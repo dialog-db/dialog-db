@@ -16,9 +16,12 @@
 use std::fs::File;
 use std::io;
 
-/// The first bytes of every archive file. The last byte is the format
-/// version.
-pub(crate) const MAGIC: &[u8; 8] = b"DIALOGA\x10";
+/// The first sixteen bytes of every archive file: `DIALOG`, the byte
+/// `0xB6` (a pilcrow in Latin-1, a mark for a record, and not valid UTF-8
+/// on its own, so a file read as text fails at once), the format version
+/// (1), and zeros, reserved. Sixteen bytes keep the slots that follow
+/// aligned, and leave room for fields without moving them.
+pub(crate) const MAGIC: &[u8; 16] = b"DIALOG\xb6\x01\0\0\0\0\0\0\0\0";
 
 /// The bytes of a record before its body.
 pub(crate) const HEADER: u64 = 1 + 4 + 4;

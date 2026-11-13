@@ -619,8 +619,10 @@ What this changes for you:
 - A block another process holds only in its extent is written again into
   the writer's own, so a head it commits never names a block another
   process has not yet folded into the file.
-- The file's format is version 16: a file written by an earlier build of
-  `dialog-chronicle` does not open.
+- The file starts with a 16-byte header: `DIALOG`, the byte `0xB6` (not
+  valid UTF-8 on its own, so a file read as text fails at once), the
+  format version, 1, and zeros, reserved. A file written by an earlier
+  build of `dialog-chronicle` does not open.
 
 Why: many processes work on separate branches of one space at once, and on
 main they never wait on one another to write. A file whose every append
@@ -2024,8 +2026,8 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
-- A `Chronicle` file is format 16; one written by an earlier build of
-  this branch's `dialog-chronicle` (format 10 to 15) does not open, and is
+- A `Chronicle` file is format 1, the first released; one written by an
+  earlier, unreleased build of `dialog-chronicle` does not open, and is
   moved again from the replica it came from with `dialog-migrate`. Nothing
   else stored or synced changes: blocks, their hashes and what a replica
   syncs are the same.

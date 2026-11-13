@@ -242,9 +242,17 @@ fn play(
     let mut failures: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     let mut images = 0;
     for at in 0..=ops.len() {
-        for trial in 0..trials {
+        // Every image that loses one write, or one sector of one, since the
+        // last sync, then images drawn at random.
+        let nearest = disk::nearest_power_losses(&ops, at).into_iter();
+        let drawn = (0..trials).map(|trial| {
             let seed = seed ^ ((at as u64) << 16) ^ trial as u64;
-            let image = disk::after_power_loss(&ops, at, &mut Draw::new(seed));
+            (
+                format!("seed {seed}"),
+                disk::after_power_loss(&ops, at, &mut Draw::new(seed)),
+            )
+        });
+        for (made, image) in nearest.chain(drawn) {
             images += 1;
             for wrong in check(&image, at, &done, &image_path)? {
                 let Some(wrong) = keep(&wrong) else {
@@ -256,10 +264,10 @@ fn play(
                     .filter(|word| word.parse::<u64>().is_err())
                     .collect::<Vec<_>>()
                     .join(" ");
-                failures.entry(kind).or_default().push(format!(
-                    "after {at} of {} (seed {seed}): {wrong}",
-                    ops.len()
-                ));
+                failures
+                    .entry(kind)
+                    .or_default()
+                    .push(format!("after {at} of {} ({made}): {wrong}", ops.len()));
             }
         }
     }

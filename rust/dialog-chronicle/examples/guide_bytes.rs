@@ -56,7 +56,9 @@ mod walk {
     /// The byte of the writer's turn: past any file the archive grows to.
     const TURN: u64 = 1 << 62;
     const SLOT: u64 = 64 * 1024;
-    const DATA: u64 = 8 + 4 * SLOT;
+    /// The header: `DIALOG`, 0xB6, the format version, zeros to 16 bytes.
+    const HEAD: u64 = 16;
+    const DATA: u64 = HEAD + 4 * SLOT;
     const ALIGN: u64 = 16;
     const PAGE: u64 = 4096;
 
@@ -460,14 +462,14 @@ mod walk {
             println!(
                 "file: {} bytes long, {allocated} allocated on the disk; magic {}",
                 bytes.len(),
-                hex(&bytes[..8])
+                hex(&bytes[..HEAD as usize])
             );
             let mut newest = None;
             for (index, name) in ["rolling 0", "rolling 1", "durable 0", "durable 1"]
                 .iter()
                 .enumerate()
             {
-                let at = 8 + index as u64 * SLOT;
+                let at = HEAD + index as u64 * SLOT;
                 let slot = self.slot(&bytes, at, name)?;
                 if let Some(slot) = slot.filter(|_| index < 2)
                     && newest
@@ -500,7 +502,7 @@ mod walk {
         fn walk_extents(&mut self, path: &Path) -> anyhow::Result<()> {
             let bytes = std::fs::read(path)?;
             for index in 0..2u64 {
-                if let Some(slot) = self.slot(&bytes, 8 + index * SLOT, "rolling")? {
+                if let Some(slot) = self.slot(&bytes, HEAD + index * SLOT, "rolling")? {
                     for extent in &slot.extents {
                         self.extent(&bytes, *extent)?;
                     }
@@ -948,7 +950,7 @@ mod walk {
             let needs = r.u16()?;
             let mut needed = Vec::new();
             for _ in 0..needs {
-                needed.push((r.u64()?, r.u64()?, r.u64()?));
+                needed.push((r.u64()?, r.u64()?, r.u64()?, r.u32()?));
             }
             let readable: String = name
                 .iter()
@@ -957,7 +959,7 @@ mod walk {
             println!(
                 "  cell id {} (data @{data_at}): name {readable:?} ({name_len} bytes), present \
                  {present}, value {value_len} bytes, first bytes {}; needs {needed:?} \
-                 (extent record, epoch, bytes)",
+                 (extent record, epoch, bytes, CRC-32 of those bytes)",
                 data_at / ALIGN,
                 hex(&value[..value.len().min(16)])
             );

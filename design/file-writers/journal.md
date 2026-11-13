@@ -1149,3 +1149,39 @@ Pinned by `it_closes_when_the_reopen_it_stood_down_for_goes_meanwhile`.
 A hook lets go of the reopened handle at that moment, as a handle that
 did not wait for `looking` does. Without the loop, the extent opening left
 is still listed after every handle went; with it, the file is closed.
+
+## 2026-11-13: format 1, and power losses checked at their nearest
+
+**Format 1.** Versions 2 to 16 were steps on this branch, and no file in
+them exists outside it, so the format released with the first merge is 1.
+The header is now 16 bytes: `DIALOG`, the byte `0xB6`, the version, and
+zeros, reserved. The byte `0xB6` does what PNG's `0x89` does: a lone byte
+above 0x7F is not valid UTF-8, so a tool that takes the file for text
+fails at once. In Latin-1 it is the pilcrow, a mark for a record.
+Sixteen bytes keep the four slots after it 16-byte aligned, and leave room
+for header fields without moving them.
+
+**The power-loss test missed a bug for several commits.** It drew 30
+images per point at random, each write since the last sync dropped, kept
+or torn with a third's chance. The bug the cell checksum fixed needs one
+image: the frame write lost, and every write after it (the extent's
+count, the cell record, the slot) kept. A random draw over the 20 to 30
+writes since a sync rarely makes that image, though it is the image any
+missing ordering point leaves: a record that names another reaches the
+disk without what it names. The test found it once in 3,750 images, and
+only at 300 images a point.
+
+Every point now also checks, systematically, the images nearest to
+everything reaching the disk (`disk::nearest_power_losses`):
+- nothing lost;
+- each write or change of length since the last sync lost, every other
+  kept;
+- each sector of each write lost.
+
+This is the bounded deviation of crash-consistency testing (ALICE,
+CrashMonkey). The random draws stay on top, for combinations farther out.
+With the checksum check taken out of recovery, the default run now fails
+at every one of the four frames that can be lost, and names the write:
+"after 120 of 125 (op 110, the write at 266408, lost): the cell names
+round 7 block 0, which the file does not hold". Before, it passed at 30
+draws a point. The four power-loss tests take 6 s, up from 4 s.

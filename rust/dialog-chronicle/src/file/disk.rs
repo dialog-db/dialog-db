@@ -121,6 +121,69 @@ fn apply(image: &mut Vec<u8>, op: &Op, keep: &mut dyn FnMut() -> bool) {
     }
 }
 
+/// The images a power loss after the first `at` of `ops` can leave that
+/// differ least from all of them reaching the disk, each with what it
+/// lost: all of them; each one since the last sync lost, every other kept;
+/// and each sector of each write since the last sync lost, every other
+/// kept. A random draw (see [`after_power_loss`]) rarely loses exactly one
+/// write and keeps everything after it, yet that is the image a missing
+/// ordering point leaves: a record that names another written before it
+/// reaches the disk without what it names. So these are checked at every
+/// point, as bounded-deviation crash testing does, not left to chance.
+pub(crate) fn nearest_power_losses(ops: &[Op], at: usize) -> Vec<(String, Vec<u8>)> {
+    let synced = ops[..at]
+        .iter()
+        .rposition(|op| matches!(op, Op::Flush))
+        .map_or(0, |last| last + 1);
+    let mut durable = Vec::new();
+    for op in &ops[..synced] {
+        apply(&mut durable, op, &mut || true);
+    }
+    let since = &ops[synced..at];
+    // The image with the op at `index` since the sync lost whole, or one
+    // `sector` of it.
+    let losing = |index: Option<usize>, sector: Option<u64>| {
+        let mut image = durable.clone();
+        for (at, op) in since.iter().enumerate() {
+            if Some(at) != index {
+                apply(&mut image, op, &mut || true);
+            } else if let Some(sector) = sector {
+                let mut nth = 0;
+                apply(&mut image, op, &mut || {
+                    nth += 1;
+                    nth - 1 != sector
+                });
+            }
+        }
+        image
+    };
+    let mut images = vec![("nothing lost".to_string(), losing(None, None))];
+    for (index, op) in since.iter().enumerate() {
+        let op_number = synced + index;
+        match op {
+            Op::Flush => {}
+            Op::Len(len) => images.push((
+                format!("op {op_number}, the length {len}, lost"),
+                losing(Some(index), None),
+            )),
+            Op::Write(offset, bytes) => {
+                images.push((
+                    format!("op {op_number}, the write at {offset}, lost"),
+                    losing(Some(index), None),
+                ));
+                let sectors = (offset + bytes.len() as u64).div_ceil(SECTOR) - offset / SECTOR;
+                for sector in (0..sectors).filter(|_| sectors > 1) {
+                    images.push((
+                        format!("op {op_number}, sector {sector} of the write at {offset}, lost"),
+                        losing(Some(index), Some(sector)),
+                    ));
+                }
+            }
+        }
+    }
+    images
+}
+
 /// What the disk could hold had the power gone after the first `at` of
 /// `ops`, as `draw` picks among the possibilities: what the last sync
 /// among them made durable, then each later one dropped, kept, or (a

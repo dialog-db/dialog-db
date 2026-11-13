@@ -693,7 +693,7 @@ fn never_made(file: &File, len: u64) -> io::Result<bool> {
     if len > DATA {
         return Ok(false);
     }
-    let mut magic = [0u8; 8];
+    let mut magic = [0u8; MAGIC.len()];
     let start = &mut magic[..len.min(MAGIC.len() as u64) as usize];
     read_at(file, 0, start)?;
     // Writes not yet synced reach the disk in any order: the slots may
@@ -716,7 +716,7 @@ fn never_made(file: &File, len: u64) -> io::Result<bool> {
 /// waited for.
 fn in_use(file: &File) -> io::Result<Option<Slot>> {
     let len = file.metadata()?.len();
-    let mut magic = [0u8; 8];
+    let mut magic = [0u8; MAGIC.len()];
     if len < DATA || {
         read_at(file, 0, &mut magic)?;
         &magic != MAGIC
@@ -843,7 +843,7 @@ fn recover(file: &File) -> io::Result<Slot> {
         slot.mark_synced(file, copy)?;
         return Ok(slot);
     }
-    let mut magic = [0u8; 8];
+    let mut magic = [0u8; MAGIC.len()];
     if len < MAGIC.len() as u64 || {
         read_at(file, 0, &mut magic)?;
         &magic != MAGIC
