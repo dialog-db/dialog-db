@@ -9,7 +9,7 @@
 //!
 //! Run as `dialog-migrate [--dry-run] --source <store> --target <file>
 //! [--catalog <name>]` to move one store into the single-file archive (the
-//! `archive-file` migration): `source` is a space's directory, or with
+//! `chronicle` migration): `source` is a space's directory, or with
 //! `--catalog` a flat directory of that catalog's blocks.
 
 // The library is native-only, so on wasm32 there is nothing to run.
@@ -74,9 +74,9 @@ mod native {
     fn available(arguments: &Arguments) -> Migrations {
         #[allow(unused_mut)]
         let mut migrations = Migrations::new();
-        #[cfg(feature = "archive-file")]
+        #[cfg(feature = "chronicle")]
         {
-            migrations = migrations.with(dialog_migration::archive_file::ArchiveFile {
+            migrations = migrations.with(dialog_migration::chronicle::IntoChronicle {
                 remove_source: arguments.remove_source,
             });
         }
@@ -96,7 +96,7 @@ mod native {
         if all.steps().next().is_none() {
             eprintln!(
                 "this build has no migrations: install it with the feature of the one to run, \
-                 such as `--features archive-file`"
+                 such as `--features chronicle`"
             );
             std::process::exit(2);
         }
@@ -111,9 +111,9 @@ mod native {
             |id: &str| arguments.steps.is_empty() || arguments.steps.iter().any(|step| step == id);
         #[allow(unused_mut)]
         let mut migrations = Migrations::new();
-        #[cfg(feature = "archive-file")]
-        if chosen("archive-file") {
-            migrations = migrations.with(dialog_migration::archive_file::ArchiveFile {
+        #[cfg(feature = "chronicle")]
+        if chosen("chronicle") {
+            migrations = migrations.with(dialog_migration::chronicle::IntoChronicle {
                 remove_source: arguments.remove_source,
             });
         }
@@ -151,10 +151,10 @@ mod native {
         Ok(())
     }
 
-    #[cfg(feature = "archive-file")]
+    #[cfg(feature = "chronicle")]
     fn store(arguments: &Arguments) -> Result<(), Box<dyn std::error::Error>> {
-        use dialog_archive_file::FileArchive;
-        use dialog_migration::archive_file::{BlockSource, Directory, transcode};
+        use dialog_chronicle::Chronicle;
+        use dialog_migration::chronicle::{BlockSource, Directory, transcode};
 
         let (Some(source), Some(target)) = (&arguments.source, &arguments.target) else {
             usage()
@@ -175,7 +175,7 @@ mod native {
             return Ok(());
         }
         let started = std::time::Instant::now();
-        let archive = FileArchive::open(target)?;
+        let archive = Chronicle::open(target)?;
         let report = transcode(&source, &archive)?;
         archive.sync()?;
         for catalog in &report.catalogs {
@@ -205,9 +205,9 @@ mod native {
         Ok(())
     }
 
-    #[cfg(not(feature = "archive-file"))]
+    #[cfg(not(feature = "chronicle"))]
     fn store(_: &Arguments) -> Result<(), Box<dyn std::error::Error>> {
-        eprintln!("moving a store needs the archive-file migration: `--features archive-file`");
+        eprintln!("moving a store needs the chronicle migration: `--features chronicle`");
         std::process::exit(2);
     }
 }

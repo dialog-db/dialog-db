@@ -484,7 +484,7 @@ on CI against main:
    with the turn folds them into frames and retires the extent, which a
    sync point frees for the next claim. The turn is a lock on one byte.
    Format 11.
-3. Cells, `61302917`: `FileArchive` provides `Resolve`, `Publish`,
+3. Cells, `61302917`: `Chronicle` provides `Resolve`, `Publish`,
    `Retract` and `List`; a cell is a record of two halves in a cells index
    of its own, updated under a lock on that cell alone, spilling to a
    block past its capacity. A repository keeps its branch heads in the
@@ -520,7 +520,7 @@ before and by the commit's now.
 ## 2026-11-11, Verifying: a test for every case the design handles
 
 Every concurrent case the design says it handles now has a test in
-`rust/dialog-archive-file/src/archive/concurrency.rs` (the archive and its
+`rust/dialog-chronicle/src/archive/concurrency.rs` (the archive and its
 cells), `src/archive/cells.rs` and `tests/repository.rs` (branches), and
 each test was checked against the code broken on purpose: with the
 guarantee it pins removed, it fails. Other processes are the test binary
@@ -844,3 +844,187 @@ again. A fold now retires only the extents the newest slot still lists in
 the epoch they were read in. Every slot a test writes is checked for an
 extent listed twice: with the old retire put back, 216 of 240 runs trip
 it; with the fix, 320 runs pass.
+
+## 2026-11-12: defects a review found
+
+A review on a branch stacked on this one
+([#786](https://github.com/dialog-db/dialog-db/pull/786)) added failing
+tests for seven defects. Each is fixed here, and its test now passes.
+
+**A torn durable slot.** There was one durable slot. A sync torn by power
+loss in the middle of writing it left no whole durable state, and opening
+fell back to a rolling slot that may name pages the torn sync had freed.
+Format 15 keeps two durable copies. A sync writes over the copy that does
+not hold the newest whole state, and opening reads the newer whole copy.
+
+**A reopen during the last close.** fcntl locks belong to the process,
+and closing any descriptor of the file drops all of them. The last close
+released PRESENT and then dropped the descriptor. Meanwhile a reopen in
+the same process could take the shared `Inner` from the open table, and
+it lost its locks when the old descriptor closed. The last close now holds
+the open table until the descriptor is closed, and it stands down if a
+reopen took a reference first.
+
+**Extents piling up.** A process that left an extent on open (or one that
+died) left it listed and empty. Nothing claimed it again, so every
+crashed or briefly opened process added one. A process now holds a `left`
+lock byte for the extent it left. An extent that is listed and empty, with
+its owner byte and `left` byte both free, is an orphan. The next writer
+that needs an extent takes the orphan before it claims a new one.
+
+**Frames for a node in another layout.** With `verify` off, a frame was
+written for a node whose rows realize to different bytes than the block
+(a padded node, or a segment in a mixed layout, which another peer can
+send). A read then served bytes that do not hash to the name. Frames are
+now always checked, and `Options::verify` is gone. The test that put the
+option there measured its cost as small next to the encode.
+
+**Migration.** Three defects:
+
+- `migrate_space` wrote a fresh file and renamed it over an existing
+  `archive.dialog`, which dropped whatever a space had already written to
+  it. It now writes into that file through `Chronicle` (see below for why
+  not a copy).
+- `unmigrated` took any `archive.dialog` to mean "migrated", but opening
+  a `Chronicle` creates one. Migration now writes
+  `archive.dialog.migrated` last, and that marker decides.
+- With `remove_source`, the `fs` archive was deleted even when the
+  transcode had left something out: a block whose bytes do not match its
+  name, or a file that is not a block. The migration now fails instead,
+  with the file written and the `fs` archive kept, and `strays` lists
+  those files.
+
+## 2026-11-13: the review's other findings
+
+The review also listed findings it reasoned about without a test. Each is
+addressed here, with a test except where noted.
+
+**Durability on a timer.** A sync point was only ever made by a later
+append, `Chronicle::sync` or the last close. A process that committed and
+then sat idle could lose that commit to a power loss for as long as it
+stayed idle. Now a thread per open file (holding the archive only while it
+looks) makes a sync point once appends have waited `SYNC_AFTER` for one.
+The thread and a handle being dropped take a mutex in turn, so the
+thread's handle is never the last one and the last close always runs
+where the user dropped the handle. Pinned by
+`it_syncs_a_commit_no_append_follows`, which waits for the durable slot to
+reach a lone commit's sequence.
+
+**The slot's size against the freed-page lists.** The slot (64 KiB) lists
+the index pages free to reuse and those freed since the last sync point,
+4 bytes each. Measured by appending sequential 8-byte blocks:
+
+| batch | file | reusable + pending | slot bytes |
+|---|---|---|---|
+| 50 000 | to 2 M blocks | under 2 700 | under 11 KB |
+| 1 000 000 | 2 M | 2 993 | 12 145 |
+| 1 000 000 | 4 M | 6 945 | 27 941 |
+| 1 000 000 | 6 M | 9 496 | 38 145 |
+
+With batches of 50 000 the lists stay flat as the file grows: the tree
+buffers inserts, so one commit rewrites a bounded number of pages. With
+batches of a million they grow with the file, and would outgrow the slot
+somewhere past 12 million blocks. A commit whose slot does not fit fails
+and leaves the file as it was, but an append that size would fail every
+time it was tried. An append now commits at most 32 Ki blocks at a time
+(`COMMIT_BLOCKS`). A fold of extents is not split: an extent holds 1 MiB,
+and a fold takes what the listed extents hold.
+
+**The table of open files held across recovery.** `open_with` held the
+process-wide table while it recovered the file, which after a power loss
+can read everything written since the last sync point. Every other open,
+and every last close, in the process waited for it. Now opens of one file
+wait for each other through a gate keyed by the file (or, for a file not
+made yet, its path), and the table is taken only to look up and register.
+Pinned by `it_opens_another_file_while_one_is_recovered`, which holds one
+file in recovery through a test hook and opens another meanwhile.
+
+**Blocking I/O in async providers.** `Put` and `Import` ran the append on
+the caller's thread: waiting for the writer's turn another process holds,
+and the syncs of a sync point. On a runtime with one thread, that stalls
+every other task. When a tokio runtime runs the caller, they now append on
+its blocking threads (the `fs` provider goes through `tokio::fs`, which
+does the same). `Get` stays inline: it reads the mapping and takes no
+lock. Pinned by `it_waits_for_the_turn_off_the_runtime`, in which another
+task of a one-thread runtime must run while the import waits. It fails
+after 5 s with the append put back inline.
+
+**Locks let go by another descriptor's close.** fcntl locks belong to the
+process, and closing any descriptor of the file lets go of all of them.
+The archive opens a file once per process, but the migration copied an
+open `archive.dialog` with `std::fs::copy`, which opens and closes a
+descriptor of it. The migration now writes into an existing file through
+`Chronicle`, which shares the process's handle, so nothing in the
+workspace opens the file beside the archive. Pinned by
+`it_migrates_into_a_file_a_process_has_open`. Linux's
+open-file-description locks would not be let go of, but they would make
+Linux the one platform where two handles in a process exclude each other,
+and macOS has no equivalent, so the archive keeps fcntl locks.
+
+## 2026-11-13: the second review round
+
+A second review of #733 (at 4a96759a, before the commit above) found the
+following. Each is addressed here.
+
+**A file cut short opened as an older state.** `recover` took rolling
+slots only up to the file's length, fell back to the durable slot, and set
+the file's length to what that slot names, without checking that the file
+ever reached it. A file cut short by something other than the archive (a
+copy that did not finish, say) opened filled out with zeros. It is
+refused now: a sync point makes everything its durable slot names durable
+before it writes the slot, so a file shorter than that was cut after.
+Two places had relied on the old behaviour, and the power-loss tests found
+both:
+- A new file's slots were written before the length it was grown to was
+  synced, so a power loss could keep a durable slot naming more than the
+  file holds. The length is now synced first.
+- The last close cut free extents off the end of the file before writing
+  a durable slot naming the shorter end. It now writes the slot first.
+
+Pinned by `it_refuses_a_file_cut_short`, which also checks that nothing
+is written to the file.
+
+**A durable copy taken up before it was on the disk.** A sync point writes
+the durable copy and then syncs it. In between, a commit in the turn (in
+another thread or process) could read that copy from the page cache and
+take up what it frees: index pages the older copy still reaches, written
+over before the newer copy was on the disk. Each durable copy's area now
+ends with the sequence of the copy last synced there, written after the
+sync, and a commit takes up only a copy that it names. The marker need
+not be synced itself: one lost to a power loss only delays a take-up.
+Separately, a sync point made in the turn (by the last close) did not
+take the sync byte, so it could write the same durable copy as one made
+without the turn in another process at the same time. It takes it now.
+Pinned by `it_takes_up_a_durable_copy_only_once_it_is_synced`, which
+takes up from inside the sync point, between the copy's write and its
+sync.
+
+**A cell naming a block a power loss lost.** Found while running the
+above: with 300 images a point instead of 30, the power-loss test failed
+at 4a96759a and at fe96285a too. An extent is claimed again after it is
+folded in and freed. Its earlier frames are still in place, and they are
+whole. A power loss that keeps the extent's new count but loses a frame
+written under it leaves the earlier claim's frame there, often of the
+same length, and the recovery check (frames whole up to the count)
+passes. The cell then names a block the file does not hold. A cell's
+record now names each extent's frames by a CRC-32 of their bytes, and
+recovery compares it. This changes the cell record, so the format is 16.
+The power-loss tests pass at 300 images a point with two different seeds.
+
+**A flaky test, `processes_arriving_together_while_the_turn_is_held_do_not_wait`.**
+It failed for the reviewer in 2 of 9 runs under load, and passed in 40
+runs here, four at a time. The reviewer's guess holds up in the code:
+`gather_fold` took the owner byte of every listed extent no process
+holds, empty ones included, to look, and `orphan` took an extent's owner
+byte before checking its left byte. A process trying to take an extent
+another left for it in that instant found it held, and waited for the
+turn instead. `gather_fold` now passes over an empty extent without
+taking its byte, and `orphan` checks the left byte first, so an extent
+another process left is never touched. Not pinned: the window is a few
+system calls wide.
+
+**Two handles dropped at once.** The reviewer pointed out that two last
+handles dropped together could both see another handle and neither close
+the file. The mutex each handle takes as it is dropped (added above for
+the sync thread) serializes them now, so the second sees itself as the
+last.

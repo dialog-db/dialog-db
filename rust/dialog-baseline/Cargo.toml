@@ -15,7 +15,7 @@ publish = false
 [features]
 # Traces one member's archive file in `tonk_bench` (`DIALOG_TRACE`), for
 # replaying the file format's pattern in the browser spike.
-trace = ["dialog-archive-file/trace"]
+trace = ["dialog-chronicle/trace"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -46,7 +46,7 @@ dialog-storage = { workspace = true, features = ["helpers"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 # The single-file archive, measured against the `fs` archive
 # (`examples/file_archive_bench.rs`).
-dialog-archive-file = { workspace = true }
+dialog-chronicle = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
 # The single-file census (`examples/single_file_census.rs`) serializes tree
 # values to measure them and models compressed and delta-encoded stores.

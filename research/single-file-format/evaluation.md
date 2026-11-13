@@ -1,5 +1,7 @@
 # Single-file format: evaluation
 
+The scripts named `bench/…` below are on the [`research-data`](https://github.com/dialog-db/dialog-db/tree/research-data/research/single-file-format/bench) branch, under `research/single-file-format/bench/`.
+
 What we measure to decide the format's open choices, and against what.
 Size alone does not decide them: an index layout that saves a megabyte can
 cost every query a page, or every sync a rewrite. Each axis below says the
@@ -33,7 +35,7 @@ archive; `branch/fs` against the `file/*` stores isolates the archive. The
 harness uses only the API main and the branch share (repository, branch,
 transaction, query), and is built twice: in this branch, and in a worktree
 of `origin/main`. Every store reads through the tree in place where it can
-(`NodeSource`; main has none, and reads blocks). Every identity is derived
+(the archive answers the tree's `nodes::Read` with nodes read in place; main reads blocks). Every identity is derived
 from one seed, so every store writes the same blocks and ends on the same
 root, and a run refuses to report stores that disagree.
 

@@ -154,7 +154,7 @@ from two machines.
 
 ## Where it lives
 
-`rust/dialog-archive-file` (native first). It splits artifact keys into
+`rust/dialog-chronicle` (native first). It splits artifact keys into
 entity, attribute and value and builds nodes from rows, so it depends on
 `dialog-artifacts` and `dialog-search-tree`, not the other way round. The
 node interface it needs is in `dialog-search-tree`.
@@ -234,7 +234,7 @@ and looks again from a newer slot; frames and tokens never change, so
 anything it already read stays true.
 
 **Sync points.** After an append, every 64 appends, 2,048 freed pages or 2
-seconds, and on `FileArchive::sync`: sync the file, write the durable slot
+seconds, and on `Chronicle::sync`: sync the file, write the durable slot
 (the current one, its freed pages now free), sync it, then write the next
 rolling slot. Nothing the durable slot reaches is ever written over, since
 pages become free only after it. This is SQLite's `synchronous=NORMAL` in
@@ -248,7 +248,7 @@ died left what it wrote with the operating system, in order. Otherwise
 since the durable slot: every record by its checksum, and every index page
 the slot reaches that was written since, by its own. It takes the newest
 rolling slot that passes, or goes back to the durable slot, and drops the
-rest. (Built: `rust/dialog-archive-file`.)
+rest. (Built: `rust/dialog-chronicle`.)
 
 ## Not in this design
 
@@ -272,7 +272,7 @@ rest. (Built: `rust/dialog-archive-file`.)
 
 ## Build order
 
-1. **Done** (`rust/dialog-archive-file`). The file and its records: append,
+1. **Done** (`rust/dialog-chronicle`). The file and its records: append,
    checksum, slots, open and recover a torn tail.
 2. **Done.** The archive effects over the file with every block whole,
    opened from a space's `Location`. A repository commits, reopens and
@@ -281,13 +281,14 @@ rest. (Built: `rust/dialog-archive-file`.)
    records other processes appended, and readers that follow the file's
    growth (`tests/repository.rs` runs two processes appending at once).
 4. **Done.** A node over rows in `dialog-search-tree`: `IndexView` and
-   `SegmentView`, backed by a block or by a store's `NodeRows`, which a
-   `NodeSource` the environment holds hands over before any block is
-   loaded. Tested by reading every node both ways and comparing every
+   `SegmentView`, backed by a block or by a store's `NodeRows`, which the
+   archive hands the tree in answer to its `nodes::Read` (first through a
+   `NodeSource`, since replaced by the tree's node commands, see
+   `design/tree-node-reads.md`). Tested by reading every node both ways and comparing every
    accessor (`tests/repository.rs`; by hand, all 14,900 nodes of a
    4096-commit Stack Exchange file).
 5. **Done.** Frames: tokens, rows, predecessors and the checked conversion
-   in the file; `Get` realizes. The archive is a `NodeSource`.
+   in the file; `Get` realizes. The archive answers `nodes::Read` with nodes read in place.
 6. **The perf gate's scenarios** over it, against the `fs` archive.
 
 ## Reading in place (step 4)

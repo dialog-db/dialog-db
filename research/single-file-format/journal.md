@@ -5,13 +5,20 @@ What we tried, what it measured, and what we decided, newest last. The
 measurements in full; the [design](design.md) is the current decision.
 Work happens on the `worker/pensive-edison-fu3bx5` branch, PR
 [#733](https://github.com/dialog-db/dialog-db/pull/733).
+The bench, report and chart scripts this journal names (`bench/…`) are on
+the [`research-data`](https://github.com/dialog-db/dialog-db/tree/research-data/research/single-file-format/bench)
+branch, under `research/single-file-format/bench/`; the reports and their
+charts are here, in [results](results/).
+Whether the format can serve dialog in a browser is a study of its own:
+its [report](browser/README.md) and [journal](browser/journal.md), with
+the survey it started from, [web-opfs.md](web-opfs.md).
 
 ## Where things stand
 
 **Status: Building.** See the [research index](../README.md) for what the
 statuses mean.
 
-- **Built:** `dialog-archive-file`, a space's blocks in one append-only
+- **Built:** `dialog-chronicle`, a space's blocks in one append-only
   file, tree nodes as frames over shared tokens, read by the tree in place
   through a mapping of the file; writers take turns across processes.
   `dialog-migration` moves a replica the `fs` provider wrote into it.
@@ -113,7 +120,7 @@ Commits: `674e2f7`, `03aed53`.
 
 ## 2026-11-05 — The archive, whole blocks first
 
-**Built.** `dialog-archive-file`: records (`kind | length | crc32 | body`),
+**Built.** `dialog-chronicle`: records (`kind | length | crc32 | body`),
 a footer ending every append, checkpoints, recovery of a torn tail, the
 archive effects (`Get`, `Put`, `Import`), opened from a space's `Location`.
 A repository commits, reopens and selects through it.
@@ -199,7 +206,7 @@ Commit: `32ffd4d`.
 
 **Built.** `dialog-migration`, a crate of migrations, each behind a
 feature, run by an application before it opens a replica (`Migrations`,
-`Step`) or by `dialog-migrate`. Its `archive-file` step moves every space
+`Step`) or by `dialog-migrate`. Its `chronicle` step moves every space
 of a replica into the file, writing it under another name and renaming it
 once complete, so an interrupted run resumes. tonk-team moves in 5.4 s.
 
@@ -1375,7 +1382,7 @@ file would be about 1 GiB.
    slot are checked (their checksums and stamps): a bounded tail, the
    appends since the last sync. If anything fails, the file goes back to
    the durable slot and drops the rest. One sync per batch (every N
-   appends, a few seconds, or `FileArchive::sync`), and the free list holds
+   appends, a few seconds, or `Chronicle::sync`), and the free list holds
    the pages of a batch: 64 appends cost 7.1% of the data against 6.3% in
    the model. SQLite's `synchronous=NORMAL` in WAL mode makes the same
    trade.
@@ -1395,7 +1402,7 @@ of six cost, and how does the database look at MusicBrainz's scale?
 wrote them and a checksum; a parent names a child by page and append; a
 reader that finds a page written over looks again from a newer slot. A
 third, durable slot is written at sync points (every 64 appends, 2,048
-freed pages or 2 seconds, and `FileArchive::sync`); freed pages are reused
+freed pages or 2 seconds, and `Chronicle::sync`); freed pages are reused
 only after one, and opening in a later boot checks what came after the
 durable slot. Blocks kept whole are frames of a whole kind. A process keeps
 the index pages it checked, and a writer remembers where it found tokens in
@@ -2069,7 +2076,7 @@ DIALOG_CENSUS_ORDER=history DIALOG_CENSUS_FILE=out DIALOG_CENSUS_INDEX=1 \
   archive path/to/blocks
 
 # a replica into the file
-cargo run --release -p dialog-migration --features archive-file \
+cargo run --release -p dialog-migration --features chronicle \
   --bin dialog-migrate -- path/to/profile
 
 # MusicBrainz as a fact log (outside the repository), then its replay
@@ -2083,24 +2090,24 @@ DIALOG_SE_CSV=mb-100k.csv DIALOG_BENCH_COMMITS=2000 \
 
 # a file, by record kind
 DIALOG_ARCHIVE_INDEX=path/to/archive.dialog cargo test --release \
-  -p dialog-archive-file --lib breakdown -- --ignored --nocapture
+  -p dialog-chronicle --lib breakdown -- --ignored --nocapture
 
 # the index's writes over a file's appends, in memory
 DIALOG_INDEX_APPENDS=2000 DIALOG_INDEX_FRAMES=1442 DIALOG_INDEX_TOKENS=1513 \
-  DIALOG_INDEX_LINEAGES=53000 cargo test --release -p dialog-archive-file \
+  DIALOG_INDEX_LINEAGES=53000 cargo test --release -p dialog-chronicle \
   --lib write_amplification_of_a_file -- --ignored --nocapture
 
 # the index's layouts with pages reused, in memory
-cargo test --release -p dialog-archive-file --lib index_layouts -- \
+cargo test --release -p dialog-chronicle --lib index_layouts -- \
   --ignored --nocapture
 
 # building a file's index again from its records
 DIALOG_ARCHIVE_INDEX=path/to/archive.dialog cargo test --release \
-  -p dialog-archive-file --lib breakdown::rebuild -- --ignored --nocapture
+  -p dialog-chronicle --lib breakdown::rebuild -- --ignored --nocapture
 
 # a tree a root names, alone, and its levels
 DIALOG_ARCHIVE_INDEX=path/to/archive.dialog DIALOG_ARCHIVE_ROOT=blake3#... \
-  cargo test --release -p dialog-archive-file --lib breakdown::live -- \
+  cargo test --release -p dialog-chronicle --lib breakdown::live -- \
   --ignored --nocapture
 
 # MusicBrainz as fewer, larger commits (every k transactions as one)

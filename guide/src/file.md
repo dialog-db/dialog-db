@@ -2,16 +2,16 @@
 
 [Blocks and Storage](./storage.md) described a space's archive as a map from hash to bytes, kept on a file system as one file per block under `archive/index/`. This chapter is about a second way to keep that same map: one file per space, called `archive.dialog`. It holds every block of the space, and, when the space also names it as its memory, every cell too, branch heads included.
 
-It is opt-in. A `Space` gets it by naming `FileArchive` as its archive, and optionally as its memory. The tree, queries and sync read and write it as they would any archive, and every block reads back as exactly the bytes it was. It runs natively only, for now.
+It is opt-in. A `Space` gets it by naming `Chronicle` as its archive, and optionally as its memory. The tree, queries and sync read and write it as they would any archive, and every block reads back as exactly the bytes it was. It runs natively only, for now.
 
 The chapter follows one fact into the file and back out, then walks through what happens when other processes write at the same time, when a peer asks for blocks, and when something goes wrong.
 
 <div class="aside">
 
-**The bytes in this chapter are real.** They come from one run of [`dialog-archive-file/examples/guide_bytes.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/examples/guide_bytes.rs), which builds Alice's grocery repository in a file and walks the file record by record after each commit, reading it from its bytes alone:
+**The bytes in this chapter are real.** They come from one run of [`dialog-chronicle/examples/guide_bytes.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/examples/guide_bytes.rs), which builds Alice's grocery repository in a file and walks the file record by record after each commit, reading it from its bytes alone:
 
 ```sh
-cargo run -p dialog-archive-file --example guide_bytes
+cargo run -p dialog-chronicle --example guide_bytes
 ```
 
 Hashes, keys and the offsets that follow them differ from run to run, since each run's session has a key of its own. The layout does not.
@@ -70,7 +70,7 @@ The gap grows with history. Over two measured histories:
 
 <div class="aside">
 
-**Implementations.** `FileArchive` is [`dialog-archive-file/src/archive.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/archive.rs). The measurements and the design behind them are in [`research/single-file-format`](https://github.com/dialog-db/dialog-db/tree/main/research/single-file-format).
+**Implementations.** `Chronicle` is [`dialog-chronicle/src/archive.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive.rs). The measurements and the design behind them are in [`research/single-file-format`](https://github.com/dialog-db/dialog-db/tree/main/research/single-file-format).
 
 </div>
 
@@ -648,11 +648,11 @@ The six new rows are then written column by column:
 
 Neighboring rows mostly share their parts, so each column is written as the difference from the row above, and a run of equal values is written once. The whole section of 16 operations takes 76 bytes. The frame's data is 126 bytes, header included, for a block of 4,372.
 
-A frame stands for its block exactly. The tree's encoding is canonical, so the rows rebuild the block byte for byte. Every build checks that a frame decodes back to its rows before writing it, and a debug build, or one with `DIALOG_ARCHIVE_VERIFY` set, also rebuilds the block and compares. A node in an older layout, or a block that is not a tree node, is kept whole instead, as a frame of kind `ff` with the block's bytes after the header.
+A frame stands for its block exactly. The tree's own encoding is canonical, so the rows of a node dialog wrote rebuild its block byte for byte, and before writing a frame the archive rebuilds the block and compares. A block that parses as a node but is not canonical (padded, say, or in a layout its keys would not choose), a node in an older layout, and a block that is not a tree node are kept whole, as a frame of kind `ff` with the block's bytes after the header.
 
 <div class="aside">
 
-**Implementations.** Splitting a key is `key_tokens` in [`dialog-archive-file/src/node.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/node.rs). Tokens and their records are [`tokens.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/tokens.rs). Rows, columns and copies are [`rows.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/rows.rs), and the frame header is `FrameHeader` in [`archive/index.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/archive/index.rs).
+**Implementations.** Splitting a key is `key_tokens` in [`dialog-chronicle/src/node.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/node.rs). Tokens and their records are [`tokens.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/tokens.rs). Rows, columns and copies are [`rows.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/rows.rs), and the frame header is `FrameHeader` in [`archive/index.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/index.rs).
 
 </div>
 
@@ -872,7 +872,7 @@ Readers take no lock at all. The writer holding the turn waits on no other lock,
 
 <div class="aside">
 
-**Implementations.** Records are [`dialog-archive-file/src/file.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/file.rs), slots [`archive/slot.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/archive/slot.rs), and the lock bytes [`locks.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/locks.rs).
+**Implementations.** Records are [`dialog-chronicle/src/file.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/file.rs), slots [`archive/slot.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/slot.rs), and the lock bytes [`locks.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/locks.rs).
 
 </div>
 
@@ -1024,7 +1024,7 @@ The order of the records is what keeps heads safe:
 
 <div class="aside">
 
-**Implementations.** Cells are [`dialog-archive-file/src/archive/cells.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/archive/cells.rs). A cell's edition is the BLAKE3 hash of its value, as on the file system store, so a compare-and-swap names the same version either way.
+**Implementations.** Cells are [`dialog-chronicle/src/archive/cells.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/cells.rs). A cell's edition is the BLAKE3 hash of its value, as on the file system store, so a compare-and-swap names the same version either way.
 
 </div>
 
@@ -1051,7 +1051,7 @@ Until now, everything Alice wrote went to the operating system, not necessarily 
 <text x="32" y="171" text-anchor="middle">4</text>
 <text class="label small" x="56" y="164">write rolling slot 13</text>
 <text class="small muted" x="56" y="180">durable = 12: pages and extents freed before 12 can be reused</text>
-<text class="label small muted" x="16" y="210">One follows every 64 appends, 2 seconds, or 2,048 freed index pages, and FileArchive::sync. It is made after the turn is let go.</text>
+<text class="label small muted" x="16" y="210">One follows every 64 appends, 2 seconds, or 2,048 freed index pages, and Chronicle::sync. It is made after the turn is let go.</text>
 </svg>
 </figure>
 
@@ -1102,7 +1102,7 @@ The node is then read **in place**: the archive decodes the frame's rows once, a
 
 <div class="aside">
 
-**Implementations.** The file's index is [`dialog-archive-file/src/archive/tree.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/archive/tree.rs), and what it maps is [`archive/index.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/archive/index.rs). A node read in place is [`archive/served.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/archive/served.rs), through `NodeSource` and the node views in [`dialog-search-tree/src/node/view.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-search-tree/src/node/view.rs).
+**Implementations.** The file's index is [`dialog-chronicle/src/archive/tree.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/tree.rs), and what it maps is [`archive/index.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/index.rs). A node read in place is [`archive/served.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/served.rs), through `NodeSource` and the node views in [`dialog-search-tree/src/node/view.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-search-tree/src/node/view.rs).
 
 </div>
 
@@ -1176,7 +1176,7 @@ The new root is written against commit 2's, which was written against commit 1's
 
 <div class="aside">
 
-**Implementations.** The chain's limit is `CHAIN` in [`dialog-archive-file/src/archive.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/archive.rs), and lineages are `lineage_key` in [`archive/index.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/archive/index.rs).
+**Implementations.** The chain's limit is `CHAIN` in [`dialog-chronicle/src/archive.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive.rs), and lineages are `lineage_key` in [`archive/index.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/index.rs).
 
 </div>
 
@@ -1428,7 +1428,7 @@ The file's index is the one thing written over: its pages are reused once no dur
 
 <div class="aside">
 
-**Implementations.** Extents are [`dialog-archive-file/src/archive/extent.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/archive/extent.rs). `Branch::transact` is [`dialog-repository/src/repository/branch/transaction/transact.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/transaction/transact.rs). The design, and the cases it is tested against with real processes, are in [`design/file-writers.md`](https://github.com/dialog-db/dialog-db/blob/main/design/file-writers.md) and [`archive/concurrency.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/archive/concurrency.rs).
+**Implementations.** Extents are [`dialog-chronicle/src/archive/extent.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/extent.rs). `Branch::transact` is [`dialog-repository/src/repository/branch/transaction/transact.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/transaction/transact.rs). The design, and the cases it is tested against with real processes, are in [`design/file-writers.md`](https://github.com/dialog-db/dialog-db/blob/main/design/file-writers.md) and [`archive/concurrency.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/concurrency.rs).
 
 </div>
 
@@ -1564,7 +1564,7 @@ Whether this works is tested, not argued. The tests record every write the archi
 
 <div class="aside">
 
-**Implementations.** Opening is `recover` in [`dialog-archive-file/src/archive.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/archive.rs). The power-loss tests are [`archive/power.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/archive/power.rs), over the recording disk in [`file/disk.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-archive-file/src/file/disk.rs).
+**Implementations.** Opening is `recover` in [`dialog-chronicle/src/archive.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive.rs). The power-loss tests are [`archive/power.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/power.rs), over the recording disk in [`file/disk.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/file/disk.rs).
 
 </div>
 
@@ -1572,8 +1572,8 @@ Whether this works is tested, not argued. The tests record every write the archi
 
 <div class="aside caveat">
 
-- **Native only.** The crate compiles to nothing on the web. Its tests run on Linux, macOS and Windows. Whether the same file can live in a browser's file system, served by one worker a tab hosts, is being measured in [`research/web-spike`](https://github.com/dialog-db/dialog-db/tree/main/research/web-spike), not built.
-- **Opt-in.** Nothing switches a replica to it. A replica the file system store wrote can be moved in with the `archive-file` migration of the `dialog-migration` crate.
+- **Native only.** The crate compiles to nothing on the web. Its tests run on Linux, macOS and Windows. Whether the same file can live in a browser's file system, served by one worker a tab hosts, is being measured in [`research/single-file-format/browser`](https://github.com/dialog-db/dialog-db/tree/main/research/single-file-format/browser), not built.
+- **Opt-in.** Nothing switches a replica to it. A replica the file system store wrote can be moved in with the `chronicle` migration of the `dialog-migration` crate.
 - **Nothing is collected.** A node no head reaches any more, such as a losing try's, stays in the file.
 - **The format is still changing.** A file written now may not open in a later release.
 

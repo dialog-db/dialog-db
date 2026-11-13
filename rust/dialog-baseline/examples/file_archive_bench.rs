@@ -37,9 +37,9 @@ use std::str::FromStr as _;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
-use dialog_archive_file::{FILE_NAME, FileArchive, Options};
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_capability::Subject;
+use dialog_chronicle::{Chronicle, FILE_NAME, Options};
 use dialog_corpus::{Entity, Fact, Instruction, Pick, Relation, Selector, Value};
 use dialog_effects::storage::{Directory, Location};
 use dialog_peer::helpers::{Seed, open_peer_as, test_owned};
@@ -75,7 +75,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static COUNTING: Counting = Counting;
 
-type FileArchiveSpace = Space<FileArchive, FileSystem, FileSystem, FileSystem, FileSystem>;
+type ChronicleSpace = Space<Chronicle, FileSystem, FileSystem, FileSystem, FileSystem>;
 
 /// What one store measured.
 #[derive(Default)]
@@ -323,18 +323,18 @@ fn ms(duration: Duration) -> String {
 
 /// Opens the archive file ahead of the space, with `options`: the space's
 /// open of the same path shares this handle, so it writes with them.
-fn hold(options: Options) -> impl Fn(&Path) -> anyhow::Result<Option<FileArchive>> {
+fn hold(options: Options) -> impl Fn(&Path) -> anyhow::Result<Option<Chronicle>> {
     move |directory: &Path| {
         let space = directory.join("repo");
         std::fs::create_dir_all(&space)?;
-        Ok(Some(FileArchive::open_with(
+        Ok(Some(Chronicle::open_with(
             space.join(FILE_NAME),
             options.clone(),
         )?))
     }
 }
 
-fn describe(archive: &Option<FileArchive>) -> String {
+fn describe(archive: &Option<Chronicle>) -> String {
     let Some(archive) = archive else {
         return String::new();
     };
@@ -390,7 +390,7 @@ async fn main() -> anyhow::Result<()> {
         entities.len()
     );
 
-    let nothing = |_: &Path| -> anyhow::Result<Option<FileArchive>> { Ok(None) };
+    let nothing = |_: &Path| -> anyhow::Result<Option<Chronicle>> { Ok(None) };
     let mut runs = Vec::new();
     // `DIALOG_BENCH_STORES=fs,file/frames` runs only those.
     let stores = std::env::var("DIALOG_BENCH_STORES")
@@ -411,7 +411,7 @@ async fn main() -> anyhow::Result<()> {
                 false
             ),
             "file/whole" => run!(
-                FileArchiveSpace,
+                ChronicleSpace,
                 "file/whole",
                 directory,
                 &log.transactions,
@@ -425,7 +425,7 @@ async fn main() -> anyhow::Result<()> {
                 false
             ),
             "file/frames" => run!(
-                FileArchiveSpace,
+                ChronicleSpace,
                 "file/frames",
                 directory,
                 &log.transactions,
@@ -436,7 +436,7 @@ async fn main() -> anyhow::Result<()> {
                 false
             ),
             _ => run!(
-                FileArchiveSpace,
+                ChronicleSpace,
                 "file/served",
                 directory,
                 &log.transactions,
@@ -491,7 +491,7 @@ async fn main() -> anyhow::Result<()> {
         if file.exists() {
             // A reader's open: its slots, and the root of the index in them.
             let started = Instant::now();
-            let reader = FileArchive::open(&file)?;
+            let reader = Chronicle::open(&file)?;
             let opened = started.elapsed();
             println!(
                 "{:<12} reopened in {}: index {} in memory",

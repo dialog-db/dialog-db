@@ -496,7 +496,16 @@ where
             if let (Some(standing), Some(built_on)) = (watermark.content(), built_on)
                 && standing == built_on
             {
-                watermark.publish(revision.clone()).perform(env).await?;
+                // The head is already published, so this commit stands
+                // whatever happens here. A watermark another writer moved
+                // in the meantime is left where it is: the lag is caught up
+                // by the next inducing instant, as above. Its
+                // `VersionMismatch` must not reach the caller, which takes
+                // it for a lost head and applies the commit again.
+                match watermark.publish(revision.clone()).perform(env).await {
+                    Ok(()) | Err(PublishError::VersionMismatch { .. }) => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
 

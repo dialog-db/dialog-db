@@ -17,11 +17,11 @@
 //! ```no_run
 //! # fn main() -> std::io::Result<()> {
 //! use dialog_migration::Migrations;
-//! use dialog_migration::archive_file::ArchiveFile;
+//! use dialog_migration::chronicle::IntoChronicle;
 //!
 //! // An application moving its spaces to the single-file archive, before
 //! // it opens them as file-archive spaces.
-//! let migrations = Migrations::new().with(ArchiveFile::default());
+//! let migrations = Migrations::new().with(IntoChronicle::default());
 //! for pending in migrations.plan("path/to/profile".as_ref())? {
 //!     println!("{}: {}", pending.step, pending.detail);
 //! }
@@ -33,7 +33,7 @@
 //! Each migration is behind a feature of its own, so it is built, and its
 //! dependencies pulled in, only by those who need to run it:
 //!
-//! - `archive-file` ([`archive_file`]): every space of a replica the `fs`
+//! - `chronicle` ([`chronicle`]): every space of a replica the `fs`
 //!   provider wrote, a file per block, into the single-file archive. A
 //!   conversion an application opts into, not an upgrade every replica
 //!   needs.
@@ -41,8 +41,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "archive-file")]
-pub mod archive_file;
+#[cfg(feature = "chronicle")]
+pub mod chronicle;
 
 /// One migration: a change to a replica on disk, made before the replica
 /// is opened.

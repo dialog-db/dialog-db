@@ -24,8 +24,8 @@
 //! With the `trace` feature, `DIALOG_TRACE=path` traces member 1's archive
 //! files (the `file` and `file-cells` stores) into `path`: every page and
 //! byte its operations read and write, and its blocks and cells (see
-//! `dialog_archive_file::trace`), each operation of member 1 named. The
-//! browser spike (`research/web-spike`) replays it.
+//! `dialog_chronicle::trace`), each operation of member 1 named. The
+//! browser spike (`research/single-file-format/browser`) replays it.
 //!
 //! It uses only what main and this branch share, so the same file builds
 //! in a worktree of `origin/main` for the baseline (`--cfg dialog_main`
@@ -102,13 +102,12 @@ mod native {
 
     type Fs = NativeSpace;
     #[cfg(not(dialog_main))]
-    type File =
-        Space<dialog_archive_file::FileArchive, FileSystem, FileSystem, FileSystem, FileSystem>;
+    type File = Space<dialog_chronicle::Chronicle, FileSystem, FileSystem, FileSystem, FileSystem>;
     /// Blocks and memory cells (branch heads among them) in one file.
     #[cfg(not(dialog_main))]
     type FileCells = Space<
-        dialog_archive_file::FileArchive,
-        dialog_archive_file::FileArchive,
+        dialog_chronicle::Chronicle,
+        dialog_chronicle::Chronicle,
         FileSystem,
         FileSystem,
         FileSystem,
@@ -117,12 +116,12 @@ mod native {
     /// Names an operation of member 1 in the trace, when one is taken.
     fn begin(_name: &str) {
         #[cfg(all(feature = "trace", not(dialog_main)))]
-        dialog_archive_file::trace::begin(_name);
+        dialog_chronicle::trace::begin(_name);
     }
 
     fn end() {
         #[cfg(all(feature = "trace", not(dialog_main)))]
-        dialog_archive_file::trace::end();
+        dialog_chronicle::trace::end();
     }
 
     pub async fn main() -> anyhow::Result<()> {
@@ -141,7 +140,7 @@ mod native {
         eprintln!("dataset {hash}, store {store}");
         #[cfg(all(feature = "trace", not(dialog_main)))]
         if let Ok(out) = std::env::var("DIALOG_TRACE") {
-            dialog_archive_file::trace::start(Path::new(&out), &root.join("member-1"))?;
+            dialog_chronicle::trace::start(Path::new(&out), &root.join("member-1"))?;
         }
         let report = match store.as_str() {
             "fs" => run::<Fs>(&lines, &root, false).await?,
@@ -154,7 +153,7 @@ mod native {
             other => anyhow::bail!("no store {other}"),
         };
         #[cfg(all(feature = "trace", not(dialog_main)))]
-        dialog_archive_file::trace::finish()?;
+        dialog_chronicle::trace::finish()?;
         let out = root.join("report.json");
         std::fs::write(
             &out,
