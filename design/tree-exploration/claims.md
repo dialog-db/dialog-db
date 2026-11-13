@@ -66,4 +66,10 @@
 | Every difficulty recorded in columns 2 to 5 comes from putting a concept and a rule between the consumer and the resolver | fact | the three rows of this ledger on shared entities collapsing, on a rule needing its node, and on only `this` reaching a body: each is about a concept or a rule, none about a resolver | holds |
 | A tree node has to be reachable as a concept | hypothesis | assumed by the agent since 2026-11-12 because a tonk page sends concept queries and a tonk view shows a concept; confirmed or struck by the maintainer | open; never stated until now |
 | A resolver query can be subscribed to | hypothesis | `Branch::subscribe<Q: Application>` accepts one by type; confirmed by a test that subscribes to `tree/node` over `dialog.branch/tree` and sees it re-run on a commit | open |
+| The current resolvers are no good | opinion | the maintainer, 2026-11-13; what is no good about them not yet said | - |
+| A step that yields a block as bytes or a record, with formulas that parse it, is better than the current resolvers | opinion | the maintainer, 2026-11-13 (first offered 2026-11-12); column 2 of [design-resolvers](design-resolvers.md) | - |
+| Each resolver loads its block, checks its hash, decodes one part and projects rows, in one function; the decoders are separate functions | fact | `ResolverQuery::evaluate` in `rust/dialog-query/src/resolver.rs`; `inspect_node`, `inspect_spans`, `inspect_keys`, `inspect_entries`, `inspect_blob_records`, `inspect_manifest` in `rust/dialog-corpus/src/inspect.rs` | holds |
+| Adding a field to a resolver takes six edits | fact | commit `6817bb6` on the draft branch, adding `entry` to `tree/key` and `tree/entry` | holds |
+| A revision is one record-valued fact, projected by two formulas | fact | `rust/dialog-query/src/formula/revision.rs` (`Revision`, `RevisionParent`); `Value::Record(Vec<u8>)` in `rust/dialog-corpus/src/model/value.rs` | holds |
+| A record value is opaque bytes with a type of its own | fact | `Value::Record(Vec<u8>)`; `RecordBytes` in `rust/dialog-query/src/types.rs` | holds |
 

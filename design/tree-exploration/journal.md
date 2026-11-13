@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | *What do we know?* The problem, accepted. What is held is decided: two commands with handlers built into dialog, each answering with a second command that a rule in the space places. That a rule's head is committed or transient today, never the overlay. That dialog dispatches commands as transient facts and reacts with inductive rules at commit, and has no built-in reaction that performs an effect. Use cases are drafted (nine). A strategy matrix exists with six columns, the sixth born from the decision on what is held. | *Where are we at?* Directing. The matrix is written and not read by the maintainer. |
-| **Agenda** | *What do we need to know?* Whether a tree node has to be reachable as a concept, or whether a consumer asking a resolver directly is enough (asked): every difficulty in columns 2 to 5 comes from the concept. Whether writing to the overlay from rules is its own topic. Whether the use cases are right (asked, not answered). For column 6 of the strategy and for the held decision alike: how dialog reacts to a command with an effect and answers with a command. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
+| **Agenda** | *What do we need to know?* What is no good about the current resolvers, in the maintainer's words (asked). Whether a tree node has to be reachable as a concept, or whether a consumer asking a resolver directly is enough (asked 2026-11-13, not answered): every difficulty in columns 2 to 5 of the strategy comes from the concept. For [design-resolvers](design-resolvers.md): what a decoding formula's row is; whether the block travels as bytes or as a record. Whether writing to the overlay from rules is its own topic. Whether the use cases are right (asked, not answered). For column 6 of the strategy and for the held decision alike: how dialog reacts to a command with an effect and answers with a command. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -418,3 +418,37 @@ changes followed from that turn.
 **Decided.** By the maintainer: contents through resolvers; column 6
 struck. The strategy among columns 2 to 5 and 7 is not decided; it
 turns on whether a node has to be a concept.
+
+## 2026-11-13, Directing: the resolvers themselves are put in question
+
+**Asked.** Does a tree node have to be reachable as a concept? Not
+answered. The maintainer opened a second decision: "I also would like us
+to design the resolvers we're going to expose, as I think current ones
+are no good. I think something that allows us to obtain a block as
+record or bytes and have a formula to parse it is probably better than
+what we have now."
+
+**Learned.** This is the opinion parked on 2026-11-12, now asked to be
+examined. It arrived as a remedy with a judgement ("no good") and no
+statement of what is wrong, so the matrix
+([design-resolvers](design-resolvers.md)) was started from what the
+agent can point at in the status quo:
+
+- *Is that simple, or easy?* Each of the seven resolvers does four
+  things in one place: load, check the hash, decode one part, project.
+  The decoders already exist apart from them. That is a braid, and the
+  maintainer's column separates it.
+- A segment is split across three resolvers paired by position, and
+  tonk's reader exists partly to put them back together.
+- Adding one field to a resolver on the draft branch took six edits.
+- The shape the maintainer names has a precedent in dialog: a revision
+  is one record-valued fact and two formulas project it.
+
+A third column (fewer, wider resolvers) was added so the choice is not
+between the status quo and one idea.
+
+What the maintainer's column costs is a block travelling as a value.
+
+**Decided.** Not decided. This decision is independent of the strategy
+one: either shape of step can be asked directly or wrapped in a
+concept.
