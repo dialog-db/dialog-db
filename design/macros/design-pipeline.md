@@ -29,7 +29,8 @@ Each ends with the tests passing.
 3. **The analyzer reads the tree.** Patterns and templates match and fill trees; the walker walks trees. Done: nothing after `parse` names the notation as parsed.
 4. **What was written, beside what was said.** Each phase gives its result and a mapping of what the result left out, and a printer takes both back to the source. See below.
    - Done, the parser's part: `parse_written` gives the trees and `Written`, the mapping; `print(trees, written)` gives the text, the same bytes for the prelude and both examples. A warning says the way to its form and an analyzed tree says which tree it came of, so the notebook says `5:1: warning: …` and where a refusal by the compiler is.
-   - Not done: a refusal by the analyzer has no place; a reported row is still printed by label and not in the order asked; `description:` is still in `concept`; printing from the analyzed tree and from the compiled form.
+   - Done, diagnostics: the analyzer does not stop at a refusal. It goes to the end of the document and gives every refusal and every warning as a diagnostic, each with a severity and the way to the form it is about, for a language server to show. A document with a refusal in it is refused whole: nothing of it comes back analyzed and none of its definitions is kept.
+   - Not done: a refusal by the parser has no place, and neither does one by the compiler beyond the tree it came of; a reported row is still printed by label and not in the order asked; `description:` is still in `concept`; printing from the analyzed tree and from the compiled form.
 5. **A pinned reference and the name table.** A resolved reference is the name and the entity it meant where it was written.
 
 ## The mapping, and printing back
@@ -64,9 +65,20 @@ A macro call is not in the analyzed tree: after `(query (todo ?t text: ?x))` onl
 | analyze | the names a template's own variables were given | derived from the site, as now |
 | compile | which rule, premise and variable is which node | a path a compiled part |
 
-Built as the maintainer decided it: a comment is on the form below it, whether it has a line to itself or ends one; a comment above a label is on the part under the label; a comment no form is below, before a closing bracket or at the end of the text, is kept on what it is inside. So today a comment that ends a line is about the form after it.
+Built as the maintainer decided it:
 
-Proposed by the agent, not decided: this table; that order is held a node and not once a definition, since a call may write its labels in another order than the definition does; that a comment which ends a line is about the node before it; that a comment with a blank line under it is about the document; that what a comment says of a concept, a rule or a labelled part is what Dialog-DB keeps as its description, and is kept as a fact so it can be found. Decided by the maintainer: a comment is metadata on the form below it and takes no place among the parts, and `description:` does not belong in a concept.
+```
+ ; about the concept                      above a form: about the form below
+ (concept (todo ?t
+            ; about text                  above a label: about the part under it
+            text: ?x  ; about text too    ends a line a form ends on: about that form
+            list: ?l)                     
+   (xyz.todo ?t text: ?x list: ?l))  ; about the concept too
+```
+
+A comment after a bracket that opens or after a label ends no form, so it is about what is below. A comment no form is below and none ends before, before a closing bracket or at the end of the text, is kept on what it is inside.
+
+Proposed by the agent, not decided: this table; that order is held a node and not once a definition, since a call may write its labels in another order than the definition does; that a comment with a blank line under it is about the document; that what a comment says of a concept, a rule or a labelled part is what Dialog-DB keeps as its description, and is kept as a fact so it can be found. Decided by the maintainer: a comment is metadata on the form below it and takes no place among the parts, and `description:` does not belong in a concept.
 
 ## Not in these stages
 

@@ -50,7 +50,17 @@ pub enum Position {
     Premise,
 }
 
-/// Something a rule said about a form without refusing it.
+/// How much a diagnostic matters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+    /// The document is refused.
+    Error,
+    /// The document stands, and something about it is worth saying.
+    Warning,
+}
+
+/// Something said about a form of a document: a refusal, or what a rule
+/// said about it without refusing it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Diagnostic {
     /// The form it is about.
@@ -60,6 +70,29 @@ pub struct Diagnostic {
     /// Where the form is in the document: the way to it, or to the
     /// tree it came of when it is not a part of what was written.
     pub path: Path,
+    /// The refusal, when this is one.
+    pub refusal: Option<Error>,
+}
+
+impl Diagnostic {
+    /// A refusal of `form`, which is at `path`.
+    pub fn refused(form: Syntax, path: Path, error: Error) -> Self {
+        Diagnostic {
+            form,
+            message: error.to_string(),
+            path,
+            refusal: Some(error),
+        }
+    }
+
+    /// How much it matters: a refusal is an error, anything else a
+    /// warning.
+    pub fn severity(&self) -> Severity {
+        match self.refusal {
+            Some(_) => Severity::Error,
+            None => Severity::Warning,
+        }
+    }
 }
 
 /// What a rule about syntax concludes.
@@ -301,6 +334,9 @@ pub struct Expander {
     tree: usize,
     /// For each kernel rule of the last document, which tree it came of.
     origin: Vec<usize>,
+    /// The parts of the tree being expanded that are being worked on,
+    /// outermost first: what a refusal is about.
+    blame: Vec<Syntax>,
     /// The forms several definitions take in the rule being expanded.
     choices: Vec<Choice>,
     /// Whether the head being expanded reports, and writes nothing.
@@ -326,44 +362,99 @@ impl Expander {
     }
 
     /// Expand every tree of `trees`, as [`submit`](Self::submit) does
-    /// the trees a text parses to.
+    /// the trees a text parses to. The first refusal is the error.
     pub fn expand(&mut self, trees: Vec<Syntax>) -> Result<(Vec<Syntax>, Vec<Diagnostic>), Error> {
+        let (kernel, diagnostics) = self.check(trees);
+        match diagnostics
+            .iter()
+            .find_map(|diagnostic| diagnostic.refusal.clone())
+        {
+            Some(error) => Err(error),
+            None => Ok((kernel, diagnostics)),
+        }
+    }
+
+    /// Expand every tree of `trees` and say everything there is to say
+    /// about them. A tree that is refused gives no rule and a
+    /// diagnostic that holds the refusal, and the trees after it are
+    /// expanded all the same. The refusals come first, in the order of
+    /// their trees, and then what the rules said without refusing.
+    pub fn check(&mut self, trees: Vec<Syntax>) -> (Vec<Syntax>, Vec<Diagnostic>) {
         self.asked.clear();
         self.origin.clear();
         self.document = trees.clone();
         let mut kernel = Vec::new();
+        let mut diagnostics = Vec::new();
         for (at, tree) in trees.into_iter().enumerate() {
             self.tree = at;
-            // Where several definitions take a form that is read, the
-            // rule is expanded once a definition: what is read is what
-            // any of them reads. Within one rule a form that recurs is
-            // the same definition's each time.
-            let mut choices = Vec::new();
-            loop {
-                self.choices = choices;
-                let rules = self.top(tree.clone())?;
-                choices = std::mem::take(&mut self.choices);
-                for rule in rules {
-                    if let Some(rule) = self.install(rule)?
-                        && !kernel.contains(&rule)
-                    {
-                        kernel.push(rule);
-                        self.origin.push(at);
-                    }
-                }
-                while let Some(last) = choices.last_mut() {
-                    if last.taken + 1 < last.of {
-                        last.taken += 1;
-                        break;
-                    }
-                    choices.pop();
-                }
-                if choices.is_empty() {
-                    break;
-                }
+            self.blame.clear();
+            let kept = kernel.len();
+            if let Err(error) = self.each(at, &tree, &mut kernel) {
+                kernel.truncate(kept);
+                self.origin.truncate(kept);
+                // The refusal is about the innermost part being worked
+                // on that is a part of the tree as written.
+                let (form, inside) = self
+                    .blame
+                    .iter()
+                    .rev()
+                    .find_map(|part| Some((part.clone(), tree.locate(part)?)))
+                    .unwrap_or((tree.clone(), Path::new()));
+                let mut path = vec![Segment::Item(at)];
+                path.extend(inside);
+                diagnostics.push(Diagnostic::refused(form, path, error));
             }
         }
-        Ok((kernel, self.diagnose()))
+        diagnostics.extend(self.diagnose());
+        (kernel, diagnostics)
+    }
+
+    /// The kernel rules one tree of a document expands to, added to
+    /// `kernel`.
+    fn each(&mut self, at: usize, tree: &Syntax, kernel: &mut Vec<Syntax>) -> Result<(), Error> {
+        // Where several definitions take a form that is read, the rule
+        // is expanded once a definition: what is read is what any of
+        // them reads. Within one rule a form that recurs is the same
+        // definition's each time.
+        let mut choices = Vec::new();
+        loop {
+            self.choices = choices;
+            let rules = self.top(tree.clone())?;
+            choices = std::mem::take(&mut self.choices);
+            for rule in rules {
+                if let Some(rule) = self.install(rule)?
+                    && !kernel.contains(&rule)
+                {
+                    kernel.push(rule);
+                    self.origin.push(at);
+                }
+            }
+            while let Some(last) = choices.last_mut() {
+                if last.taken + 1 < last.of {
+                    last.taken += 1;
+                    break;
+                }
+                choices.pop();
+            }
+            if choices.is_empty() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Do `work` with `part` as what a refusal in it is about.
+    fn about<T>(
+        &mut self,
+        part: &Syntax,
+        work: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let depth = self.blame.len();
+        self.blame.push(part.clone());
+        let done = work(self);
+        if done.is_ok() {
+            self.blame.truncate(depth);
+        }
+        done
     }
 
     /// For each kernel rule the last document expanded to, which of its
@@ -673,6 +764,7 @@ impl Expander {
                         form: form.clone(),
                         message: message.clone(),
                         path,
+                        refusal: None,
                     };
                     if !diagnostics.contains(&diagnostic) {
                         diagnostics.push(diagnostic);
@@ -725,7 +817,8 @@ impl Expander {
                     apply("all", each)
                 });
             }
-            tree = self.ask(&tree, position)?;
+            let asked = tree;
+            tree = self.about(&asked, |this| this.ask(&asked, position))?;
         }
     }
 
@@ -755,7 +848,7 @@ impl Expander {
                         },
                     )
                 }
-                _ => self.ask(&tree, Position::Head)?,
+                _ => self.about(&tree, |this| this.ask(&tree, Position::Head))?,
             };
         }
         let written = Clauses::of(&tree);
@@ -770,6 +863,7 @@ impl Expander {
                     .is_some_and(|word| HEAD_WORDS.contains(&word))
                     && items(head).iter().any(several)))
         {
+            self.blame.push(head.clone());
             return Err(Error::Refused(format!(
                 "{head} is several heads: a rule has one head, so write a rule for each"
             )));
@@ -780,12 +874,15 @@ impl Expander {
             .chain(&written.unless)
             .find(|part| several(part))
         {
+            self.blame.push(part.clone());
             return Err(Error::Refused(format!(
                 "{part} is not a premise: premises are written one after another"
             )));
         }
         let heads = match written.head {
-            Some(head) => members(self.application(head, Position::Head)?),
+            Some(head) => members(self.about(&head, |this| {
+                this.application(head.clone(), Position::Head)
+            })?),
             None => Vec::new(),
         };
         let mut walked = Clauses {
@@ -800,19 +897,23 @@ impl Expander {
                 .applies()
                 .is_some_and(|word| HEAD_WORDS.contains(&word))
             {
+                self.blame.push(premise.clone());
                 return Err(Error::Refused(format!(
                     "{premise} is a head, and stands among the premises: the first part of a rule is its head, and a rule has one, so write a rule for each"
                 )));
             }
-            walked
-                .when
-                .extend(members(self.application(premise, Position::Premise)?));
+            walked.when.extend(members(self.about(&premise, |this| {
+                this.application(premise.clone(), Position::Premise)
+            })?));
         }
         for premise in written.unless {
-            self.negating = true;
-            let stands = self.application(premise.clone(), Position::Premise);
-            self.negating = false;
-            walked.unless.push(together(members(stands?), &premise)?);
+            let joined = self.about(&premise, |this| {
+                this.negating = true;
+                let stands = this.application(premise.clone(), Position::Premise);
+                this.negating = false;
+                together(members(stands?), &premise)
+            })?;
+            walked.unless.push(joined);
         }
         let split = heads.len() > 1;
         let mut rules = Vec::new();

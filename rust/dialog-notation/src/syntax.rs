@@ -147,6 +147,7 @@ fn run<'a>(
                                     end: mark.span.end,
                                 },
                                 closing: mark.comments.clone(),
+                                after: mark.after.clone(),
                                 ..Note::default()
                             },
                         );
@@ -181,6 +182,7 @@ pub(crate) fn tree(
         span: mark.span,
         comments: mark.comments.clone(),
         closing: mark.closing.clone(),
+        after: mark.after.clone(),
         ..Note::default()
     });
     let inside = |at: usize| mark.and_then(|mark| mark.parts.get(at));
@@ -246,7 +248,8 @@ pub(crate) fn tree(
                             order.push(Slot::Rest {
                                 at: rest.span.start,
                             });
-                            note.closing.extend(rest.comments.iter().cloned());
+                            note.closing
+                                .extend(rest.comments.iter().chain(&rest.after).cloned());
                             note.closing.sort_by_key(|comment| comment.at);
                         }
                     }

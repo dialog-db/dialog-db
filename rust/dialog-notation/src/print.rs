@@ -177,6 +177,8 @@ impl Printer<'_> {
                     match slot {
                         Slot::Item { at, of } => {
                             path.push(Segment::Item(*at));
+                            let starts = of.or(self.written.span(path).map(|span| span.start));
+                            self.closing(closing, &mut next, starts);
                             if let Some(of) = of {
                                 self.labelled("of", Some(*of), path);
                             }
@@ -236,6 +238,9 @@ impl Printer<'_> {
                     .unwrap_or_else(|| atom.spelled(key));
                 self.token(start, &spelled);
             }
+        }
+        if let Some(comment) = note.and_then(|note| note.after.as_ref()) {
+            self.comment(comment);
         }
     }
 

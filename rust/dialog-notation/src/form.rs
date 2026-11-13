@@ -228,6 +228,8 @@ pub(crate) struct Mark {
     pub comments: Vec<Comment>,
     /// The comments before its closing bracket.
     pub closing: Vec<Comment>,
+    /// The comment that ends the line the form ends on.
+    pub after: Option<Comment>,
     /// A mark a form inside: an application's head and then its parts,
     /// a vector's items, a map's keys and values in turn.
     pub parts: Vec<Mark>,
@@ -262,12 +264,18 @@ struct Token {
     /// The token as written.
     raw: String,
     span: Span,
-    /// The comments between the token before it and it.
+    /// The comments between the token before it and it, but for one
+    /// that ends the line a form ends on.
     comments: Vec<Comment>,
+    /// The comment after it on its line, where the token ends a form.
+    after: Option<Comment>,
 }
 
 /// The tokens of `text`, each with where it is. A `;` starts a comment
-/// that runs to the end of its line, and is kept on the token below it.
+/// that runs to the end of its line. A comment that ends a line is about
+/// the form that ends before it on that line, and is kept on that form's
+/// last token. Any other is about the form below it, and is kept on the
+/// token below it.
 fn tokens(text: &str) -> Result<(Vec<Token>, Tail), Error> {
     let mut tokens = Vec::new();
     let mut comments = Vec::new();
@@ -299,10 +307,24 @@ fn tokens(text: &str) -> Result<(Vec<Token>, Tail), Error> {
                 while chars.peek().is_some_and(|&c| c != '\n') {
                     take(&mut chars, &mut here);
                 }
-                comments.push(Comment {
+                let comment = Comment {
                     text: raw.trim_end().to_string(),
                     at: start,
-                });
+                };
+                // A token that opens a form or labels a part ends no
+                // form, so a comment after it is about what is below.
+                match tokens.last_mut() {
+                    Some(Token {
+                        text, span, after, ..
+                    }) if span.end.line == start.line
+                        && after.is_none()
+                        && !matches!(text.as_str(), "(" | "[" | "{")
+                        && label(text).is_none() =>
+                    {
+                        *after = Some(comment);
+                    }
+                    _ => comments.push(comment),
+                }
                 continue;
             }
             '(' | ')' | '[' | ']' | '{' | '}' => {
@@ -341,6 +363,7 @@ fn tokens(text: &str) -> Result<(Vec<Token>, Tail), Error> {
             raw,
             span: Span { start, end: here },
             comments: std::mem::take(&mut comments),
+            after: None,
         });
     }
     Ok((
@@ -404,6 +427,7 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Error> {
         if let Some(closer) = tokens.get(*at) {
             mark.span.end = closer.span.end;
             mark.closing = closer.comments.clone();
+            mark.after = closer.after.clone();
         }
         *at += 1;
     };
@@ -433,6 +457,7 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Error> {
                             span: next.span,
                             raw: next.raw.clone(),
                             comments: next.comments.clone(),
+                            after: next.after.clone(),
                             ..Mark::default()
                         });
                         Form::symbol(name)
@@ -484,6 +509,7 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Error> {
         }
         other => {
             mark.raw = token.raw.clone();
+            mark.after = token.after.clone();
             atom(other)
         }
     };

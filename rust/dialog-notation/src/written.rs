@@ -10,7 +10,7 @@
 //! | the order the parts were written in, and `of:` written or not | the [`Slot`]s of the node |
 //! | a token spelled another way than a printer would spell it | the spelling |
 //! | where the node is | its [`Span`] |
-//! | a comment | its text, on the node below it |
+//! | a comment | its text, on the node it is about: the one that ends just before it on its line, and otherwise the one below it |
 //!
 //! It does not hold the text. The space between two tokens is not kept
 //! either: it is what lies between where one ends and the next starts.
@@ -123,6 +123,9 @@ pub struct Note {
     pub order: Vec<Slot>,
     /// The comments above the node, which are about it.
     pub comments: Vec<Comment>,
+    /// The comment that ends the line the node ends on, right after
+    /// it, which is about it too.
+    pub after: Option<Comment>,
     /// The comments inside the node that no part is below: before its
     /// closing bracket, or before a `...`.
     pub closing: Vec<Comment>,
@@ -151,9 +154,12 @@ impl Written {
         self.note(path).map(|note| note.span)
     }
 
-    /// The comments about the node at `path`: the ones above it.
-    pub fn comments(&self, path: &[Segment]) -> &[Comment] {
-        self.note(path).map_or(&[], |note| &note.comments)
+    /// The comments about the node at `path`: the ones above it, and
+    /// then the one that ends its line.
+    pub fn comments(&self, path: &[Segment]) -> Vec<&Comment> {
+        self.note(path)
+            .map(|note| note.comments.iter().chain(&note.after).collect())
+            .unwrap_or_default()
     }
 
     /// Put the node at `path`, and every node inside it, one step

@@ -10,7 +10,7 @@
 //! | phase | takes | gives |
 //! |---|---|---|
 //! | [`parse`](parse()) | text | syntax trees, names unresolved |
-//! | [`Analyzer::analyze`] | syntax trees | analyzed trees, every one a rule of the kernel, which tree each came of, and what the definitions said about the document |
+//! | [`Analyzer::analyze`] | syntax trees | analyzed trees, every one a rule of the kernel, which tree each came of, and diagnostics: every refusal and every warning, each with the way to the form it is about |
 //! | [`compile`](compile()) | an analyzed tree | what Dialog-DB already runs: concept queries, deductive and inductive rules, facts and dispatched commands |
 //!
 //! Analysis is the walker ([`expand`]) and the patterns it matches
@@ -37,7 +37,7 @@
 //!      (query (task ?t title: ?x))",
 //! )?;
 //! let mut analyzer = Analyzer::new()?;
-//! let analysis = analyzer.analyze(&trees)?;
+//! let analysis = analyzer.analyze(&trees);
 //! assert!(analysis.diagnostics.is_empty());
 //! let steps = compile(&analysis.analyzed[0])?;
 //! assert_eq!(steps.len(), 1);
@@ -60,7 +60,7 @@ pub mod written;
 pub use analyze::{Analysis, Analyzer};
 pub use compile::{Query, Step, compile};
 pub use data::Data;
-pub use expand::{Diagnostic, Expander, Position};
+pub use expand::{Diagnostic, Expander, Position, Severity};
 pub use form::{Form, Part, read};
 pub use parse::{parse, parse_written};
 pub use print::print;
@@ -68,7 +68,7 @@ pub use syntax::{Parameters, Signature, Syntax};
 pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};
 
 /// Why a document was not read, expanded or compiled.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Error {
     /// The text is not forms.
     #[error("cannot read: {0}")]

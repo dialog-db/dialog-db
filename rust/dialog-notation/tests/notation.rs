@@ -269,6 +269,20 @@ async fn it_says_where_a_warning_and_a_refusal_are() -> Result<()> {
         refused.downcast::<Error>(),
         Ok(Error::Unsupported(_))
     ));
+
+    // A refusal by the analyzer says where the part it is about is.
+    let refused = notebook
+        .submit("(rule (xyz.seen ?a n: ?n)\n  (xyz.a ?a n: ?n)\n  (frobnicate ?a))")
+        .await
+        .expect_err("nothing says what frobnicate is");
+    assert!(
+        refused.to_string().contains("line 3, column 3"),
+        "{refused:#}"
+    );
+    assert!(matches!(
+        refused.downcast::<Error>(),
+        Ok(Error::Unknown(_))
+    ));
     Ok(())
 }
 

@@ -91,9 +91,11 @@ mod tests {
         back("(a)(b) [ 1  2 ]{ k: 1 }")
     }
 
+    /// A comment is about the form that ends before it on its line,
+    /// and otherwise about the form below it.
     #[dialog_common::test]
-    fn it_keeps_a_comment_on_the_form_below_it() -> Result<(), Error> {
-        let text = "; A to-do, on a list.\n;; Two lines of it.\n(concept (todo ?t\n           ; what it says\n           text: ?x ; ends the line\n           ; the list it is on\n           list: ?l\n           ; nothing below\n           )\n  (xyz.todo ?t text: ?x ; again\n   ...?rest))\n; the end\n";
+    fn it_keeps_a_comment_on_the_form_it_is_about() -> Result<(), Error> {
+        let text = "; A to-do, on a list.\n;; Two lines of it.\n(concept (todo ?t\n           ; what it says\n           text: ?x ; shown in the list\n           ; the list it is on\n           list: ?l\n           ; nothing below\n           ) ; the call\n  (xyz.todo ?t text: ?x ; again\n   ...?rest)) ; the whole of it\n; the end\n";
         back(text)?;
         let (_, written) = parse_written(text)?;
         let said = |path: &[Segment]| -> Vec<String> {
@@ -103,11 +105,12 @@ mod tests {
                 .map(|comment| comment.said().to_string())
                 .collect()
         };
-        let concept = [Segment::Item(0)];
         assert_eq!(
-            said(&concept),
-            vec!["A to-do, on a list.", "Two lines of it."]
+            said(&[Segment::Item(0)]),
+            vec!["A to-do, on a list.", "Two lines of it.", "the whole of it"]
         );
+        let call = [Segment::Item(0), Segment::Item(0)];
+        assert_eq!(said(&call), vec!["the call"]);
         let field = |label: &str| {
             [
                 Segment::Item(0),
@@ -115,19 +118,50 @@ mod tests {
                 Segment::Term(label.into()),
             ]
         };
-        assert_eq!(said(&field("text")), vec!["what it says"]);
-        // A comment that ends a line is, like any other, on the form
-        // below it.
+        // Above its label, and at the end of its line.
         assert_eq!(
-            said(&field("list")),
-            vec!["ends the line", "the list it is on"]
+            said(&field("text")),
+            vec!["what it says", "shown in the list"]
         );
-        let closing = &written
-            .note(&[Segment::Item(0), Segment::Item(0)])
-            .unwrap()
-            .closing;
+        assert_eq!(said(&field("list")), vec!["the list it is on"]);
+        // A comment no form is below, and none ends before, is kept on
+        // what it is inside.
+        let closing = &written.note(&call).unwrap().closing;
         assert_eq!(closing[0].said(), "nothing below");
+        assert_eq!(
+            said(&[
+                Segment::Item(0),
+                Segment::Item(1),
+                Segment::Term("text".into())
+            ]),
+            vec!["again"]
+        );
         assert_eq!(written.trailing[0].said(), "the end");
+        Ok(())
+    }
+
+    /// A token that opens a form or labels a part ends no form, so a
+    /// comment after it is about what is below.
+    #[dialog_common::test]
+    fn it_keeps_a_comment_after_a_bracket_or_a_label_on_the_form_below() -> Result<(), Error> {
+        let text = "(xyz.todo ?t text: ; what it says\n  ?x\n  tags: [ ; the first\n    ?a ?rest ... ; any more\n  ])";
+        back(text)?;
+        let (_, written) = parse_written(text)?;
+        let said = |path: &[Segment]| -> Vec<String> {
+            written
+                .comments(path)
+                .iter()
+                .map(|comment| comment.said().to_string())
+                .collect()
+        };
+        let part = |label: &str| vec![Segment::Item(0), Segment::Term(label.into())];
+        assert_eq!(said(&part("text")), vec!["what it says"]);
+        let mut first = part("tags");
+        first.push(Segment::Item(0));
+        assert_eq!(said(&first), vec!["the first"]);
+        let mut repeat = part("tags");
+        repeat.push(Segment::Item(1));
+        assert_eq!(said(&repeat), vec!["any more"]);
         Ok(())
     }
 
