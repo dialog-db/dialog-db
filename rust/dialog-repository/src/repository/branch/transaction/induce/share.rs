@@ -25,6 +25,7 @@
 //! written, and such a rule is evaluated on its own after all.
 
 use std::collections::HashMap;
+use std::mem;
 use std::sync::Arc;
 
 use dialog_corpus::{Entity, Pick, Relation, Value};
@@ -104,7 +105,7 @@ impl Round {
     /// The part of the candidate at `at`, taken: each candidate is
     /// fired once.
     pub(super) fn take(&mut self, at: usize) -> Part {
-        std::mem::replace(&mut self.parts[at], Part::Alone)
+        mem::replace(&mut self.parts[at], Part::Alone)
     }
 
     /// Keep what the `First` of `group` matched.
@@ -179,12 +180,13 @@ pub(super) fn order_decides(heads: &[WrittenHead]) -> bool {
 #[cfg(test)]
 pub(super) mod probe {
     use std::cell::Cell;
+    use std::env;
     use std::sync::OnceLock;
 
     /// What `DIALOG_TEST_SHARE` asks for, read once.
     fn asked() -> &'static str {
         static ASKED: OnceLock<String> = OnceLock::new();
-        ASKED.get_or_init(|| std::env::var("DIALOG_TEST_SHARE").unwrap_or_default())
+        ASKED.get_or_init(|| env::var("DIALOG_TEST_SHARE").unwrap_or_default())
     }
 
     /// Whether the order of matches is left to decide, for a run that

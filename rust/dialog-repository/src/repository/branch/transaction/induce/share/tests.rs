@@ -734,16 +734,17 @@ async fn it_evaluates_a_rule_alone_when_the_order_of_matches_decides() -> Result
 /// one cell under `last` the two rules elect different values. A rule
 /// that reads another's matches must still write what it writes alone.
 ///
-/// Eight rules state one body of two premises over one concept, and
-/// differ in the attribute they write. The test requires that both
-/// orders occur among them and that the two orders do write different
-/// values, so it cannot pass by every rule agreeing with the first.
+/// Eight rules state one body, two premises alike but for their
+/// variable, and differ in the attribute they write. The test requires
+/// that both orders occur among them and that somewhere the two orders
+/// do elect different values, so it cannot pass by every rule agreeing
+/// with the first.
 #[dialog_common::test]
 async fn it_writes_in_its_own_order_a_body_two_rules_list_in_two_orders() -> Result<()> {
-    let edge = |from: &str, to: &str| {
+    let edge = |from: &str| {
         premise(
             concept(&[("to", field("edge/to", "entity:", "all:"))]),
-            &[("this", from), ("to", to)],
+            &[("this", from), ("to", "this")],
         )
     };
     let domains = [
@@ -754,50 +755,64 @@ async fn it_writes_in_its_own_order_a_body_two_rules_list_in_two_orders() -> Res
         .map(|domain| {
             rule(
                 "assert!",
-                head("far", &format!("{domain}/far"), "entity:", "last:"),
-                vec![edge("near", "this"), edge("far", "near")],
+                head("from", &format!("{domain}/from"), "entity:", "last:"),
+                vec![edge("from"), edge("other")],
                 vec![],
             )
         })
         .collect::<Result<_>>()?;
 
     // Which premise each rule lists first, as it is stored and decoded:
-    // the one whose `to` is `this`, or the other.
-    let near_first: Vec<bool> = rules
+    // the one whose subject the head writes, or the other.
+    let head_first: Vec<bool> = rules
         .iter()
         .map(|rule| {
             let stored = InductiveRule::decode(&rule.encode()).expect("a stored rule decodes");
+            let written = stored
+                .conclusion()
+                .with()
+                .iter()
+                .map(|(name, _)| name.to_string())
+                .next()
+                .expect("a head has a field");
             let first = stored.analysis().premises[0].parameters();
-            first.get("to").and_then(|term| term.name()) == Some("this")
+            first.get("this").and_then(|term| term.name()) == Some(written.as_str())
         })
         .collect();
     assert!(
-        near_first.contains(&true) && near_first.contains(&false),
-        "the rules list the body in both orders: {near_first:?}"
+        head_first.contains(&true) && head_first.contains(&false),
+        "the rules list the body in both orders: {head_first:?}"
     );
 
-    // `hub` is reached from `old`, and `new` from `outer`. One commit
-    // adds an edge from `new` to `hub` and one from `beyond` to `old`:
-    // `hub` is now two steps from `outer` through `new`, found through
-    // the near premise, and from `beyond` through `old`, found through
-    // the far one.
+    // Each hub is reached from one node, and one commit adds an edge
+    // to it from a second. The pairs are named so that whichever order
+    // a scan gives two nodes in, some hub has the old one first.
+    const HUBS: usize = 6;
+    let pair = |hub: usize| {
+        if hub.is_multiple_of(2) {
+            (format!("node:a{hub}"), format!("node:z{hub}"))
+        } else {
+            (format!("node:z{hub}"), format!("node:a{hub}"))
+        }
+    };
     let world_of = |share: bool| {
         let rules = rules.clone();
         async move {
             let _unshared = (!share).then(Unshared::new);
             let world = world().await?;
-            let mut ground = Changes::new();
-            let link = |changes: &mut Changes, from: &str, to: &str| {
+            let link = |changes: &mut Changes, from: &str, hub: usize| {
                 assert(
                     changes,
                     "edge/to",
                     from,
-                    Value::Entity(entity(to)),
+                    Value::Entity(entity(&format!("hub:{hub}"))),
                     Pick::All,
                 );
             };
-            link(&mut ground, "node:old", "node:hub");
-            link(&mut ground, "node:outer", "node:new");
+            let mut ground = Changes::new();
+            for hub in 0..HUBS {
+                link(&mut ground, &pair(hub).0, hub);
+            }
             commit(&world, ground, Changes::new()).await?;
             let mut transaction = world.branch.transaction();
             for rule in &rules {
@@ -812,28 +827,34 @@ async fn it_writes_in_its_own_order_a_body_two_rules_list_in_two_orders() -> Res
             probe::take();
 
             let mut changes = Changes::new();
-            link(&mut changes, "node:new", "node:hub");
-            link(&mut changes, "node:beyond", "node:old");
+            for hub in 0..HUBS {
+                link(&mut changes, &pair(hub).1, hub);
+            }
             commit(&world, changes, Changes::new()).await?;
             let counts = probe::take();
 
+            // What each hub holds under each rule's attribute.
             let mut held = Vec::new();
-            for domain in domains {
-                let selector = Selector::new()
-                    .the(relation(&format!("{domain}/far")))
-                    .of(entity("node:hub"));
-                let stream = world
-                    .branch
-                    .claims()
-                    .select(selector)
-                    .perform(&world.operator)
-                    .await?;
-                let facts: Vec<_> = stream.collect().await;
-                let mut values = Vec::new();
-                for fact in facts {
-                    values.push(format!("{:?}", fact.and_then(|view| view.to_owned())?.is));
+            for hub in 0..HUBS {
+                let mut by_rule = Vec::new();
+                for domain in domains {
+                    let selector = Selector::new()
+                        .the(relation(&format!("{domain}/from")))
+                        .of(entity(&format!("hub:{hub}")));
+                    let stream = world
+                        .branch
+                        .claims()
+                        .select(selector)
+                        .perform(&world.operator)
+                        .await?;
+                    let facts: Vec<_> = stream.collect().await;
+                    let mut values = Vec::new();
+                    for fact in facts {
+                        values.push(format!("{:?}", fact.and_then(|view| view.to_owned())?.is));
+                    }
+                    by_rule.push(values);
                 }
-                held.push(values);
+                held.push(by_rule);
             }
             anyhow::Ok((held, counts))
         }
@@ -842,27 +863,17 @@ async fn it_writes_in_its_own_order_a_body_two_rules_list_in_two_orders() -> Res
     let (unshared, _) = world_of(false).await?;
     assert_eq!(shared, unshared, "every rule elects what it elects alone");
 
-    let outer = format!("{:?}", Value::Entity(entity("node:outer")));
-    let beyond = format!("{:?}", Value::Entity(entity("node:beyond")));
-    let elected: Vec<&str> = shared
-        .iter()
-        .map(|values| match values.as_slice() {
-            [value] if *value == outer => "outer",
-            [value] if *value == beyond => "beyond",
-            other => panic!("one value is elected under `last`: {other:?}"),
-        })
-        .collect();
-    assert!(
-        elected.contains(&"outer") && elected.contains(&"beyond"),
-        "the two orders elect different values: {elected:?}"
-    );
-    for (near, elected) in near_first.iter().zip(&elected) {
-        assert_eq!(
-            *elected,
-            if *near { "beyond" } else { "outer" },
-            "a rule elects the match its later premise finds"
-        );
+    for by_rule in &shared {
+        for values in by_rule {
+            assert_eq!(values.len(), 1, "one value is elected under `last`");
+        }
     }
+    assert!(
+        shared
+            .iter()
+            .any(|by_rule| by_rule.iter().any(|values| values != &by_rule[0])),
+        "at some hub the two orders elect different values: {shared:?}"
+    );
     let (read, alone) = counts;
     assert_eq!(read + alone, rules.len() - 1, "all eight state one body");
     assert_eq!(
