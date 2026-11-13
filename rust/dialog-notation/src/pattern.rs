@@ -1,22 +1,23 @@
-//! Patterns and templates: taking a form apart and building one.
+//! Patterns and templates: taking a tree apart and building one.
 //!
-//! A pattern is a form with variables in it. Matching binds each
-//! variable to the part of a form that stands where it stands. A
+//! A pattern is a tree with variables in it. Matching binds each
+//! variable to the part of a tree that stands where it stands. A
 //! template is filled from those bindings.
 
 use std::collections::BTreeMap;
 
-use crate::form::{Form, Part};
+use crate::Error;
+use crate::syntax::{Parameters, Syntax};
 
 /// What a pattern's variable took.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Binding {
-    /// One form.
-    One(Form),
-    /// The forms a repeated part took, in order.
-    Many(Vec<Form>),
+    /// One tree.
+    One(Syntax),
+    /// The trees a repeated part took, in order.
+    Many(Vec<Syntax>),
     /// The labelled parts a `...?rest` took.
-    Row(Vec<(String, Form)>),
+    Row(BTreeMap<String, Syntax>),
 }
 
 /// What each variable of a pattern took.
@@ -33,59 +34,81 @@ fn bind(mut bindings: Bindings, name: &str, binding: Binding) -> Option<Bindings
     }
 }
 
-/// The names of the variables in a pattern, in the order they occur.
-pub fn variables(pattern: &Form, into: &mut Vec<String>) {
-    match pattern {
-        Form::Variable(name) => into.push(name.clone()),
-        Form::Vector(items) => items.iter().for_each(|item| variables(item, into)),
-        Form::Map(entries) => entries.iter().for_each(|(key, value)| {
-            variables(key, into);
-            variables(value, into);
-        }),
-        Form::Application(head, parts) => {
-            variables(head, into);
-            for part in parts {
-                match part {
-                    Part::Bare(form) | Part::Labelled(_, form) => variables(form, into),
-                }
-            }
+/// What a run of patterns binds against a run of trees. One of the
+/// patterns may repeat, `p ...`: it takes any number of trees, each
+/// matching `p`, and every variable in it takes them all.
+fn run(given: &[Syntax], wanted: &[Syntax], mut bindings: Bindings) -> Option<Bindings> {
+    let Some(at) = wanted
+        .iter()
+        .position(|pattern| matches!(pattern, Syntax::Repeat(_)))
+    else {
+        if given.len() != wanted.len() {
+            return None;
         }
-        _ => {}
+        return given
+            .iter()
+            .zip(wanted)
+            .try_fold(bindings, |bindings, (item, pattern)| {
+                matches(item, pattern, bindings)
+            });
+    };
+    let (before, after) = (&wanted[..at], &wanted[at + 1..]);
+    let Syntax::Repeat(repeated) = &wanted[at] else {
+        return None;
+    };
+    if given.len() < before.len() + after.len() {
+        return None;
     }
-}
-
-/// What `pattern` binds against `form`, on top of `bindings`, or `None`
-/// when the form does not have the pattern's shape.
-///
-/// - A variable takes any one form, and the same form wherever it
-///   recurs. `_` takes anything.
-/// - Bare parts match in order and in number; `p ...` takes any number
-///   of them, each matching `p`.
-/// - A labelled part the form leaves out leaves its variables unbound.
-///   `...?rest` takes the labelled parts the pattern does not name;
-///   without it the form may have none.
-pub fn matches(form: &Form, pattern: &Form, bindings: Bindings) -> Option<Bindings> {
-    match pattern {
-        Form::Variable(name) => bind(bindings, name, Binding::One(form.clone())),
-        Form::Blank => Some(bindings),
-        Form::Vector(patterns) => {
-            let Form::Vector(items) = form else {
+    let tail = given.len() - after.len();
+    let mut names = Vec::new();
+    repeated.variables(&mut names);
+    let mut columns: BTreeMap<&str, Vec<Syntax>> = names
+        .iter()
+        .map(|name| (name.as_str(), Vec::new()))
+        .collect();
+    for item in &given[before.len()..tail] {
+        let one = matches(item, repeated, Bindings::new())?;
+        for name in &names {
+            let Some(Binding::One(taken)) = one.get(name) else {
                 return None;
             };
-            if items.len() != patterns.len() {
-                return None;
-            }
-            items
-                .iter()
-                .zip(patterns)
-                .try_fold(bindings, |bindings, (item, pattern)| {
-                    matches(item, pattern, bindings)
-                })
+            columns.get_mut(name.as_str())?.push(taken.clone());
         }
+    }
+    for (name, column) in columns {
+        bindings = bind(bindings, name, Binding::Many(column))?;
+    }
+    given[..before.len()]
+        .iter()
+        .zip(before)
+        .chain(given[tail..].iter().zip(after))
+        .try_fold(bindings, |bindings, (item, pattern)| {
+            matches(item, pattern, bindings)
+        })
+}
+
+/// What `pattern` binds against `tree`, on top of `bindings`, or `None`
+/// when the tree does not have the pattern's shape.
+///
+/// - A variable takes any one tree, and the same tree wherever it
+///   recurs. `_` takes anything.
+/// - Parts with no label match in order and in number; `p ...` takes
+///   any number of them, each matching `p`.
+/// - A labelled part the tree leaves out leaves its variables unbound.
+///   `...?rest` takes the labelled parts the pattern does not name;
+///   without it the tree may have none.
+pub fn matches(tree: &Syntax, pattern: &Syntax, bindings: Bindings) -> Option<Bindings> {
+    match pattern {
+        Syntax::Variable(name) => bind(bindings, name, Binding::One(tree.clone())),
+        Syntax::Blank => Some(bindings),
+        Syntax::Tuple(patterns) => match tree {
+            Syntax::Tuple(items) => run(items, patterns, bindings),
+            _ => None,
+        },
         // A map is taken apart by key: the pattern's keys are what they
-        // are, and each has to be a key of the form.
-        Form::Map(patterns) => {
-            let Form::Map(entries) = form else {
+        // are, and each has to be a key of the tree.
+        Syntax::Map(patterns) => {
+            let Syntax::Map(entries) = tree else {
                 return None;
             };
             if entries.len() != patterns.len() {
@@ -98,175 +121,126 @@ pub fn matches(form: &Form, pattern: &Form, bindings: Bindings) -> Option<Bindin
                     matches(value, pattern, bindings)
                 })
         }
-        Form::Application(pattern_head, _) => {
-            let (head, _) = form.as_application()?;
-            let mut bindings = matches(head, pattern_head, bindings)?;
-
-            let given = form.bare();
-            let wanted = pattern.bare();
-            let pairs: Vec<(&Form, &Form)> = match wanted.iter().position(|p| **p == Form::Ellipsis)
-            {
-                Some(0) => return None,
-                Some(at) => {
-                    let (before, repeated, after) =
-                        (&wanted[..at - 1], wanted[at - 1], &wanted[at + 1..]);
-                    if given.len() < before.len() + after.len() {
-                        return None;
-                    }
-                    let tail = given.len() - after.len();
-                    let mut names = Vec::new();
-                    variables(repeated, &mut names);
-                    let mut columns: BTreeMap<&str, Vec<Form>> = names
-                        .iter()
-                        .map(|name| (name.as_str(), Vec::new()))
-                        .collect();
-                    for item in &given[before.len()..tail] {
-                        let one = matches(item, repeated, Bindings::new())?;
-                        for name in &names {
-                            let Some(Binding::One(taken)) = one.get(name) else {
-                                return None;
-                            };
-                            columns.get_mut(name.as_str())?.push(taken.clone());
-                        }
-                    }
-                    for (name, column) in columns {
-                        bindings = bind(bindings, name, Binding::Many(column))?;
-                    }
-                    given[..before.len()]
-                        .iter()
-                        .copied()
-                        .zip(before.iter().copied())
-                        .chain(given[tail..].iter().copied().zip(after.iter().copied()))
-                        .collect()
-                }
-                None => {
-                    if given.len() != wanted.len() {
-                        return None;
-                    }
-                    given.into_iter().zip(wanted).collect()
-                }
+        Syntax::Application(wanted, named) => {
+            let Syntax::Application(operator, operand) = tree else {
+                return None;
             };
-            for (item, pattern) in pairs {
-                bindings = matches(item, pattern, bindings)?;
-            }
-
-            let labelled = form.labelled();
-            let named = pattern.labelled();
-            for (label, pattern) in &named {
-                if let Some((_, item)) = labelled.iter().find(|(name, _)| name == label) {
+            let bindings = matches(operator, wanted, bindings)?;
+            let mut bindings = run(&operand.items, &named.items, bindings)?;
+            for (label, pattern) in &named.terms {
+                if let Some(item) = operand.terms.get(label) {
                     bindings = matches(item, pattern, bindings)?;
                 }
             }
-            let extra: Vec<(String, Form)> = labelled
+            let extra: BTreeMap<String, Syntax> = operand
+                .terms
                 .iter()
-                .filter(|(label, _)| !named.iter().any(|(name, _)| name == label))
-                .map(|(label, item)| (label.to_string(), (*item).clone()))
+                .filter(|(label, _)| !named.terms.contains_key(*label))
+                .map(|(label, item)| (label.clone(), item.clone()))
                 .collect();
-            let rest = pattern
-                .as_application()?
-                .1
-                .iter()
-                .find_map(|part| match part {
-                    Part::Bare(Form::Rest(name)) => Some(name),
-                    _ => None,
-                });
-            match rest {
+            match &named.rest {
                 Some(name) => bind(bindings, name, Binding::Row(extra)),
                 None => extra.is_empty().then_some(bindings),
             }
         }
-        literal => (form == literal).then_some(bindings),
+        literal => (tree == literal).then_some(bindings),
     }
+}
+
+/// A run of templates, filled. A template that repeats is filled once
+/// for each of what its variables took.
+fn fill_run(templates: &[Syntax], bindings: &Bindings, fresh: &str) -> Result<Vec<Syntax>, Error> {
+    let mut filled = Vec::new();
+    for template in templates {
+        let Syntax::Repeat(repeated) = template else {
+            filled.push(fill(template, bindings, fresh)?);
+            continue;
+        };
+        let mut names = Vec::new();
+        repeated.variables(&mut names);
+        let many: Vec<(&String, &Vec<Syntax>)> = names
+            .iter()
+            .filter_map(|name| match bindings.get(name) {
+                Some(Binding::Many(trees)) => Some((name, trees)),
+                _ => None,
+            })
+            .collect();
+        let count = many.first().map_or(0, |(_, trees)| trees.len());
+        for index in 0..count {
+            let mut each = bindings.clone();
+            for (name, trees) in &many {
+                if let Some(tree) = trees.get(index) {
+                    each.insert((*name).clone(), Binding::One(tree.clone()));
+                }
+            }
+            filled.push(fill(repeated, &each, fresh)?);
+        }
+    }
+    Ok(filled)
 }
 
 /// `template` with every variable the bindings hold replaced by what it
 /// took. Any other variable is the template's own: it is renamed with
 /// `fresh`, so no two expansions share it and it cannot capture a
-/// variable of the form being expanded.
-pub fn fill(template: &Form, bindings: &Bindings, fresh: &str) -> Form {
-    match template {
-        Form::Variable(name) => match bindings.get(name) {
-            Some(Binding::One(form)) => form.clone(),
-            Some(Binding::Many(forms)) => Form::Vector(forms.clone()),
-            Some(Binding::Row(_)) | None => Form::Variable(format!("{name}.{fresh}")),
+/// variable of the tree being expanded.
+///
+/// A label the template writes and a `...?rest` also brings is refused:
+/// a tree says a label once.
+pub fn fill(template: &Syntax, bindings: &Bindings, fresh: &str) -> Result<Syntax, Error> {
+    Ok(match template {
+        Syntax::Variable(name) => match bindings.get(name) {
+            Some(Binding::One(tree)) => tree.clone(),
+            Some(Binding::Many(trees)) => Syntax::Tuple(trees.clone()),
+            Some(Binding::Row(_)) | None => Syntax::Variable(format!("{name}.{fresh}")),
         },
-        Form::Vector(items) => Form::Vector(
-            items
-                .iter()
-                .map(|item| fill(item, bindings, fresh))
-                .collect(),
-        ),
-        Form::Map(entries) => Form::Map(
+        Syntax::Tuple(items) => Syntax::Tuple(fill_run(items, bindings, fresh)?),
+        Syntax::Map(entries) => Syntax::Map(
             entries
                 .iter()
-                .map(|(key, value)| (fill(key, bindings, fresh), fill(value, bindings, fresh)))
-                .collect(),
+                .map(|(key, value)| {
+                    Ok((fill(key, bindings, fresh)?, fill(value, bindings, fresh)?))
+                })
+                .collect::<Result<_, Error>>()?,
         ),
-        Form::Application(head, parts) => {
-            let mut filled = Vec::new();
-            let mut at = 0;
-            while at < parts.len() {
-                match &parts[at] {
-                    Part::Labelled(label, item) => {
-                        filled.push(Part::Labelled(label.clone(), fill(item, bindings, fresh)));
-                    }
-                    Part::Bare(Form::Ellipsis) => {}
-                    Part::Bare(Form::Rest(name)) => {
-                        if let Some(Binding::Row(row)) = bindings.get(name) {
-                            filled.extend(
-                                row.iter().map(|(label, item)| {
-                                    Part::Labelled(label.clone(), item.clone())
-                                }),
-                            );
-                        }
-                    }
-                    Part::Bare(item) => {
-                        let repeats = matches!(parts.get(at + 1), Some(Part::Bare(Form::Ellipsis)));
-                        if repeats {
-                            let mut names = Vec::new();
-                            variables(item, &mut names);
-                            let many: Vec<(&String, &Vec<Form>)> = names
-                                .iter()
-                                .filter_map(|name| match bindings.get(name) {
-                                    Some(Binding::Many(forms)) => Some((name, forms)),
-                                    _ => None,
-                                })
-                                .collect();
-                            let count = many.first().map_or(0, |(_, forms)| forms.len());
-                            for index in 0..count {
-                                let mut each = bindings.clone();
-                                for (name, forms) in &many {
-                                    if let Some(form) = forms.get(index) {
-                                        each.insert((*name).clone(), Binding::One(form.clone()));
-                                    }
-                                }
-                                filled.push(Part::Bare(fill(item, &each, fresh)));
-                            }
-                        } else {
-                            filled.push(Part::Bare(fill(item, bindings, fresh)));
-                        }
+        Syntax::Application(operator, operand) => {
+            let mut filled = Parameters {
+                items: fill_run(&operand.items, bindings, fresh)?,
+                ..Parameters::default()
+            };
+            for (label, item) in &operand.terms {
+                filled
+                    .terms
+                    .insert(label.clone(), fill(item, bindings, fresh)?);
+            }
+            if let Some(Binding::Row(row)) =
+                operand.rest.as_ref().and_then(|name| bindings.get(name))
+            {
+                for (label, item) in row {
+                    if filled.terms.insert(label.clone(), item.clone()).is_some() {
+                        return Err(Error::Refused(format!(
+                            "{template} says `{label}:`, and so does what it is given"
+                        )));
                     }
                 }
-                at += 1;
             }
-            Form::application(fill(head, bindings, fresh), filled)
+            Syntax::Application(Box::new(fill(operator, bindings, fresh)?), filled)
         }
         literal => literal.clone(),
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::form::read;
+    use crate::parse;
 
-    fn one(text: &str) -> Form {
-        read(text).unwrap().remove(0)
+    fn one(text: &str) -> Syntax {
+        parse(text).unwrap().remove(0)
     }
 
-    fn rewrite(form: &str, pattern: &str, template: &str) -> Option<String> {
-        let bindings = matches(&one(form), &one(pattern), Bindings::new())?;
-        Some(fill(&one(template), &bindings, "s").to_string())
+    fn rewrite(tree: &str, pattern: &str, template: &str) -> Option<String> {
+        let bindings = matches(&one(tree), &one(pattern), Bindings::new())?;
+        Some(fill(&one(template), &bindings, "s").unwrap().to_string())
     }
 
     #[test]
@@ -339,5 +313,19 @@ mod tests {
             rewrite("(todo ?t colour: ?c)", "(todo ?t text: ?x)", "x"),
             None
         );
+    }
+
+    #[test]
+    fn it_refuses_a_label_the_template_and_the_rest_both_say() {
+        let bindings = matches(
+            &one("(add (todo state: :done text: \"x\"))"),
+            &one("(?command (?concept ...?fields))"),
+            Bindings::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            fill(&one("(xyz.todo _ state: :open ...?fields)"), &bindings, "s"),
+            Err(Error::Refused(_))
+        ));
     }
 }

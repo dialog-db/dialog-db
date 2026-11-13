@@ -41,13 +41,9 @@ impl Analyzer {
     /// Analyze `trees`: keep the definitions among them, and give every
     /// other analyzed.
     pub fn analyze(&mut self, trees: &[Syntax]) -> Result<Analysis, Error> {
-        let forms = trees.iter().map(Syntax::form).collect();
-        let (rules, diagnostics) = self.expander.expand(forms)?;
+        let (analyzed, diagnostics) = self.expander.expand(trees.to_vec())?;
         Ok(Analysis {
-            analyzed: rules
-                .iter()
-                .map(Syntax::try_from)
-                .collect::<Result<_, Error>>()?,
+            analyzed,
             diagnostics,
         })
     }

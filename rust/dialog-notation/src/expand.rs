@@ -1,4 +1,4 @@
-//! Expansion: rewriting a form until every part of it is kernel.
+//! Expansion: rewriting a tree until every part of it is kernel.
 //!
 //! The kernel is small: `rule` with its heads, `when` and `unless`; the
 //! application of a relation and of a formula; `assert!`, `retract!`,
@@ -10,24 +10,24 @@
 //!   (when (expand (query ?head))))
 //! ```
 //!
-//! `(expand pattern)` holds for the form being expanded when it has the
-//! pattern's shape, and `(syntax template)` is what the form becomes.
+//! `(expand pattern)` holds for the tree being expanded when it has the
+//! pattern's shape, and `(syntax template)` is what the tree becomes.
 //! Neither is walked into: what is inside them is syntax.
 //!
-//! The [`Expander`] is the walker. It rewrites a top-level form until
+//! The [`Expander`] is the walker. It rewrites a top-level tree until
 //! it is a `rule`, then every head and premise until each applies a
 //! relation or a formula, asking the rules about syntax at each step.
 //! In this proof of concept those rules are kept and evaluated here,
 //! not stored in a replica and not run by the query engine, which
-//! cannot yet take a form apart.
+//! cannot yet take a tree apart.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Error;
-use crate::form::{Form, Kind, Part, read};
+use crate::form::Kind;
 use crate::parse::parse;
-use crate::pattern::{Binding, Bindings, fill, matches, variables};
-use crate::syntax::{Signature, Syntax as Tree};
+use crate::pattern::{Binding, Bindings, fill, matches};
+use crate::syntax::{Parameters, Signature, Syntax};
 
 /// The core forms, written in the kernel.
 pub const PRELUDE: &str = include_str!("prelude.clj");
@@ -42,10 +42,10 @@ pub enum Position {
 }
 
 /// Something a rule said about a form without refusing it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Diagnostic {
-    /// The form it is about, as written.
-    pub form: Form,
+    /// The form it is about.
+    pub form: Syntax,
     /// What was said.
     pub message: String,
 }
@@ -54,7 +54,7 @@ pub struct Diagnostic {
 #[derive(Clone, Debug)]
 enum Answer {
     /// `(syntax template)`: the form becomes the template, filled.
-    Syntax(Form),
+    Syntax(Syntax),
     /// `(warning "…")`: the form stands, and this is said about it.
     Warning(String),
 }
@@ -62,12 +62,12 @@ enum Answer {
 /// A rule about syntax: `(expand pattern)` among its premises, and
 /// `(syntax template)` or `(warning "…")` as its head.
 #[derive(Clone, Debug)]
-struct Syntax {
+struct Definition {
     answer: Answer,
-    pattern: Form,
+    pattern: Syntax,
     position: Option<Position>,
-    when: Vec<Form>,
-    unless: Vec<Form>,
+    when: Vec<Syntax>,
+    unless: Vec<Syntax>,
     /// What the rule defines, where it defines a concept: a name
     /// applied with labels, standing for reads and nothing else.
     signature: Option<Signature>,
@@ -77,7 +77,7 @@ struct Syntax {
 /// for it in the rule being expanded.
 #[derive(Clone, Debug)]
 struct Choice {
-    form: Form,
+    form: Syntax,
     taken: usize,
     of: usize,
 }
@@ -88,85 +88,98 @@ const HEAD_WORDS: [&str; 4] = ["assert!", "retract!", "assert", "report"];
 /// The words whose parts are syntax, never walked into.
 const DIRECTIVES: [&str; 3] = ["expand", "syntax", "warning"];
 
+/// `name` applied to `items`, with no labelled part.
+fn apply(name: &str, items: Vec<Syntax>) -> Syntax {
+    Syntax::Application(
+        Box::new(Syntax::Reference(name.to_string())),
+        Parameters {
+            items,
+            ..Parameters::default()
+        },
+    )
+}
+
+/// The parts with no label of an application, or none.
+fn items(tree: &Syntax) -> &[Syntax] {
+    tree.operand().map_or(&[], |operand| &operand.items)
+}
+
 /// The parts of a kernel rule.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Clauses {
     /// What the rule says about itself: its labelled parts.
-    pub said: Vec<(String, Form)>,
+    pub said: BTreeMap<String, Syntax>,
     /// Its heads.
-    pub heads: Vec<Form>,
+    pub heads: Vec<Syntax>,
     /// Its `when` premises.
-    pub when: Vec<Form>,
+    pub when: Vec<Syntax>,
     /// Its `unless` premises.
-    pub unless: Vec<Form>,
+    pub unless: Vec<Syntax>,
 }
 
 impl Clauses {
-    /// The parts of a `(rule …)` form.
-    pub fn of(rule: &Form) -> Self {
+    /// The parts of a `(rule …)` tree.
+    pub fn of(rule: &Syntax) -> Self {
         let mut clauses = Clauses::default();
-        let Some((_, parts)) = rule.as_application() else {
+        let Some(operand) = rule.operand() else {
             return clauses;
         };
-        for part in parts {
-            match part {
-                Part::Labelled(label, form) => clauses.said.push((label.clone(), form.clone())),
+        clauses.said = operand.terms.clone();
+        for part in &operand.items {
+            match part.applies() {
                 // What must not hold may stand among what must, as in
                 // `A, not B, not C`: each is one more "and not".
-                Part::Bare(form) if form.is("when") => {
-                    for premise in form.bare() {
-                        if premise.is("unless") {
-                            clauses.unless.extend(premise.bare().into_iter().cloned());
+                Some("when") => {
+                    for premise in items(part) {
+                        if premise.applies() == Some("unless") {
+                            clauses.unless.extend(items(premise).iter().cloned());
                         } else {
                             clauses.when.push(premise.clone());
                         }
                     }
                 }
-                Part::Bare(form) if form.is("unless") => {
-                    clauses.unless.extend(form.bare().into_iter().cloned());
-                }
-                Part::Bare(form) => clauses.heads.push(form.clone()),
+                Some("unless") => clauses.unless.extend(items(part).iter().cloned()),
+                _ => clauses.heads.push(part.clone()),
             }
         }
         clauses
     }
 
-    /// These parts as a `(rule …)` form.
-    pub fn into_rule(self) -> Form {
-        let mut parts: Vec<Part> = self
-            .said
-            .into_iter()
-            .map(|(label, form)| Part::Labelled(label, form))
-            .collect();
-        parts.extend(self.heads.into_iter().map(Part::Bare));
+    /// These parts as a `(rule …)` tree.
+    pub fn into_rule(self) -> Syntax {
+        let mut parts = self.heads;
         for (word, premises) in [("when", self.when), ("unless", self.unless)] {
             if !premises.is_empty() {
-                parts.push(Part::Bare(Form::application(
-                    Form::symbol(word),
-                    premises.into_iter().map(Part::Bare).collect(),
-                )));
+                parts.push(apply(word, premises));
             }
         }
-        Form::application(Form::symbol("rule"), parts)
+        Syntax::Application(
+            Box::new(Syntax::Reference("rule".into())),
+            Parameters {
+                items: parts,
+                terms: self.said,
+                rest: None,
+            },
+        )
     }
 }
 
-/// The forms a form stands for: itself, or what `(all …)` holds.
-fn members(form: Form) -> Vec<Form> {
-    if form.is("all") {
-        form.bare().into_iter().cloned().flat_map(members).collect()
+/// The trees a tree stands for: itself, or what `(all …)` holds.
+fn members(tree: Syntax) -> Vec<Syntax> {
+    if tree.applies() == Some("all") {
+        items(&tree).iter().cloned().flat_map(members).collect()
     } else {
-        vec![form]
+        vec![tree]
     }
 }
 
-/// `form` with the variables an expansion at `site` named for itself
+/// `tree` with the variables an expansion at `site` named for itself
 /// renamed by where each first occurs, so two answers that differ only
 /// in what a definition called its own variables are equal.
-fn unnamed(form: &Form, site: &str) -> Form {
-    fn walk(form: &Form, suffix: &str, seen: &mut Vec<String>) -> Form {
-        match form {
-            Form::Variable(name) if name.ends_with(suffix) => {
+fn unnamed(tree: &Syntax, site: &str) -> Syntax {
+    fn walk(tree: &Syntax, suffix: &str, seen: &mut Vec<String>) -> Syntax {
+        match tree {
+            Syntax::Variable(name) if name.ends_with(suffix) => {
                 let at = seen
                     .iter()
                     .position(|other| other == name)
@@ -174,84 +187,106 @@ fn unnamed(form: &Form, site: &str) -> Form {
                         seen.push(name.clone());
                         seen.len() - 1
                     });
-                Form::Variable(format!("{at}{suffix}"))
+                Syntax::Variable(format!("{at}{suffix}"))
             }
-            Form::Vector(items) => {
-                Form::Vector(items.iter().map(|item| walk(item, suffix, seen)).collect())
+            Syntax::Tuple(items) => {
+                Syntax::Tuple(items.iter().map(|item| walk(item, suffix, seen)).collect())
             }
-            Form::Map(entries) => Form::Map(
+            Syntax::Map(entries) => Syntax::Map(
                 entries
                     .iter()
                     .map(|(key, value)| (walk(key, suffix, seen), walk(value, suffix, seen)))
                     .collect(),
             ),
-            Form::Application(head, parts) => {
-                let head = walk(head, suffix, seen);
-                let parts = parts
+            Syntax::Repeat(repeated) => Syntax::Repeat(Box::new(walk(repeated, suffix, seen))),
+            Syntax::Application(operator, operand) => {
+                let operator = walk(operator, suffix, seen);
+                let items = operand
+                    .items
                     .iter()
-                    .map(|part| match part {
-                        Part::Bare(form) => Part::Bare(walk(form, suffix, seen)),
-                        Part::Labelled(label, form) => {
-                            Part::Labelled(label.clone(), walk(form, suffix, seen))
-                        }
-                    })
+                    .map(|item| walk(item, suffix, seen))
                     .collect();
-                Form::application(head, parts)
+                let terms = operand
+                    .terms
+                    .iter()
+                    .map(|(label, term)| (label.clone(), walk(term, suffix, seen)))
+                    .collect();
+                Syntax::Application(
+                    Box::new(operator),
+                    Parameters {
+                        items,
+                        terms,
+                        rest: operand.rest.clone(),
+                    },
+                )
             }
             other => other.clone(),
         }
     }
-    walk(form, &format!(".{site}"), &mut Vec::new())
+    walk(tree, &format!(".{site}"), &mut Vec::new())
 }
 
 /// Several reads of one entity as one read, so that their absence is
 /// the absence of all of them together. Dialog negates one proposition,
 /// and a read of one entity may span domains.
-fn together(mut forms: Vec<Form>, written: &Form) -> Result<Form, Error> {
-    if forms.len() == 1 {
-        return Ok(forms.remove(0));
+fn together(mut trees: Vec<Syntax>, written: &Syntax) -> Result<Syntax, Error> {
+    if trees.len() == 1 {
+        return Ok(trees.remove(0));
     }
-    let entities: BTreeSet<Option<&Form>> = forms
-        .iter()
-        .map(|form| form.bare().first().copied())
-        .collect();
-    if !forms.iter().all(Form::is_read) || entities.len() != 1 {
-        return Err(Error::Refused(format!(
+    let spans = || {
+        Error::Refused(format!(
             "the absence of {written} is not one read: dialog negates one proposition, and this spans entities"
-        )));
+        ))
+    };
+    let entity = items(&trees[0]).first().cloned();
+    if !trees
+        .iter()
+        .all(|tree| tree.is_read() && items(tree).first() == entity.as_ref())
+    {
+        return Err(spans());
     }
-    let domain = forms[0].head().unwrap_or_default().to_string();
-    let mut parts: Vec<Part> = forms[0]
-        .bare()
-        .into_iter()
-        .take(1)
-        .cloned()
-        .map(Part::Bare)
-        .collect();
-    for form in &forms {
-        let other = form.head().unwrap_or_default();
-        for (label, term) in form.labelled() {
+    let domain = trees[0].applies().unwrap_or_default().to_string();
+    let mut operand = Parameters {
+        items: entity.into_iter().collect(),
+        ..Parameters::default()
+    };
+    for tree in &trees {
+        let other = tree.applies().unwrap_or_default();
+        for (label, term) in tree
+            .operand()
+            .into_iter()
+            .flat_map(|operand| &operand.terms)
+        {
             let whole = if label.contains('/') || other == domain {
-                label.to_string()
+                label.clone()
             } else {
                 format!("{other}/{label}")
             };
-            parts.push(Part::Labelled(whole, term.clone()));
+            if let Some(said) = operand.terms.insert(whole.clone(), term.clone())
+                && said != *term
+            {
+                return Err(Error::Refused(format!(
+                    "the absence of {written} says `{whole}:` twice"
+                )));
+            }
         }
     }
-    Ok(Form::application(Form::symbol(domain), parts))
+    Ok(Syntax::Application(
+        Box::new(Syntax::Reference(domain)),
+        operand,
+    ))
 }
 
 /// The walker, with the rules about syntax it has been given.
 #[derive(Clone, Debug, Default)]
 pub struct Expander {
-    syntax: Vec<Syntax>,
+    syntax: Vec<Definition>,
     /// The names some rule about syntax is for.
     names: BTreeSet<String>,
     /// The domains some installed rule reads.
     reads: BTreeSet<String>,
     /// Every form the rules were asked about since the last report.
-    asked: Vec<(Form, Position)>,
+    asked: Vec<(Syntax, Position)>,
     /// The forms several definitions take in the rule being expanded.
     choices: Vec<Choice>,
     /// Whether the head being expanded reports, and writes nothing.
@@ -263,26 +298,24 @@ pub struct Expander {
 impl Expander {
     /// A walker that knows the core forms.
     pub fn new() -> Result<Self, Error> {
-        // The core forms go the way every document does, through the
-        // tree, so what the tree cannot say the prelude cannot use.
         let mut expander = Expander::default();
-        expander.expand(parse(PRELUDE)?.iter().map(Tree::form).collect())?;
+        expander.submit(PRELUDE)?;
         Ok(expander)
     }
 
-    /// Read `text` and expand every form in it. A rule about syntax is
-    /// kept here; every other form comes back as a kernel rule, in the
-    /// order written, with what the rules said about the document.
-    pub fn submit(&mut self, text: &str) -> Result<(Vec<Form>, Vec<Diagnostic>), Error> {
-        self.expand(read(text)?)
+    /// Parse `text` and expand every tree of it. A rule about syntax is
+    /// kept here; every other comes back as a kernel rule, in the order
+    /// written, with what the rules said about the document.
+    pub fn submit(&mut self, text: &str) -> Result<(Vec<Syntax>, Vec<Diagnostic>), Error> {
+        self.expand(parse(text)?)
     }
 
-    /// Expand every form of `forms`, as [`submit`](Self::submit) does
-    /// the forms a text reads to.
-    pub fn expand(&mut self, forms: Vec<Form>) -> Result<(Vec<Form>, Vec<Diagnostic>), Error> {
+    /// Expand every tree of `trees`, as [`submit`](Self::submit) does
+    /// the trees a text parses to.
+    pub fn expand(&mut self, trees: Vec<Syntax>) -> Result<(Vec<Syntax>, Vec<Diagnostic>), Error> {
         self.asked.clear();
         let mut kernel = Vec::new();
-        for form in forms {
+        for tree in trees {
             // Where several definitions take a form that is read, the
             // rule is expanded once a definition: what is read is what
             // any of them reads. Within one rule a form that recurs is
@@ -290,7 +323,7 @@ impl Expander {
             let mut choices = Vec::new();
             loop {
                 self.choices = choices;
-                let rule = self.top(form.clone())?;
+                let rule = self.top(tree.clone())?;
                 choices = std::mem::take(&mut self.choices);
                 if let Some(rule) = self.install(rule)?
                     && !kernel.contains(&rule)
@@ -313,22 +346,24 @@ impl Expander {
     }
 
     /// Keep a rule about syntax, and note what any other rule reads.
-    fn install(&mut self, rule: Form) -> Result<Option<Form>, Error> {
+    fn install(&mut self, rule: Syntax) -> Result<Option<Syntax>, Error> {
         let clauses = Clauses::of(&rule);
         let answer = match clauses.heads.as_slice() {
-            [head] if head.is("syntax") => match head.bare().as_slice() {
-                [template] => Some(Answer::Syntax((*template).clone())),
+            [head] if head.applies() == Some("syntax") => match items(head) {
+                [template] => Some(Answer::Syntax(template.clone())),
                 _ => return Err(Error::Refused(format!("{head} takes one template"))),
             },
-            [head] if head.is("warning") => match head.bare().as_slice() {
-                [Form::Text(message)] => Some(Answer::Warning(message.clone())),
+            [head] if head.applies() == Some("warning") => match items(head) {
+                [Syntax::Constant(dialog_corpus::Value::String(message))] => {
+                    Some(Answer::Warning(message.clone()))
+                }
                 _ => return Err(Error::Refused(format!("{head} takes one text"))),
             },
             _ => None,
         };
         let Some(answer) = answer else {
             for premise in &clauses.when {
-                if let (true, Some(domain)) = (premise.is_read(), premise.head()) {
+                if let (true, Some(domain)) = (premise.is_read(), premise.applies()) {
                     self.reads.insert(domain.to_string());
                 }
             }
@@ -338,28 +373,30 @@ impl Expander {
         let mut when = clauses.when;
         let at = when
             .iter()
-            .position(|premise| premise.is("expand"))
+            .position(|premise| premise.applies() == Some("expand"))
             .ok_or_else(|| {
                 Error::Refused(format!(
                     "a rule about syntax needs an (expand …) premise: {rule}"
                 ))
             })?;
         let expand = when.remove(at);
-        let pattern = match expand.bare().as_slice() {
-            [pattern] => (*pattern).clone(),
+        let pattern = match items(&expand) {
+            [pattern] => pattern.clone(),
             _ => return Err(Error::Refused(format!("{expand} takes one pattern"))),
         };
-        let position = match expand.at("in") {
+        let position = match expand.operand().and_then(|operand| operand.terms.get("in")) {
             None => None,
-            Some(Form::Keyword(word)) if word == "head" => Some(Position::Head),
-            Some(Form::Keyword(word)) if word == "premise" => Some(Position::Premise),
-            Some(other) => return Err(Error::Refused(format!("{other} is not a position"))),
+            Some(word) => match word.keyword() {
+                Some("head") => Some(Position::Head),
+                Some("premise") => Some(Position::Premise),
+                _ => return Err(Error::Refused(format!("{word} is not a position"))),
+            },
         };
 
         if let Answer::Syntax(template) = &answer {
             Self::check_concept(&pattern, template)?;
         }
-        if let Some(name) = pattern.head() {
+        if let Some(name) = pattern.applies() {
             self.names.insert(name.to_string());
         }
         // A definition under a signature replaces the one before it
@@ -370,16 +407,16 @@ impl Expander {
                 if position.is_none()
                     && when.is_empty()
                     && clauses.unless.is_empty()
-                    && members(template.clone()).iter().all(Form::is_read) =>
+                    && members(template.clone()).iter().all(Syntax::is_read) =>
             {
-                Signature::of(&Tree::try_from(&pattern)?, "concept")
+                Signature::of(&pattern, "concept")
             }
             _ => None,
         };
         if signature.is_some() {
             self.syntax.retain(|rule| rule.signature != signature);
         }
-        self.syntax.push(Syntax {
+        self.syntax.push(Definition {
             answer,
             pattern,
             position,
@@ -394,22 +431,22 @@ impl Expander {
     /// reads and nothing else, since a check has no inverse, and every
     /// variable in them is one of its parameters, since a write must
     /// know every value. The reads may be of several entities.
-    fn check_concept(pattern: &Form, template: &Form) -> Result<(), Error> {
+    fn check_concept(pattern: &Syntax, template: &Syntax) -> Result<(), Error> {
         let said = members(template.clone());
-        if !said.iter().any(Form::is_read)
-            || !said.iter().all(|form| form.is_read() || form.is_formula())
+        if !said.iter().any(Syntax::is_read)
+            || !said.iter().all(|tree| tree.is_read() || tree.is_formula())
         {
             return Ok(());
         }
-        if let Some(check) = said.iter().find(|form| form.is_formula()) {
+        if let Some(check) = said.iter().find(|tree| tree.is_formula()) {
             return Err(Error::Refused(format!(
                 "a concept maps both ways, and a check has no inverse: {check}"
             )));
         }
         let mut given = Vec::new();
-        variables(pattern, &mut given);
+        pattern.variables(&mut given);
         let mut used = Vec::new();
-        said.iter().for_each(|form| variables(form, &mut used));
+        said.iter().for_each(|tree| tree.variables(&mut used));
         match used.iter().find(|name| !given.contains(name)) {
             Some(own) => Err(Error::Refused(format!(
                 "a concept maps both ways, so every variable in it is a parameter: ?{own}"
@@ -418,12 +455,12 @@ impl Expander {
         }
     }
 
-    /// The bindings under which a rule about syntax applies to `form`.
-    fn applies(&self, rule: &Syntax, form: &Form, position: Position) -> Option<Bindings> {
+    /// The bindings under which a rule about syntax applies to `tree`.
+    fn applies(&self, rule: &Definition, tree: &Syntax, position: Position) -> Option<Bindings> {
         if rule.position.is_some_and(|wanted| wanted != position) {
             return None;
         }
-        let mut bindings = matches(form, &rule.pattern, Bindings::new())?;
+        let mut bindings = matches(tree, &rule.pattern, Bindings::new())?;
         for premise in &rule.when {
             bindings = self.holds(premise, bindings)?;
         }
@@ -438,64 +475,66 @@ impl Expander {
     }
 
     /// Whether a premise of a rule about syntax holds, and what it binds.
-    /// Such a premise applies one of a few formulas over symbols, or
+    /// Such a premise applies one of a few formulas over names, or
     /// reads what this walker knows: the names syntax is defined for,
     /// `(dialog.name _ is: ?name)`, and the domains installed rules
     /// read, `(dialog.rule _ on: ?domain)`.
-    fn holds(&self, premise: &Form, bindings: Bindings) -> Option<Bindings> {
-        let value = |term: &Form| match term {
-            Form::Variable(name) => match bindings.get(name) {
-                Some(Binding::One(form)) => Some(form.clone()),
+    fn holds(&self, premise: &Syntax, bindings: Bindings) -> Option<Bindings> {
+        let value = |term: &Syntax| match term {
+            Syntax::Variable(name) => match bindings.get(name) {
+                Some(Binding::One(tree)) => Some(tree.clone()),
                 _ => None,
             },
             other => Some(other.clone()),
         };
-        let symbol = |term: &Form| match value(term)? {
-            Form::Symbol(name) => Some(name),
+        let name = |term: &Syntax| match value(term)? {
+            Syntax::Reference(name) => Some(name),
             _ => None,
         };
-        let (head, _) = premise.as_application()?;
-        let subject = premise.bare().first().copied();
-        match head {
-            Form::Keyword(formula) => match formula.as_str() {
-                "command" => {
-                    let domain =
-                        format!("command.{}.{}", symbol(subject?)?, symbol(premise.at("")?)?);
-                    match premise.at("is")? {
-                        Form::Variable(name) => {
-                            let mut bindings = bindings.clone();
-                            match bindings.get(name) {
-                                Some(Binding::One(Form::Symbol(bound))) if *bound == domain => {}
-                                Some(_) => return None,
-                                None => {
-                                    bindings
-                                        .insert(name.clone(), Binding::One(Form::symbol(domain)));
-                                }
-                            }
-                            Some(bindings)
-                        }
-                        _ => None,
+        let Syntax::Application(operator, operand) = premise else {
+            return None;
+        };
+        let subject = operand.items.first();
+        match (operator.keyword(), &**operator) {
+            (Some("command"), _) => {
+                let domain = format!(
+                    "command.{}.{}",
+                    name(subject?)?,
+                    name(operand.terms.get("")?)?
+                );
+                let Syntax::Variable(is) = operand.terms.get("is")? else {
+                    return None;
+                };
+                let domain = Binding::One(Syntax::Reference(domain));
+                let mut bindings = bindings.clone();
+                match bindings.get(is) {
+                    Some(bound) if *bound == domain => {}
+                    Some(_) => return None,
+                    None => {
+                        bindings.insert(is.clone(), domain);
                     }
                 }
-                "domain" => {
-                    (value(subject?)?.kind() == Some(Kind::Domain)).then_some(bindings.clone())
-                }
-                "name" => (value(subject?)?.kind() == Some(Kind::Name)).then_some(bindings.clone()),
-                _ => None,
-            },
-            Form::Symbol(relation) if relation == "dialog.name" => self
+                Some(bindings)
+            }
+            (Some("domain"), _) => {
+                (Kind::of(&name(subject?)?) == Kind::Domain).then_some(bindings.clone())
+            }
+            (Some("name"), _) => {
+                (Kind::of(&name(subject?)?) == Kind::Name).then_some(bindings.clone())
+            }
+            (None, Syntax::Reference(relation)) if relation == "dialog.name" => self
                 .names
-                .contains(&symbol(premise.at("is")?)?)
+                .contains(&name(operand.terms.get("is")?)?)
                 .then_some(bindings.clone()),
-            Form::Symbol(relation) if relation == "dialog.rule" => self
+            (None, Syntax::Reference(relation)) if relation == "dialog.rule" => self
                 .reads
-                .contains(&symbol(premise.at("on")?)?)
+                .contains(&name(operand.terms.get("on")?)?)
                 .then_some(bindings.clone()),
             _ => None,
         }
     }
 
-    /// What the rules say `form` expands to in `position`. No answer is
+    /// What the rules say `tree` expands to in `position`. No answer is
     /// refused. Of several:
     ///
     /// - Answers that differ only in the names of their own variables
@@ -507,39 +546,42 @@ impl Expander {
     /// - What must not hold is refused: its absence under any of the
     ///   definitions would be a rule of several negations, not several
     ///   rules.
-    fn ask(&mut self, form: &Form, position: Position) -> Result<Form, Error> {
-        // What the template's own variables are named apart by: the form
-        // being expanded and where it stands, by reference, so the names
-        // do not move with how either is spelled.
-        let site = Form::application(
-            Form::symbol("site"),
+    fn ask(&mut self, tree: &Syntax, position: Position) -> Result<Syntax, Error> {
+        // What the template's own variables are named apart by: the
+        // tree being expanded and where it stands, by reference, so the
+        // names do not move with how either is spelled.
+        let site = apply(
+            "site",
             vec![
-                Part::Bare(form.clone()),
-                Part::Bare(Form::symbol(match position {
-                    Position::Head => "head",
-                    Position::Premise => "premise",
-                })),
+                tree.clone(),
+                Syntax::Reference(
+                    match position {
+                        Position::Head => "head",
+                        Position::Premise => "premise",
+                    }
+                    .into(),
+                ),
             ],
         )
         .reference()?
         .to_string()[..4]
             .to_string();
-        let mut found: Vec<(Form, Option<Signature>)> = Vec::new();
+        let mut found: Vec<(Syntax, Option<Signature>)> = Vec::new();
         for rule in &self.syntax {
             if let (Answer::Syntax(template), Some(bindings)) =
-                (&rule.answer, self.applies(rule, form, position))
+                (&rule.answer, self.applies(rule, tree, position))
             {
-                let answer = fill(template, &bindings, &site);
+                let answer = fill(template, &bindings, &site)?;
                 let same = unnamed(&answer, &site);
                 if !found.iter().any(|(other, _)| unnamed(other, &site) == same) {
                     found.push((answer, rule.signature.clone()));
                 }
             }
         }
-        self.asked.push((form.clone(), position));
-        let ambiguous = |found: &[(Form, Option<Signature>)]| {
+        self.asked.push((tree.clone(), position));
+        let ambiguous = |found: &[(Syntax, Option<Signature>)]| {
             Error::Ambiguous(
-                form.to_string(),
+                tree.to_string(),
                 found
                     .iter()
                     .map(|(answer, _)| answer.to_string())
@@ -548,13 +590,11 @@ impl Expander {
             )
         };
         match found.len() {
-            0 => Err(Error::Unknown(form.to_string())),
+            0 => Err(Error::Unknown(tree.to_string())),
             1 => Ok(found.remove(0).0),
             _ if self.negating => Err(ambiguous(&found)),
             _ if position == Position::Head && !self.reporting => {
-                let written = Tree::try_from(form)
-                    .ok()
-                    .and_then(|tree| Signature::of(&tree, "concept"));
+                let written = Signature::of(tree, "concept");
                 let mut exact = found.iter().filter(|(_, signature)| {
                     signature.is_some()
                         && signature.as_ref().map(|signature| &signature.parameters)
@@ -566,11 +606,11 @@ impl Expander {
                 }
             }
             of => {
-                let taken = match self.choices.iter().find(|choice| choice.form == *form) {
+                let taken = match self.choices.iter().find(|choice| choice.form == *tree) {
                     Some(choice) => choice.taken,
                     None => {
                         self.choices.push(Choice {
-                            form: form.clone(),
+                            form: tree.clone(),
                             taken: 0,
                             of,
                         });
@@ -610,77 +650,78 @@ impl Expander {
 
     /// A head or a premise, rewritten until it applies a relation or a
     /// formula. `(all …)` comes back when it stands for several.
-    fn application(&mut self, mut form: Form, position: Position) -> Result<Form, Error> {
+    fn application(&mut self, mut tree: Syntax, position: Position) -> Result<Syntax, Error> {
         loop {
-            if form.is_read() || form.is_formula() || DIRECTIVES.iter().any(|word| form.is(word)) {
-                return Ok(form);
+            let word = tree.applies().map(str::to_string);
+            if tree.is_read()
+                || tree.is_formula()
+                || word
+                    .as_deref()
+                    .is_some_and(|word| DIRECTIVES.contains(&word))
+            {
+                return Ok(tree);
             }
-            if form.is("all") {
-                let each = form
-                    .bare()
-                    .into_iter()
+            if word.as_deref() == Some("all") {
+                let each = items(&tree)
+                    .iter()
                     .cloned()
-                    .map(|member| self.application(member, position).map(Part::Bare))
+                    .map(|member| self.application(member, position))
                     .collect::<Result<Vec<_>, _>>()?;
-                return Ok(Form::application(Form::symbol("all"), each));
+                return Ok(apply("all", each));
             }
             if let (Position::Head, Some(word)) = (
                 position,
-                form.head().filter(|word| HEAD_WORDS.contains(word)),
+                word.as_deref().filter(|word| HEAD_WORDS.contains(word)),
             ) {
-                let word = word.to_string();
-                let inner = match form.bare().as_slice() {
-                    [inner] => (*inner).clone(),
-                    _ => return Err(Error::Refused(format!("{form} takes one application"))),
+                let inner = match items(&tree) {
+                    [inner] => inner.clone(),
+                    _ => return Err(Error::Refused(format!("{tree} takes one application"))),
                 };
                 let reporting = std::mem::replace(&mut self.reporting, word == "report");
                 let stands = self.application(inner, Position::Head);
                 self.reporting = reporting;
-                let mut each: Vec<Part> = members(stands?)
+                let mut each: Vec<Syntax> = members(stands?)
                     .into_iter()
-                    .map(|member| {
-                        Part::Bare(Form::application(
-                            Form::symbol(&word),
-                            vec![Part::Bare(member)],
-                        ))
-                    })
+                    .map(|member| apply(word, vec![member]))
                     .collect();
                 return Ok(if each.len() == 1 {
-                    match each.remove(0) {
-                        Part::Bare(only) => only,
-                        Part::Labelled(_, only) => only,
-                    }
+                    each.remove(0)
                 } else {
-                    Form::application(Form::symbol("all"), each)
+                    apply("all", each)
                 });
             }
-            form = self.ask(&form, position)?;
+            tree = self.ask(&tree, position)?;
         }
     }
 
-    /// A top-level form, rewritten until it is a kernel rule. A write at
+    /// A top-level tree, rewritten until it is a kernel rule. A write at
     /// the top level is a rule with that head and whatever clauses
     /// follow it.
-    fn top(&mut self, mut form: Form) -> Result<Form, Error> {
-        while !form.is("rule") {
-            form = match form.head().filter(|word| HEAD_WORDS.contains(word)) {
-                Some(word) => {
-                    let (_, parts) = form
-                        .as_application()
-                        .ok_or_else(|| Error::Unknown(form.to_string()))?;
-                    let Some((Part::Bare(first), rest)) = parts.split_first() else {
-                        return Err(Error::Refused(format!("{form} takes an application")));
+    fn top(&mut self, mut tree: Syntax) -> Result<Syntax, Error> {
+        while tree.applies() != Some("rule") {
+            tree = match (
+                tree.applies().filter(|word| HEAD_WORDS.contains(word)),
+                tree.operand(),
+            ) {
+                (Some(word), Some(operand)) => {
+                    let Some((first, rest)) = operand.items.split_first() else {
+                        return Err(Error::Refused(format!("{tree} takes an application")));
                     };
-                    let head =
-                        Form::application(Form::symbol(word), vec![Part::Bare(first.clone())]);
-                    let mut parts = vec![Part::Bare(head)];
+                    let mut parts = vec![apply(word, vec![first.clone()])];
                     parts.extend(rest.iter().cloned());
-                    Form::application(Form::symbol("rule"), parts)
+                    Syntax::Application(
+                        Box::new(Syntax::Reference("rule".into())),
+                        Parameters {
+                            items: parts,
+                            terms: operand.terms.clone(),
+                            rest: None,
+                        },
+                    )
                 }
-                None => self.ask(&form, Position::Head)?,
+                _ => self.ask(&tree, Position::Head)?,
             };
         }
-        let written = Clauses::of(&form);
+        let written = Clauses::of(&tree);
         let mut walked = Clauses {
             said: written.said,
             ..Clauses::default()
@@ -720,7 +761,7 @@ mod tests {
         let mut expander = Expander::new()?;
         expander.submit(setup)?;
         let (kernel, _) = expander.submit(text)?;
-        Ok(kernel.iter().map(Form::to_string).collect())
+        Ok(kernel.iter().map(Syntax::to_string).collect())
     }
 
     /// `unless` beside `when` and `unless` inside it are one rule.
@@ -766,9 +807,9 @@ mod tests {
         let mut expander = Expander::new().unwrap();
         let (kernel, diagnostics) = expander.submit(TODO).unwrap();
         assert_eq!(
-            kernel.iter().map(Form::to_string).collect::<Vec<_>>(),
+            kernel.iter().map(Syntax::to_string).collect::<Vec<_>>(),
             vec![
-                "(rule (assert! (xyz.todo ?t list: (:last (:entity ?l)) text: (:last (:text ?x)) state: (:last :open))) \
+                "(rule (assert! (xyz.todo ?t list: (:last (:entity ?l)) state: (:last :open) text: (:last (:text ?x)))) \
                  (when (command.add.todo _ about: ?t list: ?l text: ?x)))"
             ]
         );
@@ -781,14 +822,19 @@ mod tests {
     #[test]
     fn it_expands_a_query_to_a_rule_that_reports() {
         let kernel = expanded(TODO, "(query (todo ?t text: ?x))").unwrap();
-        let rule = Clauses::of(&read(&kernel[0]).unwrap()[0]);
-        let own = |form: &Form| match form.at("list") {
-            Some(list) => list.to_string(),
-            None => panic!("{form} reads the list"),
+        let rule = Clauses::of(&parse(&kernel[0]).unwrap()[0]);
+        let at = |tree: &Syntax, label: &str| {
+            tree.operand()
+                .and_then(|operand| operand.terms.get(label))
+                .cloned()
         };
-        assert!(rule.heads[0].is("report"));
-        let head = rule.heads[0].bare()[0];
-        assert_eq!(head.at("text"), rule.when[0].at("text"));
+        let own = |tree: &Syntax| match at(tree, "list") {
+            Some(list) => list.to_string(),
+            None => panic!("{tree} reads the list"),
+        };
+        assert_eq!(rule.heads[0].applies(), Some("report"));
+        let head = &items(&rule.heads[0])[0];
+        assert_eq!(at(head, "text"), at(&rule.when[0], "text"));
         assert!(own(head).starts_with("(:last (:entity ?l."));
         assert!(own(&rule.when[0]).starts_with("(:last (:entity ?l."));
         assert_ne!(own(head), own(&rule.when[0]));
@@ -887,20 +933,20 @@ mod tests {
         let rules = expanded(both, "(query (todo ?t title: ?x))").unwrap();
         assert_eq!(rules.len(), 2, "{rules:?}");
         for (rule, domain) in rules.iter().zip(["xyz.todo", "xyz.note"]) {
+            // The labels come in their own order, so the field the
+            // query left out stands before or after the one it named.
             assert!(
-                rule.starts_with(&format!("(rule (report ({domain} ?t title: ?x ")),
+                rule.starts_with(&format!("(rule (report ({domain} ?t "))
+                    && rule.contains(" title: ?x"),
                 "{rule}"
             );
-            assert!(
-                rule.contains(&format!("(when ({domain} ?t title: ?x ")),
-                "{rule}"
-            );
+            assert!(rule.contains(&format!("(when ({domain} ?t ")), "{rule}");
         }
         // A write says every field, so the labels written are one
         // definition's signature.
         assert_eq!(
             expanded(both, r#"(assert! (todo todo:1 title: "x" pinned: true))"#).unwrap(),
-            vec![r#"(rule (assert! (xyz.note todo:1 title: "x" pinned: true)))"#]
+            vec![r#"(rule (assert! (xyz.note todo:1 pinned: true title: "x")))"#]
         );
         // A write that fits both and is neither is refused, and so is
         // the absence of what several definitions take.
@@ -973,7 +1019,7 @@ mod tests {
             "(query (io.person ?p name: ?n) (when (io.person ?p name: ?n)) (unless (author ?p)))",
         )
         .unwrap();
-        assert!(kernel[0].contains("(unless (io.person ?p name: ?n."));
-        assert!(kernel[0].contains("io.contact/email: ?e."));
+        assert!(kernel[0].contains("(unless (io.person ?p io.contact/email: ?e."));
+        assert!(kernel[0].contains(" name: ?n."));
     }
 }

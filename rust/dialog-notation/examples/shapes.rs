@@ -141,7 +141,7 @@ fn main() -> Result<()> {
         if !path.ends_with("prelude.clj") {
             let (rules, _) = expander.submit(&text)?;
             for rule in &rules {
-                count(rule, &mut kernel);
+                count(&rule.form(), &mut kernel);
             }
         }
     }

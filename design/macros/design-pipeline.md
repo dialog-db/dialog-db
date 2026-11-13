@@ -26,7 +26,7 @@ Each ends with the tests passing.
 
 1. **The boundary.** `parse`, `Analyzer::analyze` and `compile` take and give trees. Done. Inside, expanding and compiling still go through the notation as parsed.
 2. **The compiler reads the tree.** `kernel.rs` and `compile.rs`. Done: neither names the notation as parsed, and a reported row is a tree.
-3. **The analyzer reads the tree.** Patterns and templates match and fill trees; the walker walks trees.
+3. **The analyzer reads the tree.** Patterns and templates match and fill trees; the walker walks trees. Done: nothing after `parse` names the notation as parsed.
 4. **The name table.** Names are resolved as a step of their own, and the analysis gives the table back.
 
 ## Not in these stages
