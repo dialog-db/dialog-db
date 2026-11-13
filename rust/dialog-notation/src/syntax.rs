@@ -128,6 +128,9 @@ fn run<'a>(
         match form {
             Form::Ellipsis => match nodes.pop() {
                 Some(Syntax::Repeat(_)) | None => {
+                    if let Some(mark) = mark {
+                        written.refused.get_or_insert(mark.span);
+                    }
                     return Err(Error::Refused("a `...` that repeats nothing".into()));
                 }
                 Some(repeated) => {
@@ -186,7 +189,39 @@ pub(crate) fn tree(
         ..Note::default()
     });
     let inside = |at: usize| mark.and_then(|mark| mark.parts.get(at));
-    let node = match form {
+    let node = match made(form, mark, &inside, path, written, note.as_mut()) {
+        Ok(node) => node,
+        Err(error) => {
+            // What is refused is the innermost form that is: the first
+            // to say so.
+            if let Some(mark) = mark {
+                written.refused.get_or_insert(mark.span);
+            }
+            return Err(error);
+        }
+    };
+    if let (Some(mark), Some(mut note)) = (mark, note) {
+        // An atom's token is kept where a printer would spell it
+        // otherwise.
+        if !mark.raw.is_empty() && mark.raw != node.spelled(key) {
+            note.spelling = Some(mark.raw.clone());
+        }
+        written.notes.insert(path.clone(), note);
+    }
+    Ok(node)
+}
+
+/// The node `form` is, its parts noted in `written`, and the order they
+/// were written in noted in `note`.
+fn made<'a>(
+    form: &'a Form,
+    mark: Option<&'a Mark>,
+    inside: &dyn Fn(usize) -> Option<&'a Mark>,
+    path: &mut Path,
+    written: &mut Written,
+    mut note: Option<&mut Note>,
+) -> Result<Syntax, Error> {
+    Ok(match form {
         Form::Text(text) => Syntax::Constant(Value::String(text.clone())),
         Form::Number(text) => Syntax::Constant(number(text)?),
         Form::Keyword(name) => Syntax::Constant(entity(&format!("{name}:"))?),
@@ -312,16 +347,7 @@ pub(crate) fn tree(
             }
             Syntax::Application(Box::new(operator?), operand)
         }
-    };
-    if let (Some(mark), Some(mut note)) = (mark, note) {
-        // An atom's token is kept where a printer would spell it
-        // otherwise.
-        if !mark.raw.is_empty() && mark.raw != node.spelled(key) {
-            note.spelling = Some(mark.raw.clone());
-        }
-        written.notes.insert(path.clone(), note);
-    }
-    Ok(node)
+    })
 }
 
 impl TryFrom<&Form> for Syntax {

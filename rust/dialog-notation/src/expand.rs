@@ -31,6 +31,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Error;
+use crate::diagnostic::Diagnostic;
 use crate::form::Kind;
 use crate::kernel::{Head, Rule};
 use crate::parse::parse;
@@ -48,51 +49,6 @@ pub enum Position {
     Head,
     /// A premise, `(unless …)` or not.
     Premise,
-}
-
-/// How much a diagnostic matters.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Severity {
-    /// The document is refused.
-    Error,
-    /// The document stands, and something about it is worth saying.
-    Warning,
-}
-
-/// Something said about a form of a document: a refusal, or what a rule
-/// said about it without refusing it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Diagnostic {
-    /// The form it is about.
-    pub form: Syntax,
-    /// What was said.
-    pub message: String,
-    /// Where the form is in the document: the way to it, or to the
-    /// tree it came of when it is not a part of what was written.
-    pub path: Path,
-    /// The refusal, when this is one.
-    pub refusal: Option<Error>,
-}
-
-impl Diagnostic {
-    /// A refusal of `form`, which is at `path`.
-    pub fn refused(form: Syntax, path: Path, error: Error) -> Self {
-        Diagnostic {
-            form,
-            message: error.to_string(),
-            path,
-            refusal: Some(error),
-        }
-    }
-
-    /// How much it matters: a refusal is an error, anything else a
-    /// warning.
-    pub fn severity(&self) -> Severity {
-        match self.refusal {
-            Some(_) => Severity::Error,
-            None => Severity::Warning,
-        }
-    }
 }
 
 /// What a rule about syntax concludes.
@@ -402,7 +358,7 @@ impl Expander {
                     .unwrap_or((tree.clone(), Path::new()));
                 let mut path = vec![Segment::Item(at)];
                 path.extend(inside);
-                diagnostics.push(Diagnostic::refused(form, path, error));
+                diagnostics.push(Diagnostic::refused(Some(form), path, error));
             }
         }
         diagnostics.extend(self.diagnose());
@@ -761,9 +717,10 @@ impl Expander {
                             .unwrap_or_default(),
                     );
                     let diagnostic = Diagnostic {
-                        form: form.clone(),
+                        form: Some(form.clone()),
                         message: message.clone(),
                         path,
+                        span: None,
                         refusal: None,
                     };
                     if !diagnostics.contains(&diagnostic) {

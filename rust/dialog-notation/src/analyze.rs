@@ -10,7 +10,8 @@
 //! replica, which is why this phase and not the others is the one that
 //! reads a database.
 
-use crate::expand::{Diagnostic, Expander, Severity};
+use crate::diagnostic::{Diagnostic, Severity};
+use crate::expand::Expander;
 use crate::{Error, Syntax};
 
 /// What analysis made of a document.
@@ -147,7 +148,7 @@ mod tests {
         assert_eq!(refused.severity(), Severity::Error);
         assert!(matches!(&refused.refusal, Some(Error::Unknown(_))));
         assert_eq!(refused.path, vec![Segment::Item(0), Segment::Item(1)]);
-        assert_eq!(refused.form, parse("(nonesuch ?x)")?[0]);
+        assert_eq!(refused.form.as_ref(), parse("(nonesuch ?x)")?.first());
         assert!(analysis.analyzed.is_empty());
         Ok(())
     }

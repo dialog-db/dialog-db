@@ -209,12 +209,15 @@ impl Form {
 
 /// Every form in `text`, in order.
 pub fn read(text: &str) -> Result<Vec<Form>, Error> {
-    Ok(read_marked(text)?
-        .0
-        .into_iter()
-        .map(|(form, _)| form)
-        .collect())
+    let (forms, _, misread) = read_marked(text);
+    match misread.into_iter().next() {
+        Some((error, _)) => Err(error),
+        None => Ok(forms.into_iter().map(|(form, _)| form).collect()),
+    }
 }
+
+/// What in a text is not forms, and where it is.
+pub(crate) type Misread = (Error, Span);
 
 /// What reading a form leaves out of it: where it is, how its token was
 /// spelled, and the comments above it. One a form, in the form's shape.
@@ -245,15 +248,42 @@ pub(crate) struct Tail {
     pub end: Point,
 }
 
-/// Every form in `text`, in order, each with its mark.
-pub(crate) fn read_marked(text: &str) -> Result<(Vec<(Form, Mark)>, Tail), Error> {
-    let (tokens, tail) = tokens(text)?;
+/// Every form in `text`, in order, each with its mark, and everything
+/// in it that is not forms. Reading goes on past what is not a form: the
+/// top-level form it is in is left out, and what follows it is read.
+pub(crate) fn read_marked(text: &str) -> (Vec<(Form, Mark)>, Tail, Vec<Misread>) {
+    let (tokens, tail, unended) = tokens(text);
     let mut at = 0;
     let mut forms = Vec::new();
+    let mut misread = Vec::new();
     while at < tokens.len() {
-        forms.push(form(&tokens, &mut at)?);
+        let start = at;
+        match form(&tokens, &mut at) {
+            Ok(read) => forms.push(read),
+            Err(not) => {
+                misread.push(not);
+                // Reading goes on after the form the refusal is in: at
+                // the token after the bracket that closes what the
+                // first token opened, or after the first token when it
+                // opened nothing.
+                let mut depth = 0i32;
+                at = tokens.len();
+                for (index, token) in tokens.iter().enumerate().skip(start) {
+                    match token.text.as_str() {
+                        "(" | "[" | "{" => depth += 1,
+                        ")" | "]" | "}" => depth -= 1,
+                        _ => {}
+                    }
+                    if depth <= 0 {
+                        at = index + 1;
+                        break;
+                    }
+                }
+            }
+        }
     }
-    Ok((forms, tail))
+    misread.extend(unended);
+    (forms, tail, misread)
 }
 
 /// A token: a bracket, a text literal or a run of anything else.
@@ -276,7 +306,10 @@ struct Token {
 /// the form that ends before it on that line, and is kept on that form's
 /// last token. Any other is about the form below it, and is kept on the
 /// token below it.
-fn tokens(text: &str) -> Result<(Vec<Token>, Tail), Error> {
+///
+/// A text that never ends is the last thing read: it is said, and the
+/// tokens before it are given.
+fn tokens(text: &str) -> (Vec<Token>, Tail, Option<Misread>) {
     let mut tokens = Vec::new();
     let mut comments = Vec::new();
     let mut chars = text.chars().peekable();
@@ -334,17 +367,34 @@ fn tokens(text: &str) -> Result<(Vec<Token>, Tail), Error> {
             '"' => {
                 take(&mut chars, &mut here);
                 let mut literal = String::from('"');
-                loop {
-                    match take(&mut chars, &mut here) {
-                        None => return Err(Error::Read("a text that never ends".into())),
-                        Some('"') => break,
-                        Some('\\') => match take(&mut chars, &mut here) {
+                let mut ended = false;
+                while let Some(c) = take(&mut chars, &mut here) {
+                    match c {
+                        '"' => {
+                            ended = true;
+                            break;
+                        }
+                        '\\' => match take(&mut chars, &mut here) {
                             Some('n') => literal.push('\n'),
                             Some(escaped) => literal.push(escaped),
-                            None => return Err(Error::Read("a text that never ends".into())),
+                            None => break,
                         },
-                        Some(c) => literal.push(c),
+                        c => literal.push(c),
                     }
+                }
+                if !ended {
+                    let unended = (
+                        Error::Read("a text that never ends".into()),
+                        Span { start, end: here },
+                    );
+                    return (
+                        tokens,
+                        Tail {
+                            comments,
+                            end: here,
+                        },
+                        Some(unended),
+                    );
                 }
                 literal
             }
@@ -366,13 +416,14 @@ fn tokens(text: &str) -> Result<(Vec<Token>, Tail), Error> {
             after: None,
         });
     }
-    Ok((
+    (
         tokens,
         Tail {
             comments,
             end: here,
         },
-    ))
+        None,
+    )
 }
 
 /// Whether a token is a label: it ends with `:` and is not all colons
@@ -412,10 +463,18 @@ fn is_number(token: &str) -> bool {
     all_digits(whole) && parts.next().is_none_or(all_digits)
 }
 
-fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Error> {
-    let ended = || Error::Read("a form that never closes".into());
-    let token = tokens.get(*at).ok_or_else(ended)?;
+fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
+    // Where the text ends and a form was to come: after a label, or as
+    // what is applied.
+    let token = tokens.get(*at).ok_or_else(|| {
+        (
+            Error::Read("a form that never closes".into()),
+            tokens.last().map(|last| last.span).unwrap_or_default(),
+        )
+    })?;
     *at += 1;
+    // A form that never closes is said where it opens.
+    let ended = || (Error::Read("a form that never closes".into()), token.span);
     let mut mark = Mark {
         span: token.span,
         comments: token.comments.clone(),
@@ -450,7 +509,9 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Error> {
                     break;
                 }
                 let key = match label(&next.text) {
-                    Some("") => return Err(Error::Read("a map key with no name".into())),
+                    Some("") => {
+                        return Err((Error::Read("a map key with no name".into()), next.span));
+                    }
                     Some(name) => {
                         *at += 1;
                         mark.parts.push(Mark {
@@ -505,7 +566,10 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Error> {
             Form::application(head, parts)
         }
         closer @ (")" | "]" | "}") => {
-            return Err(Error::Read(format!("a `{closer}` that closes nothing")));
+            return Err((
+                Error::Read(format!("a `{closer}` that closes nothing")),
+                token.span,
+            ));
         }
         other => {
             mark.raw = token.raw.clone();

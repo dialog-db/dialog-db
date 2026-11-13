@@ -1,10 +1,8 @@
 //! A branch of a repository kept in memory, and the syntax submitted
 //! to it so far. The example and the tests share it.
 
-use anyhow::{Context as _, Result};
-use dialog_notation::{
-    Analyzer, Diagnostic, Error, Segment, Span, Step, Written, compile, parse_written,
-};
+use anyhow::Result;
+use dialog_notation::{Analyzer, Diagnostic, Error, Step, check};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_peer::{Peer, Session};
 use dialog_query::query::Output as _;
@@ -22,8 +20,6 @@ pub struct Notebook {
     /// over the branch for every query, so they last as long as it does
     /// and no longer.
     held: Vec<DeductiveRule>,
-    /// What the trees of the last document left out of its text.
-    written: Written,
 }
 
 impl Notebook {
@@ -36,7 +32,6 @@ impl Notebook {
             branch,
             analyzer: Analyzer::new()?,
             held: Vec::new(),
-            written: Written::default(),
         })
     }
 
@@ -46,49 +41,35 @@ impl Notebook {
         self.held.len()
     }
 
-    /// Where in the last document the node at `path` starts, in words.
-    fn place(&self, path: &[Segment]) -> String {
-        match self.written.span(path) {
-            Some(span) => format!(
-                "line {}, column {}",
-                span.start.line + 1,
-                span.start.column + 1
-            ),
-            None => "somewhere in the document".into(),
-        }
-    }
-
-    /// Where in the last document a diagnostic's form is.
-    pub fn span(&self, diagnostic: &Diagnostic) -> Option<Span> {
-        self.written.span(&diagnostic.path)
-    }
-
     /// Submit a document: one transaction for what it writes, installs
     /// and issues, then its queries against the result. The report is
     /// every row, as written, sorted.
     pub async fn submit(&mut self, text: &str) -> Result<(Vec<String>, Vec<Diagnostic>)> {
         // The three phases: text to trees, trees to analyzed trees, an
-        // analyzed tree to what Dialog-DB runs.
-        let (trees, written) = parse_written(text)?;
-        self.written = written;
-        let analysis = self.analyzer.analyze(&trees);
-        // A document with a refusal in it is refused whole. The first
-        // one is the error, said with where it is.
-        if let Some((refused, error)) = analysis
+        // analyzed tree to what Dialog-DB runs. A document with a
+        // refusal in it is refused whole. The first one is the error,
+        // said with where it is.
+        let checked = check(&mut self.analyzer, text);
+        if let Some((refused, error)) = checked
             .refusals()
             .find_map(|refused| Some((refused, refused.refusal.clone()?)))
         {
-            return Err(anyhow::Error::new(error).context(self.place(&refused.path)));
+            let place = match refused.span {
+                Some(span) => format!(
+                    "line {}, column {}",
+                    span.start.line + 1,
+                    span.start.column + 1
+                ),
+                None => "somewhere in the document".into(),
+            };
+            return Err(anyhow::Error::new(error).context(place));
         }
-        let (analyzed, diagnostics) = (analysis.analyzed, analysis.diagnostics);
+        let diagnostics = checked.diagnostics;
         let mut transaction = self.branch.transaction();
         let mut writes = false;
         let mut queries = Vec::new();
-        for (rule, origin) in analyzed.iter().zip(&analysis.origin) {
-            // What the compiler refuses is said with where the tree the
-            // rule came of is.
-            let steps = compile(rule).with_context(|| self.place(&[Segment::Item(*origin)]))?;
-            for step in steps {
+        {
+            for step in checked.steps {
                 transaction = match step {
                     Step::Assert(statement) => transaction.assert(statement),
                     Step::Retract(statement) => transaction.retract(statement),

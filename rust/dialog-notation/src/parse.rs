@@ -4,6 +4,7 @@
 //! [`Syntax::Reference`] whatever it names, and whether a form defines
 //! one is for the [analyzer](crate::analyze) to say.
 
+use crate::diagnostic::Diagnostic;
 use crate::form::read_marked;
 use crate::syntax::tree;
 use crate::written::{Path, Segment, Written};
@@ -18,23 +19,69 @@ pub fn parse(text: &str) -> Result<Vec<Syntax>, Error> {
 /// The syntax trees `text` says, and what they leave out of it: where
 /// each node is, the order its parts were written in, a token spelled
 /// its own way, and the comments. [`print`](crate::print()) takes the two
-/// back to the text.
+/// back to the text. The first thing refused is the error;
+/// [`parse_document`] says every one, and where.
 pub fn parse_written(text: &str) -> Result<(Vec<Syntax>, Written), Error> {
-    let (forms, tail) = read_marked(text)?;
+    let parsed = parse_document(text);
+    match parsed
+        .diagnostics
+        .into_iter()
+        .find_map(|diagnostic| diagnostic.refusal)
+    {
+        Some(error) => Err(error),
+        None => Ok((parsed.trees, parsed.written)),
+    }
+}
+
+/// What parsing made of a text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Parsed {
+    /// The trees of the forms that were read, in the order written.
+    pub trees: Vec<Syntax>,
+    /// What the trees leave out of the text.
+    pub written: Written,
+    /// Every part of the text that was refused, each with where it is.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Parse `text` and say everything in it that is refused, each with
+/// where in the text it is. Parsing does not stop at a refusal: a form
+/// that is refused gives no tree, and the forms after it are parsed all
+/// the same.
+pub fn parse_document(text: &str) -> Parsed {
+    let (forms, tail, misread) = read_marked(text);
     let mut written = Written {
         trailing: tail.comments,
         end: tail.end,
         ..Written::default()
     };
-    let mut path = Path::new();
+    let mut diagnostics = Vec::new();
     let mut trees = Vec::new();
-    for (at, (form, mark)) in forms.iter().enumerate() {
-        path.push(Segment::Item(at));
-        let node = tree(form, Some(mark), false, &mut path, &mut written);
-        path.pop();
-        trees.push(node?);
+    for (form, mark) in &forms {
+        let mut path: Path = vec![Segment::Item(trees.len())];
+        match tree(form, Some(mark), false, &mut path, &mut written) {
+            Ok(node) => trees.push(node),
+            Err(error) => {
+                // Nothing of a refused form is kept: its place among
+                // the trees is the next form's.
+                let at = Segment::Item(trees.len());
+                written.notes.retain(|way, _| way.first() != Some(&at));
+                let span = written.refused.take().unwrap_or(mark.span);
+                diagnostics.push(Diagnostic::misread(span, error));
+            }
+        }
     }
-    Ok((trees, written))
+    diagnostics.extend(
+        misread
+            .into_iter()
+            .map(|(error, span)| Diagnostic::misread(span, error)),
+    );
+    diagnostics.sort_by_key(|diagnostic| diagnostic.span.map(|span| span.start));
+    Parsed {
+        trees,
+        written,
+        diagnostics,
+    }
 }
 
 #[cfg(test)]
@@ -238,5 +285,93 @@ mod tests {
     #[dialog_common::test]
     fn it_refuses_text_that_is_not_forms() {
         assert!(matches!(parse("(todo ?t"), Err(Error::Read(_))));
+    }
+
+    /// Parsing says every part of a text it refuses and where each is,
+    /// and gives the trees of the forms around them.
+    #[dialog_common::test]
+    fn it_says_everything_it_refuses_and_where() {
+        let text = "(todo ?t state: :open)
+)
+(xyz.todo ?t text: ?x
+          text: ?y)
+(f [... ?a])
+(g {: 1})
+(xyz.todo todo:1 n: 5)
+(h \"never ends";
+        let parsed = parse_document(text);
+        let said: Vec<(String, u32, u32, u32, u32)> = parsed
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                let span = diagnostic.span.expect("the parser says where");
+                (
+                    diagnostic.message.clone(),
+                    span.start.line,
+                    span.start.column,
+                    span.end.line,
+                    span.end.column,
+                )
+            })
+            .collect();
+        assert_eq!(
+            said,
+            vec![
+                (
+                    "cannot read: a `)` that closes nothing".to_string(),
+                    1,
+                    0,
+                    1,
+                    1
+                ),
+                (
+                    "(xyz.todo ?t text: ?x text: ?y) says `text:` twice".to_string(),
+                    2,
+                    0,
+                    3,
+                    19
+                ),
+                ("a `...` that repeats nothing".to_string(), 4, 4, 4, 7),
+                (
+                    "cannot read: a map key with no name".to_string(),
+                    5,
+                    4,
+                    5,
+                    5
+                ),
+                (
+                    "cannot read: a form that never closes".to_string(),
+                    7,
+                    0,
+                    7,
+                    1
+                ),
+                (
+                    "cannot read: a text that never ends".to_string(),
+                    7,
+                    3,
+                    7,
+                    14
+                ),
+            ]
+        );
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.severity() == crate::Severity::Error)
+        );
+        // The forms around them are read, and the mapping is of them.
+        assert_eq!(
+            parsed.trees,
+            parse("(todo ?t state: :open) (xyz.todo todo:1 n: 5)").unwrap()
+        );
+        assert_eq!(
+            parsed
+                .written
+                .span(&[Segment::Item(1)])
+                .map(|span| span.start),
+            Some(Point { line: 6, column: 0 })
+        );
     }
 }

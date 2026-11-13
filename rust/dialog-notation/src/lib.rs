@@ -27,6 +27,12 @@
 //! [`Diagnostic`] says the way to the form it is about, which the
 //! mapping turns into a place.
 //!
+//! No phase stops at the first thing it refuses. [`parse_document`] and
+//! [`Analyzer::analyze`] say every refusal, each a [`Diagnostic`], and
+//! [`check`](check()) runs the three phases over a text and gives what
+//! it compiles to and every diagnostic with where in the text it is,
+//! which is what an editor or a language server asks for.
+//!
 //! ```no_run
 //! # fn main() -> Result<(), dialog_notation::Error> {
 //! use dialog_notation::{Analyzer, compile, parse};
@@ -46,8 +52,10 @@
 //! ```
 
 pub mod analyze;
+pub mod check;
 pub mod compile;
 pub mod data;
+pub mod diagnostic;
 pub mod expand;
 pub mod form;
 pub mod kernel;
@@ -58,11 +66,13 @@ pub mod syntax;
 pub mod written;
 
 pub use analyze::{Analysis, Analyzer};
+pub use check::{Checked, check};
 pub use compile::{Query, Step, compile};
 pub use data::Data;
-pub use expand::{Diagnostic, Expander, Position, Severity};
+pub use diagnostic::{Diagnostic, Severity};
+pub use expand::{Expander, Position};
 pub use form::{Form, Part, read};
-pub use parse::{parse, parse_written};
+pub use parse::{Parsed, parse, parse_document, parse_written};
 pub use print::print;
 pub use syntax::{Parameters, Signature, Syntax};
 pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};

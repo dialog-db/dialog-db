@@ -253,7 +253,7 @@ async fn it_says_where_a_warning_and_a_refusal_are() -> Result<()> {
     let [warning] = diagnostics.as_slice() else {
         panic!("one warning: {diagnostics:?}");
     };
-    let span = notebook.span(warning).expect("the warning has a place");
+    let span = warning.span.expect("the warning has a place");
     assert_eq!((span.start.line, span.start.column), (1, 2));
     assert_eq!((span.end.line, span.end.column), (1, 34));
 

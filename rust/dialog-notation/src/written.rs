@@ -141,6 +141,8 @@ pub struct Written {
     pub trailing: Vec<Comment>,
     /// Where the text ends.
     pub end: Point,
+    /// Where the form being made a tree was refused, while it is.
+    pub(crate) refused: Option<Span>,
 }
 
 impl Written {
