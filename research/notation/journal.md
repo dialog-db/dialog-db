@@ -821,6 +821,16 @@ xychart-beta
 
 **Decision.** Add two sentences to the maintainer's, on the domain form: a concept matches any entity that has its attributes, whoever gave them values; a rule's conclusion holds as soon as its conditions do.
 
+## 2026-11-13 — R37: asked yes or no, readers commit to "not found"
+
+**Question.** The one [planned](results/r37-plan.md), from the maintainer: on the rule case, asked directly whether a note with "hello world" is found, what do readers say and why?
+
+**Method.** Clean runner, 20 readers, R35's `undef-derive` with question 2 made a yes or no question.
+
+**Results.** [r37](results/r37.md). 4 of 20 said yes, against 11 of 20 on the open question, and all four made it conditional on rules running at query time. Of the 16 who said no, 12 said the rule makes a `memo`, not a `note`; 7 said the rule never runs because nothing asks for `memo`.
+
+**Decision.** The open question overstated the shared-name form. Readers' committed model is nominal and goal-directed. Use the direct question from now on, and test the two sentences that answer it: concepts match by attribute, and a rule's conclusion holds without being asked for.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
