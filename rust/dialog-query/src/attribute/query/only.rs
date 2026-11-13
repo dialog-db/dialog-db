@@ -40,6 +40,58 @@ fn materialize_winner(winner: FactView) -> Result<Option<Winner>, DialogCorpusEr
     }
 }
 
+/// The row that `winner`, the winner of one cell, gives when it extends
+/// `base` in a read of one entity, or `None` when it gives no row.
+///
+/// The typed `is` slot of `selector` reads the winner first (see
+/// [`AttributeQueryAll::admit`]). Where `constraint` holds the value of the
+/// query, the winner as the slot reads it must read as the constant (see
+/// `Value::reads_as`). The row then binds the winner as the slot reads it, as
+/// it always has.
+///
+/// A slot that narrows a number, such as `float:32`, can read a winner as
+/// another number than the constant, where the winner as it was stored reads
+/// as the constant. The slot reads the stored 1e30 as 1.0000000150474662e30,
+/// and the constant 1e30 stays as it was written. A first read finds such a
+/// winner by a scan for the constant, and it compares the stored winner with
+/// the constant (see [`challenge`]). So this read takes that winner too, as a
+/// first read does. Its row cites the winner as it was stored, and leaves the
+/// value of the query as it is bound, through `resolved`, whose `is` is the
+/// constant, as the scan of a first read does. Every other winner gives the
+/// row that it gave before.
+fn elected(
+    selector: &AttributeQueryAll,
+    resolved: &AttributeQueryAll,
+    constraint: Option<&Value>,
+    base: &Match,
+    winner: Fact,
+    standing: Option<(Edition, [u8; 32])>,
+) -> Result<Option<Match>, EvaluationError> {
+    // A slot reads a stored value as another value only when the value is a
+    // number (see `Type::view`), so only a number keeps its stored form.
+    let stored = constraint
+        .filter(|_| winner.is.data_type().is_number())
+        .map(|_| winner.is.clone());
+    let Some(admitted) = selector.admit(winner) else {
+        return Ok(None);
+    };
+    let mut extension = base.clone();
+    match constraint {
+        Some(constraint) if !admitted.is.reads_as(constraint) => match stored {
+            Some(stored) if stored.reads_as(constraint) => {
+                let winner = Fact {
+                    is: stored,
+                    ..admitted
+                };
+                resolved.merge(&mut extension, winner, standing)?;
+            }
+            _ => return Ok(None),
+        },
+        _ => selector.merge(&mut extension, admitted, standing)?,
+    }
+    Ok(Some(extension))
+}
+
 /// The `(attribute, entity)` lookup [`challenge`] verifies `candidate`
 /// against: every stored value of the candidate's attribute on its
 /// entity, among which the winner is elected.
@@ -354,7 +406,7 @@ impl AttributeQueryOnly {
                     // Sliding window path. A constant value admits the
                     // winner a reader of the constant's type observes as
                     // it (see `Value::reads_as`), as the scan's own exact
-                    // bound does.
+                    // bound does (see `elected`).
                     let value_constraint = resolved.is().as_constant().cloned();
 
                     let scan = AttributeQueryAll::lookup(
@@ -387,21 +439,19 @@ impl AttributeQueryOnly {
                                     // (`CorruptEntry`) is a corrupt tree
                                     // entry: drop the group's yield rather
                                     // than failing the query.
-                                    match materialize_winner(current)?.and_then(
-                                        |(winner, standing)| {
-                                            selector.admit(winner).map(|winner| (winner, standing))
-                                        },
-                                    ) {
-                                        Some((winner, standing))
-                                            if value_constraint
-                                                .as_ref()
-                                                .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
-                                        {
-                                            let mut extension = base.clone();
-                                            selector.merge(&mut extension, winner, standing)?;
-                                            yield extension;
-                                        }
-                                        _ => {}
+                                    let row = match materialize_winner(current)? {
+                                        Some((winner, standing)) => elected(
+                                            &selector,
+                                            &resolved,
+                                            value_constraint.as_ref(),
+                                            &base,
+                                            winner,
+                                            standing,
+                                        )?,
+                                        None => None,
+                                    };
+                                    if let Some(extension) = row {
+                                        yield extension;
                                     }
                                     fact
                                 }
@@ -413,19 +463,19 @@ impl AttributeQueryOnly {
                     // Yield the final group's winner (unless its stored
                     // bytes are corrupt; see the group-close arm above).
                     if let Some(winner) = candidate.take() {
-                        match materialize_winner(winner)?.and_then(|(winner, standing)| {
-                            selector.admit(winner).map(|winner| (winner, standing))
-                        }) {
-                            Some((winner, standing))
-                                if value_constraint
-                                    .as_ref()
-                                    .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
-                            {
-                                let mut extension = base.clone();
-                                selector.merge(&mut extension, winner, standing)?;
-                                yield extension;
-                            }
-                            _ => {}
+                        let row = match materialize_winner(winner)? {
+                            Some((winner, standing)) => elected(
+                                &selector,
+                                &resolved,
+                                value_constraint.as_ref(),
+                                &base,
+                                winner,
+                                standing,
+                            )?,
+                            None => None,
+                        };
+                        if let Some(extension) = row {
+                            yield extension;
                         }
                     }
                 } else {
@@ -1158,6 +1208,55 @@ mod tests {
              (and certainly no Absent fallback) should be produced"
         );
 
+        Ok(())
+    }
+
+    /// A slot of `float:32` reads the stored 1e30 and the stored natural
+    /// 10^30 as 1.0000000150474662e30. A value of 1e30 that a row binds
+    /// before the read still finds each of them, in a read that starts from
+    /// the entity as in a scan for the value. The row keeps the bound 1e30. A
+    /// value of 3.0 finds neither.
+    #[dialog_common::test]
+    async fn it_reads_a_bound_value_that_a_slot_of_float_32_narrows() -> anyhow::Result<()> {
+        use crate::corpus::Type as ValueType;
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let float = Entity::new()?;
+        let natural = Entity::new()?;
+        let score = the!("item/score");
+        assert_relation!(branch, &operator, score, float, 1e30f64);
+        assert_relation!(branch, &operator, score, natural, 10u128.pow(30));
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        for (entity, value, rows) in [
+            (Term::from(float.clone()), 1e30, 1),
+            (Term::from(natural.clone()), 1e30, 1),
+            (Term::var("item"), 1e30, 2),
+            (Term::from(float.clone()), 3.0, 0),
+            (Term::var("item"), 3.0, 0),
+        ] {
+            let what = format!("{value:?} of {entity}");
+            let query = AttributeQueryOnly::new(
+                Term::from(the!("item/score")),
+                entity,
+                Term::<Any>::typed_var("score", Kind::from(ValueType::F32)),
+                Term::blank(),
+            );
+            let mut base = Match::new();
+            base.bind(&Term::var("score"), Value::Float(value))?;
+            let results =
+                Selection::try_vec(Application::evaluate(query, base.seed(), &source)).await?;
+            assert_eq!(results.len(), rows, "{what}");
+            for row in results {
+                assert_eq!(
+                    row.lookup(&Term::var("score"))?.content()?,
+                    Value::Float(value),
+                    "{what}"
+                );
+            }
+        }
         Ok(())
     }
 
