@@ -1557,3 +1557,71 @@ fn it_does_not_pile_up_extents_left_by_processes_that_die() -> anyhow::Result<()
     );
     Ok(())
 }
+
+/// A handle opened after the last close of a file keeps the file present,
+/// even when the sync thread took its reference to the closing handle's
+/// state while that close was under way. The thread upgrades a weak
+/// reference it copied from the table of open files without holding the
+/// table, so it can land after the close found itself the last handle:
+/// the close then lets go of the present byte, the state stays alive in
+/// the table through the thread's reference, and a reopen shares it
+/// without the byte, so another process takes itself for the last.
+#[dialog_common::test]
+fn it_keeps_the_file_present_when_the_sync_thread_looks_during_the_last_close() -> anyhow::Result<()>
+{
+    use std::sync::{Arc, Mutex};
+
+    let directory = tempfile::tempdir()?;
+    let path = archive_in(&directory);
+    let path_text = path.to_string_lossy().into_owned();
+    // The sync thread's part is played here, at a chosen moment.
+    let archive = Chronicle::open_with(
+        &path,
+        Options {
+            sync_in_background: false,
+            ..Options::default()
+        },
+    )?;
+    archive.append("index", &[block("first")])?;
+    // A block left in an extent, so the last close has a commit to make,
+    // which is where the sync thread looks.
+    let holder = hold(&path, locks::TURN, true)?;
+    archive.append("index", &[block("loose")])?;
+    holder.finish()?;
+    anyhow::ensure!(
+        !holding(&archive).is_empty(),
+        "the block is in an extent, for the close to fold in"
+    );
+
+    // What the sync thread does when it wakes: upgrades the weak reference
+    // it copied from the table of open files.
+    let weak = Arc::downgrade(&archive.inner);
+    let looked: Arc<Mutex<Option<Arc<super::Inner>>>> = Arc::default();
+    let look = looked.clone();
+    *archive.inner.before_publish.lock() = Some(Box::new(move || {
+        let mut look = look.lock().expect("not poisoned");
+        if look.is_none() {
+            *look = weak.upgrade();
+        }
+    }));
+    drop(archive);
+    let held = looked.lock().expect("not poisoned").take();
+    anyhow::ensure!(
+        held.is_some(),
+        "the sync thread looked while the last close was under way"
+    );
+
+    let reopened = Chronicle::open(&path)?;
+    let mut other = Process::spawn(&["try", &path_text, &locks::PRESENT.to_string()])?;
+    let taken = other.won()?;
+    other.finish()?;
+    // The sync thread goes on: it lets go of its reference.
+    if let Some(held) = held {
+        Chronicle::sync_if_waited(held);
+    }
+    assert!(
+        !taken,
+        "another process took the present byte exclusive while this one has the file open"
+    );
+    all_read_back(&reopened, &["first".into(), "loose".into()])
+}
