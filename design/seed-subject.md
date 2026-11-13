@@ -98,7 +98,16 @@ A second change comes with it, because the first would otherwise lose something 
 
 ### What it costs and saves
 
-Measured on #788's harness, where the command premise names no subject (`research/rule-heads/results/2026-11-13-sound.md` on that branch).
+Measured on #788's harness, where the command premise names no subject (`research/rule-heads/results/2026-11-13-sound.md` on that branch). Instructions under callgrind, millions, the median of three runs interleaved with main:
+
+| | body, heads | main | #791 | |
+|---|---|---|---|---|
+| one commit of 500 commands, one rule of a wide head | 1 read, 2 heads | 902.3 | 563.9 | -37.5% |
+| one commit of 500 commands, one rule of a wide head | 4 reads, 4 heads | 1563.8 | 1221.2 | -21.9% |
+| one commit of one command, one rule of a wide head | 1 read, 2 heads | 4.51 | 3.80 | -15.7% |
+| one commit of one command, one rule of a wide head | 4 reads, 4 heads | 6.25 | 5.46 | -12.7% |
+
+A rule a head saves that for each rule: 25% to 47%. What it costs: a rule over an attribute derived from itself is evaluated in full where it was seeded, each time that attribute is written. Not measured: no scenario of the harness has one.
 
 ## For the maintainer to decide
 
