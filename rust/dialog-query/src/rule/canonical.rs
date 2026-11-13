@@ -735,7 +735,10 @@ mod tests {
     #[dialog_common::test]
     fn it_spells_one_body_alike_under_two_heads() {
         let far = rule_headed("friend", vec![knows("this", "x"), knows("x", "friend")]);
-        let near = rule_headed("friend", vec![knows("this", "friend"), knows("friend", "y")]);
+        let near = rule_headed(
+            "friend",
+            vec![knows("this", "friend"), knows("friend", "y")],
+        );
         assert_ne!(far.this(), near.this(), "the heads make them two rules");
 
         let (far, near) = (body_of(&far), body_of(&near));

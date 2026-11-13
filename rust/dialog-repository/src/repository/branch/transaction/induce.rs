@@ -60,8 +60,8 @@ use crate::repository::archive::erased;
 use crate::repository::branch::session::{QueryEnv, shared_metadata};
 use crate::repository::source::View;
 use crate::rules::{
-    Induced, Reads, TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr,
-    source_attr, transient_attr,
+    Induced, Reads, TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr,
+    transient_attr,
 };
 use crate::{CommitError, RemoteSite, Revision, Staged};
 use std::slice::from_ref;

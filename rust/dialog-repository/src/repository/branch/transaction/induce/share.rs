@@ -132,6 +132,10 @@ pub(super) fn order_decides(heads: &[WrittenHead]) -> bool {
     if heads.len() < 2 {
         return false;
     }
+    #[cfg(test)]
+    if probe::is_unordered() {
+        return false;
+    }
     type Writes<'a> = Vec<(&'a Value, &'a Pick)>;
     let mut written: HashMap<(&Entity, &Relation), Writes<'_>> =
         HashMap::with_capacity(heads.len());
@@ -139,7 +143,10 @@ pub(super) fn order_decides(heads: &[WrittenHead]) -> bool {
         for (at, (relation, _, _)) in cells.iter().enumerate() {
             // A relation this head writes twice is taken once, at its
             // first field, with every write in field order.
-            if cells[..at].iter().any(|(earlier, _, _)| earlier == relation) {
+            if cells[..at]
+                .iter()
+                .any(|(earlier, _, _)| earlier == relation)
+            {
                 continue;
             }
             let writes: Writes<'_> = cells[at..]
@@ -162,9 +169,29 @@ pub(super) fn order_decides(heads: &[WrittenHead]) -> bool {
 /// In tests: sharing turned off, so the same commits can be run both
 /// ways, and counts of what a round shared, so a test of sharing can
 /// tell that it happened.
+///
+/// `DIALOG_TEST_SHARE` turns a part off for a whole run of the tests,
+/// to see which of them hold it up: `off` shares nothing, which the
+/// tests that count what was shared then fail on, and `unordered`
+/// writes from shared matches whatever their order decides, which the
+/// check of a shared firing against the rule's own evaluation then
+/// fails on wherever the two orders differ.
 #[cfg(test)]
 pub(super) mod probe {
     use std::cell::Cell;
+    use std::sync::OnceLock;
+
+    /// What `DIALOG_TEST_SHARE` asks for, read once.
+    fn asked() -> &'static str {
+        static ASKED: OnceLock<String> = OnceLock::new();
+        ASKED.get_or_init(|| std::env::var("DIALOG_TEST_SHARE").unwrap_or_default())
+    }
+
+    /// Whether the order of matches is left to decide, for a run that
+    /// shows what the guard is for.
+    pub(super) fn is_unordered() -> bool {
+        asked() == "unordered"
+    }
 
     // Per thread: the test runtime drives each test on one thread.
     thread_local! {
@@ -179,7 +206,7 @@ pub(super) mod probe {
     }
 
     pub(super) fn is_off() -> bool {
-        OFF.with(Cell::get)
+        OFF.with(Cell::get) || asked() == "off"
     }
 
     /// Note a rule that wrote its head from another rule's matches.

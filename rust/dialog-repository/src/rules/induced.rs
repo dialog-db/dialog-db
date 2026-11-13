@@ -12,10 +12,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
-use dialog_query::rule::canonical;
 use dialog_query::InductiveRule;
 #[cfg(test)]
 use dialog_query::Premise;
+use dialog_query::rule::canonical;
 use dialog_query::type_system::Type as Kind;
 
 /// An inductive rule decoded from its stored bytes, with what a round

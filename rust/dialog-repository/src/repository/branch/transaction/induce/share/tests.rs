@@ -429,16 +429,18 @@ async fn it_evaluates_once_a_body_two_rules_state() -> Result<()> {
     let (shared, unshared) = both(&rules, &[], &commits).await?;
 
     assert!(
-        shared
-            .facts
-            .contains(&format!("out.a/by item:2 {:?}", Value::Entity(entity("user:1")))),
+        shared.facts.contains(&format!(
+            "out.a/by item:2 {:?}",
+            Value::Entity(entity("user:1"))
+        )),
         "the first head is written: {:?}",
         shared.facts
     );
     assert!(
-        shared
-            .facts
-            .contains(&format!("out.a/list item:2 {:?}", Value::Entity(entity("list:0")))),
+        shared.facts.contains(&format!(
+            "out.a/list item:2 {:?}",
+            Value::Entity(entity("list:0"))
+        )),
         "the second head is written: {:?}",
         shared.facts
     );
@@ -464,11 +466,36 @@ async fn it_partitions_a_round_by_body() -> Result<()> {
     let near = || vec![touched("by"), listed("list")];
     let far = || vec![touched("by"), listed("list"), owned("list", "owner")];
     let rules = [
-        rule("assert!", head("by", "out.a/by", "entity:", "last:"), near(), vec![])?,
-        rule("assert!", head("list", "out.a/list", "entity:", "last:"), near(), vec![])?,
-        rule("assert!", head("by", "out.b/by", "entity:", "all:"), near(), vec![])?,
-        rule("assert!", head("owner", "out.a/owner", "entity:", "last:"), far(), vec![])?,
-        rule("assert!", head("list", "out.b/list", "entity:", "last:"), far(), vec![])?,
+        rule(
+            "assert!",
+            head("by", "out.a/by", "entity:", "last:"),
+            near(),
+            vec![],
+        )?,
+        rule(
+            "assert!",
+            head("list", "out.a/list", "entity:", "last:"),
+            near(),
+            vec![],
+        )?,
+        rule(
+            "assert!",
+            head("by", "out.b/by", "entity:", "all:"),
+            near(),
+            vec![],
+        )?,
+        rule(
+            "assert!",
+            head("owner", "out.a/owner", "entity:", "last:"),
+            far(),
+            vec![],
+        )?,
+        rule(
+            "assert!",
+            head("list", "out.b/list", "entity:", "last:"),
+            far(),
+            vec![],
+        )?,
         rule(
             "assert!",
             head("tag", "out.a/tag", "text:", "all:"),
@@ -489,7 +516,14 @@ async fn it_partitions_a_round_by_body() -> Result<()> {
         2 * shared.evaluations,
         "six rules, each seeded alike, are three evaluations"
     );
-    for the in ["out.a/by", "out.a/list", "out.b/by", "out.a/owner", "out.b/list", "out.a/tag"] {
+    for the in [
+        "out.a/by",
+        "out.a/list",
+        "out.b/by",
+        "out.a/owner",
+        "out.b/list",
+        "out.a/tag",
+    ] {
         assert!(
             shared.facts.iter().any(|fact| fact.starts_with(the)),
             "{the} is written: {:?}",
@@ -554,9 +588,10 @@ async fn it_shares_under_a_renaming_and_not_across_meanings() -> Result<()> {
     let (shared, _) = both(&[named, renamed, other], &[], &commits).await?;
     assert_eq!(shared.shared, (1, 0), "two of the three share");
     assert!(
-        shared
-            .facts
-            .contains(&format!("out.a/owner item:3 {:?}", Value::Entity(entity("user:1")))),
+        shared.facts.contains(&format!(
+            "out.a/owner item:3 {:?}",
+            Value::Entity(entity("user:1"))
+        )),
         "the renamed rule wrote the owner of the list: {:?}",
         shared.facts
     );
@@ -622,8 +657,12 @@ async fn it_does_not_share_bodies_their_heads_type_differently() -> Result<()> {
     );
     let negative = format!("{:?}", Value::SignedInt(-5));
     assert!(
-        shared.facts.contains(&format!("out.b/rank item:1 {negative}"))
-            && shared.facts.contains(&format!("out.c/rank item:1 {negative}")),
+        shared
+            .facts
+            .contains(&format!("out.b/rank item:1 {negative}"))
+            && shared
+                .facts
+                .contains(&format!("out.c/rank item:1 {negative}")),
         "the integer heads read the negative rank: {:?}",
         shared.facts
     );
@@ -646,9 +685,24 @@ async fn it_does_not_share_bodies_their_heads_type_differently() -> Result<()> {
 async fn it_evaluates_a_rule_alone_when_the_order_of_matches_decides() -> Result<()> {
     let body = || vec![touched("by"), tagged("tag")];
     let rules = [
-        rule("assert!", head("tag", "out.a/tag", "text:", "last:"), body(), vec![])?,
-        rule("assert!", head("tag", "out.b/tag", "text:", "all:"), body(), vec![])?,
-        rule("assert!", head("by", "out.a/by", "entity:", "last:"), body(), vec![])?,
+        rule(
+            "assert!",
+            head("tag", "out.a/tag", "text:", "last:"),
+            body(),
+            vec![],
+        )?,
+        rule(
+            "assert!",
+            head("tag", "out.b/tag", "text:", "all:"),
+            body(),
+            vec![],
+        )?,
+        rule(
+            "assert!",
+            head("by", "out.a/by", "entity:", "last:"),
+            body(),
+            vec![],
+        )?,
     ];
     // item:1 has two tags, so each touch of it matches twice; item:0
     // has one.
@@ -666,7 +720,10 @@ async fn it_evaluates_a_rule_alone_when_the_order_of_matches_decides() -> Result
         alone >= 1,
         "a head that writes two tags to one cell is evaluated alone"
     );
-    assert!(read >= 2, "where a cell is written once, the matches are read");
+    assert!(
+        read >= 2,
+        "where a cell is written once, the matches are read"
+    );
     Ok(())
 }
 
@@ -678,7 +735,10 @@ fn it_tells_when_the_order_of_heads_decides() {
     let head = |of: &str, cells: Vec<(Relation, Value, Pick)>| (entity(of), cells);
 
     assert!(!order_decides(&[]));
-    assert!(!order_decides(&[head("item:1", vec![cell("out/a", "x", Pick::Last)])]));
+    assert!(!order_decides(&[head(
+        "item:1",
+        vec![cell("out/a", "x", Pick::Last)]
+    )]));
     assert!(
         !order_decides(&[
             head("item:1", vec![cell("out/a", "x", Pick::Last)]),
@@ -702,15 +762,39 @@ fn it_tells_when_the_order_of_heads_decides() {
     );
     assert!(
         !order_decides(&[
-            head("item:1", vec![cell("out/a", "x", Pick::Last), cell("out/b", "p", Pick::Last)]),
-            head("item:1", vec![cell("out/a", "x", Pick::Last), cell("out/c", "q", Pick::Last)]),
+            head(
+                "item:1",
+                vec![
+                    cell("out/a", "x", Pick::Last),
+                    cell("out/b", "p", Pick::Last)
+                ]
+            ),
+            head(
+                "item:1",
+                vec![
+                    cell("out/a", "x", Pick::Last),
+                    cell("out/c", "q", Pick::Last)
+                ]
+            ),
         ]),
         "two heads that write a cell the same leave it the same either way"
     );
     assert!(
         order_decides(&[
-            head("item:1", vec![cell("out/a", "x", Pick::Last), cell("out/a", "y", Pick::All)]),
-            head("item:1", vec![cell("out/a", "y", Pick::All), cell("out/a", "x", Pick::Last)]),
+            head(
+                "item:1",
+                vec![
+                    cell("out/a", "x", Pick::Last),
+                    cell("out/a", "y", Pick::All)
+                ]
+            ),
+            head(
+                "item:1",
+                vec![
+                    cell("out/a", "y", Pick::All),
+                    cell("out/a", "x", Pick::Last)
+                ]
+            ),
         ]),
         "one cell written twice by each head, in another order"
     );
@@ -747,7 +831,12 @@ async fn it_shares_a_body_with_a_head_that_writes_a_collection() -> Result<()> {
         ]
     };
     let rules = [
-        rule("assert!", members, body("member", "list", "member/key"), vec![])?,
+        rule(
+            "assert!",
+            members,
+            body("member", "list", "member/key"),
+            vec![],
+        )?,
         rule(
             "assert!",
             head("who", "out.a/by", "entity:", "all:"),
@@ -925,7 +1014,11 @@ fn generated_rules(dice: &mut Dice) -> Result<(Vec<InductiveRule>, Vec<Entity>)>
             };
             let domain = ["out.a", "out.b"][dice.below(2)];
             let pick = ["last:", "all:"][dice.below(2)];
-            let polarity = if dice.below(5) == 0 { "retract!" } else { "assert!" };
+            let polarity = if dice.below(5) == 0 {
+                "retract!"
+            } else {
+                "assert!"
+            };
             rules.push(rule(
                 polarity,
                 head(variable, &format!("{domain}/{base}"), kind, pick),
@@ -1077,6 +1170,9 @@ async fn it_writes_what_the_unshared_path_writes_over_generated_rules() -> Resul
         alone += shared.shared.1;
         saved += unshared.evaluations - shared.evaluations;
     }
+    println!(
+        "{GENERATED} rule sets: {read} rules read another's matches, {alone} were evaluated alone for the order's sake, {saved} evaluations saved"
+    );
     assert!(
         read >= GENERATED as usize,
         "the generated sets share bodies: {read} rules read another's matches"

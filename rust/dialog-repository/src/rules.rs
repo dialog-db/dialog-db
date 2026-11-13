@@ -78,8 +78,8 @@ use parking_lot::RwLock;
 use crate::{Revision, schema};
 
 mod induced;
-pub(crate) use induced::{Induced, Reads};
 use dialog_common::Blake3Hash;
+pub(crate) use induced::{Induced, Reads};
 
 // The `dialog.rule/*` vocabulary and the Statement lowerings that
 // install/uninstall a rule by plain assertion/retraction live with the
