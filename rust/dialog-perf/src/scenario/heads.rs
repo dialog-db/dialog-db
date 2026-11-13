@@ -7,12 +7,21 @@
 //! and when. The body reads the list the to-do is on, and in the heavy
 //! shape that list's owner, the owner's team and the to-do's state. The
 //! heads write what the body bound under `out/…`, two of them or four.
+//!
+//! `heads-…` dispatches a command a to-do in one commit. `heads-each-…`
+//! makes a commit a command, `size` of them, over [`TODOS`] to-dos, after
+//! one commit off the record that leaves the rules loaded. Two variables
+//! vary what a sweep of those runs against, for checking that the store
+//! and the warm-up do not decide the result: `DIALOG_PERF_HEADS_TODOS`
+//! is how many to-dos are seeded, and `DIALOG_PERF_HEADS_COLD`, set to
+//! anything, leaves the commit off the record out.
 
 use std::future::Future;
+use std::ops::Range;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_corpus::{Pick, Value};
+use dialog_corpus::{Entity, Pick, Value};
 use dialog_query::attribute::expression::dynamic::DynamicAttributeExpression;
 use dialog_query::{InductiveRule, Relation};
 use dialog_repository::Transient;
@@ -30,6 +39,10 @@ const OWNERS: usize = 10;
 /// How many teams the owners are spread over.
 const TEAMS: usize = 3;
 
+/// How many to-dos a commit of one command is made against, unless
+/// `DIALOG_PERF_HEADS_TODOS` says otherwise.
+const TODOS: usize = 500;
+
 /// What a head writes, in the order heads are added: the variable the
 /// body binds and the attribute it is written under.
 const WRITES: [&str; 4] = ["to", "from", "by", "at"];
@@ -46,6 +59,9 @@ pub enum Shape {
     Named,
     /// No rule at all: what the commit costs before any rule runs.
     None,
+    /// No rule and no command: the transaction asserts what the heads
+    /// would write. What committing those facts costs before any rule.
+    Plain,
 }
 
 /// A premise reading `attribute` of the entity `of` into `into`.
@@ -126,7 +142,7 @@ fn rules(
 ) -> Result<(Vec<InductiveRule>, Option<Transient>)> {
     let writes = &WRITES[..heads];
     Ok(match shape {
-        Shape::None => (Vec::new(), None),
+        Shape::None | Shape::Plain => (Vec::new(), None),
         Shape::Wide => (
             vec![induce("assert!", head("out", writes), body(heavy, narrow))?],
             None,
@@ -245,25 +261,31 @@ async fn install(env: &Env, rules: Vec<InductiveRule>, transient: Option<Transie
     Ok(())
 }
 
-/// Dispatch a `move` command for each of `size` to-dos in one
-/// transaction: to the next list, by one of seven movers, at a time of
-/// its own.
-async fn dispatch(env: &Env, size: usize, narrow: bool) -> Result<()> {
+/// What the command for to-do `index` carries, by field: the to-do, the
+/// next list, one of seven movers and a time of its own.
+fn command(index: usize) -> [(&'static str, Entity); 4] {
+    [
+        ("target", entity("todo", index)),
+        ("to", entity("list", (index + 1) % LISTS)),
+        ("by", entity("user", index % 7)),
+        ("at", entity("tick", index)),
+    ]
+}
+
+/// Dispatch a `move` command for each of the to-dos `todos` in one
+/// transaction.
+async fn dispatch(env: &Env, todos: Range<usize>, narrow: bool) -> Result<()> {
     let mut transaction = env.branch.transaction();
-    for index in 0..size {
-        let command = entity("move", index);
-        for (name, value) in [
-            ("cmd.move/target", entity("todo", index)),
-            ("cmd.move/to", entity("list", (index + 1) % LISTS)),
-            ("cmd.move/by", entity("user", index % 7)),
-            ("cmd.move/at", entity("tick", index)),
-        ] {
-            if name != "cmd.move/target" && !carried(narrow).contains(&&name["cmd.move/".len()..]) {
+    for index in todos {
+        let of = entity("move", index);
+        for (field, value) in command(index) {
+            let name = format!("cmd.move/{field}");
+            if field != "target" && !carried(narrow).contains(&field) {
                 continue;
             }
             transaction = transaction.dispatch(DynamicAttributeExpression {
                 the: name.parse::<Relation>()?,
-                of: command.clone(),
+                of: of.clone(),
                 is: Value::Entity(value),
                 cause: None,
                 cardinality: None,
@@ -277,6 +299,25 @@ async fn dispatch(env: &Env, size: usize, narrow: bool) -> Result<()> {
         .perform(&env.operator)
         .await?;
     Ok(())
+}
+
+/// Assert what `heads` heads would write for to-do `index`, in a
+/// transaction of its own with no command: each fact under `last`, as a
+/// head writes it.
+async fn write(env: &Env, index: usize, heads: usize) -> Result<()> {
+    let this = entity("todo", index);
+    let facts = WRITES[..heads].iter().map(|write| {
+        let value = match *write {
+            "from" => entity("list", index % LISTS),
+            carried => command(index)
+                .into_iter()
+                .find(|(field, _)| *field == carried)
+                .map(|(_, value)| value)
+                .expect("a head writes what the command carries or the list it was on"),
+        };
+        fact(&this, &format!("out/{write}"), Value::Entity(value))
+    });
+    env.commit(assert_all(facts, Pick::Last)).await
 }
 
 struct Heads {
@@ -293,7 +334,7 @@ impl Prepared for Heads {
 
     fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
         Box::pin(async move {
-            dispatch(&self.env, self.size, self.narrow).await?;
+            dispatch(&self.env, 0..self.size, self.narrow).await?;
             Ok(Outcome::from([(
                 "facts".into(),
                 (self.facts * self.size) as u64,
@@ -324,6 +365,104 @@ pub async fn writing(
     }))
 }
 
+struct Each {
+    env: Env,
+    commits: usize,
+    shape: Shape,
+    heads: usize,
+    todos: usize,
+    cold: bool,
+}
+
+impl Each {
+    /// The commit for to-do `index`: its command dispatched, or for
+    /// [`Shape::Plain`] its facts asserted.
+    async fn commit(&self, index: usize) -> Result<()> {
+        match self.shape {
+            Shape::Plain => write(&self.env, index, self.heads).await,
+            _ => dispatch(&self.env, index..index + 1, false).await,
+        }
+    }
+}
+
+impl Prepared for Each {
+    fn env(&self) -> &Env {
+        &self.env
+    }
+
+    fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
+        Box::pin(async move {
+            for index in 0..self.commits {
+                self.commit(index).await?;
+            }
+            // What the run was made against, beside its counters, so a
+            // report says which store and which start it measured.
+            self.env.count("heads.todos", self.todos as u64);
+            self.env.count("heads.cold", u64::from(self.cold));
+            let facts = if self.shape == Shape::None {
+                0
+            } else {
+                self.heads
+            };
+            Ok(Outcome::from([
+                ("commits".into(), self.commits as u64),
+                ("facts".into(), (facts * self.commits) as u64),
+            ]))
+        })
+    }
+}
+
+/// `commits` commits of one command each over `todos` to-dos, the rules
+/// of `shape` installed. Unless `cold`, one commit for the last to-do is
+/// made first, off the record, so the measured commits find the rules
+/// loaded, as every commit of a running application but its first does.
+async fn each_over(
+    todos: usize,
+    cold: bool,
+    commits: usize,
+    shape: Shape,
+    heavy: bool,
+    heads: usize,
+) -> Result<Box<dyn Prepared>> {
+    anyhow::ensure!(
+        commits < todos,
+        "{commits} commits need a to-do each and one for the commit off the record, of {todos}"
+    );
+    let env = Env::open().await?;
+    seed(&env, todos).await?;
+    let (rules, transient) = rules(shape, heavy, false, heads)?;
+    install(&env, rules, transient).await?;
+    let each = Each {
+        env,
+        commits,
+        shape,
+        heads,
+        todos,
+        cold,
+    };
+    if !cold {
+        each.commit(todos - 1).await?;
+    }
+    Ok(Box::new(each))
+}
+
+/// `heads-each-<shape>-<body>-<heads>`: `size` commits of one command
+/// each. The phase is those commits, so its instructions over `size` are
+/// one commit's.
+pub async fn each(
+    size: usize,
+    shape: Shape,
+    heavy: bool,
+    heads: usize,
+) -> Result<Box<dyn Prepared>> {
+    let todos = match std::env::var("DIALOG_PERF_HEADS_TODOS") {
+        Ok(todos) => todos.parse()?,
+        Err(_) => TODOS,
+    };
+    let cold = std::env::var_os("DIALOG_PERF_HEADS_COLD").is_some();
+    each_over(todos, cold, size, shape, heavy, heads).await
+}
+
 /// `heads-move-<shape>`: the same commit against the rules that assert
 /// the list a to-do goes to and retract the list it was on.
 pub async fn moved(size: usize, shape: Shape) -> Result<Box<dyn Prepared>> {
@@ -342,7 +481,6 @@ pub async fn moved(size: usize, shape: Shape) -> Result<Box<dyn Prepared>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dialog_corpus::Entity;
     use dialog_query::query::Output as _;
     use dialog_query::{ConceptQuery, Parameters, Term};
 
@@ -411,6 +549,43 @@ mod tests {
             assert_eq!(wide, outcome(Shape::Repeat, heavy, narrow, heads).await?);
             assert_eq!(wide, outcome(Shape::Named, heavy, narrow, heads).await?);
             let none = outcome(Shape::None, heavy, narrow, heads).await?;
+            assert!(none.iter().all(Vec::is_empty), "no rule writes nothing");
+        }
+        Ok(())
+    }
+
+    /// What five commits of one command each leave under every
+    /// attribute `shape` may write, over twenty to-dos.
+    async fn each_outcome(shape: Shape, heavy: bool, heads: usize) -> Result<Vec<Vec<String>>> {
+        let mut prepared = each_over(20, false, 5, shape, heavy, heads).await?;
+        prepared.measure().await?;
+        let mut all = Vec::new();
+        for write in WRITES {
+            all.push(written(prepared.env(), &format!("out/{write}")).await?);
+        }
+        Ok(all)
+    }
+
+    /// A commit a command writes the same facts in every shape, and the
+    /// same as a transaction that asserts them itself: the five measured
+    /// and the one off the record. Without this `plain` is not the floor
+    /// of the others.
+    #[tokio::test]
+    async fn it_writes_the_same_facts_a_commit_a_command() -> Result<()> {
+        for (heavy, heads) in [(false, 2), (false, 4), (true, 2), (true, 4)] {
+            let plain = each_outcome(Shape::Plain, heavy, heads).await?;
+            for (at, rows) in plain.iter().enumerate() {
+                let expected = if at < heads { 6 } else { 0 };
+                assert_eq!(rows.len(), expected, "plain, attribute {at}");
+            }
+            for shape in [Shape::Wide, Shape::Repeat, Shape::Named] {
+                assert_eq!(
+                    plain,
+                    each_outcome(shape, heavy, heads).await?,
+                    "{shape:?}, heavy {heavy}, {heads} heads"
+                );
+            }
+            let none = each_outcome(Shape::None, heavy, heads).await?;
             assert!(none.iter().all(Vec::is_empty), "no rule writes nothing");
         }
         Ok(())
