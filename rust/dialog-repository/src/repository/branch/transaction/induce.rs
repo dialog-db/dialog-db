@@ -180,7 +180,6 @@ where
                 }
             })
             .collect();
-        let direct = touched.clone();
 
         // The overlay's trigger slice: rules, markers, and support
         // edges staged in this transaction (including novelty from
@@ -211,14 +210,19 @@ where
                 }
             }
         }
+        // What changed derivedly this round: every attribute a
+        // deductive rule concludes from something touched, whether or
+        // not a row of the round also writes it. A candidate premised
+        // on one is evaluated in full.
+        let mut derived: BTreeSet<Reach> = BTreeSet::new();
         for entity in &installed_deductive {
             let Some(body) = dispatch.deductive(entity, &overlay, env).await? else {
                 continue;
             };
             for (_, field) in body.conclusion().with().iter() {
-                // Inserted after the `direct` snapshot, so these land
-                // in the expanded set and force full evaluation.
-                touched.insert(Reach::of(field.descriptor().the()));
+                let reach = Reach::of(field.descriptor().the());
+                derived.insert(reach.clone());
+                touched.insert(reach);
             }
         }
 
@@ -241,7 +245,7 @@ where
         // reaches inductive rules premised on the derived concepts it
         // (transitively) supports through deductive rules.
         dispatch
-            .expand_through_deduction(&mut touched, &overlay, env)
+            .expand_through_deduction(&mut touched, &mut derived, &overlay, env)
             .await?;
 
         // Trigger-indexed discovery: footprint gate, then one
@@ -255,10 +259,15 @@ where
         }
         candidates.extend(installed.iter().cloned());
 
-        // Attributes only reachable through the deductive closure: a
+        // Attributes reached through the deductive closure: a
         // candidate premised on one changed *derivedly*, which a base
-        // row cannot seed.
-        let expanded: BTreeSet<Reach> = touched.difference(&direct).cloned().collect();
+        // row cannot seed. An attribute a row of the round writes is
+        // among them when a deductive rule also concludes it from
+        // something touched (a rule that derives an attribute from
+        // itself, say): the row seeds the entity it is about, and the
+        // facts derived from it for other entities are found only by
+        // evaluating in full.
+        let expanded: BTreeSet<Reach> = derived;
 
         let mut novelty = Changes::new();
         let mut emitted_transients = Changes::new();
@@ -524,7 +533,8 @@ impl<'a> Dispatch<'a> {
     /// Close `touched` over the deductive support graph: for each
     /// touched attribute, `dialog.rule/reads` names the deductive rules
     /// whose bodies read it; their conclusions' attributes are
-    /// *derived-touched* and recurse until the frontier is exhausted.
+    /// *derived-touched*, collected in `derived` whether or not they
+    /// were touched already, and recurse until the frontier is exhausted.
     /// Composed from per-rule facts at dispatch time, never stored, so
     /// late-installed deductive rules are picked up automatically.
     /// Polarity is deliberately ignored across derived edges: through
@@ -532,6 +542,7 @@ impl<'a> Dispatch<'a> {
     async fn expand_through_deduction<Env>(
         &self,
         touched: &mut BTreeSet<Reach>,
+        derived: &mut BTreeSet<Reach>,
         overlay: &OverlayTriggers,
         env: &Env,
     ) -> Result<(), CommitError>
@@ -590,9 +601,10 @@ impl<'a> Dispatch<'a> {
                     continue;
                 };
                 for (_, field) in body.conclusion().with().iter() {
-                    let derived = Reach::of(field.descriptor().the());
-                    if touched.insert(derived.clone()) {
-                        frontier.push(derived);
+                    let reach = Reach::of(field.descriptor().the());
+                    derived.insert(reach.clone());
+                    if touched.insert(reach.clone()) {
+                        frontier.push(reach);
                     }
                 }
             }
@@ -1180,6 +1192,10 @@ async fn evaluate_seed<'a, 'r>(
 /// what the unnamed subject matched and constrains nothing else, so a
 /// full evaluation finds the same matches with it or without.
 fn subject_named(rule: &InductiveRule, at: usize) -> Option<(Vec<Premise>, ConceptQuery)> {
+    #[cfg(test)]
+    if unnamed::is_as_before() {
+        return None;
+    }
     let premises = &rule.analysis().premises;
     let Premise::Assert(Proposition::Concept(query)) = &premises[at] else {
         return None;
@@ -1215,6 +1231,28 @@ fn subject_named(rule: &InductiveRule, at: usize) -> Option<(Vec<Premise>, Conce
     let mut premises = premises.clone();
     premises[at] = Premise::Assert(Proposition::Concept(query.clone()));
     Some((premises, query))
+}
+
+/// In tests: subjects left unnamed as they were before
+/// [`subject_named`], so a test can run one commit both ways and say
+/// what changed.
+#[cfg(test)]
+mod unnamed {
+    use std::cell::Cell;
+
+    // Per thread: the test runtime drives each test on one thread.
+    thread_local! {
+        static AS_BEFORE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Seed as before on this thread, or as now.
+    pub(super) fn as_before(on: bool) {
+        AS_BEFORE.with(|cell| cell.set(on));
+    }
+
+    pub(super) fn is_as_before() -> bool {
+        AS_BEFORE.with(Cell::get)
+    }
 }
 
 /// The rows of `rows` that may seed `query` together: the rows of one
@@ -1578,6 +1616,9 @@ mod oracle {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod subject_tests;
 
 #[cfg(test)]
 mod tests {
