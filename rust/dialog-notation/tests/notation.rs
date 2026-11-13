@@ -29,12 +29,11 @@ const TODO: &str = r#"
     (concept (todo ?t list: ?l text: ?x state: ?s)
       (xyz.todo ?t list: (:last (:entity ?l))
                    text: (:last (:text ?x))
-                   state: (:last (:entity ?s)))
-      description: "Something to do, on a list")
+                   state: (:last (:entity ?s))))
 
+    ; Adding a to-do opens it.
     (rule (assert! (todo ?t list: ?l text: ?x state: :open))
-      (add (todo ?t list: ?l text: ?x))
-      description: "Adding a to-do opens it")
+      (add (todo ?t list: ?l text: ?x)))
 
     ; A write says every field, so one that changes the state alone
     ; writes the relation, not the concept.
@@ -214,10 +213,10 @@ async fn it_derives_a_relation_and_reports_rows_of_several_premises() -> Result<
                (assert! (shop.item item:pot name: (:text "Pot") price: (:natural 30)))
                (assert! (shop.item item:cup name: (:text "Cup") price: (:natural 9)))
 
+               ; What costs less than ten.
                (rule (shop.offer ?i name: ?n price: ?p)
                  (shop.item ?i name: (:text ?n) price: (:natural ?p))
-                 (< ?p : 10)
-                 description: "What costs less than ten")"#,
+                 (< ?p : 10))"#,
         )
         .await?;
 

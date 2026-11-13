@@ -5,17 +5,23 @@
 //! analyzed trees. It gives what the document compiles to, and every
 //! diagnostic of every phase with where in the text it is.
 
+use crate::Syntax;
 use crate::analyze::Analyzer;
 use crate::compile::{Step, compile};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::parse_document;
-use crate::written::{Segment, Written};
+use crate::written::{Comment, Segment, Written};
+use dialog_corpus::Value;
 
 /// What the three phases made of a text.
 #[derive(Debug, Clone)]
 pub struct Checked {
-    /// What the document compiles to, in the order written. Nothing
-    /// when any part of it is refused.
+    /// The analyzed trees the document came to, each with what the
+    /// comments about the form it came of say as its `description:`.
+    /// Nothing when any part of the document is refused.
+    pub analyzed: Vec<Syntax>,
+    /// What the analyzed trees compile to, in the order written.
+    /// Nothing when any part of the document is refused.
     pub steps: Vec<Step>,
     /// What the trees of the document leave out of its text.
     pub written: Written,
@@ -43,6 +49,7 @@ impl Checked {
 pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
     let parsed = parse_document(text);
     let mut checked = Checked {
+        analyzed: Vec::new(),
         steps: Vec::new(),
         written: parsed.written,
         diagnostics: parsed.diagnostics,
@@ -54,8 +61,12 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
     let analysis = trial.analyze(&parsed.trees);
     checked.diagnostics = analysis.diagnostics;
     let mut steps = Vec::new();
+    let mut trees = Vec::new();
     for (analyzed, origin) in analysis.analyzed.iter().zip(&analysis.origin) {
-        match compile(analyzed) {
+        let analyzed = described(analyzed, &checked.written, *origin);
+        let compiled = compile(&analyzed);
+        trees.push(analyzed);
+        match compiled {
             Ok(compiled) => steps.extend(compiled),
             // What the compiler refuses is said of the tree the rule
             // came of: nothing yet says which part of it.
@@ -70,10 +81,30 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
         diagnostic.span = diagnostic.place(&checked.written);
     }
     if checked.refusals().next().is_none() {
+        checked.analyzed = trees;
         checked.steps = steps;
         *analyzer = trial;
     }
     checked
+}
+
+/// `analyzed` with what the comments about the tree it came of say as
+/// its `description:`, when it has none.
+fn described(analyzed: &Syntax, written: &Written, origin: usize) -> Syntax {
+    let said: Vec<&str> = written
+        .comments(&[Segment::Item(origin)])
+        .into_iter()
+        .map(Comment::said)
+        .filter(|said| !said.is_empty())
+        .collect();
+    let mut analyzed = analyzed.clone();
+    if let (false, Syntax::Application(_, operand)) = (said.is_empty(), &mut analyzed) {
+        operand
+            .terms
+            .entry("description".into())
+            .or_insert_with(|| Syntax::Constant(Value::String(said.join("\n"))));
+    }
+    analyzed
 }
 
 #[cfg(test)]
@@ -81,6 +112,78 @@ mod tests {
     use super::*;
     use crate::Error;
     use crate::written::Point;
+
+    /// What a comment right above a rule says is the rule's
+    /// description: the analyzed tree holds it, and the compiler is
+    /// given it. A comment with a blank line under it is not about the
+    /// rule.
+    #[dialog_common::test]
+    fn it_gives_a_rule_the_comment_above_it_as_its_description() -> Result<(), Error> {
+        let mut analyzer = Analyzer::new()?;
+        let checked = check(
+            &mut analyzer,
+            "; How a list is kept.
+
+; Something to do, on a list.
+(concept (todo ?t text: ?x done: ?d)
+  (xyz.todo ?t text: (:last (:text ?x)) done: (:last ?d)))
+
+; Adding a to-do
+; opens it.
+(rule (assert! (todo ?t text: ?x done: false))
+  (add (todo ?t text: ?x))) ; and that is all
+
+; What is left to do.
+(rule (xyz.pending ?t text: ?x)
+  (todo ?t text: ?x done: false))
+
+(rule (xyz.done ?t text: ?x)
+  (todo ?t text: ?x done: true))
+",
+        );
+        assert_eq!(checked.diagnostics, Vec::new());
+        let descriptions: Vec<Option<String>> = checked
+            .analyzed
+            .iter()
+            .map(|rule| {
+                crate::kernel::Rule::parse(rule)
+                    .ok()
+                    .and_then(|rule| rule.description)
+            })
+            .collect();
+        assert_eq!(
+            descriptions,
+            vec![
+                Some("Adding a to-do\nopens it.\nand that is all".to_string()),
+                Some("What is left to do.".to_string()),
+                None,
+            ]
+        );
+        // The concept's is kept on its form.
+        let said: Vec<&str> = checked
+            .written
+            .comments(&[Segment::Item(0)])
+            .into_iter()
+            .map(Comment::said)
+            .collect();
+        assert_eq!(said, vec!["Something to do, on a list."]);
+
+        // Dialog-DB is given the description and keeps none: the rule
+        // it builds gives none back, and what it stores of a rule holds
+        // no description. So what a comment says is not yet anywhere a
+        // query can find it.
+        let kept: Vec<Option<String>> = checked
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Induce(rule) => Some(rule.descriptor().description),
+                Step::Deduce(rule) => Some(rule.descriptor().description),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kept, vec![None, None, None]);
+        Ok(())
+    }
 
     fn started(diagnostic: &Diagnostic) -> (u32, u32) {
         let start = diagnostic.span.expect("a place in the text").start;

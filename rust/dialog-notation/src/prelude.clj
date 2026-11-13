@@ -16,16 +16,14 @@
 
 ; A concept is a rule about syntax: where its name is applied, the reads
 ; its body holds stand. Its variables tie its parameters to the fields;
-; the names need not agree. What it says about itself, such as
-; description:, goes to the rule.
-(rule (syntax (rule ...?about
-                (syntax ?body)
+; the names need not agree. What it is for is said in a comment above
+; it, and not in the concept.
+(rule (syntax (rule (syntax ?body)
                 (expand (?name ?this ...?fields))))
-  (expand (concept (?name ?this ...?fields) ?body ...?about)))
-(rule (syntax (rule ...?about
-                (syntax (all ?first ?second ?more ...))
+  (expand (concept (?name ?this ...?fields) ?body)))
+(rule (syntax (rule (syntax (all ?first ?second ?more ...))
                 (expand (?name ?this ...?fields))))
-  (expand (concept (?name ?this ...?fields) ?first ?second ?more ... ...?about)))
+  (expand (concept (?name ?this ...?fields) ?first ?second ?more ...)))
 
 ; A command is an application around an application, whose head names
 ; nothing. Its rows live in a domain of its own, and say what the

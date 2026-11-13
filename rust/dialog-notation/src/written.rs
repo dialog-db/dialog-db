@@ -156,12 +156,46 @@ impl Written {
         self.note(path).map(|note| note.span)
     }
 
-    /// The comments about the node at `path`: the ones above it, and
-    /// then the one that ends its line.
+    /// The comments about the node at `path`: the lines of comment right
+    /// above it, or above its label, with no blank line between, and
+    /// then the one that ends its line. A comment with a blank line
+    /// under it is about no node: it is about the document, or the part
+    /// of it that follows.
     pub fn comments(&self, path: &[Segment]) -> Vec<&Comment> {
-        self.note(path)
-            .map(|note| note.comments.iter().chain(&note.after).collect())
-            .unwrap_or_default()
+        let Some(note) = self.note(path) else {
+            return Vec::new();
+        };
+        // The line the node starts on, or its label when that is
+        // written on a line before it.
+        let mut line = self.label(path).map_or(note.span.start.line, |label| {
+            label.line.min(note.span.start.line)
+        });
+        let mut about = Vec::new();
+        for comment in note.comments.iter().rev() {
+            if comment.at.line + 1 == line {
+                line = comment.at.line;
+            } else if comment.at.line < line {
+                break;
+            }
+            about.push(comment);
+        }
+        about.reverse();
+        about.extend(&note.after);
+        about
+    }
+
+    /// Where the label of the node at `path` is, when it was written
+    /// under one.
+    fn label(&self, path: &[Segment]) -> Option<Point> {
+        let (last, parent) = path.split_last()?;
+        self.note(parent)?
+            .order
+            .iter()
+            .find_map(|slot| match (slot, last) {
+                (Slot::Term { label, at }, Segment::Term(named)) if label == named => Some(*at),
+                (Slot::Item { at, of }, Segment::Item(item)) if at == item => *of,
+                _ => None,
+            })
     }
 
     /// Put the node at `path`, and every node inside it, one step

@@ -187,6 +187,28 @@ mod tests {
         Ok(())
     }
 
+    /// A comment with a blank line under it is about no form. It is
+    /// still kept, and printed where it was.
+    #[dialog_common::test]
+    fn it_keeps_a_comment_with_a_blank_line_under_it_off_the_form_below() -> Result<(), Error> {
+        let text = "; About the document.\n; Two lines of it.\n\n; About the form.\n(xyz.todo ?t\n  ; about nothing\n\n  ; about the text\n  text: ?x)\n";
+        back(text)?;
+        let (_, written) = parse_written(text)?;
+        let said = |path: &[Segment]| -> Vec<String> {
+            written
+                .comments(path)
+                .iter()
+                .map(|comment| comment.said().to_string())
+                .collect()
+        };
+        assert_eq!(said(&[Segment::Item(0)]), vec!["About the form."]);
+        assert_eq!(
+            said(&[Segment::Item(0), Segment::Term("text".into())]),
+            vec!["about the text"]
+        );
+        Ok(())
+    }
+
     /// A token that opens a form or labels a part ends no form, so a
     /// comment after it is about what is below.
     #[dialog_common::test]
