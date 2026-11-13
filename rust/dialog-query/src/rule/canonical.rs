@@ -91,6 +91,85 @@ pub struct Identity {
     pub reduce: Vec<(String, ReduceSpec)>,
 }
 
+/// What [`spell`] makes of a rule under one labeling.
+struct Spelling {
+    /// The head re-keyed, when the rule was spelled with one.
+    conclusion: Option<ConceptDescriptor>,
+    /// The premises renamed and sorted.
+    premises: Vec<Premise>,
+    /// The reduce clause re-keyed and renamed, in field order.
+    reduce: Vec<(String, ReduceSpec)>,
+}
+
+/// A rule's body spelled without its head: every variable but `this`
+/// renamed by a labeling that reads the premises alone, and the
+/// premises sorted by their encoding under it.
+///
+/// Two rules whose bodies are one conjunction under a renaming of
+/// their variables that keeps `this` have equal [`premises`](Self::premises)
+/// here, whatever their heads name: a rule's [identity](Identity) cannot
+/// say that, since the head's fields decide its labeling. The converse
+/// is exact and does not rest on the labeling: equal `premises` are the
+/// given premises of both, each renamed one to one by its own
+/// [`names`](Self::names), so one body's matches are the other's under
+/// the composed renaming.
+///
+/// The labeling's search is bounded as a rule's is: past the bound two
+/// spellings of one body may be spelled apart, never two bodies alike.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Body {
+    /// The premises renamed and sorted by encoding, with their
+    /// concepts' field names and descriptions as given.
+    pub premises: Vec<Premise>,
+    /// Each variable the body names, as given, to its name in
+    /// `premises`. `this` keeps its name and is not listed.
+    pub names: BTreeMap<String, String>,
+    /// `premises` encoded, each under its length: equal for equal
+    /// `premises`, so bodies can be bucketed by it.
+    pub encoded: Vec<u8>,
+}
+
+/// The [`Body`] of `premises`. `None` for a body the formal notation
+/// cannot express (one reading an attribute through a raw scan), which
+/// has no encoding to be sorted by.
+pub fn body(premises: &[Premise]) -> Result<Option<Body>, TypeError> {
+    let mut locals: BTreeSet<String> = variables(premises);
+    locals.remove("this");
+    let locals: Vec<String> = locals.into_iter().collect();
+    let holes: Rename = locals
+        .iter()
+        .map(|name| (name.clone(), HOLE.to_string()))
+        .collect();
+
+    let mut atoms = Vec::with_capacity(premises.len());
+    let holed = rename_premises(premises, &holes)?;
+    for (premise, shape) in premises.iter().zip(&holed) {
+        let Some(shape) = encode_premise(shape) else {
+            return Ok(None);
+        };
+        atoms.push(Atom {
+            shape,
+            slots: slots(premise.parameters().iter(), &locals),
+        });
+    }
+
+    let rule = Rule {
+        conclusion: None,
+        premises,
+        reduce: &[],
+        locals,
+        fields: Vec::new(),
+        atoms,
+    };
+    let names = label(&rule)?;
+    let (encoded, spelling) = spell(&rule, &names)?;
+    Ok(Some(Body {
+        premises: spelling.premises,
+        names,
+        encoded,
+    }))
+}
+
 /// One place a variable may occur: a premise, a reduce entry or a
 /// head field, with the variables it names under their keys.
 struct Atom {
@@ -103,7 +182,8 @@ struct Atom {
 /// What the labeling works over: the rule's parts, the variables to
 /// label, and the head's fields with their key operands.
 struct Rule<'a> {
-    conclusion: &'a ConceptDescriptor,
+    /// The head, or `None` when a body is spelled on its own.
+    conclusion: Option<&'a ConceptDescriptor>,
     premises: &'a [Premise],
     reduce: &'a [(String, ReduceSpec)],
     /// Every variable the labeling names, in name order.
@@ -209,7 +289,7 @@ pub(crate) fn canonicalize(
     }
 
     let rule = Rule {
-        conclusion,
+        conclusion: Some(conclusion),
         premises,
         reduce,
         locals,
@@ -217,7 +297,14 @@ pub(crate) fn canonicalize(
         atoms,
     };
     let names = label(&rule)?;
-    let (_, identity) = spell(&rule, &names)?;
+    let (_, spelling) = spell(&rule, &names)?;
+    let identity = Identity {
+        conclusion: spelling
+            .conclusion
+            .expect("a rule spelled with its head keeps it"),
+        premises: spelling.premises,
+        reduce: spelling.reduce,
+    };
 
     // The working spelling renames the locals the head does not bind,
     // under a prefix none of the head's names could be mistaken for.
@@ -418,14 +505,18 @@ fn names(classes: &[Vec<String>], rule: &Rule<'_>) -> Rename {
 /// The rule under `names`: head re-keyed, premises renamed and sorted
 /// by encoding, reduce re-keyed and renamed, and the whole encoded
 /// for comparison.
-fn spell(rule: &Rule<'_>, names: &Rename) -> Result<(Vec<u8>, Identity), TypeError> {
-    let fields: Vec<(String, ConceptFieldDescriptor)> = rule
-        .conclusion
-        .with()
-        .iter()
-        .map(|(name, field)| (names[name].clone(), field.clone()))
-        .collect();
-    let conclusion = ConceptDescriptor::try_from(fields)?;
+fn spell(rule: &Rule<'_>, names: &Rename) -> Result<(Vec<u8>, Spelling), TypeError> {
+    let conclusion = match rule.conclusion {
+        Some(conclusion) => {
+            let fields: Vec<(String, ConceptFieldDescriptor)> = conclusion
+                .with()
+                .iter()
+                .map(|(name, field)| (names[name].clone(), field.clone()))
+                .collect();
+            Some(ConceptDescriptor::try_from(fields)?)
+        }
+        None => None,
+    };
     let renamed = rename_premises(rule.premises, names)?;
     let mut keyed: Vec<(Vec<u8>, Premise)> = renamed
         .into_iter()
@@ -451,7 +542,10 @@ fn spell(rule: &Rule<'_>, names: &Rename) -> Result<(Vec<u8>, Identity), TypeErr
         })
         .collect();
     reduce.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut encoded = encode(&conclusion)?;
+    let mut encoded = match &conclusion {
+        Some(conclusion) => encode(conclusion)?,
+        None => Vec::new(),
+    };
     for (key, _) in &keyed {
         encoded.extend_from_slice(&(key.len() as u64).to_be_bytes());
         encoded.extend_from_slice(key);
@@ -459,7 +553,7 @@ fn spell(rule: &Rule<'_>, names: &Rename) -> Result<(Vec<u8>, Identity), TypeErr
     encoded.extend(encode(&reduce)?);
     Ok((
         encoded,
-        Identity {
+        Spelling {
             conclusion,
             premises: keyed.into_iter().map(|(_, premise)| premise).collect(),
             reduce,
@@ -615,6 +709,91 @@ mod tests {
 
     fn rule(when: Vec<Value>) -> DeductiveRule {
         rule_headed("friend", when)
+    }
+
+    /// The body of `rule` spelled without its head.
+    fn body_of(rule: &DeductiveRule) -> super::Body {
+        super::body(&rule.analysis().premises)
+            .expect("the body spells")
+            .expect("the body encodes")
+    }
+
+    /// For a variable of `from`, the variable of `to` in its place.
+    fn in_place_of<'a>(from: &super::Body, to: &'a super::Body, variable: &str) -> &'a str {
+        let spelled = &from.names[variable];
+        to.names
+            .iter()
+            .find(|(_, name)| *name == spelled)
+            .map(|(given, _)| given.as_str())
+            .expect("equal bodies name the same variables")
+    }
+
+    /// Two rules that read a friend of a friend, one concluding the far
+    /// end and one the near, are two rules with one body. The head
+    /// variable of each is a local of the other, and the renaming says
+    /// which.
+    #[dialog_common::test]
+    fn it_spells_one_body_alike_under_two_heads() {
+        let far = rule_headed("friend", vec![knows("this", "x"), knows("x", "friend")]);
+        let near = rule_headed(
+            "friend",
+            vec![knows("this", "friend"), knows("friend", "y")],
+        );
+        assert_ne!(far.this(), near.this(), "the heads make them two rules");
+
+        let (far, near) = (body_of(&far), body_of(&near));
+        assert_eq!(far.premises, near.premises);
+        assert_eq!(far.encoded, near.encoded);
+        assert_ne!(
+            in_place_of(&far, &near, "friend"),
+            "friend",
+            "the far end is not what the near rule concludes"
+        );
+        let middle = far
+            .names
+            .keys()
+            .find(|name| *name != "friend")
+            .expect("the far rule has a local");
+        assert_eq!(in_place_of(&far, &near, middle), "friend");
+    }
+
+    /// Variable names and the order of premises are not part of a body.
+    #[dialog_common::test]
+    fn it_spells_a_body_alike_whatever_its_names_and_order() {
+        let x = body_of(&rule(vec![knows("this", "x"), knows("x", "friend")]));
+        let a = body_of(&rule(vec![knows("a", "friend"), knows("this", "a")]));
+        assert_eq!(x.premises, a.premises);
+        assert_eq!(x.encoded, a.encoded);
+    }
+
+    /// Bodies that mean different things are spelled apart: another
+    /// join, another attribute, and `this` in another place, which is
+    /// the one name a body keeps.
+    #[dialog_common::test]
+    fn it_spells_bodies_that_differ_in_meaning_apart() {
+        let chain = body_of(&rule(vec![knows("this", "x"), knows("x", "friend")]));
+
+        let fork = body_of(&rule(vec![knows("this", "x"), knows("this", "friend")]));
+        assert_ne!(chain.premises, fork.premises, "a chain is not a fork");
+        assert_ne!(chain.encoded, fork.encoded);
+
+        let follows = json!({
+            "assert": head("knows", "social/follows"),
+            "where": {
+                "this": { "?": { "name": "x" } },
+                "knows": { "?": { "name": "friend" } }
+            }
+        });
+        let other = body_of(&rule(vec![knows("this", "x"), follows]));
+        assert_ne!(chain.premises, other.premises, "another attribute");
+        assert_ne!(chain.encoded, other.encoded);
+
+        let reversed = body_of(&rule(vec![knows("x", "this"), knows("friend", "x")]));
+        assert_ne!(
+            chain.premises, reversed.premises,
+            "the chain read towards `this` is another body"
+        );
+        assert_ne!(chain.encoded, reversed.encoded);
     }
 
     /// Calling a local `x` or `a` does not make another rule.
