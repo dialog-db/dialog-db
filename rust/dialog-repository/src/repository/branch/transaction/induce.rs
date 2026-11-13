@@ -25,6 +25,9 @@
 //!    transients, or errors after [`MAX_ROUNDS`] rounds — the runaway
 //!    guard for self-feeding cascades.
 //!
+//! Seeded candidates of a round that state one body have it evaluated
+//! once ([`share`]).
+//!
 //! What is deliberately *not* here yet (see `notes/inductive-rules.md`):
 //! the per-head trigger footprint and alpha-discrimination caches that
 //! keep hot-attribute fan-out flat, delta-restricted body evaluation,
@@ -57,10 +60,14 @@ use crate::repository::archive::erased;
 use crate::repository::branch::session::{QueryEnv, shared_metadata};
 use crate::repository::source::View;
 use crate::rules::{
-    TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
+    Induced, Reads, TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr,
+    source_attr, transient_attr,
 };
 use crate::{CommitError, RemoteSite, Revision, Staged};
 use std::slice::from_ref;
+use std::sync::Arc;
+
+mod share;
 
 /// Round bound for the induction loop: a cascade still emitting
 /// transients or novelty after this many rounds fails the commit
@@ -259,10 +266,16 @@ where
 
         let mut novelty = Changes::new();
         let mut emitted_transients = Changes::new();
+
+        // Every candidate is loaded before any fires, so the rules that
+        // state one body are known up front. They fire in the
+        // candidates' own order either way.
+        let mut loaded: Vec<(Arc<Induced>, bool, bool)> = Vec::new();
         for entity in candidates {
-            let Some(rule) = dispatch.load(&entity, &overlay, env).await? else {
+            let Some(induced) = dispatch.load(&entity, &overlay, env).await? else {
                 continue;
             };
+            let rule = induced.rule();
             let transient_head = dispatch
                 .is_transient(&rule.conclusion().this(), &overlay, env)
                 .await?;
@@ -274,7 +287,7 @@ where
             // seed cannot express: enabling by removal (`unless` over
             // a retracted or superseded fact) and premises that
             // changed derivedly through the deductive closure.
-            let (positive, unless) = premise_reach(&rule);
+            let (positive, unless) = premise_reach(rule);
             let full = installed.contains(&entity)
                 || expanded
                     .iter()
@@ -285,25 +298,67 @@ where
                 || replace_attrs
                     .iter()
                     .any(|a| unless.iter().any(|u| u.covers(a)));
-            if full {
+            loaded.push((induced, transient_head, full));
+        }
+
+        // The seeded candidates that state one body are evaluated once,
+        // under the first of them (see [`share`]).
+        let mut shared = share::Round::of(
+            loaded
+                .iter()
+                .map(|(induced, _, full)| (!full).then_some(induced)),
+        );
+        for (at, (induced, transient_head, full)) in loaded.iter().enumerate() {
+            let rule = induced.rule();
+            let transient_head = *transient_head;
+            if *full {
                 fire(
-                    &rule,
+                    rule,
                     transient_head,
                     &view,
                     &mut novelty,
                     &mut emitted_transients,
                 )
                 .await?;
-            } else {
-                fire_seeded(
-                    &rule,
-                    transient_head,
-                    &assert_rows,
-                    &view,
-                    &mut novelty,
-                    &mut emitted_transients,
-                )
-                .await?;
+                continue;
+            }
+            match shared.take(at) {
+                share::Part::Alone => {
+                    fire_seeded(
+                        rule,
+                        transient_head,
+                        &assert_rows,
+                        &view,
+                        &mut novelty,
+                        &mut emitted_transients,
+                    )
+                    .await?;
+                }
+                share::Part::First(group) => {
+                    let matches = fire_seeded(
+                        rule,
+                        transient_head,
+                        &assert_rows,
+                        &view,
+                        &mut novelty,
+                        &mut emitted_transients,
+                    )
+                    .await?;
+                    shared.keep(group, matches);
+                }
+                share::Part::Other(group, reads) => {
+                    fire_shared(
+                        rule,
+                        transient_head,
+                        &reads,
+                        shared.matches(group),
+                        &assert_rows,
+                        &view,
+                        &mut novelty,
+                        &mut emitted_transients,
+                    )
+                    .await?;
+                }
             }
         }
 
@@ -656,7 +711,7 @@ impl<'a> Dispatch<'a> {
         entity: &Entity,
         overlay: &OverlayTriggers,
         env: &Env,
-    ) -> Result<Option<InductiveRule>, CommitError>
+    ) -> Result<Option<Arc<Induced>>, CommitError>
     where
         Env: Provider<BlobRead>
             + Provider<Get>
@@ -698,8 +753,7 @@ impl<'a> Dispatch<'a> {
         if !rule.stored_as(entity) {
             return Ok(None);
         }
-        cache.record_inductive(entity.clone(), &bytes, rule.clone());
-        Ok(Some(rule))
+        Ok(Some(cache.record_inductive(entity.clone(), &bytes, rule)))
     }
 
     /// Whether the concept at `entity` carries the
@@ -989,7 +1043,7 @@ async fn fire<'a>(
     if matches.is_empty() {
         return Ok(());
     }
-    emit_matches(rule, transient_head, matches, view, novelty, transients).await
+    emit_matches(rule, transient_head, &matches, view, novelty, transients).await
 }
 
 /// The reach of a rule's concept premises, split by polarity:
@@ -1026,6 +1080,9 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 /// first bound into one evaluation. It finds every match of the rows
 /// seeded one by one when it finds any (see [`seed_groups`] for why);
 /// when it finds none, the rows are seeded one by one.
+///
+/// Returns the matches found, for the rules of the round that state
+/// this rule's body (see [`share`]).
 async fn fire_seeded<'a>(
     rule: &InductiveRule,
     transient_head: bool,
@@ -1033,12 +1090,12 @@ async fn fire_seeded<'a>(
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
-) -> Result<(), CommitError> {
+) -> Result<Vec<Match>, CommitError> {
     let matches = seeded_matches(rule, rows, view, Seeding::Grouped).await?;
     #[cfg(test)]
     let before = (novelty.clone(), transients.clone());
     if !matches.is_empty() {
-        emit_matches(rule, transient_head, matches, view, novelty, transients).await?;
+        emit_matches(rule, transient_head, &matches, view, novelty, transients).await?;
     }
     #[cfg(test)]
     oracle::agrees(
@@ -1051,6 +1108,52 @@ async fn fire_seeded<'a>(
         transients,
     )
     .await?;
+    Ok(matches)
+}
+
+/// Fires `rule` from `matches`, which another rule stating its body
+/// found this round: `reads` gives, for a variable of `rule`, the
+/// variable holding its value there. The matches are those `rule`
+/// would find seeded with `rows` itself, in another order, so it writes
+/// what it would write alone unless the order decides what is written
+/// ([`share::order_decides`]); then it is evaluated on its own.
+#[allow(clippy::too_many_arguments)]
+async fn fire_shared<'a>(
+    rule: &InductiveRule,
+    transient_head: bool,
+    reads: &Reads,
+    matches: &[Match],
+    rows: &[Fact],
+    view: &QueryEnv<'a>,
+    novelty: &mut Changes,
+    transients: &mut Changes,
+) -> Result<(), CommitError> {
+    let heads = written_heads(rule, Some(reads), matches)?;
+    if share::order_decides(&heads) {
+        #[cfg(test)]
+        share::probe::own();
+        fire_seeded(rule, transient_head, rows, view, novelty, transients).await?;
+        return Ok(());
+    }
+    #[cfg(test)]
+    let before = (novelty.clone(), transients.clone());
+    if !heads.is_empty() {
+        emit_heads(rule, transient_head, heads, view, novelty, transients).await?;
+    }
+    #[cfg(test)]
+    {
+        share::probe::shared();
+        oracle::shares(
+            rule,
+            transient_head,
+            rows,
+            view,
+            before,
+            novelty,
+            transients,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -1293,13 +1396,26 @@ type WrittenHead = (Entity, Vec<(Relation, Value, Pick)>);
 async fn emit_matches<'a>(
     rule: &InductiveRule,
     transient_head: bool,
-    matches: Vec<Match>,
+    matches: &[Match],
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
-    let heads = written_heads(rule, &matches)?;
+    let heads = written_heads(rule, None, matches)?;
+    emit_heads(rule, transient_head, heads, view, novelty, transients).await
+}
 
+/// Write `heads`, the heads `rule` found this round in the order it
+/// found them: transient heads into `transients`, durable heads
+/// (novelty-checked against the frozen view) into `novelty`.
+async fn emit_heads<'a>(
+    rule: &InductiveRule,
+    transient_head: bool,
+    heads: Vec<WrittenHead>,
+    view: &QueryEnv<'a>,
+    novelty: &mut Changes,
+    transients: &mut Changes,
+) -> Result<(), CommitError> {
     // A seeded rule is evaluated once per stimulus row a premise names,
     // so an event that carries several of a premise's fields finds the
     // same binding once per field: each distinct head is written once,
@@ -1368,7 +1484,22 @@ async fn emit_matches<'a>(
 /// The head each of `matches` writes, in order: its subject and the
 /// cells of the fields it binds. A match that leaves `this` unbound
 /// writes nothing and is left out.
-fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenHead>, CommitError> {
+///
+/// `reads` is given when `matches` are another rule's, one stating the
+/// body of `rule` ([`share`]): a variable of `rule` is then looked up
+/// under the name it has there, and one the body does not bind is
+/// unbound, whatever that rule calls its own variables.
+fn written_heads(
+    rule: &InductiveRule,
+    reads: Option<&Reads>,
+    matches: &[Match],
+) -> Result<Vec<WrittenHead>, CommitError> {
+    let variable = |name: &str| -> Option<Term<Any>> {
+        match reads {
+            Some(reads) => reads.variable(name).map(Term::<Any>::var),
+            None => Some(Term::<Any>::var(name)),
+        }
+    };
     let conclusion = rule.conclusion();
     let mut heads: Vec<WrittenHead> = Vec::with_capacity(matches.len());
     for matched in matches {
@@ -1381,7 +1512,9 @@ fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenH
 
         let mut cells = Vec::new();
         for (name, field) in conclusion.with().iter() {
-            let Ok(Binding::Present(value)) = matched.lookup(&Term::<Any>::var(name)) else {
+            let Some(Ok(Binding::Present(value))) =
+                variable(name).map(|variable| matched.lookup(&variable))
+            else {
                 // Optional head fields the frame didn't bind emit
                 // nothing.
                 continue;
@@ -1392,8 +1525,9 @@ fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenH
             let attribute = match relation.attribute() {
                 Some(attribute) => attribute,
                 None => {
-                    let key = Term::<Any>::var(The::key_operand(name));
-                    let Ok(Binding::Present(Value::String(key))) = matched.lookup(&key) else {
+                    let Some(Ok(Binding::Present(Value::String(key)))) =
+                        variable(&The::key_operand(name)).map(|key| matched.lookup(&key))
+                    else {
                         continue;
                     };
                     relation.entry(&key).map_err(|error| {
@@ -1481,7 +1615,7 @@ mod oracle {
             emit_matches(
                 rule,
                 transient_head,
-                per_row,
+                &per_row,
                 view,
                 &mut expected_novelty,
                 &mut expected_transients,
@@ -1495,6 +1629,48 @@ mod oracle {
         assert_eq!(
             transients, &expected_transients,
             "grouped seeding must write the transients seeding row by row writes"
+        );
+        Ok(())
+    }
+
+    /// The same check for a rule fired from another rule's matches
+    /// ([`share`](super::share)): evaluating `rule` itself, seeded with
+    /// `rows` from the `before` the shared firing started from, writes
+    /// the `novelty` and `transients` the shared firing wrote; panics
+    /// with both when it does not. It runs under every test in which
+    /// two rules of a round state one body, and its own evaluation is
+    /// left out of the count of evaluations.
+    pub(super) async fn shares(
+        rule: &InductiveRule,
+        transient_head: bool,
+        rows: &[Fact],
+        view: &QueryEnv<'_>,
+        before: (Changes, Changes),
+        novelty: &Changes,
+        transients: &Changes,
+    ) -> Result<(), CommitError> {
+        let counted = EVALUATIONS.with(Cell::get);
+        let own = seeded_matches(rule, rows, view, Seeding::Grouped).await?;
+        EVALUATIONS.with(|evaluations| evaluations.set(counted));
+        let (mut expected_novelty, mut expected_transients) = before;
+        if !own.is_empty() {
+            emit_matches(
+                rule,
+                transient_head,
+                &own,
+                view,
+                &mut expected_novelty,
+                &mut expected_transients,
+            )
+            .await?;
+        }
+        assert_eq!(
+            novelty, &expected_novelty,
+            "a rule fired from a shared body must write the novelty it writes alone"
+        );
+        assert_eq!(
+            transients, &expected_transients,
+            "a rule fired from a shared body must write the transients it writes alone"
         );
         Ok(())
     }

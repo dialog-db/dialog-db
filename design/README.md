@@ -79,3 +79,8 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   until it seals; as many commits it writes the same nodes again and
   again. The objective is confirmed; its bounds (how large, on what
   machine, within what memory and time) are not yet stated.
+- [Rules that state one body each evaluate it](share-body.md):
+  **Designing.** A commit pays for a condition once for every rule that
+  states it. An approach is built for the maintainer to judge: the
+  seeded rules of a round that state one body have it evaluated once,
+  checked against evaluating each alone.

@@ -1,0 +1,13 @@
+# Claims: rules that state one body each evaluate it
+
+| # | claim | kind | backing | status |
+|---|---|---|---|---|
+| 1 | A seeded evaluation reads two things of a rule: its premises and the types analysis inferred | fact | `seeded_matches`, `evaluate_seed`, `seed` in `induce.rs` read `rule.analysis().premises`; `InductiveRule::plan` hands `Planner::plan` the premises and `analysis.types`; `apply_types` in `rust/dialog-query/src/planner/plan.rs` reads the types by variable name | holds |
+| 2 | A head reaches the body's evaluation only by narrowing a number: a numeric head field narrows a variable the body left wider | fact | `TypeEnv::infer_for` in `rust/dialog-query/src/rule/types.rs`, the loop over `head`; `it_does_not_share_bodies_their_heads_type_differently` | holds |
+| 3 | A stored rule lists its premises sorted by their encoding under names the head takes part in choosing | fact | `canonicalize` adds an atom a head field and `spell` sorts, in `rust/dialog-query/src/rule/canonical.rs`; a rule is decoded from that spelling | holds |
+| 4 | Equal spellings of two bodies are the same premises under a one to one renaming, whether or not the labeling is canonical | fact | `canonical::body` renames by a map that gives every variable its own name and then compares; `it_spells_bodies_that_differ_in_meaning_apart` | holds |
+| 5 | A cell keeps its writes in order and two cells do not meet, so the order of two heads shows only where both write one cell differently | fact | `Changes`, `associate`, `into_instructions` in `rust/dialog-corpus/src/model/update.rs`; `it_tells_when_the_order_of_heads_decides` | holds |
+| 6 | Two rules with the same premises and types, under a renaming, find the same set of matches for the same rows, whatever order each lists its premises in | hypothesis | refuted by one rule fired from another's matches that writes other than it writes alone, which `oracle::shares` checks at every such firing in `dialog-repository`'s tests; it is what a planner that orders premises by cost already assumes of itself | open; no test of the crate refutes it |
+| 7 | The body written again costs 27% to 87% more instructions than one wide head at one command a commit, and 61% to 148% more at 500 | fact | `research/rule-heads/results/2026-11-12-one-command.md` and `2026-11-12.md` on #788's branch | holds |
+| 8 | A rule fired in full, and a rule that reduces, would share a body as soundly as a seeded one | hypothesis | the same differential check, extended to `fire`; not built | open |
+| 9 | Sharing by body is worth building whether or not dialog gains a rule of several heads | opinion | the agent, 2026-11-13: authors repeat conditions across rules that are not one rule of several heads | - |

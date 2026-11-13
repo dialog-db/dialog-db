@@ -76,6 +76,9 @@ use dialog_search_tree::{Cache, Manifest};
 use parking_lot::RwLock;
 
 use crate::{Revision, schema};
+
+mod induced;
+pub(crate) use induced::{Induced, Reads};
 use dialog_common::Blake3Hash;
 
 // The `dialog.rule/*` vocabulary and the Statement lowerings that
@@ -555,8 +558,9 @@ pub(crate) struct RuleContent {
     /// whether a rule exists, and forged bytes under a known entity miss
     /// it and fail their content-address check as they would cold.
     bodies: Cache<(Entity, Blake3Hash), DeductiveRule>,
-    /// Hydrated inductive bodies, keyed like `bodies`.
-    inductive: Cache<(Entity, Blake3Hash), InductiveRule>,
+    /// Hydrated inductive bodies, keyed like `bodies`, each with what a
+    /// round of induction may share of its body.
+    inductive: Cache<(Entity, Blake3Hash), Arc<Induced>>,
     /// A selecting concept's rule and covering rule, keyed by the
     /// concept, the attributes it reads as derived and the one source
     /// rule deriving them (if one). Pure functions of their key, so
@@ -903,18 +907,26 @@ impl RuleCache {
 
     /// The inductive body `rule` decoded to from `bytes`, if decoded
     /// before.
-    pub(crate) fn inductive(&self, rule: &Entity, bytes: &[u8]) -> Option<InductiveRule> {
+    pub(crate) fn inductive(&self, rule: &Entity, bytes: &[u8]) -> Option<Arc<Induced>> {
         self.content
             .inductive
             .get_cached(&(rule.clone(), Blake3Hash::hash(bytes)))
     }
 
     /// Cache the inductive body `rule` decoded to from `bytes`, once it
-    /// was checked to be stored under its content address.
-    pub(crate) fn record_inductive(&self, rule: Entity, bytes: &[u8], body: InductiveRule) {
+    /// was checked to be stored under its content address, and return
+    /// it as it is kept.
+    pub(crate) fn record_inductive(
+        &self,
+        rule: Entity,
+        bytes: &[u8],
+        body: InductiveRule,
+    ) -> Arc<Induced> {
+        let induced = Arc::new(Induced::new(body));
         self.content
             .inductive
-            .insert((rule, Blake3Hash::hash(bytes)), body);
+            .insert((rule, Blake3Hash::hash(bytes)), induced.clone());
+        induced
     }
 
     /// The cached committed transience verdict for `concept` if
