@@ -4460,12 +4460,12 @@ mod tests {
         let (started, starts) = std::sync::mpsc::channel::<()>();
         let started = Mutex::new(started);
         let held = slow.clone();
-        *RECOVERING.lock() = Some(Arc::new(move |path: &Path| {
+        let recovering = Recovering::set(move |path: &Path| {
             if path == held {
                 let _ = started.lock().send(());
                 let _ = released.lock().recv();
             }
-        }));
+        });
         let opening = std::thread::spawn(move || Chronicle::open(slow).map(drop));
         starts.recv_timeout(Duration::from_secs(10))?;
         let (done, finished) = std::sync::mpsc::channel();
@@ -4475,7 +4475,7 @@ mod tests {
         });
         let other = finished.recv_timeout(Duration::from_secs(10));
         release.send(())?;
-        *RECOVERING.lock() = None;
+        drop(recovering);
         opening.join().expect("the open of the slow file")?;
         assert!(
             matches!(other, Ok(Ok(()))),
@@ -4620,6 +4620,264 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+        Ok(())
+    }
+
+    /// Tests that set [`RECOVERING`] take this first: the hook is the
+    /// process's, and each test's hook would stand in for another's.
+    static RECOVERING_TESTS: Mutex<()> = Mutex::new(());
+
+    /// Sets the [`RECOVERING`] hook for as long as it is held, and clears
+    /// it however the test ends.
+    struct Recovering(#[allow(dead_code)] parking_lot::MutexGuard<'static, ()>);
+
+    impl Recovering {
+        fn set(hook: impl Fn(&Path) + Send + Sync + 'static) -> Self {
+            let held = RECOVERING_TESTS.lock();
+            *RECOVERING.lock() = Some(Arc::new(hook));
+            Self(held)
+        }
+    }
+
+    impl Drop for Recovering {
+        fn drop(&mut self) {
+            *RECOVERING.lock() = None;
+        }
+    }
+
+    /// Holds the next sync point made of `archive` between its two syncs
+    /// for `held`, appending so that one is due, and waits for the sync
+    /// thread to make it. Returns the name of the thread that made it.
+    fn hold_the_next_sync(archive: &Chronicle, held: Duration) -> anyhow::Result<Option<String>> {
+        let (holding, holds) = std::sync::mpsc::channel();
+        let mut holding = Some(holding);
+        *archive.inner.before_durable_synced.lock() = Some(Box::new(move || {
+            if let Some(holding) = holding.take() {
+                let _ = holding.send(std::thread::current().name().map(str::to_string));
+                std::thread::sleep(held);
+            }
+        }));
+        archive.append("index", &[block("synced in the background")])?;
+        Ok(holds.recv_timeout(SYNC_AFTER * 3)?)
+    }
+
+    /// Dropping a handle that is not the last returns at once, even while
+    /// the sync thread is making a sync point, as every served node and
+    /// every put holds and drops one. It fails today: a handle being
+    /// dropped takes `looking`, which the sync thread holds across both
+    /// syncs of a sync point.
+    #[dialog_common::test]
+    fn it_drops_a_handle_while_a_sync_point_is_made() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
+        let held = Duration::from_millis(1500);
+        let syncing = hold_the_next_sync(&archive, held)?;
+        assert_eq!(
+            syncing.as_deref(),
+            Some("chronicle sync"),
+            "made in the background"
+        );
+        let handle = archive.clone();
+        let started = Instant::now();
+        drop(handle);
+        let waited = started.elapsed();
+        assert!(
+            waited < Duration::from_millis(200),
+            "dropping a handle that is not the last waited {waited:?} for the sync point"
+        );
+        Ok(())
+    }
+
+    /// A node the archive serves to a tree is let go at once while the
+    /// sync thread makes a sync point: a tree drops nodes as it reads past
+    /// them. It fails today: the node holds a handle of the archive, and
+    /// dropping it waits out the sync point.
+    #[dialog_common::test]
+    async fn it_lets_go_of_a_served_node_while_a_sync_point_is_made() -> anyhow::Result<()> {
+        use crate::node::tests::{entity_segment, segment_manifest};
+        use dialog_effects::archive::prelude::ArchiveScope;
+        use dialog_search_tree::nodes::Read;
+
+        let directory = tempfile::tempdir()?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
+        let segment = entity_segment("alice", &segment_manifest())?;
+        archive.append("index", std::slice::from_ref(&segment))?;
+        assert!(
+            archive.is_frame("index", segment.blake3_hash()),
+            "kept as a frame"
+        );
+        let node = Read::<TreeNode>::new(
+            ArchiveScope::new(subject()).catalog("index"),
+            segment.blake3_hash().clone(),
+        )
+        .perform(&archive)
+        .await?
+        .expect("the node is held");
+        let syncing = hold_the_next_sync(&archive, Duration::from_millis(1500))?;
+        assert_eq!(
+            syncing.as_deref(),
+            Some("chronicle sync"),
+            "made in the background"
+        );
+        let started = Instant::now();
+        drop(node);
+        let waited = started.elapsed();
+        assert!(
+            waited < Duration::from_millis(200),
+            "letting go of a served node waited {waited:?} for the sync point"
+        );
+        Ok(())
+    }
+
+    /// Runs what `waits` makes on a one-thread runtime while another
+    /// thread holds the writer's turn, until another task of the runtime
+    /// tells that thread to let go. Whether the other task told it: it
+    /// could not while `waits` held the runtime's thread, and the turn is
+    /// let go in any case after five seconds.
+    fn told_while_waiting<'a, F>(
+        archive: &'a Chronicle,
+        waits: impl FnOnce(&'a Chronicle) -> F,
+    ) -> anyhow::Result<bool>
+    where
+        F: std::future::Future<Output = anyhow::Result<()>>,
+    {
+        let (go, gone) = std::sync::mpsc::channel::<()>();
+        let (held, holding) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|scope| -> anyhow::Result<bool> {
+            let holder = scope.spawn(move || -> anyhow::Result<bool> {
+                let turn = archive.turn()?;
+                held.send(())?;
+                let told = gone.recv_timeout(Duration::from_secs(5)).is_ok();
+                drop(turn);
+                Ok(told)
+            });
+            holding.recv()?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(async {
+                let tell = async {
+                    tokio::task::yield_now().await;
+                    let _ = go.send(());
+                };
+                let (waited, ()) = futures_util::join!(waits(archive), tell);
+                waited
+            })?;
+            holder.join().expect("the holder")
+        })
+    }
+
+    /// A cell publish that waits for the writer's turn holds up no other
+    /// task of the runtime running it, as an import does not. It fails
+    /// today: the memory providers write the cell inline, so the publish
+    /// waits for the turn on the runtime's one thread.
+    #[dialog_common::test]
+    fn it_waits_for_the_turn_off_the_runtime_to_publish_a_cell() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
+        let told = told_while_waiting(&archive, |archive| async move {
+            subject()
+                .writer()
+                .memory()
+                .space("local")
+                .cell("main")
+                .publish(b"waits".to_vec(), None)
+                .perform(archive)
+                .await?;
+            Ok(())
+        })?;
+        assert!(
+            told,
+            "the other task ran while the publish waited for the turn"
+        );
+        assert_eq!(
+            archive.resolve_cell("local", "main")?.as_deref(),
+            Some(&b"waits"[..])
+        );
+        Ok(())
+    }
+
+    /// A tree's write of nodes that waits for the writer's turn holds up
+    /// no other task of the runtime running it, as an import does not. It
+    /// fails today: the tree's write provider appends inline, and a
+    /// catalog the file does not number yet waits for the turn.
+    #[dialog_common::test]
+    fn it_waits_for_the_turn_off_the_runtime_to_write_tree_nodes() -> anyhow::Result<()> {
+        use crate::node::tests::{entity_segment, segment_manifest};
+        use dialog_effects::archive::prelude::ArchiveScope;
+        use dialog_search_tree::nodes::Write;
+
+        let directory = tempfile::tempdir()?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
+        let segment = entity_segment("alice", &segment_manifest())?;
+        let node = tree_node(&segment).expect("a tree node");
+        let told = told_while_waiting(&archive, |archive| async move {
+            // A catalog the file does not number yet: no extent takes it,
+            // so the write waits for the turn.
+            Write::new(ArchiveScope::new(subject()).catalog("fresh"), vec![node])
+                .perform(archive)
+                .await?;
+            Ok(())
+        })?;
+        assert!(
+            told,
+            "the other task ran while the write waited for the turn"
+        );
+        assert!(archive.get("fresh", segment.blake3_hash())?.is_some());
+        Ok(())
+    }
+
+    /// Two opens of a file that does not exist yet wait for each other,
+    /// as `OPENING` says, so the second shares what the first opened: it
+    /// does not recover the file while the first is, and one descriptor is
+    /// opened. It fails today: the first open makes the file before it
+    /// recovers it, so the second finds a file and passes a gate of
+    /// another key.
+    #[dialog_common::test]
+    fn it_shares_a_new_file_two_opens_make_at_once() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("new");
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        let (started, starts) = std::sync::mpsc::channel::<()>();
+        let started = Mutex::new(started);
+        let recovered = Arc::new(AtomicU64::new(0));
+        let counted = recovered.clone();
+        let held = path.clone();
+        let recovering = Recovering::set(move |path: &Path| {
+            if path == held && counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                let _ = started.lock().send(());
+                let _ = released.lock().recv_timeout(Duration::from_secs(30));
+            }
+        });
+        let first = std::thread::spawn({
+            let path = path.clone();
+            move || Chronicle::open(path)
+        });
+        starts.recv_timeout(Duration::from_secs(10))?;
+        let second = std::thread::spawn({
+            let path = path.clone();
+            move || Chronicle::open(path)
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while recovered.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let while_first_opened = recovered.load(Ordering::SeqCst);
+        release.send(())?;
+        let first = first.join().expect("the first open");
+        let second = second.join().expect("the second open");
+        drop(recovering);
+        assert_eq!(
+            while_first_opened, 1,
+            "the second open recovered the file while the first was opening it"
+        );
+        let (first, second) = (first?, second?);
+        assert!(
+            Arc::ptr_eq(&first.inner, &second.inner),
+            "one handle shared"
+        );
+        assert_eq!(recovered.load(Ordering::SeqCst), 1, "one descriptor opened");
         Ok(())
     }
 
