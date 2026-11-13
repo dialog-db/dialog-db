@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing** again from 2026-11-12, for the three phases ([design-pipeline.md](design-pipeline.md)); how the phases stand behind the query engine is still Directing. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
-| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Decided 2026-11-13: a rule has one head and `(all …)` is not written; what that does to #776 and to several heads in #779 is the maintainer's to say. Whether a template says several things with `(all …)` or a spread. Whether a command takes fields beside what it is about, and a slash in its name. The prelude written without `when`. Parked by the maintainer: `update`, and with it what it does with a dependent that does not fit or arrives by sync. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. |
+| **Agenda** | Next to ask: what a refusal is, a text that stops analysis at the first or a diagnostic with a place among others (stage 4 of [design-pipeline.md](design-pipeline.md)). Then: a reported row in the order asked, `description:` out of `concept` with comments in its place, printing from the analyzed tree. Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Decided 2026-11-13: a rule has one head and `(all …)` is not written; what that does to #776 and to several heads in #779 is the maintainer's to say. Whether a template says several things with `(all …)` or a spread. Whether a command takes fields beside what it is about, and a slash in its name. The prelude written without `when`. Parked by the maintainer: `update`, and with it what it does with a dependent that does not fit or arrives by sync. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. |
 
 ## Candidate problems
 
@@ -750,4 +750,32 @@ Not examined yet. They are columns, not recommendations.
 - Not the same as two heads on one rule: each rule waits only on its own premises. The test of the move shows it: a to-do on no list is still put on one, since the write does not wait on what only the retraction needs. Whoever wants both or neither writes the premises again, or names the condition.
 
 **Decided.** By the maintainer: no `(all …)` for several heads; write a rule for each; add it later if it is found to be needed. He decided knowing the cost as measured: today the body again is 27% to 87% over a wide head at one command a commit (#788), and within 1% to 7% only once the engine evaluates a shared body once, which is prototyped and not sound. By the agent, open to change: `(all …)` refused among the premises too, where it only ever said what writing them one after another says; `(all …)` kept as a template's answer until a spread is designed. Open, and his: #776 and several heads in #779 have nothing left asking for them here.
+
+## 2026-11-13, Designing: what was written, beside the tree
+
+**Asked.** Nothing new of the maintainer. Built from what he said on 2026-11-12: a form that takes the tree and gives the source, tested by printing the original; the mapping holds no source, it holds what was named what and the order; comments are metadata on the form below.
+
+**Learned.** Built, the parser's part of stage 4.
+
+```
+ text ──parse_written──▶ trees + Written ──print──▶ text
+                                  │
+                                  └── a note a node, by the way to it:
+                                      span        where it starts and ends, line and column
+                                      order       its parts as written: item, label and where, ...?rest
+                                      spelling    its token, only where a printer would spell it otherwise
+                                      comments    the ones above it
+                                      closing     the ones inside it that no part is below
+```
+
+- The prelude and both examples print back byte for byte. So do labels in any order, `of:` written or not, `007`, `1.50`, a text with escapes, a struct's key written either way, blank lines and columns.
+- Space is not held and did not need a layout: once every token has a place, the space is what lies between two places. Lost: space at the end of a line, and a tab.
+- The mapping is beside the tree and keyed by the way to a node, so the tree is what it was: two texts that say the same thing still parse to equal trees.
+- A tree changed after parsing still prints. What the mapping knows stays where it was written and what it does not know follows.
+- A warning now says the way to its form, found by looking for the form in the tree it was asked for. That is a search and not a record: it is right for a form as written and falls back to the whole tree for a form a definition made. The record is the analyzer's part of the mapping, not built.
+- An analyzed tree says which tree it came of. A refusal by the compiler is said with that tree's place.
+- A refusal by the analyzer has no place at all. An error is a text, and nothing in it says which node it is about.
+- Tonk's language server is the bar he set. There the parser gives a list of diagnostics, the analyzer runs when the parser gives none, and an analyzer error carries a span (`tonk-language-server/src/server.rs`, `tonk-notation/src/syntax.rs`).
+
+**Decided.** Not decided, and next to ask: what a refusal is. Today analysis stops at the first one and says a text. The agent's hypothesis: a refusal is a diagnostic like a warning, with a severity and the way to its form; analysis goes on to the end of the document and gives them all; nothing is compiled while one of them is an error. Refuted if a later refusal in a document is usually noise caused by the first.
 

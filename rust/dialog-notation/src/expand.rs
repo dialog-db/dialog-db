@@ -36,6 +36,7 @@ use crate::kernel::{Head, Rule};
 use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, fill, matches};
 use crate::syntax::{Parameters, Signature, Syntax};
+use crate::written::{Path, Segment};
 
 /// The core forms, written in the kernel.
 pub const PRELUDE: &str = include_str!("prelude.clj");
@@ -56,6 +57,9 @@ pub struct Diagnostic {
     pub form: Syntax,
     /// What was said.
     pub message: String,
+    /// Where the form is in the document: the way to it, or to the
+    /// tree it came of when it is not a part of what was written.
+    pub path: Path,
 }
 
 /// What a rule about syntax concludes.
@@ -288,8 +292,15 @@ pub struct Expander {
     names: BTreeSet<String>,
     /// The domains some installed rule reads.
     reads: BTreeSet<String>,
-    /// Every form the rules were asked about since the last report.
-    asked: Vec<(Syntax, Position)>,
+    /// Every form the rules were asked about since the last report,
+    /// and which tree of the document it was asked for.
+    asked: Vec<(Syntax, Position, usize)>,
+    /// The trees of the document being expanded, as given.
+    document: Vec<Syntax>,
+    /// Which of them is being expanded.
+    tree: usize,
+    /// For each kernel rule of the last document, which tree it came of.
+    origin: Vec<usize>,
     /// The forms several definitions take in the rule being expanded.
     choices: Vec<Choice>,
     /// Whether the head being expanded reports, and writes nothing.
@@ -318,8 +329,11 @@ impl Expander {
     /// the trees a text parses to.
     pub fn expand(&mut self, trees: Vec<Syntax>) -> Result<(Vec<Syntax>, Vec<Diagnostic>), Error> {
         self.asked.clear();
+        self.origin.clear();
+        self.document = trees.clone();
         let mut kernel = Vec::new();
-        for tree in trees {
+        for (at, tree) in trees.into_iter().enumerate() {
+            self.tree = at;
             // Where several definitions take a form that is read, the
             // rule is expanded once a definition: what is read is what
             // any of them reads. Within one rule a form that recurs is
@@ -334,6 +348,7 @@ impl Expander {
                         && !kernel.contains(&rule)
                     {
                         kernel.push(rule);
+                        self.origin.push(at);
                     }
                 }
                 while let Some(last) = choices.last_mut() {
@@ -349,6 +364,12 @@ impl Expander {
             }
         }
         Ok((kernel, self.diagnose()))
+    }
+
+    /// For each kernel rule the last document expanded to, which of its
+    /// trees the rule came of.
+    pub fn origin(&self) -> &[usize] {
+        &self.origin
     }
 
     /// Keep a rule about syntax, and note what any other rule reads.
@@ -584,7 +605,7 @@ impl Expander {
                 }
             }
         }
-        self.asked.push((tree.clone(), position));
+        self.asked.push((tree.clone(), position, self.tree));
         let ambiguous = |found: &[(Syntax, Option<Signature>)]| {
             Error::Ambiguous(
                 tree.to_string(),
@@ -636,14 +657,22 @@ impl Expander {
     /// command issued further up.
     fn diagnose(&mut self) -> Vec<Diagnostic> {
         let mut diagnostics: Vec<Diagnostic> = Vec::new();
-        for (form, position) in std::mem::take(&mut self.asked) {
+        for (form, position, tree) in std::mem::take(&mut self.asked) {
             for rule in &self.syntax {
                 if let (Answer::Warning(message), Some(_)) =
                     (&rule.answer, self.applies(rule, &form, position))
                 {
+                    let mut path = vec![Segment::Item(tree)];
+                    path.extend(
+                        self.document
+                            .get(tree)
+                            .and_then(|written| written.locate(&form))
+                            .unwrap_or_default(),
+                    );
                     let diagnostic = Diagnostic {
                         form: form.clone(),
                         message: message.clone(),
+                        path,
                     };
                     if !diagnostics.contains(&diagnostic) {
                         diagnostics.push(diagnostic);

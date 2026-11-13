@@ -10,7 +10,7 @@
 //! | phase | takes | gives |
 //! |---|---|---|
 //! | [`parse`](parse()) | text | syntax trees, names unresolved |
-//! | [`Analyzer::analyze`] | syntax trees | analyzed trees, every one a rule of the kernel, and what the definitions said about the document |
+//! | [`Analyzer::analyze`] | syntax trees | analyzed trees, every one a rule of the kernel, which tree each came of, and what the definitions said about the document |
 //! | [`compile`](compile()) | an analyzed tree | what Dialog-DB already runs: concept queries, deductive and inductive rules, facts and dispatched commands |
 //!
 //! Analysis is the walker ([`expand`]) and the patterns it matches
@@ -18,6 +18,14 @@
 //! [`kernel`]. The notation as parsed ([`form`]) is the parser's own,
 //! and what a tree is printed as: nothing after [`parse`](parse())
 //! reads it.
+//!
+//! A tree says what a text means and not how it was written.
+//! [`parse_written`] gives, beside the trees, the mapping that holds
+//! what they left out ([`written`]): where each node is, the order its
+//! parts were written in, a token spelled its own way, and the
+//! comments. [`print`](print()) takes the two back to the text, and a
+//! [`Diagnostic`] says the way to the form it is about, which the
+//! mapping turns into a place.
 //!
 //! ```no_run
 //! # fn main() -> Result<(), dialog_notation::Error> {
@@ -45,15 +53,19 @@ pub mod form;
 pub mod kernel;
 pub mod parse;
 pub mod pattern;
+pub mod print;
 pub mod syntax;
+pub mod written;
 
 pub use analyze::{Analysis, Analyzer};
 pub use compile::{Query, Step, compile};
 pub use data::Data;
 pub use expand::{Diagnostic, Expander, Position};
 pub use form::{Form, Part, read};
-pub use parse::parse;
+pub use parse::{parse, parse_written};
+pub use print::print;
 pub use syntax::{Parameters, Signature, Syntax};
+pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};
 
 /// Why a document was not read, expanded or compiled.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

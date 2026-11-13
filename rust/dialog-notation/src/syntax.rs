@@ -51,7 +51,8 @@ use merkle_reference::Reference;
 
 use crate::Error;
 use crate::data::Data;
-use crate::form::{Form, Kind, Part};
+use crate::form::{Form, Kind, Mark, Part};
+use crate::written::{Note, Path, Segment, Slot, Span, Written};
 
 /// A node of the syntax tree.
 #[derive(Clone, Debug, PartialEq)]
@@ -117,87 +118,214 @@ pub(crate) fn entity(uri: &str) -> Result<Value, Error> {
 
 /// The nodes a run of forms is: a form followed by `...` is that form,
 /// repeated.
-fn run<'a>(forms: impl IntoIterator<Item = &'a Form>) -> Result<Vec<Syntax>, Error> {
+fn run<'a>(
+    forms: impl IntoIterator<Item = (&'a Form, Option<&'a Mark>)>,
+    path: &mut Path,
+    written: &mut Written,
+) -> Result<Vec<Syntax>, Error> {
     let mut nodes: Vec<Syntax> = Vec::new();
-    for form in forms {
+    for (form, mark) in forms {
         match form {
             Form::Ellipsis => match nodes.pop() {
                 Some(Syntax::Repeat(_)) | None => {
                     return Err(Error::Refused("a `...` that repeats nothing".into()));
                 }
-                Some(repeated) => nodes.push(Syntax::Repeat(Box::new(repeated))),
+                Some(repeated) => {
+                    // The node the `...` follows is now what a repeat
+                    // repeats, and the repeat is where it was.
+                    path.push(Segment::Item(nodes.len()));
+                    if let Some(mark) = mark {
+                        let start = written
+                            .span(path)
+                            .map_or(mark.span.start, |span| span.start);
+                        written.repeat(path);
+                        written.notes.insert(
+                            path.clone(),
+                            Note {
+                                span: Span {
+                                    start,
+                                    end: mark.span.end,
+                                },
+                                closing: mark.comments.clone(),
+                                ..Note::default()
+                            },
+                        );
+                    }
+                    path.pop();
+                    nodes.push(Syntax::Repeat(Box::new(repeated)));
+                }
             },
-            form => nodes.push(Syntax::try_from(form)?),
+            form => {
+                path.push(Segment::Item(nodes.len()));
+                let node = tree(form, mark, false, path, written);
+                path.pop();
+                nodes.push(node?);
+            }
         }
     }
     Ok(nodes)
+}
+
+/// The node a form is. Where the form has a mark, what the node leaves
+/// out of it is noted in `written` under `path`. `key` says the form is
+/// the key of a struct's entry, which is spelled as a label where it
+/// can be.
+pub(crate) fn tree(
+    form: &Form,
+    mark: Option<&Mark>,
+    key: bool,
+    path: &mut Path,
+    written: &mut Written,
+) -> Result<Syntax, Error> {
+    let mut note = mark.map(|mark| Note {
+        span: mark.span,
+        comments: mark.comments.clone(),
+        closing: mark.closing.clone(),
+        ..Note::default()
+    });
+    let inside = |at: usize| mark.and_then(|mark| mark.parts.get(at));
+    let node = match form {
+        Form::Text(text) => Syntax::Constant(Value::String(text.clone())),
+        Form::Number(text) => Syntax::Constant(number(text)?),
+        Form::Keyword(name) => Syntax::Constant(entity(&format!("{name}:"))?),
+        Form::Symbol(name) if name == "true" || name == "false" => {
+            Syntax::Constant(Value::Boolean(name == "true"))
+        }
+        Form::Symbol(name) if form.kind() == Some(Kind::Entity) => Syntax::Constant(entity(name)?),
+        Form::Symbol(name) => Syntax::Reference(name.clone()),
+        Form::Variable(name) => Syntax::Variable(name.clone()),
+        Form::Blank => Syntax::Blank,
+        Form::Ellipsis => {
+            return Err(Error::Refused("a `...` that repeats nothing".into()));
+        }
+        Form::Rest(name) => {
+            return Err(Error::Refused(format!(
+                "`...?{name}` stands for labelled parts, and is not among the parts of an application"
+            )));
+        }
+        Form::Vector(items) => Syntax::Tuple(run(
+            items
+                .iter()
+                .enumerate()
+                .map(|(at, item)| (item, inside(at))),
+            path,
+            written,
+        )?),
+        Form::Map(entries) => {
+            let mut nodes = Vec::new();
+            for (at, (name, value)) in entries.iter().enumerate() {
+                path.push(Segment::Key(at));
+                let name = tree(name, inside(2 * at), true, path, written);
+                path.pop();
+                path.push(Segment::Value(at));
+                let value = tree(value, inside(2 * at + 1), false, path, written);
+                path.pop();
+                nodes.push((name?, value?));
+            }
+            Syntax::Map(nodes)
+        }
+        Form::Application(head, parts) => {
+            let mut operand = Parameters::default();
+            let mut bare: Vec<(&Form, Option<&Mark>)> = Vec::new();
+            let mut order = Vec::new();
+            // `of:` is the part with no label, written with one.
+            let primary = form.of().is_some();
+            for (at, part) in parts.iter().enumerate() {
+                let part_mark = inside(at + 1);
+                let label_mark = mark
+                    .and_then(|mark| mark.labels.get(at))
+                    .and_then(Option::as_ref);
+                match part {
+                    Part::Bare(Form::Rest(name)) => {
+                        if operand.rest.replace(name.clone()).is_some() {
+                            return Err(Error::Refused(format!(
+                                "{form} takes the labelled parts not named twice"
+                            )));
+                        }
+                        if let (Some(rest), Some(note)) = (part_mark, note.as_mut()) {
+                            order.push(Slot::Rest {
+                                at: rest.span.start,
+                            });
+                            note.closing.extend(rest.comments.iter().cloned());
+                            note.closing.sort_by_key(|comment| comment.at);
+                        }
+                    }
+                    Part::Bare(part) => {
+                        if !matches!(part, Form::Ellipsis) {
+                            order.push(Slot::Item {
+                                at: bare
+                                    .iter()
+                                    .filter(|(form, _)| **form != Form::Ellipsis)
+                                    .count(),
+                                of: None,
+                            });
+                        }
+                        bare.push((part, part_mark));
+                    }
+                    Part::Labelled(label, part) => {
+                        let item = primary && label == "of";
+                        path.push(if item {
+                            Segment::Item(0)
+                        } else {
+                            Segment::Term(label.clone())
+                        });
+                        let term = tree(part, part_mark, false, path, written);
+                        // A comment above a label is about the part
+                        // under it.
+                        if let (Some((at, comments)), Some(noted)) =
+                            (label_mark, written.notes.get_mut(path.as_slice()))
+                        {
+                            noted.comments.splice(0..0, comments.iter().cloned());
+                            order.push(if item {
+                                Slot::Item {
+                                    at: 0,
+                                    of: Some(*at),
+                                }
+                            } else {
+                                Slot::Term {
+                                    label: label.clone(),
+                                    at: *at,
+                                }
+                            });
+                        }
+                        path.pop();
+                        let term = term?;
+                        if item {
+                            operand.items.push(term);
+                        } else if operand.terms.insert(label.clone(), term).is_some() {
+                            return Err(Error::Refused(format!("{form} says `{label}:` twice")));
+                        }
+                    }
+                }
+            }
+            if !bare.is_empty() {
+                operand.items = run(bare, path, written)?;
+            }
+            path.push(Segment::Operator);
+            let operator = tree(head, inside(0), false, path, written);
+            path.pop();
+            if let Some(note) = note.as_mut() {
+                note.order = order;
+            }
+            Syntax::Application(Box::new(operator?), operand)
+        }
+    };
+    if let (Some(mark), Some(mut note)) = (mark, note) {
+        // An atom's token is kept where a printer would spell it
+        // otherwise.
+        if !mark.raw.is_empty() && mark.raw != node.spelled(key) {
+            note.spelling = Some(mark.raw.clone());
+        }
+        written.notes.insert(path.clone(), note);
+    }
+    Ok(node)
 }
 
 impl TryFrom<&Form> for Syntax {
     type Error = Error;
 
     fn try_from(form: &Form) -> Result<Self, Error> {
-        Ok(match form {
-            Form::Text(text) => Syntax::Constant(Value::String(text.clone())),
-            Form::Number(text) => Syntax::Constant(number(text)?),
-            Form::Keyword(name) => Syntax::Constant(entity(&format!("{name}:"))?),
-            Form::Symbol(name) if name == "true" || name == "false" => {
-                Syntax::Constant(Value::Boolean(name == "true"))
-            }
-            Form::Symbol(name) if form.kind() == Some(Kind::Entity) => {
-                Syntax::Constant(entity(name)?)
-            }
-            Form::Symbol(name) => Syntax::Reference(name.clone()),
-            Form::Variable(name) => Syntax::Variable(name.clone()),
-            Form::Blank => Syntax::Blank,
-            Form::Ellipsis => {
-                return Err(Error::Refused("a `...` that repeats nothing".into()));
-            }
-            Form::Rest(name) => {
-                return Err(Error::Refused(format!(
-                    "`...?{name}` stands for labelled parts, and is not among the parts of an application"
-                )));
-            }
-            Form::Vector(items) => Syntax::Tuple(run(items)?),
-            Form::Map(entries) => Syntax::Map(
-                entries
-                    .iter()
-                    .map(|(key, value)| Ok((Syntax::try_from(key)?, Syntax::try_from(value)?)))
-                    .collect::<Result<_, Error>>()?,
-            ),
-            Form::Application(head, parts) => {
-                let mut operand = Parameters::default();
-                let mut bare = Vec::new();
-                for part in parts {
-                    match part {
-                        Part::Bare(Form::Rest(name)) => {
-                            if operand.rest.replace(name.clone()).is_some() {
-                                return Err(Error::Refused(format!(
-                                    "{form} takes the labelled parts not named twice"
-                                )));
-                            }
-                        }
-                        Part::Bare(part) => bare.push(part),
-                        Part::Labelled(label, part) => {
-                            let term = Syntax::try_from(part)?;
-                            if operand.terms.insert(label.clone(), term).is_some() {
-                                return Err(Error::Refused(format!(
-                                    "{form} says `{label}:` twice"
-                                )));
-                            }
-                        }
-                    }
-                }
-                operand.items = run(bare)?;
-                // `of:` is the part with no label, written with one.
-                if operand.items.is_empty()
-                    && let Some(primary) = operand.terms.remove("of")
-                {
-                    operand.items.push(primary);
-                }
-                Syntax::Application(Box::new(Syntax::try_from(&**head)?), operand)
-            }
-        })
+        tree(form, None, false, &mut Path::new(), &mut Written::default())
     }
 }
 
@@ -374,6 +502,61 @@ impl Syntax {
     /// The tree `bytes` hold.
     pub fn decode(bytes: &[u8]) -> Result<Syntax, Error> {
         Syntax::try_from(&Data::decode(bytes)?)
+    }
+
+    /// The way from this node to the first node inside it that is
+    /// `part`, or to itself.
+    pub fn locate(&self, part: &Syntax) -> Option<Path> {
+        fn find(node: &Syntax, part: &Syntax, path: &mut Path) -> bool {
+            if node == part {
+                return true;
+            }
+            let inside = |segment: Segment, node: &Syntax, path: &mut Path| {
+                path.push(segment);
+                let found = find(node, part, path);
+                if !found {
+                    path.pop();
+                }
+                found
+            };
+            match node {
+                Syntax::Application(operator, operand) => {
+                    inside(Segment::Operator, operator, path)
+                        || operand
+                            .items
+                            .iter()
+                            .enumerate()
+                            .any(|(at, item)| inside(Segment::Item(at), item, path))
+                        || operand
+                            .terms
+                            .iter()
+                            .any(|(label, term)| inside(Segment::Term(label.clone()), term, path))
+                }
+                Syntax::Tuple(items) => items
+                    .iter()
+                    .enumerate()
+                    .any(|(at, item)| inside(Segment::Item(at), item, path)),
+                Syntax::Map(entries) => entries.iter().enumerate().any(|(at, (name, value))| {
+                    inside(Segment::Key(at), name, path) || inside(Segment::Value(at), value, path)
+                }),
+                Syntax::Repeat(repeated) => inside(Segment::Repeated, repeated, path),
+                _ => false,
+            }
+        }
+        let mut path = Path::new();
+        find(self, part, &mut path).then_some(path)
+    }
+
+    /// How a printer spells this node when nothing says how it was
+    /// written. The key of a struct's entry is spelled as a label where
+    /// it can be.
+    pub fn spelled(&self, key: bool) -> String {
+        match (key, self.form()) {
+            (true, form) if form.label().is_some() => {
+                format!("{}:", form.label().unwrap_or_default())
+            }
+            (_, form) => form.to_string(),
+        }
     }
 
     /// The notation that says this. The parts with no label come first,

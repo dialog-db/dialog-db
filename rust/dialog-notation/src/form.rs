@@ -8,6 +8,7 @@
 use std::fmt::{self, Display, Formatter};
 
 use crate::Error;
+use crate::written::{Comment, Point, Span};
 
 /// A piece of notation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -105,7 +106,7 @@ impl Form {
 
     /// The part labelled `of:`, where no part is written without a
     /// label: the primary, spelled out.
-    fn of(&self) -> Option<&Form> {
+    pub(crate) fn of(&self) -> Option<&Form> {
         let mut bare = self
             .parts()
             .iter()
@@ -208,44 +209,114 @@ impl Form {
 
 /// Every form in `text`, in order.
 pub fn read(text: &str) -> Result<Vec<Form>, Error> {
-    let tokens = tokens(text)?;
+    Ok(read_marked(text)?
+        .0
+        .into_iter()
+        .map(|(form, _)| form)
+        .collect())
+}
+
+/// What reading a form leaves out of it: where it is, how its token was
+/// spelled, and the comments above it. One a form, in the form's shape.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Mark {
+    /// Where the form is.
+    pub span: Span,
+    /// An atom's token as written. Empty for anything in brackets.
+    pub raw: String,
+    /// The comments above the form.
+    pub comments: Vec<Comment>,
+    /// The comments before its closing bracket.
+    pub closing: Vec<Comment>,
+    /// A mark a form inside: an application's head and then its parts,
+    /// a vector's items, a map's keys and values in turn.
+    pub parts: Vec<Mark>,
+    /// For an application, a part at a time: where its label is and the
+    /// comments above the label, when it has one.
+    pub labels: Vec<Option<(Point, Vec<Comment>)>>,
+}
+
+/// The comments after the last form of a text, and where the text ends.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Tail {
+    pub comments: Vec<Comment>,
+    pub end: Point,
+}
+
+/// Every form in `text`, in order, each with its mark.
+pub(crate) fn read_marked(text: &str) -> Result<(Vec<(Form, Mark)>, Tail), Error> {
+    let (tokens, tail) = tokens(text)?;
     let mut at = 0;
     let mut forms = Vec::new();
     while at < tokens.len() {
         forms.push(form(&tokens, &mut at)?);
     }
-    Ok(forms)
+    Ok((forms, tail))
 }
 
-/// The tokens of `text`: brackets, text literals and runs of anything
-/// else. A `;` starts a comment that runs to the end of its line.
-fn tokens(text: &str) -> Result<Vec<String>, Error> {
+/// A token: a bracket, a text literal or a run of anything else.
+struct Token {
+    /// What it says: itself, or for a text literal `"` and then the
+    /// text, its escapes read.
+    text: String,
+    /// The token as written.
+    raw: String,
+    span: Span,
+    /// The comments between the token before it and it.
+    comments: Vec<Comment>,
+}
+
+/// The tokens of `text`, each with where it is. A `;` starts a comment
+/// that runs to the end of its line, and is kept on the token below it.
+fn tokens(text: &str) -> Result<(Vec<Token>, Tail), Error> {
     let mut tokens = Vec::new();
+    let mut comments = Vec::new();
     let mut chars = text.chars().peekable();
+    let mut here = Point::default();
+    let step = |c: char, here: &mut Point| {
+        if c == '\n' {
+            here.line += 1;
+            here.column = 0;
+        } else {
+            here.column += 1;
+        }
+    };
     while let Some(&next) = chars.peek() {
-        match next {
+        let start = here;
+        let mut raw = String::new();
+        let mut take = |chars: &mut std::iter::Peekable<std::str::Chars>, here: &mut Point| {
+            let c = chars.next()?;
+            step(c, here);
+            raw.push(c);
+            Some(c)
+        };
+        let said = match next {
             c if c.is_whitespace() => {
-                chars.next();
+                take(&mut chars, &mut here);
+                continue;
             }
             ';' => {
-                for c in chars.by_ref() {
-                    if c == '\n' {
-                        break;
-                    }
+                while chars.peek().is_some_and(|&c| c != '\n') {
+                    take(&mut chars, &mut here);
                 }
+                comments.push(Comment {
+                    text: raw.trim_end().to_string(),
+                    at: start,
+                });
+                continue;
             }
             '(' | ')' | '[' | ']' | '{' | '}' => {
-                tokens.push(next.to_string());
-                chars.next();
+                take(&mut chars, &mut here);
+                next.to_string()
             }
             '"' => {
-                chars.next();
+                take(&mut chars, &mut here);
                 let mut literal = String::from('"');
                 loop {
-                    match chars.next() {
+                    match take(&mut chars, &mut here) {
                         None => return Err(Error::Read("a text that never ends".into())),
                         Some('"') => break,
-                        Some('\\') => match chars.next() {
+                        Some('\\') => match take(&mut chars, &mut here) {
                             Some('n') => literal.push('\n'),
                             Some(escaped) => literal.push(escaped),
                             None => return Err(Error::Read("a text that never ends".into())),
@@ -253,22 +324,32 @@ fn tokens(text: &str) -> Result<Vec<String>, Error> {
                         Some(c) => literal.push(c),
                     }
                 }
-                tokens.push(literal);
+                literal
             }
             _ => {
-                let mut token = String::new();
-                while let Some(&c) = chars.peek() {
-                    if c.is_whitespace() || "()[]{};\"".contains(c) {
-                        break;
-                    }
-                    token.push(c);
-                    chars.next();
+                while chars
+                    .peek()
+                    .is_some_and(|&c| !c.is_whitespace() && !"()[]{};\"".contains(c))
+                {
+                    take(&mut chars, &mut here);
                 }
-                tokens.push(token);
+                String::new()
             }
-        }
+        };
+        tokens.push(Token {
+            text: if said.is_empty() { raw.clone() } else { said },
+            raw,
+            span: Span { start, end: here },
+            comments: std::mem::take(&mut comments),
+        });
     }
-    Ok(tokens)
+    Ok((
+        tokens,
+        Tail {
+            comments,
+            end: here,
+        },
+    ))
 }
 
 /// Whether a token is a label: it ends with `:` and is not all colons
@@ -308,61 +389,105 @@ fn is_number(token: &str) -> bool {
     all_digits(whole) && parts.next().is_none_or(all_digits)
 }
 
-fn form(tokens: &[String], at: &mut usize) -> Result<Form, Error> {
+fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Error> {
     let ended = || Error::Read("a form that never closes".into());
     let token = tokens.get(*at).ok_or_else(ended)?;
     *at += 1;
-    match token.as_str() {
+    let mut mark = Mark {
+        span: token.span,
+        comments: token.comments.clone(),
+        ..Mark::default()
+    };
+    // The bracket that closes what `token` opened: where the form
+    // ends, and the comments no part of it is below.
+    let close = |mark: &mut Mark, at: &mut usize| {
+        if let Some(closer) = tokens.get(*at) {
+            mark.span.end = closer.span.end;
+            mark.closing = closer.comments.clone();
+        }
+        *at += 1;
+    };
+    let read = match token.text.as_str() {
         "[" => {
             let mut items = Vec::new();
-            while tokens.get(*at).ok_or_else(ended)? != "]" {
-                items.push(form(tokens, at)?);
+            while tokens.get(*at).ok_or_else(ended)?.text != "]" {
+                let (item, inside) = form(tokens, at)?;
+                items.push(item);
+                mark.parts.push(inside);
             }
-            *at += 1;
-            Ok(Form::Vector(items))
+            close(&mut mark, at);
+            Form::Vector(items)
         }
         "{" => {
             let mut entries = Vec::new();
             loop {
                 let next = tokens.get(*at).ok_or_else(ended)?;
-                if next == "}" {
+                if next.text == "}" {
                     break;
                 }
-                let key = match label(next) {
+                let key = match label(&next.text) {
                     Some("") => return Err(Error::Read("a map key with no name".into())),
                     Some(name) => {
                         *at += 1;
+                        mark.parts.push(Mark {
+                            span: next.span,
+                            raw: next.raw.clone(),
+                            comments: next.comments.clone(),
+                            ..Mark::default()
+                        });
                         Form::symbol(name)
                     }
-                    None => form(tokens, at)?,
+                    None => {
+                        let (key, inside) = form(tokens, at)?;
+                        mark.parts.push(inside);
+                        key
+                    }
                 };
-                entries.push((key, form(tokens, at)?));
+                let (value, inside) = form(tokens, at)?;
+                mark.parts.push(inside);
+                entries.push((key, value));
             }
-            *at += 1;
-            Ok(Form::Map(entries))
+            close(&mut mark, at);
+            Form::Map(entries)
         }
         "(" => {
-            let head = form(tokens, at)?;
+            let (head, inside) = form(tokens, at)?;
+            mark.parts.push(inside);
             let mut parts = Vec::new();
             loop {
                 let next = tokens.get(*at).ok_or_else(ended)?;
-                if next == ")" {
+                if next.text == ")" {
                     break;
                 }
-                match label(next) {
+                match label(&next.text) {
                     Some(name) => {
                         *at += 1;
-                        parts.push(Part::Labelled(name.to_string(), form(tokens, at)?));
+                        let (part, inside) = form(tokens, at)?;
+                        mark.parts.push(inside);
+                        mark.labels
+                            .push(Some((next.span.start, next.comments.clone())));
+                        parts.push(Part::Labelled(name.to_string(), part));
                     }
-                    None => parts.push(Part::Bare(form(tokens, at)?)),
+                    None => {
+                        let (part, inside) = form(tokens, at)?;
+                        mark.parts.push(inside);
+                        mark.labels.push(None);
+                        parts.push(Part::Bare(part));
+                    }
                 }
             }
-            *at += 1;
-            Ok(Form::application(head, parts))
+            close(&mut mark, at);
+            Form::application(head, parts)
         }
-        ")" | "]" | "}" => Err(Error::Read(format!("a `{token}` that closes nothing"))),
-        other => Ok(atom(other)),
-    }
+        closer @ (")" | "]" | "}") => {
+            return Err(Error::Read(format!("a `{closer}` that closes nothing")));
+        }
+        other => {
+            mark.raw = token.raw.clone();
+            atom(other)
+        }
+    };
+    Ok((read, mark))
 }
 
 impl Display for Form {

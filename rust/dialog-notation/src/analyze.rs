@@ -20,7 +20,10 @@ pub struct Analysis {
     /// their forms were written. A form several definitions take is a
     /// rule a definition.
     pub analyzed: Vec<Syntax>,
-    /// What the definitions said about the document.
+    /// For each analyzed tree, which tree of the document it came of.
+    pub origin: Vec<usize>,
+    /// What the definitions said about the document, each with the way
+    /// to the form it is about.
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -44,6 +47,7 @@ impl Analyzer {
         let (analyzed, diagnostics) = self.expander.expand(trees.to_vec())?;
         Ok(Analysis {
             analyzed,
+            origin: self.expander.origin().to_vec(),
             diagnostics,
         })
     }
@@ -52,7 +56,42 @@ impl Analyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse;
+    use crate::written::{Point, Segment, Span};
+    use crate::{parse, parse_written};
+
+    /// A warning says the way to the form it is about, which the
+    /// mapping the parser gave turns into a place in the text. An
+    /// analyzed tree says which tree it came of.
+    #[dialog_common::test]
+    fn it_says_where_the_form_a_warning_is_about_is() -> Result<(), Error> {
+        let text = "(concept (todo ?t text: ?x)
+  (xyz.todo ?t text: (:last (:text ?x))))
+
+(rule (ad (todo ?t text: ?x))
+  (xyz.draft ?t text: ?x))
+";
+        let (trees, written) = parse_written(text)?;
+        let analysis = Analyzer::new()?.analyze(&trees)?;
+        let [warning] = analysis.diagnostics.as_slice() else {
+            panic!("one warning: {:?}", analysis.diagnostics);
+        };
+        assert_eq!(warning.message, "no rule reads this command");
+        assert_eq!(warning.path, vec![Segment::Item(1), Segment::Item(0)]);
+        assert_eq!(
+            written.span(&warning.path),
+            Some(Span {
+                start: Point { line: 3, column: 6 },
+                end: Point {
+                    line: 3,
+                    column: 29
+                },
+            })
+        );
+        // The concept is kept as a definition, so the one analyzed tree
+        // is the rule's.
+        assert_eq!(analysis.origin, vec![1]);
+        Ok(())
+    }
 
     #[dialog_common::test]
     fn it_gives_an_analyzed_tree_a_form_and_keeps_a_definition() -> Result<(), Error> {

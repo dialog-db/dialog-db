@@ -37,7 +37,14 @@ async fn main() -> Result<()> {
             println!("{row}");
         }
         for diagnostic in diagnostics {
-            println!("; warning: {}: {}", diagnostic.message, diagnostic.form);
+            let place = match notebook.span(&diagnostic) {
+                Some(span) => format!("{}:{}: ", span.start.line + 1, span.start.column + 1),
+                None => String::new(),
+            };
+            println!(
+                "; {place}warning: {}: {}",
+                diagnostic.message, diagnostic.form
+            );
         }
     }
     if notebook.held() > 0 {

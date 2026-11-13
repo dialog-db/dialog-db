@@ -1,8 +1,10 @@
 //! A branch of a repository kept in memory, and the syntax submitted
 //! to it so far. The example and the tests share it.
 
-use anyhow::Result;
-use dialog_notation::{Analyzer, Diagnostic, Error, Step, compile, parse};
+use anyhow::{Context as _, Result};
+use dialog_notation::{
+    Analyzer, Diagnostic, Error, Segment, Span, Step, Written, compile, parse_written,
+};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_peer::{Peer, Session};
 use dialog_query::query::Output as _;
@@ -20,6 +22,8 @@ pub struct Notebook {
     /// over the branch for every query, so they last as long as it does
     /// and no longer.
     held: Vec<DeductiveRule>,
+    /// What the trees of the last document left out of its text.
+    written: Written,
 }
 
 impl Notebook {
@@ -32,6 +36,7 @@ impl Notebook {
             branch,
             analyzer: Analyzer::new()?,
             held: Vec::new(),
+            written: Written::default(),
         })
     }
 
@@ -41,19 +46,38 @@ impl Notebook {
         self.held.len()
     }
 
+    /// Where in the last document a diagnostic's form is.
+    pub fn span(&self, diagnostic: &Diagnostic) -> Option<Span> {
+        self.written.span(&diagnostic.path)
+    }
+
     /// Submit a document: one transaction for what it writes, installs
     /// and issues, then its queries against the result. The report is
     /// every row, as written, sorted.
     pub async fn submit(&mut self, text: &str) -> Result<(Vec<String>, Vec<Diagnostic>)> {
         // The three phases: text to trees, trees to analyzed trees, an
         // analyzed tree to what Dialog-DB runs.
-        let analysis = self.analyzer.analyze(&parse(text)?)?;
+        let (trees, written) = parse_written(text)?;
+        self.written = written;
+        let analysis = self.analyzer.analyze(&trees)?;
         let (analyzed, diagnostics) = (analysis.analyzed, analysis.diagnostics);
         let mut transaction = self.branch.transaction();
         let mut writes = false;
         let mut queries = Vec::new();
-        for rule in &analyzed {
-            for step in compile(rule)? {
+        for (rule, origin) in analyzed.iter().zip(&analysis.origin) {
+            // What the compiler refuses is said with where the tree the
+            // rule came of is.
+            let steps = compile(rule).with_context(|| {
+                match self.written.span(&[Segment::Item(*origin)]) {
+                    Some(span) => format!(
+                        "line {}, column {}",
+                        span.start.line + 1,
+                        span.start.column + 1
+                    ),
+                    None => format!("tree {origin}"),
+                }
+            })?;
+            for step in steps {
                 transaction = match step {
                     Step::Assert(statement) => transaction.assert(statement),
                     Step::Retract(statement) => transaction.retract(statement),

@@ -242,6 +242,36 @@ async fn it_derives_a_relation_and_reports_rows_of_several_premises() -> Result<
     Ok(())
 }
 
+/// A warning and what the compiler refuses both say where in the text
+/// they are about.
+#[dialog_common::test]
+async fn it_says_where_a_warning_and_a_refusal_are() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let (_, diagnostics) = notebook
+        .submit("(assert! (xyz.todo todo:1 text: \"x\"))\n  (ad (xyz.todo todo:1 text: \"y\"))")
+        .await?;
+    let [warning] = diagnostics.as_slice() else {
+        panic!("one warning: {diagnostics:?}");
+    };
+    let span = notebook.span(warning).expect("the warning has a place");
+    assert_eq!((span.start.line, span.start.column), (1, 2));
+    assert_eq!((span.end.line, span.end.column), (1, 34));
+
+    let refused = notebook
+        .submit("\n\n  (query (xyz.a ?a n: ?n) (xyz.a ?a n: ?n) (:like ?n : \"x\"))")
+        .await
+        .expect_err("the compiler has no counterpart for it");
+    assert!(
+        refused.to_string().contains("line 3, column 3"),
+        "{refused:#}"
+    );
+    assert!(matches!(
+        refused.downcast::<Error>(),
+        Ok(Error::Unsupported(_))
+    ));
+    Ok(())
+}
+
 /// A rule has one head. Two written as one rule are refused, and
 /// nothing the document says is written, the fact beside the rule
 /// included.

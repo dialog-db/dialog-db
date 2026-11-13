@@ -28,6 +28,8 @@ Each ends with the tests passing.
 2. **The compiler reads the tree.** `kernel.rs` and `compile.rs`. Done: neither names the notation as parsed, and a reported row is a tree.
 3. **The analyzer reads the tree.** Patterns and templates match and fill trees; the walker walks trees. Done: nothing after `parse` names the notation as parsed.
 4. **What was written, beside what was said.** Each phase gives its result and a mapping of what the result left out, and a printer takes both back to the source. See below.
+   - Done, the parser's part: `parse_written` gives the trees and `Written`, the mapping; `print(trees, written)` gives the text, the same bytes for the prelude and both examples. A warning says the way to its form and an analyzed tree says which tree it came of, so the notebook says `5:1: warning: …` and where a refusal by the compiler is.
+   - Not done: a refusal by the analyzer has no place; a reported row is still printed by label and not in the order asked; `description:` is still in `concept`; printing from the analyzed tree and from the compiled form.
 5. **A pinned reference and the name table.** A resolved reference is the name and the entity it meant where it was written.
 
 ## The mapping, and printing back
@@ -52,14 +54,17 @@ A macro call is not in the analyzed tree: after `(query (todo ?t text: ?x))` onl
 | lost at | what | held as |
 |---|---|---|
 | parse | the order of labelled parts | a permutation a node |
-| parse | `of:` written or left out; a number's digits; `:open` or `open:`; which bracket | a spelling a node, where it is not the default |
+| parse | `of:` written or left out | where `of:` is, in the node's order |
+| parse | a number's digits, a text's escapes, a struct's key written as a label or not | the token as spelled, a node, only where a printer would spell it otherwise |
 | parse | where a node is in the text | a range a node |
 | parse | a comment | its text, on the node it is about. Decided by the maintainer: comments matter more than anything else here, to document source and to find things by their documentation. A comment is not derived from anything, as a name is not, so holding it is not holding the source |
-| parse | space between tokens | not held. A printer lays the text out, so the test is the same tokens and comments in the same order, and the same bytes where the source was in the printer's layout |
+| parse | space between tokens | not held, and not needed: it is what lies between where one token ends and the next starts. So the test is the same bytes. Two things are lost: space at the end of a line, and a tab, which is written as a space |
 | analyze | the call a definition was applied to | the definition, by entity, at the node; what its template dropped |
 | analyze | the name a reference was written as | the name, beside the entity |
 | analyze | the names a template's own variables were given | derived from the site, as now |
 | compile | which rule, premise and variable is which node | a path a compiled part |
+
+Built as the maintainer decided it: a comment is on the form below it, whether it has a line to itself or ends one; a comment above a label is on the part under the label; a comment no form is below, before a closing bracket or at the end of the text, is kept on what it is inside. So today a comment that ends a line is about the form after it.
 
 Proposed by the agent, not decided: this table; that order is held a node and not once a definition, since a call may write its labels in another order than the definition does; that a comment which ends a line is about the node before it; that a comment with a blank line under it is about the document; that what a comment says of a concept, a rule or a labelled part is what Dialog-DB keeps as its description, and is kept as a fact so it can be found. Decided by the maintainer: a comment is metadata on the form below it and takes no place among the parts, and `description:` does not belong in a concept.
 
