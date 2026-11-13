@@ -1115,6 +1115,193 @@ async fn it_answers_an_entry_that_the_body_derives_twice_once_when_the_head_hold
     Ok(())
 }
 
+/// How a query of a range of a log whose head holds the key binds that key.
+#[derive(Clone, Copy, Debug)]
+enum KeyBinding {
+    /// The query leaves the key free.
+    Free,
+    /// The query binds the key to the constant `n00150`.
+    Constant,
+    /// A rule reads the range with the key bound to a variable, which an
+    /// earlier premise of its body binds to `n00150`.
+    Variable,
+}
+
+/// A query of a range of a log whose head holds the key can bind that key, to a
+/// constant or to a variable that an earlier premise binds. The query then asks
+/// for the rows of one key. Each path of evaluation gives the same rows for it
+/// as for a free key: the path of one evaluation for each entry, and the path
+/// of one evaluation for each field of the head. A stored fact of a field of
+/// the head turns the second path on, and the test runs it with a stored fact
+/// of the text and with a stored fact of the key. The rows are the same with
+/// the holder of the log bound and with the holder free, on a first read and in
+/// a live query after each change.
+#[dialog_common::test]
+async fn it_answers_a_bound_key_on_each_path_when_the_head_holds_the_key() -> Result<()> {
+    for holder_bound in [true, false] {
+        for key in [KeyBinding::Constant, KeyBinding::Variable, KeyBinding::Free] {
+            let fast = rows_of_a_bound_key(None, holder_bound, key).await?;
+            for lone in ["text", "key"] {
+                let slow = rows_of_a_bound_key(Some(lone), holder_bound, key).await?;
+                assert_eq!(
+                    fast, slow,
+                    "holder bound: {holder_bound}, key: {key:?}, a stored {lone}"
+                );
+            }
+            let counts: Vec<usize> = fast.iter().map(Vec::len).collect();
+            let expected = match (key, holder_bound) {
+                (KeyBinding::Free, true) => [20, 19, 20, 20, 21],
+                (KeyBinding::Free, false) => [40, 39, 40, 40, 41],
+                (_, true) => [1, 0, 1, 1, 1],
+                (_, false) => [2, 1, 2, 2, 2],
+            };
+            assert_eq!(
+                counts, expected,
+                "holder bound: {holder_bound}, key: {key:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The rows of a live query of a range of the log of the first holder, or of
+/// the log of each holder when `holder_bound` is false, whose head holds the
+/// key, as the query binds the key. The rows are those of the first read and
+/// those after each of four changes: the leave of the entry under the key
+/// `n00150` of the first log, a new entry under that key, a change of the text
+/// of the item of that entry, and a new entry under another key of the range.
+/// After each change the live query must hold the rows of a first read. With a
+/// `lone` field, a stored fact of that field of the head, on an entity that no
+/// entry holds, turns the fast path off first.
+async fn rows_of_a_bound_key(
+    lone: Option<&str>,
+    holder_bound: bool,
+    key: KeyBinding,
+) -> Result<Vec<Vec<String>>> {
+    let (branch, operator, keys) = opened(Keyed::Dictionary, &[200, 200]).await?;
+    let chosen = "n00150".to_string();
+    let mut setup = branch.transaction().assert(
+        dialog_query::the!("test.choice/key")
+            .of("choice:one".parse::<Entity>()?)
+            .is(chosen.clone()),
+    );
+    if let Some(field) = lone {
+        let the = Relation::from(CorpusRelation::try_from(format!("test.window/{field}"))?);
+        setup = setup.assert(
+            the.of("other:lone".parse::<Entity>()?)
+                .is("alone".to_string()),
+        );
+    }
+    setup.commit().publish().perform(&operator).await?;
+
+    let general = channel(0);
+    let window = Window {
+        key_in_head: true,
+        keyed: Keyed::Dictionary,
+        channel: holder_bound.then_some(general.as_str()),
+        lower: at_least(keys.at(140)),
+        upper: below(keys.at(160)),
+    };
+    let rule = window.rule()?;
+    let mut query = window.query()?;
+    // The rule of a choice reads the range under the key that the stored
+    // choice names, and its head holds what the range holds.
+    let mut head = fields("test.chosen");
+    head["with"]["key"] = json!({ "the": "test.chosen/key", "as": "text:", "pick": "all:" });
+    let mut terms = Map::new();
+    terms.insert("this".to_string(), json!({ "?": { "name": "this" } }));
+    terms.insert("key".to_string(), json!({ "?": { "name": "key" } }));
+    for (name, _) in FIELDS {
+        terms.insert(name.to_string(), json!({ "?": { "name": name } }));
+    }
+    let choice: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": head.clone(),
+        "when": [
+            {
+                "assert": { "with": { "key": { "the": "test.choice/key", "as": "text:" } } },
+                "where": { "this": { "entity:": "choice:one" }, "key": { "?": { "name": "key" } } }
+            },
+            { "assert": window.head(), "where": terms },
+        ]
+    }))?;
+    let choice = choice.compile()?;
+    match key {
+        KeyBinding::Free => {}
+        KeyBinding::Constant => {
+            query.terms.insert("key".into(), Term::constant(chosen));
+        }
+        KeyBinding::Variable => {
+            query.predicate = serde_json::from_value(head)?;
+        }
+    }
+    let subscribe = || {
+        branch
+            .query()
+            .with(rule.clone())
+            .with(choice.clone())
+            .subscribe(query.clone())
+    };
+    let mut subscription = subscribe();
+    subscription.poll(&operator).await?.expect("the first read");
+    let mut seen = vec![entries(subscription.results())?];
+
+    let of: Entity = general.parse()?;
+    let held: Entity = "message:0-150".parse()?;
+    let new: Entity = "message:0-new".parse()?;
+    let entry = |key: &str| -> Result<Relation> {
+        Ok(Relation::from(CorpusRelation::try_from(format!(
+            "chat.channel.log/{key}"
+        ))?))
+    };
+    // Each step opens its transaction when it runs: a transaction commits
+    // against the head it opened at, so one opened before the step ahead of
+    // it published would be refused.
+    type Step<'s> = Box<
+        dyn Fn(
+                crate::Transaction<&'s crate::Branch>,
+            ) -> Result<crate::Transaction<&'s crate::Branch>>
+            + 's,
+    >;
+    let steps: Vec<Step<'_>> = vec![
+        Box::new(|transaction| {
+            Ok(transaction.retract(entry("n00150")?.of(of.clone()).is(held.clone())))
+        }),
+        Box::new(|transaction| post(transaction, 0, "new", 900, "n00150")),
+        Box::new(|transaction| {
+            Ok(transaction
+                .retract(
+                    dialog_query::the!("chat.message/text")
+                        .of(new.clone())
+                        .is("hello".to_string()),
+                )
+                .assert(
+                    dialog_query::the!("chat.message/text")
+                        .of(new.clone())
+                        .is("edited".to_string()),
+                ))
+        }),
+        Box::new(|transaction| post(transaction, 0, "other", 901, "n00151x")),
+    ];
+    for step in steps {
+        step(branch.transaction())?
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        subscription.poll(&operator).await?;
+        let live = entries(subscription.results())?;
+        let mut fresh = subscribe();
+        let fresh = fresh.poll(&operator).await?.expect("the first read");
+        assert_eq!(
+            live,
+            entries(&fresh.asserted)?,
+            "the live query holds a first read"
+        );
+        seen.push(live);
+    }
+    Ok(seen)
+}
+
 /// A live window keeps a message for as long as one entry of its range holds
 /// it. Two entries hold message 150. The window answers it once, keeps it when
 /// one of the two entries leaves, and drops it when the other leaves too.
