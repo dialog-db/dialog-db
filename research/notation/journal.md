@@ -831,6 +831,16 @@ xychart-beta
 
 **Decision.** The open question overstated the shared-name form. Readers' committed model is nominal and goal-directed. Use the direct question from now on, and test the two sentences that answer it: concepts match by attribute, and a rule's conclusion holds without being asked for.
 
+## 2026-11-13 — R38: spelling out "one rule per attribute" works
+
+**Question.** The one [planned](results/r38-plan.md), from the maintainer: if the spec says plainly that a concept is a two-way mapping, one attribute per field, and that a rule concluding a concept is shorthand for one rule per attribute, with the expansion shown, do readers expect what dialog does?
+
+**Method.** Clean runner. The note-and-memo derive case with the direct question, with and without the spec, and R30's renamed derived to-do with the spec.
+
+**Results.** [r38](results/r38.md). The note is found by 19 of 20 with the spec, 0 of 10 without. The renamed derived to-do's rename lands for 16 of 20, on the document that scored 0 every time before. Readers worked the expansion through: a rule's conclusion becomes heads in the domain form, which a condition reads. What remains is the election: 9 of the 16 said the to-do has two titles and nothing says which wins.
+
+**Decision.** The expansion goes into the spec, as proposed, with the sentence on how `last` elects between stored and derived values beside it.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
