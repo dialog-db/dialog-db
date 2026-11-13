@@ -409,6 +409,11 @@ struct Inner {
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     before_letting_go: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>, // bare-send-ok: test hook
+    /// Called once by the last handle's close when it stands down, before
+    /// it looks again.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    after_standing_down: Mutex<Option<Box<dyn FnOnce() + Send>>>, // bare-send-ok: test hook
     /// Called by a sync point made without the turn between writing the
     /// durable copy and syncing it.
     #[cfg(test)]
@@ -1444,6 +1449,8 @@ impl Chronicle {
             before_durable_synced: Mutex::new(None),
             #[cfg(test)]
             before_letting_go: Mutex::new(None),
+            #[cfg(test)]
+            after_standing_down: Mutex::new(None),
             #[cfg(test)]
             dies: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -3241,6 +3248,18 @@ fn snapshot_after_claim(
     Ok(owned)
 }
 
+/// What [`Chronicle::close`] did.
+enum Closing {
+    /// Closed the file: the table of open files, held until the handle's
+    /// state is gone.
+    Closed(parking_lot::MutexGuard<'static, HashMap<FileId, Weak<Inner>>>),
+    /// Stood down: another reference to the file's state was there.
+    NotLast,
+    /// Did not close it, as a process that dies does not (in tests), or as
+    /// one that could not take the turn.
+    Skipped,
+}
+
 /// The last handle of a file in this process closes it (see
 /// [`close`](Chronicle::close)).
 impl Drop for Chronicle {
@@ -3268,26 +3287,46 @@ impl Chronicle {
     /// handle is not used again.
     fn let_go(&mut self) {
         let dropping = self.inner.dropping.clone();
-        let guard = dropping.lock();
-        if Arc::strong_count(&self.inner) != 1 {
+        loop {
+            let guard = dropping.lock();
+            if Arc::strong_count(&self.inner) != 1 {
+                self.letting_go();
+                // SAFETY: taken once, here, and not used again.
+                drop(unsafe { ManuallyDrop::take(&mut self.inner) });
+                drop(guard);
+                return;
+            }
+            drop(guard);
+            let open = match self.close() {
+                Closing::Closed(open) => Some(open),
+                Closing::Skipped => None,
+                // A reference was taken while this one waited for the turn:
+                // looked at again under `dropping`, as it may have gone
+                // again by now, leaving this one the last after all.
+                Closing::NotLast => {
+                    #[cfg(test)]
+                    {
+                        let hook = self.inner.after_standing_down.lock().take();
+                        if let Some(hook) = hook {
+                            hook();
+                        }
+                    }
+                    continue;
+                }
+            };
             self.letting_go();
             // SAFETY: taken once, here, and not used again.
-            drop(unsafe { ManuallyDrop::take(&mut self.inner) });
+            let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
+            // The last handle's state, its descriptor among it, goes while
+            // the table of open files is held: an open of the file in this
+            // process waits for it, and opens a descriptor of its own only
+            // once this one is closed. Closing a descriptor lets go of
+            // every lock this process holds on the file, a new handle's
+            // among them.
+            drop(inner);
+            drop(open);
             return;
         }
-        drop(guard);
-        let open = self.close();
-        let _guard = open.is_none().then(|| dropping.lock());
-        self.letting_go();
-        // SAFETY: taken once, here, and not used again.
-        let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
-        // The last handle's state, its descriptor among it, goes while the
-        // table of open files is held: an open of the file in this process
-        // waits for it, and opens a descriptor of its own only once this
-        // one is closed. Closing a descriptor lets go of every lock this
-        // process holds on the file, a new handle's among them.
-        drop(inner);
-        drop(open);
     }
 
     /// In tests, the hook between finding whether a handle is the last and
@@ -3313,18 +3352,20 @@ impl Chronicle {
     /// the turn is had if this is still the last handle: an open that came
     /// while the close waited shares this handle, so the close stands down
     /// and nothing it would let go of is let go.
-    fn close(&self) -> Option<parking_lot::MutexGuard<'static, HashMap<FileId, Weak<Inner>>>> {
+    fn close(&self) -> Closing {
         if Arc::strong_count(&self.inner) != 1 {
-            return None;
+            return Closing::NotLast;
         }
         #[cfg(test)]
         if self.inner.dies.load(Ordering::Relaxed) {
-            return None;
+            return Closing::Skipped;
         }
-        let turn = self.turn().ok()?;
+        let Ok(turn) = self.turn() else {
+            return Closing::Skipped;
+        };
         let open = OPEN.lock();
         if Arc::strong_count(&self.inner) != 1 {
-            return None;
+            return Closing::NotLast;
         }
         if let Ok(snapshot) = self.newest_in_turn(&turn) {
             let _ = self.integrate_some(&turn, snapshot, true);
@@ -3342,7 +3383,7 @@ impl Chronicle {
             let _ = self.truncate_free_tail(&turn);
             let _ = locks::unlock(file, locks::PRESENT);
         }
-        Some(open)
+        Closing::Closed(open)
     }
 }
 

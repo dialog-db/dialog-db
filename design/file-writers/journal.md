@@ -1127,3 +1127,25 @@ Both are acted on.
   `it_lets_go_of_a_reopened_handle_while_the_last_close_waits_for_the_turn`
   waited 1.0 s before (the other process held the turn that long), and
   now does not wait.
+
+## 2026-11-13: the sixth review round
+
+The sixth review (at 3b826092) found one gap, reasoned: a last close that
+stood down for a reopen took `dropping` again and let go without looking
+at the count. If the reopen's handles went in between, nothing closed the
+file. The gap is narrower than the review put it. A handle dropped when it
+finds at most one other reference waits for `looking`, which the closing
+handle holds, so a single reopened handle cannot slip into the window.
+Two or more can: each finds three or more references and does not wait,
+and together they bring the count to one. The last close now loops. After
+standing down, it looks again under `dropping`, and closes if it is the
+last after all.
+
+`close` now says why it did not close (`Closing::NotLast` or `Skipped`),
+so a close skipped for another reason (the turn could not be had, or, in
+tests, a dying process) does not loop.
+
+Pinned by `it_closes_when_the_reopen_it_stood_down_for_goes_meanwhile`.
+A hook lets go of the reopened handle at that moment, as a handle that
+did not wait for `looking` does. Without the loop, the extent opening left
+is still listed after every handle went; with it, the file is closed.

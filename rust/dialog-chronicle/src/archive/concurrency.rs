@@ -1668,3 +1668,59 @@ fn it_lets_go_of_a_reopened_handle_while_the_last_close_waits_for_the_turn() -> 
     );
     all_read_back(&reopened, &["first".into()])
 }
+
+/// A last close that stood down for a reopen, which is then let go of
+/// before the close looks again, closes the file: it finds itself the last
+/// after all. Before, it let go without looking, and nothing closed the
+/// file. The reopen is let go of from a hook at that moment, as a handle
+/// is let go of that found two or more others when it was dropped, so did
+/// not wait for the sync thread (`looking`), which the closing handle
+/// holds.
+#[dialog_common::test]
+fn it_closes_when_the_reopen_it_stood_down_for_goes_meanwhile() -> anyhow::Result<()> {
+    use std::sync::{Arc, Mutex};
+
+    let directory = tempfile::tempdir()?;
+    let path = archive_in(&directory);
+    let options = Options {
+        sync_in_background: false,
+        ..Options::default()
+    };
+    let archive = Chronicle::open_with(&path, options.clone())?;
+    archive.append("index", &[block("first")])?;
+    anyhow::ensure!(
+        !archive.current().slot.extents.is_empty(),
+        "extents listed, which only a close takes back"
+    );
+    let reopen: Arc<Mutex<Option<Chronicle>>> = Arc::default();
+    let letting_go = reopen.clone();
+    *archive.inner.after_standing_down.lock() = Some(Box::new(move || {
+        if let Some(reopened) = letting_go.lock().expect("not poisoned").take() {
+            std::mem::ManuallyDrop::new(reopened).let_go();
+        }
+    }));
+    let holder = hold(&path, locks::TURN, true)?;
+    let closing = std::thread::spawn(move || drop(archive));
+    // The close waits for the turn the other process holds; the file is
+    // reopened meanwhile, so the close stands down once it has the turn.
+    std::thread::sleep(Duration::from_millis(200));
+    *reopen.lock().expect("not poisoned") = Some(Chronicle::open_with(&path, options.clone())?);
+    holder.finish()?;
+    closing.join().expect("the close");
+    anyhow::ensure!(
+        reopen.lock().expect("not poisoned").is_none(),
+        "the close stood down, and the reopen was let go of"
+    );
+    let after = Chronicle::open_with(
+        &path,
+        Options {
+            leave_extent: false,
+            ..options
+        },
+    )?;
+    assert!(
+        after.current().slot.extents.is_empty(),
+        "nothing closed the file: the extent opening left is still listed"
+    );
+    all_read_back(&after, &["first".into()])
+}
