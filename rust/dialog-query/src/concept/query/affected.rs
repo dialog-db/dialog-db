@@ -588,6 +588,12 @@ fn collection_of(concept: &ConceptDescriptor) -> Option<(&str, &ConceptFieldDesc
 /// a premise of its own type: a float sees 3.5 as itself, and a natural or an
 /// integer sees it as 3.
 ///
+/// The float -0.0 is a zero whose sign is set. The store keys each zero as
+/// one number, and a query reads a constant -0.0 as 0.0 in each place where
+/// the constant meets a stored or a bound value (see
+/// `Value::without_negative_zero`). So a constant -0.0 counts as the float
+/// 0.0 does.
+///
 /// A value that a positive premise takes as its entity is an entity in each
 /// row, and a scan compares an entity by equality, so such a value joins
 /// evenly. A value that passes through `coalesce` is left out of that: the

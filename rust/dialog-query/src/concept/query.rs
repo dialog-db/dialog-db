@@ -336,6 +336,11 @@ impl ConceptQuery {
     /// an entity. A constant written bare reads as the first type its
     /// payload fits, so it may name the field's value under another type,
     /// which no claim of the field would match.
+    ///
+    /// A constant -0.0 reads as the constant 0.0 in the place of any field
+    /// (see [`Value::without_negative_zero`]). A scan for -0.0 finds a
+    /// stored 0.0, and a read of one entity compares its stored 0.0 with
+    /// the constant, so both reads take the constant as 0.0.
     pub fn conformed(mut self) -> Self {
         let mut conformed = Vec::new();
         for (name, term) in self.terms.iter() {
@@ -351,17 +356,36 @@ impl ConceptQuery {
                     .find(|(field, _)| field == name)
                     .and_then(|(_, field)| field.content_type())
             };
-            if let Some(kind) = kind {
-                let fitted = value.clone().conform(kind);
-                if &fitted != value {
-                    conformed.push((name.clone(), fitted));
-                }
+            let fitted = match kind {
+                Some(kind) => value.clone().conform(kind),
+                None => value.clone(),
+            }
+            .without_negative_zero();
+            if &fitted != value {
+                conformed.push((name.clone(), fitted));
             }
         }
         for (name, value) in conformed {
             self.terms.insert(name, Term::Constant(value));
         }
         self
+    }
+
+    /// The terms that a row of this query holds: each term as it is, with
+    /// a constant -0.0 read as 0.0, as the evaluation reads it (see
+    /// [`conformed`](Self::conformed)). So a row of a query of -0.0 holds
+    /// 0.0, as a row of a query of 0.0 does.
+    pub(crate) fn concluded_terms(&self) -> Parameters {
+        let mut terms = self.terms.clone();
+        for (name, term) in self.terms.iter() {
+            if let Term::Constant(Value::Float(float)) = term
+                && *float == 0.0
+                && float.is_sign_negative()
+            {
+                terms.insert(name.clone(), term.clone().without_negative_zero());
+            }
+        }
+        terms
     }
 
     /// Estimate the cost of this concept application given the current environment.

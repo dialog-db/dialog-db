@@ -219,10 +219,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
         });
 
         // Realize via the trait method. Required and optional impls
-        // each handle their own Binding semantics.
+        // each handle their own Binding semantics. A constant reads as the
+        // evaluation reads it: a constant -0.0 as 0.0 (see
+        // `Term::without_negative_zero`).
         realize_fields.push(quote! {
             #field_name: <#field_type as dialog_query::ConceptField>::realize(
-                source.lookup(&dialog_query::Term::<dialog_query::types::Any>::from(&self.#field_name))?
+                source.lookup(
+                    &dialog_query::Term::<dialog_query::types::Any>::from(&self.#field_name)
+                        .without_negative_zero(),
+                )?
             )?
         });
 

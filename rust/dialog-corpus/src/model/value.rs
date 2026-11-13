@@ -212,6 +212,19 @@ impl Value {
         }
     }
 
+    /// This value with the float -0.0 read as the float 0.0, and every other
+    /// value as it is. The float -0.0 is a zero whose sign is set. The band
+    /// keys each zero as one number, so a stored -0.0 reads back as 0 and a
+    /// scan for -0.0 finds a stored 0.0. A query reads a constant through
+    /// this where the constant meets a stored or a bound value, so that it
+    /// takes -0.0 as 0.0 in each place, as the store does.
+    pub fn without_negative_zero(self) -> Value {
+        match self {
+            Value::Float(float) if float == 0.0 && float.is_sign_negative() => Value::Float(0.0),
+            value => value,
+        }
+    }
+
     /// The number this value is, when it is one: the identity the band keys
     /// it by.
     fn number(&self) -> Option<Number> {
@@ -2131,6 +2144,25 @@ mod view_tests {
             Value::UnsignedInt(1_152_921_504_606_847_000).same_number(&Value::Float(2f64.powi(60)))
         );
         assert!(Value::UnsignedInt(10u128.pow(30)).same_number(&Value::Float(1e30)));
+    }
+
+    /// The float -0.0 reads as the float 0.0. Every other value stays as it
+    /// is: the float 0.0, the natural 0, a float that is not a zero, and NaN.
+    #[dialog_common::test]
+    fn it_reads_negative_zero_as_zero() {
+        let read = Value::Float(-0.0).without_negative_zero();
+        assert!(matches!(read, Value::Float(zero) if zero == 0.0 && zero.is_sign_positive()));
+        for value in [
+            Value::Float(0.0),
+            Value::Float(-1.5),
+            Value::UnsignedInt(0),
+            Value::SignedInt(0),
+            Value::String("-0.0".into()),
+        ] {
+            assert_eq!(value.clone().without_negative_zero(), value);
+        }
+        let nan = Value::Float(-f64::NAN).without_negative_zero();
+        assert!(matches!(nan, Value::Float(nan) if nan.is_nan() && nan.is_sign_negative()));
     }
 
     #[dialog_common::test]

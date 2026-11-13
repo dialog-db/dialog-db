@@ -61,6 +61,12 @@ const COALESCE_COST: usize = 1;
 ///   the constraint orders after the premise resolving its source.
 /// - If `fallback` itself is an unbound variable, the row is
 ///   filtered out (we can't bind without a concrete value).
+///
+/// A constant `source` or `fallback` of -0.0 binds `is` to 0.0 (see
+/// [`Value::without_negative_zero`](crate::Value::without_negative_zero)), as a constant -0.0 reads in the
+/// place of a field. So the value that flows into `is` meets a stored zero
+/// as the constant 0.0 does. A constant `is` of -0.0 reads as 0.0 too, so it
+/// takes a chosen zero as the constant 0.0 does.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Coalesce {
     /// The optional input term, typically a variable bound by an
@@ -221,9 +227,9 @@ impl Coalesce {
     /// Never consumes the input stream into a buffer; passes rows
     /// through one at a time.
     pub fn evaluate<M: Selection>(self, selection: M) -> impl Selection {
-        let source = self.source;
-        let fallback = self.fallback;
-        let is = self.is;
+        let source = self.source.without_negative_zero();
+        let fallback = self.fallback.without_negative_zero();
+        let is = self.is.without_negative_zero();
         try_stream! {
             for await candidate in selection {
                 let base = candidate?;
@@ -353,6 +359,63 @@ mod tests {
             Value::from("default".to_string()),
             "output should bind to fallback's value"
         );
+        Ok(())
+    }
+
+    /// A constant fallback of -0.0 binds the output to 0.0, as a constant
+    /// -0.0 reads in the place of a field. A fallback of 0.0 binds 0.0 too,
+    /// and an output that already holds 0.0 takes the fallback -0.0.
+    #[dialog_common::test]
+    async fn it_binds_a_fallback_of_negative_zero_as_zero() -> Result<(), EvaluationError> {
+        for zero in [-0.0, 0.0] {
+            let coalesce = Coalesce::new(
+                Term::var("source"),
+                Term::Constant(Value::Float(zero)),
+                Term::var("out"),
+            );
+            let mut candidate = Match::new();
+            candidate.bind_absent(&Term::var("source"))?;
+            let results: Vec<Match> = coalesce
+                .clone()
+                .evaluate(candidate.clone().seed())
+                .try_collect()
+                .await?;
+            let out = results[0].lookup(&Term::var("out"))?.content()?;
+            assert!(
+                matches!(out, Value::Float(out) if out == 0.0 && out.is_sign_positive()),
+                "a fallback of {zero:?} binds {out:?}"
+            );
+
+            candidate.bind(&Term::var("out"), Value::Float(0.0))?;
+            let results: Vec<Match> = coalesce.evaluate(candidate.seed()).try_collect().await?;
+            assert_eq!(
+                results.len(),
+                1,
+                "a fallback of {zero:?} and an output of 0.0"
+            );
+        }
+        Ok(())
+    }
+
+    /// A constant output of -0.0 reads as 0.0, so it takes a source of 0.0,
+    /// as a constant output of 0.0 does.
+    #[dialog_common::test]
+    async fn it_reads_a_constant_output_of_negative_zero_as_zero() -> Result<(), EvaluationError> {
+        for zero in [-0.0, 0.0] {
+            let coalesce = Coalesce::new(
+                Term::var("source"),
+                Term::var("fallback"),
+                Term::Constant(Value::Float(zero)),
+            );
+            let mut candidate = Match::new();
+            candidate.bind(&Term::var("source"), Value::Float(0.0))?;
+            let results: Vec<Match> = coalesce.evaluate(candidate.seed()).try_collect().await?;
+            assert_eq!(
+                results.len(),
+                1,
+                "an output of {zero:?} and a source of 0.0"
+            );
+        }
         Ok(())
     }
 

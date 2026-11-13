@@ -30,6 +30,13 @@ const EQUALITY_COST: usize = 1;
 /// 3. **Error on Unbound**: When neither term is bound, the constraint cannot be evaluated
 ///    and raises a `ConstraintViolation` error.
 ///
+/// The float -0.0 is a zero whose sign is set. The store keys each zero as one
+/// number, so a stored -0.0 reads back as 0, and a scan for -0.0 finds a
+/// stored 0.0. The equality reads a float -0.0 as the float 0.0 in the same
+/// way (see [`Value::without_negative_zero`]). It takes -0.0 as equal to
+/// 0.0, and it binds 0.0 where the other side holds -0.0. Every other value
+/// it compares and binds as it is.
+///
 /// # Example
 /// ```no_run
 /// # use dialog_query::constraint::equality::Equality;
@@ -118,7 +125,7 @@ impl Equality {
                 match (base.lookup(&this), base.lookup(&is)) {
                     // Both Present: yield iff values match.
                     (Ok(Binding::Present(this_val)), Ok(Binding::Present(is_val))) => {
-                        if this_val == is_val {
+                        if this_val.without_negative_zero() == is_val.without_negative_zero() {
                             yield base;
                         }
                     }
@@ -133,12 +140,12 @@ impl Equality {
                     // One side Present, other unbound: propagate the value.
                     (Err(_), Ok(Binding::Present(is_val))) => {
                         let mut extension = base.clone();
-                        extension.bind(&this, is_val)?;
+                        extension.bind(&this, is_val.without_negative_zero())?;
                         yield extension;
                     }
                     (Ok(Binding::Present(this_val)), Err(_)) => {
                         let mut extension = base.clone();
-                        extension.bind(&is, this_val)?;
+                        extension.bind(&is, this_val.without_negative_zero())?;
                         yield extension;
                     }
                     // One side Absent, other unbound: propagate Absent
@@ -222,6 +229,37 @@ mod tests {
             "Should have no results when values don't match"
         );
 
+        Ok(())
+    }
+
+    /// The equality reads a float -0.0 as the float 0.0. It takes -0.0 as
+    /// equal to 0.0, and it binds 0.0 where the other side holds -0.0. It
+    /// still tells the float 0.0 from the natural 0, as it did before.
+    #[dialog_common::test]
+    async fn it_reads_negative_zero_as_zero() -> Result<(), EvaluationError> {
+        async fn rows(this: Value, is: Value) -> Result<usize, EvaluationError> {
+            let mut candidate = Match::new();
+            candidate.bind(&Term::var("x"), this)?;
+            let results: Vec<Match> = Equality::new(Term::var("x"), Term::Constant(is))
+                .evaluate(candidate.seed())
+                .try_collect()
+                .await?;
+            Ok(results.len())
+        }
+        assert_eq!(rows(Value::Float(0.0), Value::Float(-0.0)).await?, 1);
+        assert_eq!(rows(Value::Float(-0.0), Value::Float(-0.0)).await?, 1);
+        assert_eq!(rows(Value::Float(-0.0), Value::Float(0.0)).await?, 1);
+        assert_eq!(rows(Value::UnsignedInt(0), Value::Float(-0.0)).await?, 0);
+
+        let constraint = Equality::new(Term::var("x"), Term::var("y"));
+        let mut candidate = Match::new();
+        candidate.bind(&Term::var("y"), Value::Float(-0.0))?;
+        let results: Vec<Match> = constraint.evaluate(candidate.seed()).try_collect().await?;
+        let bound = results[0].lookup(&Term::var("x"))?.content()?;
+        assert!(
+            matches!(bound, Value::Float(zero) if zero == 0.0 && zero.is_sign_positive()),
+            "x binds 0.0, not {bound:?}"
+        );
         Ok(())
     }
 

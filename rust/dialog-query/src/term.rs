@@ -294,6 +294,17 @@ impl<T: Typed> Term<T> {
         }
     }
 
+    /// This term with a constant -0.0 read as the constant 0.0 (see
+    /// [`Value::without_negative_zero`]), and every other term as it is. A
+    /// variable stays as it is. A query reads each constant that meets a
+    /// stored or a bound value through this.
+    pub fn without_negative_zero(self) -> Self {
+        match self {
+            Term::Constant(value) => Term::Constant(value.without_negative_zero()),
+            variable => variable,
+        }
+    }
+
     /// Returns `true` if this term is bound in the given environment.
     ///
     /// Constants are always bound. Named variables are bound if their name
