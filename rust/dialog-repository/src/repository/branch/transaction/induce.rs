@@ -1398,7 +1398,6 @@ mod spike {
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::env;
-    use std::rc::Rc;
     use std::sync::{Arc, OnceLock};
 
     use dialog_corpus::Entity;
@@ -1476,7 +1475,7 @@ mod spike {
     #[derive(Clone, PartialEq, Eq, Hash)]
     pub(super) enum PlanKey {
         Rule(Entity),
-        Shared(Rc<str>),
+        Shared(Arc<str>),
     }
 
     thread_local! {
@@ -1553,7 +1552,7 @@ mod spike {
     /// One body several candidates of a round state.
     pub(super) struct Group {
         /// The entities of the rules that state it, joined.
-        pub key: Rc<str>,
+        pub key: Arc<str>,
         /// The rule the body is evaluated under.
         pub rule: InductiveRule,
         /// What it matched this round, once it has been evaluated.
@@ -1563,18 +1562,18 @@ mod spike {
     /// The groups of a round's candidates, by candidate.
     pub(super) struct Shared {
         groups: Vec<Group>,
-        of: HashMap<usize, (usize, Option<Rc<Rename>>)>,
+        of: HashMap<usize, (usize, Option<Arc<Rename>>)>,
     }
 
     /// A group as it is kept between rounds and commits: the rule its
     /// body is evaluated under, and each member's renaming.
-    type Kept = Option<(InductiveRule, Vec<Option<Rc<Rename>>>)>;
+    type Kept = Option<(InductiveRule, Vec<Option<Arc<Rename>>>)>;
 
     thread_local! {
         /// Each rule as its stored spelling encodes, by its entity.
-        static SPELLINGS: RefCell<HashMap<Entity, Rc<Json>>> = RefCell::new(HashMap::new());
+        static SPELLINGS: RefCell<HashMap<Entity, Arc<Json>>> = RefCell::new(HashMap::new());
         /// Every group made, by its members' entities.
-        static KEPT: RefCell<HashMap<Rc<str>, Kept>> = RefCell::new(HashMap::new());
+        static KEPT: RefCell<HashMap<Arc<str>, Kept>> = RefCell::new(HashMap::new());
     }
 
     impl Shared {
@@ -1606,7 +1605,7 @@ mod spike {
             if seeded.len() < 2 {
                 return shared;
             }
-            let key: Rc<str> = seeded
+            let key: Arc<str> = seeded
                 .iter()
                 .map(|&at| loaded[at].0.to_string())
                 .collect::<Vec<_>>()
@@ -1635,7 +1634,7 @@ mod spike {
 
         /// The group candidate `at` is in, if it is in one, and how its
         /// head reads the group's matches.
-        pub(super) fn group(&mut self, at: usize) -> Option<(&mut Group, Option<Rc<Rename>>)> {
+        pub(super) fn group(&mut self, at: usize) -> Option<(&mut Group, Option<Arc<Rename>>)> {
             let (group, rename) = self.of.get(&at)?.clone();
             Some((self.groups.get_mut(group)?, rename))
         }
@@ -1648,13 +1647,13 @@ mod spike {
     /// round whose seeded candidates state two bodies or more is left
     /// ungrouped: the spike does not partition them.
     fn group(seeded: &[usize], loaded: &[(Entity, Arc<InductiveRule>, bool, bool)]) -> Kept {
-        let spellings: Vec<Rc<Json>> = seeded
+        let spellings: Vec<Arc<Json>> = seeded
             .iter()
             .map(|&at| spelling(&loaded[at].0, &loaded[at].1))
             .collect::<Option<_>>()?;
         let first = &spellings[0];
         let mut union = (**first).clone();
-        let mut renames: Vec<Option<Rc<Rename>>> = vec![None];
+        let mut renames: Vec<Option<Arc<Rename>>> = vec![None];
         for other in &spellings[1..] {
             let rename = same_body(first, other)?;
             // The fields of this member's head, under the names their
@@ -1668,14 +1667,14 @@ mod spike {
                 }
                 reads.insert(name.clone(), variable);
             }
-            renames.push(Some(Rc::new(reads)));
+            renames.push(Some(Arc::new(reads)));
         }
         let rule: InductiveRule = serde_json::from_value(union).ok()?;
         Some((rule, renames))
     }
 
     /// `rule` as it encodes, kept by the entity it is stored under.
-    fn spelling(entity: &Entity, rule: &InductiveRule) -> Option<Rc<Json>> {
+    fn spelling(entity: &Entity, rule: &InductiveRule) -> Option<Arc<Json>> {
         if let Some(spelling) = SPELLINGS.with(|all| all.borrow().get(entity).cloned()) {
             return Some(spelling);
         }
@@ -1687,7 +1686,7 @@ mod spike {
             object.insert("assert!".into(), head);
         }
         object.remove("description");
-        let spelling = Rc::new(json);
+        let spelling = Arc::new(json);
         SPELLINGS.with(|all| all.borrow_mut().insert(entity.clone(), spelling.clone()));
         Some(spelling)
     }
@@ -2006,6 +2005,7 @@ mod oracle {
     /// grouped firing started from, writes the `novelty` and
     /// `transients` the grouped firing wrote; panics with both when it
     /// does not.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn agrees(
         key: &super::spike::PlanKey,
         rule: &InductiveRule,
