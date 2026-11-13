@@ -863,6 +863,23 @@ Every reader who saw the rename land said the to-do shows "Fix login bug", and a
 
 **Decision.** The spec opens with the framing, the one-field example and the election sentence. design.md is to be updated to say so.
 
+## 2026-11-13 — R40: type and policy on a variable line
+
+**Question.** The one [planned](results/r40-plan.md): the maintainer's concise concept gives each variable a line, `(?t as: :text policy: :last in: :memory)`. Does a policy on its own line say which claims it elects? His draft put `policy: :last` on `?l`, which only appears as the entity of `(xyz.list ?l task: ?i)`.
+
+**Method.** Clean runner, 20 readers on the draft (types swapped back, `in:` left out) and 20 on the same constraints written in place of the variable. To-do `a` sits on two lists.
+
+**Results.** [r40](results/r40.md).
+
+| spelling | `a` on two lists |
+|---|---|
+| a line per variable | 3 of 20 |
+| in place | 13 of 20 |
+
+On a line, 17 of 20 read the policy as the concept field's, so `a` keeps its newest list. In place, most saw it sits on an entity, which has no claims. A policy cannot give a to-do one list when the list holds the link.
+
+**Decision.** None yet. A line per variable misleads where a variable is an entity or appears in two calls; in place is what the maintainer finds hard to read.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
