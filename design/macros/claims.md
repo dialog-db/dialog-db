@@ -159,3 +159,7 @@
 | a named condition is within a tenth of a rule of several heads where the body is heavy | hypothesis | the agent's, 2026-11-12, by voice | refuted: +21.5% and +33.4% (#788) |
 | the difference holds at one command a commit, which is what a person issues | hypothesis | not run. Confirmed or refuted by the same scenarios at size 1 | open |
 | `all` is a splice, and a spread in a head's place or at the top level would do what it does | opinion | Irakli, 2026-11-12, by voice: "splice is something usually macros have ... maybe with a spread" | - |
+| what analysis gives is called the analyzed tree | opinion | Irakli, 2026-11-12 | - |
+| the prelude and every test's document say the same through the tree as through the notation as parsed, but for the order of labels | fact | stage 1 of [design-pipeline.md](design-pipeline.md): 59 unit, 21 integration and 2 doc tests pass with five expected rows reordered by label | holds |
+| expansion and name resolution alternate inside one phase, with no tree between them | hypothesis | the agent's. A definition is chosen by the head and labels of a form; what a form references is known once it is expanded. Refuted by a pass that resolves every name before any form is expanded | open |
+| types are inferred in the engine when a compiled rule is planned, so a type error has no place in the source | fact | `TypeEnv::infer` (`dialog-query/src/rule/types.rs`); `compile` gives descriptors and keeps no map from a variable to where it was written | holds |

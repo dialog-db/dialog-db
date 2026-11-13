@@ -2,7 +2,7 @@
 //! to it so far. The example and the tests share it.
 
 use anyhow::Result;
-use dialog_notation::{Diagnostic, Error, Expander, Step, compile};
+use dialog_notation::{Analyzer, Diagnostic, Error, Step, compile, parse};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_peer::{Peer, Session};
 use dialog_query::query::Output as _;
@@ -14,7 +14,7 @@ use dialog_storage::provider::storage::VolatileSpace;
 pub struct Notebook {
     pub operator: Peer<VolatileSpace, Session>,
     pub branch: Branch,
-    expander: Expander,
+    analyzer: Analyzer,
     /// The rules Dialog-DB cannot keep yet: a rule that holds a struct
     /// has no stored form. The notebook holds them itself and lays them
     /// over the branch for every query, so they last as long as it does
@@ -30,7 +30,7 @@ impl Notebook {
         Ok(Notebook {
             operator,
             branch,
-            expander: Expander::new()?,
+            analyzer: Analyzer::new()?,
             held: Vec::new(),
         })
     }
@@ -45,11 +45,14 @@ impl Notebook {
     /// and issues, then its queries against the result. The report is
     /// every row, as written, sorted.
     pub async fn submit(&mut self, text: &str) -> Result<(Vec<String>, Vec<Diagnostic>)> {
-        let (kernel, diagnostics) = self.expander.submit(text)?;
+        // The three phases: text to trees, trees to analyzed trees, an
+        // analyzed tree to what Dialog-DB runs.
+        let analysis = self.analyzer.analyze(&parse(text)?)?;
+        let (analyzed, diagnostics) = (analysis.analyzed, analysis.diagnostics);
         let mut transaction = self.branch.transaction();
         let mut writes = false;
         let mut queries = Vec::new();
-        for rule in &kernel {
+        for rule in &analyzed {
             for step in compile(rule)? {
                 transaction = match step {
                     Step::Assert(statement) => transaction.assert(statement),

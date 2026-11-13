@@ -61,9 +61,9 @@ async fn it_defines_a_concept_and_runs_a_command_through_it() -> Result<()> {
     assert_eq!(
         report(&mut notebook, "(query (todo ?t text: ?x state: ?s))").await?,
         vec![
-            r#"(xyz.todo todo:1 text: "Buy milk" state: :open)"#,
-            r#"(xyz.todo todo:2 text: "Call mum" state: :open)"#,
-            r#"(xyz.todo todo:3 text: "Ship it" state: :open)"#,
+            r#"(xyz.todo todo:1 state: :open text: "Buy milk")"#,
+            r#"(xyz.todo todo:2 state: :open text: "Call mum")"#,
+            r#"(xyz.todo todo:3 state: :open text: "Ship it")"#,
         ]
     );
 
@@ -74,8 +74,8 @@ async fn it_defines_a_concept_and_runs_a_command_through_it() -> Result<()> {
             "(query (todo ?t text: ?x list: list:home state: :open))"
         )
         .await?,
-        vec![r#"(xyz.todo todo:1 list: list:home text: "Buy milk" state: :open)"#],
-        "a row has the order the concept gives its fields"
+        vec![r#"(xyz.todo todo:1 list: list:home state: :open text: "Buy milk")"#],
+        "a row lists its fields by label: a tree keeps no order of them"
     );
 
     // The command held for one round and is not on the branch.
@@ -236,7 +236,7 @@ async fn it_derives_a_relation_and_reports_rows_of_several_premises() -> Result<
                          (< ?p : ?q)))"
         )
         .await?,
-        vec!["(shop.pair item:tea with: item:cup total: 13)"]
+        vec!["(shop.pair item:tea total: 13 with: item:cup)"]
     );
     Ok(())
 }
@@ -405,7 +405,7 @@ async fn it_lets_a_rule_issue_a_command_another_rule_reads() -> Result<()> {
     notebook.submit("(archive (xyz.list list:home))").await?;
     assert_eq!(
         report(&mut notebook, "(query (todo ?t text: ?x state: :open))").await?,
-        vec![r#"(xyz.todo todo:3 text: "Ship it" state: :open)"#]
+        vec![r#"(xyz.todo todo:3 state: :open text: "Ship it")"#]
     );
     // Neither command is on the branch.
     assert!(
@@ -848,7 +848,7 @@ async fn it_keeps_a_form_on_a_branch_under_the_entity_that_names_it() -> Result<
 async fn it_holds_a_symbol_with_no_domain_as_a_value_and_not_as_an_attribute() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
-        .submit("(assert! (xyz.form form:1 head: /todo var: /?x op: /+))")
+        .submit("(assert! (xyz.form form:1 head: /todo op: /+ var: /?x))")
         .await?;
     assert_eq!(
         report(
@@ -856,7 +856,7 @@ async fn it_holds_a_symbol_with_no_domain_as_a_value_and_not_as_an_attribute() -
             "(query (xyz.form ?f head: ?h var: ?v op: ?o))"
         )
         .await?,
-        vec!["(xyz.form form:1 head: /todo var: /?x op: /+)"]
+        vec!["(xyz.form form:1 head: /todo op: /+ var: /?x)"]
     );
 
     let claim = notebook

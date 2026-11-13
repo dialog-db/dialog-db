@@ -25,6 +25,7 @@ use std::collections::BTreeSet;
 
 use crate::Error;
 use crate::form::{Form, Kind, Part, read};
+use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, fill, matches, variables};
 use crate::syntax::{Signature, Syntax as Tree};
 
@@ -262,8 +263,10 @@ pub struct Expander {
 impl Expander {
     /// A walker that knows the core forms.
     pub fn new() -> Result<Self, Error> {
+        // The core forms go the way every document does, through the
+        // tree, so what the tree cannot say the prelude cannot use.
         let mut expander = Expander::default();
-        expander.submit(PRELUDE)?;
+        expander.expand(parse(PRELUDE)?.iter().map(Tree::form).collect())?;
         Ok(expander)
     }
 
@@ -271,9 +274,15 @@ impl Expander {
     /// kept here; every other form comes back as a kernel rule, in the
     /// order written, with what the rules said about the document.
     pub fn submit(&mut self, text: &str) -> Result<(Vec<Form>, Vec<Diagnostic>), Error> {
+        self.expand(read(text)?)
+    }
+
+    /// Expand every form of `forms`, as [`submit`](Self::submit) does
+    /// the forms a text reads to.
+    pub fn expand(&mut self, forms: Vec<Form>) -> Result<(Vec<Form>, Vec<Diagnostic>), Error> {
         self.asked.clear();
         let mut kernel = Vec::new();
-        for form in read(text)? {
+        for form in forms {
             // Where several definitions take a form that is read, the
             // rule is expanded once a definition: what is read is what
             // any of them reads. Within one rule a form that recurs is

@@ -156,8 +156,14 @@ fn written(value: &Value) -> Form {
     }
 }
 
+/// Compile an analyzed tree: the third phase, from a rule of the
+/// kernel to what Dialog-DB runs.
+pub fn compile(rule: &Syntax) -> Result<Vec<Step>, Error> {
+    kernel(&rule.form())
+}
+
 /// Compile an expanded `(rule …)` form.
-pub fn compile(form: &Form) -> Result<Vec<Step>, Error> {
+fn kernel(form: &Form) -> Result<Vec<Step>, Error> {
     let rule = Rule::parse(form)?;
     if rule.heads.is_empty() {
         return Err(Error::Refused(format!("{form} has no head")));
@@ -1075,10 +1081,10 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::form::read as forms;
+    use crate::parse;
 
     fn steps(text: &str) -> Result<Vec<Step>, Error> {
-        compile(&forms(text)?.remove(0))
+        compile(&parse(text)?.remove(0))
     }
 
     #[test]
@@ -1090,10 +1096,11 @@ mod tests {
             panic!("one assertion");
         };
         assert_eq!(statement.this.to_string(), "todo:1");
-        assert_eq!(statement.with[0].is, Value::String("Buy milk".into()));
-        assert_eq!(statement.with[0].pick, dialog_query::Pick::Last);
-        assert_eq!(statement.with[1].is, Value::UnsignedInt(3));
-        assert_eq!(statement.with[1].pick, dialog_query::Pick::All);
+        // A tree keeps no order of labels, so the fields come by label.
+        assert_eq!(statement.with[0].is, Value::UnsignedInt(3));
+        assert_eq!(statement.with[0].pick, dialog_query::Pick::All);
+        assert_eq!(statement.with[1].is, Value::String("Buy milk".into()));
+        assert_eq!(statement.with[1].pick, dialog_query::Pick::Last);
     }
 
     #[test]

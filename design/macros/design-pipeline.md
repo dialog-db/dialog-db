@@ -5,26 +5,26 @@
 Decided by the maintainer: there are three phases and a command over them; the analyzer may be a resolver; a macro resolves its names when it is defined. The shapes below are the agent's, built in `rust/dialog-notation` and open to change.
 
 ```
- text ──parse──▶ syntax tree ──analyze──▶ kernel tree ──compile──▶ what Dialog-DB runs
-                 as written,              every form a rule,       statements, rules,
-                 names unresolved         names resolved,          queries
-                                          and a table of what
-                                          each name meant
+ text ──parse──▶ syntax tree ──analyze──▶ analyzed tree ──compile──▶ what Dialog-DB runs
+                 as written,              every form a rule          statements, rules,
+                 names unresolved         of the kernel, names       queries
+                                          resolved, and a table
+                                          of what each name meant
 ```
 
 | phase | takes | gives | reads the database |
 |---|---|---|---|
 | `parse` | text | a list of trees: applications, variables, constants, references, structs, tuples | no |
-| `analyze` | trees, and the definitions in force | the kernel rules; the name table: each name written and what it resolved to, or that it did not; diagnostics | yes: the definitions. Today they are held by the analyzer in memory |
-| `compile` | a kernel rule, as a tree | steps: assert, retract, issue, deduce, induce, query | no |
+| `analyze` | trees, and the definitions in force | the analyzed trees, each a rule of the kernel; the name table: each name written and what it resolved to, or that it did not; diagnostics | yes: the definitions. Today they are held by the analyzer in memory |
+| `compile` | an analyzed tree | steps: assert, retract, issue, deduce, induce, query | no |
 
-What is the same in every phase is the tree. The notation as parsed (`Form`) is the parser's own and what a tree is printed as; nothing after `parse` reads it.
+Named by the maintainer: what analysis gives is the **analyzed tree**. What is the same in every phase is the tree. The notation as parsed (`Form`) is the parser's own and what a tree is printed as; nothing after `parse` reads it.
 
 ## Stages
 
 Each ends with the tests passing.
 
-1. **The boundary.** `parse`, `Analyzer::analyze` and `compile` take and give trees. Inside, expanding and compiling still go through the notation as parsed.
+1. **The boundary.** `parse`, `Analyzer::analyze` and `compile` take and give trees. Done. Inside, expanding and compiling still go through the notation as parsed.
 2. **The compiler reads the tree.** `kernel.rs` and `compile.rs`.
 3. **The analyzer reads the tree.** Patterns and templates match and fill trees; the walker walks trees.
 4. **The name table.** Names are resolved as a step of their own, and the analysis gives the table back.

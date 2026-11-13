@@ -648,3 +648,20 @@ Not examined yet. They are columns, not recommendations.
 **Learned.** What is built is one walk: `Expander::submit` reads text, expands by rules about syntax held in memory, and gives kernel rules as the notation as parsed, which `compile` reads. The tree is built beside it and nothing downstream reads it. A reference resolved to an entity has no spelling in the notation as parsed, so what was decided today cannot be built until the phases read the tree.
 
 **Decided.** By the agent, as the reading of "done" to build to, in [design-pipeline.md](design-pipeline.md): three phases that take and give trees, in four stages, the last a name table the analysis gives back. What is left out of the stages is listed there with what each waits on.
+
+## 2026-11-12, Designing: the boundary between the phases
+
+**Asked.** Irakli: what analysis gives should be called the analyzed tree. And: where does macro expansion take place, or type inference?
+
+**Learned.**
+
+- Stage 1 is built: `parse`, `Analyzer::analyze` and `compile` take and give trees, and the prelude itself goes through the tree. Nothing the prelude or the tests write is lost by the tree but one thing: the order of labels. A reported row lists its fields by label now, where a test had it in the order the concept gave them.
+- Expansion is inside analysis. Which definition takes a form is found by resolving its head and its labels, and which names in it are references is known only once it is expanded, so the two alternate and there is no tree between them. What can be asked for apart is one step: this form, expanded once.
+- Type inference is in the engine, after `compile`: `TypeEnv::infer` when a compiled rule is planned. So a contradiction comes back with no place in the source, and nothing says what type a variable has without compiling and planning.
+
+```
+ text ─parse─▶ syntax tree ─analyze─▶ analyzed tree ─compile─▶ rules, queries ─plan─▶ run
+                            resolve ⇄ expand                                   types inferred
+```
+
+**Decided.** By the maintainer: "analyzed tree". Open, and asked of him: whether types are inferred once, by the engine, and asked for by the pipeline, or by analysis itself; and whether a row keeps the order its fields were written in.
