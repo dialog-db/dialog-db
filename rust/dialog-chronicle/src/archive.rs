@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use dialog_capability::{Capability, Provider, Resume};
-use dialog_common::{Blake3Hash, Buffer};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSend};
 use dialog_effects::archive::prelude::{GetExt, ImportExt, PutExt};
 use dialog_effects::archive::{ArchiveError, Get, Import, Put};
 use dialog_search_tree::{Manifest, NodeBody};
@@ -3413,10 +3413,10 @@ impl Chronicle {
     /// process holds, and make a sync point, which must not hold up the
     /// runtime's other tasks. A read answers at once: it reads the file's
     /// mapping and takes no lock.
-    pub(crate) fn off_runtime<T: Send + 'static>(
+    pub(crate) fn off_runtime<T: ConditionalSend + 'static>(
         &self,
-        work: impl FnOnce(&Chronicle) -> T + Send + 'static,
-        failed: impl FnOnce(tokio::task::JoinError) -> T + Send + 'static,
+        work: impl FnOnce(&Chronicle) -> T + ConditionalSend + 'static,
+        failed: impl FnOnce(tokio::task::JoinError) -> T + ConditionalSend + 'static,
     ) -> Resume<'_, T> {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return Resume::now(work(self));
@@ -4715,7 +4715,9 @@ mod tests {
     struct Recovering(#[allow(dead_code)] parking_lot::MutexGuard<'static, ()>);
 
     impl Recovering {
-        fn set(hook: impl Fn(&Path) + Send + Sync + 'static) -> Self {
+        fn set(
+            hook: impl Fn(&Path) + ConditionalSend + dialog_common::ConditionalSync + 'static,
+        ) -> Self {
             let held = RECOVERING_TESTS.lock();
             *RECOVERING.lock() = Some(Arc::new(hook));
             Self(held)
