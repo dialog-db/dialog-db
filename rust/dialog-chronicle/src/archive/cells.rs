@@ -436,18 +436,23 @@ impl Provider<Publish> for Chronicle {
             &format!("{}/{}", effect.space(), effect.cell()),
             effect.content(),
         );
-        Resume::now(self.publish_cell(
-            effect.space(),
-            effect.cell(),
-            effect.content(),
-            effect.when(),
-        ))
+        let (space, cell) = (effect.space().to_string(), effect.cell().to_string());
+        let (content, when) = (effect.content().to_vec(), effect.when().cloned());
+        self.off_runtime(
+            move |archive| archive.publish_cell(&space, &cell, &content, when.as_ref()),
+            |error| Err(MemoryError::Storage(error.to_string())),
+        )
     }
 }
 
 impl Provider<Retract> for Chronicle {
     fn execute(&self, effect: Capability<Retract>) -> Resume<'_, Result<(), MemoryError>> {
-        Resume::now(self.retract_cell(effect.space(), effect.cell(), effect.when()))
+        let (space, cell) = (effect.space().to_string(), effect.cell().to_string());
+        let when = effect.when().clone();
+        self.off_runtime(
+            move |archive| archive.retract_cell(&space, &cell, &when),
+            |error| Err(MemoryError::Storage(error.to_string())),
+        )
     }
 }
 

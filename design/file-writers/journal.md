@@ -1028,3 +1028,43 @@ handles dropped together could both see another handle and neither close
 the file. The mutex each handle takes as it is dropped (added above for
 the sync thread) serializes them now, so the second sees itself as the
 last.
+
+## 2026-11-13: the third review round
+
+The third review (at 284574e2) found the following, all addressed here.
+
+**Dropping a handle waited for a background sync point.** Every handle's
+drop took the mutex the sync thread held across its sync point (two fsyncs,
+and a wait for the sync byte if another process held it). Every node served
+to a tree holds a handle, and every write on a runtime dropped one, so reads
+and appends stalled for each background sync. The reviewer measured 1.5 s
+with a sync point held open for that long. A handle now takes the mutex only
+when it may be the last, that is, when at most one other handle (perhaps the
+thread's) is left. The thread lets go of its own handle under the mutex and
+closes the file if every other handle went meanwhile. That covers two last
+handles dropped at once, which each find the other and leave the close to
+the thread. Pinned by `it_drops_a_handle_without_waiting_for_a_sync_point`:
+1.50 s before, under 0.5 s after.
+
+**One sync thread per open file.** There is now one per process. Every
+second it looks at each file the process has open (the table of open
+files). An application with many spaces open pays for one thread, not one
+per space.
+
+**Writes left on the runtime.** Only `Put` and `Import` had moved to
+tokio's blocking threads. The tree's `nodes::Write` and a cell's `Publish`
+and `Retract` now go through the same path (`off_runtime`). A branch head's
+update always takes the writer's turn, so it was the write most likely to
+block a one-thread runtime. `it_waits_for_the_turn_off_the_runtime` now
+publishes a cell as well, and fails with the cell written inline.
+
+**Two opens of a new file.** The gate was keyed by the path before the file
+existed and by the file once it did. So an open arriving after the first
+had made the file, but before it was open, took another gate and recovered
+the file beside it, in the same process, where the file's locks do not
+exclude. Each open now takes its path's gate always, then the file's when
+there is one, in that order. Pinned by
+`it_opens_a_new_file_once_for_two_opens`, which holds the first open inside
+its recovery: before the fix the second recovers too. One case is still
+open: two names for a file that does not exist yet, which only a symbolic
+link to a missing target makes.

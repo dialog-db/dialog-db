@@ -36,8 +36,10 @@ pub(crate) const PRESENT: u64 = BASE - 1;
 pub(crate) const RECOVERY: u64 = BASE - 2;
 
 /// The byte a process holds exclusive while it makes a sync point: the
-/// durable slot is written by one at a time, without the writer's turn.
-/// It is taken before the turn, never while holding it.
+/// durable slot is written by one at a time. A sync point made in the
+/// writer's turn (the last close's) waits for it while holding the turn;
+/// one made without the turn holds it and only tries the turn, never
+/// waiting for it, so neither waits on the other.
 pub(crate) const SYNC: u64 = BASE - 3;
 
 /// The byte an extent's owner holds while the extent is its own, by the

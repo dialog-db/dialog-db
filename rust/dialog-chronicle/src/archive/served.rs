@@ -435,9 +435,18 @@ impl<N: Node> Provider<Write<N>> for Chronicle {
                 block.as_ref(),
             );
         }
-        Resume::now(
-            self.append(write.catalog.catalog_name(), &blocks)
-                .map_err(|error| DialogSearchTreeError::Storage(error.into())),
+        let catalog = write.catalog.catalog_name().to_string();
+        self.off_runtime(
+            move |archive| {
+                archive
+                    .append(&catalog, &blocks)
+                    .map_err(|error| DialogSearchTreeError::Storage(error.into()))
+            },
+            |error| {
+                Err(DialogSearchTreeError::Storage(
+                    dialog_storage::DialogStorageError::Storage(error.to_string()),
+                ))
+            },
         )
     }
 }

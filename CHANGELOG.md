@@ -657,10 +657,12 @@ What this changes for you:
   not opened twice.
 - The file is synced after an append once 64 appends have come since
   the last sync or 2 seconds have passed, on `Chronicle::sync`, on the
-  last close, and by a thread of the archive's own once appends have
-  waited 2 seconds for a sync (`Options::sync_in_background`, on by
-  default), so a commit no other append follows is durable within about
-  three seconds. That is weaker than the `fs` provider, which syncs every
+  last close, and by a sync thread once appends have waited 2 seconds
+  for a sync (`Options::sync_in_background`, on by default), so a commit
+  no other append follows is durable within about three seconds. The
+  thread is one per process, for every file it has open, and wakes once a
+  second. Dropping a handle waits for it only when that handle may be the
+  last. That is weaker than the `fs` provider, which syncs every
   block it writes; call `Chronicle::sync` where a commit must be durable
   before anything else happens. A power loss loses at most the appends
   since the last sync, and never leaves the file damaged: opening goes back to the newest state
@@ -684,15 +686,18 @@ What this changes for you:
   slot that frees it is on the disk, and a sync point made in the writer's
   turn waits for one made without it, so two never write the same durable
   copy.
-- `Put` and `Import` append on tokio's blocking threads when a tokio
-  runtime runs the caller: an append can wait for the writer's turn
-  another process holds and make a sync point, and holds up none of the
-  runtime's other tasks while it does. `Get` answers at once from the
-  file's mapping.
+- Every write (`Put`, `Import`, the tree's `nodes::Write`, and a cell's
+  `Publish` and `Retract`) runs on tokio's blocking threads when a tokio
+  runtime runs the caller: it can wait for the writer's turn another
+  process holds and make a sync point, and holds up none of the runtime's
+  other tasks while it does. Reads (`Get`, `Resolve`, `List`, the tree's
+  node reads) answer at once from the file's mapping.
 - An append of more than 32 Ki blocks is committed in parts, so the index
   pages one commit frees fit the slot that lists them.
 - An open of a file that has to be recovered holds up no open or close of
-  another file in the process.
+  another file in the process. Two opens of one file in a process wait
+  for each other, by its path and, once it exists, by the file, so the
+  second shares the first's handle even when the first made the file.
 - An extent a process left behind when it closed or died is written into
   again by the next writer that needs one, instead of a new one, so a
   file opened and closed many times does not grow a dead extent each
