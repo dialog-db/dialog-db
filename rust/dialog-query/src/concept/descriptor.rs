@@ -815,7 +815,7 @@ impl Application for ConceptQuery {
         }
         Ok(ConceptConclusion {
             this,
-            terms: self.terms.clone(),
+            terms: self.concluded_terms(),
             source,
         })
     }
@@ -850,7 +850,7 @@ impl Application for ConceptQuery {
         };
         Ok(ConceptConclusion {
             this: entity,
-            terms: self.terms.clone(),
+            terms: self.concluded_terms(),
             source,
         })
     }
@@ -2419,5 +2419,49 @@ mod tests {
 
         // An empty string is treated as absent.
         assert_eq!(described.with_description("").description(), None);
+    }
+
+    /// A query that holds the constant -0.0 in the place of a field reads it
+    /// as 0.0. It is restricted to one entity, as the same query with the
+    /// constant 0.0 is. Its evaluation takes the constant 0.0, and each row
+    /// that it realizes or adopts holds 0.0 and equals the row of the query
+    /// of 0.0.
+    #[dialog_common::test]
+    fn it_reads_a_query_that_holds_negative_zero_as_zero() -> Result<(), EvaluationError> {
+        let predicate = ConceptDescriptor::try_from([(
+            "score",
+            AttributeDescriptor::new(the!("item/score"), "", Cardinality::One, Some(Type::Float)),
+        )])
+        .unwrap();
+        let query = |score: f64| {
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("this"));
+            terms.insert("score".into(), Term::Constant(Value::Float(score)));
+            ConceptQuery {
+                terms,
+                predicate: predicate.clone(),
+            }
+        };
+        let positive = |value: Option<&Value>| matches!(value, Some(Value::Float(zero)) if *zero == 0.0 && zero.is_sign_positive());
+        let entity = Entity::new().unwrap();
+        let Restriction::Scoped(restricted) = query(-0.0).restrict(&entity) else {
+            panic!("a query of -0.0 restricts to one entity");
+        };
+        assert!(positive(
+            restricted
+                .conformed()
+                .terms
+                .get("score")
+                .and_then(Term::as_constant)
+        ));
+        let mut source = Match::new();
+        source.bind(&Term::var("this"), Value::Entity(entity.clone()))?;
+        let row = query(-0.0).realize(source.clone())?;
+        assert!(positive(Some(&Value::Float(row.get::<f64>("score")?))));
+        assert_eq!(row, query(0.0).realize(source.clone())?);
+        let adopted = query(-0.0).adopt(row)?;
+        assert!(positive(Some(&Value::Float(adopted.get::<f64>("score")?))));
+        assert_eq!(adopted, query(0.0).realize(source)?);
+        Ok(())
     }
 }

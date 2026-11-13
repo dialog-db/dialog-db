@@ -3457,3 +3457,397 @@ async fn it_reads_a_constant_that_a_field_of_float_32_narrows_in_the_place_of_a_
     }
     Ok(())
 }
+
+/// The facts, the steps, and the names of the items that a first read gives
+/// after each step, for the tests of negative zero.
+type NegativeZero = (Vec<Write>, Vec<Vec<Write>>, [&'static [&'static str]; 8]);
+
+/// The facts of the tests of negative zero: an item with the score 3.0 and an
+/// owner of each item. Then the steps: items arrive with each zero of each
+/// number type (the float 0.0, the float -0.0, the natural 0, and the integer
+/// 0), a name changes, and zeros leave and arrive. Gives the names of the
+/// items whose score is a zero after each step, which is what a first read of
+/// a filter of -0.0 gives.
+fn negative_zero_steps() -> Result<NegativeZero> {
+    let item = |name: &'static str, n: &'static str, score: Value| {
+        vec![
+            (true, "rv.m/name", name, Value::String(n.into())),
+            (true, "rv.m/score", name, score),
+        ]
+    };
+    let mut setup = item("item:1", "a1", Value::Float(3.0));
+    for (owner, item) in [
+        ("owner:1", "item:1"),
+        ("owner:2", "item:2"),
+        ("owner:3", "item:3"),
+        ("owner:4", "item:4"),
+        ("owner:5", "item:5"),
+    ] {
+        setup.push((true, "rv.o/item", owner, Value::Entity(item.parse()?)));
+    }
+    let steps = vec![
+        item("item:2", "a2", Value::Float(0.0)),
+        item("item:3", "a3", Value::Float(-0.0)),
+        item("item:4", "a4", Value::UnsignedInt(0)),
+        item("item:5", "a5", Value::SignedInt(0)),
+        vec![(true, "rv.m/name", "item:2", Value::String("b2".into()))],
+        vec![(false, "rv.m/score", "item:3", Value::Float(-0.0))],
+        vec![
+            (false, "rv.m/score", "item:1", Value::Float(3.0)),
+            (true, "rv.m/score", "item:1", Value::Float(0.0)),
+        ],
+        vec![(false, "rv.m/score", "item:2", Value::Float(0.0))],
+    ];
+    let zeros: [&[&str]; 8] = [
+        &["a2"],
+        &["a2", "a3"],
+        &["a2", "a3", "a4"],
+        &["a2", "a3", "a4", "a5"],
+        &["a3", "a4", "a5", "b2"],
+        &["a4", "a5", "b2"],
+        &["a1", "a4", "a5", "b2"],
+        &["a1", "a4", "a5"],
+    ];
+    Ok((setup, steps, zeros))
+}
+
+/// A filter `?score == -0.0` on a field of floats. The equality reads -0.0
+/// as 0.0, as the store keys each zero as one number. So a first read gives
+/// each item whose stored score is a zero of any number type, and each of its
+/// rows holds the score 0.0, as a filter `?score == 0.0` gives. After each
+/// step the live query holds the rows of a first read and keeps its
+/// incremental path, as items arrive with each zero and leave again, for a
+/// rule that reads the model and for a rule that reaches the model through
+/// an owner.
+#[dialog_common::test]
+async fn it_holds_the_rows_of_a_first_read_for_a_filter_of_negative_zero() -> Result<()> {
+    let (setup, steps, zeros) = negative_zero_steps()?;
+    for kind in ["Float", "float:"] {
+        for owner in [false, true] {
+            for constant in ["-0.0", "0.0"] {
+                let what = format!("== {constant}, {kind}, through an owner: {owner}");
+                let (rule, head) = filtered(kind, serde_json::from_str(constant)?, owner)?;
+                let (rows, full) = rows_of_a_query_after_each_step(
+                    slice::from_ref(&rule),
+                    &each_field(&head)?,
+                    &setup,
+                    &steps,
+                )
+                .await?;
+                for (step, (rows, zeros)) in rows.iter().zip(zeros).enumerate() {
+                    assert_eq!(names(rows)?, zeros.to_vec(), "{what}, step {step}");
+                    for row in rows {
+                        let score = row.get::<f64>("score")?;
+                        assert!(
+                            score == 0.0 && score.is_sign_positive(),
+                            "{what}, step {step}: {score:?}"
+                        );
+                    }
+                }
+                assert_eq!(full, 1, "{what}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A constant -0.0 reads as 0.0 wherever it meets a stored or a bound value, as
+/// the store keys each zero as one number. These are the forms: the place of a
+/// field in the body of a rule, for a rule that reads the model and for a rule
+/// that reaches the model through an owner; the place of a field of a negated
+/// concept; the fallback of `coalesce` and an equality, each of which gives the
+/// constant to a variable in the place of a field; the output of `coalesce`,
+/// which compares the constant with the stored score; and the query itself, for
+/// a query of the model and for a query of the head of a rule. A first read of
+/// each form gives the items that the same form with the constant 0.0 gives,
+/// and each row that holds a score holds 0.0. After each step the live query
+/// holds the rows of a first read. It evaluates its rules in full at its first
+/// poll alone, as the same form with 0.0 does.
+#[dialog_common::test]
+async fn it_reads_a_constant_of_negative_zero_as_zero_in_each_place() -> Result<()> {
+    let (setup, steps, zeros) = negative_zero_steps()?;
+    // The named items whose score is no zero, after each step.
+    let others: [&[&str]; 8] = [
+        &["a1"],
+        &["a1"],
+        &["a1"],
+        &["a1"],
+        &["a1"],
+        &["a1", "a3"],
+        &["a3"],
+        &["a3", "b2"],
+    ];
+    let variable = |name: &str| json!({ "?": { "name": name } });
+    let named =
+        json!({ "assert": ">=", "where": { "of": variable("name"), "with": { "text:": "a" } } });
+    let compile = |head: &Json, when: Vec<Json>, unless: Vec<Json>| -> Result<DeductiveRule> {
+        let rule: DeductiveRuleDescriptor =
+            serde_json::from_value(json!({ "deduce": head, "when": when, "unless": unless }))?;
+        Ok(rule.compile()?)
+    };
+    let scored = |query: &mut ConceptQuery, zero: f64| {
+        query
+            .terms
+            .insert("score".into(), Term::Constant(Value::Float(zero)));
+    };
+    for kind in ["Float", "float:"] {
+        for zero in [-0.0, 0.0] {
+            let constant = Json::from(zero);
+            let model = json!({ "with": {
+                "name": { "the": "rv.m/name", "as": "Text", "cardinality": "one" },
+                "score": { "the": "rv.m/score", "as": kind, "cardinality": "one" },
+            } });
+            let name_of_the_model = json!({ "with": {
+                "name": { "the": "rv.m/name", "as": "Text", "cardinality": "one" },
+            } });
+            let score_of_the_model = json!({ "with": {
+                "score": { "the": "rv.m/score", "as": kind, "cardinality": "one" },
+            } });
+            let with_bonus = json!({ "with": {
+                "name": { "the": "rv.m/name", "as": "Text", "cardinality": "one" },
+                "bonus": { "the": "rv.m/bonus", "as": kind, "cardinality": "one", "optional": true },
+            } });
+            let head = json!({ "with": { "name": { "the": "rv.out/name", "as": "Text" } } });
+            let head_scored = json!({ "with": {
+                "name": { "the": "rv.out/name", "as": "Text" },
+                "score": { "the": "rv.out/score", "as": kind },
+            } });
+            let named_item = json!({ "assert": name_of_the_model, "where": {
+                "this": variable("this"), "name": variable("name"),
+            } });
+            let in_place = compile(
+                &head,
+                vec![
+                    json!({ "assert": model, "where": {
+                        "this": variable("this"), "name": variable("name"), "score": constant,
+                    } }),
+                    named.clone(),
+                ],
+                vec![],
+            )?;
+            let in_place_of_an_owner = compile(
+                &head,
+                vec![
+                    json!({
+                        "assert": { "with": { "item": { "the": "rv.o/item", "as": "Entity" } } },
+                        "where": { "this": variable("this"), "item": variable("item") },
+                    }),
+                    json!({ "assert": model, "where": {
+                        "this": variable("item"), "name": variable("name"), "score": constant,
+                    } }),
+                    named.clone(),
+                ],
+                vec![],
+            )?;
+            let negated = compile(
+                &head,
+                vec![named_item, named.clone()],
+                vec![json!({ "assert": score_of_the_model, "where": {
+                    "this": variable("this"), "score": constant,
+                } })],
+            )?;
+            let coalesced = compile(
+                &head_scored,
+                vec![
+                    json!({ "assert": with_bonus, "where": {
+                        "this": variable("this"), "name": variable("name"), "bonus": variable("bonus"),
+                    } }),
+                    json!({ "assert": "coalesce", "where": {
+                        "source": variable("bonus"), "fallback": constant, "is": variable("score"),
+                    } }),
+                    json!({ "assert": score_of_the_model, "where": {
+                        "this": variable("this"), "score": variable("score"),
+                    } }),
+                    named.clone(),
+                ],
+                vec![],
+            )?;
+            let coalesced_into_the_constant = compile(
+                &head,
+                vec![
+                    json!({ "assert": with_bonus, "where": {
+                        "this": variable("this"), "name": variable("name"), "bonus": variable("bonus"),
+                    } }),
+                    json!({ "assert": score_of_the_model, "where": {
+                        "this": variable("this"), "score": variable("stored"),
+                    } }),
+                    json!({ "assert": "coalesce", "where": {
+                        "source": variable("bonus"), "fallback": variable("stored"), "is": constant,
+                    } }),
+                    named.clone(),
+                ],
+                vec![],
+            )?;
+            let equal = compile(
+                &head_scored,
+                vec![
+                    json!({ "assert": "==", "where": { "this": variable("score"), "is": constant } }),
+                    json!({ "assert": model, "where": {
+                        "this": variable("this"), "name": variable("name"), "score": variable("score"),
+                    } }),
+                    named.clone(),
+                ],
+                vec![],
+            )?;
+            let copied = compile(
+                &head_scored,
+                vec![
+                    json!({ "assert": model, "where": {
+                        "this": variable("this"), "name": variable("name"), "score": variable("score"),
+                    } }),
+                    named.clone(),
+                ],
+                vec![],
+            )?;
+            let mut of_the_model = each_field(&model)?;
+            scored(&mut of_the_model, zero);
+            let mut of_the_head = each_field(&head_scored)?;
+            scored(&mut of_the_head, zero);
+            for (form, rules, query, expected) in [
+                ("a rule", vec![in_place], each_field(&head)?, zeros),
+                (
+                    "a rule through an owner",
+                    vec![in_place_of_an_owner],
+                    each_field(&head)?,
+                    zeros,
+                ),
+                (
+                    "a negated concept",
+                    vec![negated],
+                    each_field(&head)?,
+                    others,
+                ),
+                (
+                    "the fallback of coalesce",
+                    vec![coalesced],
+                    each_field(&head_scored)?,
+                    zeros,
+                ),
+                (
+                    "the output of coalesce",
+                    vec![coalesced_into_the_constant],
+                    each_field(&head)?,
+                    zeros,
+                ),
+                ("an equality", vec![equal], each_field(&head_scored)?, zeros),
+                ("a query of the model", vec![], of_the_model, zeros),
+                (
+                    "a query of the head of a rule",
+                    vec![copied],
+                    of_the_head,
+                    zeros,
+                ),
+            ] {
+                let what = format!("{zero:?} in {form}, {kind}");
+                let (rows, full) =
+                    rows_of_a_query_after_each_step(&rules, &query, &setup, &steps).await?;
+                for (step, (rows, expected)) in rows.iter().zip(expected).enumerate() {
+                    assert_eq!(names(rows)?, expected.to_vec(), "{what}, step {step}");
+                    if query.terms.contains("score") {
+                        for row in rows {
+                            let score = row.get::<f64>("score")?;
+                            assert!(
+                                score == 0.0 && score.is_sign_positive(),
+                                "{what}, step {step}: {score:?}"
+                            );
+                        }
+                    }
+                }
+                assert_eq!(full, 1, "{what}");
+            }
+        }
+    }
+    Ok(())
+}
+
+mod negative_zero_lens {
+    use dialog_query::Attribute;
+
+    /// The score of an item of the tests of negative zero.
+    #[derive(Attribute, Clone, PartialEq)]
+    #[domain("rv.m")]
+    pub struct Score(pub f64);
+}
+
+/// An item of the tests of negative zero, as a typed concept.
+#[derive(dialog_query::Concept, Debug, Clone, PartialEq)]
+pub struct ScoredItem {
+    /// The item.
+    pub this: Entity,
+    /// Its score.
+    pub score: negative_zero_lens::Score,
+}
+
+/// A typed query (of a concept that `#[derive(Concept)]` makes) that holds
+/// the constant -0.0 in the place of a field reads it as 0.0. A first read
+/// gives each item whose stored score is a zero of any number type, and each
+/// row holds the score 0.0, as the same query with 0.0 gives. After each
+/// step the live query holds the rows of a first read, each live row holds
+/// the score 0.0 with no sign, and the live query evaluates in full at its
+/// first poll alone.
+#[dialog_common::test]
+async fn it_reads_a_typed_query_of_negative_zero_as_zero() -> Result<()> {
+    use dialog_query::Query;
+    let (setup, steps, _) = negative_zero_steps()?;
+    let expected: [&[&str]; 8] = [
+        &["item:2"],
+        &["item:2", "item:3"],
+        &["item:2", "item:3", "item:4"],
+        &["item:2", "item:3", "item:4", "item:5"],
+        &["item:2", "item:3", "item:4", "item:5"],
+        &["item:2", "item:4", "item:5"],
+        &["item:1", "item:2", "item:4", "item:5"],
+        &["item:1", "item:4", "item:5"],
+    ];
+    let items = |rows: &[ScoredItem]| -> Vec<String> {
+        let mut items: Vec<String> = rows.iter().map(|row| row.this.to_string()).collect();
+        items.sort();
+        items
+    };
+    for zero in [-0.0, 0.0] {
+        let query = || Query::<ScoredItem> {
+            this: Term::var("this"),
+            score: Term::Constant(Value::Float(zero)),
+        };
+        let (branch, operator) = empty().await?;
+        commit_writes(&branch, &operator, &setup).await?;
+        let mut live = branch.query().subscribe(query());
+        live.poll(&operator).await?;
+        for (step, (writes, expected)) in steps.iter().zip(expected).enumerate() {
+            commit_writes(&branch, &operator, writes).await?;
+            live.poll(&operator).await?;
+            let read = branch
+                .query()
+                .subscribe(query())
+                .poll(&operator)
+                .await?
+                .map_or(Vec::new(), |delta| delta.asserted);
+            assert_eq!(items(&read), expected.to_vec(), "{zero:?}, step {step}");
+            for row in &read {
+                let score = row.score.0;
+                assert!(
+                    score == 0.0 && score.is_sign_positive(),
+                    "{zero:?}, step {step}: {score:?}"
+                );
+            }
+            let held = live.results();
+            assert_eq!(held.len(), read.len(), "{zero:?}, step {step}");
+            assert!(
+                held.iter().all(|row| read.contains(row)),
+                "{zero:?}, step {step}"
+            );
+            // The derived equality of a row takes -0.0 as 0.0, so the sign
+            // of each live row is checked by its bits.
+            for row in held {
+                assert_eq!(
+                    row.score.0.to_bits(),
+                    0.0f64.to_bits(),
+                    "{zero:?}, step {step}: {:?}",
+                    row.score.0
+                );
+            }
+        }
+        assert_eq!(live.recomputes(), 1, "{zero:?}");
+    }
+    Ok(())
+}

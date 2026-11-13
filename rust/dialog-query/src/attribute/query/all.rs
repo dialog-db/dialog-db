@@ -56,6 +56,11 @@ impl AttributeQueryAll {
     /// semantic-layer construct realized by
     /// [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery), so a `Nothing` bit
     /// on the `is` term's kind is meaningless here and is stripped.
+    ///
+    /// A constant `is` of -0.0 reads as the constant 0.0 (see
+    /// [`Term::without_negative_zero`]). A scan for either finds each stored
+    /// zero, and a read of one entity compares its stored value with the
+    /// constant, so both reads take the constant as 0.0.
     pub fn new(the: Term<Relation>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         Self::with_source(the, of, is, cause, Term::<Record>::unique())
     }
@@ -84,7 +89,7 @@ impl AttributeQueryAll {
             (Some(name), Some(kind)) if kind.is_optional() => {
                 Term::<Any>::typed_var(name.to_string(), kind.required())
             }
-            _ => is,
+            _ => is.without_negative_zero(),
         };
         Self {
             the,

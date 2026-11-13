@@ -1211,6 +1211,44 @@ mod tests {
         Ok(())
     }
 
+    /// A constant value of -0.0 reads as 0.0. A read that starts from the
+    /// entity compares the stored value with the constant, and it finds the
+    /// stored 0.0 and the stored natural 0, as a scan for the constant does.
+    /// A constant of 1.5 still finds neither.
+    #[dialog_common::test]
+    async fn it_reads_a_constant_value_of_negative_zero_as_zero() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let float = Entity::new()?;
+        let natural = Entity::new()?;
+        let score = the!("item/score");
+        assert_relation!(branch, &operator, score, float, 0.0f64);
+        assert_relation!(branch, &operator, score, natural, 0u32);
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        for (entity, constant, rows) in [
+            (&float, -0.0, 1),
+            (&natural, -0.0, 1),
+            (&float, 0.0, 1),
+            (&natural, 0.0, 1),
+            (&float, 1.5, 0),
+        ] {
+            let query = AttributeQueryOnly::new(
+                Term::from(the!("item/score")),
+                Term::from(entity.clone()),
+                Term::Constant(Value::Float(constant)),
+                Term::var("cause"),
+            );
+            let results =
+                Selection::try_vec(Application::evaluate(query, Match::new().seed(), &source))
+                    .await?;
+            assert_eq!(results.len(), rows, "{constant:?} of {entity}");
+        }
+        Ok(())
+    }
+
     /// A slot of `float:32` reads the stored 1e30 and the stored natural
     /// 10^30 as 1.0000000150474662e30. A value of 1e30 that a row binds
     /// before the read still finds each of them, in a read that starts from
