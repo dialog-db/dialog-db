@@ -97,9 +97,21 @@ impl Induced {
 /// In tests: keeping plans turned off, so the same commits can be run
 /// both ways, and counts of the plans made and the plans reused, so a
 /// test can tell that plans were kept.
+///
+/// `DIALOG_TEST_PLANS=off` keeps none for a whole run of the tests, to
+/// see which of them hold the keeping up.
 #[cfg(test)]
 pub(crate) mod probe {
     use std::cell::Cell;
+    use std::env;
+    use std::sync::OnceLock;
+
+    /// Whether `DIALOG_TEST_PLANS` asks for no plan to be kept, read
+    /// once.
+    fn asked_off() -> bool {
+        static OFF: OnceLock<bool> = OnceLock::new();
+        *OFF.get_or_init(|| env::var("DIALOG_TEST_PLANS").is_ok_and(|asked| asked == "off"))
+    }
 
     // Per thread: the test runtime drives each test on one thread.
     thread_local! {
@@ -114,7 +126,7 @@ pub(crate) mod probe {
     }
 
     pub(super) fn is_off() -> bool {
-        OFF.with(Cell::get)
+        OFF.with(Cell::get) || asked_off()
     }
 
     pub(super) fn planned() {
