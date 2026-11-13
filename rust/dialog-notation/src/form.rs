@@ -64,6 +64,23 @@ pub enum Kind {
 /// The characters an operator is made of.
 const OPERATOR: &str = "+-*/<>=";
 
+impl Kind {
+    /// The kind of thing the symbol `name` names.
+    pub fn of(name: &str) -> Kind {
+        if !name.is_empty() && name.chars().all(|c| OPERATOR.contains(c)) {
+            Kind::Operator
+        } else if name.contains(':') {
+            Kind::Entity
+        } else if name.contains('/') {
+            Kind::Attribute
+        } else if name.contains('.') {
+            Kind::Domain
+        } else {
+            Kind::Name
+        }
+    }
+}
+
 impl Form {
     /// An application of `head` to `parts`.
     pub fn application(head: Form, parts: Vec<Part>) -> Self {
@@ -130,22 +147,10 @@ impl Form {
 
     /// The kind of thing a symbol names. `None` for anything but a symbol.
     pub fn kind(&self) -> Option<Kind> {
-        let Form::Symbol(name) = self else {
-            return None;
-        };
-        Some(
-            if !name.is_empty() && name.chars().all(|c| OPERATOR.contains(c)) {
-                Kind::Operator
-            } else if name.contains(':') {
-                Kind::Entity
-            } else if name.contains('/') {
-                Kind::Attribute
-            } else if name.contains('.') {
-                Kind::Domain
-            } else {
-                Kind::Name
-            },
-        )
+        match self {
+            Form::Symbol(name) => Some(Kind::of(name)),
+            _ => None,
+        }
     }
 
     /// Whether this applies a relation: its head is a domain.

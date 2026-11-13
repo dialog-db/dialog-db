@@ -95,7 +95,7 @@ fn refused(what: &str, error: impl Display) -> Error {
 
 /// A number as written, as the value it is: a natural where it can be,
 /// then an integer, then a float.
-fn number(text: &str) -> Result<Value, Error> {
+pub(crate) fn number(text: &str) -> Result<Value, Error> {
     if let Ok(natural) = text.parse::<u64>() {
         Ok(Value::UnsignedInt(natural.into()))
     } else if let Ok(integer) = text.parse::<i64>() {
@@ -109,7 +109,7 @@ fn number(text: &str) -> Result<Value, Error> {
     }
 }
 
-fn entity(uri: &str) -> Result<Value, Error> {
+pub(crate) fn entity(uri: &str) -> Result<Value, Error> {
     Entity::from_str(uri)
         .map(Value::Entity)
         .map_err(|error| refused("not an entity", error))
@@ -278,6 +278,75 @@ impl Syntax {
             ),
             Syntax::Tuple(items) => node("tuple", [("items", list(items)?)]),
             Syntax::Repeat(repeated) => node("repeat", [("of", repeated.data()?)]),
+        }
+    }
+
+    /// The name this applies, where it is the application of a name.
+    pub fn applies(&self) -> Option<&str> {
+        match self {
+            Syntax::Application(operator, _) => match &**operator {
+                Syntax::Reference(name) => Some(name),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// What this application's operator is applied to.
+    pub fn operand(&self) -> Option<&Parameters> {
+        match self {
+            Syntax::Application(_, operand) => Some(operand),
+            _ => None,
+        }
+    }
+
+    /// The keyword this is, without its `:`. A keyword is the entity
+    /// `name:`.
+    pub fn keyword(&self) -> Option<&str> {
+        match self {
+            Syntax::Constant(Value::Entity(entity)) => entity
+                .as_str()
+                .strip_suffix(':')
+                .filter(|name| !name.is_empty() && !name.contains(':')),
+            _ => None,
+        }
+    }
+
+    /// Whether this applies a relation: its operator is a domain.
+    pub fn is_read(&self) -> bool {
+        self.applies()
+            .is_some_and(|name| Kind::of(name) == Kind::Domain)
+    }
+
+    /// Whether this applies a formula: its operator is a keyword or an
+    /// operator.
+    pub fn is_formula(&self) -> bool {
+        match self {
+            Syntax::Application(operator, _) => {
+                operator.keyword().is_some()
+                    || matches!(&**operator, Syntax::Reference(name) if Kind::of(name) == Kind::Operator)
+            }
+            _ => false,
+        }
+    }
+
+    /// The names of the variables in the tree, in the order they occur:
+    /// the parts with no label first, then the labelled parts by label.
+    pub fn variables(&self, into: &mut Vec<String>) {
+        match self {
+            Syntax::Variable(name) => into.push(name.clone()),
+            Syntax::Application(operator, operand) => {
+                operator.variables(into);
+                operand.items.iter().for_each(|item| item.variables(into));
+                operand.terms.values().for_each(|term| term.variables(into));
+            }
+            Syntax::Map(entries) => entries.iter().for_each(|(key, value)| {
+                key.variables(into);
+                value.variables(into);
+            }),
+            Syntax::Tuple(items) => items.iter().for_each(|item| item.variables(into)),
+            Syntax::Repeat(repeated) => repeated.variables(into),
+            Syntax::Blank | Syntax::Constant(_) | Syntax::Reference(_) => {}
         }
     }
 

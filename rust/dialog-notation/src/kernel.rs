@@ -1,12 +1,14 @@
 //! The kernel, typed: what an expanded rule is made of.
 //!
-//! Expansion leaves a `(rule …)` form whose every head and premise
-//! applies a relation or a formula. This module reads that form into
+//! Analysis leaves a `(rule …)` tree whose every head and premise
+//! applies a relation or a formula. This module reads that tree into
 //! the shapes Dialog-DB's own descriptors have, and refuses what is not
 //! kernel.
 
+use dialog_corpus::Value;
+
 use crate::Error;
-use crate::form::{Form, Kind, Part};
+use crate::syntax::Syntax;
 
 /// The types a term may be read under: `(:text ?x)`.
 pub const TYPES: [&str; 8] = [
@@ -36,7 +38,7 @@ pub enum Term {
     Formula(Box<Formula>),
     /// A struct, `{key value}`, or a tuple, `[a b]`. With no variable in
     /// it, it is a value; with one, a pattern.
-    Struct(Form),
+    Struct(Syntax),
 }
 
 /// One field of a read: an attribute, the term its value stands under,
@@ -136,39 +138,46 @@ pub struct Rule {
     pub unless: Vec<Premise>,
 }
 
-fn term(form: &Form) -> Result<Term, Error> {
-    Ok(match form {
-        Form::Variable(name) => Term::Variable(name.clone()),
-        Form::Blank => Term::Blank,
-        Form::Text(text) => Term::Text(text.clone()),
-        Form::Number(number) => Term::Number(number.clone()),
-        Form::Keyword(name) => Term::Entity(format!("{name}:")),
-        Form::Symbol(name) if form.kind() == Some(Kind::Entity) => Term::Entity(name.clone()),
-        Form::Symbol(name) => Term::Symbol(name.clone()),
+fn term(node: &Syntax) -> Result<Term, Error> {
+    Ok(match node {
+        Syntax::Variable(name) => Term::Variable(name.clone()),
+        Syntax::Blank => Term::Blank,
+        Syntax::Constant(Value::String(text)) => Term::Text(text.clone()),
+        Syntax::Constant(Value::UnsignedInt(natural)) => Term::Number(natural.to_string()),
+        Syntax::Constant(Value::SignedInt(integer)) => Term::Number(integer.to_string()),
+        Syntax::Constant(Value::Float(float)) => Term::Number(format!("{float:?}")),
+        Syntax::Constant(Value::Boolean(truth)) => Term::Symbol(truth.to_string()),
+        Syntax::Constant(Value::Entity(entity)) => Term::Entity(entity.as_str().to_string()),
+        Syntax::Constant(Value::Symbol(_)) => Term::Symbol(node.to_string()),
+        Syntax::Reference(name) => Term::Symbol(name.clone()),
         application if application.is_formula() => Term::Formula(Box::new(formula(application)?)),
-        Form::Map(_) | Form::Vector(_) => Term::Struct(form.clone()),
+        Syntax::Map(_) | Syntax::Tuple(_) => Term::Struct(node.clone()),
         other => return Err(Error::Refused(format!("{other} is not a term"))),
     })
 }
 
-fn formula(form: &Form) -> Result<Formula, Error> {
-    let name = match form.as_application() {
-        Some((Form::Keyword(name) | Form::Symbol(name), _)) => name.clone(),
-        _ => return Err(Error::Refused(format!("{form} applies no formula"))),
+fn formula(node: &Syntax) -> Result<Formula, Error> {
+    let (Syntax::Application(operator, operand), true) = (node, node.is_formula()) else {
+        return Err(Error::Refused(format!("{node} applies no formula")));
     };
-    let subject = match form.bare().as_slice() {
+    let name = match (operator.keyword(), &**operator) {
+        (Some(name), _) => name.to_string(),
+        (None, Syntax::Reference(name)) => name.clone(),
+        _ => return Err(Error::Refused(format!("{node} applies no formula"))),
+    };
+    let subject = match operand.items.as_slice() {
         [] => None,
         [subject] => Some(term(subject)?),
         _ => {
             return Err(Error::Refused(format!(
-                "{form} has more than one part without a label"
+                "{node} has more than one part without a label"
             )));
         }
     };
-    let labelled = form
-        .labelled()
-        .into_iter()
-        .map(|(label, part)| Ok((label.to_string(), term(part)?)))
+    let labelled = operand
+        .terms
+        .iter()
+        .map(|(label, part)| Ok((label.clone(), term(part)?)))
         .collect::<Result<_, Error>>()?;
     Ok(Formula {
         name,
@@ -179,18 +188,26 @@ fn formula(form: &Form) -> Result<Formula, Error> {
 
 /// A field's term, with the type and pick it was written under taken
 /// off: `(:last (:text ?x))` is `?x`, text, last.
-fn field(domain: &str, label: &str, mut form: &Form) -> Result<Field, Error> {
+fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
     let mut kind = None;
     let mut pick = None;
-    while let Some((Form::Keyword(word), [Part::Bare(inner)])) = form.as_application() {
-        if TYPES.contains(&word.as_str()) {
-            kind = Some(word.clone());
-        } else if PICKS.contains(&word.as_str()) {
-            pick = Some(word.clone());
+    while let Syntax::Application(operator, operand) = node {
+        let (Some(word), [inner], true, None) = (
+            operator.keyword(),
+            operand.items.as_slice(),
+            operand.terms.is_empty(),
+            &operand.rest,
+        ) else {
+            break;
+        };
+        if TYPES.contains(&word) {
+            kind = Some(word.to_string());
+        } else if PICKS.contains(&word) {
+            pick = Some(word.to_string());
         } else {
             break;
         }
-        form = inner;
+        node = inner;
     }
     Ok(Field {
         label: label.to_string(),
@@ -199,101 +216,121 @@ fn field(domain: &str, label: &str, mut form: &Form) -> Result<Field, Error> {
         } else {
             format!("{domain}/{label}")
         },
-        term: term(form)?,
+        term: term(node)?,
         kind,
         pick,
     })
 }
 
-fn read(form: &Form) -> Result<Read, Error> {
-    let domain = form
-        .head()
-        .filter(|_| form.is_read())
-        .ok_or_else(|| Error::Refused(format!("{form} applies no relation")))?
-        .to_string();
-    let entity = match form.bare().as_slice() {
+fn read(node: &Syntax) -> Result<Read, Error> {
+    let (Some(domain), Some(operand), true) = (node.applies(), node.operand(), node.is_read())
+    else {
+        return Err(Error::Refused(format!("{node} applies no relation")));
+    };
+    let entity = match operand.items.as_slice() {
         [entity] => term(entity)?,
         _ => {
             return Err(Error::Refused(format!(
-                "{form} needs its entity, and nothing else without a label"
+                "{node} needs its entity, and nothing else without a label"
             )));
         }
     };
-    let fields = form
-        .labelled()
-        .into_iter()
-        .map(|(label, part)| field(&domain, label, part))
+    let fields = operand
+        .terms
+        .iter()
+        .map(|(label, part)| field(domain, label, part))
         .collect::<Result<Vec<_>, _>>()?;
     if fields.iter().any(|field| field.label == "of") {
         return Err(Error::Refused(format!(
-            "{form} says `of:` twice: the part with no label is `of:`"
+            "{node} says `of:` twice: the part with no label is `of:`"
         )));
     }
     if fields.is_empty() {
-        return Err(Error::Refused(format!("{form} names no field")));
+        return Err(Error::Refused(format!("{node} names no field")));
     }
     Ok(Read {
-        domain,
+        domain: domain.to_string(),
         entity,
         fields,
     })
 }
 
-fn premise(form: &Form) -> Result<Premise, Error> {
-    if form.is_read() {
-        Ok(Premise::Read(read(form)?))
-    } else if form.is_formula() {
-        Ok(Premise::Formula(formula(form)?))
+fn premise(node: &Syntax) -> Result<Premise, Error> {
+    if node.is_read() {
+        Ok(Premise::Read(read(node)?))
+    } else if node.is_formula() {
+        Ok(Premise::Formula(formula(node)?))
     } else {
-        Err(Error::Refused(format!("{form} is not a kernel premise")))
+        Err(Error::Refused(format!("{node} is not a kernel premise")))
     }
 }
 
-fn head(form: &Form) -> Result<Head, Error> {
-    if form.is_read() {
-        return Ok(Head::Derive(read(form)?));
+fn head(node: &Syntax) -> Result<Head, Error> {
+    if node.is_read() {
+        return Ok(Head::Derive(read(node)?));
     }
-    let inner = match form.bare().as_slice() {
-        [inner] => read(inner)?,
-        _ => return Err(Error::Refused(format!("{form} is not a kernel head"))),
+    let inner = match node.operand().map(|operand| operand.items.as_slice()) {
+        Some([inner]) => read(inner)?,
+        _ => return Err(Error::Refused(format!("{node} is not a kernel head"))),
     };
-    match form.head() {
+    match node.applies() {
         Some("assert!") => Ok(Head::Assert(inner)),
         Some("retract!") => Ok(Head::Retract(inner)),
         Some("assert") => Ok(Head::Hold(inner)),
         Some("report") => Ok(Head::Report(inner)),
-        _ => Err(Error::Refused(format!("{form} is not a kernel head"))),
+        _ => Err(Error::Refused(format!("{node} is not a kernel head"))),
     }
 }
 
 impl Rule {
-    /// Read an expanded `(rule …)` form.
-    pub fn parse(form: &Form) -> Result<Self, Error> {
-        if !form.is("rule") {
-            return Err(Error::Refused(format!("{form} is not a rule")));
-        }
-        let clauses = crate::expand::Clauses::of(form);
-        let description = clauses.said.iter().find_map(|(label, said)| match said {
-            Form::Text(text) if label == "description" => Some(text.clone()),
+    /// Read an analyzed tree: a `(rule …)` whose every head and premise
+    /// is kernel.
+    pub fn parse(node: &Syntax) -> Result<Self, Error> {
+        let (Some("rule"), Some(operand)) = (node.applies(), node.operand()) else {
+            return Err(Error::Refused(format!("{node} is not a rule")));
+        };
+        let description = match operand.terms.get("description") {
+            Some(Syntax::Constant(Value::String(text))) => Some(text.clone()),
             _ => None,
-        });
-        Ok(Rule {
+        };
+        let mut rule = Rule {
             description,
-            heads: clauses.heads.iter().map(head).collect::<Result<_, _>>()?,
-            when: clauses.when.iter().map(premise).collect::<Result<_, _>>()?,
-            unless: clauses
-                .unless
-                .iter()
-                .map(premise)
-                .collect::<Result<_, _>>()?,
-        })
+            heads: Vec::new(),
+            when: Vec::new(),
+            unless: Vec::new(),
+        };
+        // What must not hold may stand among what must, as in
+        // `A, not B, not C`: each is one more "and not".
+        let members = |clause: &Syntax| clause.operand().map(|operand| operand.items.clone());
+        for part in &operand.items {
+            match part.applies() {
+                Some("when") => {
+                    for member in members(part).unwrap_or_default() {
+                        if member.applies() == Some("unless") {
+                            for negated in members(&member).unwrap_or_default() {
+                                rule.unless.push(premise(&negated)?);
+                            }
+                        } else {
+                            rule.when.push(premise(&member)?);
+                        }
+                    }
+                }
+                Some("unless") => {
+                    for negated in members(part).unwrap_or_default() {
+                        rule.unless.push(premise(&negated)?);
+                    }
+                }
+                _ => rule.heads.push(head(part)?),
+            }
+        }
+        Ok(rule)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::form::read as forms;
+    use crate::parse as forms;
 
     #[test]
     fn it_reads_a_rule_into_heads_and_premises() {
@@ -324,8 +361,9 @@ mod tests {
         let Head::Report(head) = &rule.heads[0] else {
             panic!("the head reports");
         };
-        assert_eq!(head.fields[0].term, Term::Entity("open:".into()));
-        assert_eq!(head.fields[1].attribute, "io.contact/email");
+        // The fields come by label, since a tree keeps no order of them.
+        assert_eq!(head.fields[0].attribute, "io.contact/email");
+        assert_eq!(head.fields[1].term, Term::Entity("open:".into()));
     }
 
     #[test]

@@ -33,10 +33,8 @@ use serde_json::{Map, Value as Json, json};
 
 use crate::Error;
 use crate::data::Data;
-use crate::form::{Form, Part};
 use crate::kernel::{Field, Formula, Head, Premise, Read, Rule, TYPES, Term};
-use crate::pattern::variables;
-use crate::syntax::Syntax;
+use crate::syntax::{self, Parameters, Syntax};
 
 /// One thing to do with a branch.
 #[derive(Debug, Clone)]
@@ -62,7 +60,7 @@ pub enum Step {
 #[derive(Debug, Clone)]
 enum Slot {
     /// The row says this, whatever matched.
-    Is(Form),
+    Is(Syntax),
     /// The row says what this variable was bound to.
     Bound(String),
     /// The row says the value this pattern is, with what its variables
@@ -86,7 +84,7 @@ pub struct Query {
 impl Query {
     /// A match, as the head the query reports with its variables
     /// replaced by what they were bound to.
-    pub fn row(&self, conclusion: &ConceptConclusion) -> Result<Form, Error> {
+    pub fn row(&self, conclusion: &ConceptConclusion) -> Result<Syntax, Error> {
         let fill = |slot: &Slot| match slot {
             Slot::Is(form) => Ok(form.clone()),
             Slot::Bound(name) => conclusion
@@ -100,41 +98,32 @@ impl Query {
                 .map(|value| written(&value))
                 .ok_or_else(|| Error::Refused("a match leaves a part of a struct unbound".into())),
         };
-        let mut parts = vec![Part::Bare(fill(&self.entity)?)];
+        let mut operand = Parameters {
+            items: vec![fill(&self.entity)?],
+            ..Parameters::default()
+        };
         for (label, slot) in &self.fields {
-            parts.push(Part::Labelled(label.clone(), fill(slot)?));
+            operand.terms.insert(label.clone(), fill(slot)?);
         }
-        Ok(Form::application(Form::symbol(&self.domain), parts))
+        Ok(Syntax::Application(
+            Box::new(Syntax::Reference(self.domain.clone())),
+            operand,
+        ))
     }
 }
 
-/// A value, as it would be written.
-fn written(value: &Value) -> Form {
+/// A value, as the tree that says it.
+fn written(value: &Value) -> Syntax {
     match value {
-        Value::Entity(entity) => {
-            let uri = entity.to_string();
-            match uri.strip_suffix(':') {
-                Some(name) if !name.is_empty() && !name.contains(':') => {
-                    Form::Keyword(name.to_string())
-                }
-                _ => Form::Symbol(uri),
-            }
-        }
-        Value::String(text) => Form::Text(text.clone()),
-        Value::UnsignedInt(number) => Form::Number(number.to_string()),
-        Value::SignedInt(number) => Form::Number(number.to_string()),
-        Value::Float(number) => Form::Number(number.to_string()),
-        Value::Boolean(truth) => Form::Symbol(truth.to_string()),
-        Value::Symbol(symbol) => Form::Symbol(symbol.to_string()),
         Value::Record(_) if matches!(value.composite(), Ok(Some(_))) => {
             match value.composite() {
-                Ok(Some(Composite::Map(map))) => Form::Map(
+                Ok(Some(Composite::Map(map))) => Syntax::Map(
                     map.iter()
                         .map(|(key, value)| {
                             // A symbol of no domain is the label a key
                             // was written as.
                             let key = match Data::Value(key.clone()).as_symbol() {
-                                Some(label) => Form::Symbol(label),
+                                Some(label) => Syntax::Reference(label),
                                 None => written(key),
                             };
                             (key, written(value))
@@ -142,28 +131,27 @@ fn written(value: &Value) -> Form {
                         .collect(),
                 ),
                 Ok(Some(Composite::List(items) | Composite::Tuple(items))) => {
-                    Form::Vector(items.iter().map(written).collect())
+                    Syntax::Tuple(items.iter().map(written).collect())
                 }
-                _ => Form::Blank,
+                _ => Syntax::Blank,
             }
         }
-        Value::Bytes(bytes) | Value::Record(bytes) => Form::Vector(
+        Value::Bytes(bytes) | Value::Record(bytes) => Syntax::Tuple(
             bytes
                 .iter()
-                .map(|byte| Form::Number(byte.to_string()))
+                .map(|byte| Syntax::Constant(Value::UnsignedInt(u64::from(*byte).into())))
                 .collect(),
         ),
+        // A symbol is written as the name that says it, `/todo` where
+        // it has no domain.
+        Value::Symbol(symbol) => Syntax::Reference(symbol.to_string()),
+        other => Syntax::Constant(other.clone()),
     }
 }
 
 /// Compile an analyzed tree: the third phase, from a rule of the
 /// kernel to what Dialog-DB runs.
-pub fn compile(rule: &Syntax) -> Result<Vec<Step>, Error> {
-    kernel(&rule.form())
-}
-
-/// Compile an expanded `(rule …)` form.
-fn kernel(form: &Form) -> Result<Vec<Step>, Error> {
+pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
     let rule = Rule::parse(form)?;
     if rule.heads.is_empty() {
         return Err(Error::Refused(format!("{form} has no head")));
@@ -198,9 +186,12 @@ fn kernel(form: &Form) -> Result<Vec<Step>, Error> {
             Head::Report(read) => {
                 // The relation a report is derived into is named by the
                 // rule and which of its heads this is.
-                let site = Form::Vector(vec![form.clone(), Form::Number(at.to_string())])
-                    .reference()?
-                    .to_string();
+                let site = Syntax::Tuple(vec![
+                    form.clone(),
+                    Syntax::Constant(Value::UnsignedInt((at as u64).into())),
+                ])
+                .reference()?
+                .to_string();
                 steps.push(report(&rule, read, &site)?);
             }
         }
@@ -297,7 +288,7 @@ fn id(formula: &Formula) -> Result<Option<Entity>, Error> {
 /// `name` says what a variable goes by where the pattern stands, and
 /// what a blank, given no name, is there.
 fn shape(
-    form: &Form,
+    form: &Syntax,
     name: &mut dyn FnMut(Option<&str>) -> Variable<Any>,
 ) -> Result<Pattern, Error> {
     fn key(node: &Syntax) -> Result<Value, Error> {
@@ -345,7 +336,7 @@ fn shape(
             }
         })
     }
-    walk(&Syntax::try_from(form)?, name)
+    walk(form, name)
 }
 
 /// A constant as Dialog-DB reads it. `None` for what is not a constant.
@@ -499,7 +490,7 @@ fn bound(rule: &Rule) -> BTreeSet<String> {
             Term::Formula(inner) => formula(inner, names),
             Term::Struct(form) => {
                 let mut inside = Vec::new();
-                variables(form, &mut inside);
+                form.variables(&mut inside);
                 names.extend(inside);
             }
             _ => {}
@@ -556,7 +547,7 @@ struct Scope {
     /// The patterns that stand where a term does, each under the
     /// variable written in its place. A pattern has no wire form, so it
     /// is put in once Dialog-DB has read the rest.
-    shapes: Vec<(String, Form, Pattern)>,
+    shapes: Vec<(String, Syntax, Pattern)>,
 }
 
 impl Scope {
@@ -945,13 +936,13 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
         }
     }
     let shown = |term: &Term| match term {
-        Term::Text(text) => Some(Form::Text(text.clone())),
-        Term::Number(text) => Some(Form::Number(text.clone())),
-        Term::Entity(uri) => Some(match uri.strip_suffix(':') {
-            Some(name) if !name.is_empty() && !name.contains(':') => Form::Keyword(name.into()),
-            _ => Form::Symbol(uri.clone()),
-        }),
-        Term::Symbol(name) => Some(Form::Symbol(name.clone())),
+        Term::Text(text) => Some(Syntax::Constant(Value::String(text.clone()))),
+        Term::Number(text) => syntax::number(text).ok().map(Syntax::Constant),
+        Term::Entity(uri) => syntax::entity(uri).ok().map(Syntax::Constant),
+        Term::Symbol(name) if name == "true" || name == "false" => {
+            Some(Syntax::Constant(Value::Boolean(name == "true")))
+        }
+        Term::Symbol(name) => Some(Syntax::Reference(name.clone())),
         Term::Variable(_) | Term::Blank | Term::Formula(_) | Term::Struct(_) => None,
     };
 

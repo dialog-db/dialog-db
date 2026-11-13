@@ -13,8 +13,9 @@
 //! | [`Analyzer::analyze`] | syntax trees | analyzed trees, every one a rule of the kernel, and what the definitions said about the document |
 //! | [`compile`](compile()) | an analyzed tree | what Dialog-DB already runs: concept queries, deductive and inductive rules, facts and dispatched commands |
 //!
-//! Inside, analysis ([`expand`]) and compiling still go through the
-//! notation as parsed ([`form`]), and are to read the tree.
+//! The compiler reads the tree ([`kernel`]). Inside analysis the walker
+//! ([`expand`]) still goes through the notation as parsed ([`form`]),
+//! and is to read the tree.
 //!
 //! ```no_run
 //! # fn main() -> Result<(), dialog_notation::Error> {
