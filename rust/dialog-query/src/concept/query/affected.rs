@@ -330,8 +330,8 @@ where
     // binds into a premise that reads it as a fact binds into an attribute
     // premise (see `collection_premise`).
     let mut stored: BTreeSet<Entity> = BTreeSet::new();
-    // The concepts that are one keyed collection under a pick that elects
-    // by value or by rank (see `elects_across`).
+    // The concepts that are one keyed collection, or one stored field,
+    // under a pick that elects by value or by rank (see `elects_across`).
     let mut across: BTreeSet<Entity> = BTreeSet::new();
     let mut queue = vec![concept.clone()];
     while let Some(descriptor) = queue.pop() {
@@ -363,7 +363,7 @@ where
         if bundle.installed().is_empty() && collection_of(&descriptor).is_some() {
             stored.insert(entity.clone());
         }
-        if elects_across(&descriptor) {
+        if elects_across(&descriptor, bundle.installed().is_empty()) {
             across.insert(entity.clone());
         }
         let rules: Vec<DeductiveRule> = bundle.rules().cloned().collect();
@@ -790,14 +790,20 @@ fn joins_numbers_unevenly(rule: &DeductiveRule) -> bool {
     reads.values().any(Reads::uneven)
 }
 
-/// Whether `concept` is one keyed collection under `max`, `min`, or `top`.
-/// A read of such a concept elects one claim among every claim of the
-/// holder, of each key, and compares the key of the premise after that. So
-/// its row for a holder is the claim that wins, and a change to any claim of
-/// the holder can change it.
-fn elects_across(concept: &ConceptDescriptor) -> bool {
+/// Whether `concept` is one keyed collection, or one field that no rule
+/// derives (`stored`), under `max`, `min`, or `top`. A read of such a
+/// concept elects one claim among every claim of the holder, and for a
+/// collection it compares the key of the premise after that. So its row for
+/// a holder is the claim that wins, and a change to any claim of the holder
+/// can change it. A concept of several fields reads a field under such a
+/// pick through the concept of its attribute, so this covers that field too.
+///
+/// A field that a rule derives is left out. Its claims come from the heads
+/// of that rule, and how a live query elects among them is a question of its
+/// own.
+fn elects_across(concept: &ConceptDescriptor, stored: bool) -> bool {
     concept.attribute_field().is_some_and(|(_, field)| {
-        matches!(field.the(), The::Collection { .. })
+        (stored || matches!(field.the(), The::Collection { .. }))
             && matches!(
                 field.descriptor().pick(),
                 Pick::Max | Pick::Min | Pick::Top(_)
