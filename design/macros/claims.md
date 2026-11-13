@@ -153,3 +153,9 @@
 | a command's name may not hold a slash: its domain is made of the name, and a slash in a domain reads as an attribute | fact | run in the notebook, 2026-11-12: `command.todo/update-title.xyz.todo` is what nothing says | holds |
 | whether writes stand or fall together is said by how they are written, a named condition or rules apart, so a head that cannot be bound needs no rule of the engine's | fact | the three move tests in `tests/notation.rs`, and the rename run above | holds |
 | a set is what several heads are, a tuple orders them for nothing, a map names them for nothing | opinion | the agent's, 2026-11-12 | - |
+| if writing on one condition is as efficient without rules of several heads there is no point in them, and if they are needed for it, have them | opinion | Irakli, 2026-11-12, by voice | - |
+| a named condition costs 21.5% to 38.7% more instructions than one rule of a wide head, and the body written again 61.0% to 148.2% more, for a commit of 500 commands | fact | #788, `research/rule-heads/results/2026-11-12.md`: callgrind, three runs within 0.43% | holds |
+| a wide head is a floor for a rule of several heads, so several heads save at most 17.7% to 27.9% of a named condition's instructions | fact | the same; a wide head only asserts, and to one entity | holds |
+| a named condition is within a tenth of a rule of several heads where the body is heavy | hypothesis | the agent's, 2026-11-12, by voice | refuted: +21.5% and +33.4% (#788) |
+| the difference holds at one command a commit, which is what a person issues | hypothesis | not run. Confirmed or refuted by the same scenarios at size 1 | open |
+| `all` is a splice, and a spread in a head's place or at the top level would do what it does | opinion | Irakli, 2026-11-12, by voice: "splice is something usually macros have ... maybe with a spread" | - |

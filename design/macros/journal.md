@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Directing**, backtracked from Designing on 2026-11-12. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
-| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. What dropping rules of several heads does to #776 and #779. Whether a command takes fields beside what it is about, and a slash in its name. The prelude written without `when`. Parked by the maintainer: `update`, and with it what it does with a dependent that does not fit or arrives by sync. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
+| **Agenda** | Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Whether a fifth to a quarter of a commit's instructions, at most, is worth a rule of several heads in the engine and the stored rule (#788, #776, #779). Whether a command takes fields beside what it is about, and a slash in its name. The prelude written without `when`. Parked by the maintainer: `update`, and with it what it does with a dependent that does not fit or arrives by sync. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. Waiting on #776: a rule of several heads. |
 
 ## Candidate problems
 
@@ -622,3 +622,21 @@ Not examined yet. They are columns, not recommendations.
 - How much there is to write is what a macro is for: a form that expands to the three rules is a rule about syntax, once `(all …)` stands at the top level.
 
 **Decided.** By the maintainer: rules of several heads are not needed; a condition is given a name and reacted to. Proposed by the agent, not decided: no collection of heads; `(all …)` in a head's place stays as what templates and a concept of several reads expand to, one rule a head. Open: whether a command takes fields beside what it is about, as he wrote it, and whether its name may hold a slash. And what this does to #776 and to several heads in #779, which is his to say.
+
+## 2026-11-12, Directing: what several heads would save, measured
+
+**Asked.** Irakli, by voice: list the trade-offs of having rules of several heads; if it can be done as efficiently without them there is no point in them, and the rest is macros; if they are needed to do it efficiently, have them. And why `all` is needed. Then: "let's measure".
+
+**Learned.** The measurement is a research topic of its own, [rule-heads](https://github.com/dialog-db/dialog-db/pull/788) (#788). One commit of 500 `move` commands, instructions under callgrind:
+
+```
+ one rule, one wide head     the stand-in for several heads     900 to 1562 million
+ a named condition           22% to 39% more
+ the body again a head       61% to 148% more, and what a rule of several heads is compiled to today
+```
+
+- The gap of a named condition is about 120 million instructions a head for 500 commands, whatever the body. Most of it is evaluating a rule of one read that a fact has already bound, about 128 thousand instructions a time.
+- The agent's guess that a named condition would be within a tenth of several heads was wrong.
+- `all` is a splice: a template that has to say several things where one stood. The maintainer: a splice is what macros usually have, perhaps as a spread. The notation has `...` already, and `all` is what the spread sits in where no form encloses it.
+
+**Decided.** Not decided. The bars set before the runs put the result between them: several heads would save at most a fifth to a quarter of a commit's instructions over a named condition, on a stand-in that is a floor. Decided by nobody yet but following from the numbers: `(all …)` in a head's place should compile to a named condition and not to the body again.
