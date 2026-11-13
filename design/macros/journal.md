@@ -941,6 +941,25 @@ Not examined yet. They are columns, not recommendations.
 
 **Decided.** By the maintainer: the new format is written always, the old read for one cycle with a migration, then dropped. A list where a value stands is quoted. The parts not named are `... ?more`. Not decided: what becomes of `?more ...`. Not built: any of the three; the reader changes once, after that answer.
 
+## 2026-11-13, Designing: `...` takes a pattern
+
+**Asked.** The maintainer asked to see every `...` there is, then what repeating a pattern of several parts means, then: "Sounds like we could do (expand (labels ... (?key ?text)))) no ?"
+
+**Learned.**
+
+- Yes. `...` followed by a pattern, which each part not named has to match, is the rest and the repeat in one form. `... ?more` is the same with a variable for the pattern. Nothing `p ...` did is lost, so the agent's question, whether to give the repeat up, falls away.
+
+```
+ today                                   decided
+ (query ?head ?premise ?more ...)        (query ?head ?premise ... ?more)
+ (?command (?concept ...?fields))        (?command (?concept ... ?fields))
+ (labels (?key ?text) ...)               (labels ... (?key ?text))
+```
+
+- What it leaves: an application holds unlabelled and labelled parts in one bracket. `... (?key ?text)` is of the unlabelled ones. A bare `... ?x` could be of either or of both. In the ledger as the agent's hypothesis: both.
+
+**Decided.** By the maintainer: `...` takes a pattern, and `p ...` goes. Not decided: what a bare `... ?x` takes in an application. Not built; the reader changes once, for this and the quoted list.
+
 ## The queue
 
 In order. One is asked, answered and written down before the next.
