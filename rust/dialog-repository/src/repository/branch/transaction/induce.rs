@@ -259,6 +259,12 @@ where
 
         let mut novelty = Changes::new();
         let mut emitted_transients = Changes::new();
+
+        // Spike `share`: every candidate is loaded before any fires, so
+        // the rules that state one body are known up front and their
+        // body is evaluated once. Firing order is the candidates' own
+        // either way.
+        let mut loaded: Vec<(Entity, InductiveRule, bool, bool)> = Vec::new();
         for entity in candidates {
             let Some(rule) = dispatch.load(&entity, &overlay, env).await? else {
                 continue;
@@ -285,18 +291,53 @@ where
                 || replace_attrs
                     .iter()
                     .any(|a| unless.iter().any(|u| u.covers(a)));
-            if full {
+            loaded.push((entity, rule, transient_head, full));
+        }
+        let mut shared = spike::Shared::of(&loaded);
+        for (at, (entity, rule, transient_head, full)) in loaded.iter().enumerate() {
+            let transient_head = *transient_head;
+            if *full {
                 fire(
-                    &rule,
+                    rule,
                     transient_head,
                     &view,
                     &mut novelty,
                     &mut emitted_transients,
                 )
                 .await?;
+            } else if let Some(group) = shared.group(at) {
+                // One evaluation of the body the group states, under a
+                // rule whose head names every variable any of the
+                // group's heads reads; each rule writes its own head
+                // from the same matches.
+                if group.matches.is_none() {
+                    group.matches = Some(
+                        seeded_matches(
+                            &group.rule,
+                            &spike::PlanKey::Shared(group.key.clone()),
+                            &assert_rows,
+                            &view,
+                            Seeding::Grouped,
+                        )
+                        .await?,
+                    );
+                }
+                let matches = group.matches.clone().unwrap_or_default();
+                if !matches.is_empty() {
+                    emit_matches(
+                        rule,
+                        transient_head,
+                        matches,
+                        &view,
+                        &mut novelty,
+                        &mut emitted_transients,
+                    )
+                    .await?;
+                }
             } else {
                 fire_seeded(
-                    &rule,
+                    entity,
+                    rule,
                     transient_head,
                     &assert_rows,
                     &view,
@@ -1027,6 +1068,7 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 /// seeded one by one when it finds any (see [`seed_groups`] for why);
 /// when it finds none, the rows are seeded one by one.
 async fn fire_seeded<'a>(
+    entity: &Entity,
     rule: &InductiveRule,
     transient_head: bool,
     rows: &[Fact],
@@ -1034,7 +1076,8 @@ async fn fire_seeded<'a>(
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
-    let matches = seeded_matches(rule, rows, view, Seeding::Grouped).await?;
+    let key = spike::PlanKey::Rule(entity.clone());
+    let matches = seeded_matches(rule, &key, rows, view, Seeding::Grouped).await?;
     #[cfg(test)]
     let before = (novelty.clone(), transients.clone());
     if !matches.is_empty() {
@@ -1042,6 +1085,7 @@ async fn fire_seeded<'a>(
     }
     #[cfg(test)]
     oracle::agrees(
+        &key,
         rule,
         transient_head,
         rows,
@@ -1073,14 +1117,25 @@ enum Seeding {
 /// it: the later replaces the earlier.
 async fn seeded_matches<'a>(
     rule: &InductiveRule,
+    key: &spike::PlanKey,
     rows: &[Fact],
     view: &QueryEnv<'a>,
     seeding: Seeding,
 ) -> Result<Vec<Match>, CommitError> {
     use dialog_query::{Premise, Proposition};
 
+    // Spike `subject`: the body with every subject named, so a seed
+    // binds the entity its rows are about. Spike `plan`: the plans this
+    // rule was given before, by the names a seed binds.
+    let body = spike::Body::of(rule);
+    let mut plans = spike::Plans::of(key);
+    let premises = match &body {
+        Some(body) => &body.premises,
+        None => &rule.analysis().premises,
+    };
+
     let mut matches: Vec<Match> = Vec::new();
-    for premise in &rule.analysis().premises {
+    for premise in premises {
         let Premise::Assert(Proposition::Concept(query)) = premise else {
             continue;
         };
@@ -1096,8 +1151,15 @@ async fn seeded_matches<'a>(
                 oracle::count(if group.len() > 1 { 1 } else { group.len() });
             }
             if group.len() > 1 {
-                let together =
-                    evaluate_seed(rule, query, group.iter().map(|&at| &rows[at]), view).await?;
+                let together = evaluate_seed(
+                    rule,
+                    body.as_ref(),
+                    &mut plans,
+                    query,
+                    group.iter().map(|&at| &rows[at]),
+                    view,
+                )
+                .await?;
                 if !together.is_empty() {
                     found.push((group[0], together));
                     continue;
@@ -1108,7 +1170,11 @@ async fn seeded_matches<'a>(
                 oracle::count(group.len());
             }
             for at in group {
-                found.push((at, evaluate_seed(rule, query, [&rows[at]], view).await?));
+                found.push((
+                    at,
+                    evaluate_seed(rule, body.as_ref(), &mut plans, query, [&rows[at]], view)
+                        .await?,
+                ));
             }
         }
         // Groups come in the order of their first rows, so only rows
@@ -1117,6 +1183,7 @@ async fn seeded_matches<'a>(
         found.sort_by_key(|(at, _)| *at);
         matches.extend(found.into_iter().flat_map(|(_, found)| found));
     }
+    plans.keep(key);
     Ok(matches)
 }
 
@@ -1124,6 +1191,8 @@ async fn seeded_matches<'a>(
 /// matches when the rows do not bind it.
 async fn evaluate_seed<'a, 'r>(
     rule: &InductiveRule,
+    body: Option<&spike::Body>,
+    plans: &mut spike::Plans,
     query: &dialog_query::ConceptQuery,
     rows: impl IntoIterator<Item = &'r Fact>,
     view: &QueryEnv<'a>,
@@ -1131,7 +1200,8 @@ async fn evaluate_seed<'a, 'r>(
     let Some((matched, scope)) = seed(query, rows) else {
         return Ok(Vec::new());
     };
-    rule.plan(&scope)
+    plans
+        .plan(rule, body, &scope)
         .evaluate(matched.seed(), view)
         .try_collect()
         .await
@@ -1280,6 +1350,262 @@ fn bind_seed(
         // as a scan for that constant admits the row.
         Some(Term::Constant(expected)) => value.reads_as(expected),
         Some(Term::Variable { name: None, .. }) | None => true,
+    }
+}
+
+/// Prototype changes to commit-time induction, for
+/// `research/rule-heads.md`: each is off unless `DIALOG_SPIKE` names it
+/// (comma-separated, or `all`), so one build measures every variant.
+/// Nothing here is meant to land as it is.
+///
+/// - `plan`: a rule is planned once for each set of names a seed binds,
+///   and the plan is kept for the life of the thread, where today it is
+///   planned again for every seed of every commit.
+/// - `share`: candidates of a round that state the same body, as the
+///   author spelled it, have it evaluated once, under a rule whose head
+///   names every variable any of their heads reads.
+/// - `subject`: a positive concept premise that leaves its subject
+///   unnamed is given a variable for it, so a seed binds the entity its
+///   rows are about and the premise is read at that entity.
+mod spike {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    use std::sync::OnceLock;
+
+    use dialog_corpus::Entity;
+    use dialog_query::{
+        Any, Conjunction, Environment, InductiveRule, Match, Planner, Premise, Proposition, Term,
+        TypeEnv,
+    };
+
+    /// Which prototypes are on.
+    #[derive(Clone, Copy, Default)]
+    pub(super) struct Switches {
+        pub plan: bool,
+        pub share: bool,
+        pub subject: bool,
+    }
+
+    /// The switches `DIALOG_SPIKE` sets, read once.
+    pub(super) fn on() -> Switches {
+        static ON: OnceLock<Switches> = OnceLock::new();
+        *ON.get_or_init(|| {
+            let set = std::env::var("DIALOG_SPIKE").unwrap_or_default();
+            let has = |name: &str| set.split(',').any(|each| each == name || each == "all");
+            Switches {
+                plan: has("plan"),
+                share: has("share"),
+                subject: has("subject"),
+            }
+        })
+    }
+
+    /// A rule's body as a seeded firing evaluates it under `subject`:
+    /// its premises with every subject named, and the types they plan
+    /// under.
+    pub(super) struct Body {
+        pub premises: Vec<Premise>,
+        types: std::sync::Arc<TypeEnv>,
+    }
+
+    impl Body {
+        /// The body of `rule` with its subjects named; `None` when
+        /// `subject` is off, and the rule's own premises are used.
+        pub(super) fn of(rule: &InductiveRule) -> Option<Self> {
+            if !on().subject {
+                return None;
+            }
+            let mut premises = rule.analysis().premises.clone();
+            for (at, premise) in premises.iter_mut().enumerate() {
+                let Premise::Assert(Proposition::Concept(query)) = premise else {
+                    continue;
+                };
+                let named = matches!(
+                    query.terms.get("this"),
+                    Some(Term::Constant(_) | Term::Variable { name: Some(_), .. })
+                );
+                if !named {
+                    query
+                        .terms
+                        .insert("this".into(), Term::<Any>::var(format!("subject.{at}")));
+                }
+            }
+            Some(Body {
+                premises,
+                types: rule.analysis().types.clone(),
+            })
+        }
+    }
+
+    /// What a kept plan belongs to: a stored rule, or the body a group
+    /// of rules shares.
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    pub(super) enum PlanKey {
+        Rule(Entity),
+        Shared(Rc<str>),
+    }
+
+    thread_local! {
+        /// Every plan kept under `plan`, by what it plans and the names
+        /// its scope binds, sorted.
+        static PLANS: RefCell<HashMap<PlanKey, HashMap<Vec<String>, Conjunction>>> =
+            RefCell::new(HashMap::new());
+        /// Under `share`, the body each rule states, as its author
+        /// spelled it, and the rule each group is evaluated under.
+        static BODIES: RefCell<HashMap<Entity, Rc<str>>> = RefCell::new(HashMap::new());
+        static GROUPS: RefCell<HashMap<Rc<str>, Option<InductiveRule>>> =
+            RefCell::new(HashMap::new());
+    }
+
+    /// The plans of one rule, taken out of the thread's for one seeded
+    /// firing and put back by [`keep`](Self::keep).
+    pub(super) struct Plans(HashMap<Vec<String>, Conjunction>);
+
+    impl Plans {
+        pub(super) fn of(key: &PlanKey) -> Self {
+            if !on().plan {
+                return Plans(HashMap::new());
+            }
+            Plans(PLANS.with(|plans| plans.borrow_mut().remove(key).unwrap_or_default()))
+        }
+
+        pub(super) fn keep(self, key: &PlanKey) {
+            if on().plan {
+                PLANS.with(|plans| plans.borrow_mut().insert(key.clone(), self.0));
+            }
+        }
+
+        /// The plan of `rule`, or of `body` when its subjects are
+        /// named, for `scope`.
+        pub(super) fn plan(
+            &mut self,
+            rule: &InductiveRule,
+            body: Option<&Body>,
+            scope: &Environment,
+        ) -> Conjunction {
+            let plan = || match body {
+                Some(body) => Planner::with_types(body.premises.clone(), body.types.clone())
+                    .plan(scope)
+                    .expect("an analyzed rule is plannable by construction"),
+                None => rule.plan(scope),
+            };
+            if !on().plan {
+                return plan();
+            }
+            let mut names: Vec<String> = scope.iter().map(str::to_string).collect();
+            names.sort();
+            self.0.entry(names).or_insert_with(plan).clone()
+        }
+    }
+
+    /// One body several candidates of a round state.
+    pub(super) struct Group {
+        /// The body, as its authors spelled it.
+        pub key: Rc<str>,
+        /// The rule the body is evaluated under.
+        pub rule: InductiveRule,
+        /// What it matched this round, once it has been evaluated.
+        pub matches: Option<Vec<Match>>,
+    }
+
+    /// The groups of a round's candidates, by candidate.
+    pub(super) struct Shared {
+        groups: Vec<Group>,
+        of: HashMap<usize, usize>,
+    }
+
+    impl Shared {
+        /// Group the candidates that fire seeded and state one body. A
+        /// candidate alone in its group is in none.
+        pub(super) fn of(loaded: &[(Entity, InductiveRule, bool, bool)]) -> Self {
+            let mut shared = Shared {
+                groups: Vec::new(),
+                of: HashMap::new(),
+            };
+            if !on().share {
+                return shared;
+            }
+            let mut by_body: Vec<(Rc<str>, Vec<usize>)> = Vec::new();
+            for (at, (entity, rule, _, full)) in loaded.iter().enumerate() {
+                if *full {
+                    continue;
+                }
+                let Some(body) = body_of(entity, rule) else {
+                    continue;
+                };
+                match by_body.iter_mut().find(|(key, _)| *key == body) {
+                    Some((_, members)) => members.push(at),
+                    None => by_body.push((body, vec![at])),
+                }
+            }
+            for (body, members) in by_body {
+                if members.len() < 2 {
+                    continue;
+                }
+                let rules: Vec<&InductiveRule> = members.iter().map(|&at| &loaded[at].1).collect();
+                let Some(rule) = union(&body, &rules) else {
+                    continue;
+                };
+                for at in members {
+                    shared.of.insert(at, shared.groups.len());
+                }
+                shared.groups.push(Group {
+                    key: body,
+                    rule,
+                    matches: None,
+                });
+            }
+            shared
+        }
+
+        /// The group candidate `at` is in, if it is in one.
+        pub(super) fn group(&mut self, at: usize) -> Option<&mut Group> {
+            let group = *self.of.get(&at)?;
+            self.groups.get_mut(group)
+        }
+    }
+
+    /// The body `rule` states, as its author spelled it: its `when` and
+    /// `unless`, encoded. Kept by the entity the rule is stored under,
+    /// which is a hash of the rule.
+    fn body_of(entity: &Entity, rule: &InductiveRule) -> Option<Rc<str>> {
+        if let Some(body) = BODIES.with(|bodies| bodies.borrow().get(entity).cloned()) {
+            return Some(body);
+        }
+        let mut json = serde_json::to_value(rule).ok()?;
+        let object = json.as_object_mut()?;
+        object.remove("assert!");
+        object.remove("retract!");
+        object.remove("description");
+        let body: Rc<str> = serde_json::to_string(&json).ok()?.into();
+        BODIES.with(|bodies| bodies.borrow_mut().insert(entity.clone(), body.clone()));
+        Some(body)
+    }
+
+    /// A rule with the body `rules` share and a head naming every field
+    /// any of their heads names, so the variables their heads read keep
+    /// their names in its matches. Kept by the body and the fields.
+    fn union(body: &Rc<str>, rules: &[&InductiveRule]) -> Option<InductiveRule> {
+        let mut fields = serde_json::Map::new();
+        for rule in rules {
+            let json = serde_json::to_value(rule).ok()?;
+            let head = json.get("assert!").or_else(|| json.get("retract!"))?;
+            for (name, field) in head.get("with")?.as_object()? {
+                fields.entry(name.clone()).or_insert_with(|| field.clone());
+            }
+        }
+        let names: Vec<&str> = fields.keys().map(String::as_str).collect();
+        let key: Rc<str> = format!("{}\n{body}", names.join(",")).into();
+        if let Some(rule) = GROUPS.with(|groups| groups.borrow().get(&key).cloned()) {
+            return rule;
+        }
+        let mut json: serde_json::Value = serde_json::from_str(body).ok()?;
+        json.as_object_mut()?
+            .insert("assert!".into(), serde_json::json!({ "with": fields }));
+        let rule: Option<InductiveRule> = serde_json::from_value(json).ok();
+        GROUPS.with(|groups| groups.borrow_mut().insert(key, rule.clone()));
+        rule
     }
 }
 
@@ -1467,6 +1793,7 @@ mod oracle {
     /// `transients` the grouped firing wrote; panics with both when it
     /// does not.
     pub(super) async fn agrees(
+        key: &super::spike::PlanKey,
         rule: &InductiveRule,
         transient_head: bool,
         rows: &[Fact],
@@ -1475,7 +1802,7 @@ mod oracle {
         novelty: &Changes,
         transients: &Changes,
     ) -> Result<(), CommitError> {
-        let per_row = seeded_matches(rule, rows, view, Seeding::PerRow).await?;
+        let per_row = seeded_matches(rule, key, rows, view, Seeding::PerRow).await?;
         let (mut expected_novelty, mut expected_transients) = before;
         if !per_row.is_empty() {
             emit_matches(
