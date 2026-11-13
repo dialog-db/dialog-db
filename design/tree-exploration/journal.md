@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* The problem, accepted. What is held is decided: two commands with handlers built into dialog, each answering with a second command that a rule in the space places. That a rule's head is committed or transient today, never the overlay. That dialog dispatches commands as transient facts and reacts with inductive rules at commit, and has no built-in reaction that performs an effect. Use cases are drafted (nine). A strategy matrix exists with six columns, the sixth born from the decision on what is held. | *Where are we at?* Directing. The matrix is written and not read by the maintainer. |
-| **Agenda** | *What do we need to know?* Whether the maintainer takes column 4 of [design-resolvers](design-resolvers.md) (asked). If so, the accessor set: which steps, and what a row of each holds. Whether a tree node has to be reachable as a concept, or whether a consumer asking a resolver directly is enough (asked 2026-11-13, not answered): every difficulty in columns 2 to 5 of the strategy comes from the concept. For [design-resolvers](design-resolvers.md): what a decoding formula's row is; whether the block travels as bytes or as a record. Whether writing to the overlay from rules is its own topic. Whether the use cases are right (asked, not answered). For column 6 of the strategy and for the held decision alike: how dialog reacts to a command with an effect and answers with a command. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
+| **Status** | *What do we know?* The problem, accepted. What is held is decided: two commands with handlers built into dialog, each answering with a second command that a rule in the space places. How a node is read is decided: accessors over a handle, the environment decoding once. That a rule's head is committed or transient today, never the overlay. That dialog dispatches commands as transient facts and reacts with inductive rules at commit, and has no built-in reaction that performs an effect. Use cases are drafted (nine). A strategy matrix exists with six columns, the sixth born from the decision on what is held. | *Where are we at?* Directing. The matrix is written and not read by the maintainer. |
+| **Agenda** | *What do we need to know?* Whether the handle is `node:` or `asset:` (asked, with a recommendation). The accessor set: which steps, and what a row of each holds; the agent drafts it next for the maintainer to mark up. Whether a node has to be a concept (asked 2026-11-13, not answered). Whether a tree node has to be reachable as a concept, or whether a consumer asking a resolver directly is enough (asked 2026-11-13, not answered): every difficulty in columns 2 to 5 of the strategy comes from the concept. For [design-resolvers](design-resolvers.md): what a decoding formula's row is; whether the block travels as bytes or as a record. Whether writing to the overlay from rules is its own topic. Whether the use cases are right (asked, not answered). For column 6 of the strategy and for the held decision alike: how dialog reacts to a command with an effect and answers with a command. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -494,3 +494,26 @@ Of the draft branch: a node as an entity is the handle this needs;
 listing when no node is given is not part of it.
 
 **Decided.** Not decided; the maintainer has the recommendation.
+
+## 2026-11-13, Designing: accessors over a handle are chosen; the handle's scheme
+
+**Asked.** Do you want column 4? The maintainer: "Ok I like your
+proposal." And: "We actually may even have the ability to read a block
+via an asset: url but not sure if that is accurate. If it is perhaps we
+should be representing node entities as asset:{hash} also."
+
+**Learned.** Checked: it is not accurate for a node. `asset:` names
+content in an archive's blob store, read through the blob lane and
+recorded by a fact that a branch holds it. A node's block is kept in the
+index catalog and read through the node layer. The two are different
+stores of one archive, so the scheme is also what tells an accessor
+where to look.
+
+The maintainer's instinct has a place it does fit: what a node points at
+in the blob store, a spilled value and a blob record, is an asset and
+should be yielded as `asset:`, which today's resolvers do not do (a
+spill is a base58 string, a blob record's hash is bytes).
+
+**Decided.** By the maintainer: column 4 of
+[design-resolvers](design-resolvers.md). The handle's scheme is not
+decided; the comparison is in that file.

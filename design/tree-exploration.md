@@ -1,6 +1,6 @@
 # A consumer that can only query cannot draw a branch's search tree
 
-Phase: **Directing.** See the [design index](README.md) for what the
+Phase: **Designing.** See the [design index](README.md) for what the
 phases mean, and the [journal](tree-exploration/journal.md) for where the
 topic stands.
 

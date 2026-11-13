@@ -5,7 +5,12 @@ yields, for: a consumer that can only query cannot draw a branch's
 search tree in a number of reads that does not grow with the tree (the
 [top story](../tree-exploration.md)).
 
-Not decided. Opened because the maintainer said, 2026-11-13: "current
+**Decided by the maintainer, 2026-11-13: column 4.** A node's entity is
+its handle; accessors are steps that ask the environment for the decoded
+node and project one part. Still to be decided under it: the accessor
+set, and the scheme of the handle (below).
+
+Opened because the maintainer said, 2026-11-13: "current
 ones are no good. I think something that allows us to obtain a block as
 record or bytes and have a formula to parse it is probably better than
 what we have now." What is no good about them has not been said by the
@@ -40,3 +45,28 @@ directly or through a concept is the strategy decision in
 | what has to be built | exists | one read step, about four formulas over `inspect`'s decoders, and the removal of seven resolvers | three resolvers in place of seven | the decoders in `inspect` take a node instead of bytes; the steps ask `nodes::Read` instead of `archive::Load`; the accessor set is redrawn |
 | who has to change | nobody | tonk's analyzer lists the resolvers by name and reads their operands (`resolver_registry.rs`), its guide documents them, and one CLI test uses `tree/node` | the same | the same |
 | every accessor decodes the block again | 🔴 yes: each resolver loads bytes, copies them (`into_vec`) and each `inspect_*` builds a node from them (`CorpusNode::try_from(Buffer::from(bytes))`); tonk's reader does the same with clones | 🔴 yes, per formula, unless each is marked cached, and the cache is then keyed by hashing the whole block per call | 🔴 as the status quo | 🟢 once per node while the environment keeps it |
+
+## The handle's scheme
+
+The maintainer asked, 2026-11-13, whether a block can be read through an
+`asset:` URL, and if so whether a node's entity should be
+`asset:<hash>`.
+
+What `asset:` is today: the entity of content kept in an archive's blob
+store (`Entity::from_blob`, `Asset::entity`), read through the blob
+lane (`blob::Read`, `blob::Load`), and carrying a fact that a branch
+holds it (`Asset::fact`). A tree node's block is not there: it is kept
+in the archive's index catalog (`ArchiveScope::index`) and read through
+the node layer. So a node's hash asked for through the blob lane is not
+found, and no asset fact names it.
+
+| criterion \ scheme | `node:<hash>` (the draft branch) | `asset:<hash>` for nodes as well |
+|---|---|---|
+| what the handle says about where its bytes are | which store: `node:` is the index catalog, `asset:` the blob store | 🟡 nothing: an accessor given `asset:` must try both stores or be told which |
+| what else is true of the entity | nothing is claimed | 🟡 an `asset:` entity has a size fact when a branch holds it, and is readable as a blob; neither holds of a node |
+| one scheme for everything addressed by its hash | 🟡 two schemes | 🟢 one |
+| things a node points at in the blob store (a spilled value, a blob record) | are `asset:`, as they are everywhere else in a branch | are `asset:` |
+
+The agent's recommendation: `node:` for nodes, and `asset:` for what a
+node points at in the blob store, so `tree/value` takes an `asset:` and
+a blob record's hash is yielded as one. Not decided.
