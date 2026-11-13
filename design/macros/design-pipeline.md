@@ -54,13 +54,14 @@ A macro call is not in the analyzed tree: after `(query (todo ?t text: ?x))` onl
 | parse | the order of labelled parts | a permutation a node |
 | parse | `of:` written or left out; a number's digits; `:open` or `open:`; which bracket | a spelling a node, where it is not the default |
 | parse | where a node is in the text | a range a node |
-| parse | space between tokens, and comments | not held: it is source. A printer lays the text out, so the test is the same tokens in the same order |
+| parse | a comment | its text, on the node it is about. Decided by the maintainer: comments matter more than anything else here, to document source and to find things by their documentation. A comment is not derived from anything, as a name is not, so holding it is not holding the source |
+| parse | space between tokens | not held. A printer lays the text out, so the test is the same tokens and comments in the same order, and the same bytes where the source was in the printer's layout |
 | analyze | the call a definition was applied to | the definition, by entity, at the node; what its template dropped |
 | analyze | the name a reference was written as | the name, beside the entity |
 | analyze | the names a template's own variables were given | derived from the site, as now |
 | compile | which rule, premise and variable is which node | a path a compiled part |
 
-Proposed by the agent, not decided: this table; that a comment is not reproduced; that order is held a node and not once a definition, since a call may write its labels in another order than the definition does.
+Proposed by the agent, not decided: this table; that order is held a node and not once a definition, since a call may write its labels in another order than the definition does; that a comment is about the node after it, or the node before it where it ends a line; that a comment on a definition and its `description:` are one thing, kept as a fact about the definition so it can be found.
 
 ## Not in these stages
 
