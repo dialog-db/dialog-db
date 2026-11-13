@@ -2,13 +2,15 @@
 
 ## Where things stand
 
-**Exploring.** Three sittings are in.
+**Exploring.** Four sittings are in.
 
 - At 500 commands a commit ([results](results/2026-11-12.md)) giving the condition a name costs 22% to 39% more instructions than one rule with a wide head, which stands in for a rule of several heads, and writing the body again a head costs 61% to 148% more.
 - At one command a commit ([results](results/2026-11-12-one-command.md)) the order is the same and the three are closer: `named` 17% to 28% over `wide`, `repeat` 27% to 87% over, of a commit that costs 2.9 to 4.0 million instructions with no rule.
 - With three prototype changes to induction on ([results](results/2026-11-12-induce-cost.md), branch `spike/induce-cost`), `repeat` is 1% to 7% over `wide` in the corner cells and every shape is 13% to 69% cheaper. `named` stays 21% to 43% over: its second round is untouched.
 
-Both of the first two are between the topic's bars, so it is the maintainer's to weigh; the third says most of what `repeat` costs is recoverable without a rule of several heads. Next, if he wants it: the cells between the corners, a sound version of evaluating a shared body once, and the design topic the measurements turned up (a seed that leaves its subject free, dialog-db/dialog-db#789).
+- Three of the prototypes are built to land and measured ([results](results/2026-11-13-sound.md)): one body evaluated once (dialog-db/dialog-db#790), a seed that binds its entity (#791, which changes what a commit writes and is the maintainer's to decide, with #789), and a rule's plans kept (#792). They save what the prototypes saved. With #790 alone `repeat` is 0.8% to 5.7% over `wide`; with #791 as well, 0.9% to 6.3%, and every shape is 11% to 67% cheaper than on main.
+
+Both of the first two are between the topic's bars, so it is the maintainer's to weigh; the third and fourth say what `repeat` costs over a rule of several heads is recovered by #790, without one. Next, if he wants it: the cells between the corners, and the fourth prototype, a rule found without reading its source again, in the form the last entry sets out.
 
 ## Datasets
 
@@ -144,6 +146,41 @@ One thing found is not a cost alone. A rule that leaves a premise's subject unna
 
 Commits: `e13e838` on `spike/induce-cost`, and the one this entry is in.
 
+## 2026-11-13, the prototypes built to land: they save what the prototypes saved
+
+**Question.** Do the optimizations the prototypes pointed at survive being made sound: does any give back its saving?
+
+**Method.** Three branches off main at dd19d6c, each its own draft pull request: `perf/share-body` (#790), `fix/seed-subject` (#791) and `perf/keep-plans` (#792). For measuring, this topic's harness was added to a build of each, and of main, and of #790 with #791 merged; the harness is in none of the pull requests. The corner cells at 500 commands a commit and at one. Three sweeps a variant under callgrind, each sitting interleaved with main.
+
+**Results.** [results/2026-11-13-sound.md](results/2026-11-13-sound.md). Millions of instructions, runs of one scenario differ by 0.42% at most.
+
+| | body, heads | `wide` | `named` | `repeat` | `repeat` over `wide` |
+|---|---|---|---|---|---|
+| 500 a commit, main | 1 read, 2 | 903.6 | 1141.4 | 1452.9 | +60.8% |
+| 500 a commit, #790 | 1 read, 2 | 901.7 | 1140.7 | 909.0 | +0.8% |
+| 500 a commit, #790 and #791 | 1 read, 2 | 564.4 | 800.7 | 569.4 | +0.9% |
+| 500 a commit, main | 4 reads, 4 | 1563.3 | 2081.8 | 3879.0 | +148.1% |
+| 500 a commit, #790 | 4 reads, 4 | 1562.9 | 2080.9 | 1614.6 | +3.3% |
+| 500 a commit, #790 and #791 | 4 reads, 4 | 1222.0 | 1738.9 | 1271.1 | +4.0% |
+| one a commit, main | 1 read, 2 | 4.51 | 5.30 | 5.74 | +27.1% |
+| one a commit, #790 | 1 read, 2 | 4.50 | 5.27 | 4.57 | +1.6% |
+| one a commit, #790 and #791 | 1 read, 2 | 3.79 | 4.58 | 3.85 | +1.7% |
+| one a commit, main | 4 reads, 4 | 6.25 | 7.90 | 11.65 | +86.3% |
+| one a commit, #790 | 4 reads, 4 | 6.23 | 7.85 | 6.58 | +5.7% |
+| one a commit, #790 and #791 | 4 reads, 4 | 5.44 | 7.05 | 5.78 | +6.3% |
+
+Each alone against main: #790 takes 37% and 58% off `repeat` at 500 and 20% and 44% at one, and under 1% off the others; #791 takes 22% to 47% off every shape at 500 and 10% to 27% at one; #792 takes 2.6% to 8.7% at 500 and 1.5% to 6.7% at one. Those are the prototypes' numbers. The sound forms gave nothing back.
+
+What making them sound turned up:
+
+- The order of matches does differ between two rules of one body, and decides what is written. Of eight rules that state one body and differ in the attribute they write, both orders of its premises occur, and they report different commands. #790 evaluates a rule alone when its matches write one cell two ways.
+- The firing for an untouched entity that #789 described is not only repeated work. On main it issues a command again, which is acted on again, and puts a durable value under `last` back over a later write. And main fires for every holder of a value when a commit writes one field of an entity, and for the entity alone when it writes two.
+- Binding the seed alone would lose a match main finds by accident. An attribute a deductive rule derives from itself is never counted as changed derivedly on main, so a rule over it is seeded, and with a named subject it misses the derived facts. #791 fires such a rule in full.
+
+**Decision.** The bar of 2026-11-12 is met by #790 alone, in the cells measured: `repeat` within 10% of `wide`. Not decided by the agent: whether any of the three lands. #791 changes what commits write and is marked breaking. `entity` was not built; the results file says what a form that keeps its check would need.
+
+Commits: #790 at `fe75f1c`, #791 at `7be4c57`, #792 at `804d200`, and the one this entry is in.
+
 ## How to reproduce
 
 ```
@@ -159,6 +196,15 @@ done
 target/release/perf sweep --only … --size 10 --out-dir …        # and 300, and 1
 DIALOG_PERF_HEADS_TODOS=5000 target/release/perf sweep --only … --out-dir …
 DIALOG_PERF_HEADS_COLD=1 target/release/perf sweep --only … --size 1 --out-dir …
+```
+
+The branches built to land, each with this topic's harness added to a local build (`git checkout research/rule-heads -- rust/dialog-perf` over the branch), the corner cells, three runs interleaved with main:
+
+```
+for run in 1 2 3; do for build in main share; do
+  perf-$build sweep --only heads-wide-light-2,heads-named-light-2,heads-repeat-light-2,heads-wide-heavy-4,heads-named-heavy-4,heads-repeat-heavy-4,heads-each-plain-2,heads-each-plain-4,heads-each-wide-light-2,heads-each-named-light-2,heads-each-repeat-light-2,heads-each-wide-heavy-4,heads-each-named-heavy-4,heads-each-repeat-heavy-4 --out-dir sweeps/$build-$run
+done; done
+python3 research/rule-heads/results/sound.py
 ```
 
 The prototypes, from a build of `spike/induce-cost`:

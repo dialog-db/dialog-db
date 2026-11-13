@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 527" width="920" height="527" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<rect width="920" height="527" fill="#fcfcfb"/>
+<text x="64" y="26" font-size="16" font-weight="600" fill="#0b0b0b">Instructions one commit of one move command retires, in millions</text>
+<text x="64" y="46" font-size="12" fill="#52514e">callgrind, median of three runs interleaved with main; every number is in the tables under the chart</text>
+<rect x="64" y="64" width="12" height="12" rx="2" fill="#8a8985"/>
+<text x="82" y="74" font-size="12" fill="#0b0b0b">main at dd19d6c</text>
+<rect x="64" y="81" width="12" height="12" rx="2" fill="#1baf7a"/>
+<text x="82" y="91" font-size="12" fill="#0b0b0b">one body evaluated once (#790)</text>
+<rect x="64" y="98" width="12" height="12" rx="2" fill="#2a78d6"/>
+<text x="82" y="108" font-size="12" fill="#0b0b0b">a seed binds its entity (#791)</text>
+<rect x="64" y="115" width="12" height="12" rx="2" fill="#c9a227"/>
+<text x="82" y="125" font-size="12" fill="#0b0b0b">a rule's plans are kept (#792)</text>
+<rect x="64" y="132" width="12" height="12" rx="2" fill="#eb6834"/>
+<text x="82" y="142" font-size="12" fill="#0b0b0b">#790 and #791 together</text>
+<line x1="64" x2="900" y1="469.0" y2="469.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="473.0" font-size="11" text-anchor="end" fill="#52514e">0</text>
+<line x1="64" x2="900" y1="392.5" y2="392.5" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="396.5" font-size="11" text-anchor="end" fill="#52514e">3</text>
+<line x1="64" x2="900" y1="316.0" y2="316.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="320.0" font-size="11" text-anchor="end" fill="#52514e">6</text>
+<line x1="64" x2="900" y1="239.5" y2="239.5" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="243.5" font-size="11" text-anchor="end" fill="#52514e">9</text>
+<line x1="64" x2="900" y1="163.0" y2="163.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="167.0" font-size="11" text-anchor="end" fill="#52514e">12</text>
+<path d="M77.0,469 V357.9 Q77.0,353.9 81.0,353.9 H94.1 Q98.1,353.9 98.1,357.9 V469 Z" fill="#8a8985"><title>main at dd19d6c, wide|1 read, 2 heads: 4.512</title></path>
+<text x="87.5" y="347.9" font-size="9" text-anchor="middle" fill="#0b0b0b">4.51</text>
+<path d="M100.1,469 V358.4 Q100.1,354.4 104.1,354.4 H117.1 Q121.1,354.4 121.1,358.4 V469 Z" fill="#1baf7a"><title>one body evaluated once (#790), wide|1 read, 2 heads: 4.496</title></path>
+<text x="110.6" y="348.4" font-size="9" text-anchor="middle" fill="#0b0b0b">4.50</text>
+<path d="M123.1,469 V376.0 Q123.1,372.0 127.1,372.0 H140.2 Q144.2,372.0 144.2,376.0 V469 Z" fill="#2a78d6"><title>a seed binds its entity (#791), wide|1 read, 2 heads: 3.804</title></path>
+<text x="133.7" y="366.0" font-size="9" text-anchor="middle" fill="#0b0b0b">3.80</text>
+<path d="M146.2,469 V359.6 Q146.2,355.6 150.2,355.6 H163.3 Q167.3,355.6 167.3,359.6 V469 Z" fill="#c9a227"><title>a rule's plans are kept (#792), wide|1 read, 2 heads: 4.445</title></path>
+<text x="156.7" y="349.6" font-size="9" text-anchor="middle" fill="#0b0b0b">4.45</text>
+<path d="M169.3,469 V376.4 Q169.3,372.4 173.3,372.4 H186.3 Q190.3,372.4 190.3,376.4 V469 Z" fill="#eb6834"><title>#790 and #791 together, wide|1 read, 2 heads: 3.788</title></path>
+<text x="179.8" y="366.4" font-size="9" text-anchor="middle" fill="#0b0b0b">3.79</text>
+<text x="133.7" y="493" font-size="12" text-anchor="middle" fill="#0b0b0b">wide</text>
+<text x="133.7" y="509" font-size="12" text-anchor="middle" fill="#52514e">1 read, 2 heads</text>
+<path d="M216.3,469 V337.8 Q216.3,333.8 220.3,333.8 H233.4 Q237.4,333.8 237.4,337.8 V469 Z" fill="#8a8985"><title>main at dd19d6c, named|1 read, 2 heads: 5.303</title></path>
+<text x="226.9" y="327.8" font-size="9" text-anchor="middle" fill="#0b0b0b">5.30</text>
+<path d="M239.4,469 V338.6 Q239.4,334.6 243.4,334.6 H256.5 Q260.5,334.6 260.5,338.6 V469 Z" fill="#1baf7a"><title>one body evaluated once (#790), named|1 read, 2 heads: 5.272</title></path>
+<text x="249.9" y="328.6" font-size="9" text-anchor="middle" fill="#0b0b0b">5.27</text>
+<path d="M262.5,469 V355.7 Q262.5,351.7 266.5,351.7 H279.5 Q283.5,351.7 283.5,355.7 V469 Z" fill="#2a78d6"><title>a seed binds its entity (#791), named|1 read, 2 heads: 4.600</title></path>
+<text x="273.0" y="345.7" font-size="9" text-anchor="middle" fill="#0b0b0b">4.60</text>
+<path d="M285.5,469 V340.3 Q285.5,336.3 289.5,336.3 H302.6 Q306.6,336.3 306.6,340.3 V469 Z" fill="#c9a227"><title>a rule's plans are kept (#792), named|1 read, 2 heads: 5.202</title></path>
+<text x="296.1" y="330.3" font-size="9" text-anchor="middle" fill="#0b0b0b">5.20</text>
+<path d="M308.6,469 V356.3 Q308.6,352.3 312.6,352.3 H325.7 Q329.7,352.3 329.7,356.3 V469 Z" fill="#eb6834"><title>#790 and #791 together, named|1 read, 2 heads: 4.578</title></path>
+<text x="319.1" y="346.3" font-size="9" text-anchor="middle" fill="#0b0b0b">4.58</text>
+<text x="273.0" y="493" font-size="12" text-anchor="middle" fill="#0b0b0b">named</text>
+<text x="273.0" y="509" font-size="12" text-anchor="middle" fill="#52514e">1 read, 2 heads</text>
+<path d="M355.7,469 V326.7 Q355.7,322.7 359.7,322.7 H372.7 Q376.7,322.7 376.7,326.7 V469 Z" fill="#8a8985"><title>main at dd19d6c, repeat|1 read, 2 heads: 5.736</title></path>
+<text x="366.2" y="316.7" font-size="9" text-anchor="middle" fill="#0b0b0b">5.74</text>
+<path d="M378.7,469 V356.5 Q378.7,352.5 382.7,352.5 H395.8 Q399.8,352.5 399.8,356.5 V469 Z" fill="#1baf7a"><title>one body evaluated once (#790), repeat|1 read, 2 heads: 4.569</title></path>
+<text x="389.3" y="346.5" font-size="9" text-anchor="middle" fill="#0b0b0b">4.57</text>
+<path d="M401.8,469 V362.9 Q401.8,358.9 405.8,358.9 H418.9 Q422.9,358.9 422.9,362.9 V469 Z" fill="#2a78d6"><title>a seed binds its entity (#791), repeat|1 read, 2 heads: 4.319</title></path>
+<text x="412.3" y="352.9" font-size="9" text-anchor="middle" fill="#0b0b0b">4.32</text>
+<path d="M424.9,469 V329.9 Q424.9,325.9 428.9,325.9 H441.9 Q445.9,325.9 445.9,329.9 V469 Z" fill="#c9a227"><title>a rule's plans are kept (#792), repeat|1 read, 2 heads: 5.614</title></path>
+<text x="435.4" y="319.9" font-size="9" text-anchor="middle" fill="#0b0b0b">5.61</text>
+<path d="M447.9,469 V374.8 Q447.9,370.8 451.9,370.8 H465.0 Q469.0,370.8 469.0,374.8 V469 Z" fill="#eb6834"><title>#790 and #791 together, repeat|1 read, 2 heads: 3.853</title></path>
+<text x="458.5" y="364.8" font-size="9" text-anchor="middle" fill="#0b0b0b">3.85</text>
+<text x="412.3" y="493" font-size="12" text-anchor="middle" fill="#0b0b0b">repeat</text>
+<text x="412.3" y="509" font-size="12" text-anchor="middle" fill="#52514e">1 read, 2 heads</text>
+<path d="M495.0,469 V313.6 Q495.0,309.6 499.0,309.6 H512.1 Q516.1,309.6 516.1,313.6 V469 Z" fill="#8a8985"><title>main at dd19d6c, wide|4 reads, 4 heads: 6.253</title></path>
+<text x="505.5" y="303.6" font-size="9" text-anchor="middle" fill="#0b0b0b">6.25</text>
+<path d="M518.1,469 V314.3 Q518.1,310.3 522.1,310.3 H535.1 Q539.1,310.3 539.1,314.3 V469 Z" fill="#1baf7a"><title>one body evaluated once (#790), wide|4 reads, 4 heads: 6.225</title></path>
+<text x="528.6" y="304.3" font-size="9" text-anchor="middle" fill="#0b0b0b">6.23</text>
+<path d="M541.1,469 V333.7 Q541.1,329.7 545.1,329.7 H558.2 Q562.2,329.7 562.2,333.7 V469 Z" fill="#2a78d6"><title>a seed binds its entity (#791), wide|4 reads, 4 heads: 5.463</title></path>
+<text x="551.7" y="323.7" font-size="9" text-anchor="middle" fill="#0b0b0b">5.46</text>
+<path d="M564.2,469 V318.8 Q564.2,314.8 568.2,314.8 H581.3 Q585.3,314.8 585.3,318.8 V469 Z" fill="#c9a227"><title>a rule's plans are kept (#792), wide|4 reads, 4 heads: 6.048</title></path>
+<text x="574.7" y="308.8" font-size="9" text-anchor="middle" fill="#0b0b0b">6.05</text>
+<path d="M587.3,469 V334.3 Q587.3,330.3 591.3,330.3 H604.3 Q608.3,330.3 608.3,334.3 V469 Z" fill="#eb6834"><title>#790 and #791 together, wide|4 reads, 4 heads: 5.438</title></path>
+<text x="597.8" y="324.3" font-size="9" text-anchor="middle" fill="#0b0b0b">5.44</text>
+<text x="551.7" y="493" font-size="12" text-anchor="middle" fill="#0b0b0b">wide</text>
+<text x="551.7" y="509" font-size="12" text-anchor="middle" fill="#52514e">4 reads, 4 heads</text>
+<path d="M634.3,469 V271.6 Q634.3,267.6 638.3,267.6 H651.4 Q655.4,267.6 655.4,271.6 V469 Z" fill="#8a8985"><title>main at dd19d6c, named|4 reads, 4 heads: 7.898</title></path>
+<text x="644.9" y="261.6" font-size="9" text-anchor="middle" fill="#0b0b0b">7.90</text>
+<path d="M657.4,469 V272.9 Q657.4,268.9 661.4,268.9 H674.5 Q678.5,268.9 678.5,272.9 V469 Z" fill="#1baf7a"><title>one body evaluated once (#790), named|4 reads, 4 heads: 7.848</title></path>
+<text x="667.9" y="262.9" font-size="9" text-anchor="middle" fill="#0b0b0b">7.85</text>
+<path d="M680.5,469 V291.9 Q680.5,287.9 684.5,287.9 H697.5 Q701.5,287.9 701.5,291.9 V469 Z" fill="#2a78d6"><title>a seed binds its entity (#791), named|4 reads, 4 heads: 7.102</title></path>
+<text x="691.0" y="281.9" font-size="9" text-anchor="middle" fill="#0b0b0b">7.10</text>
+<path d="M703.5,469 V278.5 Q703.5,274.5 707.5,274.5 H720.6 Q724.6,274.5 724.6,278.5 V469 Z" fill="#c9a227"><title>a rule's plans are kept (#792), named|4 reads, 4 heads: 7.626</title></path>
+<text x="714.1" y="268.5" font-size="9" text-anchor="middle" fill="#0b0b0b">7.63</text>
+<path d="M726.6,469 V293.2 Q726.6,289.2 730.6,289.2 H743.7 Q747.7,289.2 747.7,293.2 V469 Z" fill="#eb6834"><title>#790 and #791 together, named|4 reads, 4 heads: 7.051</title></path>
+<text x="737.1" y="283.2" font-size="9" text-anchor="middle" fill="#0b0b0b">7.05</text>
+<text x="691.0" y="493" font-size="12" text-anchor="middle" fill="#0b0b0b">named</text>
+<text x="691.0" y="509" font-size="12" text-anchor="middle" fill="#52514e">4 reads, 4 heads</text>
+<path d="M773.7,469 V175.9 Q773.7,171.9 777.7,171.9 H790.7 Q794.7,171.9 794.7,175.9 V469 Z" fill="#8a8985"><title>main at dd19d6c, repeat|4 reads, 4 heads: 11.650</title></path>
+<text x="784.2" y="165.9" font-size="9" text-anchor="middle" fill="#0b0b0b">11.65</text>
+<path d="M796.7,469 V305.2 Q796.7,301.2 800.7,301.2 H813.8 Q817.8,301.2 817.8,305.2 V469 Z" fill="#1baf7a"><title>one body evaluated once (#790), repeat|4 reads, 4 heads: 6.582</title></path>
+<text x="807.3" y="295.2" font-size="9" text-anchor="middle" fill="#0b0b0b">6.58</text>
+<path d="M819.8,469 V257.2 Q819.8,253.2 823.8,253.2 H836.9 Q840.9,253.2 840.9,257.2 V469 Z" fill="#2a78d6"><title>a seed binds its entity (#791), repeat|4 reads, 4 heads: 8.461</title></path>
+<text x="830.3" y="247.2" font-size="9" text-anchor="middle" fill="#0b0b0b">8.46</text>
+<path d="M842.9,469 V195.8 Q842.9,191.8 846.9,191.8 H859.9 Q863.9,191.8 863.9,195.8 V469 Z" fill="#c9a227"><title>a rule's plans are kept (#792), repeat|4 reads, 4 heads: 10.870</title></path>
+<text x="853.4" y="185.8" font-size="9" text-anchor="middle" fill="#0b0b0b">10.87</text>
+<path d="M865.9,469 V325.6 Q865.9,321.6 869.9,321.6 H883.0 Q887.0,321.6 887.0,325.6 V469 Z" fill="#eb6834"><title>#790 and #791 together, repeat|4 reads, 4 heads: 5.781</title></path>
+<text x="876.5" y="315.6" font-size="9" text-anchor="middle" fill="#0b0b0b">5.78</text>
+<text x="830.3" y="493" font-size="12" text-anchor="middle" fill="#0b0b0b">repeat</text>
+<text x="830.3" y="509" font-size="12" text-anchor="middle" fill="#52514e">4 reads, 4 heads</text>
+<line x1="64" x2="900" y1="469" y2="469" stroke="#52514e" stroke-width="1"/>
+</svg>
