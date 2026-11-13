@@ -841,6 +841,28 @@ xychart-beta
 
 **Decision.** The expansion goes into the spec, as proposed, with the sentence on how `last` elects between stored and derived values beside it.
 
+## 2026-11-13 — R39: framing, one-field example and `last`
+
+**Question.** The one [planned](results/r39-plan.md): how short can the spec be? Three versions, each with a sentence on how `last` elects:
+
+- the maintainer's framing, "a concept is just a set of attributes that share an entity, a convenient way to express derivations over those attributes more concisely";
+- the framing with a one-field example;
+- R38's expansion.
+
+**Method.** Clean runner, 20 readers per version on the note derive case and on the renamed derived to-do.
+
+**Results.** [r39](results/r39.md).
+
+| version | note found | to-do rename |
+|---|---|---|
+| framing | 20 of 20 | 10 of 20 |
+| framing with example | 20 of 20 | 18 of 20 |
+| expansion | 18 of 20 | 19 of 20 |
+
+Every reader who saw the rename land said the to-do shows "Fix login bug", and all 60 said a later issue change shows "Login fails". The framing alone carries a conclusion from one concept to another, but not into a domain call in a rule's condition. The one-field example closes that.
+
+**Decision.** The spec opens with the framing, the one-field example and the election sentence. design.md is to be updated to say so.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
