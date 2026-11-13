@@ -1,6 +1,6 @@
 # What a rule of several heads would save
 
-**Status: Exploring.** One sitting is in ([results](rule-heads/results/2026-11-12.md)): a named condition costs 22% to 39% more than the stand-in for several heads, and the body written again 61% to 148% more, which is between the bars below. Asked by the design of the notation ([macros](../design/macros.md), #773), which would drop rules of several heads from its kernel if writing on one condition is as cheap without them.
+**Status: Exploring.** Two sittings are in. At 500 commands a commit a named condition costs 22% to 39% more than the stand-in for several heads and the body written again 61% to 148% more ([results](rule-heads/results/2026-11-12.md)). At one command a commit it is 17% to 28% and 27% to 87% ([results](rule-heads/results/2026-11-12-one-command.md)). Both are between the bars below. Asked by the design of the notation ([macros](../design/macros.md), #773), which would drop rules of several heads from its kernel if writing on one condition is as cheap without them.
 
 ## The question
 

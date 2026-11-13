@@ -52,7 +52,8 @@ runs, in the journal's "Where things stand"; they change together.
 - [What a rule of several heads would save](rule-heads.md): **Exploring.**
   Whether writing several facts on one condition costs enough with rules of
   one head for dialog to need a rule of several. A named condition costs
-  22% to 39% more than a stand-in for several heads; the maintainer's to weigh.
+  22% to 39% more than a stand-in for several heads at 500 commands a commit
+  and 17% to 28% more at one; the maintainer's to weigh.
 - [Single-file format](single-file-format.md): **Building**, on
   [dialog-db/dialog-db#733](https://github.com/dialog-db/dialog-db/pull/733).
   A replica's blocks in one append-only file, every token stored once.

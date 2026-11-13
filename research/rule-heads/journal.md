@@ -2,7 +2,7 @@
 
 ## Where things stand
 
-**Exploring.** The harness is on the branch and one sitting is in: [results of 2026-11-12](results/2026-11-12.md). Giving the condition a name costs 22% to 39% more instructions than one rule with a wide head, which stands in for a rule of several heads; writing the body again a head costs 61% to 148% more. That is between the bars, so it is the maintainer's to weigh. Next, if he wants it: the same at one command a commit, and what the 128 thousand instructions to evaluate a rule of one read are.
+**Exploring.** Two sittings are in. At 500 commands a commit ([results](results/2026-11-12.md)) giving the condition a name costs 22% to 39% more instructions than one rule with a wide head, which stands in for a rule of several heads, and writing the body again a head costs 61% to 148% more. At one command a commit ([results](results/2026-11-12-one-command.md)) the order is the same and the three are closer: `named` 17% to 28% over `wide`, `repeat` 27% to 87% over, of a commit that costs 2.9 to 4.0 million instructions with no rule. Both are between the topic's bars, so it is the maintainer's to weigh. Next: what the engine could recover, with the prototypes on `spike/induce-cost` being measured.
 
 ## Datasets
 
@@ -78,6 +78,33 @@ Net of `plain` has no bar. It is reported to say what the rules themselves cost.
 
 Three runs, interleaved: off, `plan`, `subject`, `share`, all, then again.
 
+## 2026-11-12, one command a commit: the difference holds
+
+**Question.** Do the differences between `wide`, `named` and `repeat` hold at one command a commit?
+
+**Method.** As set out in the entry of that name above: `heads-each-…`, 100 commits of one command each over 500 to-dos after one commit off the record, three sweeps under callgrind. `it_writes_the_same_facts_a_commit_a_command` checks that the three shapes and `plain` write the same facts.
+
+**Results.** [results/2026-11-12-one-command.md](results/2026-11-12-one-command.md). Millions of instructions a commit; runs of one scenario differ by 0.32% at most.
+
+| body | heads | `plain` | `wide` | `named` | `repeat` | `named` over `wide` | `repeat` over `wide` |
+|---|---|---|---|---|---|---|---|
+| one read | 2 | 2.91 | 4.52 | 5.30 | 5.73 | +17.4% | +26.9% |
+| one read | 4 | 4.02 | 5.83 | 7.43 | 10.30 | +27.5% | +76.7% |
+| four reads | 2 | 2.91 | 4.94 | 5.81 | 6.72 | +17.8% | +36.1% |
+| four reads | 4 | 4.02 | 6.25 | 7.90 | 11.66 | +26.3% | +86.5% |
+
+Net of `plain`, `named` is 43% to 89% over `wide` and `repeat` 76% to 247% over.
+
+The three guesses held: the order is the same, gross the three are closer than at 500, and net they are further apart. One thing was not guessed: a commit with no rule does not cost a fixed amount. It is 1.97 million averaged over the first 10 commits, 3.18 over 300, and 4.48 over a store of 5000 to-dos, so the gross percentages move with how much has been committed, between +13% and +47% for `named` over the checks. What the rules add moves much less.
+
+Where a commit's instructions go, `wide` with one read and two heads: 2.15 million the commit itself, 0.50 of it signing, and 1.84 induction, of which 0.66 is four range estimates of the command premise's fields. The entry above this one is about that.
+
+The check called "the first commit of a process" is the first commit after the rules were installed by the same process, which has already decoded them. A process that starts with the rules stored was not run.
+
+**Decision.** The bar is met: `named` is 10% or more over `wide` in every cell, so the difference holds at one command a commit. Whether it is large enough to want a rule of several heads is the maintainer's, as before.
+
+Commits: `d311797` and the one this entry is in.
+
 ## How to reproduce
 
 ```
@@ -85,4 +112,12 @@ cargo build -p dialog-perf --release
 for run in 1 2 3; do
   target/release/perf sweep --only "$(target/release/perf list | grep -o 'heads-[a-z0-9-]*' | paste -sd,)" --out-dir target/heads-$run
 done
+```
+
+`heads-each-…` are among them. Their checks, each a sweep of its own:
+
+```
+target/release/perf sweep --only … --size 10 --out-dir …        # and 300, and 1
+DIALOG_PERF_HEADS_TODOS=5000 target/release/perf sweep --only … --out-dir …
+DIALOG_PERF_HEADS_COLD=1 target/release/perf sweep --only … --size 1 --out-dir …
 ```
