@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing** again from 2026-11-12, for the three phases ([design-pipeline.md](design-pipeline.md)); how the phases stand behind the query engine is still Directing. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
-| **Agenda** | To ask: whether descriptions are `dialog.meta/description`, which Dialog-DB refuses from a transaction today, or stay under the notation's own `syntax.meta`. Which format a stored rule that holds a pattern is stamped (#779), which is what stands between the notation and structs in rules that write. Next: a reported row in the order asked, printing from the analyzed tree, `data.rs` over the composite value of #778. Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Decided 2026-11-13: a rule has one head and `(all …)` is not written; what that does to #776 and to several heads in #779 is the maintainer's to say. Whether a template says several things with `(all …)` or a spread. Whether a command takes fields beside what it is about, and a slash in its name. The prelude written without `when`. Parked by the maintainer: `update`, and with it what it does with a dependent that does not fit or arrives by sync. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. |
+| **Agenda** | To ask: whether descriptions are `dialog.meta/description`, which Dialog-DB refuses from a transaction today, or stay under the notation's own `syntax.meta`. Which format a stored rule that holds a pattern is stamped (#779), which is what stands between the notation and structs in rules that write. What `[ ]` says, a list or a tuple: it is a tuple today, a list has no spelling, and the choice is dear to change once values are stored. Next: a rest in a struct and a list with a run, which dialog has and the notation does not write; a reported row in the order asked; printing from the analyzed tree. Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Decided 2026-11-13: a rule has one head and `(all …)` is not written; what that does to #776 and to several heads in #779 is the maintainer's to say. Whether a template says several things with `(all …)` or a spread. Whether a command takes fields beside what it is about, and a slash in its name. The prelude written without `when`. Parked by the maintainer: `update`, and with it what it does with a dependent that does not fit or arrives by sync. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. |
 
 ## Candidate problems
 
@@ -861,3 +861,40 @@ Not examined yet. They are columns, not recommendations.
 
 **Decided.** By the agent, open to change: descriptions under `syntax.meta` and not `dialog.meta`, until the maintainer says whether dialog lets `dialog.meta/` through; a comment block joined by lines. Not decided: what stands between the notation and structs in rules is one decision of the maintainer's, the stamping of a format that can hold a pattern, and then a build. With one head a rule, several heads are no longer one of the additions that format has to carry.
 
+## 2026-11-13, Designing: a tree kept as dialog's composite value, and which patterns the notation writes
+
+**Asked.** "Also where's pattern support workstream or composite value support? We need both here" (the maintainer). The engine agent's report came in the same sitting.
+
+**Learned.**
+
+- Built: a syntax tree is kept as the composite value of #778. `data.rs` was a layout of the notation's own, version 2, marked a stand-in from the day it was written. It is 215 lines where it was 472: what is left is how a name is spelled as a symbol and a map whose keys are names. `Syntax::value` is the tree as a value, and `Syntax::try_from(&Value)` reads one. `bijoux` is no longer a dependency.
+- No name moved. The names of three trees and a signature under the old layout are pinned in `it_names_a_tree_apart_from_how_it_is_kept`, recorded before the change and equal after. A name follows nesting 128 composites deep (`NAMED_DEPTH`), about 40 forms nested in forms, and past that a part is named by its bytes.
+- What did move: one number is kept one way. A constant written `2.0` reads back from a kept tree as `2`. The old layout kept the two apart in bytes under one name.
+- A record of the old layout starts with the byte 2, which dialog now reads as a composite of a version it does not know, and refuses by that number. Nothing real was stored under it.
+- Found by keeping trees that way: a query takes a kept form apart by a pattern, with no code that knows what a form is.
+
+```
+ (query (syntax.form ?f is: {type: :application
+                             operator: {type: :reference name: /todo}
+                             operand: _}))
+
+ every kept form that applies `todo`
+```
+
+- For that, a name with a `/` in it is a symbol where a struct holds a value (`/todo`, `xyz.todo/text`), as it already was where a field does. A symbol was printed that way and could not be written back.
+- The notation writes two of the patterns dialog has:
+
+```
+ dialog (#778)                    the notation
+ Map   { key: Pattern … }         {author: ?who}            ✓
+ Map   { … , rest }               {author: ?who ...?rest}   not read
+ List  [ Pattern … ]              no spelling
+ List  [ … , run ]                no spelling
+ Tuple [ Pattern … ]              [?first ?second]          ✓
+```
+
+- So a pattern cannot reach into the parts of a kept node: they are a list, `[ ]` is a tuple, and a list is not a tuple (`it_finds_a_kept_form_by_a_pattern_over_its_tree` pins the empty answer).
+- A list a query gives back prints as `[ ]`, which reads as a tuple. What is printed does not read back as the value it was.
+- The engine agent's three pull requests are open as drafts, each green: #790 (one body evaluated once), #791 (a seed binds its entity, breaking), #792 (a rule planned once). With #790 alone, a rule each with the body again is 0.8% to 5.7% over one wide head, where it was 27% to 148% on main: inside the bar of 10% set on 2026-11-12. One head a rule costs nothing several heads would have saved. Numbers: `research/rule-heads/results/2026-11-13-sound.md` (#788).
+
+**Decided.** Built, needing no decision: the tree over the composite value; a symbol written in a struct. Not decided, the maintainer's: what `[ ]` says. The agent's hypothesis is a list, in the ledger with what would refute it. Next, needing no decision: a rest in a struct, since `...?rest` already says a rest in an application, and a list with a run, since a tuple has none.

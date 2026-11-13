@@ -926,6 +926,96 @@ async fn it_keeps_a_form_on_a_branch_under_the_entity_that_names_it() -> Result<
     Ok(())
 }
 
+/// A kept form is a composite value, so a query takes it apart by a
+/// pattern like any struct: the forms that apply a name are found by
+/// the shape of an application, with no code that knows what a form is.
+#[dialog_common::test]
+async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let is: AttributeDescriptor =
+        serde_json::from_value(json!({ "the": "syntax.form/is", "as": "record:" }))?;
+    let mut entities = Vec::new();
+    for text in [
+        "(todo ?t)",
+        "(todo ?t state: :open)",
+        "(done ?t)",
+        "[todo ?t]",
+    ] {
+        let syntax = Syntax::try_from(&read(text)?[0])?;
+        entities.push(syntax.entity()?.to_string());
+        notebook
+            .branch
+            .transaction()
+            .assert(ConceptStatement {
+                this: syntax.entity()?,
+                with: vec![is.resolve(syntax.value()?)?],
+            })
+            .commit()
+            .publish()
+            .perform(&notebook.operator)
+            .await?;
+    }
+    notebook.branch.refresh(&notebook.operator).await?;
+
+    // Every application of `todo`, whatever it is applied to. A
+    // reference holds its name as a symbol of no domain, written
+    // `/todo`. The tuple that starts with `todo` applies nothing.
+    let mut applies = report(
+        &mut notebook,
+        "(query (syntax.form ?f is: {type: :application
+                                     operator: {type: :reference name: /todo}
+                                     operand: _}))",
+    )
+    .await?;
+    applies.sort();
+    let mut expected = vec![
+        format!(
+            "(syntax.form {} is: {{operand: {{items: [{{name: \"t\" type: :variable}}] terms: {{}} type: :parameters}} operator: {{name: /todo type: :reference}} type: :application}})",
+            entities[0]
+        ),
+        format!(
+            "(syntax.form {} is: {{operand: {{items: [{{name: \"t\" type: :variable}}] terms: {{state: {{type: :constant value: :open}}}} type: :parameters}} operator: {{name: /todo type: :reference}} type: :application}})",
+            entities[1]
+        ),
+    ];
+    expected.sort();
+    assert_eq!(applies, expected);
+
+    // Taken further apart: the applications with no labelled part, by
+    // the shape of their parameters, whatever name they apply.
+    let bare = report(
+        &mut notebook,
+        "(query (syntax.form ?f is: {type: :application
+                                     operator: {type: :reference name: ?name}
+                                     operand: {type: :parameters items: ?items terms: {}}}))",
+    )
+    .await?;
+    assert_eq!(bare.len(), 2, "{bare:?}");
+    assert!(bare.iter().any(|row| row.contains(&entities[0])));
+    assert!(bare.iter().any(|row| row.contains(&entities[2])));
+
+    // A tuple is no application, so it has no such shape, and it has
+    // one of its own.
+    let tuples = report(
+        &mut notebook,
+        "(query (syntax.form ?f is: {type: :tuple items: ?items}))",
+    )
+    .await?;
+    assert_eq!(tuples.len(), 1, "{tuples:?}");
+    assert!(tuples[0].contains(&entities[3]));
+
+    // The parts of a node are a list, and `[ ]` in a query is a tuple:
+    // a list is not a tuple, so a pattern cannot yet take the items of
+    // a kept form apart.
+    let items = report(
+        &mut notebook,
+        "(query (syntax.form ?f is: {type: :tuple items: [_ _]}))",
+    )
+    .await?;
+    assert_eq!(items, Vec::<String>::new());
+    Ok(())
+}
+
 /// What a form as a record rests on: a symbol with no domain is a value
 /// today, a variable or an operator spelled as one included, and it is
 /// not an attribute a claim can be made under.

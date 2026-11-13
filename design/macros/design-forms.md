@@ -144,12 +144,13 @@ Built, in `rust/dialog-notation/src/data.rs` and `src/syntax.rs`. The first vers
 | text, number, truth | as dialog has them | as dialog does |
 | entity | `Value::Entity` | `entity:` |
 | symbol, of a domain or of none | `Value::Symbol`: `xyz.todo/text`, `/todo` | `symbol:` |
-| list | none yet | `Type::LIST` |
-| map, from data to data | none yet | `Type::MAP` |
+| list | a `record:` that holds a composite list | `Type::LIST` |
+| map, from data to data | a `record:` that holds a composite map | `Type::MAP` |
 
-- **The data knows no syntax.** `Data` is a value, a list or a map. A node of the tree is a map that says its `type`, and only `syntax.rs` reads it as one.
-- **The name** is the reference of the tree's data, and `form:` with it in base58 is the entity. Two orders of the same labels are one name, and so are `1.5` and `1.50`. The natural 3 and the float 3.0 are one name too, as they are one number to dialog, though they are two byte strings: a name does not follow the layout.
-- **The layout** is `Data::encode`: a version byte, then tags, lengths as bijou64, a map's entries in the order of their keys. `Data::decode` refuses another version by its number, and bytes that are not the one way the data is written. It is version 2, and a stand-in for the composite value [patterns](../patterns.md) builds.
+- **The data knows no syntax.** It is a value, a list or a map, as dialog has them since [patterns](../patterns.md) (#778). A node of the tree is a map that says its `type`, and only `syntax.rs` reads it as one.
+- **The name** is the reference of the tree's data, and `form:` with it in base58 is the entity. Two orders of the same labels are one name, and so are `1.5` and `1.50`. The natural 3 and the float 3.0 are one name too, as they are one number to dialog, and kept they are one byte string: `2.0` reads back as `2`.
+- **The layout** is dialog's composite value: a version byte, then dag-cbor, a map's entries in the order of their keys. A record under another version is refused by its number, and so are bytes that are not the one way the value is written. The notation had a layout of its own until 2026-11-13, a stand-in for this one; no name moved when it went (`it_names_a_tree_apart_from_how_it_is_kept`).
+- **A kept tree is taken apart by a pattern**, like any struct: `(query (syntax.form ?f is: {type: :application operator: {type: :reference name: /todo} operand: _}))` is every kept form that applies `todo` (`it_finds_a_kept_form_by_a_pattern_over_its_tree`). The parts of a node are a list, and `[ ]` in the notation is a tuple, so a pattern does not reach into them yet.
 - A tree is kept on a real branch as a `record:` value under its `form:` entity and read back (`it_keeps_a_form_on_a_branch_under_the_entity_that_names_it`). Every form of the prelude and the examples has a tree that lays out and reads back (`it_keeps_every_form_of_the_prelude_and_the_examples`).
 - The crate hashes no text. The names an expansion gives its own variables, and the relation a query is derived into, come from references.
 

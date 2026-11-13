@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use dialog_corpus::{Composite, Entity, Value};
+use dialog_corpus::{Composite, Entity, Relation, Value};
 use dialog_query::concept::descriptor::ConceptStatement;
 use dialog_query::formula::entity::derive;
 use dialog_query::{
@@ -33,7 +33,7 @@ use dialog_query::{
 use serde_json::{Map, Value as Json, json};
 
 use crate::Error;
-use crate::data::Data;
+use crate::data;
 use crate::kernel::{Field, Formula, Head, Premise, Read, Rule, TYPES, Term};
 use crate::syntax::{self, Parameters, Syntax};
 
@@ -123,7 +123,7 @@ fn written(value: &Value) -> Syntax {
                         .map(|(key, value)| {
                             // A symbol of no domain is the label a key
                             // was written as.
-                            let key = match Data::Value(key.clone()).as_symbol() {
+                            let key = match data::spelled(key) {
                                 Some(label) => Syntax::Reference(label),
                                 None => written(key),
                             };
@@ -305,10 +305,7 @@ fn shape(
     fn key(node: &Syntax) -> Result<Value, Error> {
         match node {
             Syntax::Constant(value) => Ok(value.clone()),
-            Syntax::Reference(label) => match Data::symbol(label)? {
-                Data::Value(symbol) => Ok(symbol),
-                _ => Err(Error::Refused(format!("{label} is not a key"))),
-            },
+            Syntax::Reference(label) => data::symbol(label),
             other => Err(Error::Refused(format!(
                 "{other} is not a key: a key is a value"
             ))),
@@ -335,6 +332,14 @@ fn shape(
                     .map(|item| walk(item, name))
                     .collect::<Result<Vec<_>, Error>>()?,
             ),
+            // A name with a `/` in it is the symbol it says, as it is
+            // where a field's value is one: `xyz.todo/text`, and `/todo`
+            // for a symbol of no domain, which is how one is printed.
+            Syntax::Reference(symbol) if symbol.contains('/') => symbol
+                .parse::<Relation>()
+                .map(Value::Symbol)
+                .map_err(|error| refused("the symbol", error))?
+                .into(),
             Syntax::Reference(symbol) => {
                 return Err(Error::Refused(format!(
                     "{symbol} is a name, not a value: text is quoted, an entity has a `:`"

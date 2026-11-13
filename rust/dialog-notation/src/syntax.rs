@@ -13,15 +13,15 @@
 //! // The syntax tree: an application of an operator to parameters.
 //! let syntax = Syntax::try_from(form)?;
 //!
-//! // The data the tree is kept in: maps that say their type.
+//! // The value the tree is kept as: maps that say their type.
 //! //
 //! // { type: :application
-//! //   operator: { type: :reference name: todo }
+//! //   operator: { type: :reference name: /todo }
 //! //   operand: { type: :parameters
 //! //              items: [{ type: :variable name: "t" }]
 //! //              terms: { state: { type: :constant value: :open } } } }
-//! let data = syntax.data()?;
-//! assert_eq!(Syntax::try_from(&data)?, syntax);
+//! let kept = syntax.value()?;
+//! assert_eq!(Syntax::try_from(&kept)?, syntax);
 //! # Ok(())
 //! # }
 //! ```
@@ -46,11 +46,11 @@ use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 
 use base58::ToBase58;
-use dialog_corpus::{Entity, Value};
+use dialog_corpus::{CompositeMap, Entity, Value};
 use merkle_reference::Reference;
 
 use crate::Error;
-use crate::data::Data;
+use crate::data;
 use crate::form::{Form, Kind, Mark, Part};
 use crate::written::{Note, Path, Segment, Slot, Span, Written};
 
@@ -359,32 +359,38 @@ impl TryFrom<&Form> for Syntax {
 }
 
 /// A node of `kind` with `fields`.
-fn node<'a>(kind: &str, fields: impl IntoIterator<Item = (&'a str, Data)>) -> Result<Data, Error> {
-    Data::record(
+fn node<'a>(
+    kind: &str,
+    fields: impl IntoIterator<Item = (&'a str, Value)>,
+) -> Result<Value, Error> {
+    data::record(
         fields
             .into_iter()
-            .chain([("type", Data::entity(&format!("{kind}:"))?)]),
+            .chain([("type", data::entity(&format!("{kind}:"))?)]),
     )
 }
 
-fn list(nodes: &[Syntax]) -> Result<Data, Error> {
-    Ok(Data::List(
-        nodes.iter().map(Syntax::data).collect::<Result<_, _>>()?,
+fn list(nodes: &[Syntax]) -> Result<Value, Error> {
+    Ok(data::list(
+        nodes
+            .iter()
+            .map(Syntax::value)
+            .collect::<Result<Vec<_>, _>>()?,
     ))
 }
 
 impl Parameters {
-    fn data(&self) -> Result<Data, Error> {
-        let terms = Data::record(
+    fn value(&self) -> Result<Value, Error> {
+        let terms = data::record(
             self.terms
                 .iter()
-                .map(|(label, term)| Ok((label.as_str(), term.data()?)))
+                .map(|(label, term)| Ok((label.as_str(), term.value()?)))
                 .collect::<Result<Vec<_>, Error>>()?,
         )?;
         let rest = self
             .rest
             .as_ref()
-            .map(|name| node("rest", [("name", Data::text(name))]))
+            .map(|name| node("rest", [("name", data::text(name))]))
             .transpose()?;
         node(
             "parameters",
@@ -396,8 +402,8 @@ impl Parameters {
 }
 
 impl Syntax {
-    /// The data the tree is kept in: every node a map that says its
-    /// `type`.
+    /// The value the tree is kept as: a composite, every node a map
+    /// that says its `type`.
     ///
     /// | node | fields |
     /// |---|---|
@@ -411,30 +417,33 @@ impl Syntax {
     /// | `:tuple` | `items`, a list of nodes |
     /// | `:repeat` | `of`, a node |
     /// | `:rest` | `name`, text |
-    pub fn data(&self) -> Result<Data, Error> {
+    pub fn value(&self) -> Result<Value, Error> {
         match self {
             Syntax::Application(operator, operand) => node(
                 "application",
-                [("operator", operator.data()?), ("operand", operand.data()?)],
+                [
+                    ("operator", operator.value()?),
+                    ("operand", operand.value()?),
+                ],
             ),
-            Syntax::Variable(name) => node("variable", [("name", Data::text(name))]),
+            Syntax::Variable(name) => node("variable", [("name", data::text(name))]),
             Syntax::Blank => node("blank", []),
-            Syntax::Constant(value) => node("constant", [("value", Data::Value(value.clone()))]),
-            Syntax::Reference(name) => node("reference", [("name", Data::symbol(name)?)]),
+            Syntax::Constant(value) => node("constant", [("value", value.clone())]),
+            Syntax::Reference(name) => node("reference", [("name", data::symbol(name)?)]),
             Syntax::Map(entries) => node(
                 "map",
                 [(
                     "entries",
-                    Data::map(
+                    data::map(
                         entries
                             .iter()
-                            .map(|(key, value)| Ok((key.data()?, value.data()?)))
+                            .map(|(key, value)| Ok((key.value()?, value.value()?)))
                             .collect::<Result<Vec<_>, Error>>()?,
                     )?,
                 )],
             ),
             Syntax::Tuple(items) => node("tuple", [("items", list(items)?)]),
-            Syntax::Repeat(repeated) => node("repeat", [("of", repeated.data()?)]),
+            Syntax::Repeat(repeated) => node("repeat", [("of", repeated.value()?)]),
         }
     }
 
@@ -507,11 +516,11 @@ impl Syntax {
         }
     }
 
-    /// What names the tree: the reference of its data. Two forms that
-    /// say one thing have one reference, whatever order their labels
-    /// were written in, and no layout has a part in it.
+    /// What names the tree: the reference of the value it is kept as.
+    /// Two forms that say one thing have one reference, whatever order
+    /// their labels were written in, and no layout has a part in it.
     pub fn reference(&self) -> Result<Reference, Error> {
-        Ok(self.data()?.reference())
+        Ok(self.value()?.reference())
     }
 
     /// The entity that names the tree: `form:` and its reference.
@@ -523,14 +532,18 @@ impl Syntax {
         .map_err(|error| refused("not an entity", error))
     }
 
-    /// The tree as bytes, which is what a `record:` value holds.
+    /// The tree as bytes: the ones the `record:` value it is kept as
+    /// holds.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        self.data()?.encode()
+        match self.value()? {
+            Value::Record(bytes) => Ok(bytes),
+            other => Err(Error::Read(format!("a node that is no record: {other:?}"))),
+        }
     }
 
     /// The tree `bytes` hold.
     pub fn decode(bytes: &[u8]) -> Result<Syntax, Error> {
-        Syntax::try_from(&Data::decode(bytes)?)
+        Syntax::try_from(&Value::Record(bytes.to_vec()))
     }
 
     /// The way from this node to the first node inside it that is
@@ -626,9 +639,7 @@ impl Syntax {
                     }
                     _ => Form::Symbol(entity.as_str().to_string()),
                 },
-                Value::Symbol(_) => {
-                    Form::Symbol(Data::Value(value.clone()).as_symbol().unwrap_or_default())
-                }
+                Value::Symbol(_) => Form::Symbol(data::spelled(value).unwrap_or_default()),
                 // The notation writes neither.
                 Value::Bytes(_) | Value::Record(_) => Form::Blank,
             },
@@ -678,26 +689,33 @@ fn unread(what: &str) -> Error {
     Error::Read(format!("a node with no {what}"))
 }
 
-fn nodes(data: &Data, field: &str) -> Result<Vec<Syntax>, Error> {
-    data.get(field)
-        .and_then(Data::as_list)
+/// The node `value` is: a map that says its type.
+fn fields(value: &Value) -> Result<CompositeMap, Error> {
+    data::entries(value)?.ok_or_else(|| unread("type"))
+}
+
+fn nodes(node: &CompositeMap, field: &str) -> Result<Vec<Syntax>, Error> {
+    data::field(node, field)
+        .map(data::items)
+        .transpose()?
+        .flatten()
         .ok_or_else(|| unread(field))?
         .iter()
         .map(Syntax::try_from)
         .collect()
 }
 
-fn text(data: &Data, field: &str) -> Result<String, Error> {
-    data.get(field)
-        .and_then(Data::as_text)
-        .map(str::to_string)
-        .ok_or_else(|| unread(field))
+fn text(node: &CompositeMap, field: &str) -> Result<String, Error> {
+    match data::field(node, field) {
+        Some(Value::String(text)) => Ok(text.clone()),
+        _ => Err(unread(field)),
+    }
 }
 
 /// The type a node says it is: the name of the entity under `type`.
-fn kind(data: &Data) -> Result<&str, Error> {
-    match data.get("type") {
-        Some(Data::Value(Value::Entity(entity))) => entity
+fn kind(node: &CompositeMap) -> Result<&str, Error> {
+    match data::field(node, "type") {
+        Some(Value::Entity(entity)) => entity
             .as_str()
             .strip_suffix(':')
             .ok_or_else(|| unread("type")),
@@ -705,78 +723,76 @@ fn kind(data: &Data) -> Result<&str, Error> {
     }
 }
 
-impl TryFrom<&Data> for Parameters {
+impl TryFrom<&Value> for Parameters {
     type Error = Error;
 
-    fn try_from(data: &Data) -> Result<Self, Error> {
-        if kind(data)? != "parameters" {
+    fn try_from(value: &Value) -> Result<Self, Error> {
+        let node = fields(value)?;
+        if kind(&node)? != "parameters" {
             return Err(unread("parameters"));
         }
-        let terms = data
-            .get("terms")
-            .and_then(Data::as_map)
+        let terms = data::field(&node, "terms")
+            .map(data::entries)
+            .transpose()?
+            .flatten()
             .ok_or_else(|| unread("terms"))?
             .iter()
             .map(|(label, term)| {
                 Ok((
-                    label.as_symbol().ok_or_else(|| unread("label"))?,
+                    data::spelled(label).ok_or_else(|| unread("label"))?,
                     Syntax::try_from(term)?,
                 ))
             })
             .collect::<Result<_, Error>>()?;
-        let rest = data
-            .get("rest")
-            .map(|rest| match kind(rest)? {
-                "rest" => text(rest, "name"),
-                _ => Err(unread("rest")),
+        let rest = data::field(&node, "rest")
+            .map(|rest| {
+                let rest = fields(rest)?;
+                match kind(&rest)? {
+                    "rest" => text(&rest, "name"),
+                    _ => Err(unread("rest")),
+                }
             })
             .transpose()?;
         Ok(Parameters {
-            items: nodes(data, "items")?,
+            items: nodes(&node, "items")?,
             terms,
             rest,
         })
     }
 }
 
-impl TryFrom<&Data> for Syntax {
+impl TryFrom<&Value> for Syntax {
     type Error = Error;
 
-    fn try_from(data: &Data) -> Result<Self, Error> {
-        let part = |field: &str| data.get(field).ok_or_else(|| unread(field));
-        Ok(match kind(data)? {
+    fn try_from(value: &Value) -> Result<Self, Error> {
+        let node = fields(value)?;
+        let part = |field: &str| data::field(&node, field).ok_or_else(|| unread(field));
+        Ok(match kind(&node)? {
             "application" => Syntax::Application(
                 Box::new(Syntax::try_from(part("operator")?)?),
                 Parameters::try_from(part("operand")?)?,
             ),
-            "variable" => Syntax::Variable(text(data, "name")?),
+            "variable" => Syntax::Variable(text(&node, "name")?),
             "blank" => Syntax::Blank,
             "constant" => match part("value")? {
-                Data::Value(Value::Bytes(_) | Value::Record(_)) => {
+                Value::Bytes(_) | Value::Record(_) => {
                     return Err(Error::Unsupported(
-                        "a constant that is bytes: the notation writes none".into(),
+                        "a constant that is bytes or a record: the notation writes neither".into(),
                     ));
                 }
-                Data::Value(value) => Syntax::Constant(value.clone()),
-                _ => {
-                    return Err(Error::Unsupported(
-                        "a constant that is a list or a map: Dialog-DB has no such value yet"
-                            .into(),
-                    ));
-                }
+                value => Syntax::Constant(value.clone()),
             },
             "reference" => {
-                Syntax::Reference(part("name")?.as_symbol().ok_or_else(|| unread("name"))?)
+                Syntax::Reference(data::spelled(part("name")?).ok_or_else(|| unread("name"))?)
             }
             "map" => Syntax::Map(
-                part("entries")?
-                    .as_map()
+                data::entries(part("entries")?)?
                     .ok_or_else(|| unread("entries"))?
                     .iter()
                     .map(|(key, value)| Ok((Syntax::try_from(key)?, Syntax::try_from(value)?)))
                     .collect::<Result<_, Error>>()?,
             ),
-            "tuple" => Syntax::Tuple(nodes(data, "items")?),
+            "tuple" => Syntax::Tuple(nodes(&node, "items")?),
             "repeat" => Syntax::Repeat(Box::new(Syntax::try_from(part("of")?)?)),
             other => {
                 return Err(Error::Read(format!(
@@ -829,14 +845,14 @@ impl Signature {
             && written.parameters.is_subset(&self.parameters)
     }
 
-    /// The signature as data.
-    pub fn data(&self) -> Result<Data, Error> {
-        Data::record([
-            ("name", Data::text(&self.name)),
-            ("subject", Data::entity(&format!("{}:", self.subject))?),
+    /// The signature as a value: a map.
+    pub fn value(&self) -> Result<Value, Error> {
+        data::record([
+            ("name", data::text(&self.name)),
+            ("subject", data::entity(&format!("{}:", self.subject))?),
             (
                 "parameters",
-                Data::List(self.parameters.iter().map(Data::text).collect()),
+                data::list(self.parameters.iter().map(data::text)),
             ),
         ])
     }
@@ -847,7 +863,7 @@ impl Signature {
     pub fn entity(&self) -> Result<Entity, Error> {
         Entity::from_str(&format!(
             "name:{}",
-            self.data()?.reference().as_bytes().to_base58()
+            self.value()?.reference().as_bytes().to_base58()
         ))
         .map_err(|error| refused("not an entity", error))
     }
@@ -879,8 +895,8 @@ mod tests {
         Syntax::try_from(&read(text).unwrap()[0]).unwrap_err()
     }
 
-    fn keyword(name: &str) -> Data {
-        Data::entity(&format!("{name}:")).unwrap()
+    fn keyword(name: &str) -> Value {
+        data::entity(&format!("{name}:")).unwrap()
     }
 
     /// The maintainer's example, node for node, but for where the part
@@ -888,31 +904,31 @@ mod tests {
     /// have a place, and not under `of` among the terms.
     #[test]
     fn it_makes_the_tree_of_an_application() -> Result<(), Error> {
-        let expected = Data::record([
+        let expected = data::record([
             ("type", keyword("application")),
             (
                 "operator",
-                Data::record([
+                data::record([
                     ("type", keyword("reference")),
-                    ("name", Data::symbol("todo")?),
+                    ("name", data::symbol("todo")?),
                 ])?,
             ),
             (
                 "operand",
-                Data::record([
+                data::record([
                     ("type", keyword("parameters")),
                     (
                         "items",
-                        Data::List(vec![Data::record([
+                        data::list([data::record([
                             ("type", keyword("variable")),
-                            ("name", Data::text("t")),
+                            ("name", data::text("t")),
                         ])?]),
                     ),
                     (
                         "terms",
-                        Data::record([(
+                        data::record([(
                             "state",
-                            Data::record([
+                            data::record([
                                 ("type", keyword("constant")),
                                 ("value", keyword("open")),
                             ])?,
@@ -921,7 +937,7 @@ mod tests {
                 ])?,
             ),
         ])?;
-        assert_eq!(one("(todo ?t state: :open)").data()?, expected);
+        assert_eq!(one("(todo ?t state: :open)").value()?, expected);
         Ok(())
     }
 
@@ -1083,7 +1099,7 @@ mod tests {
 
     #[test]
     fn it_refuses_a_key_twice_where_the_tree_becomes_data() {
-        assert!(matches!(one("{a: 1 a: 2}").data(), Err(Error::Refused(_))));
+        assert!(matches!(one("{a: 1 a: 2}").value(), Err(Error::Refused(_))));
     }
 
     /// Two definitions over the same attributes, with other names for
@@ -1121,18 +1137,74 @@ mod tests {
         Ok(())
     }
 
+    /// A name does not move with how a tree is kept: these are the names
+    /// the trees had under the layout the notation had of its own,
+    /// before it kept them as composite values.
+    #[test]
+    fn it_names_a_tree_apart_from_how_it_is_kept() -> Result<(), Error> {
+        for (text, name) in [
+            (
+                "(todo ?t state: :open)",
+                "form:6zdaZQpk7kebcAVHhZ7D2aHfm8qH2YH8DSpMFj3N8wzU",
+            ),
+            (
+                r#"{a: 1 b: [2.0 "x" -3 ?y ...]}"#,
+                "form:ANpSivMCf1y68JwcKpfx6hPmhpm5EkLJWcT67DduHD6k",
+            ),
+            (
+                "(rule (xyz.todo ?t done: true) (xyz.todo ?t state: :done) (unless (f 1.5 x/y +)))",
+                "form:DUVe6jwPbwVjGQu4D26HERqULgLWyxA8H5DN88bXZ9Px",
+            ),
+        ] {
+            assert_eq!(one(text).entity()?.as_str(), name, "{text}");
+        }
+        assert_eq!(
+            Signature::of(&one("(todo ?t title: ?x author: ?a)"), "concept")
+                .unwrap()
+                .entity()?
+                .as_str(),
+            "name:BDRfo9w4GFhULUXvQ921yhcqpwvQfKUgYTDZJM9gsx8q"
+        );
+        Ok(())
+    }
+
+    /// A tree is kept as a composite value, so it is read back from the
+    /// value a query gives, and one number is kept one way: `2.0` reads
+    /// back as `2`.
+    #[test]
+    fn it_keeps_a_tree_as_a_composite_value() -> Result<(), Error> {
+        let tree = one(r#"(f ?x 2.0 {a: [1 "b"]} label: _ ...?rest)"#);
+        let kept = tree.value()?;
+        assert!(matches!(
+            kept.composite(),
+            Ok(Some(dialog_corpus::Composite::Map(_)))
+        ));
+        let back = Syntax::try_from(&kept)?;
+        assert_eq!(
+            back.to_string(),
+            r#"(f ?x 2 {a: [1 "b"]} label: _ ...?rest)"#
+        );
+        assert_eq!(back.value()?, kept);
+        assert_eq!(back.reference()?, tree.reference()?);
+        Ok(())
+    }
+
     #[test]
     fn it_refuses_data_that_is_no_node() -> Result<(), Error> {
         assert_eq!(
-            Syntax::try_from(&Data::text("todo")),
+            Syntax::try_from(&data::text("todo")),
             Err(Error::Read("a node with no type".into()))
         );
         assert_eq!(
-            Syntax::try_from(&Data::record([("type", keyword("verb"))])?),
+            Syntax::try_from(&data::list([keyword("verb")])),
+            Err(Error::Read("a node with no type".into()))
+        );
+        assert_eq!(
+            Syntax::try_from(&data::record([("type", keyword("verb"))])?),
             Err(Error::Read("a node of no type this reads: verb".into()))
         );
         assert_eq!(
-            Syntax::try_from(&Data::record([("type", keyword("variable"))])?),
+            Syntax::try_from(&data::record([("type", keyword("variable"))])?),
             Err(Error::Read("a node with no name".into()))
         );
         Ok(())
