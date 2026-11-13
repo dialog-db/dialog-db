@@ -30,11 +30,34 @@ These were written after rounds 1 to 15 had run, from the scoring each round use
 - **Failure:** one in three or fewer: the spelling is dropped, whatever its other merits.
 - **The middle:** a spelling that passes but the maintainer rejects on design grounds (it overloads a form, it reads as a call that passes nothing, it puts construction in a concept). The journal records both the numbers and the reason.
 
-Readers are `claude-haiku` subagents. Three per variant is the least; a difference of one reader in three is noise.
+Readers are `claude-haiku` subagents. Three per variant is the least; a difference of one reader in three is noise. From R31 on, readers run clean: headless `claude -p` with the system prompt replaced and no memory, MCP servers, settings or tools, because the subagents of R17 to R30 saw the maintainer's memory, the repository's rules and the session's connectors. Results near one half need 20 readers per variant (R34).
 
 ## The second question: how to write it
 
 Added on 2026-11-07, before R16 ran. With the notation held fixed, which way of writing its spec lets the same reader write and predict correctly: the spec as it is, a reference card, a walkthrough, or a card with the mistakes earlier readers made? The hypothesis is that the spec's length, rationale and evidence get in a cheap reader's way, and that a short document with examples does better. The bars, the rubric and the four documents are in [`results/r16-plan.md`](notation/results/r16-plan.md), committed before any reader ran: a style wins with a median of at least 13 of 15 points and at least 2 above the spec's, and loses if none beats the spec's median by more than 1.
+
+## The third question: what a rule's conclusion is
+
+Added on 2026-11-13, after R27 found every reader misreading a derived to-do's rename. Readers bring Datalog's split between stored and derived relations:
+
+- a domain call such as `(xyz.todo ?t title: ?x)` reads as the stored layer;
+- a rule's conclusion reads as a view that exists only at query time;
+- a rule reads as running only when its head is asked for.
+
+Dialog has one layer: a rule's conclusion is values of the attributes behind its concept, seen by every read of them.
+
+R28 to R37 tried to teach that in prose and in notation; none of it held up on the clean runner. R38 and R39 found what does: the spec opens with three things, written into [design.md](notation/design.md#model):
+
+- the maintainer's framing, a concept is a set of attributes, a convenient way to express derivations over them;
+- a one-field example of a concept rule and the domain rule it is the same as;
+- a sentence on how `last` elects between stored and concluded values.
+
+With them:
+
+| document | without the spec | with it |
+|---|---|---|
+| a rule's `memo` is found as a `note` | 0 of 10 | 20 of 20 |
+| a renamed derived to-do's rename lands | 0 of 10 | 18 of 20 |
 
 ## Prior art
 

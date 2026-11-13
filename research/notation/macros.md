@@ -1,6 +1,6 @@
 # Forms as commands, macros as rules
 
-**Proposed.** A way to have one kind of top-level form and a small kernel, with `concept`, `view`, `query` and the rest written in the notation as a prelude. It picks up the macro system in Gozala's tonk journal ([2026-05-16](https://github.com/tonk-labs/tonk/blob/journal/%40gozala/2026-05-16.md), [2026-05-21](https://github.com/tonk-labs/tonk/blob/journal/%40gozala/2026-05-21.md)) and moves it from the YAML notation to this one. Conduct's choice of Lux-style macros that read declarations is the same idea seen from the language side: here a macro reads declarations because it is a rule, and declarations are facts.
+**Proposed.** Written before rules dropped `when` and `!` (R27, see [design](design.md#rules)); its rules still use that spelling. A way to have one kind of top-level form and a small kernel, with `concept`, `view`, `query` and the rest written in the notation as a prelude. It picks up the macro system in Gozala's tonk journal ([2026-05-16](https://github.com/tonk-labs/tonk/blob/journal/%40gozala/2026-05-16.md), [2026-05-21](https://github.com/tonk-labs/tonk/blob/journal/%40gozala/2026-05-21.md)) and moves it from the YAML notation to this one. Conduct's choice of Lux-style macros that read declarations is the same idea seen from the language side: here a macro reads declarations because it is a rule, and declarations are facts.
 
 ## The idea
 
