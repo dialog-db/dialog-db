@@ -9,6 +9,8 @@
 //! one log sit side by side in key order, and a comparison on the key reads
 //! the entries in its range alone (see `ConceptQuery::key_bound`).
 
+use std::slice;
+
 use anyhow::Result;
 use dialog_corpus::position::{self, Bias, Position};
 use dialog_corpus::{Entity, Relation as CorpusRelation, Value};
@@ -3265,5 +3267,193 @@ async fn it_keeps_a_filter_of_text_on_a_field_with_no_type_on_the_incremental_pa
         evaluations_in_full(&rule.compile()?, &head, &setup, &steps).await?,
         1
     );
+    Ok(())
+}
+
+/// Opens a live query of `head` under `rule` over the facts of `setup`, and
+/// then commits each step. After each step the live query holds the rows of
+/// a first read. Gives the rows of the first read after each step.
+async fn rows_after_each_step(
+    rule: &DeductiveRule,
+    head: &Json,
+    setup: &[Write],
+    steps: &[Vec<Write>],
+) -> Result<Vec<Vec<ConceptConclusion>>> {
+    let (rows, _) =
+        rows_of_a_query_after_each_step(slice::from_ref(rule), &each_field(head)?, setup, steps)
+            .await?;
+    Ok(rows)
+}
+
+/// Opens a live query of `query` under `rules` over the facts of `setup`,
+/// and then commits each step. After each step the live query holds the rows
+/// of a first read. Gives the rows of the first read after each step, and how
+/// many times the live query evaluated its rules in full, the first poll
+/// included.
+async fn rows_of_a_query_after_each_step(
+    rules: &[DeductiveRule],
+    query: &ConceptQuery,
+    setup: &[Write],
+    steps: &[Vec<Write>],
+) -> Result<(Vec<Vec<ConceptConclusion>>, usize)> {
+    let subscribe = |branch: &Branch| {
+        let mut layer = branch.query();
+        for rule in rules {
+            layer = layer.with(rule.clone());
+        }
+        layer.subscribe(query.clone())
+    };
+    let (branch, operator) = empty().await?;
+    commit_writes(&branch, &operator, setup).await?;
+    let mut live = subscribe(&branch);
+    live.poll(&operator).await?;
+    let mut rows = Vec::new();
+    for step in steps {
+        commit_writes(&branch, &operator, step).await?;
+        live.poll(&operator).await?;
+        let read = subscribe(&branch)
+            .poll(&operator)
+            .await?
+            .map_or(Vec::new(), |delta| delta.asserted);
+        let held = live.results();
+        assert_eq!(held.len(), read.len(), "the live query and a first read");
+        assert!(held.iter().all(|row| read.contains(row)));
+        rows.push(read);
+    }
+    Ok((rows, live.recomputes()))
+}
+
+/// The names of the items of `rows`, in order.
+fn names(rows: &[ConceptConclusion]) -> Result<Vec<String>> {
+    let mut names = rows
+        .iter()
+        .map(|row| row.get::<String>("name"))
+        .collect::<Result<Vec<_>, _>>()?;
+    names.sort();
+    Ok(names)
+}
+
+/// The facts, the steps, and the names of the items that a first read gives
+/// after each step, for the tests of a constant that `float:32` narrows.
+type Float32 = (Vec<Write>, Vec<Vec<Write>>, [&'static [&'static str]; 7]);
+
+/// The facts of the tests of a constant that `float:32` narrows: an item with
+/// the score 3.0 and an owner of each item. Then the steps: items arrive with
+/// the float 1e30, the natural 10^30, and the float 1.0000000150474662e30 (1e30
+/// as the nearest float of 32 bits), a name changes, and scores leave and
+/// arrive. Gives the names of the items whose stored score is 1e30, as a float
+/// or as a natural, after each step.
+fn float_32_steps() -> Result<Float32> {
+    let item = |name: &'static str, n: &'static str, score: Value| {
+        vec![
+            (true, "rv.m/name", name, Value::String(n.into())),
+            (true, "rv.m/score", name, score),
+        ]
+    };
+    let narrowed = f64::from(1e30f32);
+    let mut setup = item("item:1", "a1", Value::Float(3.0));
+    for (owner, item) in [
+        ("owner:1", "item:1"),
+        ("owner:2", "item:2"),
+        ("owner:3", "item:3"),
+        ("owner:4", "item:4"),
+    ] {
+        setup.push((true, "rv.o/item", owner, Value::Entity(item.parse()?)));
+    }
+    let steps = vec![
+        item("item:2", "a2", Value::Float(1e30)),
+        item("item:3", "a3", Value::UnsignedInt(10u128.pow(30))),
+        item("item:4", "a4", Value::Float(narrowed)),
+        vec![(true, "rv.m/name", "item:2", Value::String("b2".into()))],
+        vec![(
+            false,
+            "rv.m/score",
+            "item:3",
+            Value::UnsignedInt(10u128.pow(30)),
+        )],
+        vec![
+            (false, "rv.m/score", "item:1", Value::Float(3.0)),
+            (true, "rv.m/score", "item:1", Value::Float(1e30)),
+        ],
+        vec![(false, "rv.m/score", "item:2", Value::Float(1e30))],
+    ];
+    let expected: [&[&str]; 7] = [
+        &["a2"],
+        &["a2", "a3"],
+        &["a2", "a3"],
+        &["a3", "b2"],
+        &["b2"],
+        &["a1", "b2"],
+        &["a1"],
+    ];
+    Ok((setup, steps, expected))
+}
+
+/// A field of `float:32` reads each number as the nearest float of 32 bits,
+/// so it reads the stored 1e30 as 1.0000000150474662e30. A filter
+/// `?score == 1e30` on that field finds the stored 1e30, and the natural
+/// 10^30 that is the same number, as a scan for the constant 1e30 finds them.
+/// A first read gives those items and no error, and after each step the live
+/// query holds the rows of a first read, for a rule that reads the model and
+/// for a rule that reaches the model through an owner.
+#[dialog_common::test]
+async fn it_reads_a_filter_of_a_constant_that_a_field_of_float_32_narrows() -> Result<()> {
+    let (setup, steps, expected) = float_32_steps()?;
+    for owner in [false, true] {
+        let (rule, head) = filtered("float:32", serde_json::from_str("1e30")?, owner)?;
+        let rows = rows_after_each_step(&rule, &head, &setup, &steps).await?;
+        for (step, (rows, expected)) in rows.iter().zip(expected).enumerate() {
+            assert_eq!(
+                names(rows)?,
+                expected.to_vec(),
+                "step {step}, owner {owner}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The constant 1e30 in the place of a field of `float:32`, with no equality.
+/// A first read finds the stored 1e30 and the natural 10^30, as the filter
+/// `?score == 1e30` does, and each row of a query of the model holds the
+/// constant 1e30. After each step the live query holds the rows of a first
+/// read, for the place of the field in a rule and for a query of the model.
+/// A live query reads a changed item alone, and that read compares the
+/// stored score with the constant as a first read does, before the field
+/// narrows the score.
+#[dialog_common::test]
+async fn it_reads_a_constant_that_a_field_of_float_32_narrows_in_the_place_of_a_field() -> Result<()>
+{
+    let (setup, steps, expected) = float_32_steps()?;
+    let variable = |name: &str| json!({ "?": { "name": name } });
+    let model = json!({ "with": {
+        "name": { "the": "rv.m/name", "as": "Text", "cardinality": "one" },
+        "score": { "the": "rv.m/score", "as": "float:32", "cardinality": "one" },
+    } });
+    let head = json!({ "with": { "name": { "the": "rv.out/name", "as": "Text" } } });
+    let rule: DeductiveRuleDescriptor = serde_json::from_value(json!({
+        "deduce": head,
+        "when": [{ "assert": model, "where": {
+            "this": variable("this"), "name": variable("name"), "score": 1e30,
+        } }],
+    }))?;
+    let mut of_the_model = each_field(&model)?;
+    of_the_model
+        .terms
+        .insert("score".into(), Term::Constant(Value::Float(1e30)));
+    for (form, rules, query) in [
+        ("a rule", vec![rule.compile()?], each_field(&head)?),
+        ("a query of the model", vec![], of_the_model),
+    ] {
+        let (rows, _) = rows_of_a_query_after_each_step(&rules, &query, &setup, &steps).await?;
+        for (step, (rows, expected)) in rows.iter().zip(expected).enumerate() {
+            assert_eq!(names(rows)?, expected.to_vec(), "{form}, step {step}");
+            if query.terms.contains("score") {
+                for row in rows {
+                    assert_eq!(row.get::<f64>("score")?, 1e30, "{form}, step {step}");
+                }
+            }
+        }
+    }
     Ok(())
 }

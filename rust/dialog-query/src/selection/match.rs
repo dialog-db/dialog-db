@@ -525,18 +525,29 @@ impl Match {
         // view reads, so it binds as it is: that is every row a scan
         // yields, and the clone the view's failure message needs is
         // paid only by a value the kind has to read through the band.
-        let value = match kind {
-            Some(kind) if matches!(kind, Kind::Primitive(_)) && kind.admits(&value) => value,
-            Some(kind) => {
-                kind.view(value.clone())
-                    .ok_or_else(|| EvaluationError::KindMismatch {
-                        variable: key.to_string(),
-                        kind: kind.to_string(),
-                        value: format!("{value:?}"),
-                        value_type: format!("{:?}", value.data_type()),
-                    })?
+        //
+        // The value as it came is kept where the view changed it, so a
+        // variable that already holds that value agrees with it below.
+        let (value, unread) = match kind {
+            Some(kind) if matches!(kind, Kind::Primitive(_)) && kind.admits(&value) => {
+                (value, None)
             }
-            None => value,
+            Some(kind) => {
+                let viewed =
+                    kind.view(value.clone())
+                        .ok_or_else(|| EvaluationError::KindMismatch {
+                            variable: key.to_string(),
+                            kind: kind.to_string(),
+                            value: format!("{value:?}"),
+                            value_type: format!("{:?}", value.data_type()),
+                        })?;
+                if viewed == value {
+                    (viewed, None)
+                } else {
+                    (viewed, Some(value))
+                }
+            }
+            None => (value, None),
         };
         if let Some(existing) = self.find(key) {
             match existing {
@@ -546,8 +557,16 @@ impl Match {
                 // integer 4 takes the stored 4, 4.0 and 4.3, as a scan for
                 // the constant 4 admits them, and one bound to the stored
                 // 4.3 takes the constant 4. The first binding is kept.
+                //
+                // A variable also agrees with the value it holds as that
+                // value came, before the kind read it. A kind that narrows a
+                // number, such as `float:32`, reads 1e30 as
+                // 1.0000000150474662e30. A variable that the constant 1e30
+                // bound then takes the stored 1e30 that a scan for the
+                // constant found, as the scan does.
                 Binding::Present(existing_value) => {
                     if *existing_value != value
+                        && unread.as_ref() != Some(existing_value)
                         && !value.reads_as(existing_value)
                         && !existing_value.reads_as(&value)
                     {
