@@ -683,3 +683,24 @@ Not examined yet. They are columns, not recommendations.
 **Corrected, later the same day.** Irakli: comments are needed "probably more than anything else", to document source and to find things by documentation. So a comment is held, as a name is: it is what someone said about a node, and nothing gives it back. Today `;` is dropped by the reader, and `description:` on a concept or a rule is the only documentation that survives, inside the kept body where a query cannot reach it.
 
 **Decided, later still.** Irakli does not like `description:` in a concept. He has written a Lisp where `;; something` was read as `(comment "something")`: it worked reasonably well, and was a problem inside a record and the like, where it took a place. Attaching a comment as metadata to the form below it was the better alternative. So a comment is metadata on the node under it, and takes no place among the parts. Proposed by the agent, not decided: `description:` goes from `rule` too, and what a comment above a concept, a rule or a labelled part says reaches Dialog-DB's descriptions through the mapping; a comment with a blank line under it is about the document and not the form after it.
+
+## 2026-11-13, Directing: what several heads would save, with the engine's costs taken apart
+
+**Asked.** Irakli had another agent measure one command a commit and explore how far the cost could be optimized (#788).
+
+**Learned.** From the agent's results on #788, measured under callgrind, three runs within 0.35%:
+
+```
+                                   wide    named            the body again
+ 500 commands a commit, as it is    1     +27% to +33%     +61% to +149%
+ one command a commit, as it is     1     +17% to +28%     +27% to +87%
+ with three prototypes in the engine 1    +21% to +43%     +1% to +7%
+```
+
+- The difference holds a command at a time.
+- With a rule planned once, a seed binding its entity and one body evaluated once for the rules that share it, writing the body again a head comes to within 1% to 7% of the stand-in for several heads. A named condition does not: what it has left is its second round.
+- The prototypes are not fit to land, by the agent's own account; one is unsound. They say what could be recovered and nothing about how.
+- Found on the way: a rule that leaves a premise's subject unnamed fires for entities a commit did not touch. Its own design topic, #789.
+- A rule is not analyzed again in a commit: the analyzed rule is kept by entity. It is planned once a seed.
+
+**Decided.** Not decided. What the numbers now say: dialog does not need a rule of several heads to write on one condition cheaply, if the engine evaluates a body once for the rules that share it. That turns over what was said yesterday: `(all …)` in a head's place can go on compiling to the body again a head, and a named condition is the dearer of the two once the engine does that.
