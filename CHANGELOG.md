@@ -656,9 +656,14 @@ What this changes for you:
   into an extent of its own instead (see the entry on writers above);
   readers take no lock. A file this process already has open is shared,
   not opened twice.
-- The file syncs itself every 64 appends or 2 seconds, and on
-  `Chronicle::sync`. A power loss loses at most the appends since, and
-  never leaves the file damaged: opening goes back to the newest state
+- The file is synced after an append once 64 appends have come since
+  the last sync or 2 seconds have passed, on `Chronicle::sync` and on the
+  last close. Nothing syncs it on a timer: a commit followed by no other
+  append is durable only once something syncs. This is weaker than the
+  `fs` provider, which syncs every block it writes; call
+  `Chronicle::sync` where a commit must survive power loss. A power loss
+  loses at most the appends since the last sync, and never leaves the
+  file damaged: opening goes back to the newest state
   that is whole. The slot that state is read from is kept twice, and a
   sync writes over the older copy, so a sync torn by power loss leaves
   the previous copy whole.
