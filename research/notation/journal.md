@@ -801,6 +801,16 @@ xychart-beta
 
 **Decision.** Ten readers per variant is too few for rates near one half; use 20. Next: one sentence saying a rule's conclusion gives values to its attributes whether or not its concept is asked for, on the plain domain form and on the one-attribute blocks.
 
+## 2026-11-13 — R35: an undefined `message` does as well as a defined one
+
+**Question.** The one [planned](results/r35-plan.md), from the maintainer: with `note` and `memo` built from `message` and `audience`, does defining those two help or hurt?
+
+**Method.** Clean runner, 20 readers per variant, with no definition of `message` or `audience`.
+
+**Results.** [r35](results/r35.md). Asserting a memo: 20 of 20. A rule's memo: 11 of 20, the same as the defined versions (10 of 20 as concepts, 4 of 10 as attribute declarations). Readers took an undefined `message` for a stored attribute. What helps is a name `note` and `memo` share below them, not its definition: 25 of 50 over R33 to R35, against 0 of 20 through `xyz.tonk.post` directly. The other half still take rules as reached only through their head's name.
+
+**Decision.** Test the sentence on how rules are evaluated, on both the plain domain form and the shared-name form.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
