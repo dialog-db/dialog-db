@@ -47,6 +47,11 @@ use tree::{Child, Nodes, PAGE, Pages, check, is_stale};
 static OPEN: LazyLock<Mutex<HashMap<FileId, Weak<Inner>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// The files the sync thread makes sync points in: those opened with
+/// [`Options::sync_in_background`]. Upgraded under [`OPEN`], as handles
+/// are.
+static SYNCED: Mutex<Vec<Weak<Inner>>> = Mutex::new(Vec::new());
+
 /// Opens under way in this process, by what they open: two opens of one
 /// file wait for each other, so the second shares what the first opened,
 /// while opens of other files go on. The table of open files is not held
@@ -344,6 +349,13 @@ impl Drop for Inner {
 }
 
 struct Inner {
+    /// Whether this process holds the present byte shared for the file:
+    /// let go of by the last close (see [`Chronicle::shared`]).
+    present: std::sync::atomic::AtomicBool,
+    /// Taken by a handle being dropped and by the sync thread letting go
+    /// of its own, so the one that finds itself the last does: two
+    /// dropped at once cannot each see the other and both stand down.
+    dropping: Arc<Mutex<()>>,
     /// Held by the sync thread while it holds the archive, and by a handle
     /// being dropped that may be the last: see `sync_if_waited`.
     looking: Arc<Mutex<()>>,
@@ -392,6 +404,11 @@ struct Inner {
     /// publishes them: for tests that read while an append is under way.
     #[cfg(test)]
     before_publish: Mutex<Option<Box<dyn FnMut() + Send>>>,
+    /// Called by a handle being dropped between finding whether it is the
+    /// last and letting go of its reference.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    before_letting_go: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>, // bare-send-ok: test hook
     /// Called by a sync point made without the turn between writing the
     /// durable copy and syncing it.
     #[cfg(test)]
@@ -1240,9 +1257,7 @@ impl Chronicle {
             if let Some(id) = FileId::at(path).map_err(|error| storage_error(path, error))?
                 && let Some(inner) = open.get(&id).and_then(Weak::upgrade)
             {
-                return Ok(Self {
-                    inner: ManuallyDrop::new(inner),
-                });
+                return Self::shared(inner).map_err(|error| storage_error(path, error));
             }
         }
         let opened = Self::open_unshared(path, options)?;
@@ -1253,16 +1268,44 @@ impl Chronicle {
             // look and the open. The new descriptor is never closed, so
             // the open one keeps its locks.
             std::mem::forget(opened);
-            return Ok(Self {
-                inner: ManuallyDrop::new(inner),
-            });
+            return Self::shared(inner).map_err(|error| storage_error(path, error));
         }
         open.insert(id, Arc::downgrade(&opened.inner));
         drop(open);
         if opened.inner.options.sync_in_background {
+            {
+                let mut synced = SYNCED.lock();
+                synced.retain(|inner| inner.strong_count() > 0);
+                synced.push(Arc::downgrade(&opened.inner));
+            }
             Self::start_syncing().map_err(|error| storage_error(path, error))?;
         }
         Ok(opened)
+    }
+
+    /// A handle of the open file `inner` holds, found in the table of open
+    /// files, which is held. A last close that ran while another reference
+    /// to the file's state was taken (one that did not go through the
+    /// table) let go of the present byte and cut the file: the byte is
+    /// taken again, as an open takes it, and the file read again, before
+    /// the state is handed out, so another process does not take itself
+    /// for the last while this one has the file open.
+    fn shared(inner: Arc<Inner>) -> io::Result<Self> {
+        let archive = Self {
+            inner: ManuallyDrop::new(inner),
+        };
+        if !archive.inner.present.load(Ordering::Acquire) {
+            let file = &archive.inner.file;
+            locks::lock(file, locks::PRESENT, false, true)?;
+            let slot = newest(file, false)?;
+            archive.inner.known.store(slot.end, Ordering::Release);
+            archive
+                .inner
+                .current
+                .store(Arc::new(snapshot(file, slot, None)?));
+            archive.inner.present.store(true, Ordering::Release);
+        }
+        Ok(archive)
     }
 
     /// Starts the process's sync thread, if it is not running: one for
@@ -1280,14 +1323,23 @@ impl Chronicle {
     }
 
     /// The process's sync thread: every [`SYNC_AFTER`]` / 2`, a sync point
-    /// in each file this process has open whose appends have waited
+    /// in each file this process has open with
+    /// [`Options::sync_in_background`] whose appends have waited
     /// [`SYNC_AFTER`] for one.
     fn keep_synced() {
         loop {
             std::thread::sleep(SYNC_AFTER / 2);
-            let open: Vec<Weak<Inner>> = OPEN.lock().values().cloned().collect();
-            for inner in open {
-                if let Some(inner) = inner.upgrade() {
+            let synced: Vec<Weak<Inner>> = SYNCED.lock().clone();
+            for inner in synced {
+                // Upgraded under the table, which a last close holds from
+                // finding itself the last until its descriptor is closed:
+                // the upgrade comes before that, and the close stands
+                // down, or after, and finds nothing.
+                let inner = {
+                    let _open = OPEN.lock();
+                    inner.upgrade()
+                };
+                if let Some(inner) = inner {
                     Self::sync_if_waited(inner);
                 }
             }
@@ -1327,6 +1379,8 @@ impl Chronicle {
         {
             let _ = archive.sync_now(false);
         }
+        let dropping = archive.inner.dropping.clone();
+        let _dropping = dropping.lock();
         let open = archive.close();
         // SAFETY: taken once, and `archive` is not used again.
         drop(unsafe { ManuallyDrop::take(&mut archive.inner) });
@@ -1366,6 +1420,8 @@ impl Chronicle {
             .map_err(|error| storage_error(&path, error))?;
         let inner = Arc::new(Inner {
             looking: Arc::default(),
+            present: std::sync::atomic::AtomicBool::new(true),
+            dropping: Arc::default(),
             known: AtomicU64::new(current.slot.end),
             current: ArcSwap::from_pointee(current),
             timings: Timings::default(),
@@ -1389,6 +1445,8 @@ impl Chronicle {
             before_publish: Mutex::new(None),
             #[cfg(test)]
             before_durable_synced: Mutex::new(None),
+            #[cfg(test)]
+            before_letting_go: Mutex::new(None),
             #[cfg(test)]
             dies: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
@@ -3193,12 +3251,21 @@ impl Drop for Chronicle {
         // A handle that may be the last but for the sync thread's waits for
         // the thread to let its own go, so that it closes the file itself.
         // One of three or more is not the last: it does not wait for a sync
-        // point. Two such dropped at once may each find the other: then the
-        // sync thread is the last, and closes the file (see
-        // `sync_if_waited`).
+        // point.
         let looking = self.inner.looking.clone();
         let _looking = (Arc::strong_count(&self.inner) <= 2).then(|| looking.lock());
+        // Handles are let go of one at a time, the sync thread's among
+        // them: the one that finds itself the last is, and closes the file.
+        let dropping = self.inner.dropping.clone();
+        let _dropping = dropping.lock();
         let open = self.close();
+        #[cfg(test)]
+        {
+            let hook = self.inner.before_letting_go.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         // SAFETY: taken once, here, and not used again: `self` is going.
         let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
         // The last handle's state, its descriptor among it, goes while the
@@ -3244,6 +3311,7 @@ impl Chronicle {
         // Its shared hold on the present byte is let go first: a lock is
         // not upgraded in place on every platform.
         let file = &self.inner.file;
+        self.inner.present.store(false, Ordering::Release);
         let _ = locks::unlock(file, locks::PRESENT);
         if let Ok(true) = locks::lock(file, locks::PRESENT, true, false) {
             let _ = self.truncate_free_tail(&turn);
@@ -4677,6 +4745,65 @@ mod tests {
         assert_eq!(synced.sequence, slot.durable, "taken up once synced");
         slot.durable = 0;
         assert!(take_up_durable(&archive.inner.file, &mut slot)?);
+        Ok(())
+    }
+
+    /// Of handles dropped at once on several threads, one finds itself the
+    /// last and closes the file: the extent opening left is taken back, as
+    /// only a close does. Before, each could see another still there and
+    /// stand down, and the file was left as after a crash.
+    #[dialog_common::test]
+    fn it_closes_once_when_handles_are_dropped_at_once() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let options = Options {
+            sync_in_background: false,
+            ..Options::default()
+        };
+        for round in 0..4 {
+            let path = directory.path().join(format!("archive {round}"));
+            let archive = Chronicle::open_with(&path, options.clone())?;
+            anyhow::ensure!(archive.current().slot.extents.len() == 1, "an extent left");
+            let barrier = std::sync::Barrier::new(3);
+            let handles: Vec<Chronicle> = (0..3)
+                .map(|_| Chronicle {
+                    inner: ManuallyDrop::new(Arc::clone(&archive.inner)),
+                })
+                .collect();
+            drop(archive);
+            // Each handle waits, between finding whether it is the last and
+            // letting go, for the others to get there too, or 100 ms: as
+            // if all three were dropped at the same instant.
+            let arrived = Arc::new((parking_lot::Mutex::new(0usize), parking_lot::Condvar::new()));
+            let gate = arrived.clone();
+            *handles[0].inner.before_letting_go.lock() = Some(Arc::new(move || {
+                let (count, all) = &*gate;
+                let mut count = count.lock();
+                *count += 1;
+                all.notify_all();
+                let deadline = Instant::now() + Duration::from_millis(100);
+                while *count < 3 && !all.wait_until(&mut count, deadline).timed_out() {}
+            }));
+            std::thread::scope(|scope| {
+                for handle in handles {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        drop(handle);
+                    });
+                }
+            });
+            let reopened = Chronicle::open_with(
+                &path,
+                Options {
+                    leave_extent: false,
+                    ..options.clone()
+                },
+            )?;
+            assert!(
+                reopened.current().slot.extents.is_empty(),
+                "round {round}: no handle closed the file"
+            );
+        }
         Ok(())
     }
 

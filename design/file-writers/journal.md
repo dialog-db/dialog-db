@@ -1068,3 +1068,41 @@ there is one, in that order. Pinned by
 its recovery: before the fix the second recovers too. One case is still
 open: two names for a file that does not exist yet, which only a symbolic
 link to a missing target makes.
+
+## 2026-11-13: the fourth review round
+
+The fourth review (at 416a5a95) found one regression from the sync thread,
+with a failing test, and one lesser race. Both are fixed.
+
+**A reopen shared a closed handle's state without the present byte.** The
+sync thread copied weak references out of the table of open files and
+upgraded them later, without the table. A last close holds the table from
+finding itself the last until its descriptor is closed, but the upgrade
+did not take the table, so it could land inside that window. The close
+then let go of the present byte, and the state stayed alive through the
+thread's reference. A reopen shared that state, so another process took
+itself for the last while this one had the file open. Two changes fix it:
+- The thread upgrades under the table, so its upgrade either comes before
+  the close's check (the close stands down) or after the state is gone.
+- A handle handed out from the table takes the present byte again, and
+  rereads the file, when a last close has let go of them. That covers a
+  reference taken some other way, which is what the reviewer's test plays:
+  `it_keeps_the_file_present_when_the_sync_thread_looks_during_the_last_close`.
+  The test failed 3 of 3 before and passes now.
+
+The sync thread also visits only files opened with
+`sync_in_background`. Before, it took a reference to every open file. With
+background sync off, that reference could make it the last holder, so the
+close ran late on the thread, and a reopen straight after shared the
+still-open state.
+
+**Handles dropped at once could all stand down.** A handle closes the file
+only if it finds itself the only reference. Three handles dropped at once
+could each see the others and none close, which leaves the file as after a
+crash, with the descriptor closed outside the table. Drops of one file's
+handles, the sync thread's included, now take a lock in turn, so exactly
+one finds itself the last. Pinned by
+`it_closes_once_when_handles_are_dropped_at_once`: a hook holds each
+handle between its check and its release, as if all three were dropped at
+the same instant. Without the lock no handle closes the file; with it, one
+does.
