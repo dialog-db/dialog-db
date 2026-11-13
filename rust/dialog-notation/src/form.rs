@@ -421,7 +421,7 @@ mod tests {
 
     #[test]
     fn it_reads_and_prints_a_form_the_same() {
-        let text = r#"(rule description: "adds one" (assert! (xyz.counter ?c count: (+ ?n : 1))) (when (increment (xyz.counter ?c)) (xyz.counter ?c count: (:natural ?n))))"#;
+        let text = r#"(rule description: "adds one" (assert! (xyz.counter ?c count: (+ ?n : 1))) (increment (xyz.counter ?c)) (xyz.counter ?c count: (:natural ?n)))"#;
         let forms = read(text).unwrap();
         assert_eq!(forms.len(), 1);
         assert_eq!(forms[0].to_string(), text);

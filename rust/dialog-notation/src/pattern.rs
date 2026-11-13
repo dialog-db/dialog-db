@@ -249,10 +249,10 @@ mod tests {
             rewrite(
                 "(query (todo ?t))",
                 "(query ?head)",
-                "(rule (report ?head) (when ?head))"
+                "(rule (report ?head) ?head)"
             )
             .as_deref(),
-            Some("(rule (report (todo ?t)) (when (todo ?t)))")
+            Some("(rule (report (todo ?t)) (todo ?t))")
         );
     }
 
@@ -260,17 +260,17 @@ mod tests {
     fn it_repeats_what_an_ellipsis_took() {
         assert_eq!(
             rewrite(
-                "(query (a ?x) (b ?y) (when (c ?x) (d ?y)))",
-                "(query ?head ... (when ?premise ...))",
-                "(rule (report ?head) ... (when ?premise ...))"
+                "(query (all (a ?x) (b ?y)) (c ?x) (d ?y))",
+                "(query (all ?head ...) ?premise ...)",
+                "(rule (all (report ?head) ...) ?premise ...)"
             )
             .as_deref(),
-            Some("(rule (report (a ?x)) (report (b ?y)) (when (c ?x) (d ?y)))")
+            Some("(rule (all (report (a ?x)) (report (b ?y))) (c ?x) (d ?y))")
         );
         assert_eq!(
             rewrite(
                 "(query (a ?x))",
-                "(query ?head ... (when ?premise ...))",
+                "(query (all ?head ...) ?premise ...)",
                 "x"
             ),
             None
@@ -323,9 +323,9 @@ mod tests {
     fn it_gives_back_a_call_by_running_its_definition_backwards() {
         for (call, pattern, template) in [
             (
-                "(query (a ?x) (b ?y) (when (c ?x) (d ?y)))",
-                "(query ?head ... (when ?premise ...))",
-                "(rule (report ?head) ... (when ?premise ...))",
+                "(query (all (a ?x) (b ?y)) (c ?x) (d ?y))",
+                "(query (all ?head ...) ?premise ...)",
+                "(rule (all (report ?head) ...) ?premise ...)",
             ),
             (
                 "(task ?mine title: \"Buy milk\")",

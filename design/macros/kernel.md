@@ -15,7 +15,7 @@ flowchart LR
 
 | | Form | In dialog today |
 |---|---|---|
-| Abstraction | `(rule head… (when premise…) (unless premise…))` | a rule descriptor; `when` and `unless` are its two lists |
+| Abstraction | `(rule head premise… (unless premise…))` | a rule descriptor: the first part is the head, or `(all …)` of several; every part after it is a premise; what `(unless …)` holds must not hold |
 | Read | `(xyz.todo ?t text: ?x state: ?s)`: application of a relation, one entity and the fields named | a concept query |
 | Compute | `(:text ?x)`, `(:value ?a is: ?b)`, `(+ ?a : ?b is: ?c)`: application of a formula | a formula query or a constraint |
 | Write | `(assert! A)`, `(retract! A)` as a rule's head: what stays | the `assert!` and `retract!` heads of an inductive rule; `Instruction::Assert(fact, pick)`, `Instruction::Retract(fact)` |
@@ -31,15 +31,15 @@ flowchart LR
 - A type is a formula that holds for values of the type, so `(:text ?x)` can stand where `?x` would. `:value` is the type of every value, so `(:value ?a is: ?b)` is equality.
 - **Proposed:** a pick wraps a term the same way, `(:last (:text ?x))`, so a read says everything about the attributes it reads. The alternative is #728's `(pick :last from: ?x)` beside the read.
 - A head made only of operator characters is a formula. Names start with a letter, so it cannot be a concept or a domain.
-- A write at the top level, `(assert! A)`, `(retract! A)` or `(assert A)` with a `when` and an `unless` if it has them, is a rule with that head.
+- A write at the top level, `(assert! A)`, `(retract! A)` or `(assert A)` with premises after it if it has them, is a rule with that head.
 
 ## Syntax is a rule
 
 A macro is a rule like any other (Irakli, 2026-11-11). Its premise says which form it is about, and its head says what that form becomes:
 
 ```clj
-(rule (syntax (rule (report ?head) (when ?head)))
-  (when (expand (query ?head))))
+(rule (syntax (rule (report ?head) ?head))
+  (expand (query ?head)))
 ```
 
 - `(expand pattern)` holds for the form being expanded when it has the pattern's shape. It binds the pattern's variables to the form's parts, as rule variables. `(expand pattern in: :head)` holds in that position only; the other position is `:premise`.
@@ -56,16 +56,16 @@ The walker rewrites a top-level form until it is a `rule` or a write, then every
 The prelude in `rust/dialog-notation/src/prelude.clj` is rules and nothing else. There was a `syntax` of two parts as the short way to write one; it is gone (2026-11-11), since its two parts had no labels and different jobs:
 
 ```clojure
-(rule (syntax (rule (report ?head) (when ?head)))
-  (when (expand (query ?head))))
+(rule (syntax (rule (report ?head) ?head))
+  (expand (query ?head)))
 
 (rule (syntax (rule ...?about
                 (syntax ?body)
-                (when (expand (?name ?this ...?fields)))))
-  (when (expand (concept (?name ?this ...?fields) ?body ...?about))))
+                (expand (?name ?this ...?fields))))
+  (expand (concept (?name ?this ...?fields) ?body ...?about)))
 ```
 
-A pattern is any form, not an application only. `unless` may stand beside `when` or inside it, each premise in it one more "and not": `(when A (unless B) (unless C))` is `A, not B, not C`.
+A pattern is any form, not an application only. `(unless …)` may stand anywhere among the premises and more than once, each premise in it one more "and not": `A (unless B) (unless C)` is `A, not B, not C`.
 
 A concept is syntax for what its body says. The variables tie its parameters to the body's fields, so the names need not agree. Writing
 
@@ -78,7 +78,7 @@ is writing this rule, which says that `(task …)` stands for that read of `xyz.
 
 ```clj
 (rule (syntax (xyz.todo ?t text: (:last (:text ?x))))
-  (when (expand (task ?t title: ?x))))
+  (expand (task ?t title: ?x)))
 ```
 
 A concept maps facts to itself and back. So its body holds reads and nothing else, and every variable in it is a parameter:
@@ -101,7 +101,7 @@ A body's reads stand together, as `(all …)`, where the concept is written:
 
 | Where the concept is written | What its reads become |
 |---|---|
-| in a `when` | premises, side by side |
+| among the premises | premises, side by side |
 | in a write or a report | one head each |
 | in an `unless` | one read when they are of one entity: `(io.person ?p name: … io.contact/email: …)` |
 
@@ -113,8 +113,8 @@ A command is an application around an application whose head names nothing. In a
 
 ```clj
 (rule (syntax (?domain _ about: ?subject ...?fields))
-  (when (expand (?command (?concept ?subject ...?fields)) in: :premise)
-        (:command ?command : ?concept is: ?domain))
+  (expand (?command (?concept ?subject ...?fields)) in: :premise)
+  (:command ?command : ?concept is: ?domain)
   (unless (dialog.name _ is: ?command)))
 ```
 
@@ -122,8 +122,8 @@ A rule may also say something about a form without refusing it:
 
 ```clj
 (rule (warning "no rule reads this command")
-  (when (expand (?command (?concept ?subject ...?fields)) in: :head)
-        (:command ?command : ?concept is: ?domain))
+  (expand (?command (?concept ?subject ...?fields)) in: :head)
+  (:command ?command : ?concept is: ?domain)
   (unless (dialog.name _ is: ?command)
           (dialog.rule _ on: ?domain)))
 ```
@@ -151,9 +151,9 @@ A description is a fact about an entity, `dialog.meta/description`, never part o
 
   ```clj
   (query (dialog.name ?thing is: ?name)
-    (when (dialog.name ?thing is: ?name)
-          (dialog.meta ?thing description: ?text)
-          (:like ?text : "%list%")))
+    (dialog.name ?thing is: ?name)
+    (dialog.meta ?thing description: ?text)
+    (:like ?text : "%list%"))
   ```
 
 In the model that answers `?name = todo`. Any other labelled part of a rule is kept the same way, under `dialog.meta`.
@@ -164,11 +164,11 @@ In the model that answers `?name = todo`. Any other labelled part of a rule is k
 
 ```clj
 ; (rule (assert! (todo ?t list: ?l text: ?x state: :open))
-;   (when (add (todo list: ?l text: ?x))
-;         (:id xyz.todo list: ?l text: ?x is: ?t)))
+;   (add (todo list: ?l text: ?x))
+;         (:id xyz.todo list: ?l text: ?x is: ?t))
 (rule (assert! (xyz.todo ?t list: (:last (:entity ?l)) text: (:last (:text ?x)) state: (:top :open)))
-  (when (dialog.command.add.todo _ list: ?l text: ?x)
-        (:id xyz.todo list: ?l text: ?x is: ?t)))
+  (dialog.command.add.todo _ list: ?l text: ?x)
+  (:id xyz.todo list: ?l text: ?x is: ?t))
 
 ; (add (todo list: list:home text: "Buy milk"))
 (rule (assert (dialog.command.add.todo (:id dialog.command.add.todo list: list:home text: "Buy milk")
@@ -176,7 +176,7 @@ In the model that answers `?name = todo`. Any other labelled part of a rule is k
 
 ; (query (todo ?t text: ?x state: ?s))
 (rule (report (xyz.todo ?t list: (:last (:entity ?l.2af3)) text: (:last (:text ?x)) state: (:top ?s)))
-  (when (xyz.todo ?t list: (:last (:entity ?l.4dd8)) text: (:last (:text ?x)) state: (:top ?s))))
+  (xyz.todo ?t list: (:last (:entity ?l.4dd8)) text: (:last (:text ?x)) state: (:top ?s)))
 
 ; report
 ; ?s = :open ?t = id:7a6a542c ?x = "Buy milk"

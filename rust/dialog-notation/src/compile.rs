@@ -598,7 +598,7 @@ impl Scope {
                 if self.negated && !self.bound.contains(name) && !name.contains('.') =>
             {
                 Err(Error::Refused(format!(
-                    "?{name} is in `unless` and nothing in `when` binds it: write `_` for \
+                    "?{name} is in `unless` and no premise binds it: write `_` for \
                      anything at all"
                 )))
             }
@@ -1097,10 +1097,10 @@ mod tests {
     #[test]
     fn it_compiles_each_head_to_a_rule_of_its_kind() {
         let steps = steps(
-            "(rule (assert! (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
-                   (retract! (xyz.counter ?c stale: ?n))
-                   (xyz.seen ?c count: ?n)
-               (when (xyz.counter ?c count: (:last (:natural ?n)))))",
+            "(rule (all (assert! (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
+                        (retract! (xyz.counter ?c stale: ?n))
+                        (xyz.seen ?c count: ?n))
+               (xyz.counter ?c count: (:last (:natural ?n))))",
         )
         .unwrap();
         assert!(matches!(
@@ -1113,12 +1113,12 @@ mod tests {
     fn it_says_what_dialog_has_no_counterpart_for() {
         assert!(matches!(
             steps(
-                "(rule (report (xyz.a ?a n: ?n)) (when (xyz.a ?a n: ?n)) (unless (xyz.b ?a n: (+ ?n : 1))))"
+                "(rule (report (xyz.a ?a n: ?n)) (xyz.a ?a n: ?n) (unless (xyz.b ?a n: (+ ?n : 1))))"
             ),
             Err(Error::Unsupported(_))
         ));
         assert!(matches!(
-            steps("(rule (report (xyz.a ?a n: ?n)) (when (xyz.a ?a n: ?n) (:like ?n : \"x\")))"),
+            steps("(rule (report (xyz.a ?a n: ?n)) (xyz.a ?a n: ?n) (:like ?n : \"x\"))"),
             Err(Error::Unsupported(_))
         ));
     }
@@ -1127,7 +1127,7 @@ mod tests {
     fn it_compiles_a_command_a_rule_issues_to_a_rule_over_a_transient_concept() {
         let steps = steps(
             "(rule (assert (command.go.x (:id command.go.x about: ?c) about: ?c))
-               (when (xyz.counter ?c count: ?n)))",
+               (xyz.counter ?c count: ?n))",
         )
         .unwrap();
         let [Step::Transient(concept), Step::Induce(rule)] = steps.as_slice() else {
@@ -1162,9 +1162,7 @@ mod tests {
     fn it_refuses_a_write_that_leaves_a_field_out() {
         // `?l.1` is how a field an expansion added and nothing binds reads.
         assert!(matches!(
-            steps(
-                "(rule (assert! (xyz.todo ?t list: ?l.1 state: :done)) (when (xyz.go ?t on: :yes)))"
-            ),
+            steps("(rule (assert! (xyz.todo ?t list: ?l.1 state: :done)) (xyz.go ?t on: :yes))"),
             Err(Error::Refused(_))
         ));
         assert!(matches!(
@@ -1176,23 +1174,19 @@ mod tests {
     #[test]
     fn it_refuses_a_variable_only_unless_names() {
         assert!(matches!(
-            steps(
-                "(rule (report (xyz.a ?a n: ?n)) (when (xyz.a ?a n: ?n)) (unless (xyz.b ?a n: ?m)))"
-            ),
+            steps("(rule (report (xyz.a ?a n: ?n)) (xyz.a ?a n: ?n) (unless (xyz.b ?a n: ?m)))"),
             Err(Error::Refused(_))
         ));
         assert!(
-            steps(
-                "(rule (report (xyz.a ?a n: ?n)) (when (xyz.a ?a n: ?n)) (unless (xyz.b ?a n: _)))"
-            )
-            .is_ok()
+            steps("(rule (report (xyz.a ?a n: ?n)) (xyz.a ?a n: ?n) (unless (xyz.b ?a n: _)))")
+                .is_ok()
         );
     }
 
     #[test]
     fn it_refuses_a_report_of_what_no_premise_binds() {
         assert!(matches!(
-            steps("(rule (report (xyz.a ?a n: ?m)) (when (xyz.a ?a n: ?n)))"),
+            steps("(rule (report (xyz.a ?a n: ?m)) (xyz.a ?a n: ?n))"),
             Err(Error::Refused(_))
         ));
     }

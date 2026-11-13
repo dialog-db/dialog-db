@@ -65,7 +65,7 @@ mod tests {
         assert!(analysis.diagnostics.is_empty());
         assert_eq!(
             analysis.analyzed,
-            parse("(rule (report (xyz.todo ?t text: ?x)) (when (xyz.todo ?t text: ?x)))")?
+            parse("(rule (report (xyz.todo ?t text: ?x)) (xyz.todo ?t text: ?x))")?
         );
         Ok(())
     }
@@ -73,7 +73,7 @@ mod tests {
     #[dialog_common::test]
     fn it_says_what_nothing_defines() -> Result<(), Error> {
         let mut analyzer = Analyzer::new()?;
-        let analysis = analyzer.analyze(&parse("(rule (report (xyz.a ?x)) (when (nonesuch ?x)))")?);
+        let analysis = analyzer.analyze(&parse("(rule (report (xyz.a ?x)) (nonesuch ?x))")?);
         assert!(matches!(analysis, Err(Error::Unknown(_))));
         Ok(())
     }

@@ -68,5 +68,4 @@ Proposed by the agent, not decided: this table; that order is held a node and no
 - A template that holds the entity of what it names, with the name beside it (decided 2026-11-12): needs a definition to have an entity, and a group that refers to itself named as one unit.
 - A kept form's relations to what it references: needs syntax kept on the branch, which waits on the composite value (#778, #748).
 - The phases behind a formula and a resolver in `dialog-query`, and `(dialog/evaluate (source "…"))`.
-- A rule without `when`: the maintainer's lean, waiting on what several heads are (#788).
 - An application lowered to a query of the definition's concept, in place of the reads it stands for.

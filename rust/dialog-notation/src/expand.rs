@@ -1,13 +1,15 @@
 //! Expansion: rewriting a tree until every part of it is kernel.
 //!
-//! The kernel is small: `rule` with its heads, `when` and `unless`; the
-//! application of a relation and of a formula; `assert!`, `retract!`,
-//! `assert` and `report` as a rule's head. Every other form is given
-//! its meaning by a rule about syntax:
+//! The kernel is small: `rule`, whose first part is its head and whose
+//! other parts are its premises, `(unless …)` among them for what must
+//! not hold; the application of a relation and of a formula; `assert!`,
+//! `retract!`, `assert` and `report` as a rule's head; `(all …)` where
+//! several stand for one. Every other form is given its meaning by a
+//! rule about syntax:
 //!
 //! ```clj
-//! (rule (syntax (rule (report ?head) (when ?head)))
-//!   (when (expand (query ?head))))
+//! (rule (syntax (rule (report ?head) ?head))
+//!   (expand (query ?head)))
 //! ```
 //!
 //! `(expand pattern)` holds for the tree being expanded when it has the
@@ -37,7 +39,7 @@ pub const PRELUDE: &str = include_str!("prelude.clj");
 pub enum Position {
     /// A rule's head, or the top level of a document.
     Head,
-    /// A premise, in a `when` or an `unless`.
+    /// A premise, `(unless …)` or not.
     Premise,
 }
 
@@ -109,49 +111,49 @@ fn items(tree: &Syntax) -> &[Syntax] {
 pub struct Clauses {
     /// What the rule says about itself: its labelled parts.
     pub said: BTreeMap<String, Syntax>,
-    /// Its heads.
+    /// Its heads: the first part, or what `(all …)` there holds.
     pub heads: Vec<Syntax>,
-    /// Its `when` premises.
+    /// Its premises: what must hold.
     pub when: Vec<Syntax>,
-    /// Its `unless` premises.
+    /// What `(unless …)` holds: what must not.
     pub unless: Vec<Syntax>,
 }
 
 impl Clauses {
-    /// The parts of a `(rule …)` tree.
+    /// The parts of a `(rule …)` tree: its first part is its head, or
+    /// `(all …)` of several; every part after it is a premise, and what
+    /// `(unless …)` holds must not hold.
     pub fn of(rule: &Syntax) -> Self {
         let mut clauses = Clauses::default();
         let Some(operand) = rule.operand() else {
             return clauses;
         };
         clauses.said = operand.terms.clone();
-        for part in &operand.items {
-            match part.applies() {
-                // What must not hold may stand among what must, as in
-                // `A, not B, not C`: each is one more "and not".
-                Some("when") => {
-                    for premise in items(part) {
-                        if premise.applies() == Some("unless") {
-                            clauses.unless.extend(items(premise).iter().cloned());
-                        } else {
-                            clauses.when.push(premise.clone());
-                        }
-                    }
-                }
-                Some("unless") => clauses.unless.extend(items(part).iter().cloned()),
-                _ => clauses.heads.push(part.clone()),
+        let Some((head, premises)) = operand.items.split_first() else {
+            return clauses;
+        };
+        clauses.heads = members(head.clone());
+        for premise in premises {
+            if premise.applies() == Some("unless") {
+                clauses.unless.extend(items(premise).iter().cloned());
+            } else {
+                clauses.when.push(premise.clone());
             }
         }
         clauses
     }
 
     /// These parts as a `(rule …)` tree.
-    pub fn into_rule(self) -> Syntax {
-        let mut parts = self.heads;
-        for (word, premises) in [("when", self.when), ("unless", self.unless)] {
-            if !premises.is_empty() {
-                parts.push(apply(word, premises));
-            }
+    pub fn into_rule(mut self) -> Syntax {
+        let head = if self.heads.len() == 1 {
+            self.heads.remove(0)
+        } else {
+            apply("all", self.heads)
+        };
+        let mut parts = vec![head];
+        parts.extend(self.when);
+        if !self.unless.is_empty() {
+            parts.push(apply("unless", self.unless));
         }
         Syntax::Application(
             Box::new(Syntax::Reference("rule".into())),
@@ -732,6 +734,17 @@ impl Expander {
                 .extend(members(self.application(head, Position::Head)?));
         }
         for premise in written.when {
+            // Nothing but its place tells a head from a premise, so a
+            // write after the first part is said to be misplaced, and
+            // not asked about as a premise.
+            if premise
+                .applies()
+                .is_some_and(|word| HEAD_WORDS.contains(&word))
+            {
+                return Err(Error::Refused(format!(
+                    "{premise} is a head, and stands among the premises: the first part of a rule is its head, and several heads are written (all …)"
+                )));
+            }
             walked
                 .when
                 .extend(members(self.application(premise, Position::Premise)?));
@@ -754,7 +767,7 @@ mod tests {
         (concept (todo ?t list: ?l text: ?x state: ?s)
           (xyz.todo ?t list: (:last (:entity ?l)) text: (:last (:text ?x)) state: (:last ?s)))
         (rule (assert! (todo ?t list: ?l text: ?x state: :open))
-          (when (add (todo ?t list: ?l text: ?x))))
+          (add (todo ?t list: ?l text: ?x)))
     "#;
 
     fn expanded(setup: &str, text: &str) -> Result<Vec<String>, Error> {
@@ -764,26 +777,57 @@ mod tests {
         Ok(kernel.iter().map(Syntax::to_string).collect())
     }
 
-    /// `unless` beside `when` and `unless` inside it are one rule.
+    /// `(unless …)` once, last, or several times among the premises, is
+    /// one rule.
     #[test]
     fn it_reads_unless_beside_when_or_inside_it() {
         let beside = expanded(
             TODO,
             "(rule (xyz.lonely ?t text: ?x)
-               (when (todo ?t text: ?x))
+               (todo ?t text: ?x)
                (unless (xyz.tag ?t name: _) (xyz.star ?t by: _)))",
         )
         .unwrap();
         let inside = expanded(
             TODO,
             "(rule (xyz.lonely ?t text: ?x)
-               (when (todo ?t text: ?x)
-                     (unless (xyz.tag ?t name: _))
-                     (unless (xyz.star ?t by: _))))",
+               (todo ?t text: ?x)
+               (unless (xyz.tag ?t name: _))
+               (unless (xyz.star ?t by: _)))",
         )
         .unwrap();
         assert_eq!(beside, inside);
         assert!(beside[0].contains("(unless (xyz.tag ?t name: _) (xyz.star ?t by: _))"));
+    }
+
+    /// Nothing but its place tells a head from a premise, so a write
+    /// after the first part is refused, and the refusal says how several
+    /// heads are written.
+    #[test]
+    fn it_refuses_a_second_head_written_among_the_premises() {
+        let refused = expanded(
+            "",
+            "(rule (assert! (xyz.todo ?t list: ?to))
+                   (retract! (xyz.todo ?t list: ?from))
+               (xyz.move ?t to: ?to from: ?from))",
+        );
+        assert!(
+            matches!(&refused, Err(Error::Refused(why)) if why.contains("(all …)")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            expanded(
+                "",
+                "(rule (all (assert! (xyz.todo ?t list: ?to))
+                            (retract! (xyz.todo ?t list: ?from)))
+                   (xyz.move ?t to: ?to from: ?from))",
+            )
+            .unwrap(),
+            vec![
+                "(rule (all (assert! (xyz.todo ?t list: ?to)) (retract! (xyz.todo ?t list: ?from))) \
+                 (xyz.move ?t from: ?from to: ?to))"
+            ]
+        );
     }
 
     /// A pattern is any form, not an application only: here a form in
@@ -792,7 +836,7 @@ mod tests {
     fn it_expands_a_form_that_is_not_an_application() {
         let kernel = expanded(
             r#"(rule (syntax (assert! (xyz.note ?n text: (:text ?x))))
-                 (when (expand [note ?n ?x])))"#,
+                 (expand [note ?n ?x]))"#,
             r#"[note note:1 "hi"]"#,
         )
         .unwrap();
@@ -810,7 +854,7 @@ mod tests {
             kernel.iter().map(Syntax::to_string).collect::<Vec<_>>(),
             vec![
                 "(rule (assert! (xyz.todo ?t list: (:last (:entity ?l)) state: (:last :open) text: (:last (:text ?x)))) \
-                 (when (command.add.todo _ about: ?t list: ?l text: ?x)))"
+                 (command.add.todo _ about: ?t list: ?l text: ?x))"
             ]
         );
         assert!(diagnostics.is_empty());
@@ -869,7 +913,7 @@ mod tests {
             .submit(
                 "(increment (xyz.counter counter:a))
                  (rule (assert! (xyz.counter ?c count: (+ ?n : 1)))
-                   (when (increment (xyz.counter ?c)) (xyz.counter ?c count: ?n)))",
+                   (increment (xyz.counter ?c)) (xyz.counter ?c count: ?n))",
             )
             .unwrap();
         assert!(diagnostics.is_empty());
@@ -878,7 +922,7 @@ mod tests {
     #[test]
     fn it_refuses_what_nothing_gives_a_meaning_and_what_two_rules_do() {
         assert!(matches!(
-            expanded(TODO, "(query (todo ?t) (when (frobnicate ?t)))"),
+            expanded(TODO, "(query (todo ?t) (frobnicate ?t))"),
             Err(Error::Unknown(_))
         ));
         // A write that says the fields of neither definition.
@@ -898,7 +942,7 @@ mod tests {
         let note = "(concept (todo ?t title: ?x) (xyz.note ?t title: ?x))";
         assert_eq!(
             expanded(TODO, &format!("{note} (query (todo ?t title: ?x))")).unwrap(),
-            vec!["(rule (report (xyz.note ?t title: ?x)) (when (xyz.note ?t title: ?x)))"]
+            vec!["(rule (report (xyz.note ?t title: ?x)) (xyz.note ?t title: ?x))"]
         );
         assert_eq!(
             expanded(TODO, &format!("{note} (query (todo ?t text: ?x))")).unwrap(),
@@ -918,7 +962,7 @@ mod tests {
         for later in [task, reordered] {
             let rules = expanded(TODO, &format!("{later} (query (todo ?t text: ?x))")).unwrap();
             assert_eq!(rules.len(), 1, "{rules:?}");
-            assert!(rules[0].contains("(when (abc.task ?t "), "{rules:?}");
+            assert!(rules[0].contains(")) (abc.task ?t "), "{rules:?}");
             assert!(!rules[0].contains("xyz.todo"), "{rules:?}");
         }
     }
@@ -940,7 +984,7 @@ mod tests {
                     && rule.contains(" title: ?x"),
                 "{rule}"
             );
-            assert!(rule.contains(&format!("(when ({domain} ?t ")), "{rule}");
+            assert!(rule.contains(&format!(")) ({domain} ?t ")), "{rule}");
         }
         // A write says every field, so the labels written are one
         // definition's signature.
@@ -957,7 +1001,7 @@ mod tests {
         assert!(matches!(
             expanded(
                 both,
-                "(query (xyz.tag ?t name: ?n) (when (xyz.tag ?t name: ?n)) (unless (todo ?t title: _)))"
+                "(query (xyz.tag ?t name: ?n) (xyz.tag ?t name: ?n) (unless (todo ?t title: _)))"
             ),
             Err(Error::Ambiguous(..))
         ));
@@ -972,7 +1016,7 @@ mod tests {
                     (concept (todo ?t name: ?b) (xyz.todo ?t text: ?b))";
         let rules = expanded(
             both,
-            "(query (xyz.tag ?t name: ?n) (when (xyz.tag ?t name: ?n) (todo ?t)))",
+            "(query (xyz.tag ?t name: ?n) (xyz.tag ?t name: ?n) (todo ?t))",
         )
         .unwrap();
         assert_eq!(rules.len(), 1, "{rules:?}");
@@ -1006,9 +1050,7 @@ mod tests {
                 "(query (list-item list:home todo: ?t))"
             )
             .unwrap(),
-            vec![
-                "(rule (report (xyz.todo ?t list: list:home)) (when (xyz.todo ?t list: list:home)))"
-            ]
+            vec!["(rule (report (xyz.todo ?t list: list:home)) (xyz.todo ?t list: list:home))"]
         );
     }
 
@@ -1016,7 +1058,7 @@ mod tests {
     fn it_joins_the_reads_of_one_entity_under_unless() {
         let kernel = expanded(
             "(concept (author ?p name: ?n email: ?e) (io.person ?p name: ?n) (io.contact ?p email: ?e))",
-            "(query (io.person ?p name: ?n) (when (io.person ?p name: ?n)) (unless (author ?p)))",
+            "(query (io.person ?p name: ?n) (io.person ?p name: ?n) (unless (author ?p)))",
         )
         .unwrap();
         assert!(kernel[0].contains("(unless (io.person ?p io.contact/email: ?e."));

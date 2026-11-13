@@ -704,3 +704,25 @@ Not examined yet. They are columns, not recommendations.
 - A rule is not analyzed again in a commit: the analyzed rule is kept by entity. It is planned once a seed.
 
 **Decided.** Not decided. What the numbers now say: dialog does not need a rule of several heads to write on one condition cheaply, if the engine evaluates a body once for the rules that share it. That turns over what was said yesterday: `(all …)` in a head's place can go on compiling to the body again a head, and a named condition is the dearer of the two once the engine does that.
+
+## 2026-11-13, Designing: a rule without `when`
+
+**Asked.** Irakli: "we decided to drop when wrapper remember". He had said he would on 2026-11-12, with what several heads look like left to settle; the agent had it down as a lean and kept `when`.
+
+**Learned.** Built. A rule's first part is its head and every part after it is a premise; `(unless …)` stands among them. Several heads are `(all h1 h2)` in the head's place, which is the splice a template already needs. A write written after the first part is refused, and the refusal says to write `(all …)`: three of five readers in round K2 wrote `(rule h1 h2 p)` untold.
+
+```
+ (rule (assert! (todo ?t list: ?l text: ?x state: :open))
+   (add (todo ?t list: ?l text: ?x)))
+
+ (rule (all (assert! (xyz.todo ?t list: ?to))
+            (retract! (xyz.todo ?t list: ?from)))
+   (move (xyz.todo ?t list: ?to))
+   (xyz.todo ?t list: ?from))
+```
+
+- The prelude is shorter: a query is two rules where it was three, since `(unless …)` is one more premise and needs no pattern of its own.
+- A query of several heads is `(query (all h1 h2) premise…)`.
+- A rule of several heads is still compiled to a rule a head with the body again, which #788 says is the cheap way once the engine evaluates a shared body once.
+
+**Decided.** By the maintainer: no `when`. By the agent, open to change: several heads as `(all …)` and not a tuple or a set, both of which he floated and then set aside; the refusal of a head among the premises.

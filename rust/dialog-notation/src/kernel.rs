@@ -299,28 +299,27 @@ impl Rule {
             when: Vec::new(),
             unless: Vec::new(),
         };
-        // What must not hold may stand among what must, as in
-        // `A, not B, not C`: each is one more "and not".
+        // The first part is the head, or `(all …)` of several. Every
+        // part after it is a premise, and what `(unless …)` holds must
+        // not hold.
         let members = |clause: &Syntax| clause.operand().map(|operand| operand.items.clone());
-        for part in &operand.items {
-            match part.applies() {
-                Some("when") => {
-                    for member in members(part).unwrap_or_default() {
-                        if member.applies() == Some("unless") {
-                            for negated in members(&member).unwrap_or_default() {
-                                rule.unless.push(premise(&negated)?);
-                            }
-                        } else {
-                            rule.when.push(premise(&member)?);
-                        }
-                    }
+        let Some((first, premises)) = operand.items.split_first() else {
+            return Ok(rule);
+        };
+        if first.applies() == Some("all") {
+            for member in members(first).unwrap_or_default() {
+                rule.heads.push(head(&member)?);
+            }
+        } else {
+            rule.heads.push(head(first)?);
+        }
+        for part in premises {
+            if part.applies() == Some("unless") {
+                for negated in members(part).unwrap_or_default() {
+                    rule.unless.push(premise(&negated)?);
                 }
-                Some("unless") => {
-                    for negated in members(part).unwrap_or_default() {
-                        rule.unless.push(premise(&negated)?);
-                    }
-                }
-                _ => rule.heads.push(head(part)?),
+            } else {
+                rule.when.push(premise(part)?);
             }
         }
         Ok(rule)
@@ -336,8 +335,8 @@ mod tests {
     fn it_reads_a_rule_into_heads_and_premises() {
         let form = forms(
             "(rule (assert! (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
-               (when (command.increment.xyz.counter _ about: ?c)
-                     (xyz.counter ?c count: (:last (:natural ?n)))))",
+               (command.increment.xyz.counter _ about: ?c)
+               (xyz.counter ?c count: (:last (:natural ?n))))",
         )
         .unwrap()
         .remove(0);

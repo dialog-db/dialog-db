@@ -35,7 +35,7 @@
 //! it is resolved.
 //!
 //! The parts of an application written with no label stay in the order
-//! written, as [`Parameters::items`], so `(when A)` and `(when A B)`
+//! written, as [`Parameters::items`], so `A` and `A B`
 //! have one shape. `of:` is the label of the part with no label: where
 //! no part is written without one, the part labelled `of:` is the
 //! first item, and `(todo ?t state: :open)` and
@@ -772,7 +772,7 @@ mod tests {
         assert_eq!(operand.items, vec![Syntax::Variable("a".into())]);
         assert_eq!(operand.terms.get("of"), Some(&Syntax::Variable("b".into())));
 
-        for text in ["(when (a ?x))", "(when (a ?x) (b ?x))"] {
+        for text in ["(a ?x)", "(a ?x) (b ?x)"] {
             let Syntax::Application(_, operand) = one(text) else {
                 panic!("an application");
             };

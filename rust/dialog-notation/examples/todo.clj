@@ -9,23 +9,23 @@
 ; `add` and `complete` are defined here and nowhere else: a command is
 ; whatever some rule reads.
 (rule (assert! (todo ?t list: ?l text: ?x state: :open))
-  (when (add (todo ?t list: ?l text: ?x)))
+  (add (todo ?t list: ?l text: ?x))
   description: "Adding a to-do opens it")
 
 ; A write says every field, so one that changes the state alone writes
 ; the relation, not the concept.
 (rule (assert! (xyz.todo ?t state: (:last (:entity :done))))
-  (when (complete (todo ?t))))
+  (complete (todo ?t)))
 
 ; A rule may issue a command, which is read in the round after.
 (rule (complete (todo ?t))
-  (when (archive (xyz.list ?l))
-        (todo ?t list: ?l))
+  (archive (xyz.list ?l))
+  (todo ?t list: ?l)
   description: "Archiving a list completes what is on it")
 
 ; What is left to do, derived and never stored.
 (rule (xyz.pending ?t text: ?x)
-  (when (todo ?t text: ?x state: :open)))
+  (todo ?t text: ?x state: :open))
 
 (add (todo todo:1 list: list:home text: "Buy milk"))
 (add (todo todo:2 list: list:home text: "Call mum"))
