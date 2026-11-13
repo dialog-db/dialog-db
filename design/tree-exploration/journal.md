@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | *What do we know?* The problem, accepted. What is held is decided: two commands with handlers built into dialog, each answering with a second command that a rule in the space places. That a rule's head is committed or transient today, never the overlay. That dialog dispatches commands as transient facts and reacts with inductive rules at commit, and has no built-in reaction that performs an effect. Use cases are drafted (nine). A strategy matrix exists with six columns, the sixth born from the decision on what is held. | *Where are we at?* Directing. The matrix is written and not read by the maintainer. |
-| **Agenda** | *What do we need to know?* What is no good about the current resolvers, in the maintainer's words (asked). Whether a tree node has to be reachable as a concept, or whether a consumer asking a resolver directly is enough (asked 2026-11-13, not answered): every difficulty in columns 2 to 5 of the strategy comes from the concept. For [design-resolvers](design-resolvers.md): what a decoding formula's row is; whether the block travels as bytes or as a record. Whether writing to the overlay from rules is its own topic. Whether the use cases are right (asked, not answered). For column 6 of the strategy and for the held decision alike: how dialog reacts to a command with an effect and answers with a command. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
+| **Agenda** | *What do we need to know?* Whether the maintainer takes column 4 of [design-resolvers](design-resolvers.md) (asked). If so, the accessor set: which steps, and what a row of each holds. Whether a tree node has to be reachable as a concept, or whether a consumer asking a resolver directly is enough (asked 2026-11-13, not answered): every difficulty in columns 2 to 5 of the strategy comes from the concept. For [design-resolvers](design-resolvers.md): what a decoding formula's row is; whether the block travels as bytes or as a record. Whether writing to the overlay from rules is its own topic. Whether the use cases are right (asked, not answered). For column 6 of the strategy and for the held decision alike: how dialog reacts to a command with an effect and answers with a command. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -452,3 +452,45 @@ What the maintainer's column costs is a block travelling as a value.
 **Decided.** Not decided. This decision is independent of the strategy
 one: either shape of step can be asked directly or wrapped in a
 concept.
+
+## 2026-11-13, Directing: the maintainer's model, and a recommendation
+
+**Asked.** What is no good about the current resolvers? The maintainer:
+"the model I was aiming for was to represent nodes as opaque resources
+(in the wasm component model sense) and then have formulas that act as
+accessors so you can read the parts you need from a query. I think the
+implementation currently implies reading the block each time, but the
+block read is cached so that should be cheap, was the expectation." A
+bad query getting a whole node as bytes is fine; "what I don't want is
+for every formula to have to decode those bytes over again, which
+perhaps is what is happening already." They asked for a recommendation.
+
+**Learned.** It is what is happening. Each resolver loads the block's
+bytes, copies them, and each `inspect_*` function builds a node from
+them again. Whether the byte read is cached does not help: what is
+repeated is the decode.
+
+The opaque resource the maintainer describes already exists in dialog,
+one layer down: since #755 the environment answers
+`nodes::Read<CorpusNode>` with a decoded node, from the node cache it
+keeps, and every query scope provides it. The resolvers do not use it;
+they ask for bytes (`archive::Load`) as the tree did before that
+change.
+
+*What does that word mean?* "Formulas as accessors": in dialog a
+formula is a function of its input values with no environment, so it
+cannot turn a handle into a node. An accessor that takes a handle has to
+ask the environment, which makes it a resolver. For formulas to be the
+accessors, the node has to travel as bytes, and then each one decodes
+it, which is the thing not wanted. So the model is kept and the word
+changes: the accessors are resolvers over a handle.
+
+That is column 4, the agent's recommendation, and it differs from
+column 2 in where the braid is cut: not between a read step and decoding
+formulas, but between the environment's node layer (read, check, decode,
+keep) and steps that only project.
+
+Of the draft branch: a node as an entity is the handle this needs;
+listing when no node is given is not part of it.
+
+**Decided.** Not decided; the maintainer has the recommendation.
