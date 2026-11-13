@@ -731,6 +731,16 @@ xychart-beta
 
 **Decision.** Rules drop `when`: `(rule conclusion condition…)`, one conclusion each, with a named directive where a rule would need two. The design has to say that a domain call reads derived facts as well as stored ones.
 
+## 2026-11-13 — R28: one sentence on domain calls does not fix the rename
+
+**Question.** The one [planned](results/r28-plan.md): does one sentence saying that a domain call reads every value of its field, stored or derived, make readers see that renaming a derived to-do lands?
+
+**Method.** As planned, ten `stated` readers and five `control` readers on R27's document, all at once.
+
+**Results.** [r28](results/r28.md). `control` scored question 8 none of five times, as R27 did. `stated` scored it twice in ten, one of them generously: the plan's "no help" bar. Readers quoted the sentence for the concept query, which they answered correctly without it, and in the rename went back to the stored facts. The step they skip is that rule A's `todo` conclusion is, through the concept, a value of `xyz.todo/title`. The sentence never says so. The two who scored took that step themselves, and both then asked how `last` elects between a stored and a derived value, which nothing they read says.
+
+**Decision.** The sentence is not enough. The candidate to test is the skipped step: a rule that concludes a concept derives values of that concept's domain fields, and a pick elects among stored and derived values by when they were last caused.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
