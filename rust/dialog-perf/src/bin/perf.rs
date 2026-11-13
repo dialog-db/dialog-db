@@ -67,6 +67,10 @@ struct SweepArgs {
     /// Skip callgrind: counters alone, no instruction counts.
     #[arg(long)]
     no_callgrind: bool,
+
+    /// Run every scenario at this size instead of the catalog's.
+    #[arg(long)]
+    size: Option<usize>,
 }
 
 #[derive(Debug, Args)]
@@ -121,6 +125,7 @@ fn main() -> Result<ExitCode> {
                 out_dir: args.out_dir.clone(),
                 only: args.only,
                 callgrind: !args.no_callgrind,
+                size: args.size,
             })?;
             eprintln!(
                 "{} report(s) written to {}",

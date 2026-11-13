@@ -26,6 +26,10 @@ pub struct SweepConfig {
     /// Whether to run each scenario under callgrind for its instruction
     /// count. Off, the reports carry counters alone.
     pub callgrind: bool,
+    /// Run every scenario at this size instead of the catalog's. A sweep
+    /// at a size of its own compares with no baseline, which is recorded
+    /// at the catalog's.
+    pub size: Option<usize>,
 }
 
 /// Run the sweep, writing `<out_dir>/<scenario>.json` per scenario (and
@@ -76,6 +80,9 @@ fn run_child(exe: &Path, scenario: &str, config: &SweepConfig) -> Result<Report>
         Command::new(exe)
     };
     command.arg("run").arg(scenario);
+    if let Some(size) = config.size {
+        command.arg("--size").arg(size.to_string());
+    }
     let output = match command.output() {
         Ok(output) => output,
         Err(error) if config.callgrind && error.kind() == std::io::ErrorKind::NotFound => {
