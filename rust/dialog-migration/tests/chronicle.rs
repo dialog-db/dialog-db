@@ -301,6 +301,38 @@ fn it_keeps_what_an_existing_archive_file_holds_when_migrating() -> anyhow::Resu
     Ok(())
 }
 
+/// A run interrupted while it wrote `archive.dialog.migrating` leaves part
+/// of a file; the next run does not take it for the space's file. Here the
+/// space has its own `archive.dialog`, holding a block only it holds, and
+/// the leftover is a prefix of it, as a copy cut short would be: the block
+/// is still there after the migration, and the leftover is gone.
+#[dialog_common::test]
+fn it_ignores_a_migrating_file_a_run_left_half_written() -> anyhow::Result<()> {
+    use dialog_migration::chronicle::{MIGRATING, migrate_space};
+
+    let directory = tempfile::tempdir()?;
+    let space = directory.path().join("repo");
+    let (old, new) = (buffer("only in the fs archive"), buffer("only in the file"));
+    put_block(&space, "index", old.as_ref(), old.as_ref())?;
+    {
+        let archive = Chronicle::open(space.join(FILE_NAME))?;
+        archive.append("index", std::slice::from_ref(&new))?;
+        archive.sync()?;
+    }
+    let whole = std::fs::read(space.join(FILE_NAME))?;
+    std::fs::write(space.join(MIGRATING), &whole[..whole.len() / 2])?;
+    migrate_space(&space, false)?;
+    assert!(!space.join(MIGRATING).exists(), "the leftover is removed");
+    let archive = Chronicle::open(space.join(FILE_NAME))?;
+    for block in [&old, &new] {
+        assert_eq!(
+            archive.get("index", block.blake3_hash())?.as_deref(),
+            Some(block.as_ref())
+        );
+    }
+    Ok(())
+}
+
 /// A process with a space's `archive.dialog` open while the space migrates
 /// goes on using that file: the migration writes into it through the same
 /// handle, so the process reads what was migrated, and what it writes
