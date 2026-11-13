@@ -721,106 +721,108 @@ fn it_tells_when_the_order_of_heads_decides() {
 /// as the value is.
 #[dialog_common::test]
 async fn it_shares_a_body_with_a_head_that_writes_a_collection() -> Result<()> {
-    let labels = || {
-        json!({
-            "with": {
-                "label": {
-                    "the": { "domain": "out.labels", "keyed": "name" },
-                    "cardinality": "many",
-                    "as": "entity:"
-                }
+    // Who touched an item, each under a position of their own.
+    let members = json!({
+        "with": {
+            "member": {
+                "the": { "domain": "out.members", "keyed": "sequence" },
+                "cardinality": "many",
+                "as": "entity:"
             }
-        })
-    };
-    let body = |tag: &str, by: &str| vec![touched(by), tagged(tag)];
-    let keyed = rule(
-        "assert!",
-        labels(),
+        }
+    });
+    let body = |who: &str, list: &str, position: &str| {
         vec![
-            touched("label"),
-            premise(
-                concept(&[("tag", field("item/tag", "text:", "all:"))]),
-                &[("this", "this"), ("tag", "label/the")],
-            ),
-        ],
-        vec![],
-    )?;
-    let plain = rule(
-        "assert!",
-        head("who", "out.a/by", "entity:", "all:"),
-        body("colour", "who"),
-        vec![],
-    )?;
-    let plain_too = rule(
-        "assert!",
-        head("user", "out.b/by", "entity:", "all:"),
-        body("shade", "user"),
-        vec![],
-    )?;
-
+            touched(who),
+            listed(list),
+            json!({
+                "assert": "dialog/position",
+                "where": {
+                    "member": var(who),
+                    "after": "",
+                    "before": "",
+                    "is": var(position)
+                }
+            }),
+        ]
+    };
+    let rules = [
+        rule("assert!", members, body("member", "list", "member/key"), vec![])?,
+        rule(
+            "assert!",
+            head("who", "out.a/by", "entity:", "all:"),
+            body("who", "where", "at"),
+            vec![],
+        )?,
+        rule(
+            "assert!",
+            head("on", "out.a/list", "entity:", "last:"),
+            body("user", "on", "place"),
+            vec![],
+        )?,
+    ];
     let commits = [
         (Changes::new(), touch(1, 1, 1)),
-        (Changes::new(), touch(2, 0, 0)),
+        (Changes::new(), touch(2, 1, 0)),
+        (Changes::new(), touch(3, 0, 0)),
     ];
-    let world_shared = world().await?;
-    install(&world_shared, &[keyed.clone(), plain.clone(), plain_too.clone()], &[]).await?;
+
+    let shared_world = world().await?;
+    install(&shared_world, &rules, &[]).await?;
     probe::take();
     for (changes, commands) in &commits {
-        commit(&world_shared, changes.clone(), commands.clone()).await?;
+        commit(&shared_world, changes.clone(), commands.clone()).await?;
     }
-    let (read, alone) = probe::take();
     assert_eq!(
-        read + alone,
-        4,
-        "the three rules state one body, the collection head among them"
+        probe::take(),
+        (6, 0),
+        "the three rules state one body, the collection head among them: two read the first's matches, a commit"
     );
-    assert!(read >= 2);
-
-    // What the collection head wrote, under each tag as its key, is
-    // what it writes with sharing off.
     let shared = (
-        labels_of(&world_shared, "item:1").await?,
-        labels_of(&world_shared, "item:0").await?,
+        members_of(&shared_world, "item:1").await?,
+        members_of(&shared_world, "item:0").await?,
     );
 
+    // What the collection head wrote is what it writes with sharing
+    // off.
     let unshared = {
         let _unshared = Unshared::new();
         let world = world().await?;
-        install(&world, &[keyed, plain, plain_too], &[]).await?;
+        install(&world, &rules, &[]).await?;
         for (changes, commands) in &commits {
             commit(&world, changes.clone(), commands.clone()).await?;
         }
         (
-            labels_of(&world, "item:1").await?,
-            labels_of(&world, "item:0").await?,
+            members_of(&world, "item:1").await?,
+            members_of(&world, "item:0").await?,
         )
     };
     assert_eq!(shared, unshared);
     assert_eq!(
         shared.0.len(),
         2,
-        "item:1 is labelled under both its tags: {:?}",
+        "item:1 holds the two who touched it, each under a key: {:?}",
         shared.0
     );
+    assert_eq!(shared.1.len(), 1, "and item:0 the one: {:?}", shared.1);
     Ok(())
 }
 
-/// What `item` holds under each key of the `out.labels` collection.
-async fn labels_of(world: &World, item: &str) -> Result<Vec<String>> {
+/// What `item` holds in the `out.members` collection, each entry with
+/// its key.
+async fn members_of(world: &World, item: &str) -> Result<Vec<String>> {
+    let selector = Selector::new().of(entity(item));
+    let stream = world
+        .branch
+        .claims()
+        .select(selector)
+        .perform(&world.operator)
+        .await?;
+    let facts: Vec<_> = stream.collect().await;
     let mut found = Vec::new();
-    for key in ["red", "green"] {
-        let selector = Selector::new()
-            .the(relation(&format!("out.labels/{key}")))
-            .of(entity(item));
-        let stream = world
-            .branch
-            .claims()
-            .select(selector)
-            .perform(&world.operator)
-            .await?;
-        let facts: Vec<_> = stream.collect().await;
-        for fact in facts {
-            let fact = fact.and_then(|view| view.to_owned())?;
+    for fact in facts {
+        let fact = fact.and_then(|view| view.to_owned())?;
+        if fact.the.to_string().starts_with("out.members/") {
             found.push(format!("{} {:?}", fact.the, fact.is));
         }
     }
