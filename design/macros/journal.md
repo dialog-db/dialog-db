@@ -925,13 +925,29 @@ Not examined yet. They are columns, not recommendations.
 
 **Decided.** By the maintainer: `( )` is a list, `[ ]` a tuple; one thing at a time, the agent picks the order. By the agent, open to change: how a list is told from a formula.
 
+## 2026-11-13, Designing: a quoted list, `... ?more`, and the format is the new one
+
+**Asked.** Two things, each answered by the maintainer.
+
+- On lists: "I think it should be ... ?more as in ... is as a special label then space. Also note that if you want to write list you may have to do '(1 2 3) same as in lisp, in other words depends on the the context. I think my assumption is that other then in syntax you're pretty much never be using lists if that does not hold we should discuss".
+- On which format a stored rule is stamped: "I don't understand the question. I think we should switch to a new format and maintain old one for backwrards compatibility for one release cycle while offering migration. In version after we'll remove support for old formulas."
+
+**Learned.**
+
+- The agent's question on stamping was badly put: it asked for a column of a matrix and did not say the case the columns differ in. The answer is the first column, "the latest": a release writes the new format always, reads the old one for one release cycle with a migration, and the release after reads the new one only.
+- The case the question was about is the other direction, which the answer does not speak of: two peers on one space, one upgraded. Every rule the upgraded one writes is in the new format, a rule of plain terms too, and the older release reads none of them. The notes of #779 record that it skips them and says nothing (`design/rule-format/stamping.md`); not checked again today. It lasts until every peer has upgraded.
+- The quote overturns what the agent built an hour before, telling a list from a formula by its head. It is the better rule: it gives the two lists the head rule had no spelling for, `'(:open :done)` and `'()`.
+- `... ?more` cannot stand beside `?more ...`. Both are in the ledger, with the agent's hypothesis that the first replaces the second.
+
+**Decided.** By the maintainer: the new format is written always, the old read for one cycle with a migration, then dropped. A list where a value stands is quoted. The parts not named are `... ?more`. Not decided: what becomes of `?more ...`. Not built: any of the three; the reader changes once, after that answer.
+
 ## The queue
 
 In order. One is asked, answered and written down before the next.
 
-1. Which format a stored rule that holds a pattern is stamped (#779, `design/rule-format/stamping.md`). First because it is what stands between the notation and patterns in rules, and no other answer unblocks as much building.
+1. Decided 2026-11-13: the new format always, the old read for one cycle. To build: format 4 on #778, with the migration. Before it, since it is asked and small: what becomes of `?more ...` now that the parts not named are `... ?more`, then the reader changed once for it and for the quoted list.
 2. Whether a rule that leaves a premise's subject unnamed fires only for the entity written (#789, #791). It changes what a commit writes on main.
-3. How a list that starts with a keyword, and the list of nothing, are written.
+3. Answered 2026-11-13 by the quote: `'(:open :done)`, `'()`.
 4. Whether descriptions are `dialog.meta/description` or stay under `syntax.meta`.
 5. Review of #777 and the open questions of #778.
 6. The agent's choices standing until said otherwise: the blank-line rule for comments; a refused document keeps no definition; a rest stands after a struct's entries; `(all …)` or a spread in a template.
