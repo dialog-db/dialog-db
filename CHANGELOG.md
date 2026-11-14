@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A durable layer is a branch the primary points at, and `Session::sync` pulls and pushes it with the primary
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[#808](https://github.com/dialog-db/dialog-db/pull/808), argued in
 [notes/layers.md](./notes/layers.md) (points 1, 11 and 13, and
 "Durable layers" under "Open").
 
