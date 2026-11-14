@@ -689,6 +689,12 @@ impl<'a> QueryEnv<'a> {
         env
     }
 
+    /// The primary's session store, read as [`session:`](crate::SESSION):
+    /// the first line's overlay. `None` for a read over no line.
+    pub(crate) fn session_store(&self) -> Option<&Ephemeral> {
+        self.sources.first().map(Source::overlay)
+    }
+
     /// The name a row of the line at `index` binds its `in` to: the
     /// primary is [`memory:`](crate::MEMORY); another line is named by
     /// its subject.

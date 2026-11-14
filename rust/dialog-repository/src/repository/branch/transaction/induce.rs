@@ -53,7 +53,7 @@ use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
-use crate::placement::{follows_selection, memory_layer};
+use crate::placement::{follows_selection, memory_layer, session_layer};
 use crate::repository::archive::erased;
 use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
@@ -125,6 +125,7 @@ where
     // and induce). Every head advance is an instant; the lag is how a
     // missed one is caught up.
     let mut stimulus: Vec<Instruction> = changes.clone().into_instructions();
+    stimulus.extend(layered_instructions(changes));
     stimulus.extend(transients.clone().into_instructions());
     stimulus.extend(layered_instructions(&transients));
     stimulus.extend(lag_delta(view, env).await?);
@@ -1409,6 +1410,23 @@ async fn emit_matches<'a>(
                     shared.push((layer, Instruction::Retract(fact)));
                 }
                 (Some(layer), Polarity::Assert) if !transient_head => {
+                    // The session's own layer is read live, and its row of
+                    // the cell stands above a write staged for it: a head
+                    // under `last` landing there retracts that row, so the
+                    // rounds after read the head as the publish will leave
+                    // it. A memory layer the composite holds needs none of
+                    // this: the round view reads it with the ticks applied.
+                    if layer == session_layer()
+                        && matches!(pick, Pick::Last)
+                        && let Some(own) = view.session_store()
+                    {
+                        let cell = Selector::new().the(fact.the.clone()).of(fact.of.clone());
+                        for held in own.scan(&cell) {
+                            if held.is != fact.is {
+                                shared.push((layer.clone(), Instruction::Retract(held)));
+                            }
+                        }
+                    }
                     shared.push((layer, Instruction::Assert(fact, pick)));
                 }
                 // A retracting head dissociates the exact bound

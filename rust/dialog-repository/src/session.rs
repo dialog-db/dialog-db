@@ -1513,12 +1513,18 @@ mod tests {
     /// 3 to 4, and 4 to nothing. A count of 2 therefore steps twice, in
     /// two ticks, and stops.
     async fn declare_steps(branch: &Branch, env: &Operator) -> Result<()> {
+        declare_steps_in(branch, env, "session:state").await
+    }
+
+    /// [`declare_steps`], with the count read from and written into the
+    /// layer named `at`.
+    async fn declare_steps_in(branch: &Branch, env: &Operator, at: &str) -> Result<()> {
         let step: InductiveRule = serde_json::from_value(serde_json::json!({
             "assert!": {
                 "with": {
                     "count": {
                         "the": "counter/count", "as": "UnsignedInteger", "pick": "last",
-                        "in": "session:state"
+                        "in": at
                     }
                 }
             },
@@ -1528,7 +1534,7 @@ mod tests {
                         "with": {
                             "count": {
                                 "the": "counter/count", "as": "UnsignedInteger", "pick": "last",
-                                "in": "session:state"
+                                "in": at
                             }
                         }
                     },
@@ -1650,6 +1656,86 @@ mod tests {
             subscription.recomputes(),
             1,
             "the instants were maintained, in order"
+        );
+        Ok(())
+    }
+
+    /// The link's own writes into a layer are its first tick: a rule
+    /// premised on the layer's row fires on them in the same dispatch,
+    /// reading the layer as that tick leaves it, and the chain lands one
+    /// instant per tick.
+    #[dialog_common::test]
+    async fn it_fires_a_rule_on_the_links_own_write_into_a_layer() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        declare_steps(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        let counter: Entity = "ctr:1".parse()?;
+
+        let start = memory.revision().sequence;
+        session
+            .transact(count(&counter, 2, &state))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            held(&memory, "counter/count", &counter)?,
+            vec!["UnsignedInt(4)".to_string()],
+            "the write of 2 stepped to 3, then 4"
+        );
+        assert_eq!(
+            memory.revision().sequence,
+            start + 3,
+            "the link's own tick and the two steps"
+        );
+        let instants = memory.since(start).expect("the ring reaches back");
+        assert_eq!(
+            counts(&instants),
+            vec![
+                vec!["UnsignedInt(2)".to_string()],
+                vec!["UnsignedInt(3)".to_string()],
+                vec!["UnsignedInt(4)".to_string()],
+            ],
+            "each tick's count, in order"
+        );
+        Ok(())
+    }
+
+    /// A head under `last` landing in the session's own layer succeeds
+    /// the row that layer already holds, within the dispatch: the rounds
+    /// after read the head, not the older row, so a chain over
+    /// `session:` runs as one over a declared layer does.
+    #[dialog_common::test]
+    async fn it_succeeds_the_sessions_own_row_within_a_dispatch() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        declare_steps_in(&branch, &operator, crate::SESSION).await?;
+        branch.refresh(&operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let own = crate::session_layer();
+        let counter: Entity = "ctr:1".parse()?;
+
+        // A row the layer holds before the dispatch, which no step follows.
+        session
+            .transact(count(&counter, 1, &own))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            held(branch.overlay(), "counter/count", &counter)?,
+            vec!["UnsignedInt(1)".to_string()]
+        );
+        // The dispatch writes 2 above it; the steps follow to 4.
+        session
+            .transact(count(&counter, 2, &own))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            held(branch.overlay(), "counter/count", &counter)?,
+            vec!["UnsignedInt(4)".to_string()],
+            "each step read the step before it, not the row the layer held"
         );
         Ok(())
     }

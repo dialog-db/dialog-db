@@ -983,6 +983,12 @@ where
         env,
     ))
     .await?;
+    // The link's own writes into layers are its first tick: the rounds
+    // read each layer as that tick leaves it, and they are stimulus of
+    // the first round, as the link's writes into the primary are.
+    for (layer, share) in &shares {
+        changes.merge(share.clone().into_layer(layer.clone()));
+    }
     let (induced, rounds) = induce(
         &view,
         &composite,
