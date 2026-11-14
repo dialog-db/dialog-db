@@ -42,6 +42,7 @@ pub fn run(scenario: &str, size: Option<usize>) -> Result<Report> {
         outcome,
         counters: since(&before, &after),
         instructions: None,
-        volatile: spec.volatile,
+        instructions_outside_allocator: None,
+        allocations: Default::default(),
     })
 }

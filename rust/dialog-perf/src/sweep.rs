@@ -6,6 +6,7 @@
 //! measured phase. Collection starts off and toggles on the
 //! `dialog_perf_measured` symbol, so the setup is not in the count.
 
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -99,9 +100,153 @@ fn run_child(exe: &Path, scenario: &str, config: &SweepConfig) -> Result<Report>
                 "{scenario}: callgrind collected nothing; the dialog_perf_measured symbol was not found (stripped?)"
             );
         }
+        let text = fs::read_to_string(&callgrind_out)
+            .with_context(|| format!("reading {}", callgrind_out.display()))?;
+        let allocator = allocator(&text);
         report.instructions = Some(instructions);
+        report.instructions_outside_allocator =
+            Some(instructions.saturating_sub(allocator.instructions));
+        report.allocations = allocator.calls;
     }
     Ok(report)
+}
+
+/// The allocator's entry points, by the kind of call each one is: the
+/// C allocator's, and Rust's global-allocator shims, which an
+/// over-aligned `realloc` copies in itself rather than in the C one.
+const ENTRY: [(&str, &str); 22] = [
+    ("malloc", "alloc"),
+    ("calloc", "alloc"),
+    ("posix_memalign", "alloc"),
+    ("aligned_alloc", "alloc"),
+    ("memalign", "alloc"),
+    ("valloc", "alloc"),
+    ("pvalloc", "alloc"),
+    ("__rust_alloc", "alloc"),
+    ("__rust_alloc_zeroed", "alloc"),
+    ("__rdl_alloc", "alloc"),
+    ("__rdl_alloc_zeroed", "alloc"),
+    ("__rg_alloc", "alloc"),
+    ("__rg_alloc_zeroed", "alloc"),
+    ("realloc", "realloc"),
+    ("__rust_realloc", "realloc"),
+    ("__rdl_realloc", "realloc"),
+    ("__rg_realloc", "realloc"),
+    ("free", "free"),
+    ("cfree", "free"),
+    ("__rust_dealloc", "free"),
+    ("__rdl_dealloc", "free"),
+    ("__rg_dealloc", "free"),
+];
+
+/// What the measured phase spent in the allocator, from a callgrind
+/// output file.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Allocator {
+    /// The inclusive cost of every call into an entry point from outside
+    /// the allocator: the allocator's own work, and what it calls, such
+    /// as the copy a `realloc` makes when it moves a block.
+    instructions: u64,
+    /// Those calls, counted by kind (`alloc`, `realloc`, `free`).
+    calls: BTreeMap<String, u64>,
+}
+
+/// The allocator's share of a callgrind output: every call from a
+/// function outside the allocator to one of its entry points, with the
+/// call's inclusive cost. A caller is inside the allocator when it is an
+/// entry point itself or is defined in glibc's `malloc.c` or `arena.c`,
+/// so a call `realloc` makes to `malloc` is not counted twice.
+///
+/// Callgrind records calls only while it collects, so these are the
+/// measured phase's own. Counting them from the output rather than by
+/// wrapping the allocator adds nothing to the instructions measured.
+///
+/// The format compresses names: `(id) name` the first time, `(id)`
+/// after, one table for functions and one for files. A `calls=` line is
+/// followed by the line holding the call's inclusive cost, its last
+/// field. Recursion suffixes (`'2`) are dropped.
+fn allocator(text: &str) -> Allocator {
+    let entry = |name: &str| {
+        ENTRY
+            .iter()
+            .find(|(entry, _)| *entry == name)
+            .map(|(_, kind)| *kind)
+    };
+    let mut functions: HashMap<String, String> = HashMap::new();
+    let mut files: HashMap<String, String> = HashMap::new();
+    let mut file = String::new();
+    let mut inside = false;
+    let mut callee: Option<&str> = None;
+    let mut pending: Option<(&str, u64)> = None;
+    let mut out = Allocator::default();
+    for line in text.lines() {
+        if let Some((kind, count)) = pending.take() {
+            if !inside {
+                let cost = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(0);
+                out.instructions += cost;
+                *out.calls.entry(kind.to_string()).or_default() += count;
+            }
+            continue;
+        }
+        if let Some(spec) = line.strip_prefix("fl=") {
+            file = resolve(&mut files, spec);
+        } else if let Some(spec) = line
+            .strip_prefix("fi=")
+            .or_else(|| line.strip_prefix("fe="))
+            .or_else(|| line.strip_prefix("cfi="))
+            .or_else(|| line.strip_prefix("cfl="))
+        {
+            resolve(&mut files, spec);
+        } else if let Some(spec) = line.strip_prefix("fn=") {
+            let name = resolve(&mut functions, spec);
+            inside = entry(unrecursed(&name)).is_some()
+                || ["/malloc/", "malloc.c", "arena.c"]
+                    .iter()
+                    .any(|part| file.contains(part));
+        } else if let Some(spec) = line.strip_prefix("cfn=") {
+            callee = entry(unrecursed(&resolve(&mut functions, spec)));
+        } else if let Some(rest) = line.strip_prefix("calls=")
+            && let Some(kind) = callee
+        {
+            let count = rest
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(0);
+            pending = Some((kind, count));
+        }
+    }
+    out
+}
+
+/// A compressed name: `(id) name` defines `id`, `(id)` refers to it.
+fn resolve(table: &mut HashMap<String, String>, spec: &str) -> String {
+    let spec = spec.trim();
+    if let Some(rest) = spec.strip_prefix('(')
+        && let Some((id, name)) = rest.split_once(')')
+    {
+        let name = name.trim();
+        if name.is_empty() {
+            return table.get(id).cloned().unwrap_or_default();
+        }
+        table.insert(id.to_string(), name.to_string());
+        return name.to_string();
+    }
+    spec.to_string()
+}
+
+/// A function's name without callgrind's recursion suffix (`'2`).
+fn unrecursed(name: &str) -> &str {
+    match name.rsplit_once('\'') {
+        Some((base, depth)) if !depth.is_empty() && depth.bytes().all(|b| b.is_ascii_digit()) => {
+            base
+        }
+        _ => name,
+    }
 }
 
 /// The instructions a callgrind output file collected: its `summary:`
@@ -117,4 +262,57 @@ fn collected(path: &Path) -> Result<u64> {
     count("summary:")
         .or_else(|| count("totals:"))
         .with_context(|| format!("{} carries no summary", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A call into the allocator from outside it is counted with its
+    /// inclusive cost, a callee's copy included; calls the allocator
+    /// makes to itself, and calls to anything else, are not. Names are
+    /// given once and referred to by id after, and a recursion suffix
+    /// names the same function.
+    #[dialog_common::test]
+    fn it_counts_the_allocator_from_a_callgrind_output() {
+        let text = "\
+fl=(1) src/engine.rs
+fn=(1) caller_a
+5 1000
+cfn=(2) malloc
+calls=3 0x10
+4 120
+cfn=(3) memcpy
+calls=5 0x20
+4 50
+fn=(4) caller_b
+cfn=(2)
+calls=2 0x10
+7 80
+cfn=(5) realloc'2
+calls=1 0x30
+7 900
+cfn=(6) __rust_dealloc
+calls=4 0x30
+7 40
+fl=(2) ./malloc/./malloc/malloc.c
+fn=(5)
+cfn=(2)
+calls=1 0x10
+9 60
+cfn=(3)
+calls=1 0x20
+9 700
+";
+        let allocator = allocator(text);
+        assert_eq!(allocator.instructions, 120 + 80 + 900 + 40);
+        assert_eq!(
+            allocator.calls,
+            BTreeMap::from([
+                ("alloc".to_string(), 5),
+                ("free".to_string(), 4),
+                ("realloc".to_string(), 1),
+            ])
+        );
+    }
 }

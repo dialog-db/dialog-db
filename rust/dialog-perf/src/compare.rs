@@ -5,8 +5,12 @@
 //! grows at all is a change in what the engine does. Block counts and
 //! bytes wobble a little with where the tree's content-defined seams
 //! fall, so they get the small allowance that wobble measures.
-//! Instruction counts are callgrind's; the allowance covers toolchain
-//! drift and layout, not work.
+//! Instructions are callgrind's, and gated outside the allocator: the
+//! total varies with the heap's layout between runs of one binary (see
+//! [`Report::instructions`]), so it is shown and not gated, and the
+//! allocator is held by its call counts instead. The allowance on the
+//! instructions covers what is left (hash order) and toolchain drift,
+//! not work.
 //!
 //! The outcome must match exactly: a workload that answers differently
 //! is a different workload (or a wrong answer), and either way the
@@ -38,11 +42,16 @@ use crate::scenario::{catalog, spec};
 /// How much growth the gate allows.
 #[derive(Debug, Clone)]
 pub struct Tolerance {
-    /// Relative growth in instructions allowed, in percent.
+    /// Relative growth in instructions outside the allocator allowed,
+    /// in percent. Six sweeps of one binary spread by 0.38% at most
+    /// (query-join, whose frees vary with hash order), most under 0.1%.
     pub instructions_pct: f64,
-    /// Absolute growth in instructions always allowed, so a tiny phase
-    /// is not gated on noise.
+    /// Absolute growth in instructions outside the allocator always
+    /// allowed, so a tiny phase is not gated on noise.
     pub instructions_slack: u64,
+    /// Absolute growth in calls into the allocator allowed: the order
+    /// of hash maps moves them by up to 37 between runs of one binary.
+    pub allocation_slack: u64,
     /// Relative growth in byte counts allowed, in percent. A seam that
     /// lands a block earlier or later changes which leaf a read loads,
     /// and with it the bytes, by a tenth with the block count the same;
@@ -64,8 +73,9 @@ pub struct Tolerance {
 impl Default for Tolerance {
     fn default() -> Self {
         Self {
-            instructions_pct: 3.0,
-            instructions_slack: 1_000_000,
+            instructions_pct: 1.0,
+            instructions_slack: 50_000,
+            allocation_slack: 64,
             bytes_pct: 15.0,
             bytes_slack: 1024,
             block_slack: 2,
@@ -101,8 +111,9 @@ pub enum Verdict {
     /// Grew past the allowance in a scenario whose baseline file the
     /// change re-records.
     Accepted,
-    /// Not gated: volatile instructions, or a scenario present on one
-    /// side only or whose workload changed.
+    /// Not gated: the total instructions, a quantity the reference does
+    /// not have, or a scenario present on one side only or whose
+    /// workload changed.
     Ungated,
 }
 
@@ -415,6 +426,17 @@ fn one_sided(out: &mut Comparison, report: &Report, base_side: bool) {
         .instructions
         .map(|value| ("instructions".to_string(), value))
         .into_iter()
+        .chain(
+            report
+                .instructions_outside_allocator
+                .map(|value| (OUTSIDE.to_string(), value)),
+        )
+        .chain(
+            report
+                .allocations
+                .iter()
+                .map(|(kind, value)| (allocation(kind), *value)),
+        )
         .chain(report.counters.iter().map(|(k, v)| (k.clone(), *v)));
     for (metric, value) in values {
         let (base, new) = if base_side {
@@ -430,6 +452,14 @@ fn one_sided(out: &mut Comparison, report: &Report, base_side: bool) {
             verdict: Verdict::Ungated,
         });
     }
+}
+
+/// The gated instruction count's metric name.
+const OUTSIDE: &str = "instructions.outside_allocator";
+
+/// The metric name of the calls into the allocator of one kind.
+fn allocation(kind: &str) -> String {
+    format!("allocator.{kind}.calls")
 }
 
 /// One scenario's rows: how each is judged and where its verdict goes.
@@ -543,14 +573,15 @@ fn compare_reports(
         rebaselined,
     };
 
-    let instructions = match (base.instructions, new.instructions) {
-        (Some(before), Some(after)) if base.volatile || new.volatile => {
-            gate.push(out, "instructions", before, after, Verdict::Ungated);
-            format!(
-                "instructions {} (volatile, not gated)",
-                change(before, after)
-            )
-        }
+    // The total is shown beside what is gated, so a reader still sees
+    // what the binary costs.
+    if let (Some(before), Some(after)) = (base.instructions, new.instructions) {
+        gate.push(out, "instructions", before, after, Verdict::Ungated);
+    }
+    let instructions = match (
+        base.instructions_outside_allocator,
+        new.instructions_outside_allocator,
+    ) {
         (Some(before), Some(after)) => {
             let cross_cpu_pct = if out.cross_cpu {
                 spec(name).map_or(0.0, |spec| spec.cross_cpu_pct)
@@ -559,25 +590,71 @@ fn compare_reports(
             };
             gate.check(
                 out,
-                "instructions",
+                OUTSIDE,
                 before,
                 after,
                 tolerance.instructions_slack,
                 tolerance.instructions_pct + cross_cpu_pct,
             );
-            format!("instructions {}", change(before, after))
+            format!("{OUTSIDE} {}", change(before, after))
         }
         (Some(before), None) => {
             if !sweep {
                 out.regressions.push(format!(
-                    "{name}: instructions not measured (baseline {before}); sweep under callgrind"
+                    "{name}: instructions not measured (baseline {before} outside the allocator); sweep under callgrind"
                 ));
             }
             "instructions not measured".to_string()
         }
-        (None, Some(after)) => format!("instructions {after} (no baseline)"),
+        (None, Some(after)) => {
+            out.rows.push(Row {
+                scenario: name.clone(),
+                metric: OUTSIDE.to_string(),
+                base: None,
+                new: Some(after),
+                verdict: Verdict::Ungated,
+            });
+            format!("{OUTSIDE} {after} (no baseline)")
+        }
         (None, None) => "no instruction counts".to_string(),
     };
+
+    // Calls into the allocator, by kind. A reference with none recorded
+    // predates them, and gates none; one that has them counts a kind it
+    // lacks from zero.
+    if base.allocations.is_empty() {
+        for (kind, after) in &new.allocations {
+            out.rows.push(Row {
+                scenario: name.clone(),
+                metric: allocation(kind),
+                base: None,
+                new: Some(*after),
+                verdict: Verdict::Ungated,
+            });
+        }
+    } else if !new.allocations.is_empty() {
+        let kinds: BTreeSet<&String> = base
+            .allocations
+            .keys()
+            .chain(new.allocations.keys())
+            .collect();
+        for kind in kinds {
+            let before = base.allocations.get(kind).copied().unwrap_or(0);
+            let after = new.allocations.get(kind).copied().unwrap_or(0);
+            gate.check(
+                out,
+                &allocation(kind),
+                before,
+                after,
+                tolerance.allocation_slack,
+                0.0,
+            );
+        }
+    } else if !sweep && new.instructions.is_some() {
+        out.regressions.push(format!(
+            "{name}: allocator calls not counted (the baseline has them)"
+        ));
+    }
 
     // Every counter either report has: a step the baseline never took
     // and the new run takes counts from zero.
@@ -623,7 +700,8 @@ mod tests {
                 .map(|(key, value)| (key.to_string(), *value))
                 .collect(),
             instructions: None,
-            volatile: false,
+            instructions_outside_allocator: None,
+            allocations: BTreeMap::new(),
         }
     }
 
@@ -675,9 +753,11 @@ mod tests {
         }
     }
 
+    /// A report with `instructions` outside the allocator, the count
+    /// the gate holds.
     fn measured(instructions: u64, counters: &[(&str, u64)]) -> Report {
         Report {
-            instructions: Some(instructions),
+            instructions_outside_allocator: Some(instructions),
             ..report(counters)
         }
     }
@@ -710,17 +790,17 @@ mod tests {
 
     /// Against a sweep from another CPU, a scenario's instructions get
     /// its measured cross-CPU spread on top of the tolerance; on the same
-    /// CPU, none. rule-point's 2.4% lets +4% through across CPUs only.
+    /// CPU, none. rule-point's 2.4% lets +3% through across CPUs only.
     #[test]
     fn a_sweep_from_another_cpu_widens_instructions_by_the_scenario() {
         let mut base = measured(48_000_000, &[]);
         base.scenario = "rule-point".into();
-        let mut new = measured(49_920_000, &[]);
+        let mut new = measured(49_440_000, &[]);
         new.scenario = "rule-point".into();
 
         let mut same = Comparison::default();
         compare_reports(&base, &new, &Tolerance::default(), &sweep(&[]), &mut same);
-        assert!(!same.passed(), "+4% on one CPU fails");
+        assert!(!same.passed(), "+3% on one CPU fails");
 
         let mut cross = Comparison {
             cross_cpu: true,
@@ -749,7 +829,7 @@ mod tests {
         let stale = comparison.stale_markdown().expect("a stale baseline");
         assert!(stale.contains("Stale baseline, re-record"), "{stale}");
         assert!(
-            stale.contains("- s: instructions 150000000 -> 116000000"),
+            stale.contains("- s: instructions.outside_allocator 150000000 -> 116000000"),
             "{stale}"
         );
 
@@ -841,18 +921,140 @@ mod tests {
             .iter()
             .map(|row| row.metric.as_str())
             .collect();
-        assert_eq!(metrics, ["instructions", "archive.put", "span.settle"]);
+        assert_eq!(
+            metrics,
+            [
+                "instructions.outside_allocator",
+                "archive.put",
+                "span.settle"
+            ]
+        );
 
         let markdown = comparison.markdown();
         let (moved, folded) = markdown.split_once("<details>").expect("a fold");
         assert!(
-            moved.contains("| s | instructions | 10,000,000 | 10,100,000 | +100,000 | +1.00% |  |"),
+            moved.contains(
+                "| s | instructions.outside_allocator | 10,000,000 | 10,100,000 | +100,000 | +1.00% |  |"
+            ),
             "{markdown}"
         );
         assert!(folded.contains("2 rows unchanged"), "{markdown}");
         assert!(
             folded.contains("| s | span.settle | 1 | 1 | +0 | 0% |  |"),
             "{markdown}"
+        );
+    }
+
+    /// The total varies with the heap's layout, so it is shown and never
+    /// gated: half again as many instructions in all, none more outside
+    /// the allocator, passes.
+    #[test]
+    fn the_total_is_shown_and_not_gated() {
+        let base = Report {
+            instructions: Some(100_000_000),
+            ..measured(70_000_000, &[])
+        };
+        let new = Report {
+            instructions: Some(150_000_000),
+            ..measured(70_000_000, &[])
+        };
+        let mut comparison = Comparison::default();
+        compare_reports(
+            &base,
+            &new,
+            &Tolerance::default(),
+            &Against::Baseline,
+            &mut comparison,
+        );
+        assert!(comparison.passed(), "{:?}", comparison.regressions);
+        let total = comparison
+            .rows
+            .iter()
+            .find(|row| row.metric == "instructions")
+            .expect("the total is a row");
+        assert_eq!(total.verdict, Verdict::Ungated);
+        assert_eq!(total.new, Some(150_000_000));
+    }
+
+    fn allocating(calls: &[(&str, u64)]) -> Report {
+        Report {
+            allocations: calls
+                .iter()
+                .map(|(kind, value)| (kind.to_string(), *value))
+                .collect(),
+            ..measured(10_000_000, &[])
+        }
+    }
+
+    /// Calls into the allocator are held to the slack hash order needs,
+    /// whatever the count: 64 more passes, 65 more fails, and a kind the
+    /// baseline never called counts from zero.
+    #[test]
+    fn allocator_calls_are_gated_to_their_slack() {
+        let base = allocating(&[("alloc", 300_000), ("free", 200_000)]);
+        let check = |new: &Report| {
+            let mut comparison = Comparison::default();
+            compare_reports(
+                &base,
+                new,
+                &Tolerance::default(),
+                &Against::Baseline,
+                &mut comparison,
+            );
+            comparison
+        };
+        assert!(check(&allocating(&[("alloc", 300_064), ("free", 200_000)])).passed());
+        let more = check(&allocating(&[("alloc", 300_065), ("free", 200_000)]));
+        assert!(
+            matches!(
+                more.rows
+                    .iter()
+                    .find(|row| row.metric == "allocator.alloc.calls")
+                    .map(|row| row.verdict),
+                Some(Verdict::Regressed)
+            ),
+            "{:?}",
+            more.rows
+        );
+        assert!(
+            !check(&allocating(&[
+                ("alloc", 300_000),
+                ("free", 200_000),
+                ("realloc", 100)
+            ]))
+            .passed()
+        );
+    }
+
+    /// A baseline recorded before the allocator was split out gates
+    /// neither new quantity: both are shown, ungated, until the file is
+    /// re-recorded.
+    #[test]
+    fn a_baseline_without_the_split_gates_neither() {
+        let file = Report {
+            instructions: Some(10_000_000),
+            ..report(&[])
+        };
+        let new = Report {
+            instructions: Some(10_000_000),
+            ..allocating(&[("alloc", 5)])
+        };
+        let mut comparison = Comparison::default();
+        compare_reports(
+            &file,
+            &new,
+            &Tolerance::default(),
+            &Against::Baseline,
+            &mut comparison,
+        );
+        assert!(comparison.passed(), "{:?}", comparison.regressions);
+        assert!(
+            comparison
+                .rows
+                .iter()
+                .all(|row| row.verdict == Verdict::Ungated),
+            "{:?}",
+            comparison.rows
         );
     }
 

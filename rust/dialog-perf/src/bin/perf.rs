@@ -77,7 +77,7 @@ struct CompareArgs {
     /// New sweep directory (e.g. `target/perf-current`).
     new: PathBuf,
 
-    /// Instruction growth allowed, in percent.
+    /// Growth allowed in instructions outside the allocator, in percent.
     #[arg(long, default_value_t = Tolerance::default().instructions_pct)]
     threshold: f64,
 
