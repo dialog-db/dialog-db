@@ -58,9 +58,12 @@
 //! the revision every layer stands at, one `dialog.layer/revision` row
 //! per layer, under `last`: of [`MEMORY`] the primary's tree, of each
 //! declared layer its instant chain, and of [`SESSION`] its own as it
-//! stood before the row was written. The same rows, as the layers stood
-//! when the dispatch began, are its stimulus, so a rule premised on a
-//! layer's revision fires once per dispatch.
+//! stood before the row was written. Of the same rows, as the layers
+//! stood when the dispatch began, those the session has not recorded
+//! are its stimulus, so a rule premised on a layer's revision fires
+//! when the layer moved. The session's own
+//! layer moves with every recording, so its row is stimulus on every
+//! dispatch after the first.
 //!
 //! The session's own layer also holds which layer is **selected**
 //! ([`Session::select`]): while one is, a write with no layer named
@@ -935,6 +938,17 @@ mod tests {
         format!("{:?}", dialog_corpus::Value::String(tree.to_base58()))
     }
 
+    /// A memory layer's revision as its `dialog.layer/revision` row names
+    /// it.
+    fn chain_text(memory: &Ephemeral) -> String {
+        use base58::ToBase58 as _;
+        let hash = memory.revision().hash;
+        format!(
+            "{:?}",
+            dialog_corpus::Value::String(hash.as_bytes().to_base58())
+        )
+    }
+
     /// After each dispatch publishes, the session's own layer holds one
     /// `dialog.layer/revision` row per layer, under `last`: a second
     /// dispatch replaces the rows the first wrote, and the primary's row
@@ -1039,15 +1053,25 @@ mod tests {
             "the rule fired, on the primary's revision as the dispatch began"
         );
 
-        let recorded = revision_of(&own, &memory_name)?;
+        // The next dispatch moves no durable layer: the primary stands
+        // where the last dispatch recorded it, so its revision is no
+        // stimulus and the rule does not fire for it again. The session's
+        // own layer moved, by the recording itself, so its revision is.
+        let own_name = crate::session_layer();
+        let own_before = chain_text(&own);
         session
             .transact(flag(&doc, true, &state))
             .perform(&operator)
             .await?;
         assert_eq!(
             held(&memory, "seen/revision", &memory_name)?,
-            recorded,
-            "it fires again, on the revision the last dispatch recorded"
+            vec![tree_text(&start)],
+            "the primary did not move, so the rule did not fire for it"
+        );
+        assert_eq!(
+            held(&memory, "seen/revision", &own_name)?,
+            vec![own_before],
+            "the session's own layer moved, so the rule fired for it"
         );
         Ok(())
     }

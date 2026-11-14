@@ -25,9 +25,11 @@ the one `Branch::overlay` has always handed out, now addressed as a
 layer. After each dispatch publishes, the session writes into it one
 `dialog.layer/revision` row per layer under `last`: of `memory:` the
 primary's tree hash, of each declared layer and of `session:` itself
-the hash of its instant chain. The same rows, as the layers stood when
-the dispatch began, are the dispatch's stimulus, so a rule premised on
-a layer's revision fires once per dispatch. A row
+the hash of its instant chain. Of the same rows, as the layers stood when
+the dispatch began, those the session has not recorded are the
+dispatch's stimulus, so a rule premised on a layer's revision fires
+when the layer moved (and on the first dispatch, which finds nothing
+recorded). A row
 `session: dialog.session/layer <layer>` selects a layer: while one is
 selected, a write with no layer named, and a rule head whose descriptor
 names none, lands in it instead of the primary. Machinery under

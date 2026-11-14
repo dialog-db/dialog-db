@@ -137,41 +137,65 @@ impl Statement for Selection {
     }
 }
 
-/// The `dialog.layer/revision` rows of a session's layers as they stand:
-/// of [`MEMORY`] the tree of `primary`'s revision, base58 as
-/// `dialog.branch/tree` renders it (none for a primary with no
-/// revision); of each of `memories` and of [`SESSION`], `own`, the hash
-/// of its instant chain, in hex. Each under `last`, bound for no layer.
+/// The revision every layer of a session stands at, as text: of
+/// [`MEMORY`] the tree of `primary`'s revision (none for a primary with
+/// no revision); of each of `memories` and of [`SESSION`], `own`, the
+/// hash of its instant chain. Each is base58, as `dialog.branch/tree`
+/// renders a tree.
+fn revisions(
+    primary: Option<&Revision>,
+    memories: &[(Entity, Ephemeral)],
+    own: &Ephemeral,
+) -> Vec<(Entity, Value)> {
+    let chain = |memory: &Ephemeral| Value::String(memory.revision().hash.as_bytes().to_base58());
+    let session = session_layer();
+    let mut rows = Vec::with_capacity(memories.len() + 2);
+    if let Some(revision) = primary {
+        let tree: &[u8] = revision.tree.hash();
+        rows.push((memory_layer(), Value::String(tree.to_base58())));
+    }
+    for (layer, memory) in memories {
+        if *layer != session {
+            rows.push((layer.clone(), chain(memory)));
+        }
+    }
+    rows.push((session, chain(own)));
+    rows
+}
+
+/// The `dialog.layer/revision` rows of a session's layers as they stand
+/// (see [`revisions`]), each under `last`, bound for no layer: what a
+/// session records in its own layer once a dispatch has published.
 pub(crate) fn revision_rows(
     primary: Option<&Revision>,
     memories: &[(Entity, Ephemeral)],
     own: &Ephemeral,
 ) -> Changes {
-    let hex = |memory: &Ephemeral| {
-        let hash = memory.revision().hash;
-        let mut text = String::with_capacity(64);
-        for byte in hash.as_bytes() {
-            text.push_str(&format!("{byte:02x}"));
-        }
-        Value::String(text)
-    };
     let mut rows = Changes::new();
-    if let Some(revision) = primary {
-        let tree: &[u8] = revision.tree.hash();
-        rows.associate(
-            revision_attr(),
-            memory_layer(),
-            Value::String(tree.to_base58()),
-            Pick::Last,
-        );
+    for (layer, revision) in revisions(primary, memories, own) {
+        rows.associate(revision_attr(), layer, revision, Pick::Last);
     }
-    let session = session_layer();
-    for (layer, memory) in memories {
-        if *layer != session {
-            rows.associate(revision_attr(), layer.clone(), hex(memory), Pick::Last);
+    rows
+}
+
+/// The `dialog.layer/revision` rows of the layers that moved since `own`
+/// last recorded them: the rows of [`revision_rows`] whose value `own`
+/// does not hold. What a dispatch through a session takes as stimulus,
+/// so a rule premised on a layer's revision fires when the layer moved,
+/// and on the first dispatch, which finds nothing recorded.
+pub(crate) fn revision_stimulus(
+    primary: Option<&Revision>,
+    memories: &[(Entity, Ephemeral)],
+    own: &Ephemeral,
+) -> Changes {
+    let mut rows = Changes::new();
+    for (layer, revision) in revisions(primary, memories, own) {
+        let recorded = own.scan(&Selector::new().the(revision_attr()).of(layer.clone()));
+        if recorded.iter().any(|fact| fact.is == revision) {
+            continue;
         }
+        rows.associate(revision_attr(), layer, revision, Pick::Last);
     }
-    rows.associate(revision_attr(), session, hex(own), Pick::Last);
     rows
 }
 

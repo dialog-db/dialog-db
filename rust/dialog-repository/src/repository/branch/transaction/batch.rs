@@ -25,7 +25,9 @@ use super::{
     Line, Transaction, TransactionCommit, carry_footprint, touches_rule_facts, touches_rules,
 };
 use crate::Ephemeral;
-use crate::placement::{follows_selection, memory_layer, revision_rows, selected, session_layer};
+use crate::placement::{
+    follows_selection, memory_layer, revision_rows, revision_stimulus, selected, session_layer,
+};
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::branch::session::{Composite, shared_metadata};
@@ -951,13 +953,15 @@ where
     }
     let (mut shares, primary) = route_shares(shares, &held)?;
     changes.apply(primary);
-    // Through a session, the revision every layer stands at as the
-    // dispatch begins is its stimulus, read as rows of `session:`: a
-    // rule premised on a layer's revision fires once per dispatch.
+    // Through a session, the revision of every layer that moved since the
+    // session last recorded it is the dispatch's stimulus, read as rows of
+    // `session:`: a rule premised on a layer's revision fires when the
+    // layer moved. The session's own layer moves with every recording, so
+    // its row is stimulus on every dispatch after the first.
     if let Some(session) = &session {
         let source = view.to_source();
         transients.merge(
-            revision_rows(view.revision(), &session.memories, source.overlay())
+            revision_stimulus(view.revision(), &session.memories, source.overlay())
                 .into_layer(session_layer()),
         );
     }
