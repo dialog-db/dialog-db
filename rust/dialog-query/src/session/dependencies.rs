@@ -65,13 +65,16 @@ use crate::Entity;
 use crate::Pick;
 use crate::attribute::AttributeDescriptor;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
-use crate::concept::query::{ConceptRules, Installed};
+use crate::concept::query::{ConceptQuery, ConceptRules, Installed};
+use crate::constraint::Constraint;
 use crate::error::EvaluationError;
 use crate::negation::Negation;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::rule::deductive::DeductiveRule;
 use crate::rule::statement::Reach;
+use crate::term::Term;
+use crate::types::Any;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter;
 
@@ -101,31 +104,42 @@ pub enum Polarity {
     /// candidate it returns, and nothing better, which negates the
     /// better candidates. `ranked` for an explicit ranking (`top`, a
     /// relation chain, `max`, `min`) rather than `last`, the default.
+    /// `decides` when the rule decides on the value read rather than
+    /// passing it along to its head (see [`decides`]).
     Electing {
         /// Whether the read ranks candidates rather than taking the
         /// newest.
         ranked: bool,
+        /// Whether the rule decides on the value the read returns.
+        decides: bool,
     },
 }
 
 impl Polarity {
     /// Whether the edge tests for something's absence inside a cycle: a
-    /// negation, an optional read or a ranked election. A `last` read is
-    /// not: inside its cycle it reads every candidate, and its readers
-    /// elect the newest once the cycle is derived in full.
+    /// negation, an optional read, a ranked election, or a `last` read
+    /// whose value the rule decides on. A `last` read whose value the
+    /// rule only passes along is not: inside its cycle it reads every
+    /// candidate, each derivation stands by the candidate it carried,
+    /// and its readers elect the newest once the cycle is derived in
+    /// full. A rule deciding on the value would act on a candidate no
+    /// reader elects, and its conclusion would outlive the election.
     fn tests_absence(self) -> bool {
         matches!(
             self,
-            Polarity::Negative | Polarity::Optional | Polarity::Electing { ranked: true }
+            Polarity::Negative
+                | Polarity::Optional
+                | Polarity::Electing { ranked: true, .. }
+                | Polarity::Electing { decides: true, .. }
         )
     }
 
     /// How plainly the edge tests for absence: an `unless` or an
-    /// optional read most, a ranked election next.
+    /// optional read most, an election next.
     fn strength(self) -> u8 {
         match self {
             Polarity::Negative | Polarity::Optional => 2,
-            Polarity::Electing { ranked: true } => 1,
+            polarity if polarity.tests_absence() => 1,
             _ => 0,
         }
     }
@@ -202,7 +216,8 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
     };
     rule.analysis()
         .premises()
-        .filter_map(|premise| match premise {
+        .enumerate()
+        .filter_map(|(index, premise)| match premise {
             Premise::Assert(Proposition::Concept(query)) if query.widens() => {
                 Some((query.predicate.clone(), Polarity::Optional))
             }
@@ -216,6 +231,7 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
                     Some(pick) if positive == Polarity::Positive && pick.elects() => {
                         Polarity::Electing {
                             ranked: !matches!(pick, Pick::Last),
+                            decides: decides(rule, index, query),
                         }
                     }
                     _ => positive,
@@ -228,6 +244,130 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
             _ => None,
         })
         .collect()
+}
+
+/// Whether `rule` decides on the value its premise `index`, a read of
+/// an attribute concept under a choosing pick, returns, rather than
+/// passing the value along.
+///
+/// A rule passes a value along when the value reaches its head and
+/// nothing else: bound to a head field, or fed to a formula or an
+/// equality whose result is. A rule decides on it when the read is
+/// pinned to a constant, or the value (or anything computed from it)
+/// is compared, joined on by another read, negated over, or checked
+/// against a constant.
+///
+/// The distinction matters inside a recursive component only. There a
+/// read sees every candidate the fixpoint derives, so a rule passing a
+/// value along derives one candidate per candidate read, each standing
+/// by the one it carried, and the election at the component's exit
+/// picks the same one a stratified read would have. A rule deciding on
+/// the value fires for a candidate no reader elects, and nothing at
+/// the exit takes its conclusion back.
+///
+/// One decision is exempt: a rule reading the cell it concludes (its
+/// own relation, of its own entity) is a rewrite. Its conclusion
+/// succeeds the value it read, and the exit ranks the cell's candidates
+/// by those successions.
+fn decides(rule: &DeductiveRule, index: usize, query: &ConceptQuery) -> bool {
+    let Some((name, _)) = query.predicate.attribute_field() else {
+        return false;
+    };
+    let named = |term: &Term<Any>| term.name().map(str::to_string);
+    let this = query.terms.get("this").and_then(named);
+    let node = ProgramAnalysis::node(&query.predicate);
+    let rewrites = this.as_deref() == Some("this")
+        && rule.conclusion().with().iter().any(|(_, field)| {
+            ProgramAnalysis::node(&ConceptDescriptor::of_attribute(field)) == node
+        });
+    if rewrites {
+        return false;
+    }
+    let mut carried: HashSet<String> = match query.terms.get(name) {
+        None => return false,
+        Some(Term::Constant(_)) => return true,
+        Some(term) => match named(term) {
+            Some(variable) => HashSet::from([variable]),
+            None => return false,
+        },
+    };
+    let premises: Vec<&Premise> = rule.analysis().premises().collect();
+    loop {
+        let before = carried.len();
+        for (other, premise) in premises.iter().enumerate() {
+            if other == index {
+                continue;
+            }
+            let carries = |term: &Term<Any>| term.name().is_some_and(|name| carried.contains(name));
+            match premise {
+                Premise::Assert(Proposition::Formula(_)) => {
+                    let parameters = premise.parameters();
+                    let schema = premise.schema();
+                    let derived = |operand: &str| {
+                        schema
+                            .get(operand)
+                            .is_some_and(|field| !field.requirement().is_required())
+                    };
+                    let feeds = parameters
+                        .iter()
+                        .any(|(operand, term)| !derived(operand) && carries(term));
+                    let checks = parameters
+                        .iter()
+                        .any(|(operand, term)| derived(operand) && carries(term));
+                    // The carried value standing in for a result is a
+                    // check of what the formula computes.
+                    if !feeds && checks {
+                        return true;
+                    }
+                    if !feeds {
+                        continue;
+                    }
+                    let mut results = Vec::new();
+                    for (operand, term) in parameters.iter() {
+                        if !derived(operand) {
+                            continue;
+                        }
+                        // A result the body pins is a check.
+                        if matches!(term, Term::Constant(_)) {
+                            return true;
+                        }
+                        results.extend(named(term));
+                    }
+                    carried.extend(results);
+                }
+                Premise::Assert(Proposition::Constraint(Constraint::Equality(equality))) => {
+                    let mut aliases = Vec::new();
+                    for (one, other) in [
+                        (&equality.this, &equality.is),
+                        (&equality.is, &equality.this),
+                    ] {
+                        if !carries(one) {
+                            continue;
+                        }
+                        match other {
+                            Term::Constant(_) => return true,
+                            term => aliases.extend(named(term)),
+                        }
+                    }
+                    carried.extend(aliases);
+                }
+                Premise::Assert(Proposition::Constraint(Constraint::Coalesce(coalesce))) => {
+                    let feeds = carries(&coalesce.source) || carries(&coalesce.fallback);
+                    if feeds {
+                        carried.extend(named(&coalesce.is));
+                    }
+                }
+                other => {
+                    if other.parameters().iter().any(|(_, term)| carries(term)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        if carried.len() == before {
+            return false;
+        }
+    }
 }
 
 /// The dependency edges a concept contributes with no rules of its own:
@@ -252,7 +392,10 @@ fn selecting_edges(
                 );
                 edges.push((
                     ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(single)),
-                    Polarity::Electing { ranked: true },
+                    Polarity::Electing {
+                        ranked: true,
+                        decides: false,
+                    },
                 ));
             }
         }
@@ -266,6 +409,7 @@ fn selecting_edges(
             } else if field.descriptor().pick().elects() {
                 Polarity::Electing {
                     ranked: !matches!(field.descriptor().pick(), Pick::Last),
+                    decides: false,
                 }
             } else {
                 Polarity::Positive
@@ -692,8 +836,10 @@ impl ProgramAnalysis {
                 let absence = match polarity {
                     Polarity::Negative => Absence::Negated,
                     Polarity::Optional => Absence::Optional,
-                    Polarity::Electing { ranked: true } => Absence::Elected,
-                    Polarity::Electing { ranked: false } => continue,
+                    polarity @ Polarity::Electing { .. } if polarity.tests_absence() => {
+                        Absence::Elected
+                    }
+                    Polarity::Electing { .. } => continue,
                     Polarity::Aggregating => {
                         violations.push(AggregationViolation {
                             concept: node.clone(),

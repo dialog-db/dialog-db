@@ -161,9 +161,16 @@ every candidate the fixpoint derives, and readers elect the newest at
 the exit, as the fixpoint always has. The component stays positive, so
 it has a least fixpoint, and the answer depends on the rules alone. A
 notebook needs this: it positions a run of inserted blocks from each
-block's successor, reading the position relation under `last`. What
-it gives up is the stratified reading of `last` inside a cycle: a
-derivation can start from a candidate a reader would not elect. Inheritance
+block's successor, reading the position relation under `last`. That
+holds for a rule that passes the value along: each candidate it derives
+stands by the candidate it carried, so the exit elects what a
+stratified read would have. A rule that decides on the value (a read
+pinned to a constant, or a value compared, joined on, negated over or
+checked) would fire for a candidate no reader elects, and nothing at
+the exit takes its conclusion back. So a `last` read the rule decides
+on is an absence test like a ranked one, and a rule closing a cycle
+through it is quarantined. The one decision kept is a rewrite, a rule
+reading the cell it concludes, which succeeds the value it read. Inheritance
 down a hierarchy through a ranked choice, a node's own value or else
 its parent's, is what quarantine rules out; lattice-valued recursion,
 where the chosen value may feed the recursion as long as it is only

@@ -14,6 +14,66 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule deciding on a `last` value inside its own cycle is set aside
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
+[`notes/attribute-heads.md`](./notes/attribute-heads.md).
+
+Inside a recursive component a read under `last` sees every candidate
+the fixpoint derives, and readers elect the newest once the component
+is derived in full. That is exact for a rule that passes the value
+along: each candidate it derives stands by the one it carried, so the
+election at the exit picks what a stratified read would have. It is not
+for a rule that decides on the value. Such a rule fires for a candidate
+no reader elects, and nothing at the exit takes its conclusion back:
+with `b` reading `own` over a losing `end`, a rule concluding a label
+for `a` from `x/label(next) = "end"` concluded it, though every read of
+`b` returned `own`. The same body under another head, outside the
+cycle, concluded nothing.
+
+A read under `last` whose value the rule decides on is now an absence
+test, as a read under `top`, `max` or `min` already was, so a rule
+closing a cycle through one is quarantined. A rule decides on a value
+when the read is pinned to a constant, or when the value, or anything
+a formula or an equality computes from it, is compared, joined on by
+another read, negated over, or checked against a constant. A rule
+passes a value along when it reaches the head and nothing else,
+directly or through formulas.
+
+What this changes for you:
+
+- A rule that reads its own relation under `last`, of another entity,
+  and decides on the value read is set aside, and listed by
+  `ProgramAnalysis::quarantined` and `dialog.rule/quarantined`. A query
+  over the relation returns what the remaining rules derive. Before, it
+  returned that rule's conclusions too, the ones drawn from losing
+  candidates among them.
+- A rule carrying a value down a chain, or computing from it (a
+  position from a successor's position, a depth from a parent's), is
+  unaffected.
+- A rule rewriting the cell it reads, `x/status(e) := "todo" :-
+  x/status(e) = "triage"`, is unaffected: it reads its own relation of
+  its own entity, and its conclusion succeeds the value it read.
+- The same rule outside a cycle is unaffected: there the read is of a
+  relation derived in full.
+- To decide on a value inside a recursion, conclude into another
+  relation, which takes the decision out of the cycle, or make the
+  decision in an inductive rule, which runs at commit over the settled
+  value.
+- `Polarity::Electing` carries `decides` beside `ranked`.
+
+Why: a rule set has to mean one thing whatever else is installed. The
+same body gave a different answer when an unrelated rule closed a cycle
+around it, with nothing reported. Setting the rule aside is reported,
+and names the rule.
+
+### Compatibility and migration
+
+- Nothing stored or synced changes. A rule the analysis now sets aside
+  stays installed and is evaluated again once the cycle it closed is
+  gone. Replicas on releases either side of this one can answer a query
+  over such a cycle differently.
+
 ## 0.4.0 (2026-11-14)
 
 ### A prefetch hint a query took but did not finish is resumed by the next query

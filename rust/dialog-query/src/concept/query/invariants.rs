@@ -1029,3 +1029,196 @@ async fn every_last_read_of_a_cell_elects_the_same_claim() -> anyhow::Result<()>
     );
     Ok(())
 }
+
+/// A chain `a -> b -> tail` where the tail holds the label `end` and
+/// `b` a label of its own written later, with the rule carrying a
+/// label down the chain: `b` reads `own`, its newest candidate, and
+/// holds `end` as a losing one.
+async fn chain_with_a_losing_label(
+    operator: &dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
+    branch: &dialog_repository::Branch,
+) -> anyhow::Result<()> {
+    let a: Entity = "id:a".parse()?;
+    let b: Entity = "id:b".parse()?;
+    let tail: Entity = "id:tail".parse()?;
+    branch
+        .transaction()
+        .assert(the!("x/label").of(tail.clone()).is("end".to_string()))
+        .commit()
+        .publish()
+        .perform(operator)
+        .await?;
+    branch
+        .transaction()
+        .assert(the!("x/label").of(b.clone()).is("own".to_string()))
+        .commit()
+        .publish()
+        .perform(operator)
+        .await?;
+    branch
+        .transaction()
+        .assert(the!("x/next").of(a.clone()).is(b.clone()))
+        .assert(the!("x/next").of(b).is(tail))
+        .assert(the!("x/mark").of(a).is("yes".to_string()))
+        .commit()
+        .publish()
+        .perform(operator)
+        .await?;
+    Ok(())
+}
+
+fn next_premise() -> serde_json::Value {
+    serde_json::json!({
+        "assert": { "with": { "next": { "the": "x/next", "as": "entity:", "pick": "last:" } } },
+        "where": { "this": { "?": { "name": "this" } }, "next": { "?": { "name": "next" } } }
+    })
+}
+
+/// `x/label(e) := l :- x/next(e) = n, x/label(n) = l`.
+fn carry_label() -> anyhow::Result<DeductiveRule> {
+    compile(serde_json::json!({
+        "deduce": { "with": { "label": { "the": "x/label", "as": "text:" } } },
+        "when": [ next_premise(), {
+            "assert": { "with": { "label": { "the": "x/label", "as": "text:", "pick": "last:" } } },
+            "where": { "this": { "?": { "name": "next" } }, "label": { "?": { "name": "label" } } }
+        }]
+    }))
+}
+
+/// `<head>(e) := "saw-end" :- x/mark(e) = "yes", x/next(e) = n,
+/// x/label(n) = "end"`: a rule deciding on the label its successor
+/// reads.
+fn saw_end(head: &str) -> anyhow::Result<DeductiveRule> {
+    compile(serde_json::json!({
+        "deduce": { "with": { "out": { "the": head, "as": "text:" } } },
+        "when": [ next_premise(), {
+            "assert": { "with": { "mark": { "the": "x/mark", "as": "text:" } } },
+            "where": { "this": { "?": { "name": "this" } }, "mark": "yes" }
+        }, {
+            "assert": { "with": { "label": { "the": "x/label", "as": "text:", "pick": "last:" } } },
+            "where": { "this": { "?": { "name": "next" } }, "label": "end" }
+        }, {
+            "assert": "==",
+            "where": { "this": "saw-end", "is": { "?": { "name": "out" } } }
+        }]
+    }))
+}
+
+/// "A rule deciding on a `last` value inside its own cycle is set
+/// aside." `b` reads `own`, so a rule firing on `x/label(next) = "end"`
+/// concludes nothing for `a` where its head is another relation. With
+/// `x/label` as its head the rule sits in the cycle the carrying rule
+/// makes, where a read sees every candidate, `end` among them: left in,
+/// it concludes `saw-end` for `a` from a label no reader of `b` sees.
+/// The analysis sets it aside, and `a` reads what the chain carries.
+#[dialog_common::test]
+async fn a_rule_deciding_on_a_last_value_inside_its_cycle_is_set_aside() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    chain_with_a_losing_label(&operator, &branch).await?;
+    let a = Value::Entity("id:a".parse()?);
+
+    let mut outside = RuleRegistry::new();
+    outside.register(carry_label()?)?;
+    outside.register(saw_end("x/flag")?)?;
+    assert!(
+        outside.analysis()?.quarantined().is_empty(),
+        "outside the cycle the read is of a relation derived in full"
+    );
+    let source = TestEnv::new(&branch, &operator, outside);
+    assert_eq!(
+        relation_under(&source, "x/flag", "last").await?,
+        vec![],
+        "b reads `own`, so nothing saw `end`"
+    );
+
+    let decides = saw_end("x/label")?;
+    let mut inside = RuleRegistry::new();
+    inside.register(carry_label()?)?;
+    inside.register(decides.clone())?;
+    let quarantined: Vec<Entity> = inside
+        .analysis()?
+        .quarantined()
+        .iter()
+        .map(|set_aside| set_aside.rule.clone())
+        .collect();
+    assert_eq!(quarantined, vec![decides.this()]);
+    let source = TestEnv::new(&branch, &operator, inside);
+    let labels = relation_under(&source, "x/label", "last").await?;
+    assert!(
+        labels.contains(&(a.clone(), Value::String("own".into()))),
+        "a reads the label the chain carries from b: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&(a, Value::String("saw-end".into()))),
+        "nothing is concluded from a label no reader of b sees: {labels:?}"
+    );
+    Ok(())
+}
+
+/// "A rule passing a `last` value through a formula inside its cycle
+/// is not set aside." `x/depth(e) := d + 1 :- x/next(e) = n,
+/// x/depth(n) = d` computes from the value it reads and decides
+/// nothing on it.
+#[dialog_common::test]
+async fn a_rule_computing_from_a_last_value_inside_its_cycle_stays() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let a: Entity = "id:a".parse()?;
+    let b: Entity = "id:b".parse()?;
+    let tail: Entity = "id:tail".parse()?;
+    branch
+        .transaction()
+        .assert(the!("x/next").of(a.clone()).is(b.clone()))
+        .assert(the!("x/next").of(b.clone()).is(tail.clone()))
+        .assert(the!("x/depth").of(tail.clone()).is(0u32))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let deeper = compile(serde_json::json!({
+        "deduce": { "with": { "depth": { "the": "x/depth", "as": "natural:" } } },
+        "when": [ next_premise(), {
+            "assert": { "with": { "depth": { "the": "x/depth", "as": "natural:", "pick": "last:" } } },
+            "where": { "this": { "?": { "name": "next" } }, "depth": { "?": { "name": "below" } } }
+        }, {
+            "assert": "math/sum",
+            "where": { "of": { "?": { "name": "below" } }, "with": 1, "is": { "?": { "name": "depth" } } }
+        }]
+    }))?;
+    let mut registry = RuleRegistry::new();
+    registry.register(deeper)?;
+    assert!(registry.analysis()?.quarantined().is_empty());
+    let source = TestEnv::new(&branch, &operator, registry);
+    let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "value": { "the": "x/depth", "as": "natural:" }
+    }}))?;
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::var("who"));
+    terms.insert("value".into(), Term::var("value"));
+    let rows = ConceptQuery { terms, predicate }
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+    let mut depths: Vec<(Value, Value)> = rows
+        .iter()
+        .map(|row| {
+            Ok((
+                row.lookup(&Term::<Any>::var("who"))?.content()?,
+                row.lookup(&Term::<Any>::var("value"))?.content()?,
+            ))
+        })
+        .collect::<anyhow::Result<_>>()?;
+    depths.sort_by_key(|pair| format!("{pair:?}"));
+    assert_eq!(
+        depths,
+        vec![
+            (Value::Entity(a), Value::UnsignedInt(2)),
+            (Value::Entity(b), Value::UnsignedInt(1)),
+            (Value::Entity(tail), Value::UnsignedInt(0)),
+        ]
+    );
+    Ok(())
+}
