@@ -321,6 +321,7 @@ mod tests {
     use crate::helpers::test_repo;
     use crate::{LayerDeclaration, Placement, PublishError};
     use anyhow::Result;
+    use dialog_common::ConditionalSend;
     use dialog_corpus::Selector;
     use dialog_peer::Peer;
     use dialog_peer::helpers::test_session_with_peer;
@@ -348,7 +349,7 @@ mod tests {
         of: &Entity,
     ) -> Result<Vec<String>>
     where
-        T: Scalar + Debug + Clone + Send + Sync + 'static,
+        T: Scalar + Debug + Clone + ConditionalSend + ConditionalSync + 'static,
     {
         let rows = query
             .select(AttributeQuery::from(
@@ -378,7 +379,7 @@ mod tests {
         of: &Entity,
     ) -> Result<Vec<String>>
     where
-        T: Scalar + Debug + Clone + Send + Sync + 'static,
+        T: Scalar + Debug + Clone + ConditionalSend + ConditionalSync + 'static,
     {
         read::<T>(branch.query(), env, the, of).await
     }
