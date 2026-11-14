@@ -66,8 +66,13 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   The [plan](tree-node-reads/plan.md) is for whoever builds it.
 - [Macros as rules](macros.md): **Designing.** A slim kernel (`rule`, two
   kinds of application, the write relations) and every other form a macro
-  that is a rule. The [core forms](macros/kernel.md) are defined and run in
-  a model.
+  that is a rule. The [core forms](macros/kernel.md) are defined and
+  [run on Dialog-DB](macros/poc.md) as a proof of concept; syntax is not
+  stored yet.
+- [A parameter holds one variable or one constant](patterns.md):
+  **Building.** A pattern in place of a term, over a composite value kept
+  as a versioned record. The [plan](patterns/plan.md) is for whoever builds
+  it, and the [journal](patterns/journal.md) says how far the build is.
 - [A replica cannot read or write what it held once a pull moves its head](held-across-pull.md):
   **Building.** A head adopted by root leaves every changed leaf by
   reference, so reads and writes of keys the replica held wait on the

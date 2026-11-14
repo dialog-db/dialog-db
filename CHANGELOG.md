@@ -14,6 +14,170 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule can name an entity it did not read
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
+[design/macros/poc.md](./design/macros/poc.md).
+
+A rule that concludes a fact of an entity its premises did not bind, the
+row of a command it issues or a record it creates, had no way to name
+that entity. The formula `entity/derive` makes one from two values: `id:`
+followed by the base58 of the two values' references, as a list under the
+type `id:`. Equal values name one entity on every replica. Deriving again
+from the result takes in one more value, and the order values are taken
+in is part of the name.
+
+What this changes for you:
+
+- `entity/derive` is a formula: `{ "assert": "entity/derive", "where":
+  { "of": …, "with": …, "is": … } }`. In Rust it is
+  `dialog_query::formula::entity::Derive`, and
+  `dialog_query::formula::entity::derive` is the same function for a
+  caller that has both values.
+- A derived entity has the scheme `id:`. Nothing reserves the scheme: an
+  entity written `id:…` by hand is an entity like any other.
+
+Why: a command a rule issues is a fact of a new entity, and that entity
+has to be the same wherever the rule fires on the same bindings. Nothing
+but the bindings can name it.
+
+Its two cells are a stand-in, and this entry is not to be released as it
+reads: the formula is to take one record once a rule can build one, and
+the entities it names will change with it.
+
+### A parameter holds a pattern: a term, or a map or a list of terms
+
+[#778](https://github.com/dialog-db/dialog-db/pull/778),
+[design/patterns.md](./design/patterns.md),
+[design/patterns/design-parameters.md](./design/patterns/design-parameters.md),
+[design/patterns/design-pattern-meaning.md](./design/patterns/design-pattern-meaning.md),
+[design/patterns/design-feasibility.md](./design/patterns/design-feasibility.md),
+[design/patterns/design-typing.md](./design/patterns/design-typing.md),
+[design/patterns/design-rule-identity.md](./design/patterns/design-rule-identity.md),
+[design/patterns/design-leaf-cost.md](./design/patterns/design-leaf-cost.md)
+
+A premise was applied to parameters that each held one variable or one
+constant, so a rule could not say a value by its shape. A parameter now
+holds a `Pattern`: a term, or a map or a list of patterns.
+Where the value is bound the pattern takes it apart and binds the
+variables inside it, and a value that does not match drops the row.
+Where every variable inside it is bound the pattern is the value, a
+composite kept as a record. A rule's body runs it whichever way the
+plan puts first.
+
+What this changes for you:
+
+- `Pattern`, `MapPattern` and `ListPattern` build one. A map pattern
+  with no rest is the map of exactly its entries; `with_rest` binds the
+  entries it did not name, as a map, and a blank rest takes them and
+  binds nothing. A list pattern with no run is the list of exactly its
+  items; `with_run` binds the ones after them, as a list.
+- `Parameters::set` binds a name to a pattern, and `shape`, `pattern`,
+  `slot`, `shapes`, `leaves` and `map_terms` look inside. `insert`, `get` and
+  `iter` take and give terms as before: for a name that holds a map or
+  a list, `get` gives the variable that stands for the whole
+  value. Code that collects the variables a premise mentions from
+  `iter` should collect them from `leaves`.
+- `Equality`'s `this` and `is` are `Pattern`s, were `Term<Any>`.
+  `Equality::new` still takes two terms, `Equality::between` takes two
+  patterns, and `Pattern::is` writes one as a premise. A `Pattern`
+  compares with a `Term<Any>` and answers `name` and `is_constant`, so
+  reading the sides of an equality between terms compiles as before;
+  matching on them as `Term::Variable` does not.
+- A concept premise that holds a pattern is planned as the concept over
+  a variable and an equality between that variable and the pattern, so
+  `DeductiveRule::analysis().premises()` lists one premise more than
+  was written.
+- A pattern has no wire form. Serializing `Parameters`, a
+  `ConceptQuery`, an `Equality` or a rule that holds a map or a list
+  of terms is an error that says so. A pattern with no variable
+  is the constant it builds and is written as one.
+- A rule that holds a pattern has an identity and runs registered, and
+  cannot be stored: `DeductiveRule::storable` and
+  `InductiveRule::storable` return `TypeError::UnstorablePattern`,
+  `try_encode` returns `None`, and asserting the rule into a
+  transaction panics with that reason, as asserting a rule whose body
+  reads an attribute through a raw scan already did.
+- Such a rule is laid over a branch for one query and run:
+  `Branch::with(rule)` and `QueryLayer::with(rule)` keep the rule as it
+  is, under the name its facts give it, and write nothing of its body.
+  `Update` has a new method for that, `hold`, which a target that is
+  never stored answers by keeping what it is given. Its default gives
+  the thing back, so an implementation of `Update` that is committed
+  needs no change and goes on refusing the rule.
+- A premise is feasible by the variables inside its patterns: a
+  parameter that holds a map or a list is bound when every
+  variable inside it is, and a premise that binds it binds each of them.
+  A rule whose pattern can never be bound fails to compile with
+  `TypeError::RequiredBindings`, which names the variables inside the
+  pattern that nothing binds. A negated premise may hold a pattern, and
+  a blank inside it stands for any value.
+- A pattern's type follows from its shape and its leaves. A variable
+  inside one keeps the type it was written with, so a rule that binds a
+  text inside a map and adds a number to it fails to compile with
+  `TypeError::TypeInference`, as one that adds a number to a text field
+  does. A map or a list under a field that reads only text, and
+  a rest or a run another premise needs to be a number, fail the same
+  way. A variable written with no type inside a pattern is any present
+  value.
+- Matching a pattern against a record under a version this release
+  does not read is `EvaluationError::RecordVersion`, not a dropped row.
+- A rule's identity names a record constant that holds a composite by
+  its parts, as `Value::reference` does.
+
+A premise whose parameters are all terms costs what it did: a concept
+read is the stream it was, field for field, and parameters of terms
+are the map of terms they were, with one place beside it for the
+patterns.
+
+Why: a rule that issues a command, derives an entity from a row or
+takes a form apart needs a value made of values where a term stands.
+One pattern that both builds and takes apart lets the planner order the
+premises, as it does for every other premise.
+
+### A record can hold a map or a list of values
+
+[#778](https://github.com/dialog-db/dialog-db/pull/778),
+[design/patterns.md](./design/patterns.md),
+[design/patterns/design-composite-bytes.md](./design/patterns/design-composite-bytes.md)
+
+A value was a scalar or a `Record`, bytes dialog did not look into. A
+`Composite` is a value made of values: a map from a value to a value
+that holds no key twice, or a list, nested as deep as it is written,
+as the IPLD data model has them. There is no tuple: a notation that has
+one writes it as a list. It is kept whole as a `Value::Record`: one version byte,
+`0x01`, then the dag-cbor of its parts. So a composite is a claim's
+value like any other: it is stored, keyed, compared, spilled and synced
+as the bytes it is. Its name is not a hash of those bytes. A composite
+is named by the merkle reference of its parts, a map under `map:` and
+a list under `list:`, each part by its own reference, so a later layout of the bytes moves no name.
+
+What this changes for you:
+
+- `dialog_corpus::Composite`, `CompositeMap` and `CompositeItems` build
+  one, and `Value::from` keeps it as a record. `Value::composite` reads
+  one back: `Ok(None)` for a scalar and for a record that starts with
+  no version byte, the composite for a record this release wrote, and
+  `Err(CompositeError::UnknownVersion { version })` for a record under a
+  version this release does not read.
+- One value has one byte string. A map's entries are written in one
+  order whatever order they were given in, a key given twice is refused
+  (`CompositeError::DuplicateKey`), and a number is kept under the
+  narrowest type that holds it, as a tree under the number band reads
+  one back: the natural `3`, the integer `3` and the float `3.0` are
+  one part, and read back as the natural `3`.
+- `Value::reference` of a record that holds a composite is the
+  reference of its parts. Of any other record it is what it was,
+  `RECORD.reference_of(bytes)`.
+- Equality, ordering, `Value::to_bytes`, `Value::to_reference` (the
+  address a spilled value is stored under) and the key encoding treat a
+  record as its bytes, as before.
+
+Why: a rule could not hold a value made of other values, and everything
+that needed one waited on the layout of a record's bytes. A name that is
+a function of the parts does not depend on that layout, and the version
+byte leaves the layout free to change.
+
 ### A prefetch hint a query took but did not finish is resumed by the next query
 
 [#770](https://github.com/dialog-db/dialog-db/pull/770), argued in
@@ -2723,6 +2887,39 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Nothing stored or synced changes shape for `entity/derive`, and nothing
+  is rewritten on upgrade. A rule that applies it is stored as any rule
+  is, and a release without the formula cannot read that rule's body, as
+  it cannot read any formula it does not know. Nothing for an embedder to
+  run.
+
+- Nothing stored or synced changes for patterns: the stored rule format
+  is format 3 as before and has no way to write a pattern, so a rule
+  that holds one is never stored, and an older replica never meets one.
+  Laid over a branch for a query, such a rule is kept in memory beside
+  the query's changes and no fact holds its body. Nothing is rewritten
+  on upgrade and an embedder runs nothing. One
+  rule changes identity between releases: a rule whose body holds a
+  record constant that is a composite is named by the composite's parts
+  here and by its bytes in an older release, so each release finds the
+  body the other stored under an entity it does not derive and leaves
+  it inert. No release before this one could write such a constant.
+- A composite is a new kind of bytes under the existing `record:` value
+  type, so nothing is rewritten on upgrade and no tree, key or wire
+  format changes. What an older replica holds under `record:` is a
+  revision's record, a bare dag-cbor map whose first byte is `0xa7`, and
+  whatever bytes an embedder stored. This release reads a record as a
+  composite only when its first byte is `0x01` and the rest is exactly
+  the bytes a composite is written in; every other record reads,
+  compares, verifies and is named as before. An older release makes of a
+  versioned record what it makes of any record: bytes it stores, syncs
+  and compares, and names by a hash of the bytes, which is not the name
+  this release gives it. It cannot look inside. A record under a later
+  version than `0x01` is carried the same way by this release and refused
+  by its number when something looks into it. An embedder runs nothing.
+  One that stored records of its own starting with a byte from `0x01` to
+  `0x17` should say so before upgrading
+  ([design/patterns/design-version-byte.md](./design/patterns/design-version-byte.md)).
 - Nothing stored or synced changes for the file store's lock; only the
   lock files beside its cells do. A lock file the previous release left
   behind holds a bare PID, which this release reads as a holder: one

@@ -39,6 +39,7 @@ members = [
     "rust/dialog-remote-fs",
     "rust/dialog-peer-iroh",
     "rust/dialog-network",
+    "rust/dialog-notation",
     "rust/dialog-identity",
     "rust/dialog-peer",
     "rust/dialog-perf",

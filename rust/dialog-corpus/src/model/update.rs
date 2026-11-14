@@ -6,6 +6,7 @@ use crate::{Asset, Cause, Entity, Fact, Instruction, Relation, Value};
 use dialog_search_tree::Manifest;
 use futures_util::Stream;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter, Result as FmtResult};
@@ -308,6 +309,21 @@ pub trait Update {
     /// size the line records for that hash, whatever size `asset` names, and
     /// changes nothing when the line records none.
     fn discard(&mut self, asset: Asset);
+
+    /// Keep `body` as what `entity` is, beside the facts, and say so by
+    /// returning nothing; or give the body back.
+    ///
+    /// A statement that names a thing by its facts and has no bytes to
+    /// write the thing itself as asks its target to hold it: a rule
+    /// that its stored body cannot write, for one. A batch that is
+    /// committed holds bytes only, so it gives the body back, and that
+    /// is what a target does unless it says otherwise. A target that
+    /// is never stored, the changes laid over a line for one query,
+    /// can keep the thing as it is.
+    fn hold(&mut self, entity: &Entity, body: Box<dyn Any>) -> Result<(), Box<dyn Any>> {
+        let _ = entity;
+        Err(body)
+    }
 }
 
 /// A domain-level write operation that can be asserted or retracted.

@@ -6,7 +6,7 @@ use std::error;
 use std::fmt;
 
 use crate::attribute::Keyed;
-use crate::corpus::{CorpusTypeError, DialogCorpusError, Type, Value};
+use crate::corpus::{COMPOSITE_VERSION, CorpusTypeError, DialogCorpusError, Type, Value};
 pub use crate::environment::Environment;
 pub use crate::proposition::Proposition;
 use crate::reduce::Aggregator;
@@ -300,6 +300,19 @@ pub enum TypeError {
         value: String,
         /// Why no body can carry it.
         reason: String,
+    },
+
+    /// A rule holds a pattern of a map or a list, and the
+    /// stored rule format has no way to write one. The rule runs where
+    /// it was built, and cannot be installed.
+    #[error(
+        "The rule holds the pattern {pattern} and cannot be stored: format {format} of a rule body writes a variable or a constant where a parameter stands, and has no way to write a pattern"
+    )]
+    UnstorablePattern {
+        /// The pattern, as it is written.
+        pattern: String,
+        /// The rule body format this release writes.
+        format: u64,
     },
 
     /// A rule application omits a required parameter.
@@ -674,6 +687,17 @@ pub enum EvaluationError {
     ConstraintViolation {
         /// Description of the violated constraint.
         constraint: String,
+    },
+
+    /// A pattern was matched against a record under a version this
+    /// release does not read. The record may well match, and this
+    /// release cannot tell, so the row is refused and not dropped.
+    #[error(
+        "A record in version {version} cannot be taken apart: this release reads version {COMPOSITE_VERSION}"
+    )]
+    RecordVersion {
+        /// The version the record names.
+        version: u8,
     },
 
     /// A required parameter was not provided.

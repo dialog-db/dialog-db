@@ -1,0 +1,193 @@
+//! What was written, beside what was said.
+//!
+//! A syntax tree says what a text means and nothing of how it was
+//! written: the labelled parts of an application are kept by label, a
+//! number is its value, and where anything stood is gone. [`Written`]
+//! is the mapping that holds what the tree left out, a node at a time:
+//!
+//! | left out | held as |
+//! |---|---|
+//! | the order the parts were written in, and `of:` written or not | the [`Slot`]s of the node |
+//! | a token spelled another way than a printer would spell it | the spelling |
+//! | where the node is | its [`Span`] |
+//! | a comment | its text, on the node it is about: the one that ends just before it on its line, and otherwise the one below it |
+//!
+//! It does not hold the text. The space between two tokens is not kept
+//! either: it is what lies between where one ends and the next starts.
+//! [`print`](crate::print()) takes a tree and its mapping back to the
+//! text.
+
+use std::collections::BTreeMap;
+
+/// A place in a text: a line and a column in it, both from zero, the
+/// column counted in characters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Point {
+    /// The line.
+    pub line: u32,
+    /// The column.
+    pub column: u32,
+}
+
+impl Point {
+    /// The place `columns` before this one, on the same line.
+    pub fn back(self, columns: u32) -> Point {
+        Point {
+            line: self.line,
+            column: self.column.saturating_sub(columns),
+        }
+    }
+}
+
+/// Where a node is: from its first character to just past its last.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Span {
+    /// Its first character.
+    pub start: Point,
+    /// Just past its last.
+    pub end: Point,
+}
+
+/// A comment: `; text`, to the end of its line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Comment {
+    /// The comment as written, its `;` included.
+    pub text: String,
+    /// Where its `;` is.
+    pub at: Point,
+}
+
+impl Comment {
+    /// What the comment says: its text without the `;` and the space
+    /// around it.
+    pub fn said(&self) -> &str {
+        self.text.trim_start_matches(';').trim()
+    }
+}
+
+/// One segment of the way from a node to a node inside it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Segment {
+    /// A part with no label of an application, a member of a tuple, or
+    /// a tree of a document, by its place.
+    Item(usize),
+    /// The operator of an application.
+    Operator,
+    /// A labelled part of an application.
+    Term(String),
+    /// The key of an entry of a struct.
+    Key(usize),
+    /// The value of an entry of a struct.
+    Value(usize),
+}
+
+/// The way from a document to a node in it.
+pub type Path = Vec<Segment>;
+
+/// One part of an application as it was written, in its place among the
+/// others.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Slot {
+    /// A part with no label, or the first of them written `of:`.
+    Item {
+        /// Which of the parts with no label.
+        at: usize,
+        /// Where `of:` is, when it was written.
+        of: Option<Point>,
+    },
+    /// A labelled part.
+    Term {
+        /// Its label.
+        label: String,
+        /// Where the label is.
+        at: Point,
+    },
+}
+
+/// What a tree left out of one node.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Note {
+    /// Where the node is.
+    pub span: Span,
+    /// The token as written, where a printer would spell it otherwise:
+    /// `007`, `1.50`, a text with `\n` in it.
+    pub spelling: Option<String>,
+    /// The parts of an application, in the order written.
+    pub order: Vec<Slot>,
+    /// The comments above the node, which are about it.
+    pub comments: Vec<Comment>,
+    /// The comment that ends the line the node ends on, right after
+    /// it, which is about it too.
+    pub after: Option<Comment>,
+    /// The comments inside the node that no part is below: before its
+    /// closing bracket, or before a `...`.
+    pub closing: Vec<Comment>,
+}
+
+/// What the trees of a document left out of the text they were parsed
+/// from.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Written {
+    /// A note a node, by the way to it.
+    pub notes: BTreeMap<Path, Note>,
+    /// The comments after the last tree.
+    pub trailing: Vec<Comment>,
+    /// Where the text ends.
+    pub end: Point,
+    /// Where the form being made a tree was refused, while it is.
+    pub(crate) refused: Option<Span>,
+}
+
+impl Written {
+    /// The note of the node at `path`.
+    pub fn note(&self, path: &[Segment]) -> Option<&Note> {
+        self.notes.get(path)
+    }
+
+    /// Where the node at `path` is.
+    pub fn span(&self, path: &[Segment]) -> Option<Span> {
+        self.note(path).map(|note| note.span)
+    }
+
+    /// The comments about the node at `path`: the lines of comment right
+    /// above it, or above its label, with no blank line between, and
+    /// then the one that ends its line. A comment with a blank line
+    /// under it is about no node: it is about the document, or the part
+    /// of it that follows.
+    pub fn comments(&self, path: &[Segment]) -> Vec<&Comment> {
+        let Some(note) = self.note(path) else {
+            return Vec::new();
+        };
+        // The line the node starts on, or its label when that is
+        // written on a line before it.
+        let mut line = self.label(path).map_or(note.span.start.line, |label| {
+            label.line.min(note.span.start.line)
+        });
+        let mut about = Vec::new();
+        for comment in note.comments.iter().rev() {
+            if comment.at.line + 1 == line {
+                line = comment.at.line;
+            } else if comment.at.line < line {
+                break;
+            }
+            about.push(comment);
+        }
+        about.reverse();
+        about.extend(&note.after);
+        about
+    }
+
+    /// Where the label of the node at `path` is, when it was written
+    /// under one.
+    fn label(&self, path: &[Segment]) -> Option<Point> {
+        let (last, parent) = path.split_last()?;
+        self.note(parent)?
+            .order
+            .iter()
+            .find_map(|slot| match (slot, last) {
+                (Slot::Term { label, at }, Segment::Term(named)) if label == named => Some(*at),
+                (Slot::Item { at, of }, Segment::Item(item)) if at == item => *of,
+                _ => None,
+            })
+    }
+}

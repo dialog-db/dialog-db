@@ -26,12 +26,15 @@ use crate::FormulaQuery;
 use crate::Premise;
 use crate::Proposition;
 use crate::Term;
+use crate::constraint::Constraint;
 use crate::corpus::Type as ValueType;
 use crate::error::InferenceError;
 use crate::formula::number::Numeric;
+use crate::pattern::Pattern;
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
 use crate::type_system::unifier::{Context, Type as Inferred, VarId, lift};
+use crate::types::Any;
 use std::collections::HashMap;
 
 /// One narrowing step recorded during inference: `premise`
@@ -143,6 +146,11 @@ impl TypeEnv {
         // once every premise has contributed, so an operand a later
         // premise types still decides the output.
         let mut signed: Vec<SignedImage> = Vec::new();
+        // The variables a pattern makes hold a record: what an equality
+        // sets equal to a map or a list, a rest and a run.
+        // Checked once every premise has contributed (see
+        // [`Self::check_records`]).
+        let mut records: Vec<String> = Vec::new();
 
         for premise in premises {
             // Negation premises don't contribute; they filter on
@@ -169,9 +177,16 @@ impl TypeEnv {
             let params = premise.parameters();
 
             for (slot_name, field) in schema.iter() {
-                let Some(param) = params.get(slot_name) else {
+                let Some((param, shape)) = params.slot(slot_name) else {
                     continue;
                 };
+                // A slot holding a map or a list of terms is
+                // typed by its shape and its leaves, not as the
+                // variable standing for the whole.
+                if let Some(pattern) = shape {
+                    Self::infer_shape(&mut ctx, pattern, field.content_type(), &mut records)?;
+                    continue;
+                }
                 let Some(var_name) = param.name() else {
                     continue;
                 };
@@ -199,10 +214,26 @@ impl TypeEnv {
                 }
             }
 
+            // A variable an equality sets equal to a map
+            // or a list holds a record, in every row that passes it.
+            if let Proposition::Constraint(Constraint::Equality(equality)) = proposition {
+                for (shape, other) in [
+                    (&equality.this, &equality.is),
+                    (&equality.is, &equality.this),
+                ] {
+                    if shape.is_composite()
+                        && let Some(name) = other.name()
+                    {
+                        records.push(name.to_string());
+                    }
+                }
+            }
+
             Self::record_narrowings(&ctx, premise, &mut current, &mut narrowings);
         }
 
         Self::settle_signed(&mut ctx, &signed)?;
+        Self::check_records(&mut ctx, &records)?;
 
         let named: HashMap<String, VarId> = ctx
             .named_vars()
@@ -332,6 +363,113 @@ impl TypeEnv {
                 return Err(InferenceError::Conflict {
                     variable: image.name.clone(),
                     reason: reason.to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Contribute a map or a list of terms standing in a slot
+    /// of kind `slot`. The pattern's type follows from its shape and
+    /// its leaves:
+    ///
+    /// - a value of the shape is kept as a record, so the slot has to
+    ///   read records, and one that reads only text is a conflict;
+    /// - a leaf keeps the descriptor a term has: a variable written as
+    ///   text is text wherever else the rule mentions it, and one
+    ///   written with no type is any present value;
+    /// - a rest is a map and a run is a list, so each holds a record
+    ///   and is added to `records`.
+    fn infer_shape(
+        ctx: &mut Context,
+        pattern: &Pattern,
+        slot: Option<&Kind>,
+        records: &mut Vec<String>,
+    ) -> Result<(), InferenceError> {
+        let record = Inferred::Static(Kind::from(ValueType::Record));
+        if let Some(slot) = slot
+            && let Err(reason) = ctx.unify(&lift(&slot.clone().required()), &record)
+        {
+            return Err(InferenceError::Conflict {
+                variable: pattern.to_string(),
+                reason: reason.to_string(),
+            });
+        }
+        Self::infer_leaves(ctx, pattern, records)
+    }
+
+    fn infer_leaves(
+        ctx: &mut Context,
+        pattern: &Pattern,
+        records: &mut Vec<String>,
+    ) -> Result<(), InferenceError> {
+        let leaf = |ctx: &mut Context, term: &Term<Any>| {
+            let Some(name) = term.name() else {
+                return Ok(());
+            };
+            let kind = term.kind().unwrap_or_else(|| Kind::from(Primitive::ALL));
+            let var = ctx.var_for_name(name);
+            ctx.unify(&lift(&kind), &Inferred::Variable(var))
+                .map(|_| ())
+                .map_err(|reason| InferenceError::Conflict {
+                    variable: name.to_string(),
+                    reason: reason.to_string(),
+                })
+        };
+        match pattern {
+            Pattern::Term(term) => leaf(ctx, term),
+            Pattern::Map(map) => {
+                for (_, part) in map.entries() {
+                    Self::infer_leaves(ctx, part, records)?;
+                }
+                Self::infer_remainder(ctx, map.rest(), records, leaf)
+            }
+            Pattern::List(list) => {
+                for part in list.items() {
+                    Self::infer_leaves(ctx, part, records)?;
+                }
+                Self::infer_remainder(ctx, list.run(), records, leaf)
+            }
+        }
+    }
+
+    /// A rest or a run: a present value, like any leaf, that holds a
+    /// record.
+    fn infer_remainder(
+        ctx: &mut Context,
+        remainder: Option<&Term<Any>>,
+        records: &mut Vec<String>,
+        leaf: impl Fn(&mut Context, &Term<Any>) -> Result<(), InferenceError>,
+    ) -> Result<(), InferenceError> {
+        let Some(term) = remainder else {
+            return Ok(());
+        };
+        records.extend(term.name().map(String::from));
+        leaf(ctx, term)
+    }
+
+    /// Refuse a rule in which a variable a pattern makes hold a record
+    /// cannot hold one, because another premise types it as something
+    /// else: a rest that a sum adds to, or a field of text read into a
+    /// map.
+    ///
+    /// The variable is checked and not narrowed. A variable narrowed to
+    /// a kind is stamped with it wherever a concept premise binds it,
+    /// and a concept field that declares no type then fails the query
+    /// on the first value of another kind it yields, where a pattern is
+    /// to drop that row.
+    fn check_records(ctx: &mut Context, records: &[String]) -> Result<(), InferenceError> {
+        let record = Primitive::singleton(ValueType::Record);
+        for name in records {
+            let var = ctx.var_for_name(name);
+            let kind = Self::resolve(ctx, var);
+            if kind.primitive_part().intersect(record).is_none() {
+                return Err(InferenceError::Conflict {
+                    variable: name.clone(),
+                    reason: format!(
+                        "a pattern makes it hold a record, and the rule's other premises make it \
+                         {kind}"
+                    ),
                 });
             }
         }

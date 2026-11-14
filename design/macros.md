@@ -1,8 +1,8 @@
 # Macros as rules
 
-Phase: **Designing.** The direction was decided by the maintainer on 2026-11-10 without a problem statement; the journal records it as a decision on an opinion.
+Phase: **Designing** the three phases ([design-pipeline](macros/design-pipeline.md)); **Directing** how they stand behind the query engine. The direction was decided by the maintainer on 2026-11-10 without a problem statement; the journal records it as a decision on an opinion. Backtracked from Designing on 2026-11-12: every phase is to be reachable from the query engine, and how is not decided.
 
-Working material: [journal](macros/journal.md), [claims](macros/claims.md), [glossary](macros/glossary.md), and [the kernel and the core forms](macros/kernel.md) with the model that runs them. It picks up [research/notation/macros.md](https://github.com/dialog-db/dialog-db/blob/docs/notation/research/notation/macros.md) on #728 and Gozala's tonk journal of [2026-05-16](https://github.com/tonk-labs/tonk/blob/journal/%40gozala/2026-05-16.md) and [2026-05-21](https://github.com/tonk-labs/tonk/blob/journal/%40gozala/2026-05-21.md).
+Working material: [journal](macros/journal.md), [claims](macros/claims.md), [glossary](macros/glossary.md), [the kernel and the core forms](macros/kernel.md) with the model that runs them, [the proof of concept on Dialog-DB](macros/poc.md), and the decision being made now, [what a form is to dialog](macros/design-forms.md). It picks up [research/notation/macros.md](https://github.com/dialog-db/dialog-db/blob/docs/notation/research/notation/macros.md) on #728 and Gozala's tonk journal of [2026-05-16](https://github.com/tonk-labs/tonk/blob/journal/%40gozala/2026-05-16.md) and [2026-05-21](https://github.com/tonk-labs/tonk/blob/journal/%40gozala/2026-05-21.md).
 
 ## Description
 

@@ -24,7 +24,8 @@
 use std::collections::BTreeSet;
 use std::{error, fmt};
 
-use dialog_corpus::identity::{BOOLEAN, ENTITY, NUMBER, RECORD, SYMBOL, TEXT};
+use dialog_corpus::Value;
+use dialog_corpus::identity::{BOOLEAN, ENTITY, NUMBER, SYMBOL, TEXT};
 use merkle_reference::{Reference, Type};
 use serde::Serialize;
 use serde::ser::{self, SerializeMap as _};
@@ -32,8 +33,10 @@ use serde::ser::{self, SerializeMap as _};
 use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::concept::query::ConceptQuery;
+use crate::constraint::Constraint;
 use crate::identity::{NULL, RULE, field};
 use crate::negation::Negation;
+use crate::pattern::Pattern;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
@@ -114,10 +117,87 @@ fn head_reference(conclusion: &ConceptDescriptor) -> Reference {
 
 /// A premise's proposition: a concept application by its concept and
 /// bindings, anything else by its wire form.
+///
+/// An equality a side of which is a map or a list of terms has
+/// no wire form. It is referenced as its wire form would be read, with
+/// each side by its [`pattern_reference`], so an equality between two
+/// terms has the reference it always had.
 fn proposition_reference(proposition: &Proposition) -> Option<Reference> {
     match proposition {
         Proposition::Concept(query) => concept_premise(query),
+        Proposition::Constraint(Constraint::Equality(equality))
+            if equality.this.is_composite() || equality.is.is_composite() =>
+        {
+            Some(Type::MAP.map([
+                (text("assert"), text("==")),
+                (
+                    text("where"),
+                    Type::MAP.map([
+                        (text("this"), pattern_reference(&equality.this)?),
+                        (text("is"), pattern_reference(&equality.is)?),
+                    ]),
+                ),
+            ]))
+        }
         other => wire_reference(other),
+    }
+}
+
+/// The reference of a premise's proposition, for whatever orders
+/// premises by it.
+pub(crate) fn proposition(proposition: &Proposition) -> Option<Reference> {
+    proposition_reference(proposition)
+}
+
+/// A pattern, by its parts: a leaf as the term it is, and a map
+/// or a list of terms as a map from its shape to its parts' references,
+/// with what takes the entries or items it did not name beside them.
+/// The same pattern has the same reference however its map's entries
+/// were given, and no layout of a value of the shape is part of it.
+fn pattern_reference(pattern: &Pattern) -> Option<Reference> {
+    let parts = |patterns: &[Pattern]| -> Option<Reference> {
+        Some(
+            Type::LIST.list(
+                patterns
+                    .iter()
+                    .map(pattern_reference)
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+        )
+    };
+    Some(match pattern {
+        Pattern::Term(term) => term_reference(term)?,
+        Pattern::Map(map) => {
+            let entries = map
+                .entries()
+                .iter()
+                .map(|(key, part)| Some((key.reference(), pattern_reference(part)?)))
+                .collect::<Option<Vec<_>>>()?;
+            let mut shape = vec![(text("map:"), Type::MAP.map(entries))];
+            if let Some(rest) = map.rest() {
+                shape.push((text("rest"), term_reference(rest)?));
+            }
+            Type::MAP.map(shape)
+        }
+        Pattern::List(list) => {
+            let mut shape = vec![(text("list:"), parts(list.items())?)];
+            if let Some(run) = list.run() {
+                shape.push((text("run"), term_reference(run)?));
+            }
+            Type::MAP.map(shape)
+        }
+    })
+}
+
+/// What a concept application binds under `name`: a term, or the map
+/// or list of terms it holds there.
+fn binding_reference(query: &ConceptQuery, name: &str) -> Option<Option<Reference>> {
+    match query.terms.shape(name) {
+        Some(pattern) => Some(Some(pattern_reference(pattern)?)),
+        None => match query.terms.get(name) {
+            Some(term) => Some(Some(term_reference(term)?)),
+            None => Some(None),
+        },
     }
 }
 
@@ -139,24 +219,26 @@ fn concept_premise(query: &ConceptQuery) -> Option<Reference> {
         let binding = if collections.contains(name) {
             named.insert(key_operand.clone());
             let mut entry = Vec::new();
-            if let Some(term) = query.terms.get(&key_operand) {
-                entry.push((text("the"), term_reference(term)?));
+            if let Some(the) = binding_reference(query, &key_operand)? {
+                entry.push((text("the"), the));
             }
-            if let Some(term) = query.terms.get(name) {
-                entry.push((text("is"), term_reference(term)?));
+            if let Some(is) = binding_reference(query, name)? {
+                entry.push((text("is"), is));
             }
             Type::MAP.map(entry)
         } else {
-            match query.terms.get(name) {
-                Some(term) => term_reference(term)?,
+            match binding_reference(query, name)? {
+                Some(binding) => binding,
                 None => continue,
             }
         };
         bindings.push((field_reference(field), binding));
     }
-    for (name, term) in query.terms.iter() {
-        if !named.contains(name.as_str()) {
-            bindings.push((text(name), term_reference(term)?));
+    for name in query.terms.keys() {
+        if !named.contains(name.as_str())
+            && let Some(binding) = binding_reference(query, name)?
+        {
+            bindings.push((text(name), binding));
         }
     }
     Some(Type::MAP.map([
@@ -240,7 +322,9 @@ fn constant(tag: &str, payload: &Node) -> Option<Reference> {
         ("boolean:", Node::Bool(value)) => BOOLEAN.reference_of(&[u8::from(*value)]),
         ("natural:" | "integer:" | "float:", Node::Number(content)) => NUMBER.reference_of(content),
         ("bytes:", payload) => Reference::hash(&bytes_of(payload)?),
-        ("record:", payload) => RECORD.reference_of(&bytes_of(payload)?),
+        // A record that holds a composite is named by its parts, and
+        // any other by its bytes, as `Value::reference` names one.
+        ("record:", payload) => Value::Record(bytes_of(payload)?).reference(),
         _ => return None,
     })
 }
