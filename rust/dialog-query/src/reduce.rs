@@ -196,8 +196,12 @@ impl Aggregator {
                     .union(Primitive::singleton(ValueType::SignedInt));
                 let consumed = consumed.primitive_part();
                 let mut band = Primitive::EMPTY;
-                if consumed.intersect(integers).is_some() {
+                // A sum of naturals is a natural; once any input may be
+                // negative the sum may be.
+                if consumed.contains(ValueType::SignedInt) {
                     band = band.union(integers);
+                } else if consumed.contains(ValueType::UnsignedInt) {
+                    band = band.union(Primitive::singleton(ValueType::UnsignedInt));
                 }
                 if consumed.contains(ValueType::Float) {
                     band = band.union(Primitive::singleton(ValueType::Float));
@@ -1160,18 +1164,26 @@ mod tests {
         }
     }
 
-    /// `sum` keeps the input's numeric band: either integer variant
-    /// admits the whole integer band (the accumulator narrows per
-    /// group), floats stay `Float`, and — identity 0 — the output is
-    /// required even over an optional input.
+    /// `sum` keeps the input's numeric band: naturals sum to a
+    /// natural, an input that may be negative admits the whole integer
+    /// band (the accumulator narrows per group), floats stay `Float`,
+    /// and — identity 0 — the output is required even over an optional
+    /// input.
     #[dialog_common::test]
     fn it_types_sum_output_by_numeric_band() {
         for input_type in [
             typed(ValueType::UnsignedInt),
-            typed(ValueType::SignedInt),
-            int_band(),
             typed(ValueType::UnsignedInt).optional(),
         ] {
+            let output = Aggregator::Sum.output_type(&input_type).unwrap();
+            assert_eq!(
+                output,
+                typed(ValueType::UnsignedInt),
+                "naturals sum to a natural"
+            );
+            assert!(!output.is_optional(), "sum has an identity");
+        }
+        for input_type in [typed(ValueType::SignedInt), int_band()] {
             let output = Aggregator::Sum.output_type(&input_type).unwrap();
             assert_eq!(output, int_band(), "integer input sums to the integer band");
             assert!(!output.is_optional(), "sum has an identity");
@@ -1256,7 +1268,7 @@ mod tests {
             .expect("min over optional String is well-typed");
         let total_type = total.output_type(&salary).unwrap();
         let first_type = first.output_type(&name).unwrap();
-        assert_eq!(total_type, int_band());
+        assert_eq!(total_type, typed(ValueType::UnsignedInt));
         assert_eq!(first_type, typed(ValueType::String).optional());
 
         let reduce = Reduce::new(vec!["dept".to_string()], vec![total, first]);

@@ -1636,22 +1636,17 @@ mod tests {
         );
     }
 
-    /// A `reduce` block is refused in a deductive rule: a fold
-    /// withdraws its previous result when a fact arrives and has no
-    /// reading inside a dependency cycle. The attribute's `pick`
-    /// chooses among the candidates instead.
+    /// A deductive rule admits a `reduce` block: outside a dependency
+    /// cycle a fold reads a relation derived in full, as an `unless`
+    /// does, and a rule closing a cycle through one is quarantined by
+    /// the program analysis.
     #[dialog_common::test]
-    fn it_refuses_reduce_in_a_deductive_rule() {
+    fn it_admits_reduce_in_a_deductive_rule() {
         use crate::reduce::{Aggregator, ReduceSpec};
 
         let conclusion = ConceptDescriptor::try_from(vec![(
             "total",
-            AttributeDescriptor::new(
-                the!("org/total"),
-                "",
-                Cardinality::One,
-                Some(Type::UnsignedInt),
-            ),
+            AttributeDescriptor::new(the!("org/total"), "", Cardinality::One, None),
         )])
         .unwrap();
         let premises = vec![
@@ -1673,8 +1668,8 @@ mod tests {
         )]);
         let result = DeductiveRule::with_reduce(conclusion, premises, reduce);
         assert!(
-            matches!(result, Err(TypeError::ReduceInOpenRule { .. })),
-            "a deductive rule admits no reduce, got {result:?}"
+            result.is_ok(),
+            "a deductive rule admits a reduce, got {result:?}"
         );
     }
 

@@ -14,6 +14,50 @@ says how to cut a release.
 
 ## Unreleased
 
+### A deductive rule may fold, and one closing a cycle through a fold is set aside
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
+[`notes/aggregation.md`](./notes/aggregation.md) and
+[`notes/attribute-heads.md`](./notes/attribute-heads.md).
+
+A deductive rule takes a `reduce` clause again: `sum`, `count`,
+`count-distinct`, `min`, `max` and `avg` over the rows of its body,
+grouped by the head fields it does not reduce. The head is an ordinary
+concept, so any rule, query or subscription reads a folded relation as
+it reads any other. Since
+[#580](https://github.com/dialog-db/dialog-db/pull/580) every authored
+rule with a `reduce` was refused (`ReduceInOpenRule`), and nothing an
+author could write folded.
+
+A fold over a relation no cycle derives reads it in full, which is the
+stratified reading an `unless` has. A rule closing a cycle through a
+fold is quarantined, the newest rule of the cycle, as one closing it
+through `unless` is, where the queries touching such a cycle used to
+fail (`AggregationThroughRecursion`).
+
+What this changes for you:
+
+- `DeductiveRule::with_reduce`, and a rule descriptor with a `reduce`
+  block, compile. `TypeError::ReduceInOpenRule` is gone.
+- A sum of naturals is a natural, so a head field declared `natural:`
+  holds it. A sum over inputs that may be negative is still an integer.
+- A quarantine made over a fold says so: `Quarantine::tested` carries
+  `Absence::Folded`. `ProgramAnalysis::violations` and
+  `EvaluationError::AggregationThroughRecursion` remain for a cycle
+  with no rule to set aside.
+- A folded value stands below every stored claim of its relation under
+  `last`: a value written to the relation is read over the fold.
+- A subscription over a folding rule, or over a rule reading one, is
+  recomputed on each poll that touches what it reads, not maintained
+  row by row.
+
+Why: refusing every fold to prevent the unstratified ones is what the
+first refusal of `unless` did, and it left the rule an author would
+write (a list is busy when it holds more than ten open items) with no
+home but a query whose result has to be written back as a fact, where
+two replicas can disagree about it. A derived relation is never
+stored, so it cannot diverge.
+
 ### A rule deciding on a `last` value inside its own cycle is set aside
 
 Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
@@ -75,6 +119,10 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A rule descriptor's `reduce` block is the one this release has always
+  encoded, so nothing stored is rewritten. An older release reads a
+  rule with a `reduce` installed by this one and leaves it inert, as it
+  left its own.
 - Nothing stored or synced changes. A rule the analysis now sets aside
   stays installed and is evaluated again once the cycle it closed is
   gone. Replicas on releases either side of this one can answer a query

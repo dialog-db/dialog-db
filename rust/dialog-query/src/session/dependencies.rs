@@ -18,15 +18,17 @@
 //! strongly connected components; a concept is *recursive* when its
 //! component is non-trivial.
 //!
-//! Outside a component, negation, optional reads and elections have
-//! stratified semantics: the premise reads a relation derived in full
-//! before the rule runs. A ranked election is a negation too: a read
-//! under `top`, a relation chain, `max` or `min` returns a candidate
-//! *and nothing better*. Inside a component such a premise would read a
-//! set the cycle is still deriving, which has no stratified meaning. A
-//! read under `last` inside its own component is not treated as one: it
-//! reads every candidate the fixpoint derives, and its readers elect
-//! the newest at the exit, so the component stays positive.
+//! Outside a component, negation, optional reads, elections and folds
+//! have stratified semantics: the premise reads a relation derived in
+//! full before the rule runs. A ranked election is a negation too: a
+//! read under `top`, a relation chain, `max` or `min` returns a
+//! candidate *and nothing better*. Inside a component such a premise
+//! would read a set the cycle is still deriving, which has no
+//! stratified meaning. A read under `last` inside its own component is
+//! treated as one only when the rule decides on the value read (see
+//! [`decides`]): a rule passing the value along reads every candidate
+//! the fixpoint derives, and its readers elect the newest at the exit,
+//! so the component stays positive.
 //!
 //! A merge of rule sets each fine on its own can close a cycle through
 //! an absence test, so it is never refused at install: the analysis
@@ -43,10 +45,10 @@
 //! which every replica sees the same, so replicas with the same history
 //! quarantine the same rules, and a quarantine lifts by itself once a
 //! rule of the cycle is retracted.
-//! An aggregating edge inside a component remains a violation: a fold
-//! has no deterministic reading over a set still growing. A deductive
-//! rule refuses `reduce` at compile time, so the violation is
-//! unreachable for authored rules and kept for the structure.
+//! An aggregating edge inside a component is an absence test like any
+//! other, as plain as an `unless`: a fold has no reading over a set
+//! still growing, so a rule of the cycle is quarantined. One left over
+//! in a cycle with no rule to set aside is a violation.
 //!
 //! Callers consume the analysis three ways:
 //!
@@ -58,8 +60,9 @@
 //! - [`RuleRegistry::acquire`](super::rule_registry::RuleRegistry::acquire)
 //!   runs the targeted [`ProgramAnalysis::check`] over the queried
 //!   concept's dependency closure, so a recursive region of the
-//!   program is evaluated by the fixpoint and an aggregating one
-//!   fails the queries that touch it (and only those).
+//!   program is evaluated by the fixpoint and an aggregating one no
+//!   quarantine could break fails the queries that touch it (and only
+//!   those).
 
 use crate::Entity;
 use crate::Pick;
@@ -81,10 +84,9 @@ use std::iter;
 /// Polarity of a dependency edge: whether the rule body references
 /// the concept positively (an ordinary premise), under `unless`,
 /// set-widened, or from a *reducing* rule whose fold must read the
-/// complete relation, or under a choosing pick. A negative, optional
-/// or electing edge inside a dependency cycle is an absence test the
-/// analysis quarantines a rule over; an aggregating one is a
-/// stratification violation.
+/// complete relation, or under a choosing pick. A negative, optional,
+/// aggregating or electing edge inside a dependency cycle is an absence
+/// test the analysis quarantines a rule over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Polarity {
     /// The body asserts the concept.
@@ -129,6 +131,7 @@ impl Polarity {
             self,
             Polarity::Negative
                 | Polarity::Optional
+                | Polarity::Aggregating
                 | Polarity::Electing { ranked: true, .. }
                 | Polarity::Electing { decides: true, .. }
         )
@@ -141,7 +144,8 @@ impl Polarity {
             Polarity::Optional => Some(Absence::Optional),
             Polarity::Electing { ranked: true, .. } => Some(Absence::Elected),
             Polarity::Electing { decides: true, .. } => Some(Absence::Decided),
-            Polarity::Electing { .. } | Polarity::Positive | Polarity::Aggregating => None,
+            Polarity::Aggregating => Some(Absence::Folded),
+            Polarity::Electing { .. } | Polarity::Positive => None,
         }
     }
 
@@ -149,7 +153,7 @@ impl Polarity {
     /// optional read most, an election next.
     fn strength(self) -> u8 {
         match self {
-            Polarity::Negative | Polarity::Optional => 2,
+            Polarity::Negative | Polarity::Optional | Polarity::Aggregating => 2,
             polarity if polarity.tests_absence() => 1,
             _ => 0,
         }
@@ -169,6 +173,8 @@ pub enum Absence {
     Elected,
     /// A read under `last` whose value the rule decides on.
     Decided,
+    /// A read a `reduce` clause folds over.
+    Folded,
 }
 
 /// The absence test a quarantined rule's cycle ran through: what made

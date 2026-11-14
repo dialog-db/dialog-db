@@ -1228,3 +1228,225 @@ async fn a_rule_computing_from_a_last_value_inside_its_cycle_stays() -> anyhow::
     );
     Ok(())
 }
+
+fn dept_total() -> anyhow::Result<DeductiveRule> {
+    compile(serde_json::json!({
+        "deduce": { "with": {
+            "total": { "the": "org.dept/total", "as": "natural:" },
+            "heads": { "the": "org.dept/heads", "as": "natural:" }
+        }},
+        "when": [{
+            "assert": { "with": {
+                "dept": { "the": "org.employee/dept", "as": "entity:" },
+                "salary": { "the": "org.employee/salary", "as": "natural:" }
+            }},
+            "where": {
+                "this": { "?": { "name": "employee" } },
+                "dept": { "?": { "name": "this" } },
+                "salary": { "?": { "name": "salary" } }
+            }
+        }],
+        "reduce": {
+            "total": { "apply": "sum", "of": { "?": { "name": "salary" } } },
+            "heads": { "apply": "count", "of": { "?": { "name": "salary" } } }
+        }
+    }))
+}
+
+/// Three employees in two departments: alice (100) and bob (50) in
+/// `dept-a`, carol (7) in `dept-b`.
+async fn staff(
+    operator: &dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
+    branch: &dialog_repository::Branch,
+) -> anyhow::Result<()> {
+    let mut transaction = branch.transaction();
+    for (who, dept, salary) in [
+        ("id:alice", "id:dept-a", 100u32),
+        ("id:bob", "id:dept-a", 50),
+        ("id:carol", "id:dept-b", 7),
+    ] {
+        let who: Entity = who.parse()?;
+        let dept: Entity = dept.parse()?;
+        transaction = transaction
+            .assert(the!("org.employee/dept").of(who.clone()).is(dept))
+            .assert(the!("org.employee/salary").of(who).is(salary));
+    }
+    transaction.commit().publish().perform(operator).await?;
+    Ok(())
+}
+
+/// The `(entity, value)` pairs of the natural-valued relation `the`,
+/// sorted.
+async fn naturals(source: &TestEnv<'_>, the: &str) -> anyhow::Result<Vec<(Value, Value)>> {
+    let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "value": { "the": the, "as": "natural:" }
+    }}))?;
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::var("who"));
+    terms.insert("value".into(), Term::var("value"));
+    let rows = ConceptQuery { terms, predicate }
+        .evaluate(Match::new().seed(), source)
+        .try_vec()
+        .await?;
+    let mut pairs: Vec<(Value, Value)> = rows
+        .iter()
+        .map(|row| {
+            Ok((
+                row.lookup(&Term::<Any>::var("who"))?.content()?,
+                row.lookup(&Term::<Any>::var("value"))?.content()?,
+            ))
+        })
+        .collect::<anyhow::Result<_>>()?;
+    pairs.sort_by_key(|pair| format!("{pair:?}"));
+    Ok(pairs)
+}
+
+fn dept(name: &str) -> Value {
+    Value::Entity(name.parse().expect("a department's entity parses"))
+}
+
+/// "A deductive rule may fold." `org.dept/total` is the sum and
+/// `org.dept/heads` the count of a department's salaries: each derived
+/// relation holds one value per department, read as any relation is.
+#[dialog_common::test]
+async fn a_deductive_rule_folds_a_relation_derived_in_full() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    staff(&operator, &branch).await?;
+    let mut registry = RuleRegistry::new();
+    registry.register(dept_total()?)?;
+    assert!(registry.analysis()?.quarantined().is_empty());
+    let source = TestEnv::new(&branch, &operator, registry);
+    assert_eq!(
+        naturals(&source, "org.dept/total").await?,
+        vec![
+            (dept("id:dept-a"), Value::UnsignedInt(150)),
+            (dept("id:dept-b"), Value::UnsignedInt(7)),
+        ]
+    );
+    assert_eq!(
+        naturals(&source, "org.dept/heads").await?,
+        vec![
+            (dept("id:dept-a"), Value::UnsignedInt(2)),
+            (dept("id:dept-b"), Value::UnsignedInt(1)),
+        ]
+    );
+    Ok(())
+}
+
+/// "Any rule consumes a folding rule's relation like any other."
+/// `org.dept/large(d) := "yes" :- org.dept/heads(d) = n, n > 1` reads
+/// the count a stratum below it.
+#[dialog_common::test]
+async fn a_rule_reads_what_a_folding_rule_derives() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    staff(&operator, &branch).await?;
+    let large = compile(serde_json::json!({
+        "deduce": { "with": { "large": { "the": "org.dept/large", "as": "text:" } } },
+        "when": [{
+            "assert": { "with": { "heads": { "the": "org.dept/heads", "as": "natural:" } } },
+            "where": { "this": { "?": { "name": "this" } }, "heads": { "?": { "name": "heads" } } }
+        }, {
+            "assert": ">",
+            "where": { "of": { "?": { "name": "heads" } }, "with": 1 }
+        }, {
+            "assert": "==",
+            "where": { "this": "yes", "is": { "?": { "name": "large" } } }
+        }]
+    }))?;
+    let mut registry = RuleRegistry::new();
+    registry.register(dept_total()?)?;
+    registry.register(large)?;
+    assert!(registry.analysis()?.quarantined().is_empty());
+    let source = TestEnv::new(&branch, &operator, registry);
+    assert_eq!(
+        relation_under(&source, "org.dept/large", "last").await?,
+        vec![(dept("id:dept-a"), Value::String("yes".into()))],
+        "only the department of two is large"
+    );
+    Ok(())
+}
+
+/// "A rule closing a cycle through a fold is set aside." A fold has no
+/// reading over a relation its own cycle is still deriving, so
+/// `org.employee/salary(e) := t :- org.employee/dept(e) = d,
+/// org.dept/total(d) = t`, which feeds the totals back into what they
+/// sum, is quarantined when it arrives, and the record says a fold was
+/// what the cycle ran through. The totals read as they did before it.
+#[dialog_common::test]
+async fn a_rule_closing_a_cycle_through_a_fold_is_set_aside() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    staff(&operator, &branch).await?;
+    let feedback = compile(serde_json::json!({
+        "deduce": { "with": { "salary": { "the": "org.employee/salary", "as": "natural:" } } },
+        "when": [{
+            "assert": { "with": { "dept": { "the": "org.employee/dept", "as": "entity:" } } },
+            "where": { "this": { "?": { "name": "this" } }, "dept": { "?": { "name": "dept" } } }
+        }, {
+            "assert": { "with": { "total": { "the": "org.dept/total", "as": "natural:" } } },
+            "where": { "this": { "?": { "name": "dept" } }, "total": { "?": { "name": "salary" } } }
+        }]
+    }))?;
+    let mut registry = RuleRegistry::new();
+    registry.register(dept_total()?)?;
+    registry.register(feedback.clone())?;
+    let analysis = registry.analysis()?;
+    let [set_aside] = analysis.quarantined() else {
+        anyhow::bail!("one rule is set aside: {:?}", analysis.quarantined());
+    };
+    assert_eq!(
+        set_aside.rule,
+        feedback.this(),
+        "the rule that arrived last"
+    );
+    assert_eq!(
+        set_aside.tested.as_ref().map(|tested| tested.absence),
+        Some(Absence::Folded)
+    );
+    assert!(analysis.violations().is_empty());
+    let source = TestEnv::new(&branch, &operator, registry);
+    assert_eq!(
+        naturals(&source, "org.dept/total").await?,
+        vec![
+            (dept("id:dept-a"), Value::UnsignedInt(150)),
+            (dept("id:dept-b"), Value::UnsignedInt(7)),
+        ]
+    );
+    Ok(())
+}
+
+/// "A folded value stands below every stored claim of its relation."
+/// A fold computes its value, so no fact stands behind it: a total
+/// written for `dept-a` is what a `last` read returns, over the sum.
+#[dialog_common::test]
+async fn a_stored_claim_is_read_over_a_folded_value() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let dept_a: Entity = "id:dept-a".parse()?;
+    branch
+        .transaction()
+        .assert(the!("org.dept/total").of(dept_a).is(5u32))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    staff(&operator, &branch).await?;
+    let mut registry = RuleRegistry::new();
+    registry.register(dept_total()?)?;
+    let source = TestEnv::new(&branch, &operator, registry);
+    assert_eq!(
+        naturals(&source, "org.dept/total").await?,
+        vec![
+            (dept("id:dept-a"), Value::UnsignedInt(5)),
+            (dept("id:dept-b"), Value::UnsignedInt(7)),
+        ],
+        "the stored total is older than every salary, and still read"
+    );
+    Ok(())
+}

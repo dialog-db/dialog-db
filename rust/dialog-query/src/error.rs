@@ -256,20 +256,6 @@ pub enum TypeError {
         concept: String,
     },
 
-    /// A deductive rule carries a `reduce` block. A deductive rule is
-    /// open: installed as facts, read by any rule installed later,
-    /// resolved against whatever program exists when a query runs. A
-    /// fold withdraws its previous result when a fact arrives, and
-    /// inside a cycle has no deterministic reading at all, so it
-    /// belongs to the closed places: a query, a subscription, an
-    /// inductive rule. An attribute's `pick` chooses among
-    /// the candidates every rule adds to instead.
-    #[error("Rule {rule} is deductive and folds: a deductive rule admits no `reduce`")]
-    ReduceInOpenRule {
-        /// The offending rule.
-        rule: Box<Rule>,
-    },
-
     /// A concept field declares a `pick` its attribute cannot read
     /// under.
     #[error("Attribute {the} cannot be read as declared: {reason}")]
@@ -732,8 +718,9 @@ pub enum EvaluationError {
     /// growing. Rules are installed unconditionally
     /// (replicas must converge on the merged rule set), so this
     /// surfaces at query time, on exactly the queries whose closure
-    /// folds in a cycle. A deductive rule refuses `reduce` at compile
-    /// time, so no authored rule reaches it.
+    /// folds in a cycle. The program analysis quarantines a rule of
+    /// such a cycle, so this is left for a cycle with no rule to set
+    /// aside.
     #[error(
         "Aggregation through recursion: rules for {concept} fold over \
          {aggregated} inside the same dependency cycle; no stratified \

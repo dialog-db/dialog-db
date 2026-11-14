@@ -176,14 +176,21 @@ its parent's, is what quarantine rules out; lattice-valued recursion,
 where the chosen value may feed the recursion as long as it is only
 used in ways that respect its order, could admit it later.
 
-So `unless` and optional premises stay in deductive rules. `reduce`
-does not: a fold has no reading over a set still growing, and unlike a
-choice it cannot be deferred to the component's exit without giving
-the rules inside a different relation than the readers outside. A
-fold belongs to the closed places, a query, a subscription, an
-inductive rule, and is refused in a deductive rule at compile time
-(`ReduceInOpenRule`), which the author sees at once and a merge never
-does.
+So `unless`, optional premises and `reduce` all stay in deductive
+rules, on one argument. A fold over a relation no cycle derives reads
+that relation in full, as a negation of it does, and is stratified. A
+fold whose input its own cycle derives has no reading over a set still
+growing, and unlike a choice it cannot be deferred to the component's
+exit without giving the rules inside a different relation than the
+readers outside, so a rule closing a cycle through a fold is
+quarantined, as plainly as one closing it through `unless`. A fold was
+refused in a deductive rule outright at first (`ReduceInOpenRule`),
+which threw away every stratified fold to prevent the unstratified
+ones, the mistake the first refusal of `unless` made.
+
+A folded value is computed, so no fact stands behind it: under `last`
+it stands below every stored claim of its relation, and a write to the
+relation is read over it.
 
 Ordered choice, which the old `variants` desugaring expressed by
 negating earlier alternatives, is better expressed by election: give
@@ -447,10 +454,11 @@ and sees the built-in's head for it like any rule's.
 
 ### Reducing rules
 
-A deductive rule refuses `reduce` (see quarantine above). The
-plumbing that split a reducing rule's heads and folded them stands in
-the code until inductive rules take `reduce`, where a fold has a
-sealed state to read and a fact to write.
+A deductive rule takes a `reduce` clause (see quarantine above). Its
+heads are split like any rule's, one per attribute it derives, each
+folding the shared body grouped by the head fields not reduced. A
+subscription over one is recomputed on a poll that touches what it
+reads; maintaining a fold row by row is not done.
 
 ### Storage: `dialog.rule/derives`
 

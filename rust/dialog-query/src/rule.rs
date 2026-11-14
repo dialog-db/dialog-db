@@ -177,38 +177,12 @@ pub trait Compile: Sized + Into<Rule> {
 /// analysis, plannability, and head grounding, parameterized over an
 /// optional `reduce` clause (`(field, spec)` pairs in head-field
 /// order; empty for a plain rule).
-/// Why `premises` and `reduce` cannot make a deductive rule, if they
-/// cannot: a deductive rule is open, installed as facts and read by
-/// whatever program exists when a query runs, so it admits no
-/// `reduce`: a fold withdraws its result when a fact arrives and has no
-/// reading inside a dependency cycle. An `unless` is admitted: outside
-/// a cycle it is stratified, and a rule closing a cycle through it is
-/// quarantined by the program analysis
-/// ([`ProgramAnalysis::quarantined`](crate::session::ProgramAnalysis::quarantined)). The
-/// check depends on the rule alone, never on the rest of the program,
-/// so no merge of rule sets is ever rejected.
-fn open_rule_error<T: Compile>(
-    conclusion: &ConceptDescriptor,
-    premises: &[Premise],
-    reduce: &[(String, ReduceSpec)],
-) -> Option<TypeError> {
-    // A negated attribute or concept premise asks that a fact be
-    // absent. Outside a dependency cycle that is stratified; a rule
-    // closing a cycle through it is quarantined, so either way the
-    // program evaluates. A fold has no such reading, so it stays out.
-    if !reduce.is_empty() {
-        let rule = Box::new(T::in_progress(conclusion.clone(), premises.to_vec()).into());
-        return Some(TypeError::ReduceInOpenRule { rule });
-    }
-    None
-}
-
 pub(crate) fn compile_rule<T: Compile>(
     conclusion: ConceptDescriptor,
     premises: Vec<Premise>,
     reduce: Vec<(String, ReduceSpec)>,
 ) -> Result<T, TypeError> {
-    compile_rule_as::<T>(conclusion, premises, reduce, true)
+    compile_rule_as::<T>(conclusion, premises, reduce)
 }
 
 /// [`compile_rule`] for a rule the engine writes for itself: a
@@ -221,14 +195,13 @@ pub(crate) fn compile_internal<T: Compile>(
     conclusion: ConceptDescriptor,
     premises: Vec<Premise>,
 ) -> Result<T, TypeError> {
-    compile_rule_as::<T>(conclusion, premises, Vec::new(), false)
+    compile_rule_as::<T>(conclusion, premises, Vec::new())
 }
 
 fn compile_rule_as<T: Compile>(
     conclusion: ConceptDescriptor,
     premises: Vec<Premise>,
     reduce: Vec<(String, ReduceSpec)>,
-    authored: bool,
 ) -> Result<T, TypeError> {
     // A concept with no required (`with`) attributes is
     // unconstructable (see `ConceptDescriptor`'s `TryFrom` /
@@ -259,12 +232,6 @@ fn compile_rule_as<T: Compile>(
     let display_premises = premises.clone();
     let authored_reduce = reduce.clone();
     encodable_constants(&conclusion, &premises, &reduce)?;
-    if authored
-        && matches!(T::KIND, RuleKind::Deductive)
-        && let Some(error) = open_rule_error::<T>(&conclusion, &premises, &reduce)
-    {
-        return Err(error);
-    }
     let analysis = match analyzer::analyze_with(conclusion.clone(), premises, T::KIND, reduce) {
         Ok(analysis) => analysis,
         Err(err) => {
