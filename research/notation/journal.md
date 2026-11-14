@@ -926,6 +926,22 @@ The list misreading is gone and the to-do holds. The note slipped to name matchi
 
 **Decision.** The spec's `in:` paragraph is the placement paragraph alone. R41's place results measured the wrong model and are set aside.
 
+## 2026-11-14 — R44: a write with no `in:` goes to the primary
+
+**Question.** The one [planned](results/r44-plan.md). The layers work now lets `in:` be a field of the concept: a read with it left out sees every layer, and a write with it left out goes to the primary, a retraction too, so a claim on another layer stays visible. Do readers expect that a retraction of the title they see can leave it showing?
+
+**Method.** Clean runner, 20 readers each: the `in:` paragraph alone, with "a write with `at:` left out goes to the primary, an assert and a retraction alike", and with the maintainer's image-editor line added.
+
+**Results.** [r44](results/r44.md).
+
+| document | retracted title still shows |
+|---|---|
+| `in:` paragraph alone | 2 of 20 |
+| plus the write sentence | 20 of 20 |
+| plus the image-editor line | 20 of 20 |
+
+**Decision.** The spec's `in:` paragraph carries the write sentence.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
