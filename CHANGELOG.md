@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### A concept read copies no inner evaluation, and a concept's descriptor clones without copying its fields
 
+[#806](https://github.com/dialog-db/dialog-db/pull/806)
+
 Every evaluation of a concept built a stream of about 12.5 KB, because it
 held the inner evaluation of both of its arms (rows sorted on the entity,
 and rows in rule order) inline, side by side, at 5.8 KB each. Its caller
