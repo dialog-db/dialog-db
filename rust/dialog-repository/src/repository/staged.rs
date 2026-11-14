@@ -80,6 +80,13 @@ struct State {
     /// The hash of the rule facts held and retracted ([`Facts::rules`]),
     /// once read; reset by a write of one.
     rules: OnceLock<Option<Blake3Hash>>,
+    /// The writes into layers (`in:`), by layer, as batches: a transaction
+    /// holds them beside its writes bound for the primary and the commit
+    /// routes each to its layer (see [`Changes::take_shares`]).
+    shares: Vec<(Entity, Changes)>,
+    /// The layer this store's own facts are read as (`in:`), when it
+    /// holds one layer's share; the primary's writes have none.
+    layer: Option<Entity>,
 }
 
 /// A settlement of a store's writes under one observation of the lines.
@@ -231,26 +238,17 @@ impl Staged {
         self.apply(changes);
     }
 
-    /// Apply a batch, each `(entity, attribute)` cell's writes in the
-    /// order they were recorded.
-    /// This store's writes split by attribute: those `selects` accepts,
-    /// and the rest, each as a store of its own in the order the writes
-    /// were made. The assets go with the rest.
-    pub(crate) fn partition<F: Fn(&Relation) -> bool>(&self, selects: F) -> (Staged, Staged) {
-        let mut taken = Changes::new();
-        let mut rest = self.0.assets.clone();
-        for (the, of, change) in &self.0.log {
-            let into = if selects(the) { &mut taken } else { &mut rest };
-            into.put_cell(the.clone(), of.clone(), vec![change.clone()]);
-        }
-        (Staged::from(taken), Staged::from(rest))
-    }
-
     pub(crate) fn apply(&mut self, mut changes: Changes) {
         if changes.is_empty() {
             return;
         }
         let state = Arc::make_mut(&mut self.0);
+        for (layer, share) in changes.take_shares() {
+            match state.shares.iter_mut().find(|(held, _)| *held == layer) {
+                Some((_, held)) => held.merge(share),
+                None => state.shares.push((layer, share)),
+            }
+        }
         for change in changes.take_assets() {
             match change {
                 AssetChange::Import(asset) => state.assets.import(asset),
@@ -293,6 +291,31 @@ impl Staged {
         &self.0.log
     }
 
+    /// The writes into layers (`in:`), by layer, in the order the layers
+    /// were first written.
+    pub(crate) fn shares(&self) -> &[(Entity, Changes)] {
+        &self.0.shares
+    }
+
+    /// Take the writes into layers out of the store, leaving the writes
+    /// bound for the primary.
+    pub(crate) fn take_shares(&mut self) -> Vec<(Entity, Changes)> {
+        std::mem::take(&mut Arc::make_mut(&mut self.0).shares)
+    }
+
+    /// This store read as the layer named `layer` (`in:`): what a read
+    /// over a transaction stamps on the rows of one share.
+    pub(crate) fn in_layer(mut self, layer: Entity) -> Self {
+        Arc::make_mut(&mut self.0).layer = Some(layer);
+        self
+    }
+
+    /// The layer this store's rows are read as, when it holds one
+    /// layer's share. See [`in_layer`](Self::in_layer).
+    pub(crate) fn layer(&self) -> Option<&Entity> {
+        self.0.layer.as_ref()
+    }
+
     /// Whether any write succeeds a claim the commit has yet to settle.
     pub(crate) fn has_successions(&self) -> bool {
         !self.0.electing.is_empty()
@@ -306,14 +329,9 @@ impl Staged {
     pub(crate) fn export(&self) -> Changes {
         let mut changes = self.0.assets.clone();
         self.put_cells(&mut changes, |_| true);
-        changes
-    }
-
-    /// The cells of the attributes `selects` accepts, as
-    /// [`export`](Self::export) leaves them, without the assets.
-    pub(crate) fn export_cells<F: Fn(&Relation) -> bool>(&self, selects: F) -> Changes {
-        let mut changes = Changes::new();
-        self.put_cells(&mut changes, selects);
+        for (layer, share) in &self.0.shares {
+            changes.merge(share.clone().into_layer(layer.clone()));
+        }
         changes
     }
 
@@ -339,7 +357,7 @@ impl Staged {
 
     /// Whether nothing was written.
     pub(crate) fn is_empty(&self) -> bool {
-        self.0.log.is_empty() && !self.0.assets.has_assets()
+        self.0.log.is_empty() && !self.0.assets.has_assets() && self.0.shares.is_empty()
     }
 
     /// The held facts a selector matches, in the store's own key order.

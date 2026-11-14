@@ -334,7 +334,7 @@ fn overlay_holds(composite: &Composite, the: &CorpusRelation, of: &Entity) -> bo
         || composite
             .memories
             .iter()
-            .any(|memory| !memory.scan(&selector).is_empty())
+            .any(|(_, memory)| !memory.scan(&selector).is_empty())
 }
 
 /// The claims a cell holds as `view` reads them: the stored claims a

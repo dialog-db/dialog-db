@@ -48,7 +48,12 @@ fn challenged(
 ) -> Result<Selector<Constrained>, EvaluationError> {
     let claim = candidate.prove(source)?;
     let attribute = CorpusRelation::try_from(Value::from(claim.the().clone()))?;
-    Ok(Selector::new().the(attribute).of(claim.of().clone()))
+    let selector = Selector::new().the(attribute).of(claim.of().clone());
+    // A cell is a cell of one layer: the challengers are the layer's own.
+    Ok(match claim.layer.clone() {
+        Some(layer) => selector.in_layer(layer),
+        None => selector,
+    })
 }
 
 /// Winner verification.
@@ -168,6 +173,18 @@ impl AttributeQueryOnly {
         self.query.cause()
     }
 
+    /// The layer term (`in:`). See [`AttributeQueryAll::layer`].
+    pub fn layer(&self) -> &Term<Entity> {
+        self.query.layer()
+    }
+
+    /// This scan over `layer` (`in:`).
+    pub fn with_layer(self, layer: Term<Entity>) -> Self {
+        Self {
+            query: self.query.with_layer(layer),
+        }
+    }
+
     /// Get the source term (internal claim handle).
     pub fn source(&self) -> &Term<Record> {
         self.query.source()
@@ -244,7 +261,8 @@ impl AttributeQueryOnly {
                     resolved.of().clone(),
                     Term::blank(),
                     resolved.cause().clone(),
-                );
+                )
+                .with_layer(resolved.layer().clone());
                 (&scan).try_into().ok()
             } else {
                 None
@@ -287,21 +305,28 @@ impl AttributeQueryOnly {
                         resolved.of().clone(),
                         Term::blank(),
                         resolved.cause().clone(),
-                    );
+                    )
+                    .with_layer(resolved.layer().clone());
 
                     let mut candidate: Option<FactView> = None;
 
                     let stream = Provider::<Select<'_>>::execute(env, (&scan).try_into()?).await?;
                     for await fact in stream {
                         let fact = fact?;
+                        if !scan.reads_from(fact.layer()) {
+                            continue;
+                        }
 
                         candidate = Some(match candidate.take() {
                             Some(current) => {
                                 // Group membership compares the raw key
                                 // bytes; nothing materializes while the
-                                // window slides within a group.
+                                // window slides within a group. A cell is
+                                // a cell of one layer, so a row of another
+                                // layer closes the group.
                                 if current.the_bytes()? == fact.the_bytes()?
                                     && current.of_bytes()? == fact.of_bytes()?
+                                    && current.layer() == fact.layer()
                                 {
                                     current.elect(fact)?
                                 } else {
@@ -312,6 +337,7 @@ impl AttributeQueryOnly {
                                     // (`CorruptEntry`) is a corrupt tree
                                     // entry: drop the group's yield rather
                                     // than failing the query.
+                                    let layer = current.layer().cloned();
                                     match materialize_winner(current)?.and_then(
                                         |(winner, standing)| {
                                             selector.admit(winner).map(|winner| (winner, standing))
@@ -323,7 +349,7 @@ impl AttributeQueryOnly {
                                                 .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
                                         {
                                             let mut extension = base.clone();
-                                            selector.merge(&mut extension, winner, standing)?;
+                                            selector.merge(&mut extension, winner, standing, layer)?;
                                             yield extension;
                                         }
                                         _ => {}
@@ -338,6 +364,7 @@ impl AttributeQueryOnly {
                     // Yield the final group's winner (unless its stored
                     // bytes are corrupt; see the group-close arm above).
                     if let Some(winner) = candidate.take() {
+                        let layer = winner.layer().cloned();
                         match materialize_winner(winner)?.and_then(|(winner, standing)| {
                             selector.admit(winner).map(|winner| (winner, standing))
                         }) {
@@ -347,7 +374,7 @@ impl AttributeQueryOnly {
                                     .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
                             {
                                 let mut extension = base.clone();
-                                selector.merge(&mut extension, winner, standing)?;
+                                selector.merge(&mut extension, winner, standing, layer)?;
                                 yield extension;
                             }
                             _ => {}

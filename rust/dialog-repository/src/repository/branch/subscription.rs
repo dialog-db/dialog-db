@@ -102,7 +102,6 @@ use futures_util::stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use super::session::{Composite, QueryEnv, QueryLayer};
-use crate::placement::PlacementMap;
 use crate::repository::archive::erased;
 use crate::repository::source::Source;
 use crate::{Branch, Ephemeral, Index, RemoteSite, Revision, Session};
@@ -407,10 +406,6 @@ pub struct Subscription<Q: Application> {
     /// the retained results were evaluated, parallel to the session's
     /// layers: what a maintained poll rewinds each layer to.
     memory_sequences: Vec<u64>,
-    /// The placements the last evaluation read by, through a session.
-    /// They are outside every demand cover, so a poll compares them
-    /// itself and evaluates afresh when they moved.
-    placed: Option<Arc<PlacementMap>>,
     /// The demand cover recorded during the last evaluation.
     demand: Demand,
     /// The last evaluation's full result, retained to compute the
@@ -475,7 +470,6 @@ impl<Q: Application> Subscription<Q> {
             overlay_sequence: 0,
             session,
             memory_sequences: vec![0; layers],
-            placed: None,
             demand: Demand::new(),
             results: Vec::new(),
             fixpoint: Arc::new(Mutex::new(None)),
@@ -789,20 +783,13 @@ where
             if !head_moved && !overlay_moved && !memories_moved {
                 return Ok(None);
             }
-            // A guided read takes each attribute from the layer it is
-            // placed on; a placement that moved changes what every row
-            // of the attribute reads as, outside any cover. Evaluate
-            // afresh.
-            let placed = self.placements(env).await?;
-            let placements_moved = placed != self.placed;
-            self.placed = placed;
             // A head-dependent result — one that read
             // `dialog.branch/tree` & co — changes on every commit by
             // construction (the binding itself moves), and those
             // metadata facts are overlay-injected, invisible to the
             // tree diff below. Skip the gate and re-evaluate when the
             // head moved; an overlay-only move leaves them alone.
-            if !(head_moved && self.demand.depends_on_head()) && !placements_moved {
+            if !(head_moved && self.demand.depends_on_head()) {
                 let mut touched = Touched::Nothing;
                 if head_moved {
                     touched = touched.merge(self.touched(env, &current).await?);
@@ -867,16 +854,13 @@ where
         self.revision = current;
         self.overlay_sequence = sequence;
         self.memory_sequences = sequences;
-        if !self.initialized {
-            self.placed = self.placements(env).await?;
-        }
         self.initialized = true;
         Ok(Some(delta))
     }
 
-    /// The memory layers the subscription reads through its session, in
-    /// the session's order; none without a session.
-    fn memories(&self) -> Vec<Ephemeral> {
+    /// The memory layers the subscription reads through its session, by
+    /// name, in the session's order; none without a session.
+    fn memories(&self) -> Vec<(Entity, Ephemeral)> {
         self.session
             .as_ref()
             .map(Session::memories)
@@ -888,17 +872,16 @@ where
     fn memory_sequences_now(&self) -> Vec<u64> {
         self.memories()
             .iter()
-            .map(|memory| memory.revision().sequence)
+            .map(|(_, memory)| memory.revision().sequence)
             .collect()
     }
 
     /// What the subscription reads: the branch, and through a session
-    /// its memory layers under the session's guide as it stands now.
+    /// its memory layers.
     fn composite(&self) -> Composite {
         Composite {
             sources: vec![Source::from(self.branch.clone())],
             memories: self.memories(),
-            guide: self.session.as_ref().map(Session::guide),
         }
     }
 
@@ -913,55 +896,14 @@ where
         let overlay = rewound(self.branch.overlay(), self.overlay_sequence)?;
         let memories = self
             .memories()
-            .iter()
+            .into_iter()
             .zip(&self.memory_sequences)
-            .map(|(memory, sequence)| rewound(memory, *sequence))
+            .map(|((layer, memory), sequence)| Some((layer, rewound(&memory, *sequence)?)))
             .collect::<Option<Vec<_>>>()?;
         Some(Composite {
             sources: vec![Source::from(self.branch.view(pinned, overlay))],
             memories,
-            guide: self.session.as_ref().map(Session::guide),
         })
-    }
-
-    /// The placements a read through the session reads by now, or
-    /// `None` for a subscription that reads no session.
-    async fn placements<'a, Env>(
-        &self,
-        env: &'a Env,
-    ) -> Result<Option<Arc<PlacementMap>>, EvaluationError>
-    where
-        Env: Provider<BlobRead>
-            + Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<Identify>
-            + Provider<ArchiveLoad>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<nodes::Read<CorpusNode>>
-            + Provider<nodes::Preload<CorpusNode>>
-            + Provider<nodes::Write<CorpusNode>>
-            + Provider<BlobLoad>
-            + Provider<dialog_corpus::Preload>
-            + Provider<dialog_corpus::Speculation>
-            + Holds
-            + ConditionalSync
-            + 'static,
-    {
-        if self.session.is_none() {
-            return Ok(None);
-        }
-        let operator = Identify
-            .perform(env)
-            .await
-            .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-        let layer = QueryLayer::from(&self.branch);
-        let overlay = layer.overlay(&operator);
-        let query_env: QueryEnv<'a> = QueryEnv::over(self.composite(), overlay, env);
-        query_env
-            .placements()
-            .await
-            .map_err(|error| EvaluationError::Store(format!("resolve the placements: {error}")))
     }
 
     /// Classify what the session's memory layers changed since their
@@ -971,7 +913,7 @@ where
     /// [`Touched::Rules`], which recomputes.
     fn touched_memories(&self) -> Touched {
         let mut touched = Touched::Nothing;
-        for (memory, sequence) in self.memories().iter().zip(&self.memory_sequences) {
+        for ((_, memory), sequence) in self.memories().iter().zip(&self.memory_sequences) {
             let Some(instants) = memory.since(*sequence) else {
                 return Touched::Rules;
             };

@@ -25,7 +25,7 @@ use super::{
     Line, Transaction, TransactionCommit, carry_footprint, touches_rule_facts, touches_rules,
 };
 use crate::Ephemeral;
-use crate::placement::{Placements, declaration_attrs};
+use crate::placement::{memory_layer, session_layer};
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::branch::session::{Composite, shared_metadata};
@@ -41,7 +41,7 @@ use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::tree::WriteScope;
-use dialog_corpus::{Change, Changes, Entity, Fact, Relation, Selector, Statement, Update as _};
+use dialog_corpus::{Change, Changes, Entity, Fact, Selector, Statement, Update as _};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
@@ -587,11 +587,15 @@ impl TransactionCommit<&Branch> {
         let overlay = branch.overlay().clone();
         let retractions = overlay_retractions(&self.changes, &overlay);
 
-        let memories = self
+        // The layers a write named for them lands in once the commit
+        // publishes: the session's, and the branch's own session overlay
+        // as `session:`.
+        let mut memories = self
             .session
             .as_ref()
             .map(|session| session.memories.clone())
             .unwrap_or_default();
+        memories.push((session_layer(), overlay.clone()));
         let (outcome, induced, shares) = Box::pin(mint_link(
             View::at(Live::Branch(branch), base.as_ref()),
             |profile, issuer| branch.commit_identity(profile, issuer),
@@ -787,43 +791,35 @@ fn apply_shares(
     Ok(())
 }
 
-/// Refuse a write of `the` placed on a layer `session` does not hold.
-fn refuse_unbound(
-    the: &Relation,
-    placements: &Placements,
-    session: &SessionContext,
-) -> Result<(), CommitError> {
-    if let Some(layer) = placements.layer_of(the)
-        && !session.memories.iter().any(|(held, _)| held == layer)
-    {
-        return Err(CommitError::UnboundLayer {
-            attribute: the.to_string(),
-            layer: layer.to_string(),
-        });
+/// Route `shares`, the writes named for a layer, to where each lands:
+/// one named for `memory:` is the primary's and comes back as the second
+/// value; one named for a layer among `held` goes to it; one named for
+/// any other layer is refused.
+fn route_shares(
+    shares: Vec<(Entity, Changes)>,
+    held: &[Entity],
+) -> Result<(Vec<(Entity, Changes)>, Changes), CommitError> {
+    let mut routed = Vec::new();
+    let mut primary = Changes::new();
+    let memory = memory_layer();
+    for (layer, share) in shares {
+        if layer == memory {
+            primary.merge(share);
+        } else if held.contains(&layer) {
+            routed.push((layer, share));
+        } else {
+            let attribute = share
+                .iter()
+                .next()
+                .map(|(_, the, _)| the.to_string())
+                .unwrap_or_default();
+            return Err(CommitError::UnboundLayer {
+                attribute,
+                layer: layer.to_string(),
+            });
+        }
     }
-    Ok(())
-}
-
-/// `shares` split by the layer each write is placed on, in the order the
-/// layers are first met.
-fn by_layer(shares: Changes, placements: &Placements) -> Vec<(Entity, Changes)> {
-    let mut by_layer: Vec<(Entity, Changes)> = Vec::new();
-    for (of, the, change) in shares.iter() {
-        let Some(layer) = placements.layer_of(the) else {
-            continue;
-        };
-        let at = match by_layer.iter().position(|(held, _)| held == layer) {
-            Some(at) => at,
-            None => {
-                by_layer.push((layer.clone(), Changes::new()));
-                by_layer.len() - 1
-            }
-        };
-        by_layer[at]
-            .1
-            .put_cell(the.clone(), of.clone(), vec![change.clone()]);
-    }
-    by_layer
+    Ok((routed, primary))
 }
 
 /// NaN is not a value: a commit that would write one is refused before
@@ -894,31 +890,22 @@ where
 {
     refuse_nan(changes.log().iter().map(|(_, _, change)| change))?;
     let operator = Identify.perform(env).await?;
-    // Through a session, the placements in force for this commit: the
-    // primary's, the session's own and the batch's. A write placed on a
-    // layer the session does not hold is refused before anything is
-    // settled or minted.
-    let (placements, composite) = match &session {
-        Some(session) => {
-            let declared = changes.export_cells(|the| declaration_attrs().contains(the));
-            let placements =
-                Placements::resolve(&view.to_source(), &session.declared, &declared, env).await?;
-            for (the, _, _) in changes.log() {
-                refuse_unbound(the, &placements, session)?;
-            }
-            (Some(placements), session.composite.clone())
-        }
-        None => (None, Composite::of(view.to_source())),
+    let composite = match &session {
+        Some(session) => session.composite.clone(),
+        None => Composite::of(view.to_source()),
     };
-    let places = |the: &Relation| {
-        placements
-            .as_ref()
-            .is_some_and(|placements| placements.layer_of(the).is_some())
-    };
-    let (shares, changes) = match &placements {
-        Some(_) => changes.partition(places),
-        None => (Staged::default(), changes),
-    };
+    // The layers a write named for them (`in:`) can land in: the
+    // session's, and the line's own session overlay as `session:`. A
+    // write named for any other is refused before anything is settled
+    // or minted; one named for `memory:` is the primary's.
+    let held: Vec<Entity> = session
+        .iter()
+        .flat_map(|session| session.memories.iter().map(|(layer, _)| layer.clone()))
+        .chain(std::iter::once(session_layer()))
+        .collect();
+    let mut changes = changes;
+    let (mut shares, primary) = route_shares(changes.take_shares(), &held)?;
+    changes.apply(primary);
     let mut changes = Box::pin(succession::settle(
         composite.clone(),
         shared_metadata(from_ref(&view), &operator),
@@ -927,20 +914,11 @@ where
     ))
     .await?;
     let induced = induce(&view, &composite, &mut changes, transients, env).await?;
-    let mut shares = shares.export();
-    if let (Some(placements), Some(session)) = (&placements, &session) {
-        // What the rules derived onto a layer goes with the shares; a
-        // layer the session does not hold refuses it as a write.
-        let derived = changes.take_cells(places);
-        for (_, the, _) in derived.iter() {
-            refuse_unbound(the, placements, session)?;
-        }
-        shares.merge(derived);
-    }
-    let shares = match &placements {
-        Some(placements) => by_layer(shares, placements),
-        None => Vec::new(),
-    };
+    // What the rules derived into a layer goes with the shares, routed
+    // the same way.
+    let (derived, primary) = route_shares(changes.take_shares(), &held)?;
+    changes.merge(primary);
+    merge_shares(&mut shares, derived);
     let touches = touches_rules(&changes);
     let touches_rule_facts = touches_rule_facts(&changes);
     let previous = view.revision().cloned();

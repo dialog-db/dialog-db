@@ -89,19 +89,17 @@ pub struct Transaction<L: Line> {
     changes: Staged,
     transients: Staged,
     /// The session this transaction commits through, if one: its layers,
-    /// which its reads and its induction see, and its placements, which
-    /// route the writes.
+    /// which its reads and its induction see, and which take the writes
+    /// named for them.
     session: Option<SessionContext>,
 }
 
 /// What a transaction through a [`Session`](crate::Session) carries: the
-/// composite its reads and its induction see, the declarations the
-/// session holds, which its commit resolves the placements over, and the
-/// memory layers that take their shares once the commit publishes.
+/// composite its reads and its induction see, and the memory layers that
+/// take their shares once the commit publishes.
 #[derive(Clone)]
 pub(crate) struct SessionContext {
     pub(crate) composite: Composite,
-    pub(crate) declared: Changes,
     pub(crate) memories: Vec<(Entity, Ephemeral)>,
 }
 
@@ -235,11 +233,16 @@ impl<L: Line> Transaction<L> {
     /// The staged layers [`Transaction::query`] reads over the line:
     /// the durable writes, then the transients. Shared, not copied.
     fn layers(&self) -> Vec<Staged> {
-        [&self.changes, &self.transients]
+        let mut layers: Vec<Staged> = [&self.changes, &self.transients]
             .into_iter()
             .filter(|layer| !layer.is_empty())
             .cloned()
-            .collect()
+            .collect();
+        // Each share is read as the layer it is written into.
+        for (layer, share) in self.changes.shares() {
+            layers.push(Staged::from(share.clone()).in_layer(layer.clone()));
+        }
+        layers
     }
 }
 

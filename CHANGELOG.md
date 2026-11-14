@@ -60,31 +60,46 @@ a query could observe outside any revision. Running handlers after the
 publish keeps a dispatch a function of head and stimulus, so a lost
 compare-and-swap re-runs no effect.
 
-### An attribute is placed on a layer, and a session routes each write to the layer its attribute is placed on
+### A row has a layer, `in`, and a session reads and writes its layers as one
 
 [#795](https://github.com/dialog-db/dialog-db/pull/795), argued in
 [notes/layers.md](./notes/layers.md).
 
-A branch's schema now says where each attribute's facts live. `Placement`
-(`dialog.attribute/in`) places an attribute on a layer; `LayerDeclaration`
-(`dialog.layer/store`) declares a layer beside the primary, backed for
-now by memory. An attribute placed nowhere lives in the primary, as it
-always did. `Branch::session()` opens a `Session` over the primary: it
-mints a memory layer for every declared layer, reads the composite of the
-primary and those layers, and commits a transaction by routing each write
-to the layer its attribute is placed on. `Session::invoke` drives it:
-one dispatch is one publication, re-run from the new head when the head
-moved under it. The primary's share is minted and published as before; a memory layer's share is applied only after
-the publish wins its compare-and-swap, so a lost head leaves no layer
-changed. A rule head whose attribute is placed on a memory layer lands
-there too, keeping its pick, and succeeds no claim of the primary.
+Where a fact lies is now a dimension of the row, beside `the`, `of` and
+`is`: its layer, `in`. An attribute descriptor may name it (`in:`), a
+constant layer or a variable a concept field binds; a statement may
+name it for every fact it writes (`Statement::at`). A read with `in`
+unbound reads every layer and binds each row's; one with `in` bound
+reads that layer alone; a write lands in the layer named, the primary
+with none. `LayerDeclaration` (`dialog.layer/store`) declares a layer
+beside the primary, backed for now by memory. `Branch::session()` opens
+a `Session` over the primary: it mints a memory layer for every declared
+layer, reads the composite, and commits a transaction by routing each
+write to its layer. `Session::invoke` drives it: one dispatch is one
+publication, re-run from the new head when the head moved under it.
+The primary's share is minted and published as before; a layer's share
+is applied only after the publish wins its compare-and-swap, so a lost
+head leaves no layer changed. A rule head whose descriptor names a
+layer lands there, keeping its pick, and succeeds no claim of the
+primary. The layers every session has are named: `memory:` is the
+primary, `session:` the branch's process-local store (what
+`Branch::overlay` holds), `control:` the loopback a command lands in.
 
 What this changes for you:
 
+- `AttributeDescriptor::in_layer` and `layer`, the descriptor's `in` on
+  the wire, `Attribution::layer`, `Claim::layer`, and `Statement::at`
+  are new. `AttributeQuery::with_layer` reads a layer by a term.
+  `Selector::in_layer` and `FactView::layer` carry the layer through a
+  store that reads several.
+- `Changes` keeps writes into layers apart (`associate_in`,
+  `dissociate_in`, `take_shares`, `iter_in`, `into_layer`), serialized
+  under an `in` key beside `facts` and `assets`. `into_instructions`
+  yields the writes bound for the primary alone.
 - `Branch::session()`, `OpenSession::declare`, `Session::{query,
-  transaction, layer, layers, declare, declared, divergences}` are new.
-  A branch read or committed directly, with no session, behaves as
-  before.
+  transaction, layer, layers, declare, declared}` are new. A branch
+  read or committed directly, with no session, behaves as before, and
+  a write `.at(session:)` through it lands in the branch's overlay.
 - `Session::invoke(command)` and `Session::transact(facts)` drive a
   session: each returns an `Invocation` whose `perform` commits and
   publishes as one unit, and re-runs the whole dispatch from the new
@@ -92,36 +107,35 @@ What this changes for you:
   times before reporting `PublishError::VersionMismatch`. A dispatch
   that writes only to memory layers publishes nothing and returns the
   unchanged head.
-- A guided read takes each attribute from the layer it is placed on
-  alone. A row of that attribute found on another layer is reported as a
-  `Divergence` (`Session::divergences`), not read.
 - `Session::subscribe(query)` is new: a standing query over the primary
   and every layer the session holds. A commit to the primary, a share a
   dispatch lands in a memory layer, and a write to the primary's session
   overlay each propagate as a result delta on the next poll, maintained
   incrementally from the layer's instants as an overlay change is. A
-  placement that moves under the query evaluates it afresh. A maintained
-  subscription through a session equals a fresh evaluation after any
-  sequence of dispatches (pinned by a seeded churn test).
-- `CommitError::UnboundLayer` is new: a write whose attribute is placed
-  on a layer the session does not hold is refused before anything is
-  settled or minted. `CommitError::InvalidPlacement` is new: a placement
-  or layer declaration whose value names no layer or no store is refused.
-- The corpus write gate admits `dialog.attribute/*` and `dialog.layer/*`
-  from an application write, as it admits `dialog.rule/*`.
+  maintained subscription through a session equals a fresh evaluation
+  after any sequence of dispatches (pinned by a seeded churn test).
+- `CommitError::UnboundLayer` is new: a write named for a layer the
+  session does not hold is refused before anything is settled or
+  minted. `CommitError::InvalidPlacement` is new: a layer declaration
+  whose value names no store is refused.
+- The corpus write gate admits `dialog.layer/*` from an application
+  write, as it admits `dialog.rule/*`.
 
 Why: local state that moves at frame rate, replicated state and
 ephemeral state peers learn of are different layers, not different
-kinds of fact. Placing an attribute on a layer in the schema lets one
-set of rules act across them, and lets a session recreate every layer
-from the primary's declarations when it opens.
+kinds of fact. A row's layer being a term lets one set of rules act
+across layers and choose where a write lands from data, the way a
+stroke lands on the layer an editor's tool is on, and lets a session
+recreate every layer from the primary's declarations when it opens.
 
 #### Compatibility and migration
 
-- A replica that declares no placement stores and syncs exactly what it
-  did. Placements and layer declarations are ordinary facts under
-  `dialog.attribute/` and `dialog.layer/`; an older release reads them as
-  facts it does not understand and ignores them. Nothing is rewritten.
+- A replica that declares no layer stores and syncs exactly what it did.
+  Layer declarations are ordinary facts under `dialog.layer/`; an older
+  release reads them as facts it does not understand and ignores them.
+  A batch of `Changes` that writes into a layer serializes with an `in`
+  key an older release does not read; one that writes into none
+  serializes as before. Nothing is rewritten.
 
 ## 0.4.0 (2026-11-14)
 

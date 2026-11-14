@@ -1,32 +1,35 @@
 //! A session: the primary branch read and written as one with the
 //! layers its schema declares beside it.
 //!
-//! The primary's schema says which layers exist ([`LayerDeclaration`])
-//! and where each attribute lives ([`Placement`]). Opening a session on
-//! the primary builds every layer the schema declares in memory and
-//! reads them with the primary as one composite: each attribute from the
-//! layer it is placed on, and from it alone (see [`placement::guide`]).
-//! A transaction through the session routes each write to the layer its
-//! attribute is placed on: the primary's share is committed and
-//! published as any branch commit is, and each memory layer's share lands
-//! in it once the publish does, so no layer shows a commit that was
-//! refused.
+//! The primary's schema says which layers exist ([`LayerDeclaration`]).
+//! Opening a session on the primary builds every layer the schema
+//! declares in memory and reads them with the primary as one composite.
+//! Where a row lies is a dimension of the row, `in`: a read with `in`
+//! unbound reads every layer and binds each row's, one with `in` bound
+//! reads that layer alone, and a write lands in the layer its
+//! descriptor names (`in:`, or [`Statement::at`]), the primary with none
+//! named. A transaction through the session routes each write so: the
+//! primary's share is committed and published as any branch commit is,
+//! and each memory layer's share lands in it once the publish does, so
+//! no layer shows a commit that was refused. The layers every session
+//! has are named [`MEMORY`], the primary, [`SESSION`], the session's own,
+//! and [`CONTROL`], the loopback a command lands in.
 //!
 //! ```no_run
-//! # use dialog_repository::{Branch, LayerDeclaration, Placement, Store};
+//! # use dialog_repository::{Branch, LayerDeclaration, Store};
+//! # use dialog_corpus::Statement as _;
 //! # async fn example(branch: Branch, env: impl dialog_repository::SessionEnv) -> anyhow::Result<()> {
-//! let state: dialog_corpus::Entity = "layer:state".parse()?;
+//! let state: dialog_corpus::Entity = "session:state".parse()?;
 //! branch
 //!     .transaction()
 //!     .assert(LayerDeclaration::new(state.clone(), Store::Memory))
-//!     .assert(Placement::new("ui/selected".parse()?, state))
 //!     .commit()
 //!     .publish()
 //!     .perform(&env)
 //!     .await?;
 //! let session = branch.session().perform(&env).await?;
 //! session
-//!     .transact(dialog_query::the!("ui/selected").of("doc:1".parse()?).is(true))
+//!     .transact(dialog_query::the!("ui/selected").of("doc:1".parse()?).is(true).at(state))
 //!     .perform(&env)
 //!     .await?;
 //! # Ok(())
@@ -43,12 +46,13 @@
 //! their answers are the next tick's stimulus.
 //!
 //! What the session holds of its own are its **declarations**
-//! ([`Session::declare`]): placements and layers this process declares
-//! for itself, which outrank what the primary's tree and session store
-//! declare, yield to what a transaction declares, and reach no layer and
-//! no peer.
+//! ([`Session::declare`]): layers this process declares for itself,
+//! which outrank what the primary's tree and session store declare, and
+//! reach no layer and no peer.
 //!
-//! [`placement::guide`]: crate::placement::guide
+//! [`MEMORY`]: crate::MEMORY
+//! [`SESSION`]: crate::SESSION
+//! [`CONTROL`]: crate::CONTROL
 
 pub mod invoke;
 
@@ -68,12 +72,10 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::nodes;
 use parking_lot::RwLock;
 
-use crate::placement::guide::{Divergence, Divergences, Guide, GuidedLayer};
-use crate::placement::{Placements, Store};
+use crate::placement::{Layers, Store};
 use crate::repository::branch::session::Composite;
 use crate::repository::branch::transaction::SessionContext;
 use crate::repository::source::Source;
-use crate::schema::DidExt as _;
 use crate::{Branch, CommitError, Ephemeral, QueryLayer, RemoteSite, Transaction};
 
 /// What a session needs of its environment: a read of the primary, to
@@ -149,9 +151,8 @@ impl OpenSession {
     /// declares.
     pub async fn perform<Env: SessionEnv>(self, env: &Env) -> Result<Session, CommitError> {
         let primary = Source::from(self.primary.clone());
-        let placements =
-            Placements::resolve(&primary, &self.declared, &Changes::new(), env).await?;
-        let layers = placements
+        let layers = Layers::resolve(&primary, &self.declared, env).await?;
+        let layers = layers
             .layers()
             .into_iter()
             .map(|(entity, store)| match store {
@@ -163,7 +164,6 @@ impl OpenSession {
                 primary: self.primary,
                 layers,
                 declared: RwLock::new(self.declared),
-                divergences: Divergences::default(),
                 handlers: RwLock::new(Vec::new()),
                 feed: RwLock::new(invoke::Feed::default()),
             }),
@@ -177,7 +177,6 @@ struct Inner {
     /// it, in the order the schema lists them.
     layers: Vec<(Entity, Ephemeral)>,
     declared: RwLock<Changes>,
-    divergences: Divergences,
     /// What answers a dispatch's commands, in registration order. See
     /// [`Session::handle`].
     handlers: RwLock<Vec<Arc<dyn invoke::Handler>>>,
@@ -229,15 +228,13 @@ impl Session {
             .collect()
     }
 
-    /// Hold `declaration` in this session: a [`Placement`](crate::Placement)
-    /// or a [`LayerDeclaration`](crate::LayerDeclaration), or a
-    /// [`Changes`] of them, whose retractions undo what an earlier call
-    /// declared or what the primary declares. It is this process's own:
-    /// it outranks a declaration the primary's session store or tree
-    /// holds, yields to one a transaction carries, guides every read and
-    /// routes every commit of the session from now on, and reaches no
-    /// layer and no peer. A layer declared here after the session opened
-    /// is not built: declare it on [`Branch::session`] instead.
+    /// Hold `declaration` in this session: a
+    /// [`LayerDeclaration`](crate::LayerDeclaration), or a [`Changes`] of
+    /// them, whose retractions undo what an earlier call declared or what
+    /// the primary declares. It is this process's own: it outranks a
+    /// declaration the primary's session store or tree holds and reaches
+    /// no layer and no peer. A layer declared here after the session
+    /// opened is not built: declare it on [`Branch::session`] instead.
     /// Chainable.
     pub fn declare<S: Statement>(&self, declaration: S) -> &Self {
         declaration.assert(&mut *self.inner.declared.write());
@@ -250,41 +247,10 @@ impl Session {
         self.inner.declared.read().clone()
     }
 
-    /// Every divergence of placement the session's reads found since
-    /// the last call: a fact in a layer other than the one its attribute
-    /// is placed on, which no read takes.
-    pub fn divergences(&self) -> Vec<Divergence> {
-        self.inner.divergences.take()
-    }
-
-    /// The memory layers this session holds, in the schema's order.
-    pub(crate) fn memories(&self) -> Vec<Ephemeral> {
-        self.inner
-            .layers
-            .iter()
-            .map(|(_, memory)| memory.clone())
-            .collect()
-    }
-
-    /// How a read of this session meets each layer.
-    pub(crate) fn guide(&self) -> Arc<Guide> {
-        Arc::new(Guide {
-            lines: vec![GuidedLayer {
-                entity: self.inner.primary.subject().did().this(),
-                primary: true,
-            }],
-            memories: self
-                .inner
-                .layers
-                .iter()
-                .map(|(entity, _)| GuidedLayer {
-                    entity: entity.clone(),
-                    primary: false,
-                })
-                .collect(),
-            divergences: self.inner.divergences.clone(),
-            declared: self.declared(),
-        })
+    /// The memory layers this session holds, by name, in the schema's
+    /// order.
+    pub(crate) fn memories(&self) -> Vec<(Entity, Ephemeral)> {
+        self.inner.layers.clone()
     }
 
     /// The layers a transaction through this session reads and induces
@@ -293,30 +259,29 @@ impl Session {
         Composite {
             sources: vec![primary],
             memories: self.memories(),
-            guide: Some(self.guide()),
         }
     }
 
-    /// A query over the session: the primary and every layer, each
-    /// attribute read from the layer it is placed on.
+    /// A query over the session: the primary and every layer. A read
+    /// with `in` unbound reads them all and binds each row's layer; one
+    /// with `in` bound reads that layer alone.
     pub fn query(&self) -> QueryLayer<'_> {
         let mut layer = QueryLayer::from(&self.inner.primary);
-        for (_, memory) in &self.inner.layers {
-            layer = layer.with_memory(memory);
+        for (name, memory) in &self.inner.layers {
+            layer = layer.with_memory(name.clone(), memory);
         }
-        layer.guided(self.guide())
+        layer
     }
 
     /// Start a transaction through the session. Its reads see every
-    /// layer; its commit routes each write to the layer its attribute is
-    /// placed on, and the memory layers take their shares once the
-    /// primary's commit publishes.
+    /// layer; its commit routes each write to the layer its descriptor
+    /// names (`in:`), the primary with none named, and the memory layers
+    /// take their shares once the primary's commit publishes.
     pub fn transaction(&self) -> Transaction<&Branch> {
         let transaction = self.inner.primary.transaction();
         let primary = transaction.view().to_source();
         transaction.with_session(SessionContext {
             composite: self.composite(primary),
-            declared: self.declared(),
             memories: self.inner.layers.clone(),
         })
     }
@@ -330,7 +295,7 @@ mod tests {
     use super::*;
     use crate::helpers::test_repo;
     use crate::{Answering, FEED_CAPACITY, Handler, HandlerError, Lost, MAX_ANSWERS};
-    use crate::{LayerDeclaration, Placement, PublishError};
+    use crate::{LayerDeclaration, PublishError};
     use anyhow::Result;
     use dialog_common::ConditionalSend;
     use dialog_corpus::Pick;
@@ -350,7 +315,7 @@ mod tests {
     type Operator = Peer<VolatileSpace, dialog_peer::Session>;
 
     fn layer(name: &str) -> Entity {
-        format!("layer:{name}").parse().expect("a layer entity")
+        format!("session:{name}").parse().expect("a layer entity")
     }
 
     /// The values of type `T` of `the` on `of` that `query` reads, as
@@ -411,9 +376,9 @@ mod tests {
         Ok(rows)
     }
 
-    /// `counter/count` of `of` as `value`, under `last`: the count is
-    /// single-valued.
-    fn count(of: &Entity, value: u64) -> AttributeStatement {
+    /// `counter/count` of `of` as `value`, under `last`, written into
+    /// `at`: the count is single-valued.
+    fn count(of: &Entity, value: u64, at: &Entity) -> impl Statement {
         AttributeStatement {
             the: QueryRelation::from("counter/count".parse::<dialog_corpus::Relation>().unwrap()),
             of: of.clone(),
@@ -422,17 +387,21 @@ mod tests {
             cardinality: Some(Cardinality::One),
             pick: Some(dialog_corpus::Pick::Last),
         }
+        .at(at.clone())
     }
 
-    /// Declare a memory layer `state` with `ui/selected` placed on it, and
-    /// a counter rule whose head `counter/count`, under `last`, is placed
-    /// there too.
+    /// Declare a memory layer `state`, and a counter rule whose head
+    /// `counter/count`, under `last`, lands there (`in:`) and whose
+    /// premise reads the count from there.
     async fn declare_state(branch: &Branch, env: &Operator) -> Result<Entity> {
         let state = layer("state");
         let increment: InductiveRule = serde_json::from_value(serde_json::json!({
             "assert!": {
                 "with": {
-                    "count": { "the": "counter/count", "as": "UnsignedInteger", "pick": "last" }
+                    "count": {
+                        "the": "counter/count", "as": "UnsignedInteger", "pick": "last",
+                        "in": "session:state"
+                    }
                 }
             },
             "when": [
@@ -445,7 +414,10 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "count": { "the": "counter/count", "as": "UnsignedInteger", "pick": "last" }
+                            "count": {
+                                "the": "counter/count", "as": "UnsignedInteger", "pick": "last",
+                                "in": "session:state"
+                            }
                         }
                     },
                     "where": {
@@ -466,8 +438,6 @@ mod tests {
         branch
             .transaction()
             .assert(LayerDeclaration::new(state.clone(), Store::Memory))
-            .assert(Placement::new("ui/selected".parse()?, state.clone()))
-            .assert(Placement::new("counter/count".parse()?, state.clone()))
             .assert(increment)
             .commit()
             .publish()
@@ -477,13 +447,12 @@ mod tests {
         Ok(state)
     }
 
-    /// A session builds the layers the primary's schema declares, routes
-    /// each write to the layer its attribute is placed on, and reads
-    /// each attribute from that layer alone: the tree never holds a fact
-    /// placed on the memory layer, and the layer never holds one placed
-    /// nowhere.
+    /// A session builds the layers the primary's schema declares and
+    /// routes each write to the layer it names: the tree never holds a
+    /// fact written into the memory layer, and the layer never holds one
+    /// written with no layer named.
     #[dialog_common::test]
-    async fn it_routes_each_write_to_the_layer_its_attribute_is_placed_on() -> Result<()> {
+    async fn it_routes_each_write_to_the_layer_it_names() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -504,7 +473,12 @@ mod tests {
                     .of(doc.clone())
                     .is("Notes".to_string()),
             )
-            .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
+            .assert(
+                dialog_query::the!("ui/selected")
+                    .of(doc.clone())
+                    .is(true)
+                    .at(state.clone()),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -542,15 +516,15 @@ mod tests {
             read::<String>(session.query(), &operator, "doc/title", &doc).await?,
             vec!["String(\"Notes\")".to_string()]
         );
-        assert!(session.divergences().is_empty(), "nothing is misplaced");
         Ok(())
     }
 
-    /// A rule's head placed on a memory layer lands there, with its pick:
+    /// A rule's head whose descriptor names a memory layer lands there,
+    /// with its pick:
     /// a dispatched command increments a count the layer holds, and the
     /// commit, which writes nothing to the tree, still publishes.
     #[dialog_common::test]
-    async fn it_lands_a_rules_head_on_the_layer_it_is_placed_on() -> Result<()> {
+    async fn it_lands_a_rules_head_on_the_layer_its_descriptor_names() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -560,7 +534,7 @@ mod tests {
         let counter: Entity = "ctr:1".parse()?;
         session
             .transaction()
-            .assert(count(&counter, 1))
+            .assert(count(&counter, 1, &state))
             .commit()
             .publish()
             .perform(&operator)
@@ -607,7 +581,7 @@ mod tests {
         let memory = session.layer(&state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
         session
-            .transact(count(&counter, 1))
+            .transact(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
         // Another handle moves the head; this session's handle is stale.
@@ -671,7 +645,7 @@ mod tests {
         let memory = session.layer(&state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
         let before = session
-            .transact(count(&counter, 1))
+            .transact(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
         let after = session
@@ -691,11 +665,11 @@ mod tests {
         Ok(())
     }
 
-    /// A write placed on a layer the session does not hold is refused
+    /// A write named for a layer the session does not hold is refused
     /// before anything changes: the primary's head and every layer stay as
     /// they were.
     #[dialog_common::test]
-    async fn it_refuses_a_write_placed_on_a_layer_the_session_does_not_hold() -> Result<()> {
+    async fn it_refuses_a_write_named_for_a_layer_the_session_does_not_hold() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -704,15 +678,19 @@ mod tests {
         let memory = session.layer(&state).expect("the state layer").clone();
         let before = branch.revision();
         let doc: Entity = "doc:1".parse()?;
-        // The session declares a placement on a layer nothing built.
-        session.declare(Placement::new("doc/note".parse()?, layer("nowhere")));
         let refused = session
             .transaction()
-            .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
+            .assert(
+                dialog_query::the!("ui/selected")
+                    .of(doc.clone())
+                    .is(true)
+                    .at(state.clone()),
+            )
             .assert(
                 dialog_query::the!("doc/note")
                     .of(doc.clone())
-                    .is("x".to_string()),
+                    .is("x".to_string())
+                    .at(layer("nowhere")),
             )
             .commit()
             .publish()
@@ -727,7 +705,7 @@ mod tests {
                 assert_eq!(named, layer("nowhere").to_string());
             }
             other => {
-                panic!("a write placed on a layer the session does not hold is refused: {other:?}")
+                panic!("a write named for a layer the session does not hold is refused: {other:?}")
             }
         }
         branch.refresh(&operator).await?;
@@ -752,7 +730,12 @@ mod tests {
         let doc: Entity = "doc:1".parse()?;
         let transaction = session
             .transaction()
-            .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
+            .assert(
+                dialog_query::the!("ui/selected")
+                    .of(doc.clone())
+                    .is(true)
+                    .at(state.clone()),
+            )
             .assert(
                 dialog_query::the!("doc/title")
                     .of(doc.clone())
@@ -818,7 +801,17 @@ mod tests {
         Ok(selected(&claims))
     }
 
-    fn flag(doc: &Entity, value: bool) -> impl Statement {
+    /// `ui/selected` of `doc` as `value`, written into `at`.
+    fn flag(doc: &Entity, value: bool, at: &Entity) -> impl Statement {
+        dialog_query::the!("ui/selected")
+            .of(doc.clone())
+            .is(value)
+            .at(at.clone())
+    }
+
+    /// `ui/selected` of `doc` as `value`, written with no layer named:
+    /// into the primary.
+    fn primary_flag(doc: &Entity, value: bool) -> impl Statement {
         dialog_query::the!("ui/selected").of(doc.clone()).is(value)
     }
 
@@ -831,7 +824,7 @@ mod tests {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        declare_state(&branch, &operator).await?;
+        let state = declare_state(&branch, &operator).await?;
         let session = branch.session().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
         let mut subscription = session.subscribe(selected_query());
@@ -839,7 +832,7 @@ mod tests {
         assert!(initial.asserted.is_empty());
 
         session
-            .transact(flag(&doc, true))
+            .transact(flag(&doc, true, &state))
             .perform(&operator)
             .await?;
         let delta = subscription
@@ -873,7 +866,7 @@ mod tests {
 
         session
             .transact(Changes::new())
-            .retract(flag(&doc, true))
+            .retract(flag(&doc, true, &state))
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("retracted");
@@ -886,11 +879,11 @@ mod tests {
         Ok(())
     }
 
-    /// A placement that moves under a standing query re-evaluates it:
-    /// the rows the layer holds stop being read once the attribute is
-    /// placed elsewhere, and are read again when it is placed back.
+    /// A read with `in` bound reads that layer alone; with `in` a
+    /// variable it reads every layer and binds each row's. The same cell
+    /// lies in two layers as two rows.
     #[dialog_common::test]
-    async fn it_re_evaluates_a_subscription_when_a_placement_moves() -> Result<()> {
+    async fn it_reads_one_layer_with_in_bound_and_binds_it_unbound() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -898,51 +891,61 @@ mod tests {
         let session = branch.session().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
         session
-            .transact(flag(&doc, true))
+            .transact(flag(&doc, true, &state))
+            .assert(primary_flag(&doc, false))
             .perform(&operator)
             .await?;
-        let mut subscription = session.subscribe(selected_query());
-        let initial = subscription.poll(&operator).await?.expect("initial");
-        assert_eq!(
-            selected(&initial.asserted),
-            vec![format!("{doc} Boolean(true)")]
-        );
 
-        // The attribute moves to the primary: the layer's row is a
-        // divergence now, not a reading.
-        session
-            .transact(Changes::new())
-            .retract(Placement::new("ui/selected".parse()?, state.clone()))
-            .perform(&operator)
-            .await?;
-        let delta = subscription
-            .poll(&operator)
-            .await?
-            .expect("placement moved");
+        let rows = |query: AttributeQuery| {
+            let session = session.clone();
+            let operator = &operator;
+            async move {
+                let claims: Vec<dialog_query::Claim> = session
+                    .query()
+                    .select(query)
+                    .perform(operator)
+                    .try_vec()
+                    .await?;
+                let mut rows: Vec<String> = claims
+                    .iter()
+                    .map(|claim| {
+                        format!(
+                            "{:?} in {}",
+                            claim.is,
+                            claim.layer().map(ToString::to_string).unwrap_or_default()
+                        )
+                    })
+                    .collect();
+                rows.sort();
+                Ok::<_, anyhow::Error>(rows)
+            }
+        };
         assert_eq!(
-            selected(&delta.retracted),
-            vec![format!("{doc} Boolean(true)")]
+            rows(
+                selected_query()
+                    .with_layer(Term::Constant(dialog_corpus::Value::Entity(state.clone())))
+            )
+            .await?,
+            vec![format!("Boolean(true) in {state}")],
+            "`in` bound to the layer reads it alone"
         );
         assert_eq!(
-            subscription.results().len(),
-            0,
-            "{:?}",
-            fresh(&session, &operator, selected_query()).await?
+            rows(
+                selected_query().with_layer(Term::Constant(dialog_corpus::Value::Entity(
+                    crate::memory_layer()
+                )))
+            )
+            .await?,
+            vec!["Boolean(false) in memory:".to_string()],
+            "`in` bound to the primary reads it alone"
         );
         assert_eq!(
-            subscription.recomputes(),
-            2,
-            "a moved placement evaluates afresh"
-        );
-
-        session
-            .transact(Placement::new("ui/selected".parse()?, state))
-            .perform(&operator)
-            .await?;
-        let delta = subscription.poll(&operator).await?.expect("placed back");
-        assert_eq!(
-            selected(&delta.asserted),
-            vec![format!("{doc} Boolean(true)")]
+            rows(selected_query().with_layer(Term::var("where"))).await?,
+            vec![
+                "Boolean(false) in memory:".to_string(),
+                format!("Boolean(true) in {state}")
+            ],
+            "`in` unbound reads every layer and binds each row's"
         );
         Ok(())
     }
@@ -966,9 +969,10 @@ mod tests {
     }
 
     /// Through any sequence of dispatches across the primary and a
-    /// memory layer, with a rule landing on the layer and a placement
-    /// moving under the query, a maintained subscription equals a fresh
-    /// evaluation after every step.
+    /// memory layer, with a rule landing on the layer and the same cell
+    /// written in both, a maintained subscription equals a fresh
+    /// evaluation after every step, and nothing after the first poll
+    /// evaluates afresh.
     #[dialog_common::test]
     async fn it_agrees_with_a_fresh_evaluation_through_session_churn() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
@@ -981,14 +985,12 @@ mod tests {
             .collect::<Result<_, _>>()?;
         let counter: Entity = "ctr:1".parse()?;
         session
-            .transact(count(&counter, 1))
+            .transact(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
         let mut subscription = session.subscribe(selected_query());
         subscription.poll(&operator).await?;
 
-        let mut moves = 0;
-        let mut placed = true;
         for seed in [7u64, 99, 2024] {
             let mut rng = Xorshift(seed);
             for step in 0..24 {
@@ -996,14 +998,14 @@ mod tests {
                 let label = match rng.below(6) {
                     0 => {
                         session
-                            .transact(flag(&doc, true))
+                            .transact(flag(&doc, true, &state))
                             .perform(&operator)
                             .await?;
                         "select"
                     }
                     1 => {
                         session
-                            .transact(flag(&doc, false))
+                            .transact(flag(&doc, false, &state))
                             .perform(&operator)
                             .await?;
                         "deselect"
@@ -1011,7 +1013,7 @@ mod tests {
                     2 => {
                         session
                             .transact(Changes::new())
-                            .retract(flag(&doc, true))
+                            .retract(flag(&doc, true, &state))
                             .perform(&operator)
                             .await?;
                         "retract"
@@ -1033,19 +1035,11 @@ mod tests {
                         "increment and title"
                     }
                     4 => {
-                        let placement = Placement::new("ui/selected".parse()?, state.clone());
-                        if placed {
-                            session
-                                .transact(Changes::new())
-                                .retract(placement)
-                                .perform(&operator)
-                                .await?;
-                        } else {
-                            session.transact(placement).perform(&operator).await?;
-                        }
-                        placed = !placed;
-                        moves += 1;
-                        "move the placement"
+                        session
+                            .transact(primary_flag(&doc, step % 2 == 0))
+                            .perform(&operator)
+                            .await?;
+                        "select in the primary"
                     }
                     _ => "nothing",
                 };
@@ -1059,24 +1053,26 @@ mod tests {
                 );
             }
         }
-        assert!(moves > 0, "the churn moved the placement");
         assert_eq!(
             subscription.recomputes(),
-            1 + moves,
-            "only the first poll and a moved placement evaluate afresh"
+            1,
+            "only the first poll evaluates afresh"
         );
         Ok(())
     }
 
-    /// Declare a memory layer `state` with `node/fetched` placed on it,
-    /// and a rule capturing a `cmd.fetched/node` answer there: the node
-    /// records every command that fetched it.
+    /// Declare a memory layer `state`, and a rule capturing a
+    /// `cmd.fetched/node` answer there (`in:`): the node records every
+    /// command that fetched it.
     async fn declare_fetch(branch: &Branch, env: &Operator) -> Result<Entity> {
         let state = layer("state");
         let capture: InductiveRule = serde_json::from_value(serde_json::json!({
             "assert!": {
                 "with": {
-                    "fetched": { "the": "node/fetched", "as": "Entity", "pick": "all" }
+                    "fetched": {
+                        "the": "node/fetched", "as": "Entity", "pick": "all",
+                        "in": "session:state"
+                    }
                 }
             },
             "when": [
@@ -1094,7 +1090,6 @@ mod tests {
         branch
             .transaction()
             .assert(LayerDeclaration::new(state.clone(), Store::Memory))
-            .assert(Placement::new("node/fetched".parse()?, state.clone()))
             .assert(capture)
             .commit()
             .publish()

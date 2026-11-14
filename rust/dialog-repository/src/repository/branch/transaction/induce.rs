@@ -312,7 +312,8 @@ where
         // emissions to the next round's stimulus. The incoming
         // transients simply expire — nothing entered `changes`, so
         // there is no sweep.
-        stimulus = novelty.clone().into_instructions();
+        stimulus = layered_instructions(&novelty);
+        stimulus.extend(novelty.clone().into_instructions());
         stimulus.extend(emitted_transients.clone().into_instructions());
         novelty.assert(changes);
         emitted_transients.clone().assert(&mut induced);
@@ -1286,7 +1287,7 @@ fn bind_seed(
 
 /// What a head writes, as `emit_matches` tells two heads apart: its
 /// subject, then each field's attribute, value and pick.
-type WrittenHead = (Entity, Vec<(Relation, Value, Pick)>);
+type WrittenHead = (Entity, Vec<(Relation, Value, Pick, Option<Entity>)>);
 
 /// Emit a rule's head for every produced match: transient heads into
 /// `transients`, durable heads (novelty-checked against the frozen
@@ -1320,27 +1321,35 @@ async fn emit_matches<'a>(
             continue;
         }
         let mut head = Changes::new();
-        // The cells placed on a memory layer. The layer elects among its
-        // own rows of a cell, so a head landing there keeps its pick and
-        // succeeds no claim of the line.
-        let mut shared = Changes::new();
-        for (attribute, value, pick) in cells {
-            let into = if !transient_head && view.lands_in_memory(&attribute).await? {
-                &mut shared
-            } else {
-                &mut head
+        // The cells whose descriptor names a layer (`in:`) other than
+        // the primary. The layer elects among its own rows of a cell,
+        // so a head landing there keeps its pick and succeeds no claim
+        // of the line.
+        let mut shared: Vec<(Entity, Instruction)> = Vec::new();
+        for (attribute, value, pick, layer) in cells {
+            let fact = Fact {
+                the: attribute,
+                of: this.clone(),
+                is: value,
+                cause: None,
             };
-            match rule.polarity() {
+            match (layer, rule.polarity()) {
+                (Some(layer), Polarity::Retract) if !transient_head => {
+                    shared.push((layer, Instruction::Retract(fact)));
+                }
+                (Some(layer), Polarity::Assert) if !transient_head => {
+                    shared.push((layer, Instruction::Assert(fact, pick)));
+                }
                 // A retracting head dissociates the exact bound
                 // triple, cardinality-independent.
-                Polarity::Retract => {
-                    dialog_corpus::Update::dissociate(into, attribute, this.clone(), value);
+                (_, Polarity::Retract) => {
+                    dialog_corpus::Update::dissociate(&mut head, fact.the, fact.of, fact.is);
                 }
                 // An asserting head writes as the field's pick says: a
                 // set appends, and a choosing pick succeeds the claim
                 // it elects, resolved against the view at commit.
-                Polarity::Assert => {
-                    dialog_corpus::Update::associate(into, attribute, this.clone(), value, pick);
+                (_, Polarity::Assert) => {
+                    dialog_corpus::Update::associate(&mut head, fact.the, fact.of, fact.is, pick);
                 }
             }
         }
@@ -1349,14 +1358,14 @@ async fn emit_matches<'a>(
             head.assert(transients);
             continue;
         }
-        for instruction in shared.into_instructions() {
-            if is_novel(view, &instruction).await? {
+        for (layer, instruction) in shared {
+            if is_novel_in(view, &instruction, Some(&layer)).await? {
                 match instruction {
-                    Instruction::Assert(a, policy) => {
-                        dialog_corpus::Update::associate(novelty, a.the, a.of, a.is, policy)
-                    }
+                    Instruction::Assert(a, policy) => dialog_corpus::Update::associate_in(
+                        novelty, layer, a.the, a.of, a.is, policy,
+                    ),
                     Instruction::Retract(a) => {
-                        dialog_corpus::Update::dissociate(novelty, a.the, a.of, a.is)
+                        dialog_corpus::Update::dissociate_in(novelty, layer, a.the, a.of, a.is)
                     }
                 }
             }
@@ -1417,11 +1426,46 @@ fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenH
                     })?
                 }
             };
-            cells.push((attribute, value, field.descriptor().pick().clone()));
+            // The layer the cell lands in (`in:`): the descriptor's
+            // constant, or the layer the body bound its variable to; the
+            // primary's own name is no layer apart.
+            let layer = match field.descriptor().layer() {
+                Some(Term::Constant(layer)) => Entity::try_from(layer.clone()).ok(),
+                Some(Term::Variable {
+                    name: Some(name), ..
+                }) => match matched.lookup(&Term::<Any>::var(name.as_ref())) {
+                    Ok(Binding::Present(Value::Entity(layer))) => Some(layer),
+                    _ => None,
+                },
+                _ => None,
+            }
+            .filter(|layer| *layer != crate::placement::memory_layer());
+            cells.push((attribute, value, field.descriptor().pick().clone(), layer));
         }
         heads.push((this, cells));
     }
     Ok(heads)
+}
+
+/// The writes into layers among `changes`, as instructions: what a round's
+/// heads landing in a layer give the next round as stimulus, beside the
+/// writes bound for the primary.
+fn layered_instructions(changes: &Changes) -> Vec<Instruction> {
+    changes
+        .iter_in()
+        .map(|(_, of, the, change)| {
+            let fact = |is: &Value| Fact {
+                the: the.clone(),
+                of: of.clone(),
+                is: is.clone(),
+                cause: None,
+            };
+            match change {
+                Change::Assert(is, policy) => Instruction::Assert(fact(is), policy.clone()),
+                Change::Retract(is) => Instruction::Retract(fact(is)),
+            }
+        })
+        .collect()
 }
 
 /// Whether applying `instruction` would change the view: asserting a
@@ -1432,13 +1476,26 @@ fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenH
 /// frozen round view, so siblings within a round judge novelty against
 /// identical state.
 async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<bool, CommitError> {
+    is_novel_in(view, instruction, None).await
+}
+
+/// [`is_novel`], judged within `layer` when one is named: a head landing
+/// in a layer is novel unless that layer holds it.
+async fn is_novel_in<'a>(
+    view: &QueryEnv<'a>,
+    instruction: &Instruction,
+    layer: Option<&Entity>,
+) -> Result<bool, CommitError> {
     let fact = match instruction {
         Instruction::Assert(a, _) | Instruction::Retract(a) => a,
     };
-    let selector = Selector::new()
+    let mut selector = Selector::new()
         .the(fact.the.clone())
         .of(fact.of.clone())
         .is(fact.is.clone());
+    if let Some(layer) = layer {
+        selector = selector.in_layer(layer.clone());
+    }
     let present = !select(view, selector).await?.is_empty();
     Ok(match instruction {
         Instruction::Assert(_, _) => !present,

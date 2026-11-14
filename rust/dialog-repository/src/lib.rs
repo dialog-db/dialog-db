@@ -38,8 +38,9 @@ pub use repository::*;
 
 /// Attribute placement: which layer an attribute's facts live in.
 pub mod placement;
-pub use placement::guide::Divergence;
-pub use placement::{LayerDeclaration, Placement, Store, attribute_entity};
+pub use placement::{
+    CONTROL, LayerDeclaration, MEMORY, SESSION, Store, control_layer, memory_layer, session_layer,
+};
 
 /// A session: the primary branch and the layers its schema declares.
 pub mod session;
