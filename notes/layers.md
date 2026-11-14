@@ -143,22 +143,33 @@ advance-and-retry loop.
 
 Placement (now attribute → one layer), guided reads and divergences,
 read-only links, capture by a durable encloser, holds until publish,
-`Committed::derived`, `Stack::declare` for a process's own
+`Committed::derived`, `Session::declare` for a process's own
 placements, the randomized invariant, induction's rounds, which are
 the ticks.
 
 ## Order
 
-1. #720 lands as the engine.
-2. `round` becomes `tick` in names and docs; a tick mints its instants
-   in the memory layers as it ends, not at the end of the dispatch.
-3. `branch.session()`, `invoke`, `transact`, `sync`; the stack built
-   from the primary's schema. Sapling and tonk move onto `invoke` and
-   delete their wiring and retry code.
-4. `in:` on attributes; scopes go; `Branch::overlay` becomes the
-   session layer.
-5. Write-only links. A transport for a layer with upstreams in memory
-   (sapling's worker–daemon link first); `Channel` goes.
+1. Done, in [#795](https://github.com/dialog-db/dialog-db/pull/795),
+   rebuilt on `main` rather than ported from #578 and #720: `in:` on
+   attributes (`Placement`, `LayerDeclaration`), guided reads and
+   divergences, `branch.session()` building the memory layers from
+   the primary's schema, `invoke` and `transact` with the re-run from
+   a moved head, a rule head landing on its placed layer with its
+   pick, `Session::subscribe` over the composite with the churn
+   invariant. Induction's rounds are the ticks; they keep their name
+   in the code.
+2. A tick mints its instants in the memory layers as it ends, not at
+   the end of the dispatch, so a subscriber sees the ticks in order
+   (point 12). Today a dispatch lands each layer's share once, after
+   the publish.
+3. Sapling and tonk move onto `invoke` and delete their wiring and
+   retry code. `Branch::overlay` becomes the session layer of a
+   session with no declared layers.
+4. `sync` on a session: pull and push every layer with upstreams.
+   Layers that are other branches of the repository (device, index),
+   named by the schema; layers on disk (`store: disk`).
+5. Write-only links. Channels (8a): a one-tick layer with a transport,
+   sapling's worker to daemon link first.
 
 ## Open
 
