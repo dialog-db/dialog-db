@@ -27,11 +27,10 @@ A rule cannot say a value by its shape: dialog has no value made of values, and 
  decided    Pattern = Variable | Constant         the leaves: what Term is
                     | Map   { key: Pattern … , rest }
                     | List  [ Pattern … , run ]
-                    | Tuple [ Pattern … ]
 ```
 
 - **A parameter holds a pattern.** Where the value is bound, the pattern takes it apart and binds what is inside it. Where everything inside it is bound, the pattern is the value. One thing, both ways.
-- **A composite value first.** A map, a list or a tuple of values, kept whole as a `Value::Record`: dag-cbor under a version byte, so a later layout is a later version. Named by a merkle reference of its parts, so no layout moves a name. A revision's record is a bare dag-cbor map and never starts with the version byte, so the two tell apart and nothing stored is rewritten.
+- **A composite value first.** A map or a list of values, as the IPLD data model has them and no tuple (Irakli, 2026-11-14: a notation may have a tuple, and that does not give it a place in the data model; it writes one as a list). Kept whole as a `Value::Record`: dag-cbor under a version byte, so a later layout is a later version. Named by a merkle reference of its parts, so no layout moves a name. A revision's record is a bare dag-cbor map and never starts with the version byte, so the two tell apart and nothing stored is rewritten.
 - **The planner and inference look inside.** A pattern is feasible by the variables in it, not as one variable. Its type follows from its shape.
 - **No stored format and no wire form changes for it now.** Rules of tonk's notation never hold a pattern. What installing a rule that holds one does is to be said, not left to happen.
 
