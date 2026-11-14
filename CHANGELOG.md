@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A session's handlers answer a dispatch's commands
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[#797](https://github.com/dialog-db/dialog-db/pull/797), argued in
 [notes/layers.md](./notes/layers.md) ("Handlers").
 
 A command is scratch: it lives one tick and lands on no layer, so
