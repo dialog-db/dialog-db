@@ -16,7 +16,7 @@ use crate::{
 };
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
-use dialog_corpus::{Cause, DialogCorpusError, Fact, Select};
+use dialog_corpus::{Cause, DialogCorpusError, Fact, Select, memory_layer};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
@@ -114,11 +114,12 @@ impl AttributeQueryAll {
 
     /// Whether a row read from `layer` is one this scan reads: any row
     /// unless the scan names a constant layer the row's differs from. A
-    /// store that reads one layer stamps none, and every row is its.
+    /// row with no layer stamped is the primary's, `memory:`.
     pub(crate) fn reads_from(&self, layer: Option<&Entity>) -> bool {
         match (&self.layer, layer) {
             (Term::Constant(Value::Entity(wanted)), Some(layer)) => wanted == layer,
-            (Term::Constant(_), Some(_)) => false,
+            (Term::Constant(Value::Entity(wanted)), None) => *wanted == memory_layer(),
+            (Term::Constant(_), _) => false,
             _ => true,
         }
     }
@@ -207,7 +208,9 @@ impl AttributeQueryAll {
         claim.layer = layer;
         let standing = Standing::new(version, claim.cause().clone());
         candidate.reserve(5);
-        if let (Some(name), Some(layer)) = (self.layer.shared_name(), claim.layer.clone()) {
+        // A row with no layer stamped is the primary's.
+        if let Some(name) = self.layer.shared_name() {
+            let layer = claim.layer.clone().unwrap_or_else(memory_layer);
             candidate.bind_variable(name, self.layer.binding_kind(), Value::Entity(layer))?;
         }
         if let Some(name) = self.the.shared_name() {

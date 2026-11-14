@@ -14,7 +14,7 @@ use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
-use dialog_corpus::{Cause, DialogCorpusError, Fact, FactView, Select};
+use dialog_corpus::{Cause, DialogCorpusError, Fact, FactView, Select, memory_layer};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::pin::Pin;
@@ -51,11 +51,12 @@ fn challenged(
     let attribute = CorpusRelation::try_from(Value::from(claim.the().clone()))?;
     let selector = Selector::new().the(attribute).of(claim.of().clone());
     // A read that binds each row's layer elects within the layer: the
-    // challengers are the layer's own. Any other read elects across the
-    // layers as one cell.
-    Ok(match claim.layer.clone() {
-        Some(layer) if per_layer => selector.in_layer(layer),
-        _ => selector,
+    // challengers are the layer's own, the primary's for a row with no
+    // layer stamped. Any other read elects across the layers as one cell.
+    Ok(if per_layer {
+        selector.in_layer(claim.layer.clone().unwrap_or_else(memory_layer))
+    } else {
+        selector
     })
 }
 

@@ -42,8 +42,8 @@ use crate::{Erased, select_from_source};
 // The declaration attribute is parsed once: every session open asks for it.
 static STORE_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.layer/store").into());
 
-/// The name of the primary: the base durable branch of a session.
-pub const MEMORY: &str = "memory:";
+pub use dialog_corpus::{MEMORY, memory_layer};
+
 /// The name of the layer every session mints: in memory, the session's
 /// own, gone when the session is.
 pub const SESSION: &str = "session:";
@@ -52,17 +52,10 @@ pub const CONTROL: &str = "control:";
 
 // The layer entities are parsed once: a read asks for them per line it
 // reads, a commit per head it writes.
-static MEMORY_LAYER: LazyLock<Entity> =
-    LazyLock::new(|| MEMORY.parse().expect("a bare scheme is an entity"));
 static SESSION_LAYER: LazyLock<Entity> =
     LazyLock::new(|| SESSION.parse().expect("a bare scheme is an entity"));
 static CONTROL_LAYER: LazyLock<Entity> =
     LazyLock::new(|| CONTROL.parse().expect("a bare scheme is an entity"));
-
-/// The entity of the primary, [`MEMORY`].
-pub fn memory_layer() -> Entity {
-    MEMORY_LAYER.clone()
-}
 
 /// The entity of the session's own layer, [`SESSION`].
 pub fn session_layer() -> Entity {
