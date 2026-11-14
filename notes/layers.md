@@ -246,6 +246,37 @@ space's and the profile's holds the profile's). What stays: the
   decision over data, never a router's; fan-out is one row per
   provider. Leaning: adopt, and rework #797 so that `Handler` is
   sugar over a consumer of `channel:host` and the feed goes.
+- `in:` as a term, not only a declaration. The maintainer's picture is
+  an image editor's: a stroke lands on the layer the tool is on, chosen
+  per stroke, not per colour. So a write names its layer: a
+  transaction's `in:` for the batch, a claim's `in:` in notation, and
+  on a rule an `in:` on the head and on each premise, constant or a
+  variable. A variable on a head is Bloom's `@address`, bound by the
+  rule from data (the row's own field, the announcements); a variable
+  on a premise binds which layer a row came from, so "whose" is read,
+  not stored. Precedence: the write's `in:` over the attribute's
+  placement over the primary. A placement then pins: a write of a
+  placed attribute to another layer is refused (`UnboundLayer` already
+  does this for a layer the session lacks), and a divergence is a row
+  of a placed attribute found elsewhere; an unplaced attribute may lie
+  on any layer the write names. This replaces the alternative of an
+  "active layer" fact and copy rules, which makes every write two
+  steps. Nothing here needs a new write path: a commit already
+  partitions a batch into `(layer, Changes)` shares.
+- Layers that are branches. The meta branch already keeps which
+  branches exist, their revisions and their upstreams (tonk's
+  `tonk.dialog.replica/active-branch`, `xyz.tonk.branch/name`). A
+  layer with `dialog.layer/store "branch"` is one of them, opened as a
+  source of the composite (a composite already has several sources),
+  and `session.sync()` pushes and pulls the primary and every branch
+  layer with its own upstreams. Such a layer is a queue when the sender
+  asserts commands into it and the recipient retracts them once
+  handled: order from the branch's commits, once from the retraction,
+  and the retraction is the acknowledgement the sender reads on its
+  next pull. The recipient's rules fire on arrival already: a pull's
+  novelty is induction's stimulus through the watermark lag. This is
+  the durable end of the channel question above; `channel:self` and
+  `channel:host` are the one-tick end. Both are layers.
 - Discovery. A provider announces what it performs as facts: the
   capability (a command concept), the provider's DID, when the
   announcement expires. Announcements are TTL'd rows of a layer, as
