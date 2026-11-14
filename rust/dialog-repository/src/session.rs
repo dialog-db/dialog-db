@@ -38,7 +38,9 @@
 //! one unit of publication, re-run from the new head when the primary's
 //! head moved under it (see [`invoke`]). [`Session::transaction`] is the
 //! same commit without the re-run, for a caller that handles a lost head
-//! itself.
+//! itself. Once a dispatch has published, the session's handlers
+//! ([`Session::handle`], [`invoke::Handler`]) answer its commands, and
+//! their answers are the next tick's stimulus.
 //!
 //! What the session holds of its own are its **declarations**
 //! ([`Session::declare`]): placements and layers this process declares
@@ -162,6 +164,8 @@ impl OpenSession {
                 layers,
                 declared: RwLock::new(self.declared),
                 divergences: Divergences::default(),
+                handlers: RwLock::new(Vec::new()),
+                feed: RwLock::new(invoke::Feed::default()),
             }),
         })
     }
@@ -174,6 +178,12 @@ struct Inner {
     layers: Vec<(Entity, Ephemeral)>,
     declared: RwLock<Changes>,
     divergences: Divergences,
+    /// What answers a dispatch's commands, in registration order. See
+    /// [`Session::handle`].
+    handlers: RwLock<Vec<Arc<dyn invoke::Handler>>>,
+    /// The session's dispatches, for readers of its command feed. See
+    /// [`Session::commands`].
+    feed: RwLock<invoke::Feed>,
 }
 
 /// The primary branch and the layers its schema declares, read and
@@ -319,9 +329,11 @@ mod tests {
 
     use super::*;
     use crate::helpers::test_repo;
+    use crate::{Answering, FEED_CAPACITY, Handler, HandlerError, Lost, MAX_ANSWERS};
     use crate::{LayerDeclaration, Placement, PublishError};
     use anyhow::Result;
     use dialog_common::ConditionalSend;
+    use dialog_corpus::Pick;
     use dialog_corpus::Selector;
     use dialog_peer::Peer;
     use dialog_peer::helpers::test_session_with_peer;
@@ -333,6 +345,7 @@ mod tests {
     use dialog_query::{AttributeQuery, InductiveRule, Term};
     use dialog_storage::provider::storage::VolatileSpace;
     use std::fmt::Debug;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     type Operator = Peer<VolatileSpace, dialog_peer::Session>;
 
@@ -1052,6 +1065,298 @@ mod tests {
             1 + moves,
             "only the first poll and a moved placement evaluate afresh"
         );
+        Ok(())
+    }
+
+    /// Declare a memory layer `state` with `node/fetched` placed on it,
+    /// and a rule capturing a `cmd.fetched/node` answer there: the node
+    /// records every command that fetched it.
+    async fn declare_fetch(branch: &Branch, env: &Operator) -> Result<Entity> {
+        let state = layer("state");
+        let capture: InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": {
+                    "fetched": { "the": "node/fetched", "as": "Entity", "pick": "all" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": { "node": { "the": "cmd.fetched/node", "as": "Entity" } }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "fetched" } },
+                        "node": { "?": { "name": "this" } }
+                    }
+                }
+            ]
+        }))?;
+        branch
+            .transaction()
+            .assert(LayerDeclaration::new(state.clone(), Store::Memory))
+            .assert(Placement::new("node/fetched".parse()?, state.clone()))
+            .assert(capture)
+            .commit()
+            .publish()
+            .perform(env)
+            .await?;
+        branch.refresh(env).await?;
+        Ok(state)
+    }
+
+    /// A handler answering every `cmd.fetch/node` with `cmd.fetched/node`
+    /// of the same command, counting its calls.
+    fn fetcher(calls: Arc<AtomicUsize>) -> Arc<dyn Handler> {
+        use dialog_corpus::{Change, Update as _};
+        Arc::new(Answering(move |commands: &Changes| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let fetch: dialog_corpus::Relation = "cmd.fetch/node".parse().expect("attribute");
+            let fetched: dialog_corpus::Relation = "cmd.fetched/node".parse().expect("attribute");
+            let mut answers = Changes::new();
+            for (of, the, change) in commands.iter() {
+                if *the == fetch
+                    && let Change::Assert(node, _) = change
+                {
+                    answers.associate(fetched.clone(), of.clone(), node.clone(), Pick::All);
+                }
+            }
+            Ok(answers)
+        }))
+    }
+
+    fn fetch(command: &str, node: &Entity) -> impl Statement {
+        dialog_query::the!("cmd.fetch/node")
+            .of(command.parse::<Entity>().expect("entity"))
+            .is(node.clone())
+    }
+
+    /// A command a dispatch leaves to the session's handlers is answered
+    /// with a command, dispatched as the next tick's stimulus, where a
+    /// rule captures it on the layer its attribute is placed on; a
+    /// subscription through the session sees the capture, and nothing
+    /// durable is written.
+    #[dialog_common::test]
+    async fn it_answers_a_command_through_a_handler() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        session.handle(fetcher(calls.clone()));
+        let node: Entity = "node:1".parse()?;
+        let mut subscription = session.subscribe(AttributeQuery::from(
+            Term::<QueryRelation>::from(QueryRelation::from(
+                "node/fetched".parse::<dialog_corpus::Relation>()?,
+            ))
+            .of(Term::<Entity>::var("e"))
+            .is(Term::<Entity>::var("v")),
+        ));
+        assert!(
+            subscription
+                .poll(&operator)
+                .await?
+                .expect("initial")
+                .asserted
+                .is_empty()
+        );
+        let before = branch.revision();
+
+        let after = session
+            .invoke(fetch("cmd:1", &node))
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(Some(after), before, "nothing durable was written");
+        assert_eq!(
+            held(&memory, "node/fetched", &node)?,
+            vec!["Entity(cmd:1)".to_string()],
+            "the rule captured the answer on the state layer"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "offered the fetch, then the answer it did not take"
+        );
+        let delta = subscription.poll(&operator).await?.expect("the capture");
+        assert_eq!(delta.asserted.len(), 1);
+        assert_eq!(delta.asserted[0].of, node);
+        Ok(())
+    }
+
+    /// Handlers that answer every command with another are stopped at
+    /// the bound, with `AnswerDivergence`, and nothing of theirs lands.
+    #[dialog_common::test]
+    async fn it_stops_handlers_that_never_stop_answering() -> Result<()> {
+        use dialog_corpus::Update as _;
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        session.handle(Arc::new(Answering(|commands: &Changes| {
+            let mut answers = Changes::new();
+            for (of, _, _) in commands.iter() {
+                answers.associate(
+                    "cmd.again/node".parse().expect("attribute"),
+                    of.clone(),
+                    dialog_corpus::Value::Boolean(true),
+                    Pick::All,
+                );
+            }
+            Ok(answers)
+        })));
+        let before = branch.revision();
+        let refused = session
+            .invoke(fetch("cmd:1", &"node:1".parse()?))
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(refused, Err(CommitError::AnswerDivergence(MAX_ANSWERS))),
+            "{refused:?}"
+        );
+        assert_eq!(branch.revision(), before);
+        assert!(held(&memory, "node/fetched", &"node:1".parse()?)?.is_empty());
+        Ok(())
+    }
+
+    /// A handler that fails fails the invocation with `Handler`, after
+    /// the dispatch it answers has published: what the dispatch wrote
+    /// stands, since the effect runs only once the writes are durable.
+    #[dialog_common::test]
+    async fn it_reports_a_handler_that_fails_after_the_dispatch_published() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        declare_fetch(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        session.handle(Arc::new(Answering(|_: &Changes| {
+            Err(HandlerError("no network".into()))
+        })));
+        let doc: Entity = "doc:1".parse()?;
+        let failed = session
+            .invoke(fetch("cmd:1", &"node:1".parse()?))
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .perform(&operator)
+            .await;
+        match failed {
+            Err(CommitError::Handler(reason)) => assert_eq!(reason, "no network"),
+            other => panic!("expected the handler's failure, got {other:?}"),
+        }
+        assert_eq!(
+            committed::<String>(&branch, &operator, "doc/title", &doc).await?,
+            vec!["String(\"Notes\")".to_string()],
+            "the dispatch published before its handler ran"
+        );
+        Ok(())
+    }
+
+    /// A consumer outside the invoke loop reads the session's command
+    /// feed, in order and once, and answers by invoking: the answer is a
+    /// dispatch of its own, which the feed records too, and the rule
+    /// captures it as it captures a handler's answer.
+    #[dialog_common::test]
+    async fn it_feeds_each_dispatch_to_a_reader_that_answers_by_invoking() -> Result<()> {
+        use dialog_corpus::{Change, Update as _};
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        let mut feed = session.commands();
+        assert!(feed.poll()?.is_empty(), "nothing dispatched yet");
+        let node: Entity = "node:1".parse()?;
+        session
+            .invoke(fetch("cmd:1", &node))
+            .perform(&operator)
+            .await?;
+        session
+            .invoke(fetch("cmd:2", &node))
+            .perform(&operator)
+            .await?;
+        assert!(
+            held(&memory, "node/fetched", &node)?.is_empty(),
+            "no handler: nothing answered yet"
+        );
+
+        let dispatches = feed.poll()?;
+        assert_eq!(
+            dispatches
+                .iter()
+                .map(|dispatched| dispatched.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let fetch_attr: dialog_corpus::Relation = "cmd.fetch/node".parse()?;
+        let mut answers = Changes::new();
+        for dispatched in &dispatches {
+            for (of, the, change) in dispatched.commands.iter() {
+                if *the == fetch_attr
+                    && let Change::Assert(is, _) = change
+                {
+                    answers.associate(
+                        "cmd.fetched/node".parse()?,
+                        of.clone(),
+                        is.clone(),
+                        Pick::All,
+                    );
+                }
+            }
+        }
+        session.invoke(answers).perform(&operator).await?;
+        assert_eq!(
+            held(&memory, "node/fetched", &node)?,
+            vec!["Entity(cmd:1)".to_string(), "Entity(cmd:2)".to_string()]
+        );
+        let answered = feed.poll()?;
+        assert_eq!(answered.len(), 1, "the answer was one dispatch");
+        assert_eq!(answered[0].sequence, 3);
+        assert!(feed.poll()?.is_empty(), "read once");
+        Ok(())
+    }
+
+    /// A reader the feed moved past is told so, and starts over from the
+    /// newest dispatch.
+    #[dialog_common::test]
+    async fn it_tells_a_reader_the_feed_moved_past_it() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        declare_fetch(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let mut feed = session.commands();
+        let node: Entity = "node:1".parse()?;
+        for index in 0..=FEED_CAPACITY {
+            session
+                .invoke(fetch(&format!("cmd:{index}"), &node))
+                .perform(&operator)
+                .await?;
+        }
+        let lost = feed.poll();
+        assert!(
+            matches!(
+                lost,
+                Err(Lost {
+                    behind: 0,
+                    oldest: 2
+                })
+            ),
+            "{lost:?}"
+        );
+        feed.catch_up();
+        assert!(feed.poll()?.is_empty());
+        session
+            .invoke(fetch("cmd:again", &node))
+            .perform(&operator)
+            .await?;
+        assert_eq!(feed.poll()?.len(), 1);
         Ok(())
     }
 }

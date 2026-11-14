@@ -590,6 +590,16 @@ pub enum CommitError {
     #[error("Commit-time induction failed: {0}")]
     Induction(String),
 
+    /// A session's handlers kept answering: each dispatch's commands were
+    /// answered with more commands, past the bound on how many dispatches
+    /// one invocation may chain.
+    #[error("Handlers did not stop answering within {0} dispatches")]
+    AnswerDivergence(u32),
+
+    /// A session's handler could not answer a dispatch's commands.
+    #[error("A handler failed to answer: {0}")]
+    Handler(String),
+
     /// A write succeeding a claim under a choosing pick could not
     /// read the claims of its cell to elect the one it succeeds.
     #[error("Succession failed: {0}")]
