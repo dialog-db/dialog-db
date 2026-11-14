@@ -50,10 +50,19 @@ use dialog_corpus::{
     Cause, Changes, DialogCorpusError, Entity, EntityKey, Fact, Instruction, Key, KeyViewConstruct,
     Pick, Relation, Selector, SortKey, Standing, Statement, Update, fact_index_keys, sort_key,
 };
+use dialog_query::DeductiveRule;
 use dialog_search_tree::Manifest;
 use parking_lot::RwLock;
 
 use crate::rules::is_rule_attribute;
+
+/// The rules a line holds as they are, each under the entity its facts
+/// name it by: a rule that has an identity and no stored body (one that
+/// holds a map or a list of terms), laid over a line for a
+/// query. Its `dialog.rule/*` index facts are among the line's facts,
+/// and its body is here, where a stored rule's is bytes under
+/// `dialog.rule/source`.
+pub(crate) type Bodies = Arc<HashMap<Entity, DeductiveRule>>;
 
 /// How many instants the ring retains. A subscription pinned further
 /// back than this recomputes from the fold instead of maintaining.
@@ -142,6 +151,8 @@ struct State {
     /// The hash of the rule facts held and hidden ([`Facts::rules`]),
     /// once read; reset by an instant that changes one.
     rules: OnceLock<Option<Blake3Hash>>,
+    /// The rules held as they are (see [`Bodies`]), when there are any.
+    bodies: Option<Bodies>,
 }
 
 impl Default for State {
@@ -154,6 +165,7 @@ impl Default for State {
             hash: Blake3Hash::from([0u8; 32]),
             log: VecDeque::new(),
             rules: OnceLock::new(),
+            bodies: None,
         }
     }
 }
@@ -597,6 +609,26 @@ impl Ephemeral {
         line
     }
 
+    /// This line holding `bodies` as well: the rules its facts name
+    /// that have no stored body (see [`Bodies`]).
+    pub(crate) fn keeping(self, bodies: Option<Bodies>) -> Self {
+        if bodies.is_some() {
+            self.state.write().bodies = bodies;
+        }
+        self
+    }
+
+    /// The rule this line holds as it is under `entity`, when it holds
+    /// one.
+    pub(crate) fn body(&self, entity: &Entity) -> Option<DeductiveRule> {
+        self.state.read().bodies.as_ref()?.get(entity).cloned()
+    }
+
+    /// Every rule this line holds as it is.
+    pub(crate) fn bodies(&self) -> Option<Bodies> {
+        self.state.read().bodies.clone()
+    }
+
     /// A new line holding this one's facts and tombstones with the
     /// facts of `changes` applied over them as one instant, its asset
     /// changes dropped. This line is left as it was. Copying the held
@@ -615,6 +647,7 @@ impl Ephemeral {
             hash: base.hash.clone(),
             log: VecDeque::new(),
             rules: base.rules.clone(),
+            bodies: base.bodies.clone(),
         };
         drop(base);
         let mut delta = Delta::unrecorded();
@@ -645,6 +678,7 @@ impl Ephemeral {
             hash: base.hash.clone(),
             log: VecDeque::new(),
             rules: base.rules.clone(),
+            bodies: base.bodies.clone(),
         };
         drop(base);
         let mut delta = Delta::unrecorded();

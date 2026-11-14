@@ -1,6 +1,8 @@
 use crate::error::Infeasible;
+use crate::pattern::Pattern;
 use crate::schema::Requirement;
-use crate::{Environment, Parameters, Premise, Schema};
+use crate::types::Any;
+use crate::{Environment, Parameters, Premise, Schema, Term};
 use std::collections::HashSet;
 
 /// Categorize a premise's parameters against a set of already-bound
@@ -14,6 +16,12 @@ use std::collections::HashSet;
 /// satisfied (by a constant or an already-bound member) and required
 /// otherwise; an `Optional` slot is bound. A negation never binds,
 /// its slots are requirements only.
+///
+/// A slot that holds a map or a list of terms is judged by the
+/// variables inside it: it is bound when every one of them is, a slot
+/// the premise binds binds each of them that is not, and a slot the
+/// premise requires requires each of them that is not. A blank inside
+/// is neither bound nor required, as a blank slot is.
 pub(crate) fn categorize(
     schema: &Schema,
     params: &Parameters,
@@ -24,9 +32,9 @@ pub(crate) fn categorize(
     // already bound.
     let mut satisfied_groups = HashSet::new();
     for (name, field) in schema.iter() {
-        if let Some(param) = params.get(name)
-            && let Requirement::Required(Some(group)) = &field.requirement
-            && (param.is_constant() || param.is_bound(environment))
+        if let Requirement::Required(Some(group)) = &field.requirement
+            && let Some(bound) = Slot::of(params, name).map(|slot| slot.is_bound(environment))
+            && bound
         {
             satisfied_groups.insert(*group);
         }
@@ -36,10 +44,10 @@ pub(crate) fn categorize(
     let mut requires = Environment::new();
     for (name, field) in schema.iter() {
         // If parameter is not set treat it as blank and move one
-        let Some(param) = params.get(name) else {
+        let Some(slot) = Slot::of(params, name) else {
             continue;
         };
-        if param.is_blank() || param.is_constant() || param.is_bound(environment) {
+        if slot.is_blank() || slot.is_bound(environment) {
             continue;
         }
         match &field.requirement {
@@ -48,24 +56,71 @@ pub(crate) fn categorize(
                 // binds otherwise put it into requirements.
                 if satisfied_groups.contains(group) {
                     if !is_negation {
-                        param.bind(&mut binds);
+                        slot.bind(environment, &mut binds);
                     }
                 } else {
-                    param.bind(&mut requires);
+                    slot.bind(environment, &mut requires);
                 }
             }
             Requirement::Required(None) => {
-                param.bind(&mut requires);
+                slot.bind(environment, &mut requires);
             }
             Requirement::Optional => {
                 if !is_negation {
-                    param.bind(&mut binds);
+                    slot.bind(environment, &mut binds);
                 }
             }
         }
     }
 
     (binds, requires)
+}
+
+/// What a parameter holds, as feasibility reads it: a term, or a map
+/// or a list of terms judged by the variables inside it.
+enum Slot<'a> {
+    Term(&'a Term<Any>),
+    Shape(&'a Pattern),
+}
+
+impl<'a> Slot<'a> {
+    fn of(params: &'a Parameters, name: &str) -> Option<Self> {
+        params.slot(name).map(|(term, shape)| match shape {
+            Some(pattern) => Slot::Shape(pattern),
+            None => Slot::Term(term),
+        })
+    }
+
+    fn is_blank(&self) -> bool {
+        match self {
+            Slot::Term(term) => term.is_blank(),
+            Slot::Shape(_) => false,
+        }
+    }
+
+    /// A constant, a bound variable, or a shape every variable of which
+    /// is bound.
+    fn is_bound(&self, environment: &Environment) -> bool {
+        match self {
+            Slot::Term(term) => term.is_constant() || term.is_bound(environment),
+            Slot::Shape(pattern) => pattern.is_bound(environment),
+        }
+    }
+
+    /// Add the variables this slot holds that `environment` does not
+    /// bind yet to `into`.
+    fn bind(&self, environment: &Environment, into: &mut Environment) {
+        match self {
+            Slot::Term(term) => term.bind(into),
+            Slot::Shape(pattern) => {
+                for term in pattern.terms() {
+                    if !term.is_bound(environment) {
+                        term.bind(into);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Premise {
@@ -257,6 +312,73 @@ mod tests {
             let expected: BTreeSet<String> = step.binds().iter().map(String::from).collect();
             assert_eq!(got, expected, "feasible binds match the planner's binds");
         }
+    }
+
+    /// A slot that holds a map of terms is judged by the variables
+    /// inside it. An equality between a variable and such a map is
+    /// feasible once every variable inside the map is bound, and then
+    /// binds the variable; or once the variable is bound, and then
+    /// binds what inside the map is not. With neither it names what it
+    /// still needs, and a variable inside the map that is bound already
+    /// is not among them.
+    #[dialog_common::test]
+    fn a_pattern_is_feasible_by_the_variables_inside_it() {
+        let pattern = Pattern::map([
+            (
+                "title".to_string(),
+                Pattern::from(Term::<Any>::var("title")),
+            ),
+            ("body".to_string(), Pattern::from(Term::<Any>::var("body"))),
+        ])
+        .expect("a pattern");
+        let premise = pattern.is(Term::<Any>::var("card"));
+
+        match premise.feasible(&scope(&["title"])) {
+            Err(Infeasible::NeedsAll(needs)) => {
+                assert!(needs.contains("body"));
+                assert!(needs.contains("card"));
+                assert!(!needs.contains("title"), "the title is bound");
+            }
+            other => panic!("expected NeedsAll, got {other:?}"),
+        }
+
+        let binds = premise
+            .feasible(&scope(&["title", "body"]))
+            .expect("the map is a value");
+        let bound: BTreeSet<&str> = binds.iter().collect();
+        assert_eq!(bound, BTreeSet::from(["card"]));
+
+        let binds = premise
+            .feasible(&scope(&["card", "title"]))
+            .expect("the value is bound");
+        let bound: BTreeSet<&str> = binds.iter().collect();
+        assert_eq!(bound, BTreeSet::from(["body"]), "what is not bound yet");
+    }
+
+    /// A negated premise binds nothing and needs every variable inside
+    /// its pattern bound. A blank inside it is not a variable to bind.
+    #[dialog_common::test]
+    fn a_negated_pattern_requires_its_variables_and_not_its_blanks() {
+        let Pattern::Map(named) = Pattern::map([(
+            "title".to_string(),
+            Pattern::from(Term::<Any>::var("title")),
+        )])
+        .expect("a pattern") else {
+            panic!("a map pattern");
+        };
+        let premise = !Pattern::Map(named.with_rest(Term::blank())).is(Term::<Any>::var("card"));
+
+        match premise.feasible(&scope(&["card"])) {
+            Err(Infeasible::NeedsAll(needs)) => {
+                assert_eq!(needs.len(), 1);
+                assert!(needs.contains("title"));
+            }
+            other => panic!("expected NeedsAll, got {other:?}"),
+        }
+        let binds = premise
+            .feasible(&scope(&["card", "title"]))
+            .expect("everything named is bound");
+        assert_eq!(binds.iter().count(), 0, "negation binds nothing");
     }
 
     fn attribute_for(the: Relation, value: &str) -> Premise {

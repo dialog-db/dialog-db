@@ -1,6 +1,6 @@
 # A parameter holds one variable or one constant
 
-**Phase: Designing.** The direction is the maintainer's, decided 2026-11-11. The implementation decisions are for whoever builds it; the brief is [the plan](patterns/plan.md).
+**Phase: Building.** The direction is the maintainer's, decided 2026-11-11. The implementation decisions are for whoever builds it, each in its own file beside [the plan](patterns/plan.md); the [journal](patterns/journal.md) says how far the build is.
 
 ## Description
 

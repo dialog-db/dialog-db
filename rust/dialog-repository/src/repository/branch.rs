@@ -122,6 +122,9 @@ pub use upstream::*;
 mod integration_tests;
 
 #[cfg(test)]
+mod composite_tests;
+
+#[cfg(test)]
 mod isolation_tests;
 #[cfg(all(
     test,
