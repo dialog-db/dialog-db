@@ -85,7 +85,7 @@ composite.
 
 ### `control:` is the layer a command lives in for one tick, a channel is a layer its consumer empties, and a provider reads what arrives in either
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[#807](https://github.com/dialog-db/dialog-db/pull/807), argued in
 [notes/layers.md](./notes/layers.md) (points 7 to 18, and "Open").
 
 A command used to be a fact apart: dispatched into a transaction, read
