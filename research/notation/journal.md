@@ -901,6 +901,16 @@ The list misreading is gone and the to-do holds. The note slipped to name matchi
 
 **Decision.** Keep the spelling. Reword the line paragraph, and decide where a conclusion is kept before writing its sentence.
 
+## 2026-11-14 — R42: a line is a claim, read and concluded
+
+**Question.** The one [planned](results/r42-plan.md): does introducing a line as a claim, "read when the concept is asked for, concluded or asserted when it is", undo R41's slip on the note?
+
+**Method.** Clean runner, 20 readers each on R41's note and to-do with that wording.
+
+**Results.** [r42](results/r42.md). The note 19 of 20 (R41: 13), the to-do 20 of 20.
+
+**Decision.** The spec's line paragraph takes the R42 wording.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
