@@ -22,9 +22,9 @@ accessor never lists.
 
 | accessor | given | one row per | a row holds |
 |---|---|---|---|
-| `tree/node` | a node | the node | `kind` (`"index"` or `"segment"`), `size` (its block, in bytes), `count` (spans or entries), `scale`, `novelty`; and the format it was written under, every field of it: `version`, `fanout-bits` ?, `max-separator`, `inline-n`, `spill-prefix`, `max-segment`, `frame-ceiling-factor`, `anchor-selector`, `entry-overhead`, `key-overhead`, `link-overhead` |
-| `tree/span` | an index node | each child | `span` (the row's own entity) ?, `at`, `node` (the child, a `node:` entity), `separator`, `until`, `rank`, `scale`, `novelty` |
-| `tree/entry` | a segment node | each entry | `entry` (the row's own entity) ?, `at`, `key`, `rank`; its state and claim: `state`, `retraction`, `origin`, `edition`, `cause`, `collapsed`, `supersedes`; `spill` (an `asset:` entity); and of a blob record: `blob` (an `asset:` entity), `blob-size`, `blob-version`. A field that does not apply to an entry is absent, not zero or empty |
+| `tree/node` | a node | the node | `kind` (`"index"` or `"segment"`), `size` (its block, in bytes), `count` (spans or entries), `scale`, `novelty`; and the format it was written under, every field of it: `version`, `fanout-bits`, `max-separator`, `inline-n`, `spill-prefix`, `max-segment`, `frame-ceiling-factor`, `anchor-selector`, `entry-overhead`, `key-overhead`, `link-overhead` |
+| `tree/span` | an index node | each child | `span` (the row's own entity), `at`, `node` (the child, a `node:` entity), `separator`, `until`, `rank`, `scale`, `novelty` |
+| `tree/entry` | a segment node | each entry | `entry` (the row's own entity), `at`, `key`, `rank`; its state and claim: `state`, `retraction`, `origin`, `edition`, `cause`, `collapsed`, `supersedes`; `spill` (an `asset:` entity); and of a blob record: `blob` (an `asset:` entity), `blob-size`, `blob-version`. A field that does not apply to an entry is absent, not zero or empty |
 | `tree/value` | an `asset:` | the value | `size`, `bytes` |
 | `tree/block` | a node | the node | `bytes`: the block as stored |
 
@@ -104,3 +104,50 @@ Found by test on the draft branch, 2026-11-14
   ? from the entity itself, if it says where it sits, or from the nodes
   the facts name, which reads every named node (each decoded once, none
   fetched).
+
+## As built, 2026-11-14
+
+On `worker/affectionate-pascal-iey41u`, in `rust/dialog-query/src/resolver.rs`
+and `rust/dialog-corpus/src/inspect.rs`. The three open points above
+were settled in building, each by the agent and each for the maintainer
+to overturn:
+
+- **A span's and an entry's entity** is where the row sits:
+  `span:<base58(node)>/<position>` and `entry:<base58(node)>/<position>`.
+  A span is not content of its own (two nodes can delegate one key
+  range), and an entity that says where it sits is what would let a
+  resolver find the node from it. No resolver takes one as its handle
+  yet: reaching a row's details by its own entity is not built.
+- **The planner asks a fact before a resolver**: `RESOLVER_COST` went
+  from 200 to 50,000, above any read of facts the planner costs. Pinned
+  by a test that reads the plan
+  (`it_is_planned_after_the_fact_that_names_its_node`); the repository
+  test cannot show it, because every node of a tree a replica wrote is
+  already kept by its environment.
+- **The fanout parameter** is `fanout-bits`. The maintainer offered
+  `fanout-factor` and has not chosen; this is the agent's, and a rename
+  is one line.
+
+Also decided in building:
+
+- `of` takes an entity only. A base58 string or raw bytes, which the
+  first resolvers took, match nothing.
+- `origin` and `edition` are absent on an unversioned write, by the
+  rule that a slot which does not apply is absent.
+- Adding a slot is one line: a resolver's struct, its cells, and how
+  its slots are read and replaced are declared from one list.
+
+Found in building, not addressed:
+
+- 🟡 **Buffered ops are not readable.** An index node holds writes that
+  have not yet been pushed down to a segment, and a small tree can hold
+  most of its recent writes that way: after one commit of two facts,
+  the root held 10 buffered ops and the one segment 1 entry. A resolver
+  yields their count (`novelty`) and nothing of what they are. The
+  first resolvers did not either. "Nothing a node holds is hidden" is
+  not yet true of these.
+- A blob record's row is written and not tested: no test here writes a
+  blob.
+- `tree/entry` yields no row for a record this build cannot decode
+  only where the whole segment fails; a blob record alone that does not
+  decode keeps its row without the blob slots.

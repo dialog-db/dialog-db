@@ -1,6 +1,6 @@
 # A consumer that can only query cannot draw a branch's search tree
 
-Phase: **Designing.** See the [design index](README.md) for what the
+Phase: **Building.** See the [design index](README.md) for what the
 phases mean, and the [journal](tree-exploration/journal.md) for where the
 topic stands.
 
@@ -138,18 +138,22 @@ Not taken on here:
   format, page bundle and display routing. Removing it is tonk's work,
   made possible by this.
 
-What has to be built in dialog, for whoever builds it:
+What has to be built in dialog:
 
-1. The `inspect` decoders take a decoded node instead of bytes.
-2. The accessors ask `nodes::Read<CorpusNode>` and project; `tree/key`,
-   `tree/blob` and `tree/manifest` go; names become kebab-case; a slot
-   that does not apply is bound absent.
-3. `dialog.branch/tree` and `tree/span`'s `node` are `node:` entities
-   (on the draft branch); a spill and a blob hash are `asset:` entities.
-4. A built-in reaction to a dispatched command that performs an effect
-   and dispatches a command in answer; the probe and fetch commands on
-   top of it.
+1. Built: the `inspect` readings take a decoded node.
+2. Built: the five resolvers ask `nodes::Read<CorpusNode>` and project;
+   `tree/key`, `tree/blob` and `tree/manifest` are gone; names are
+   kebab-case; a slot that does not apply is bound absent.
+3. Built: `dialog.branch/tree` and `tree/span`'s `node` are `node:`
+   entities; a spill and a blob hash are `asset:` entities; a span and
+   an entry each have an entity.
+4. Not built: a handler that reacts to a dispatched command with an
+   effect and answers with a command, and the probe and fetch commands
+   on top of it. It belongs with the session and layers work
+   (dialog-db/dialog-db#795, #721), which has been told of the need.
 
-Of the draft branch `worker/affectionate-pascal-iey41u`: the `node:`
-entity stays; an entity for an entry stays in some form, to be decided
-with a span's; listing when no node is given comes out.
+Still open in what is built
+([design-accessors](tree-exploration/design-accessors.md), last two
+sections): reaching a span's or an entry's details by its own entity;
+the ops an index node buffers, which no resolver yields; the name
+`fanout-bits`.

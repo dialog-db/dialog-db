@@ -14,86 +14,73 @@ says how to cut a release.
 
 ## Unreleased
 
-### A tree resolver with no node given lists every node, so a plain rule over one installs
+### A tree node is a handle, and five resolvers read it
 
-A `tree/*` resolver had to be told which node to read: `of` was a
-required input. A query that left it open answered nothing, and a rule
-whose body was only `tree/node(of: ?this, …)` was refused at install
-(`RequiredBindings`), because nothing in it could be run without a node
-given. The one way to describe tree nodes as a concept was a recursive
-rule from the root down, and a recursive rule is evaluated in full
-whatever the caller asks for, so reading one node walked the whole tree.
+Argued in [design/tree-exploration.md](./design/tree-exploration.md).
 
-`of` is now optional on every `tree/*` resolver but `tree/value`. With a
-node given, a resolver reads that node's block, as before. With `of`
-open, it reads the roots the scope's heads name (`dialog.branch/tree`)
-and walks down from them, yielding every node reached, in key order,
-with `of` bound to it. A rule over a resolver is then an ordinary rule:
+The seven `tree/*` resolvers each loaded a node's block and decoded one
+part of it, so a query asking three things of one node decoded it three
+times. A segment's entries were split across three of them (`tree/key`,
+`tree/entry`, `tree/blob`) and paired by position. A node was named by
+the base58 string of its hash, which is not an entity, so a rule could
+not derive a concept whose rows were nodes.
 
-```text
-node(this, kind) :- tree/node(of: this, kind)
-```
-
-Asked for every node it walks the tree, one block read per node. Asked
-for one node by `this` it reads that one block.
-
-What this changes for you:
-
-- A `tree/*` query that leaves `of` open (a blank, or a variable nothing
-  else binds) used to answer nothing and now walks the tree, loading
-  every node its heads reach, from a remote where the replica does not
-  hold one. Give `of` whenever one node is what you want.
-- A rule whose premises leave a resolver's node to the caller compiles.
-- `ResolverQuery::estimate` answers `RESOLVER_WALK_COST` instead of
-  `None` for an open node, so the planner schedules the walk, and puts
-  any premise that would name the node ahead of it.
-- `tree/value` is unchanged: `of` is still required, since a spilled
-  value is not a tree node and nothing lists them.
-
-Why: a relation that can be looked up but not listed cannot be the body
-of a rule, since a rule has to answer with nothing given. Letting the
-resolver list makes it a relation like any other, and keeps the lookup
-as cheap as it was.
-
-### A tree node and a tree entry are entities, so a rule can derive a concept from them
-
-A `tree/*` resolver named a node by the base58 string of its hash, and
-`dialog.branch/tree` carried the root the same way. A resolver row has no
-entity of its own, so a rule that derived a concept from one had to take
-`this` from somewhere else, usually the branch. Every child of a node
-then landed on that one entity: a concept over the 20 children of a root
-answered with one row, whose fields came from different children.
-
-A node is now named by an entity, `node:<base58(hash)>`
-(`Entity::from_node`, `Entity::node_hash`), and so is an entry,
-`entry:<base58(hash of its key)>`. A rule takes the one a resolver yields
-as its `this`:
+A node is now opaque to a query, which holds its handle: the entity
+`node:<base58(hash)>` (`Entity::from_node`, `Entity::node_hash`).
+`dialog.branch/tree` carries the root's handle and `tree/span` yields
+each child's. A resolver takes the handle as `of`, asks the environment
+for the decoded node (`nodes::Read`, as the tree's own reads do), and
+yields one part of it. The environment decodes a node once and keeps it.
 
 ```text
-BranchRevision(tree: ?root)
-  ⋈ tree/span(of: ?root, node: ?this)
-  ⋈ tree/node(of: ?this, kind: ?kind)
+tree/node   what the node is, and the format it was written under
+tree/span   an index node's children, with what the node holds about each
+tree/entry  a segment node's entries, each whole
+tree/block  the node's block as stored
+tree/value  a spilled value's bytes, by its asset: entity
 ```
 
 What this changes for you:
 
+- `tree/key`, `tree/blob` and `tree/manifest` are gone, with
+  `TreeKeyQuery`, `TreeBlobQuery` and `TreeManifestQuery`. A key and its
+  rank, and a blob record's fields, are slots of `tree/entry`; the
+  manifest's fields are slots of `tree/node`. `tree/block` is new.
+- `of` is an entity: a `node:` for every resolver but `tree/value`,
+  which takes an `asset:`. A base58 string or raw bytes, which `of`
+  used to take, match nothing.
 - `dialog.branch/tree` is an entity (`branch::Tree(Entity)`), not text.
-  A concept that reads it declares the field as an entity, and code that
-  read the base58 string takes it from `tree.0.node_hash()`.
-- `tree/span` yields `node` as an entity, not text.
-- `tree/key` and `tree/entry` have a new output, `entry`: the entry's
-  entity, the same from both. `TreeKeyQuery` and `TreeEntryQuery` have
-  the field to match.
-- Every `tree/*` resolver takes an entity as `of`. A base58 string and
-  the raw 32 bytes are still accepted, so a reference typed in by hand
-  keeps working.
-- `tree/entry`'s `spill` is unchanged: text, empty when the value is
-  inline.
+  A concept that reads it declares the field as an entity; the hash is
+  `tree.0.node_hash()`.
+- `tree/span` yields `node` as a `node:` entity, and a new slot `span`:
+  the span's own entity, `span:<base58(node)>/<position>`. `tree/entry`
+  yields `entry`, `entry:<base58(node)>/<position>`. A rule deriving a
+  concept of spans or of entries has an entity for each row.
+- `tree/entry` yields `spill` and `blob` as `asset:` entities. A slot
+  that does not apply to a row is absent: `spill` when the value is
+  inline (it was an empty string), `origin` and `edition` when the
+  write was unversioned (they were empty and 0), the blob slots on any
+  entry that is no blob record, and the claim slots on one that is.
+- Slot names are kebab-case: `max-separator`, `inline-n`,
+  `spill-prefix`, `max-segment`, `frame-ceiling-factor`,
+  `anchor-selector`. `fanout_n` is `fanout-bits`. `tree/node` also
+  yields `entry-overhead`, `key-overhead` and `link-overhead`, which no
+  resolver did.
+- `RESOLVER_COST` is 50,000, from 200. Where a rule's body has a fact
+  that decides whether a node is read, the planner now asks the fact
+  first, whether or not the caller gave the node.
+- `dialog_corpus::inspect` has a reading of each part that takes a
+  decoded node (`summary`, `spans`, `keys`, `entries`, `blob_records`,
+  `manifest`) beside the `inspect_*` functions that take bytes.
+- A resolver still requires its handle. A rule whose body is a resolver
+  alone is refused at install as before; a rule that names its nodes by
+  a fact installs, and reads those nodes and no others.
 
-Why: a concept row is identified by its entity, so a resolver that
-yields none cannot be the subject of a derived concept. The hash is a
-node's whole identity, so the entity is the same on every replica and
-in every revision that reaches the node.
+Why: a query should be able to read everything a node holds without the
+embedder decoding blocks for it, and the reading and decoding of a node
+belong to the environment, which already does both for the tree. A
+handle that is an entity is what a rule needs to make a node, a span or
+an entry the subject of a concept.
 
 ### A pull says how much it downloads, and can bring along only what the replica holds
 
@@ -2652,17 +2639,13 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
-- **A tree resolver that lists.** Nothing stored changes. A rule stored
-  on a branch that joins a resolver through a node another premise
-  binds reads as it did. One that left a resolver's node open matched
-  nothing before and now lists.
-- **Tree nodes and entries as entities.** Nothing stored changes:
-  `dialog.branch/tree` is derived from the branch when a query runs and
-  was never written, and resolver rows are read off blocks. An older
-  release reads everything this one writes. A rule or concept stored on
-  a branch that reads `dialog.branch/tree` as text, or binds
-  `tree/span`'s `node` to a text field, stops matching and has to be
-  re-authored with the field as an entity.
+- **Tree resolvers.** Nothing stored changes: `dialog.branch/tree` is
+  derived from the branch when a query runs and was never written, and
+  resolver rows are read off blocks. An older release reads everything
+  this one writes. A rule stored on a branch that uses `tree/key`,
+  `tree/blob` or `tree/manifest`, a snake_case manifest slot, or a
+  base58 string as `of`, or that reads `dialog.branch/tree` as text, no
+  longer compiles or no longer matches, and has to be re-authored.
 - Nothing stored or synced changes for the file store's lock; only the
   lock files beside its cells do. A lock file the previous release left
   behind holds a bare PID, which this release reads as a holder: one

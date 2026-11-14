@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* The problem and the approach in four parts (top story). That the accessors must serve concepts as well as direct queries, in the maintainer's words. That a rule over an accessor installs and reads only what a fact names (tested), and that asked for a node no fact names it reads the node before asking the fact (tested). | *Where are we at?* Designing, backtracked from Building: the accessor set is reopened in one respect. |
-| **Agenda** | *What do we need to know?* What a span's and an entry's entity is made of. How a row's details are reached by that entity. How the planner is made to ask a fact before an accessor. The fanout parameter's name (`fanout-bits` proposed against `fanout-factor`). Open hypotheses for the build as before. | *Where are we going?* The three open points of [design-accessors](design-accessors.md), then Building. |
+| **Status** | *What do we know?* The problem and the approach (top story). Three of the four things to build in dialog are built and tested on the draft branch: the readings over a decoded node, the five resolvers, the entities. That an index node's buffered ops are readable by no resolver. | *Where are we at?* Building. The fourth thing, a handler for commands, is not built and belongs with the session work in #795. |
+| **Agenda** | *What do we need to know?* The maintainer's word on what building settled without them: a span's and an entry's entity being its place, `fanout-bits`, `of` taking an entity only. Whether buffered ops are to be exposed, and as what. How a row's details are reached by its own entity. | *Where are we going?* The handler, once #795's session lands; then tonk: pin, a query step that is not a concept, the component, and the removal of its reader. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -669,3 +669,36 @@ was sent. The proposal is recorded and not taken up.
 **Decided.** Nothing. The maintainer's wish for a handler to be a
 subscription is answered, by that session, as: not a subscription, a
 handler run by the session's invoke loop.
+
+## 2026-11-14, Building: the resolvers are built
+
+**Asked.** The maintainer: continue and complete the implementation.
+
+**Learned.** Built on the draft branch: the readings in `inspect` over
+a decoded node; `rust/dialog-query/src/resolver.rs` rewritten as five
+resolvers over a handle that ask `nodes::Read`; listing removed, the
+handle required again. 1,745 tests in the three crates, the workspace
+clippy gate and a wasm check of the two crates pass.
+
+Three hypotheses of the ledger are settled by it: the decoders take a
+node and a node keeps its block's size; a resolver binds a slot absent;
+costing a resolver above reads of facts orders the plan.
+
+Two things were learned that the design did not have:
+
+- A test of entries found one where it expected a dozen. The tree was
+  right: after a small commit most writes sit on the root index as
+  buffered ops, and no resolver yields those, only their count. The
+  design says nothing a node holds is hidden, and this is.
+- Block reads stopped being a measure. Every node of a tree a replica
+  wrote is kept by its environment, so reading one reads no block; the
+  earlier tests that counted block reads were measuring the old
+  resolvers' own loads. What a plan reads is now pinned on the plan.
+
+Not built: the handler for commands (item 4), which is the session
+work's; nothing on the tonk side, which waits on a dialog release
+carrying this and on #795.
+
+**Decided.** In building, by the agent, for the maintainer to overturn:
+the row entities, the cost, `fanout-bits`, `of` as an entity only
+([design-accessors](design-accessors.md), "As built").

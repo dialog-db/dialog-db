@@ -1,5 +1,4 @@
-//! Resolver premises: moded, multi-row premises resolved by selecting
-//! from content-addressed storage through the evaluation environment.
+//! Resolver premises: accessors over a search-tree node.
 //!
 //! Scans and resolvers are the same kind of thing — selects the
 //! environment answers — distinguished by the *address space* they
@@ -12,45 +11,46 @@
 //!   recorded per scanned range. A range can also be enumerated, so
 //!   an unconstrained scan is expensive but defined.
 //! - A **resolver** selects by content address over the immutable block
-//!   universe ([`Load`](dialog_effects::archive::Load) of a digest
-//!   [`anywhere`] the scope reads). A hash
-//!   resolves to the same bytes forever, so a resolver's rows are a pure
-//!   function of the node it is given — no fact demand exists to record
-//!   (see `dialog_corpus::inspect` for the full soundness
-//!   argument); what changes over time is *reachability* — which
-//!   root the branch head names — and the revision-anchored
-//!   subscription (`Demand::head`) tracks exactly that.
-//!
-//! A resolver given its node reads that one block. A resolver whose node
-//! is open (`of` a blank, or a variable nothing else binds) lists: it
-//! reads the roots the scope's heads name (`dialog.branch/tree`, an
-//! ordinary recorded read) and walks down from them, yielding every
-//! node reached with `of` bound to it. So a resolver is a relation like
-//! any other, one that can be listed as well as looked up, and a rule
-//! over it is an ordinary rule: asked for everything it walks the tree,
-//! and asked for one node by `this` it reads one block, because the
-//! planner hands the bound `this` to the resolver as its `of`. The walk
-//! costs [`RESOLVER_WALK_COST`], so in a join the planner lets any
-//! premise that names the node run first. `tree/value` alone does not
-//! list: a spilled value is not a tree node and is reached only by the
-//! reference an entry carries.
+//!   universe. A hash resolves to the same bytes forever, so a
+//!   resolver's rows are a pure function of the handle it is given — no
+//!   fact demand exists to record (see `dialog_corpus::inspect` for the
+//!   full soundness argument); what changes over time is
+//!   *reachability* — which root the branch head names — and the
+//!   revision-anchored subscription (`Demand::head`) tracks exactly
+//!   that. A content address cannot be enumerated, so a resolver whose
+//!   handle is unbound is non-viable (`estimate() → None`) until a join
+//!   binds it. That is also what keeps a query from reading, and
+//!   fetching, a tree it was not pointed at.
 //!
 //! The admission rule for new resolvers is the address-space rule, not a
 //! case-by-case idempotency argument: a resolver may select only from
 //! content-addressed (immutable) storage. Anything addressed by
-//! mutable state is a scan and must record demand.
+//! mutable state is a scan and must record demand. Whether a replica
+//! holds a block is such state, and is not asked here.
 //!
-//! The first resolvers expose the search tree's *logical model* (see
-//! `notes/tree-relations.md`): a node is an index (a table of spans)
-//! or a segment (a run of entries); an index's spans each delegate a
-//! key range `[separator, until)` to a child and carry the ops
-//! buffered against it; a segment's entries are ranked keys; and every
-//! node embeds the format manifest it was written under. A node is
-//! named by its `node:<base58(hash)>` entity, which is what
-//! `dialog.branch/tree` carries and what `tree/span` hands out for each
-//! child, so a query reaches the tree by joining through
-//! `BranchRevision`, and a rule deriving a concept from a node has the
-//! node itself to use as `this`:
+//! # A node is a handle, and a resolver reads one part of it
+//!
+//! A node is opaque to a query. What a query holds of it is its handle,
+//! the `node:<base58(hash)>` entity ([`Entity::from_node`]):
+//! `dialog.branch/tree` carries the root's, and `tree/span` yields each
+//! child's. A resolver takes the handle as `of`, asks the environment
+//! for the node ([`nodes::Read`]), and yields one part of it as rows.
+//! The environment reads, checks and decodes a node once and keeps it,
+//! as it does for the tree's own reads; a query that asks several
+//! resolvers about one node decodes it once.
+//!
+//! - `tree/node`: what the node is, and the format it was written under.
+//! - `tree/span`: an index node's children, with what the node holds
+//!   about each.
+//! - `tree/entry`: a segment node's entries, each whole.
+//! - `tree/block`: the node's block as stored.
+//! - `tree/value`: a spilled value's bytes. Its handle is an `asset:`
+//!   entity, since a spilled value lives in the blob store, as every
+//!   `asset:` does; a `tree/entry` row yields it as `spill`.
+//!
+//! Nothing a node holds is left out. A slot that does not apply to a
+//! row (the spill of an inline value, the claim of a blob record) is
+//! bound absent, not to a zero or an empty value.
 //!
 //! ```text
 //! BranchRevision(branch, tree: ?root)
@@ -59,19 +59,20 @@
 //!   ⋈ tree/node(of: ?child, …)
 //! ```
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Display};
 use std::sync::LazyLock;
 
-use base58::{FromBase58, ToBase58};
+use base58::ToBase58;
 use dialog_capability::Subject;
 use dialog_common::{Blake3Hash, Buffer};
+use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::{DialogCorpusError, inspect};
 use dialog_effects::archive::prelude::ArchiveScope;
-use dialog_effects::{archive, blob};
+use dialog_effects::blob;
+use dialog_search_tree::nodes;
 use serde::{Deserialize, Serialize};
 
-use crate::attribute::AttributeQuery;
 use crate::corpus::Type as ValueType;
 use crate::error::EvaluationError;
 use crate::formula::cell::Cells;
@@ -80,7 +81,7 @@ use crate::selection::{Match, Selection};
 use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
-use crate::{Entity, Environment, Parameters, Schema, Scope, Value, the, try_stream};
+use crate::{Entity, Environment, Parameters, Schema, Scope, Value, try_stream};
 
 /// The archive a resolver reads a content address from: the wildcard
 /// subject's, meaning any archive the scope reads.
@@ -108,10 +109,10 @@ pub fn anywhere() -> ArchiveScope {
 /// the bytes the reference names: an environment handing back other bytes
 /// for it (a corrupt store, a line answering for the wrong block) is a
 /// failed read, refused rather than inspected as if it were the block.
-fn verified(
-    reference: &inspect::NodeReference,
-    block: Buffer,
-) -> Result<Buffer, DialogCorpusError> {
+///
+/// The node layer checks a node's block this way itself; this is for the
+/// one read that does not go through it, a spilled value's.
+fn verified(reference: &[u8; 32], block: Buffer) -> Result<Buffer, DialogCorpusError> {
     if block.blake3_hash() != &Blake3Hash::from(*reference) {
         return Err(DialogCorpusError::InvalidValue(format!(
             "block {} does not hash to its reference",
@@ -121,278 +122,152 @@ fn verified(
     Ok(block)
 }
 
-/// Base cost of a resolver step: one content-addressed block fetch
-/// plus decode, scheduled after cheap in-memory premises but ahead of
-/// broad scans.
-pub const RESOLVER_COST: usize = 200;
-
-/// Base cost of a resolver step whose node is open: it walks every
-/// node the scope's heads reach, so the planner runs it only when no
-/// other premise can name the node first.
-pub const RESOLVER_WALK_COST: usize = 1_000_000;
-
-/// Variables of the scan that reads the roots an open resolver walks
-/// from. They never leave it: the scan runs over a row of its own.
-const BRANCH: &str = "branch";
-const ROOT: &str = "root";
-const CAUSE: &str = "cause";
-
-/// What a resolver's `of` names in a row.
-enum Reference {
-    /// A block, by its hash.
-    Named(inspect::NodeReference),
-    /// A value that names no block.
-    Malformed,
-    /// Nothing: the term is a blank or a variable the row leaves unbound.
-    Open,
-}
-
-/// The root a row of the roots scan bound, if it names a node.
-fn root_reference(row: &Match) -> Option<inspect::NodeReference> {
-    match row.lookup(&Term::var(ROOT)) {
-        Ok(crate::Binding::Present(Value::Entity(root))) => root.node_hash(),
-        _ => None,
-    }
-}
+/// Base cost of a resolver step: one node read, which may fetch.
+///
+/// Above any read of facts the planner knows, so that in a body where a
+/// fact decides whether a node is to be read at all (a rule that reads
+/// only the nodes a space has recorded it holds), the fact is asked
+/// first and a node it rules out is never read.
+pub const RESOLVER_COST: usize = 50_000;
 
 /// Serde default for omitted parameter slots.
 fn blank() -> Term<Any> {
     Term::blank()
 }
 
-/// The kind of a block-reference input cell: a `node:` (or, for a
-/// spilled value, `asset:`) `Entity`, a base58 `String`, or raw 32-byte
-/// `Bytes` — the union the evaluator's `node_reference` actually
-/// accepts. The entity is what the resolvers themselves hand out
-/// (`tree/span`'s `node`, `dialog.branch/tree`), so a rule chains one
-/// into the next and can use it as a row's `this`; the other two admit a
-/// reference typed in by hand or taken from a decomposition formula's
-/// bytes output.
-fn reference_kind() -> Kind {
-    Kind::from(ValueType::Entity)
-        .union(&Kind::from(ValueType::String))
-        .union(&Kind::from(ValueType::Bytes))
+/// Declares one resolver's query struct, its cells, and how its slots
+/// are read and replaced, from one list of slots: a slot's name in a
+/// query, its kind and its description are stated once.
+macro_rules! accessor {
+    (
+        $(#[$meta:meta])*
+        $query:ident, $cells:ident, of: $handle:literal;
+        $( $field:ident => $name:literal : $kind:ident, $doc:literal; )*
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        pub struct $query {
+            #[doc = $handle]
+            #[doc = " Required."]
+            #[serde(default = "blank")]
+            pub of: Term<Any>,
+            $(
+                #[doc = $doc]
+                #[serde(default = "blank", rename = $name)]
+                pub $field: Term<Any>,
+            )*
+        }
+
+        static $cells: LazyLock<Cells> = LazyLock::new(|| {
+            Cells::define(|builder| {
+                builder
+                    .cell("of", Some(Kind::from(ValueType::Entity)))
+                    .the($handle)
+                    .required();
+                $(
+                    builder
+                        .cell($name, Some(Kind::from(ValueType::$kind)))
+                        .the($doc);
+                )*
+            })
+        });
+
+        impl $query {
+            /// Every slot of this resolver, by its name in a query.
+            fn parameters(&self) -> Parameters {
+                let mut parameters = Parameters::new();
+                parameters.insert("of".into(), self.of.clone());
+                $( parameters.insert($name.into(), self.$field.clone()); )*
+                parameters
+            }
+
+            /// Replace each slot `terms` names; the others keep theirs.
+            fn replace(&mut self, terms: &Parameters) {
+                if let Some(term) = terms.get("of") {
+                    self.of = term.clone();
+                }
+                $(
+                    if let Some(term) = terms.get($name) {
+                        self.$field = term.clone();
+                    }
+                )*
+            }
+        }
+    };
 }
 
-/// The entity naming the tree node behind `reference`.
-fn node_entity(reference: &inspect::NodeReference) -> Result<Entity, DialogCorpusError> {
-    Entity::from_node(reference)
-        .map_err(|error| DialogCorpusError::InvalidValue(format!("node entity: {error:?}")))
+accessor! {
+    /// The `tree/node` resolver: what a node is, and the format it was
+    /// written under. One row.
+    TreeNodeQuery, TREE_NODE_CELLS, of: "The node, as its `node:` entity.";
+    kind => "kind": String, "`\"index\"` (a table of spans) or `\"segment\"` (a run of entries).";
+    size => "size": UnsignedInt, "Size of the node's block in bytes.";
+    count => "count": UnsignedInt, "Span count (index) or entry count (segment).";
+    scale => "scale": UnsignedInt, "The node's scale code: an advisory log-scale size of its subtree.";
+    novelty => "novelty": UnsignedInt, "Buffered ops riding this node (0 for a segment).";
+    version => "version": UnsignedInt, "Layout version; pins how the rest of the node is read.";
+    fanout_bits => "fanout-bits": UnsignedInt, "Branching parameter `n`: how many bits of a key's hash decide a boundary; expected fanout is `2^n`.";
+    max_separator => "max-separator": UnsignedInt, "Keys longer than this never become boundaries.";
+    inline_n => "inline-n": UnsignedInt, "Values longer than this spill to the blob store.";
+    spill_prefix => "spill-prefix": UnsignedInt, "Leading raw value bytes a spilled value's key keeps.";
+    max_segment => "max-segment": UnsignedInt, "Leaf-run weight cap; 0 disables it.";
+    frame_ceiling_factor => "frame-ceiling-factor": UnsignedInt, "Hard frame-weight ceiling as a multiple of `max-segment`.";
+    anchor_selector => "anchor-selector": UnsignedInt, "Which candidate seam a forced cut anchors at.";
+    entry_overhead => "entry-overhead": UnsignedInt, "Weight charged per leaf entry beyond its key and value bytes.";
+    key_overhead => "key-overhead": UnsignedInt, "Weight the per-key cut floor charges beyond a key's bytes.";
+    link_overhead => "link-overhead": UnsignedInt, "Weight charged per index link beyond its separator and child hash.";
 }
 
-/// The entity naming the entry stored under `key`: `entry:<base58>` of
-/// the key's hash.
-///
-/// A key occurs once in a tree, so the key is the entry's whole
-/// identity, and `tree/key` and `tree/entry` name the same entry by the
-/// same entity wherever its segment sits.
-fn entry_entity(key: &[u8]) -> Result<Entity, DialogCorpusError> {
-    format!("entry:{}", Blake3Hash::hash(key).as_bytes().to_base58())
-        .parse()
-        .map_err(|error| DialogCorpusError::InvalidValue(format!("entry entity: {error:?}")))
+accessor! {
+    /// The `tree/span` resolver: one row per span of an index node — the
+    /// key range `[separator, until)` the node delegates to one child,
+    /// with everything it holds against it. No rows for a segment.
+    TreeSpanQuery, TREE_SPAN_CELLS, of: "The index node, as its `node:` entity.";
+    span => "span": Entity, "The span's own entity: this node and the span's position in it.";
+    at => "at": UnsignedInt, "Position among the node's spans.";
+    node => "node": Entity, "The child node rooting the span's subtree, as its `node:` entity.";
+    separator => "separator": Bytes, "The span's lower bound: a prefix of the subtree's least key. Empty for the first span.";
+    until => "until": Bytes, "The span's upper bound: the next span's separator. Empty for the last span.";
+    scale => "scale": UnsignedInt, "The subtree's advisory scale code.";
+    rank => "rank": UnsignedInt, "Seam rank of the separator: the level coin that made this boundary.";
+    novelty => "novelty": UnsignedInt, "Buffered ops the node holds against this span.";
 }
 
-/// The `tree/node` resolver: describe the node behind a reference.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TreeNodeQuery {
-    /// Node reference (base58 of the node's content hash) — required.
-    #[serde(default = "blank")]
-    pub of: Term<Any>,
-    /// `"index"` (a table of spans) or `"segment"` (a run of entries).
-    #[serde(default = "blank")]
-    pub kind: Term<Any>,
-    /// Serialized block size in bytes.
-    #[serde(default = "blank")]
-    pub size: Term<Any>,
-    /// Span count (index) or entry count (segment).
-    #[serde(default = "blank")]
-    pub count: Term<Any>,
-    /// The node's scale code (advisory log-scale subtree size).
-    #[serde(default = "blank")]
-    pub scale: Term<Any>,
-    /// Buffered hitchhiker ops riding this node (0 for a segment).
-    #[serde(default = "blank")]
-    pub novelty: Term<Any>,
+accessor! {
+    /// The `tree/entry` resolver: one row per entry of a segment node,
+    /// whole — its key, its state and claim, the value it spilled, and
+    /// the blob record it is when it is one. No rows for an index.
+    TreeEntryQuery, TREE_ENTRY_CELLS, of: "The segment node, as its `node:` entity.";
+    entry => "entry": Entity, "The entry's own entity: this node and the entry's position in it.";
+    at => "at": UnsignedInt, "Position within the segment.";
+    key => "key": Bytes, "The entry's index key.";
+    rank => "rank": UnsignedInt, "The key's leaf-coin rank: what decides whether a boundary forms after it.";
+    state => "state": String, "`\"asserted\"` for a stored datum, `\"removed\"` for a tombstone.";
+    retraction => "retraction": Boolean, "Whether the datum marks a retraction. Absent on a blob record.";
+    origin => "origin": Bytes, "Origin half of the claim's version. Absent when the write was unversioned.";
+    edition => "edition": UnsignedInt, "Edition half of the claim's version. Absent when the write was unversioned.";
+    cause => "cause": UnsignedInt, "Prior claim versions in the entry's cause. Absent on a blob record.";
+    collapsed => "collapsed": UnsignedInt, "Claim versions collapsed into this entry. Absent on a blob record.";
+    supersedes => "supersedes": UnsignedInt, "Versions a covering record supersedes. Absent on a blob record.";
+    spill => "spill": Entity, "The spilled value, as its `asset:` entity. Absent when the value is inline.";
+    blob => "blob": Entity, "The blob a blob record is about, as its `asset:` entity. Absent on any other entry.";
+    blob_size => "blob-size": UnsignedInt, "Size of that blob in bytes. Absent on any other entry.";
+    blob_version => "blob-version": UnsignedInt, "The blob record's encoding version. Absent on any other entry.";
 }
 
-/// The `tree/span` resolver: one row per span of an index node — the
-/// key range `[separator, until)` the node delegates to one child,
-/// with everything pending against it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TreeSpanQuery {
-    /// Node reference of the index node — required.
-    #[serde(default = "blank")]
-    pub of: Term<Any>,
-    /// Position among the node's spans.
-    #[serde(default = "blank")]
-    pub at: Term<Any>,
-    /// The child node rooting the span's subtree, as its `node:` entity,
-    /// feeding the next `tree/node`/`tree/span` input.
-    #[serde(default = "blank")]
-    pub node: Term<Any>,
-    /// The span's lower bound: a front-coded prefix of the subtree's
-    /// minimum leaf key. Empty for the leftmost span (−∞).
-    #[serde(default = "blank")]
-    pub separator: Term<Any>,
-    /// The span's upper bound: the next span's separator. Empty for
-    /// the last span (+∞).
-    #[serde(default = "blank")]
-    pub until: Term<Any>,
-    /// The subtree's advisory scale code.
-    #[serde(default = "blank")]
-    pub scale: Term<Any>,
-    /// Seam rank of the separator: the level coin that made this
-    /// boundary exist (0 for the leftmost span and forced seams).
-    #[serde(default = "blank")]
-    pub rank: Term<Any>,
-    /// Buffered hitchhiker ops pending against this span.
-    #[serde(default = "blank")]
-    pub novelty: Term<Any>,
+accessor! {
+    /// The `tree/block` resolver: a node's block as stored. One row.
+    TreeBlockQuery, TREE_BLOCK_CELLS, of: "The node, as its `node:` entity.";
+    bytes => "bytes": Bytes, "The node's block.";
 }
 
-/// The `tree/key` resolver: one row per entry of a segment node.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TreeKeyQuery {
-    /// Node reference of the segment node — required.
-    #[serde(default = "blank")]
-    pub of: Term<Any>,
-    /// Position within the segment.
-    #[serde(default = "blank")]
-    pub at: Term<Any>,
-    /// The entry's own entity, derived from its key: the same entry is
-    /// the same entity in `tree/key` and `tree/entry`.
-    #[serde(default = "blank")]
-    pub entry: Term<Any>,
-    /// The entry's variable-length index key bytes.
-    #[serde(default = "blank")]
-    pub key: Term<Any>,
-    /// The key's leaf-coin rank: what decides whether a leaf boundary
-    /// forms after this entry.
-    #[serde(default = "blank")]
-    pub rank: Term<Any>,
-}
-
-/// The `tree/entry` resolver: one row per entry of a segment node,
-/// surfacing the entry's stored claim metadata — the *value* side; the
-/// fact content itself lives in the key (`tree/key` +
-/// `dialog/key-part`). This is what makes the history and coverage
-/// regions legible: versions, causes, and coverage ride here.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TreeEntryQuery {
-    /// Node reference of the segment node — required.
-    #[serde(default = "blank")]
-    pub of: Term<Any>,
-    /// Position within the segment.
-    #[serde(default = "blank")]
-    pub at: Term<Any>,
-    /// The entry's own entity, derived from its key: the same entry is
-    /// the same entity in `tree/key` and `tree/entry`.
-    #[serde(default = "blank")]
-    pub entry: Term<Any>,
-    /// The entry's variable-length index key bytes.
-    #[serde(default = "blank")]
-    pub key: Term<Any>,
-    /// `"asserted"` for a stored datum, `"removed"` for a tombstone.
-    #[serde(default = "blank")]
-    pub state: Term<Any>,
-    /// Whether the datum marks a retraction (a covering record).
-    #[serde(default = "blank")]
-    pub retraction: Term<Any>,
-    /// Origin half of the claim's version (32 bytes; empty when the
-    /// write was unversioned).
-    #[serde(default = "blank")]
-    pub origin: Term<Any>,
-    /// Edition half of the claim's version (0 when unversioned).
-    #[serde(default = "blank")]
-    pub edition: Term<Any>,
-    /// Number of prior claim versions in the entry's cause.
-    #[serde(default = "blank")]
-    pub cause: Term<Any>,
-    /// Extra claim versions collapsed into this entry.
-    #[serde(default = "blank")]
-    pub collapsed: Term<Any>,
-    /// Versions a covering record supersedes.
-    #[serde(default = "blank")]
-    pub supersedes: Term<Any>,
-    /// The spilled value's block reference (base58), empty when the
-    /// value is inline in the key. Feeds `tree/value`.
-    #[serde(default = "blank")]
-    pub spill: Term<Any>,
-}
-
-/// The `tree/value` resolver: read a spilled value's raw bytes by its
-/// content-addressed block reference (a `tree/entry` row's `spill`).
-/// The block holds the value's raw bytes; the value's type is in the
-/// key (`dialog/key-part`'s `vtype` component).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TreeValueQuery {
-    /// The spilled value's 32-byte block reference — required.
-    #[serde(default = "blank")]
-    pub of: Term<Any>,
-    /// Size of the value in bytes.
-    #[serde(default = "blank")]
-    pub size: Term<Any>,
-    /// The value's raw bytes.
-    #[serde(default = "blank")]
-    pub bytes: Term<Any>,
-}
-
-/// The `tree/blob` resolver: one row per blob-index entry of a
-/// segment node — the content-derived metadata the tree stores about a
-/// referenced blob. The blob's bytes live in the blob store, outside
-/// the tree; sizes and hashes here are what replication and the
-/// inspector reason with.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TreeBlobQuery {
-    /// Node reference of the segment node — required.
-    #[serde(default = "blank")]
-    pub of: Term<Any>,
-    /// Position within the segment.
-    #[serde(default = "blank")]
-    pub at: Term<Any>,
-    /// The referenced blob's 32-byte content hash.
-    #[serde(default = "blank")]
-    pub blob: Term<Any>,
-    /// The blob record's encoding version.
-    #[serde(default = "blank")]
-    pub version: Term<Any>,
-    /// Total size of the blob in bytes.
-    #[serde(default = "blank")]
-    pub size: Term<Any>,
-}
-
-/// The `tree/manifest` resolver: the format manifest the node embeds,
-/// field for field. Every node carries one, so a bare reference is
-/// self-describing and mixed-format trees are visible per node.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TreeManifestQuery {
-    /// Node reference — required.
-    #[serde(default = "blank")]
-    pub of: Term<Any>,
-    /// Format version; pins how the rest of the node is interpreted.
-    #[serde(default = "blank")]
-    pub version: Term<Any>,
-    /// Branching parameter `n`; expected fanout is `2^n`.
-    #[serde(default = "blank")]
-    pub fanout_n: Term<Any>,
-    /// Keys longer than this never become boundaries.
-    #[serde(default = "blank")]
-    pub max_separator: Term<Any>,
-    /// Values longer than this spill to the block store.
-    #[serde(default = "blank")]
-    pub inline_n: Term<Any>,
-    /// Leading raw value bytes a spilled value's key keeps as prefix.
-    #[serde(default = "blank")]
-    pub spill_prefix: Term<Any>,
-    /// Leaf-run weight cap; 0 disables it.
-    #[serde(default = "blank")]
-    pub max_segment: Term<Any>,
-    /// Hard frame-weight ceiling as a multiple of `max_segment`.
-    #[serde(default = "blank")]
-    pub frame_ceiling_factor: Term<Any>,
-    /// Which candidate seam a forced cut anchors at.
-    #[serde(default = "blank")]
-    pub anchor_selector: Term<Any>,
+accessor! {
+    /// The `tree/value` resolver: a spilled value's bytes, by the
+    /// `asset:` entity a `tree/entry` row yields as `spill`. The value's
+    /// type is in the entry's key (`dialog/key-part`). One row.
+    TreeValueQuery, TREE_VALUE_CELLS, of: "The spilled value, as its `asset:` entity.";
+    size => "size": UnsignedInt, "Size of the value in bytes.";
+    bytes => "bytes": Bytes, "The value's raw bytes.";
 }
 
 /// A resolver premise bound to specific term arguments.
@@ -414,205 +289,20 @@ pub enum ResolverQuery {
     /// Resolver `tree/span`.
     #[serde(rename = "tree/span")]
     TreeSpan(TreeSpanQuery),
-    /// Resolver `tree/key`.
-    #[serde(rename = "tree/key")]
-    TreeKey(TreeKeyQuery),
     /// Resolver `tree/entry`.
     #[serde(rename = "tree/entry")]
     TreeEntry(TreeEntryQuery),
+    /// Resolver `tree/block`.
+    #[serde(rename = "tree/block")]
+    TreeBlock(TreeBlockQuery),
     /// Resolver `tree/value`.
     #[serde(rename = "tree/value")]
     TreeValue(TreeValueQuery),
-    /// Resolver `tree/blob`.
-    #[serde(rename = "tree/blob")]
-    TreeBlob(TreeBlobQuery),
-    /// Resolver `tree/manifest`.
-    #[serde(rename = "tree/manifest")]
-    TreeManifest(TreeManifestQuery),
 }
 
-static TREE_NODE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
-    Cells::define(|builder| {
-        builder
-            .cell("of", Some(reference_kind()))
-            .the("Node reference: base58 of the node's content hash.");
-        builder
-            .cell("kind", Some(Kind::from(ValueType::String)))
-            .the("\"index\" (a table of spans) or \"segment\" (a run of entries).");
-        builder
-            .cell("size", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Serialized block size in bytes.");
-        builder
-            .cell("count", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Span count (index) or entry count (segment).");
-        builder
-            .cell("scale", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("The node's advisory scale code.");
-        builder
-            .cell("novelty", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Buffered ops riding this node (0 for a segment).");
-    })
-});
-
-static TREE_SPAN_CELLS: LazyLock<Cells> = LazyLock::new(|| {
-    Cells::define(|builder| {
-        builder
-            .cell("of", Some(reference_kind()))
-            .the("Node reference of the index node.");
-        builder
-            .cell("at", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Position among the node's spans.");
-        builder
-            .cell("node", Some(Kind::from(ValueType::Entity)))
-            .the("The child node rooting the span's subtree, as its entity.");
-        builder
-            .cell("separator", Some(Kind::from(ValueType::Bytes)))
-            .the("The span's lower bound (empty = −∞).");
-        builder
-            .cell("until", Some(Kind::from(ValueType::Bytes)))
-            .the("The span's upper bound: the next separator (empty = +∞).");
-        builder
-            .cell("scale", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("The subtree's advisory scale code.");
-        builder
-            .cell("rank", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Seam rank of the separator (the boundary's level coin).");
-        builder
-            .cell("novelty", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Buffered ops pending against this span.");
-    })
-});
-
-static TREE_KEY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
-    Cells::define(|builder| {
-        builder
-            .cell("of", Some(reference_kind()))
-            .the("Node reference of the segment node.");
-        builder
-            .cell("at", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Position within the segment.");
-        builder
-            .cell("entry", Some(Kind::from(ValueType::Entity)))
-            .the("The entry's own entity, derived from its key.");
-        builder
-            .cell("key", Some(Kind::from(ValueType::Bytes)))
-            .the("The entry's variable-length index key bytes.");
-        builder
-            .cell("rank", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("The key's leaf-coin rank.");
-    })
-});
-
-static TREE_ENTRY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
-    Cells::define(|builder| {
-        builder
-            .cell("of", Some(reference_kind()))
-            .the("Node reference of the segment node.");
-        builder
-            .cell("at", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Position within the segment.");
-        builder
-            .cell("entry", Some(Kind::from(ValueType::Entity)))
-            .the("The entry's own entity, derived from its key.");
-        builder
-            .cell("key", Some(Kind::from(ValueType::Bytes)))
-            .the("The entry's variable-length index key bytes.");
-        builder
-            .cell("state", Some(Kind::from(ValueType::String)))
-            .the("\"asserted\" or \"removed\".");
-        builder
-            .cell("retraction", Some(Kind::from(ValueType::Boolean)))
-            .the("Whether the datum marks a retraction.");
-        builder
-            .cell("origin", Some(Kind::from(ValueType::Bytes)))
-            .the("Origin half of the claim's version (empty = unversioned).");
-        builder
-            .cell("edition", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Edition half of the claim's version.");
-        builder
-            .cell("cause", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Prior claim versions in the entry's cause.");
-        builder
-            .cell("collapsed", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Extra claim versions collapsed into this entry.");
-        builder
-            .cell("supersedes", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Versions a covering record supersedes.");
-        builder
-            .cell("spill", Some(Kind::from(ValueType::String)))
-            .the("Spilled value's block reference (empty = inline).");
-    })
-});
-
-static TREE_VALUE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
-    Cells::define(|builder| {
-        builder
-            .cell("of", Some(reference_kind()))
-            .the("The spilled value's 32-byte block reference.")
-            .required();
-        builder
-            .cell("size", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Size of the value in bytes.");
-        builder
-            .cell("bytes", Some(Kind::from(ValueType::Bytes)))
-            .the("The value's raw bytes.");
-    })
-});
-
-static TREE_BLOB_CELLS: LazyLock<Cells> = LazyLock::new(|| {
-    Cells::define(|builder| {
-        builder
-            .cell("of", Some(reference_kind()))
-            .the("Node reference of the segment node.");
-        builder
-            .cell("at", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Position within the segment.");
-        builder
-            .cell("blob", Some(Kind::from(ValueType::Bytes)))
-            .the("The referenced blob's 32-byte content hash.");
-        builder
-            .cell("version", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("The blob record's encoding version.");
-        builder
-            .cell("size", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Total size of the blob in bytes.");
-    })
-});
-
-static TREE_MANIFEST_CELLS: LazyLock<Cells> = LazyLock::new(|| {
-    Cells::define(|builder| {
-        builder
-            .cell("of", Some(reference_kind()))
-            .the("Node reference.");
-        builder
-            .cell("version", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Format version.");
-        builder
-            .cell("fanout_n", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Branching parameter n; expected fanout is 2^n.");
-        builder
-            .cell("max_separator", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Keys longer than this never become boundaries.");
-        builder
-            .cell("inline_n", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Values longer than this spill to the block store.");
-        builder
-            .cell("spill_prefix", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Order-preserving prefix bytes a spilled value's key keeps.");
-        builder
-            .cell("max_segment", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Leaf-run weight cap; 0 disables it.");
-        builder
-            .cell(
-                "frame_ceiling_factor",
-                Some(Kind::from(ValueType::UnsignedInt)),
-            )
-            .the("Hard frame-weight ceiling as a multiple of max_segment.");
-        builder
-            .cell("anchor_selector", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Which candidate seam a forced cut anchors at.");
-    })
-});
+/// One slot of a row a resolver yields: the term it binds, and its
+/// value, or `None` when the slot does not apply to the row.
+type Slot<'a> = (&'a Term<Any>, Option<Value>);
 
 impl ResolverQuery {
     /// Returns the formal notation name (e.g. `"tree/node"`).
@@ -620,11 +310,9 @@ impl ResolverQuery {
         match self {
             Self::TreeNode(_) => "tree/node",
             Self::TreeSpan(_) => "tree/span",
-            Self::TreeKey(_) => "tree/key",
             Self::TreeEntry(_) => "tree/entry",
+            Self::TreeBlock(_) => "tree/block",
             Self::TreeValue(_) => "tree/value",
-            Self::TreeBlob(_) => "tree/blob",
-            Self::TreeManifest(_) => "tree/manifest",
         }
     }
 
@@ -633,11 +321,9 @@ impl ResolverQuery {
         match self {
             Self::TreeNode(_) => &TREE_NODE_CELLS,
             Self::TreeSpan(_) => &TREE_SPAN_CELLS,
-            Self::TreeKey(_) => &TREE_KEY_CELLS,
             Self::TreeEntry(_) => &TREE_ENTRY_CELLS,
+            Self::TreeBlock(_) => &TREE_BLOCK_CELLS,
             Self::TreeValue(_) => &TREE_VALUE_CELLS,
-            Self::TreeBlob(_) => &TREE_BLOB_CELLS,
-            Self::TreeManifest(_) => &TREE_MANIFEST_CELLS,
         }
     }
 
@@ -646,105 +332,39 @@ impl ResolverQuery {
         self.cells().into()
     }
 
-    /// The required node-reference input term.
+    /// The required handle term.
     fn of(&self) -> &Term<Any> {
         match self {
             Self::TreeNode(query) => &query.of,
             Self::TreeSpan(query) => &query.of,
-            Self::TreeKey(query) => &query.of,
             Self::TreeEntry(query) => &query.of,
+            Self::TreeBlock(query) => &query.of,
             Self::TreeValue(query) => &query.of,
-            Self::TreeBlob(query) => &query.of,
-            Self::TreeManifest(query) => &query.of,
         }
     }
 
     /// Estimate the cost of this resolver given the environment.
     ///
-    /// One block read when the node is named. When it is open, the
-    /// resolver walks every node the scope's heads reach, at
-    /// [`RESOLVER_WALK_COST`], so the planner schedules it after any
-    /// premise that would name the node. `tree/value` has nothing to
-    /// walk and is `None` until its reference is bound.
+    /// `None` while the handle is an unbound variable: nodes are not
+    /// enumerable, and a resolver that went looking for them would read,
+    /// and fetch, a whole tree — the planner refuses to schedule it until
+    /// a join binds the handle. A *blank* `of` (a query that never names
+    /// the handle at all) is scheduled but can match nothing: every row
+    /// fails the handle lookup, so such a query returns empty rather
+    /// than erroring.
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
-        if self.of().is_bound(env) {
-            Some(RESOLVER_COST)
-        } else {
-            self.lists().then_some(RESOLVER_WALK_COST)
-        }
+        self.of().is_bound(env).then_some(RESOLVER_COST)
     }
 
     /// Returns the parameters for this resolver application.
     pub fn parameters(&self) -> Parameters {
-        let mut params = Parameters::new();
         match self {
-            Self::TreeNode(query) => {
-                params.insert("of".into(), query.of.clone());
-                params.insert("kind".into(), query.kind.clone());
-                params.insert("size".into(), query.size.clone());
-                params.insert("count".into(), query.count.clone());
-                params.insert("scale".into(), query.scale.clone());
-                params.insert("novelty".into(), query.novelty.clone());
-            }
-            Self::TreeSpan(query) => {
-                params.insert("of".into(), query.of.clone());
-                params.insert("at".into(), query.at.clone());
-                params.insert("node".into(), query.node.clone());
-                params.insert("separator".into(), query.separator.clone());
-                params.insert("until".into(), query.until.clone());
-                params.insert("scale".into(), query.scale.clone());
-                params.insert("rank".into(), query.rank.clone());
-                params.insert("novelty".into(), query.novelty.clone());
-            }
-            Self::TreeKey(query) => {
-                params.insert("of".into(), query.of.clone());
-                params.insert("at".into(), query.at.clone());
-                params.insert("entry".into(), query.entry.clone());
-                params.insert("key".into(), query.key.clone());
-                params.insert("rank".into(), query.rank.clone());
-            }
-            Self::TreeEntry(query) => {
-                params.insert("of".into(), query.of.clone());
-                params.insert("at".into(), query.at.clone());
-                params.insert("entry".into(), query.entry.clone());
-                params.insert("key".into(), query.key.clone());
-                params.insert("state".into(), query.state.clone());
-                params.insert("retraction".into(), query.retraction.clone());
-                params.insert("origin".into(), query.origin.clone());
-                params.insert("edition".into(), query.edition.clone());
-                params.insert("cause".into(), query.cause.clone());
-                params.insert("collapsed".into(), query.collapsed.clone());
-                params.insert("supersedes".into(), query.supersedes.clone());
-                params.insert("spill".into(), query.spill.clone());
-            }
-            Self::TreeValue(query) => {
-                params.insert("of".into(), query.of.clone());
-                params.insert("size".into(), query.size.clone());
-                params.insert("bytes".into(), query.bytes.clone());
-            }
-            Self::TreeBlob(query) => {
-                params.insert("of".into(), query.of.clone());
-                params.insert("at".into(), query.at.clone());
-                params.insert("blob".into(), query.blob.clone());
-                params.insert("version".into(), query.version.clone());
-                params.insert("size".into(), query.size.clone());
-            }
-            Self::TreeManifest(query) => {
-                params.insert("of".into(), query.of.clone());
-                params.insert("version".into(), query.version.clone());
-                params.insert("fanout_n".into(), query.fanout_n.clone());
-                params.insert("max_separator".into(), query.max_separator.clone());
-                params.insert("inline_n".into(), query.inline_n.clone());
-                params.insert("spill_prefix".into(), query.spill_prefix.clone());
-                params.insert("max_segment".into(), query.max_segment.clone());
-                params.insert(
-                    "frame_ceiling_factor".into(),
-                    query.frame_ceiling_factor.clone(),
-                );
-                params.insert("anchor_selector".into(), query.anchor_selector.clone());
-            }
+            Self::TreeNode(query) => query.parameters(),
+            Self::TreeSpan(query) => query.parameters(),
+            Self::TreeEntry(query) => query.parameters(),
+            Self::TreeBlock(query) => query.parameters(),
+            Self::TreeValue(query) => query.parameters(),
         }
-        params
     }
 
     /// This resolver over `terms` instead of its own: a slot `terms`
@@ -752,212 +372,45 @@ impl ResolverQuery {
     pub fn with_parameters(&self, terms: &Parameters) -> Self {
         let mut renamed = self.clone();
         match &mut renamed {
-            Self::TreeNode(query) => {
-                if let Some(term) = terms.get("of") {
-                    query.of = term.clone();
-                }
-                if let Some(term) = terms.get("kind") {
-                    query.kind = term.clone();
-                }
-                if let Some(term) = terms.get("size") {
-                    query.size = term.clone();
-                }
-                if let Some(term) = terms.get("count") {
-                    query.count = term.clone();
-                }
-                if let Some(term) = terms.get("scale") {
-                    query.scale = term.clone();
-                }
-                if let Some(term) = terms.get("novelty") {
-                    query.novelty = term.clone();
-                }
-            }
-            Self::TreeSpan(query) => {
-                if let Some(term) = terms.get("of") {
-                    query.of = term.clone();
-                }
-                if let Some(term) = terms.get("at") {
-                    query.at = term.clone();
-                }
-                if let Some(term) = terms.get("node") {
-                    query.node = term.clone();
-                }
-                if let Some(term) = terms.get("separator") {
-                    query.separator = term.clone();
-                }
-                if let Some(term) = terms.get("until") {
-                    query.until = term.clone();
-                }
-                if let Some(term) = terms.get("scale") {
-                    query.scale = term.clone();
-                }
-                if let Some(term) = terms.get("rank") {
-                    query.rank = term.clone();
-                }
-                if let Some(term) = terms.get("novelty") {
-                    query.novelty = term.clone();
-                }
-            }
-            Self::TreeKey(query) => {
-                if let Some(term) = terms.get("of") {
-                    query.of = term.clone();
-                }
-                if let Some(term) = terms.get("at") {
-                    query.at = term.clone();
-                }
-                if let Some(term) = terms.get("entry") {
-                    query.entry = term.clone();
-                }
-                if let Some(term) = terms.get("key") {
-                    query.key = term.clone();
-                }
-                if let Some(term) = terms.get("rank") {
-                    query.rank = term.clone();
-                }
-            }
-            Self::TreeEntry(query) => {
-                if let Some(term) = terms.get("of") {
-                    query.of = term.clone();
-                }
-                if let Some(term) = terms.get("at") {
-                    query.at = term.clone();
-                }
-                if let Some(term) = terms.get("entry") {
-                    query.entry = term.clone();
-                }
-                if let Some(term) = terms.get("key") {
-                    query.key = term.clone();
-                }
-                if let Some(term) = terms.get("state") {
-                    query.state = term.clone();
-                }
-                if let Some(term) = terms.get("retraction") {
-                    query.retraction = term.clone();
-                }
-                if let Some(term) = terms.get("origin") {
-                    query.origin = term.clone();
-                }
-                if let Some(term) = terms.get("edition") {
-                    query.edition = term.clone();
-                }
-                if let Some(term) = terms.get("cause") {
-                    query.cause = term.clone();
-                }
-                if let Some(term) = terms.get("collapsed") {
-                    query.collapsed = term.clone();
-                }
-                if let Some(term) = terms.get("supersedes") {
-                    query.supersedes = term.clone();
-                }
-                if let Some(term) = terms.get("spill") {
-                    query.spill = term.clone();
-                }
-            }
-            Self::TreeValue(query) => {
-                if let Some(term) = terms.get("of") {
-                    query.of = term.clone();
-                }
-                if let Some(term) = terms.get("size") {
-                    query.size = term.clone();
-                }
-                if let Some(term) = terms.get("bytes") {
-                    query.bytes = term.clone();
-                }
-            }
-            Self::TreeBlob(query) => {
-                if let Some(term) = terms.get("of") {
-                    query.of = term.clone();
-                }
-                if let Some(term) = terms.get("at") {
-                    query.at = term.clone();
-                }
-                if let Some(term) = terms.get("blob") {
-                    query.blob = term.clone();
-                }
-                if let Some(term) = terms.get("version") {
-                    query.version = term.clone();
-                }
-                if let Some(term) = terms.get("size") {
-                    query.size = term.clone();
-                }
-            }
-            Self::TreeManifest(query) => {
-                if let Some(term) = terms.get("of") {
-                    query.of = term.clone();
-                }
-                if let Some(term) = terms.get("version") {
-                    query.version = term.clone();
-                }
-                if let Some(term) = terms.get("fanout_n") {
-                    query.fanout_n = term.clone();
-                }
-                if let Some(term) = terms.get("max_separator") {
-                    query.max_separator = term.clone();
-                }
-                if let Some(term) = terms.get("inline_n") {
-                    query.inline_n = term.clone();
-                }
-                if let Some(term) = terms.get("spill_prefix") {
-                    query.spill_prefix = term.clone();
-                }
-                if let Some(term) = terms.get("max_segment") {
-                    query.max_segment = term.clone();
-                }
-                if let Some(term) = terms.get("frame_ceiling_factor") {
-                    query.frame_ceiling_factor = term.clone();
-                }
-                if let Some(term) = terms.get("anchor_selector") {
-                    query.anchor_selector = term.clone();
-                }
-            }
+            Self::TreeNode(query) => query.replace(terms),
+            Self::TreeSpan(query) => query.replace(terms),
+            Self::TreeEntry(query) => query.replace(terms),
+            Self::TreeBlock(query) => query.replace(terms),
+            Self::TreeValue(query) => query.replace(terms),
         }
         renamed
     }
 
-    /// Resolve the node-reference input against the row, from a constant
-    /// or a bound variable: a `node:` entity (or the `asset:` entity of a
-    /// spilled value), a base58 string, or raw bytes. A value that names
-    /// no block is [`Malformed`](Reference::Malformed) and filters the row
-    /// (mirroring the forged-record-projects-nothing convention); no
-    /// value at all is [`Open`](Reference::Open).
-    fn node_reference(&self, base: &Match) -> Reference {
+    /// The hash the handle names in this row: a node's for a `node:`
+    /// entity, a spilled value's for an `asset:` given to `tree/value`.
+    /// `None` filters the row: a handle that is unbound, of another
+    /// scheme, or malformed contributes nothing, mirroring the
+    /// forged-record-projects-nothing convention.
+    fn reference(&self, base: &Match) -> Option<[u8; 32]> {
         let value = match self.of() {
             Term::Constant(value) => value.clone(),
             term => match base.lookup(term) {
                 Ok(crate::Binding::Present(value)) => value,
-                _ => return Reference::Open,
+                _ => return None,
             },
         };
-        let reference = match value {
-            // What the resolvers hand out: `tree/span`'s `node`, and the
-            // root `dialog.branch/tree` carries.
-            Value::Entity(entity) => entity.node_hash().or_else(|| entity.blob_hash()),
-            Value::String(reference) => reference
-                .from_base58()
-                .ok()
-                .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()),
-            // Raw 32-byte references chain too (e.g. straight from a
-            // decomposition formula's bytes output).
-            Value::Bytes(bytes) => <[u8; 32]>::try_from(bytes).ok(),
-            _ => None,
+        let Value::Entity(entity) = value else {
+            return None;
         };
-        reference.map_or(Reference::Malformed, Reference::Named)
+        match self {
+            Self::TreeValue(_) => entity.blob_hash(),
+            _ => entity.node_hash(),
+        }
     }
 
     /// Evaluate this resolver over the incoming selection.
     ///
-    /// Per input row with `of` given: resolve the node reference, perform
-    /// the idempotent [`Load`](archive::Load) command through the
-    /// environment for a block [`anywhere`] it reads, decode the block,
-    /// and project one output row per result — a segment asked for spans,
-    /// an index asked for keys, an absent block, or a resolvable
-    /// reference whose block is not a tree node at all (e.g. a spilled
-    /// value block joined into `tree/node`) all yield zero rows,
-    /// mirroring the malformed-reference convention above.
-    ///
-    /// Per input row with `of` open: walk down from every root the scope
-    /// reads ([`ROOT`]) and project each node reached, binding `of` to
-    /// it. Nodes come in key order, each once.
+    /// Per input row: take the hash its handle names, ask the
+    /// environment for the node ([`nodes::Read`], [`anywhere`] the scope
+    /// reads), and project one output row per result. A node the
+    /// environment cannot reach, a segment asked for spans, an index
+    /// asked for entries, and a handle that names no node all yield zero
+    /// rows.
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         env: &'a Env,
@@ -972,279 +425,247 @@ impl ResolverQuery {
                 let mut base = candidate?;
                 // Every row this one extends into shares its bindings.
                 base.share();
-                match resolver.node_reference(&base) {
-                    Reference::Named(reference) => {
-                        // A spilled value lives in the blob store, apart from the
-                        // tree's nodes, so `tree/value` reads through that lane.
-                        let loaded = match &resolver {
-                            ResolverQuery::TreeValue(_) => blob::Load::new(anywhere(), reference)
-                                .perform(env)
-                                .await
-                                .map_err(DialogCorpusError::from)?,
-                            _ => archive::Load::new(anywhere().index(), reference)
-                                .perform(env)
-                                .await
-                                .map_err(DialogCorpusError::from)?,
-                        };
+                let Some(reference) = resolver.reference(&base) else {
+                    continue;
+                };
+                let rows = match &resolver {
+                    // A spilled value lives in the blob store, apart from
+                    // the tree's nodes, and is read as the bytes it is.
+                    ResolverQuery::TreeValue(query) => {
+                        let loaded = blob::Load::new(anywhere(), reference)
+                            .perform(env)
+                            .await
+                            .map_err(DialogCorpusError::from)?;
                         let Some(block) = loaded else {
                             continue;
                         };
                         let bytes = verified(&reference, block)?.into_vec();
-                        for row in resolver.project(&base, bytes)? {
-                            yield row;
-                        }
+                        rows(&base, vec![vec![
+                            (&query.size, Some(Value::UnsignedInt(bytes.len() as u128))),
+                            (&query.bytes, Some(Value::Bytes(bytes))),
+                        ]])?
                     }
-                    Reference::Malformed => continue,
-                    Reference::Open => {
-                        if !resolver.lists() {
-                            continue;
-                        }
-                        // The roots are read like any other fact, so the
-                        // read is recorded and a subscription re-runs the
-                        // walk when a head moves.
-                        let roots = Box::pin(
-                            AttributeQuery::new(
-                                Term::from(the!("dialog.branch/tree")),
-                                Term::<Entity>::var(BRANCH),
-                                Term::var(ROOT),
-                                Term::var(CAUSE),
-                                None,
-                            )
-                            .evaluate(env, Match::new().seed()),
+                    _ => {
+                        let read = nodes::Read::<CorpusNode>::new(
+                            anywhere().index(),
+                            Blake3Hash::from(reference),
                         );
-                        let mut pending: Vec<inspect::NodeReference> = Vec::new();
-                        for await root in roots {
-                            pending.extend(root_reference(&root?));
-                        }
-                        pending.reverse();
-
-                        let mut seen: HashSet<inspect::NodeReference> = HashSet::new();
-                        while let Some(reference) = pending.pop() {
-                            if !seen.insert(reference) {
-                                continue;
-                            }
-                            let loaded = archive::Load::new(anywhere().index(), reference)
-                                .perform(env)
-                                .await
-                                .map_err(DialogCorpusError::from)?;
-                            let Some(block) = loaded else {
-                                continue;
-                            };
-                            let bytes = verified(&reference, block)?.into_vec();
-                            // An index's children are walked after it, in
-                            // span order: the stack takes them reversed.
-                            if let Ok(spans) = inspect::inspect_spans(bytes.clone()) {
-                                pending.extend(spans.into_iter().rev().map(|span| span.node));
-                            }
-                            let mut named = base.clone();
-                            named.bind(resolver.of(), Value::Entity(node_entity(&reference)?))?;
-                            for row in resolver.project(&named, bytes)? {
-                                yield row;
-                            }
-                        }
+                        let Some(node) = read
+                            .perform(env)
+                            .await
+                            .map_err(DialogCorpusError::from)?
+                        else {
+                            continue;
+                        };
+                        resolver.project(&base, &reference, &node)?
                     }
+                };
+                for row in rows {
+                    yield row;
                 }
             }
         }
     }
 
-    /// Whether this resolver lists every node when `of` is open. A
-    /// spilled value is not a tree node and is reached only by the
-    /// reference an entry carries, so `tree/value` does not.
-    fn lists(&self) -> bool {
-        !matches!(self, Self::TreeValue(_))
-    }
-
-    /// The rows the block `bytes` projects to under this resolver, each
-    /// extending `base`.
-    fn project(&self, base: &Match, bytes: Vec<u8>) -> Result<Vec<Match>, EvaluationError> {
-        let mut rows = Vec::new();
-        match self {
-            ResolverQuery::TreeNode(query) => {
-                let Ok(node) = inspect::inspect_node(bytes) else {
-                    return Ok(rows);
-                };
-                let row = project(
-                    base,
-                    &[
-                        (&query.kind, Value::String(node.kind.into())),
-                        (&query.size, Value::UnsignedInt(node.size.into())),
-                        (&query.count, Value::UnsignedInt(node.count.into())),
-                        (&query.scale, Value::UnsignedInt(node.scale.into())),
-                        (&query.novelty, Value::UnsignedInt(node.novelty.into())),
-                    ],
-                )?;
-                rows.extend(row);
+    /// The rows `node` projects to under this resolver, each extending
+    /// `base`. `reference` is the node's hash.
+    fn project(
+        &self,
+        base: &Match,
+        reference: &[u8; 32],
+        node: &CorpusNode,
+    ) -> Result<Vec<Match>, EvaluationError> {
+        let unsigned = |value: u64| Some(Value::UnsignedInt(value.into()));
+        let projected = match self {
+            Self::TreeNode(query) => {
+                let summary = inspect::summary(node)?;
+                let manifest = inspect::manifest(node)?;
+                vec![vec![
+                    (&query.kind, Some(Value::String(summary.kind.into()))),
+                    (&query.size, unsigned(summary.size)),
+                    (&query.count, unsigned(summary.count)),
+                    (&query.scale, unsigned(summary.scale)),
+                    (&query.novelty, unsigned(summary.novelty)),
+                    (&query.version, unsigned(manifest.version)),
+                    (&query.fanout_bits, unsigned(manifest.fanout_n)),
+                    (&query.max_separator, unsigned(manifest.max_separator)),
+                    (&query.inline_n, unsigned(manifest.inline_n)),
+                    (&query.spill_prefix, unsigned(manifest.spill_prefix)),
+                    (&query.max_segment, unsigned(manifest.max_segment)),
+                    (
+                        &query.frame_ceiling_factor,
+                        unsigned(manifest.frame_ceiling_factor),
+                    ),
+                    (&query.anchor_selector, unsigned(manifest.anchor_selector)),
+                    (&query.entry_overhead, unsigned(manifest.entry_overhead)),
+                    (&query.key_overhead, unsigned(manifest.key_overhead)),
+                    (&query.link_overhead, unsigned(manifest.link_overhead)),
+                ]]
             }
-            ResolverQuery::TreeSpan(query) => {
-                let Ok(spans) = inspect::inspect_spans(bytes) else {
-                    return Ok(rows);
-                };
-                for span in spans {
-                    let row = project(
-                        base,
-                        &[
-                            (&query.at, Value::UnsignedInt(span.at.into())),
-                            (&query.node, Value::Entity(node_entity(&span.node)?)),
-                            (&query.separator, Value::Bytes(span.separator)),
-                            (&query.until, Value::Bytes(span.until)),
-                            (&query.scale, Value::UnsignedInt(span.scale.into())),
-                            (&query.rank, Value::UnsignedInt(span.rank.into())),
-                            (&query.novelty, Value::UnsignedInt(span.novelty.into())),
-                        ],
-                    )?;
-                    rows.extend(row);
+            Self::TreeSpan(query) => {
+                let mut projected = Vec::new();
+                for span in inspect::spans(node)? {
+                    projected.push(vec![
+                        (
+                            &query.span,
+                            Some(Value::Entity(placed("span", reference, span.at)?)),
+                        ),
+                        (&query.at, unsigned(span.at)),
+                        (&query.node, Some(Value::Entity(node_entity(&span.node)?))),
+                        (&query.separator, Some(Value::Bytes(span.separator))),
+                        (&query.until, Some(Value::Bytes(span.until))),
+                        (&query.scale, unsigned(span.scale)),
+                        (&query.rank, unsigned(span.rank)),
+                        (&query.novelty, unsigned(span.novelty)),
+                    ]);
                 }
+                projected
             }
-            ResolverQuery::TreeKey(query) => {
-                let Ok(keys) = inspect::inspect_keys(bytes) else {
-                    return Ok(rows);
-                };
-                for (at, entry) in keys.into_iter().enumerate() {
-                    let row = project(
-                        base,
-                        &[
-                            (&query.at, Value::UnsignedInt(at as u128)),
-                            (&query.entry, Value::Entity(entry_entity(&entry.key)?)),
-                            (&query.key, Value::Bytes(entry.key)),
-                            (&query.rank, Value::UnsignedInt(entry.rank.into())),
-                        ],
-                    )?;
-                    rows.extend(row);
+            Self::TreeEntry(query) => {
+                let ranks = inspect::keys(node)?;
+                let blobs: HashMap<u64, inspect::BlobEntrySummary> = inspect::blob_records(node)
+                    // A record this build cannot decode keeps its entry's
+                    // row, without the blob slots.
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|record| (record.at, record))
+                    .collect();
+                let mut projected = Vec::new();
+                for entry in inspect::entries(node)? {
+                    let blob = blobs.get(&entry.at);
+                    // A blob record carries no claim: it says what a blob
+                    // is, not who wrote a fact.
+                    let claim = |value: Option<Value>| if blob.is_some() { None } else { value };
+                    let versioned = !entry.origin.is_empty();
+                    let spill = match &entry.spill {
+                        Some(hash) => Some(Value::Entity(asset_entity(hash)?)),
+                        None => None,
+                    };
+                    let about = match blob {
+                        Some(record) => <[u8; 32]>::try_from(record.blob.as_slice())
+                            .ok()
+                            .map(|hash| asset_entity(&hash))
+                            .transpose()?
+                            .map(Value::Entity),
+                        None => None,
+                    };
+                    projected.push(vec![
+                        (
+                            &query.entry,
+                            Some(Value::Entity(placed("entry", reference, entry.at)?)),
+                        ),
+                        (&query.at, unsigned(entry.at)),
+                        (
+                            &query.rank,
+                            ranks
+                                .get(entry.at as usize)
+                                .and_then(|key| unsigned(key.rank)),
+                        ),
+                        (&query.key, Some(Value::Bytes(entry.key))),
+                        (&query.state, Some(Value::String(entry.state.into()))),
+                        (
+                            &query.retraction,
+                            claim(Some(Value::Boolean(entry.retraction))),
+                        ),
+                        (
+                            &query.origin,
+                            claim(versioned.then(|| Value::Bytes(entry.origin.clone()))),
+                        ),
+                        (
+                            &query.edition,
+                            claim(versioned.then(|| Value::UnsignedInt(entry.edition.into()))),
+                        ),
+                        (&query.cause, claim(unsigned(entry.cause))),
+                        (&query.collapsed, claim(unsigned(entry.collapsed))),
+                        (&query.supersedes, claim(unsigned(entry.supersedes))),
+                        (&query.spill, spill),
+                        (&query.blob, about),
+                        (
+                            &query.blob_size,
+                            blob.and_then(|record| unsigned(record.size)),
+                        ),
+                        (
+                            &query.blob_version,
+                            blob.and_then(|record| unsigned(record.version)),
+                        ),
+                    ]);
                 }
+                projected
             }
-            ResolverQuery::TreeEntry(query) => {
-                let Ok(entries) = inspect::inspect_entries(bytes) else {
-                    return Ok(rows);
-                };
-                for entry in entries {
-                    let spill = entry
-                        .spill
-                        .map(|reference| reference.to_base58())
-                        .unwrap_or_default();
-                    let row = project(
-                        base,
-                        &[
-                            (&query.at, Value::UnsignedInt(entry.at.into())),
-                            (&query.entry, Value::Entity(entry_entity(&entry.key)?)),
-                            (&query.key, Value::Bytes(entry.key)),
-                            (&query.state, Value::String(entry.state.into())),
-                            (&query.retraction, Value::Boolean(entry.retraction)),
-                            (&query.origin, Value::Bytes(entry.origin)),
-                            (&query.edition, Value::UnsignedInt(entry.edition.into())),
-                            (&query.cause, Value::UnsignedInt(entry.cause.into())),
-                            (&query.collapsed, Value::UnsignedInt(entry.collapsed.into())),
-                            (
-                                &query.supersedes,
-                                Value::UnsignedInt(entry.supersedes.into()),
-                            ),
-                            (&query.spill, Value::String(spill)),
-                        ],
-                    )?;
-                    rows.extend(row);
-                }
-            }
-            ResolverQuery::TreeValue(query) => {
-                // The loaded block IS the value: raw bytes, no
-                // node decode. Type information lives in the
-                // key the reference came from.
-                let row = project(
-                    base,
-                    &[
-                        (&query.size, Value::UnsignedInt(bytes.len() as u128)),
-                        (&query.bytes, Value::Bytes(bytes)),
-                    ],
-                )?;
-                rows.extend(row);
-            }
-            ResolverQuery::TreeBlob(query) => {
-                let Ok(records) = inspect::inspect_blob_records(bytes) else {
-                    return Ok(rows);
-                };
-                for record in records {
-                    let row = project(
-                        base,
-                        &[
-                            (&query.at, Value::UnsignedInt(record.at.into())),
-                            (&query.blob, Value::Bytes(record.blob)),
-                            (&query.version, Value::UnsignedInt(record.version.into())),
-                            (&query.size, Value::UnsignedInt(record.size.into())),
-                        ],
-                    )?;
-                    rows.extend(row);
-                }
-            }
-            ResolverQuery::TreeManifest(query) => {
-                let Ok(manifest) = inspect::inspect_manifest(bytes) else {
-                    return Ok(rows);
-                };
-                let row = project(
-                    base,
-                    &[
-                        (&query.version, Value::UnsignedInt(manifest.version.into())),
-                        (
-                            &query.fanout_n,
-                            Value::UnsignedInt(manifest.fanout_n.into()),
-                        ),
-                        (
-                            &query.max_separator,
-                            Value::UnsignedInt(manifest.max_separator.into()),
-                        ),
-                        (
-                            &query.inline_n,
-                            Value::UnsignedInt(manifest.inline_n.into()),
-                        ),
-                        (
-                            &query.spill_prefix,
-                            Value::UnsignedInt(manifest.spill_prefix.into()),
-                        ),
-                        (
-                            &query.max_segment,
-                            Value::UnsignedInt(manifest.max_segment.into()),
-                        ),
-                        (
-                            &query.frame_ceiling_factor,
-                            Value::UnsignedInt(manifest.frame_ceiling_factor.into()),
-                        ),
-                        (
-                            &query.anchor_selector,
-                            Value::UnsignedInt(manifest.anchor_selector.into()),
-                        ),
-                    ],
-                )?;
-                rows.extend(row);
-            }
-        }
-        Ok(rows)
+            Self::TreeBlock(query) => vec![vec![(
+                &query.bytes,
+                Some(Value::Bytes(node.buffer().as_ref().to_vec())),
+            )]],
+            // Read through the blob store in `evaluate`, not as a node.
+            Self::TreeValue(_) => Vec::new(),
+        };
+        rows(base, projected)
     }
 }
 
-/// Extend `base` with the projected output values. A constant slot
-/// whose value disagrees, or a pre-bound variable that conflicts,
-/// filters the row (`None`) — the membership-test semantics shared
-/// with formulas; any other bind failure is a genuine error.
-fn project(base: &Match, fields: &[(&Term<Any>, Value)]) -> Result<Option<Match>, EvaluationError> {
-    let mut row = base.clone();
-    for (term, value) in fields {
-        match term {
-            Term::Constant(expected) => {
-                if expected != value {
-                    return Ok(None);
+/// The entity naming the tree node `reference` hashes to.
+fn node_entity(reference: &[u8; 32]) -> Result<Entity, DialogCorpusError> {
+    Entity::from_node(reference)
+        .map_err(|error| DialogCorpusError::InvalidValue(format!("node entity: {error:?}")))
+}
+
+/// The entity naming the content `hash` names in the blob store.
+fn asset_entity(hash: &[u8; 32]) -> Result<Entity, DialogCorpusError> {
+    Entity::from_blob(hash)
+        .map_err(|error| DialogCorpusError::InvalidValue(format!("asset entity: {error:?}")))
+}
+
+/// The entity of a row that is a place in a node: `scheme` (`span` or
+/// `entry`), the node's hash, and the row's position in it, as
+/// `<scheme>:<base58(hash)>/<position>`.
+///
+/// A span and an entry are not content of their own: the same key range
+/// can be delegated by two nodes, and what is asked of one is what its
+/// node holds about it. So a row is named by where it sits, which is
+/// also what lets a reader holding the entity find the node.
+fn placed(scheme: &str, node: &[u8; 32], at: u64) -> Result<Entity, DialogCorpusError> {
+    format!("{scheme}:{}/{at}", node.to_base58())
+        .parse()
+        .map_err(|error| DialogCorpusError::InvalidValue(format!("{scheme} entity: {error:?}")))
+}
+
+/// One row extending `base` per entry of `projected`. A row is dropped
+/// when a constant slot disagrees with its value or a variable it would
+/// bind is already bound otherwise — the membership-test semantics
+/// shared with formulas; any other bind failure is a genuine error.
+fn rows(base: &Match, projected: Vec<Vec<Slot<'_>>>) -> Result<Vec<Match>, EvaluationError> {
+    let mut rows = Vec::with_capacity(projected.len());
+    'row: for slots in projected {
+        let mut row = base.clone();
+        for (term, value) in slots {
+            let bound = match (term, value) {
+                (Term::Constant(expected), Some(value)) => {
+                    if *expected != value {
+                        continue 'row;
+                    }
+                    Ok(())
                 }
-            }
-            _ => match row.bind(term, value.clone()) {
+                // A constant asks for a value; a slot that does not
+                // apply has none to agree with.
+                (Term::Constant(_), None) => continue 'row,
+                (term, Some(value)) => row.bind(term, value),
+                (term, None) => row.bind_absent(term),
+            };
+            match bound {
                 Ok(()) => {}
                 Err(EvaluationError::Assignment { .. })
-                | Err(EvaluationError::KindMismatch { .. }) => return Ok(None),
+                | Err(EvaluationError::KindMismatch { .. }) => continue 'row,
                 Err(error) => return Err(error),
-            },
+            }
         }
+        rows.push(row);
     }
-    Ok(Some(row))
+    Ok(rows)
 }
 
 /// A realized resolver row: the value each named slot bound.
-/// Constant slots are echoed; slots the row did not bind are absent.
+/// Constant slots are echoed; slots the row did not bind, or bound
+/// absent, are absent.
 pub type ResolverConclusion = BTreeMap<String, Value>;
 
 impl Application for ResolverQuery {
@@ -1288,20 +709,124 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    /// A resolver inspects only the block its reference names: the bytes
-    /// an environment hands back are checked against the reference, so a
-    /// store answering with another block fails the premise rather than
-    /// yielding rows attributed to a block it never read.
+    /// A spilled value's block is checked against the hash its handle
+    /// names: a store answering with another block fails the premise
+    /// rather than yielding rows attributed to a block it never read.
     #[dialog_common::test]
     fn it_refuses_a_block_that_does_not_hash_to_its_reference() {
         let asked = Buffer::from(b"the block asked for".to_vec());
         let other = Buffer::from(b"some other block".to_vec());
-        let reference: inspect::NodeReference = *asked.blake3_hash().as_bytes();
+        let reference: [u8; 32] = *asked.blake3_hash().as_bytes();
 
         assert_eq!(verified(&reference, asked.clone()).unwrap(), asked);
         assert!(matches!(
             verified(&reference, other),
             Err(DialogCorpusError::InvalidValue(_))
         ));
+    }
+
+    /// A span and an entry are named by where they sit, and the entity
+    /// says so readably.
+    #[dialog_common::test]
+    fn it_names_a_row_by_its_node_and_position() {
+        let node = [7u8; 32];
+        let span = placed("span", &node, 3).expect("a span entity");
+        assert_eq!(span.as_str(), format!("span:{}/3", node.to_base58()));
+        assert_ne!(span, placed("span", &node, 4).unwrap());
+        assert_ne!(span, placed("entry", &node, 3).unwrap());
+    }
+
+    /// Every resolver deserializes from its name with no slots given,
+    /// and its handle is the one slot it requires.
+    #[dialog_common::test]
+    fn it_requires_only_the_handle() {
+        for name in [
+            "tree/node",
+            "tree/span",
+            "tree/entry",
+            "tree/block",
+            "tree/value",
+        ] {
+            let query: ResolverQuery =
+                serde_json::from_value(serde_json::json!({ "assert": name, "where": {} }))
+                    .unwrap_or_else(|error| panic!("{name} deserializes: {error}"));
+            assert_eq!(query.name(), name);
+            let schema = query.schema();
+            let required: Vec<&String> = schema
+                .iter()
+                .filter(|(_, field)| field.requirement().is_required())
+                .map(|(slot, _)| slot)
+                .collect();
+            assert_eq!(required, vec!["of"], "{name} requires its handle alone");
+            assert_eq!(
+                query.estimate(&Environment::new()),
+                None,
+                "{name} is not scheduled without its handle"
+            );
+        }
+    }
+
+    /// In a rule where a fact decides whether a node is read, the fact is
+    /// asked first, whether or not the caller gave the node: a node the
+    /// fact rules out is then never read, and so never fetched.
+    #[dialog_common::test]
+    fn it_is_planned_after_the_fact_that_names_its_node() {
+        use crate::planner::Plan;
+        use crate::rule::DeductiveRuleDescriptor;
+
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": {
+                "kind": { "the": "probe/node-kind", "as": "text:" }
+            }},
+            "when": [
+                {
+                    "assert": "tree/node",
+                    "where": {
+                        "of": { "?": { "name": "this" } },
+                        "kind": { "?": { "name": "kind" } }
+                    }
+                },
+                {
+                    "assert": { "with": {
+                        "held": { "the": "probe/held", "as": "text:" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "held": { "?": { "name": "held" } }
+                    }
+                }
+            ]
+        }))
+        .expect("a rule descriptor");
+        let rule = descriptor.compile().expect("the rule compiles");
+
+        let mut given = Environment::new();
+        given.add("this");
+        for scope in [Environment::new(), given] {
+            let plan = rule.plan(&scope);
+            assert_eq!(plan.steps.len(), 2, "two premises, two steps");
+            assert!(
+                matches!(plan.steps.last(), Some(Plan::Resolver(..))),
+                "the node is read last: {:?}",
+                plan.steps
+            );
+        }
+    }
+
+    /// A slot is named in a query as the resolver's cells name it,
+    /// kebab-case, whatever the field is called in Rust.
+    #[dialog_common::test]
+    fn it_reads_slots_by_their_query_names() {
+        let query: ResolverQuery = serde_json::from_value(serde_json::json!({
+            "assert": "tree/node",
+            "where": { "fanout-bits": { "?": { "name": "bits" } } }
+        }))
+        .expect("deserializes");
+        let ResolverQuery::TreeNode(node) = &query else {
+            panic!("a tree/node query");
+        };
+        assert_eq!(node.fanout_bits.name(), Some("bits"));
+        assert!(query.parameters().get("fanout-bits").is_some());
+        assert!(query.schema().iter().any(|(slot, _)| slot == "fanout-bits"));
     }
 }

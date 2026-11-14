@@ -1,8 +1,8 @@
 //! Formulas decomposing index keys into their components.
 //!
-//! The tree resolvers (`tree/span`, `tree/key`) surface raw key and
+//! The tree resolvers (`tree/span`, `tree/entry`) surface raw key and
 //! separator bytes; these formulas make them legible: apply
-//! [`KeyPart`] to a full entry key (from `tree/key`) or
+//! [`KeyPart`] to a full entry key (from `tree/entry`) or
 //! [`SeparatorPart`] to a span boundary (a `tree/span` row's
 //! `separator`/`until`), and get one row per component — its position, kind,
 //! human rendering, and raw bytes. Pure per-row computation over the
@@ -31,7 +31,7 @@ type Bytes = Vec<u8>;
 /// row per component, in the key's own sort order.
 #[derive(Debug, Clone, Formula)]
 pub struct KeyPart {
-    /// The raw key bytes — a `tree/key` row's `key`.
+    /// The raw key bytes — a `tree/entry` row's `key`.
     pub of: Bytes,
     /// Position of the component within the key, from 0.
     #[output]

@@ -70,8 +70,8 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   remote. A download can bring along only what the replica holds, and a
   pull can retry when a commit overtakes it.
 - [A consumer that can only query cannot draw a branch's search tree](tree-exploration.md):
-  **Designing.** The one embedder that shows the tree reads blocks
+  **Building.** The one embedder that shows the tree reads blocks
   through machinery of its own. A node is a handle that five accessors
   read, the environment decoding once; what a replica holds is learned
-  and changed by commands. Three points open for reading through
-  concepts.
+  and changed by commands. The resolvers are built; the command
+  handler waits on the session work.

@@ -353,27 +353,18 @@ one node's decoded summaries at a time — nodes are capped near
   node (bytes, in entry order). Entry *values*/states are v2 (see out
   of scope).
 
-A node travels as its `node:<base58(hash)>` entity: what
-`dialog.branch/tree` carries, what `tree/span` yields as `node`, and
-what every resolver takes as `of` (a bare base58 string or the raw
-bytes are still accepted). This reverses the first cut, which passed
-the base58 string on the grounds that resolver rows are not EAV facts
-and so need no entity. The rows are not facts, but a rule that derives
-a concept from them needs a `this` per row, and with only a string to
-hand it had to borrow some other entity: every child of a node then
-landed on one subject and collapsed into a single row. An entry gets
-the same treatment, `entry:<base58(hash of its key)>`, from `tree/key`
-and `tree/entry`.
-
-This note also says throughout that a resolver whose input is unbound
-is non-viable (`estimate() → None`) until a join binds it. That held
-for the first cut and no longer does: with its node open a `tree/*`
-resolver lists, walking down from the roots the scope's heads name.
-The reason is the same as for the entities. A relation that can only
-be looked up cannot be a rule's whole body, so a concept of tree nodes
-had to be a recursive rule from the root, and a recursive rule is
-evaluated in full however narrowly it is asked. `tree/value` keeps the
-old behavior.
+What follows in this note is the first cut and is kept as the record
+of it. The resolvers were redrawn in
+[design/tree-exploration.md](../design/tree-exploration.md): a node is
+a handle, the entity `node:<base58(hash)>`, which `dialog.branch/tree`
+carries and `tree/span` yields; a resolver asks the environment for the
+decoded node and yields one part of it; and there are five
+(`tree/node` with the manifest folded in, `tree/span`, `tree/entry`
+with what `tree/key` and `tree/blob` yielded, `tree/block`,
+`tree/value`). The first cut passed the base58 string on the grounds
+that resolver rows are not EAV facts and so need no entity; a rule that
+derives a concept from them needs one per row. What this note says of
+an unbound input still holds: it is non-viable until a join binds it.
 
 Pure formulas (ordinary `Formula`s in `dialog-query/src/formula/`,
 registered in `define_formulas!` beside `dialog/revision`):
