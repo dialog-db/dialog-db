@@ -7,9 +7,12 @@
 //! function of the handle it is given, and it leaves one thing a query
 //! cannot say: whether asking for a node would fetch it.
 //!
-//! That is asked by command, before the query is issued. [`Holdings`] is
-//! the handler dialog provides for it, registered on a session like any
-//! other ([`Session::handle`](crate::Session::handle)):
+//! That is asked by command, before the query is issued. [`Holdings`]
+//! answers such commands ([`Holdings::answers`]), and is wired to a
+//! session as a handler ([`Session::handle`](crate::Session::handle)).
+//! How a session offers commands to what answers them is being redrawn
+//! (a provider as a subscription over the command, in the layers work);
+//! the wiring here follows it, and what is answered does not change:
 //!
 //! | command | answered with |
 //! |---|---|
@@ -98,23 +101,26 @@ where
     Env: Provider<nodes::Read<CorpusNode>> + ConditionalSend + ConditionalSync,
 {
     /// Whether the replica holds `node`, fetching it first when `fetch`.
-    async fn holds(&self, node: [u8; 32], fetch: bool) -> Result<bool, HandlerError> {
+    async fn holds(&self, node: [u8; 32], fetch: bool) -> Result<bool, String> {
         let read = nodes::Read::<CorpusNode>::new(self.catalog.clone(), Blake3Hash::from(node));
         let read = if fetch { read } else { read.locally() };
         read.perform(&self.env)
             .await
             .map(|found| found.is_some())
-            .map_err(|error| HandlerError(format!("reading a node: {error}")))
+            .map_err(|error| format!("reading a node: {error}"))
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Env> Handler for Holdings<Env>
-where
-    Env: Provider<nodes::Read<CorpusNode>> + ConditionalSend + ConditionalSync,
-{
-    async fn answer(&self, commands: &Changes) -> Result<Changes, HandlerError> {
+    /// The answers to the node commands among `commands`: for each
+    /// [`PROBE`] and [`FETCH`] whose value is a `node:` entity, the two
+    /// facts of its answer, on the command's own entity. Any other
+    /// command is left out.
+    ///
+    /// This is the whole of what the handler does, and it does not
+    /// depend on how a session offers commands and takes answers: the
+    /// [`Handler`] below is one way of wiring it, and a provider that
+    /// reads commands some other way calls this and invokes what it
+    /// returns.
+    pub async fn answers(&self, commands: &Changes) -> Result<Changes, String> {
         let relation =
             |name: &str| -> Relation { name.parse().expect("a node command's attribute") };
         let (probe, fetch) = (relation(PROBE), relation(FETCH));
@@ -152,6 +158,17 @@ where
             answer(&mut answers, &command, held, Value::Boolean(local));
         }
         Ok(answers)
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Env> Handler for Holdings<Env>
+where
+    Env: Provider<nodes::Read<CorpusNode>> + ConditionalSend + ConditionalSync,
+{
+    async fn answer(&self, commands: &Changes) -> Result<Changes, HandlerError> {
+        self.answers(commands).await.map_err(HandlerError)
     }
 }
 

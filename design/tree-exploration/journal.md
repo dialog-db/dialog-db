@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | *What do we know?* The problem and the approach (top story). Three of the four things to build in dialog are built and tested on the draft branch: the readings over a decoded node, the five resolvers, the entities. That an index node's buffered ops are readable by no resolver. | *Where are we at?* Building. All four things are built on the draft branch, which now sits on top of the session stack (`claude/layers-5`) instead of beside it. |
-| **Agenda** | *What do we need to know?* The maintainer's word on what building settled without them: a span's and an entry's entity being its place, `fanout-bits`, `of` taking an entity only. Whether buffered ops are to be exposed, and as what. How a row's details are reached by its own entity. | *Where are we going?* The stack session's answer on which branch to follow and what shifted. Then tonk: pin, a query step that is not a concept, the component, and the removal of its reader. |
+| **Agenda** | *What do we need to know?* The maintainer's word on what building settled without them: a span's and an entry's entity being its place, `fanout-bits`, `of` taking an entity only. Whether buffered ops are to be exposed, and as what. How a row's details are reached by its own entity. | *Where are we going?* When `claude/layers-6` is pushed and verified: merge it, and re-wire `Holdings` from `Session::handle` to the provider it brings. Then tonk: pin, a query step that is not a concept, the component, and the removal of its reader. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -736,3 +736,42 @@ Not tested: a fetch that brings a node from a remote. Not known: what
 shifted in the stack session's plan and the maintainer's.
 
 **Decided.** Nothing new. The draft branch follows the stack from here.
+
+## 2026-11-14, Building: what the stack session says shifted
+
+**Asked.** That session, for its status, which branch to build on, and
+what shifted. Its answer, by message, not checked beyond what GitHub
+shows:
+
+- Build on `claude/layers-5` as it stands; once a pull request is open
+  on a branch it only adds commits. `claude/layers-6` (control layers
+  and channels) is still being rewritten and is not to be built on yet.
+- The maintainer decided, and `layers-6` implements, that
+  `Session::handle`, `Handler` and the command feed go. A command lands
+  in a `control:` layer for one tick; what answers it is a provider, a
+  subscription over the command concept through a helper on the
+  session, which answers by invoking a command naming the one it
+  answers by its entity, after the dispatch it answers has published.
+  This is the shape the maintainer first asked for here ("ideally a
+  session subscription that can do the job and then invoke a command
+  back as a response"), which that session had earlier said could not
+  be.
+- Locality stays a command: nothing shifted there.
+- Nothing in the stack touches the resolvers or `dialog.branch/tree`.
+  One near contact: #803 writes the tree's hash as base58 text in
+  `dialog.layer/revision`, where `dialog.branch/tree` is now a `node:`
+  entity.
+
+**Learned.** `Holdings` was built on `Session::handle` an hour before
+this arrived. What it answers was separated from how it is wired:
+`Holdings::answers(&Changes) -> Changes` is the whole of it, and the
+`Handler` impl is one line over it, so when the provider helper lands
+the wiring changes and the answers do not.
+
+*Those two cannot both be true*, to raise with the maintainer: the root
+of a tree is a `node:` entity in `dialog.branch/tree` and base58 text in
+`dialog.layer/revision`. A rule going from a layer's revision to its
+tree would have to turn one into the other, and no formula does.
+
+**Decided.** Nothing. The draft branch stays on `layers-5` until
+`layers-6` is announced.
