@@ -144,6 +144,11 @@ mod tests {
     fn it_prints_the_rest_of_a_struct_where_it_was_written() -> Result<(), Error> {
         back("(query (xyz.note ?n about: {author: ?who   ... ?others}))")?;
         back("{... ?all}")?;
+        // A key the struct ends on is printed as it was written, with
+        // no value.
+        back("(query (xyz.note ?n about: {author: ?who ...}))")?;
+        back("{author: ?who\n  ... }")?;
+        back("{pinned:}")?;
         // `...` is a part like any other, wherever it stands, and a
         // quote is printed as it was written.
         back("(rule (syntax (all ?first   ... ?more))\n  (expand (query ?head ...)))")?;

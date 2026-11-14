@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use dialog_corpus::Value;
 
 use crate::Error;
+use crate::pattern::REST;
 use crate::syntax::Syntax;
 
 /// The types a term may be read under: `(:text ?x)`.
@@ -255,7 +256,16 @@ fn read(node: &Syntax) -> Result<Read, Error> {
     else {
         return Err(Error::Refused(format!("{node} applies no relation")));
     };
-    let entity = match operand.items.as_slice() {
+    // A trailing `...` says the other fields are left out on purpose. A
+    // relation has no list of its fields, so it reads the same with it
+    // and without.
+    let dots = |part: &Syntax| matches!(part, Syntax::Reference(name) if name == REST);
+    let items = match operand.items.as_slice() {
+        [items @ .., last] if dots(last) => items,
+        [items @ .., last, Syntax::Blank] if dots(last) => items,
+        items => items,
+    };
+    let entity = match items {
         [entity] => term(entity)?,
         _ => {
             return Err(Error::Refused(format!(

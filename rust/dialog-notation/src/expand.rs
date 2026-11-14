@@ -169,6 +169,29 @@ fn members(tree: Syntax) -> Vec<Syntax> {
     }
 }
 
+/// `tree` without a trailing `...` or `... _`, and whether it had one.
+fn open(tree: &Syntax) -> (Syntax, bool) {
+    let dots = |part: &Syntax| matches!(part, Syntax::Reference(name) if name == REST);
+    let Syntax::Application(operator, operand) = tree else {
+        return (tree.clone(), false);
+    };
+    let kept = match operand.items.as_slice() {
+        [items @ .., last] if dots(last) => items,
+        [items @ .., last, Syntax::Blank] if dots(last) => items,
+        _ => return (tree.clone(), false),
+    };
+    (
+        Syntax::Application(
+            operator.clone(),
+            Parameters {
+                items: kept.to_vec(),
+                terms: operand.terms.clone(),
+            },
+        ),
+        true,
+    )
+}
+
 /// Whether `tree` is written as a form may be, and otherwise the part
 /// that is not and why. The reader gives labels and `...` no meaning,
 /// so what they may not say is said here.
@@ -693,12 +716,38 @@ impl Expander {
         // names it. `(?concept ... ?fields)` and
         // `(?concept ?subject ... ?fields)` both match a call with a
         // part that has no label, and the second is the one meant.
+        // A trailing `...` says the fields not written are left out on
+        // purpose. With it a read fits a concept that has more fields
+        // than it says; without it a read says every field, as a write
+        // does.
+        let (said, open) = open(tree);
+        let reads = position == Position::Premise || self.reporting;
+        let written: BTreeSet<&String> = said
+            .operand()
+            .map(|operand| operand.terms.keys().collect())
+            .unwrap_or_default();
+        let mut left_out: Option<Vec<String>> = None;
         let mut found: Vec<(Syntax, Option<Signature>)> = Vec::new();
         let mut least = usize::MAX;
         for rule in &self.syntax {
             if let (Answer::Syntax(template), Some(bindings)) =
-                (&rule.answer, self.applies(rule, tree, position))
+                (&rule.answer, self.applies(rule, &said, position))
             {
+                if let Some(signature) = rule.signature.as_ref()
+                    && reads
+                    && !open
+                {
+                    let missing: Vec<String> = signature
+                        .parameters
+                        .iter()
+                        .filter(|label| !written.contains(label))
+                        .cloned()
+                        .collect();
+                    if !missing.is_empty() {
+                        left_out.get_or_insert(missing);
+                        continue;
+                    }
+                }
                 let left: usize = bindings
                     .values()
                     .map(|binding| match binding {
@@ -733,11 +782,22 @@ impl Expander {
             )
         };
         match found.len() {
-            0 => Err(Error::Unknown(tree.to_string())),
+            0 => match left_out {
+                Some(missing) => Err(Error::Refused(format!(
+                    "{tree} leaves out {}: say them, or write `...` after what it says for \
+                     the fields it does not",
+                    missing
+                        .iter()
+                        .map(|label| format!("`{label}:`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))),
+                None => Err(Error::Unknown(tree.to_string())),
+            },
             1 => Ok(found.remove(0).0),
             _ if self.negating => Err(ambiguous(&found)),
             _ if position == Position::Head && !self.reporting => {
-                let written = Signature::of(tree, "concept");
+                let written = Signature::of(&said, "concept");
                 let mut exact = found.iter().filter(|(_, signature)| {
                     signature.is_some()
                         && signature.as_ref().map(|signature| &signature.parameters)
@@ -985,6 +1045,40 @@ mod tests {
         Ok(kernel.iter().map(Syntax::to_string).collect())
     }
 
+    /// A read of a concept says every field, as a write does, or says
+    /// with `...` that it leaves the others out. A relation has no list
+    /// of its fields, so it reads the same with `...` and without.
+    #[test]
+    fn it_refuses_a_concept_read_that_leaves_fields_out_untold() {
+        assert_eq!(
+            expanded(TODO, "(query (todo ?t text: ?x))"),
+            Err(Error::Refused(
+                "(todo ?t text: ?x) leaves out `list:`, `state:`: say them, or write `...` \
+                 after what it says for the fields it does not"
+                    .into()
+            ))
+        );
+        let open = expanded(TODO, "(query (todo ?t text: ?x ...))").unwrap();
+        assert_eq!(open.len(), 1);
+        // `...` alone is `... _`. The two say one thing, and differ in
+        // the names the expansion gives its own variables, which are
+        // made of the form as written.
+        assert_eq!(
+            expanded(TODO, "(query (todo ?t text: ?x ... _))")
+                .unwrap()
+                .len(),
+            1
+        );
+        // Every field said, it needs no `...`.
+        assert!(expanded(TODO, "(query (todo ?t list: ?l text: ?x state: ?s))").is_ok());
+        // What it leaves out may not be bound: a concept's fields are
+        // facts, and no record of them is kept.
+        assert!(expanded(TODO, "(query (todo ?t text: ?x ... ?others))").is_err());
+        // A relation.
+        assert!(expanded(TODO, "(query (xyz.todo ?t text: ?x))").is_ok());
+        assert!(expanded(TODO, "(query (xyz.todo ?t text: ?x ...))").is_ok());
+    }
+
     /// `(unless …)` once, last, or several times among the premises, is
     /// one rule.
     #[test]
@@ -992,14 +1086,14 @@ mod tests {
         let beside = expanded(
             TODO,
             "(rule (xyz.lonely ?t text: ?x)
-               (todo ?t text: ?x)
+               (todo ?t text: ?x ...)
                (unless (xyz.tag ?t name: _) (xyz.star ?t by: _)))",
         )
         .unwrap();
         let inside = expanded(
             TODO,
             "(rule (xyz.lonely ?t text: ?x)
-               (todo ?t text: ?x)
+               (todo ?t text: ?x ...)
                (unless (xyz.tag ?t name: _))
                (unless (xyz.star ?t by: _)))",
         )
@@ -1096,7 +1190,7 @@ mod tests {
             "(concept (card ?c title: ?x owner: ?o)
                (xyz.card ?c title: (:last (:text ?x)))
                (xyz.owned ?c by: (:last (:entity ?o))))",
-            "(query (card ?c title: ?x))",
+            "(query (card ?c title: ?x ...))",
         )
         .unwrap();
         assert_eq!(kernel.len(), 1, "{kernel:?}");
@@ -1138,7 +1232,7 @@ mod tests {
     /// another where it stands as the premise.
     #[test]
     fn it_expands_a_query_to_a_rule_that_reports() {
-        let kernel = expanded(TODO, "(query (todo ?t text: ?x))").unwrap();
+        let kernel = expanded(TODO, "(query (todo ?t text: ?x ...))").unwrap();
         let rule = Clauses::of(&parse(&kernel[0]).unwrap()[0]);
         let at = |tree: &Syntax, label: &str| {
             tree.operand()
@@ -1196,7 +1290,7 @@ mod tests {
     #[test]
     fn it_refuses_what_nothing_gives_a_meaning_and_what_two_rules_do() {
         assert!(matches!(
-            expanded(TODO, "(query (todo ?t) (frobnicate ?t))"),
+            expanded(TODO, "(query (todo ?t ...) (frobnicate ?t))"),
             Err(Error::Unknown(_))
         ));
         // A write that says the fields of neither definition.
@@ -1219,8 +1313,8 @@ mod tests {
             vec!["(rule (report (xyz.note ?t title: ?x)) (xyz.note ?t title: ?x))"]
         );
         assert_eq!(
-            expanded(TODO, &format!("{note} (query (todo ?t text: ?x))")).unwrap(),
-            expanded(TODO, "(query (todo ?t text: ?x))").unwrap()
+            expanded(TODO, &format!("{note} (query (todo ?t text: ?x ...))")).unwrap(),
+            expanded(TODO, "(query (todo ?t text: ?x ...))").unwrap()
         );
     }
 
@@ -1234,7 +1328,7 @@ mod tests {
         let reordered = "(concept (todo ?t state: ?s text: ?x list: ?l)
                            (abc.task ?t list: ?l text: ?x state: ?s))";
         for later in [task, reordered] {
-            let rules = expanded(TODO, &format!("{later} (query (todo ?t text: ?x))")).unwrap();
+            let rules = expanded(TODO, &format!("{later} (query (todo ?t text: ?x ...))")).unwrap();
             assert_eq!(rules.len(), 1, "{rules:?}");
             assert!(rules[0].contains(")) (abc.task ?t "), "{rules:?}");
             assert!(!rules[0].contains("xyz.todo"), "{rules:?}");
@@ -1248,7 +1342,7 @@ mod tests {
     fn it_reads_through_every_definition_the_labels_fit() {
         let both = "(concept (todo ?t title: ?x done: ?d) (xyz.todo ?t title: ?x done: ?d))
                     (concept (todo ?t title: ?x pinned: ?p) (xyz.note ?t title: ?x pinned: ?p))";
-        let rules = expanded(both, "(query (todo ?t title: ?x))").unwrap();
+        let rules = expanded(both, "(query (todo ?t title: ?x ...))").unwrap();
         assert_eq!(rules.len(), 2, "{rules:?}");
         for (rule, domain) in rules.iter().zip(["xyz.todo", "xyz.note"]) {
             // The labels come in their own order, so the field the
@@ -1275,7 +1369,7 @@ mod tests {
         assert!(matches!(
             expanded(
                 both,
-                "(query (xyz.tag ?t name: ?n) (xyz.tag ?t name: ?n) (unless (todo ?t title: _)))"
+                "(query (xyz.tag ?t name: ?n) (xyz.tag ?t name: ?n) (unless (todo ?t title: _ ...)))"
             ),
             Err(Error::Ambiguous(..))
         ));
@@ -1290,13 +1384,13 @@ mod tests {
                     (concept (todo ?t name: ?b) (xyz.todo ?t text: ?b))";
         let rules = expanded(
             both,
-            "(query (xyz.tag ?t name: ?n) (xyz.tag ?t name: ?n) (todo ?t))",
+            "(query (xyz.tag ?t name: ?n) (xyz.tag ?t name: ?n) (todo ?t ...))",
         )
         .unwrap();
         assert_eq!(rules.len(), 1, "{rules:?}");
         // Each name for the field reads the same attribute.
         assert_eq!(
-            expanded(both, "(query (todo ?t title: ?x))").unwrap(),
+            expanded(both, "(query (todo ?t title: ?x ...))").unwrap(),
             expanded(both, "(query (todo ?t name: ?x))").unwrap()
         );
     }
@@ -1332,7 +1426,7 @@ mod tests {
     fn it_joins_the_reads_of_one_entity_under_unless() {
         let kernel = expanded(
             "(concept (author ?p name: ?n email: ?e) (io.person ?p name: ?n) (io.contact ?p email: ?e))",
-            "(query (io.person ?p name: ?n) (io.person ?p name: ?n) (unless (author ?p)))",
+            "(query (io.person ?p name: ?n) (io.person ?p name: ?n) (unless (author ?p ...)))",
         )
         .unwrap();
         assert!(kernel[0].contains("(unless (io.person ?p io.contact/email: ?e."));

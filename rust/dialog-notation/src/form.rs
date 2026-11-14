@@ -244,6 +244,9 @@ pub(crate) struct Mark {
     /// For an application, a part at a time: where its label is and the
     /// comments above the label, when it has one.
     pub labels: Vec<Option<(Point, Vec<Comment>)>>,
+    /// The form was not written: the `_` a struct's last key has for
+    /// its value when the struct ends on the key.
+    pub implied: bool,
 }
 
 /// The comments after the last form of a text, and where the text ends.
@@ -530,6 +533,21 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
                         key
                     }
                 };
+                // A key the struct ends on has `_` for its value:
+                // `{author: ?who ...}` is `{author: ?who ... _}`.
+                let closes = tokens.get(*at).ok_or_else(ended)?;
+                if closes.text == "}" {
+                    mark.parts.push(Mark {
+                        span: Span {
+                            start: closes.span.start,
+                            end: closes.span.start,
+                        },
+                        implied: true,
+                        ..Mark::default()
+                    });
+                    entries.push((key, Form::Blank));
+                    break;
+                }
                 let (value, inside) = form(tokens, at)?;
                 mark.parts.push(inside);
                 entries.push((key, value));
@@ -758,6 +776,19 @@ mod tests {
                 "(todo ?t ...)"
             ]
         );
+    }
+
+    /// A key a struct ends on has `_` for its value, whatever the key.
+    #[test]
+    fn it_reads_a_key_a_struct_ends_on_as_a_key_of_a_blank() {
+        for (short, long) in [
+            ("{author: ?who ...}", "{author: ?who ... _}"),
+            ("{author: ?who pinned:}", "{author: ?who pinned: _}"),
+            ("{pinned}", "{pinned: _}"),
+        ] {
+            assert_eq!(read(short).unwrap(), read(long).unwrap(), "{short}");
+            assert_eq!(read(short).unwrap()[0].to_string(), long);
+        }
     }
 
     /// `'x` is `(quote x)` to the reader, a list like any other.

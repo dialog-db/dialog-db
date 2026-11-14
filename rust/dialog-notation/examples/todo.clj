@@ -26,11 +26,11 @@
 ; Archiving a list completes what is on it.
 (rule (complete (todo ?t))
   (archive (xyz.list ?l))
-  (todo ?t list: ?l))
+  (todo ?t list: ?l ...))
 
 ; What is left to do, derived and never stored.
 (rule (xyz.pending ?t text: ?x)
-  (todo ?t text: ?x state: :open))
+  (todo ?t text: ?x state: :open ...))
 
 (add (todo todo:1 list: list:home text: "Buy milk"))
 (add (todo todo:2 list: list:home text: "Call mum"))

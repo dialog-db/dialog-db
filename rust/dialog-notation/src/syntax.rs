@@ -111,15 +111,17 @@ pub(crate) fn entity(uri: &str) -> Result<Value, Error> {
         .map_err(|error| refused("not an entity", error))
 }
 
-/// The nodes a run of forms is, each in its place.
+/// The nodes a run of forms is, each in its place: the first is the
+/// item `from`.
 fn run<'a>(
     forms: impl IntoIterator<Item = (&'a Form, Option<&'a Mark>)>,
     path: &mut Path,
     written: &mut Written,
+    from: usize,
 ) -> Result<Vec<Syntax>, Error> {
     let mut nodes: Vec<Syntax> = Vec::new();
     for (form, mark) in forms {
-        path.push(Segment::Item(nodes.len()));
+        path.push(Segment::Item(from + nodes.len()));
         let node = tree(form, mark, false, path, written);
         path.pop();
         nodes.push(node?);
@@ -162,6 +164,9 @@ pub(crate) fn tree(
         // otherwise.
         if !mark.raw.is_empty() && mark.raw != node.spelled(key) {
             note.spelling = Some(mark.raw.clone());
+        } else if mark.implied {
+            // What the reader put there is written as nothing.
+            note.spelling = Some(String::new());
         }
         written.notes.insert(path.clone(), note);
     }
@@ -196,6 +201,7 @@ fn made<'a>(
                 .map(|(at, item)| (item, inside(at))),
             path,
             written,
+            0,
         )?),
         Form::Map(entries) => {
             let mut nodes = Vec::new();
@@ -223,8 +229,11 @@ fn made<'a>(
                     .and_then(Option::as_ref);
                 match part {
                     Part::Bare(part) => {
+                        // Where `of:` is written out it is the first
+                        // item, and a part with no label beside it,
+                        // `...`, comes after it.
                         order.push(Slot::Item {
-                            at: bare.len(),
+                            at: bare.len() + usize::from(primary),
                             of: None,
                         });
                         bare.push((part, part_mark));
@@ -266,7 +275,8 @@ fn made<'a>(
                 }
             }
             if !bare.is_empty() {
-                operand.items = run(bare, path, written)?;
+                let from = operand.items.len();
+                operand.items.extend(run(bare, path, written, from)?);
             }
             path.push(Segment::Operator);
             let operator = tree(head, inside(0), false, path, written);

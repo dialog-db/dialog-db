@@ -1012,11 +1012,33 @@ Not examined yet. They are columns, not recommendations.
 
 **Decided.** By the maintainer: the split, the quote, the trailing `...`. By the agent, to ask: the rule that names the most wins.
 
+## 2026-11-13, Designing: a read says every field or says `...`
+
+**Asked.** Whether a concept read that leaves fields out without `...` is refused. The maintainer: "Yes it should. Also reader of the { foo: ?a … } should read it as { foo: ?a … _ } or any other trailing key should assume value _".
+
+**Learned.**
+
+- Built. A read of a concept says every field, as a write does, or ends in `...`. Left off, the refusal names what is missing, where the read is.
+
+```
+ (query (todo ?t text: ?x))        refused: leaves out `list:`, `state:`
+ (query (todo ?t text: ?x ...))    every todo, whatever its list and state
+ (query (xyz.todo ?t text: ?x))    a relation: nothing lists its fields, so it reads as before
+```
+
+- It changes which definition a read is of. Without `...` a read is of the definition whose fields are the labels written; with it, of every definition that has them. Two definitions of one name are told apart by a read the way they were by a write.
+- Seventeen reads in the tests and the example left fields out. Each took a `...`.
+- Built, in the reader: a key a struct ends on has `_` for its value. It is the one place the reader fills something in, and it is not about `...`: any key. The mapping notes the blank as written with nothing, so the text prints back as it was.
+- What that costs: the reader took a struct of an odd number of parts for a mistake, and no longer does.
+- Found on the way: `(todo text: ?x of: ?t ...)` lost its `of:`, since the parts with no label replaced it. Mended, with the test that found it.
+
+**Decided.** By the maintainer: both. Still to ask: whether, of the rules that apply to a form, the ones that name the most win.
+
 ## The queue
 
 In order. One is asked, answered and written down before the next.
 
-1. Asked 2026-11-13, in this order: whether a concept read that leaves fields out without `...` is refused; then whether, of the rules that apply to a form, the ones that name the most win. Built the same day: the reader that gives `...` no meaning, the quoted list, the record's refusals.
+1. To ask: whether, of the rules that apply to a form, the ones that name the most win (the agent's, built to make two rules of the prelude one answer). Built 2026-11-13: the reader that gives `...` no meaning, the quoted list, the record's refusals, a read that says every field or `...`, a struct's last key.
 1. Decided 2026-11-13: the new format always, the old read for one cycle. To build next: format 4 on #778, with the migration.
 2. Whether a rule that leaves a premise's subject unnamed fires only for the entity written (#789, #791). It changes what a commit writes on main.
 3. Answered 2026-11-13 by the quote: `'(:open :done)`, `'()`.

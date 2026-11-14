@@ -58,7 +58,7 @@ async fn it_defines_a_concept_and_runs_a_command_through_it() -> Result<()> {
         .await?;
 
     assert_eq!(
-        report(&mut notebook, "(query (todo ?t text: ?x state: ?s))").await?,
+        report(&mut notebook, "(query (todo ?t text: ?x state: ?s ...))").await?,
         vec![
             r#"(xyz.todo todo:1 state: :open text: "Buy milk")"#,
             r#"(xyz.todo todo:2 state: :open text: "Call mum")"#,
@@ -172,7 +172,7 @@ async fn it_joins_the_reads_a_concept_holds_and_negates_them_as_one() -> Result<
         .await?;
 
     assert_eq!(
-        report(&mut notebook, "(query (author ?p name: ?n))").await?,
+        report(&mut notebook, "(query (author ?p name: ?n ...))").await?,
         vec![r#"(io.person person:ada name: "Ada")"#],
         "a read the query names no field of says nothing in the report"
     );
@@ -181,7 +181,7 @@ async fn it_joins_the_reads_a_concept_holds_and_negates_them_as_one() -> Result<
             &mut notebook,
             "(query (io.person ?p name: ?n)
                    (io.person ?p name: (:text ?n))
-                   (unless (author ?p)))"
+                   (unless (author ?p ...)))"
         )
         .await?,
         vec![r#"(io.person person:bob name: "Bob")"#]
@@ -193,7 +193,7 @@ async fn it_joins_the_reads_a_concept_holds_and_negates_them_as_one() -> Result<
             &mut notebook,
             "(query (io.person ?p name: ?n)
                (io.person ?p name: (:text ?n))
-               (unless (author ?p)))"
+               (unless (author ?p ...)))"
         )
         .await?,
         vec![r#"(io.person person:bob name: "Bob")"#]
@@ -475,7 +475,7 @@ async fn it_lets_a_rule_issue_a_command_another_rule_reads() -> Result<()> {
             "{TODO}
              (rule (complete (todo ?t))
                (archive (xyz.list ?l))
-               (todo ?t list: ?l))"
+               (todo ?t list: ?l ...))"
         ))
         .await?;
     assert!(diagnostics.is_empty());
@@ -489,7 +489,7 @@ async fn it_lets_a_rule_issue_a_command_another_rule_reads() -> Result<()> {
 
     notebook.submit("(archive (xyz.list list:home))").await?;
     assert_eq!(
-        report(&mut notebook, "(query (todo ?t text: ?x state: :open))").await?,
+        report(&mut notebook, "(query (todo ?t text: ?x state: :open ...))").await?,
         vec![r#"(xyz.todo todo:3 state: :open text: "Ship it")"#]
     );
     // Neither command is on the branch.
@@ -572,14 +572,14 @@ async fn it_reports_through_every_definition_a_query_fits() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (todo ?t title: ?x))").await?,
+        report(&mut notebook, "(query (todo ?t title: ?x ...))").await?,
         vec![
             r#"(xyz.note note:1 title: "Call Ada")"#,
             r#"(xyz.todo todo:1 title: "Buy milk")"#,
         ]
     );
     assert_eq!(
-        report(&mut notebook, "(query (todo ?t pinned: ?p))").await?,
+        report(&mut notebook, "(query (todo ?t pinned: ?p ...))").await?,
         vec!["(xyz.note note:1 pinned: true)"]
     );
     Ok(())
@@ -860,8 +860,8 @@ async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()>
 
     let milk = vec![r#"(xyz.todo todo:1 text: "Buy milk")"#];
     for query in [
-        "(query (todo ?t text: ?x))",
-        "(query (todo text: ?x of: ?t))",
+        "(query (todo ?t text: ?x ...))",
+        "(query (todo text: ?x of: ?t ...))",
     ] {
         assert_eq!(report(&mut notebook, query).await?, milk, "{query}");
     }
