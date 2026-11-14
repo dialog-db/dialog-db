@@ -528,12 +528,17 @@ impl ConceptQuery {
                 && this
                     .as_ref()
                     .is_some_and(|term| term.name().is_some() && !first.contains(term));
+            // Both arms box the evaluation they drive. Held inline, the
+            // two would be laid out side by side in this stream's state,
+            // which every caller moves when it returns and again when it
+            // boxes it: twice the inner state's size copied per
+            // evaluation of a concept, before any row is read.
             if sort {
-                let unsorted = app.clone().evaluate_unsorted(
+                let unsorted = Box::pin(app.clone().evaluate_unsorted(
                     rules,
                     Box::pin(stream::iter([Ok(first)]).chain(selection)),
                     env,
-                );
+                ));
                 let mut rows: Vec<(Vec<u8>, Match)> = Vec::new();
                 for await row in unsorted {
                     let row = row?;
@@ -550,11 +555,11 @@ impl ConceptQuery {
                 }
                 return;
             }
-            for await row in app.evaluate_unsorted(
+            for await row in Box::pin(app.evaluate_unsorted(
                 rules,
                 Box::pin(stream::iter([Ok(first)]).chain(selection)),
                 env,
-            ) {
+            )) {
                 yield row?;
             }
         }

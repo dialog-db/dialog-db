@@ -8,6 +8,7 @@ use crate::memo::Memo;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// `skip_serializing_if` helper: a required field omits the
 /// `optional` key on the wire, so a required entry serializes
@@ -214,9 +215,14 @@ impl From<AttributeDescriptor> for ConceptFieldDescriptor {
 /// attribute would constrain nothing and match every entity.
 ///
 /// Serializes as a JSON map: `{ "field-name": { "the": "domain/name", ... } }`.
+///
+/// The map is shared: nothing changes it once it is built, and a query
+/// clones its concept's descriptor several times per evaluation (into
+/// its plan, its rule lookup, its renamed premises), so a clone is a
+/// count rather than a copy of every field name and attribute.
 #[repr(transparent)]
 #[derive(Debug, Clone, PartialEq)]
-pub struct NamedAttributes(BTreeMap<String, ConceptFieldDescriptor>);
+pub struct NamedAttributes(Arc<BTreeMap<String, ConceptFieldDescriptor>>);
 
 impl NamedAttributes {
     /// Returns an iterator over all fields as (name, field) pairs,
@@ -267,7 +273,7 @@ impl NamedAttributes {
                 }
             }
         }
-        Ok(NamedAttributes(map))
+        Ok(NamedAttributes(Arc::new(map)))
     }
 }
 
