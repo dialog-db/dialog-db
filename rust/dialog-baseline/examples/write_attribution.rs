@@ -15,6 +15,9 @@
 //! ```sh
 //! cargo run --release -p dialog-baseline --example write_attribution -- 25000 2500
 //! ```
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use std::sync::{Arc, Mutex};
 

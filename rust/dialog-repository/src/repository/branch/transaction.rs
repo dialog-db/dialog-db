@@ -11,11 +11,13 @@ mod quarantine;
 pub(crate) use induce::induction_ignores;
 mod query;
 mod succession;
+mod transact;
 pub use batch::*;
 pub use query::{TransactionQuery, TransactionSelectQuery};
 pub(crate) use succession::ReadSettlement;
 #[cfg(test)]
 pub(crate) use succession::{settle, stored_claims};
+pub use transact::Transact;
 
 use crate::Commit;
 use crate::repository::branch::asset::store_assets;
@@ -493,6 +495,12 @@ impl Branch {
             + ConditionalSync
             + 'static,
     {
-        Box::pin(self.transaction().commit().publish().perform(env)).await
+        // Its rules run over the head: one that lost the race runs them
+        // again over the head that won.
+        Box::pin(
+            self.transact(|transaction| async move { Ok::<_, CommitError>(transaction) })
+                .perform(env),
+        )
+        .await
     }
 }
