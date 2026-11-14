@@ -6,7 +6,7 @@ For whoever builds it. In order; each step lands with its tests before the next 
 
 In `dialog-corpus`.
 
-- A value made of values: a map (a value to a value, no key twice), a list, a tuple. Nested as deep as written.
+- A value made of values: a map (a value to a value, no key twice), a list. Nested as deep as written. No tuple: the plan had one until 2026-11-14.
 - Kept as `Value::Record`: one version byte, then dag-cbor. A reader refuses a version it does not know, by its number. Bytes that do not start with a version byte are a record of before, such as a revision's, and read as they do today.
 - Named by `merkle_reference`: a map under `Type::MAP`, a list under `Type::LIST`, each part by its own reference. `Value::reference` for a composite is that, not a hash of its bytes. A record of before keeps the name it has.
 - One byte string a value: entries of a map in one order, whatever order they were given in.
@@ -18,7 +18,7 @@ Done when: a composite round-trips through a branch as a claim's value; two maps
 
 In `dialog-query`.
 
-- `Pattern`, with `Term`'s two cases as its leaves and a map, a list and a tuple above them. A map pattern may bind the entries it did not name, as a map. A list pattern may bind a run, as a list.
+- `Pattern`, with `Term`'s two cases as its leaves and a map and a list above them. A map pattern may bind the entries it did not name, as a map. A list pattern may bind a run, as a list.
 - `Parameters` maps a name to a pattern. Every premise that reads a parameter as a variable or a constant keeps working for the leaves.
 - Matching a pattern against a value binds its variables or fails. A pattern whose variables are all bound is a value.
 
