@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### Every session has its own layer, `session:`, which records the layers' revisions and which layer is selected
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[#803](https://github.com/dialog-db/dialog-db/pull/803), argued in
 [notes/layers.md](./notes/layers.md) ("The `session:` layer").
 
 A session now holds its own layer, `session:`, whether or not the
