@@ -82,7 +82,11 @@ impl SeValue {
 /// Whether an attribute is multi-valued (asserted, never superseded).
 /// In the SE schema only `se.post/tag` accumulates values.
 pub fn is_multi_valued(attribute: &str) -> bool {
-    attribute == "se.post/tag"
+    // A MusicBrainz log (`research/single-file-format/bench/musicbrainz.py`,
+    // on the `research-data` branch) writes each entity once, with every
+    // alias, tag and relation as a fact of its own: nothing it writes
+    // supersedes anything.
+    attribute == "se.post/tag" || attribute.starts_with("mb.")
 }
 
 /// A transaction-ordered fact log ready to replay.

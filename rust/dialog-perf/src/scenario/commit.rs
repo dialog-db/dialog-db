@@ -2,6 +2,9 @@
 //! standing key every time, writes that succeed standing claims, writes
 //! to a relation a rule derives, and writes that dispatch a chain of
 //! inductive rules.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use std::future::Future;
 use std::pin::Pin;

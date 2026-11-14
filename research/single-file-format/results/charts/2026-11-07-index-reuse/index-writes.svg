@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 460" font-family="system-ui, sans-serif" font-size="12">
+<rect width="960" height="460" fill="#ffffff"/>
+<text x="70" y="24" font-size="16" font-weight="600">What an append writes to the index, against the append's own data</text>
+<text x="70" y="44" fill="#4b5563">MusicBrainz's appends, modelled; dashed: as much as the data</text>
+<line x1="70" x2="940" y1="350.0" y2="350.0" stroke="#e5e7eb"/>
+<text x="64" y="354.0" text-anchor="end" fill="#4b5563">0.00</text>
+<line x1="70" x2="940" y1="294.0" y2="294.0" stroke="#e5e7eb"/>
+<text x="64" y="298.0" text-anchor="end" fill="#4b5563">3.68</text>
+<line x1="70" x2="940" y1="238.0" y2="238.0" stroke="#e5e7eb"/>
+<text x="64" y="242.0" text-anchor="end" fill="#4b5563">7.36</text>
+<line x1="70" x2="940" y1="182.0" y2="182.0" stroke="#e5e7eb"/>
+<text x="64" y="186.0" text-anchor="end" fill="#4b5563">11.04</text>
+<line x1="70" x2="940" y1="126.0" y2="126.0" stroke="#e5e7eb"/>
+<text x="64" y="130.0" text-anchor="end" fill="#4b5563">14.72</text>
+<line x1="70" x2="940" y1="70.0" y2="70.0" stroke="#e5e7eb"/>
+<text x="64" y="74.0" text-anchor="end" fill="#4b5563">18.41</text>
+<text x="16" y="210.0" transform="rotate(-90 16 210.0)" text-anchor="middle" fill="#4b5563">× the append's data</text>
+<line x1="70" x2="940" y1="334.8" y2="334.8" stroke="#111827" stroke-dasharray="4 3"/>
+<rect x="84.5" y="326.4" width="114.0" height="23.6" fill="#6b7280"/>
+<line x1="141.5" x2="141.5" y1="326.4" y2="326.4" stroke="#111827"/>
+<text x="141.5" y="320.4" text-anchor="middle" font-weight="600">1.55</text>
+<text x="142.5" y="366" text-anchor="end" transform="rotate(-30 142.5 366)">keys held, 16 B</text>
+<rect x="229.5" y="339.2" width="114.0" height="10.8" fill="#6b7280"/>
+<line x1="286.5" x2="286.5" y1="339.2" y2="339.2" stroke="#111827"/>
+<text x="286.5" y="333.2" text-anchor="middle" font-weight="600">0.71</text>
+<text x="287.5" y="366" text-anchor="end" transform="rotate(-30 287.5 366)">4-byte fragments, 8 B</text>
+<rect x="374.5" y="345.1" width="114.0" height="4.9" fill="#6b7280"/>
+<line x1="431.5" x2="431.5" y1="345.1" y2="345.1" stroke="#111827"/>
+<text x="431.5" y="339.1" text-anchor="middle" font-weight="600">0.32</text>
+<text x="432.5" y="366" text-anchor="end" transform="rotate(-30 432.5 366)">positions, tree</text>
+<rect x="519.5" y="95.5" width="114.0" height="254.5" fill="#6b7280"/>
+<line x1="576.5" x2="576.5" y1="95.5" y2="95.5" stroke="#111827"/>
+<text x="576.5" y="89.5" text-anchor="middle" font-weight="600">16.73</text>
+<text x="577.5" y="366" text-anchor="end" transform="rotate(-30 577.5 366)">hashed, 4 KiB</text>
+<rect x="664.5" y="210.2" width="114.0" height="139.8" fill="#6b7280"/>
+<line x1="721.5" x2="721.5" y1="210.2" y2="210.2" stroke="#111827"/>
+<text x="721.5" y="204.2" text-anchor="middle" font-weight="600">9.19</text>
+<text x="722.5" y="366" text-anchor="end" transform="rotate(-30 722.5 366)">hashed, 1 KiB</text>
+<rect x="809.5" y="272.2" width="114.0" height="77.8" fill="#6b7280"/>
+<line x1="866.5" x2="866.5" y1="272.2" y2="272.2" stroke="#111827"/>
+<text x="866.5" y="266.2" text-anchor="middle" font-weight="600">5.11</text>
+<text x="867.5" y="366" text-anchor="end" transform="rotate(-30 867.5 366)">hashed, 512 B</text>
+<rect x="765" y="436" width="12" height="12" fill="#6b7280"/>
+<text x="783" y="446">index writes ÷ data</text>
+</svg>

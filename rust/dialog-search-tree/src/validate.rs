@@ -247,7 +247,11 @@ mod tests {
         storage: &mut Store,
     ) -> Result<()> {
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         Ok(())
     }

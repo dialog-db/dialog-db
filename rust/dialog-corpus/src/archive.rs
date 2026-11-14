@@ -223,7 +223,12 @@ impl ArchiveDelta {
     /// as a block of the catalog, where a spilled-value read finds it.
     pub fn flush_into(&mut self, blocks: &Blocks) {
         for node in self.flush_nodes() {
-            blocks.store(node.buffer().clone());
+            // A staged node is one a persist sealed, from its block.
+            blocks.store(
+                node.buffer()
+                    .expect("a staged node is read from its block")
+                    .clone(),
+            );
         }
         for blob in self.flush_blobs() {
             blocks.store(blob);

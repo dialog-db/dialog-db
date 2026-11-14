@@ -259,7 +259,7 @@ where
         let mut asserts = 0usize;
         while let Some((entry_at, key)) = keys.next_key()? {
             let slot = asserts;
-            if buffer.polarity.get(entry_at).copied() == Some(1) {
+            if buffer.is_assert(entry_at) {
                 asserts += 1;
             }
             // Keys stream in sorted order: everything past the end bound
@@ -641,7 +641,14 @@ where
                     let NodeBody::Segment(segment) = node.body() else {
                         unreachable!("segment checked above")
                     };
-                    let mut keys = segment.keys::<Key>()?;
+                    // Over rows the leaf is entered at the range's start;
+                    // a block's columnar keys stream from the first.
+                    let mut keys = match &start_bytes {
+                        Bound::Included(bound) | Bound::Excluded(bound) => {
+                            segment.keys_from::<Key>(bound)?
+                        }
+                        Bound::Unbounded => segment.keys::<Key>()?,
+                    };
                     while let Some((at, key)) = keys.next_key()? {
                         // Buffered inserts sorting before this entry.
                         while let Some((buffered_key, _)) = buffered.peek() {
@@ -1080,7 +1087,11 @@ mod walker_novelty_tests {
         storage: &mut Store,
     ) -> Result<()> {
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         Ok(())
     }
@@ -1343,7 +1354,11 @@ mod prefetch_tests {
 
         let tree = edit.persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         Ok(Tree::at(

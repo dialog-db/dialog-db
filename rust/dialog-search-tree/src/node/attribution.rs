@@ -117,13 +117,21 @@ where
         &self,
         manifest: &Manifest,
     ) -> Result<FrameAttribution, DialogSearchTreeError> {
+        if self.is_rows() {
+            // Attribution is of a block's bytes: build the block and read it.
+            return Self::try_from(self.buffer()?.clone())?.attribution(manifest);
+        }
         let mut out = FrameAttribution {
             total: self.size(),
             prelude: self.prelude_len(),
             ..FrameAttribution::default()
         };
         match self.body() {
-            NodeBody::Index(index) => {
+            NodeBody::Index(crate::IndexView::Rows(_))
+            | NodeBody::Segment(crate::SegmentView::Rows(_)) => {
+                unreachable!("a node read from rows is attributed through its block")
+            }
+            NodeBody::Index(crate::IndexView::Archived(index)) => {
                 out.children = index.len();
                 out.hashes = 32 * index.len();
                 out.separators = index.prefix.len() + index.suffixes.len() + 4 * index.ends.len();
@@ -154,7 +162,7 @@ where
                     out.layouts.entry(*layout).or_default().values = serialized_len(values)?;
                 }
             }
-            NodeBody::Segment(segment) => {
+            NodeBody::Segment(crate::SegmentView::Archived(segment)) => {
                 out.keys = segment.columns.iter().map(archived_column_bytes).sum();
                 let mut values: BTreeMap<u8, Vec<Value>> = BTreeMap::new();
                 segment.for_each_entry::<Key, _>(|key, value| {

@@ -33,7 +33,11 @@ fn bench_insert_sequential(c: &mut Criterion) {
                             .unwrap();
                         // Flush after each persist so the next edit can load the nodes this persist created.
                         for (_, node) in delta.flush() {
-                            storage.store(node.buffer().clone());
+                            storage.store(
+                                node.buffer()
+                                    .expect("a node built from its block has one")
+                                    .clone(),
+                            );
                         }
                     }
                 });
@@ -71,7 +75,11 @@ fn bench_insert_random(c: &mut Criterion) {
                             .unwrap();
                         // Flush after each persist so the next edit can load the nodes this persist created.
                         for (_, node) in delta.flush() {
-                            storage.store(node.buffer().clone());
+                            storage.store(
+                                node.buffer()
+                                    .expect("a node built from its block has one")
+                                    .clone(),
+                            );
                         }
                     }
                 });

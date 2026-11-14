@@ -294,7 +294,11 @@ mod tests {
                     .await?
                     .persist(&mut delta)?;
                 for (_, node) in delta.flush() {
-                    storage.store(node.buffer().clone());
+                    storage.store(
+                        node.buffer()
+                            .expect("a node built from its block has one")
+                            .clone(),
+                    );
                 }
             }
         }
@@ -320,7 +324,11 @@ mod tests {
                     .await?
                     .persist(&mut delta)?;
                 for (_, node) in delta.flush() {
-                    storage.store(node.buffer().clone());
+                    storage.store(
+                        node.buffer()
+                            .expect("a node built from its block has one")
+                            .clone(),
+                    );
                 }
             }
         }
@@ -351,7 +359,11 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
         Ok(tree)
@@ -485,7 +497,11 @@ mod tests {
         let mut delta = Delta::zero();
         let root = hitchhiker.persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         let tree = PersistentTree::<[u8; 5], Vec<u8>>::at(crate::helpers::test_catalog(), root);
 
@@ -568,7 +584,7 @@ mod tests {
         let mut delta = Delta::zero();
         let root = hitchhiker.persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(node.buffer()?.clone());
         }
         let tree = PersistentTree::<[u8; 5], Vec<u8>>::at(crate::helpers::test_catalog(), root);
 

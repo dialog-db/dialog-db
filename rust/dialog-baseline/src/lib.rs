@@ -35,6 +35,7 @@
 /// measurement crate can count the blocks a workload moves.
 pub use dialog_peer::helpers::metered;
 pub mod nodes;
+pub mod replica;
 pub mod repo;
 pub mod se;
 

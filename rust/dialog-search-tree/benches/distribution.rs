@@ -149,7 +149,11 @@ where
             .unwrap();
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
     }
 
@@ -178,7 +182,11 @@ where
             .unwrap();
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
     }
 }
@@ -331,7 +339,11 @@ where
         let node = node.unwrap();
         total_nodes += 1;
         if seen.insert(node.hash().clone()) {
-            total_bytes += node.buffer().as_ref().len();
+            total_bytes += node
+                .buffer()
+                .expect("a node read from its block")
+                .as_ref()
+                .len();
         }
         match node.as_index() {
             Ok(_) => index_nodes += 1,

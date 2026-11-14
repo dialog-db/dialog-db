@@ -5,6 +5,9 @@
 //! ```sh
 //! cargo run --release -p dialog-baseline --example hash_audit -- 2000
 //! ```
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use dialog_baseline::metered::Tally;
 use dialog_baseline::repo::DialogRepo;

@@ -252,7 +252,7 @@ mod tests {
 
     use crate::helpers::test_repo;
     use crate::registry::RegistryEnv;
-    use crate::{Branch, CommitError, PublishError, PullError};
+    use crate::{Branch, PublishError, PullError};
     use anyhow::Result;
     use dialog_corpus::history::History as _;
     use dialog_corpus::{Fact, Instruction, Selector, Value};
@@ -321,28 +321,30 @@ mod tests {
         Ok(())
     }
 
-    /// Without `merge`, the same race is refused as before.
+    /// Without `merge`, the same race is not refused: the commit that lost
+    /// applies its instructions again over the head that won, and both
+    /// stand.
     #[dialog_common::test]
-    async fn it_refuses_a_lost_race_unless_asked_to_merge() -> Result<()> {
+    async fn it_applies_a_lost_race_again_unless_asked_to_merge() -> Result<()> {
         let (worker, peer) = test_session_with_peer().await;
         let repo = test_repo(&worker, &peer).await;
         let first = repo.branch("main").open().perform(&worker).await?;
         let second = repo.branch("main").open().perform(&peer).await?;
 
-        first
+        let won = first
             .commit(stream::iter(vec![name("user:a", "Alice")?]))
             .perform(&worker)
             .await?;
-        let raced = second
+        let applied = second
             .commit(stream::iter(vec![name("user:b", "Bob")?]))
             .perform(&peer)
-            .await;
-        assert!(
-            matches!(
-                raced,
-                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
-            ),
-            "{raced:?}"
+            .await?;
+        assert_ne!(applied.version(), won.version());
+        let fresh = repo.branch("main").open().perform(&peer).await?;
+        assert_eq!(fresh.revision(), Some(applied));
+        assert_eq!(
+            names(&fresh, &peer).await?,
+            vec![Value::String("Alice".into()), Value::String("Bob".into())]
         );
         Ok(())
     }

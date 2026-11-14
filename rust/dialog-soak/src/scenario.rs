@@ -6,6 +6,9 @@
 //! A scenario is a function from a seeded [`Site`] to a list of
 //! [`PhaseReport`]s; [`run`] seeds the site unshaped, switches the link
 //! model on, runs the scenario's phases, and labels the report.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;

@@ -138,7 +138,7 @@ async fn flush_counting(
 ) -> u64 {
     let mut count = 0u64;
     for (_, node) in delta.flush() {
-        storage.store(node.buffer().clone());
+        storage.store(node.buffer().expect("a sealed node has its block").clone());
         count += 1;
     }
     count

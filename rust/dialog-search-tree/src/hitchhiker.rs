@@ -1494,7 +1494,7 @@ where
         let links = match node.body() {
             NodeBody::Segment(_) => return Ok(false),
             NodeBody::Index(index) => {
-                if !index.novelty.is_empty() {
+                if index.novelty_len() != 0 {
                     return Ok(true);
                 }
                 index.links()?
@@ -1639,7 +1639,11 @@ mod tests {
         storage: &mut TestStorage,
     ) -> Result<()> {
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         Ok(())
     }
@@ -1797,7 +1801,7 @@ mod tests {
             let mut delta = Delta::zero();
             let root = live.persist_mut(&mut delta)?;
             let frame = delta.get(&root).expect("the persist wrote the root");
-            root_bytes.push(frame.buffer().as_ref().len());
+            root_bytes.push(frame.buffer()?.as_ref().len());
             flush(&mut delta, &mut storage).await?;
         }
         for at in [0usize, 9, 49, 99] {
@@ -3014,7 +3018,11 @@ mod tests {
         storage: &mut SpecStorage,
     ) -> Result<()> {
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         Ok(())
     }
@@ -3504,7 +3512,10 @@ mod tests {
         let mut delta = Delta::zero();
         tree.persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            let buffer = node.buffer().clone();
+            let buffer = node
+                .buffer()
+                .expect("a node built from its block has one")
+                .clone();
             let node = PersistentNode::<[u8; 4], Vec<u8>>::try_from(buffer)?;
             assert_eq!(
                 node.manifest()?,

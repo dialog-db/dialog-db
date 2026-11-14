@@ -166,7 +166,12 @@ async fn it_edits_trees_written_in_the_legacy_layout() -> anyhow::Result<()> {
                     "{}: an edit writes tagged nodes",
                     fixture.name
                 );
-                storage.store(buffer.buffer().clone());
+                storage.store(
+                    buffer
+                        .buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
 
             let edited = Tree::at(dialog_search_tree::helpers::test_catalog(), root);

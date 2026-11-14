@@ -2,6 +2,7 @@
 
 use crate::{ConnectedReplica, RemoteSite, UploadError};
 use dialog_capability::{Fork, Provider, Subject};
+use dialog_common::r#async::spawn;
 use dialog_common::{Buffer, ConditionalSync};
 use dialog_corpus::{Datum, Key, State};
 use dialog_effects::archive::prelude::{ArchiveScope, CatalogScope};
@@ -116,6 +117,13 @@ where
 {
     /// Execute the upload, writing the nodes' own buffers to the remote
     /// with up to 16 concurrent uploads.
+    ///
+    /// A node's buffer may have to be built (a store that keeps nodes as
+    /// rows builds the block from them), which is work for a processor, not
+    /// a wait. Each is built as a task of its own, so where there are
+    /// threads several are built at once, and a block goes to the remote
+    /// as soon as it is built rather than holding up the puts in flight
+    /// while it is.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), UploadError>
     where
         Env: Provider<Get> + Provider<Fork<RemoteSite, Put>> + ConditionalSync,
@@ -125,12 +133,20 @@ where
         self.nodes
             .map(|node| async move {
                 let node = node?;
+                spawn(async move { node.buffer().cloned() })
+                    .await
+                    .map_err(|_| {
+                        DialogSearchTreeError::Node("A block's bytes were not built".into())
+                    })?
+                    .map_err(UploadError::from)
+            })
+            .buffer_unordered(UPLOAD_CONCURRENCY)
+            .map(|buffer| async move {
                 index
-                    .put(node.buffer().clone())
+                    .put(buffer?)
                     .perform(env)
                     .await
-                    .map_err(UploadError::RemoteWrite)?;
-                Ok(())
+                    .map_err(UploadError::RemoteWrite)
             })
             .buffer_unordered(UPLOAD_CONCURRENCY)
             .try_collect::<()>()

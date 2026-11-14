@@ -156,7 +156,7 @@ async fn flush(
     let mut nodes = 0usize;
     let mut bytes = 0u64;
     for (_, node) in delta.flush() {
-        let buffer = node.buffer().clone();
+        let buffer = node.buffer().expect("a sealed node has its block").clone();
         nodes += 1;
         bytes += buffer.as_ref().len() as u64;
         storage.store(buffer);

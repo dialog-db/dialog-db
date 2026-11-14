@@ -606,6 +606,8 @@ version = "1.2.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2352e5597e9c544d5e6d9c95190d5d27738ade584fa8db0a16e130e5c2b5296e"
 dependencies = [
+ "jobserver",
+ "libc",
  "shlex",
 ]
 
@@ -1286,22 +1288,32 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base58",
+ "blake3",
  "criterion",
  "dialog-capability",
+ "dialog-chronicle",
  "dialog-common",
  "dialog-corpus",
+ "dialog-credentials",
  "dialog-effects",
  "dialog-network",
  "dialog-peer",
+ "dialog-query",
+ "dialog-remote-fs",
  "dialog-repository",
  "dialog-search-tree",
  "dialog-storage",
+ "dialog-varsig",
  "futures-util",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
+ "rkyv",
  "rusqlite",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
+ "zstd",
 ]
 
 [[package]]
@@ -1330,6 +1342,35 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "dialog-chronicle"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "async-trait",
+ "crc32fast",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-corpus",
+ "dialog-effects",
+ "dialog-peer",
+ "dialog-repository",
+ "dialog-search-tree",
+ "dialog-storage",
+ "futures-util",
+ "hashbrown 0.16.1",
+ "libc",
+ "memmap2",
+ "papaya",
+ "parking_lot",
+ "rkyv",
+ "tempfile",
+ "tokio",
+ "windows-sys 0.61.2",
+ "zerocopy",
 ]
 
 [[package]]
@@ -1569,6 +1610,27 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "dialog-migration"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "base58",
+ "dialog-capability",
+ "dialog-chronicle",
+ "dialog-common",
+ "dialog-corpus",
+ "dialog-effects",
+ "dialog-migration",
+ "dialog-peer",
+ "dialog-repository",
+ "dialog-search-tree",
+ "dialog-storage",
+ "futures-util",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -3483,6 +3545,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jobserver"
+version = "0.1.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
+dependencies = [
+ "getrandom 0.4.3",
+ "libc",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3673,6 +3745,15 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "memmap2"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b0ca1155a9ecc25aa12e8313a119f32edf0255fea2f44839c4ac0a12b2ac157"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "merkle-reference"
@@ -5602,6 +5683,10 @@ name = "seize"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "semver"
@@ -7806,3 +7891,31 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zstd"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdb02c3132d251ab1606e9fc913a7da6c6ed08cc263df15edf082e1dc497d157"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c8ea04668f5de8d8d51051714ba560c9536519cadcdb8829bba4fe2ad159b03"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.2+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
+dependencies = [
+ "cc",
+ "pkg-config",
+]

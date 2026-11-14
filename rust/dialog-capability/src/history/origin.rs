@@ -37,6 +37,7 @@ use super::Issuer;
     rkyv::Deserialize,
 )]
 #[repr(transparent)]
+#[rkyv(derive(PartialEq), compare(PartialEq))]
 pub struct Origin(pub [u8; 32]);
 
 /// Serde encodes an [`Origin`] as a byte string, NOT as the derive's

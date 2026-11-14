@@ -80,7 +80,11 @@ impl Blocks {
     pub fn flush<Key, Value>(&self, delta: &mut Delta<Blake3Hash, PersistentNode<Key, Value>>) {
         let blocks: Vec<Buffer> = delta
             .flush()
-            .map(|(_, node)| node.buffer().clone())
+            .map(|(_, node)| {
+                node.buffer()
+                    .expect("a sealed node is read from its block")
+                    .clone()
+            })
             .collect();
         if blocks.is_empty() {
             return;

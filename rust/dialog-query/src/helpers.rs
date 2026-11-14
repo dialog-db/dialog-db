@@ -13,6 +13,9 @@
 //! 3. **On-disk wall-clock** — real-world latency where I/O dominates,
 //!    via an [`BenchEnv::temp`] environment backed by the platform temp
 //!    directory.
+// Exercises the one-shot `.commit().publish().perform(..)`, which keeps
+// failing on a lost race as it did; nothing here races.
+#![allow(deprecated)]
 
 // The runtime imports below use `::dialog_query::…`, but the
 // `#[derive(Concept)]`/`#[derive(Attribute)]` expansions emit bare
