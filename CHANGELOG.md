@@ -14,6 +14,75 @@ says how to cut a release.
 
 ## Unreleased
 
+### A durable layer is a branch the primary points at, and `Session::sync` pulls and pushes it with the primary
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[notes/layers.md](./notes/layers.md) (points 1, 11 and 13, and
+"Durable layers" under "Open").
+
+A session's layers were all in memory. A layer can now be durable: a
+branch of the repository, declared in the primary as
+`memory:<name> dialog.layer/store "durable"` (`Store::Durable`). A
+session opens the branch `<name>` beside the primary and reads it as a
+line whose rows bind `in` to `memory:<name>`. A write `in:
+memory:<name>`, a rule head whose descriptor names it, and a write
+while it is selected are committed on that branch as part of the
+dispatch, and nothing of them lives in memory. The primary records the
+revision each durable layer stands at as a pointer fact of its own,
+`memory:<name> dialog.layer/revision <the layer's tree, base58>`, under
+`last`, written by the dispatch that moved the layer, so the primary's
+history says which revision of each layer goes with each of its own.
+The layers publish bottom to top, the primary last since it carries the
+pointers, and a lost compare-and-swap on any of them re-runs the whole
+dispatch from the new heads. `Session::sync` pulls every durable layer
+with upstreams, then the primary, writes the pointer of a layer the
+pulls moved, and pushes the layers, then the primary.
+
+What this changes for you:
+
+- `Store::Durable` is new; `LayerDeclaration::new("memory:notes".parse()?,
+  Store::Durable)` declares one. A durable layer named under another
+  store (`session:notes`) or with no branch name (`memory:`) fails the
+  session's open with `CommitError::InvalidPlacement`.
+- `Session::layers` lists the durable layers after the memory layers.
+  `Session::durable(name)` and `Session::durables()` hand out their
+  branches, for setting their upstreams; `Session::layer` answers
+  `None` for a durable layer, which holds no memory cell.
+- A dispatch that writes a durable layer commits on its branch and on
+  the primary, with the pointer fact, so it publishes on the primary
+  even when it wrote nothing else there. The session's own
+  `dialog.layer/revision` rows of `session:` include each durable
+  layer's tree, so a rule premised on a durable layer's revision fires
+  when it moved.
+- `CommitError::UnboundLayer` refuses a write into `memory:<name>` the
+  primary does not declare, before any branch moves.
+- `Session::sync(download)` and `SyncSession`, `SyncEnv` and
+  `SyncError` are new. A sync names its `Download`, as every pull does.
+- A query through a session, `Session::query`, a transaction through
+  it, and `Session::subscribe` read the durable layers too. A
+  subscription re-evaluates when a durable layer moved.
+
+Why: a device-local or replicated table beside the primary is a layer,
+not a separate mechanism, and its history has to be tied to the
+primary's, the way a submodule pointer ties a submodule to its
+superproject, so one revision of the primary names the whole
+composite.
+
+#### Compatibility and migration
+
+- `dialog.layer/store "durable"` and the pointer fact
+  `memory:<name> dialog.layer/revision` are new stored facts in the
+  primary, replicated with it; the layer's rows are in its own branch,
+  synced as any branch is. 0.4.0 and earlier know no layer declarations
+  and read both as ordinary facts, and read the primary without the
+  layer's rows. A build of this release line from before this change
+  opens no session on a primary that declares a durable layer: it
+  refuses the declaration with `CommitError::InvalidPlacement`. Nothing
+  already stored is rewritten, and nothing has to be run.
+- What a durable layer syncs to is its branch's own upstreams, set on
+  the branch (`Session::durable(name)` then `Branch::set_upstream`), on
+  each replica. The declaration carries no upstream.
+
 ### `control:` is the layer a command lives in for one tick, a channel is a layer its consumer empties, and a provider reads what arrives in either
 
 [#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
