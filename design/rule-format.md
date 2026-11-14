@@ -9,7 +9,7 @@ A rule is kept on a branch as a body in format 3: the dag-cbor of its canonical 
 Four pieces of work have each reached something format 3 cannot write:
 
 ```
- patterns (#777, #778)     a parameter that holds a map, a list or a tuple of terms
+ patterns (#777, #778)     a parameter that holds a map or a list of terms
  records (#748)            a composite value, as a constant and as what a pattern builds
  rule heads (#776)         a rule of several heads, asserts and retracts mixed
  macros (#772, #773)       a rule about syntax: `expand` among its premises, `syntax` as its head
@@ -47,13 +47,13 @@ A stored format changes here, so whatever is built is a breaking change with a c
 
 ## Problem
 
-A rule that holds a map, a list or a tuple of terms runs where it is built and cannot be kept. It has a name and no bytes, so it is not installed on a branch, not synced, and not there the next time the branch is opened.
+A rule that holds a map or a list of terms runs where it is built and cannot be kept. It has a name and no bytes, so it is not installed on a branch, not synced, and not there the next time the branch is opened.
 
 Of the four pieces of work in the description, patterns are the one left. Records ask nothing new of a body. A rule has one head since 2026-11-13, so several heads are no addition. A rule about syntax is not stored yet, and is not part of this.
 
 ## Approach
 
-Format 4 writes what format 3 wrote, and a map, a list or a tuple of terms where a parameter stands.
+Format 4 writes what format 3 wrote, and a map or a list of terms where a parameter stands.
 
 ```
  a release       writes      reads               migrates

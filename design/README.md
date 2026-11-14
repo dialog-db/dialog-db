@@ -70,7 +70,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   remote. A download can bring along only what the replica holds, and a
   pull can retry when a commit overtakes it.
 - [A stored rule says less than a rule can](rule-format.md):
-  **Building.** A rule that holds a map, a list or a tuple of terms runs
+  **Building.** A rule that holds a map or a list of terms runs
   and cannot be kept. Format 4 writes one. A release writes it always and
   reads the earlier formats for one release cycle, with a migration; a
   rule's name does not move.

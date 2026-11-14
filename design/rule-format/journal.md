@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The approach is decided: format 4 writes a pattern, a release writes it always and reads the earlier ones for one release cycle, with `Branch::upgrade_rules` as the migration. Patterns are the one addition: a rule has one head, records ask nothing, a rule about syntax is not stored. A pattern is named by its parts already, so no name moves. | **Building**, on `feat/rule-format-4` over the patterns build. |
-| **Agenda** | Whether the maintainer wants other words for a pattern than `map`, `list`, `tuple`. What one entity holds once two releases have each written its body. | The build, its changelog entry with the compatibility note, and the notation storing a rule that holds a struct. |
+| **Agenda** | Whether the maintainer wants other words for a pattern than `map`, `list`. What one entity holds once two releases have each written its body. | The build, its changelog entry with the compatibility note, and the notation storing a rule that holds a struct. |
 
 ## Candidate problems
 
