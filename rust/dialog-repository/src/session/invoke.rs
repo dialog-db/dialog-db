@@ -72,6 +72,16 @@ impl Session {
     /// the next dispatch.
     ///
     /// [`Arrivals`]: super::Arrivals
+    /// Read again the head of the primary and of every durable layer:
+    /// what a dispatch re-run after a lost compare-and-swap builds on.
+    pub(crate) async fn refresh<Env: SessionEnv>(&self, env: &Env) -> Result<(), CommitError> {
+        self.primary().refresh(env).await?;
+        for (_, branch) in self.durables() {
+            branch.refresh(env).await?;
+        }
+        Ok(())
+    }
+
     fn land(&self, commands: &Changes) -> Result<(), CommitError> {
         let mut asserted = Changes::new();
         for (of, the, change) in commands.iter() {
@@ -128,8 +138,8 @@ impl Invocation {
 }
 
 /// One dispatch of `changes` and `transients` through `session`: commit
-/// and publish, re-run from the new head when the publish loses its
-/// compare-and-swap. Answers the head it left the primary at and every
+/// and publish, re-run from the new heads when the publish loses its
+/// compare-and-swap, on the primary or on any durable layer. Answers the head it left the primary at and every
 /// command of the dispatch: the ones dispatched and the ones its rules
 /// dispatched in any tick.
 async fn dispatch<Env: SessionEnv>(
@@ -151,7 +161,7 @@ async fn dispatch<Env: SessionEnv>(
                     return Err(lost.into());
                 }
                 reruns += 1;
-                session.primary().refresh(env).await?;
+                session.refresh(env).await?;
                 continue;
             }
             Err(error) => return Err(error),
@@ -165,7 +175,7 @@ async fn dispatch<Env: SessionEnv>(
                     return Err(lost.into());
                 }
                 reruns += 1;
-                session.primary().refresh(env).await?;
+                session.refresh(env).await?;
             }
             Err(error) => return Err(error),
         }

@@ -21,7 +21,7 @@ use crate::Commit;
 use crate::placement::control_layer;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::session::{Composite, shared_metadata};
-use crate::repository::source::{Live, View};
+use crate::repository::source::{Live, Source, View};
 use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
 use crate::{Branch, CommitError, Ephemeral, PublishError, RemoteSite, Revision, Snapshot, Staged};
 use dialog_capability::{Fork, Provider};
@@ -96,12 +96,63 @@ pub struct Transaction<L: Line> {
 }
 
 /// What a transaction through a [`Session`](crate::Session) carries: the
-/// composite its reads and its induction see, and the memory layers that
-/// take their shares once the commit publishes.
+/// composite its reads and its induction see, the memory layers that
+/// take their shares once the commit publishes, and the durable layers
+/// that commit theirs on their branches.
 #[derive(Clone)]
 pub(crate) struct SessionContext {
     pub(crate) composite: Composite,
     pub(crate) memories: Vec<(Entity, Ephemeral)>,
+    pub(crate) durables: Vec<DurableLayer>,
+}
+
+/// A durable layer of a session as one dispatch reads and writes it: the
+/// layer's name, its branch, and the head the dispatch pinned when it
+/// began, which its reads see and its commit on the branch builds on and
+/// compares and swaps against.
+#[derive(Clone)]
+pub(crate) struct DurableLayer {
+    pub(crate) layer: Entity,
+    pub(crate) branch: Branch,
+    pinned: Option<Edition<Revision>>,
+}
+
+impl DurableLayer {
+    /// The layer `layer`, the branch `branch`, pinned at its head now.
+    pub(crate) fn pin(layer: Entity, branch: Branch) -> Self {
+        let pinned = (&branch).pin();
+        Self {
+            layer,
+            branch,
+            pinned,
+        }
+    }
+
+    /// The revision the layer was pinned at.
+    pub(crate) fn revision(&self) -> Option<Revision> {
+        self.pinned.as_ref().map(|edition| edition.content.clone())
+    }
+
+    /// The layer's branch at the pinned head, as a line a read sees.
+    pub(crate) fn source(&self) -> Source {
+        View::at(
+            Live::Branch(&self.branch),
+            self.pinned.as_ref().map(|edition| &edition.content),
+        )
+        .to_source()
+    }
+
+    /// A transaction on the layer's branch, pinned where the dispatch
+    /// pinned it, so its commit refuses a head that moved since.
+    pub(crate) fn transaction(&self) -> Transaction<&Branch> {
+        Transaction {
+            line: &self.branch,
+            pinned: self.pinned.clone(),
+            changes: Staged::default(),
+            transients: Staged::default(),
+            session: None,
+        }
+    }
 }
 
 /// What a [`Transaction`] runs on: a `&`[`Branch`], a `&`[`Snapshot`]

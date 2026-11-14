@@ -26,13 +26,13 @@ use super::{
 };
 use crate::Ephemeral;
 use crate::placement::{
-    control_layer, follows_selection, memory_layer, revision_rows, revision_stimulus, selected,
-    session_layer,
+    Pointer, control_layer, follows_selection, memory_layer, revision_rows, revision_stimulus,
+    selected, session_layer, tree_revision,
 };
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::branch::session::{Composite, shared_metadata};
-use crate::repository::branch::transaction::SessionContext;
+use crate::repository::branch::transaction::{DurableLayer, SessionContext};
 use crate::repository::source::{Caches, Live, View};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
@@ -57,6 +57,7 @@ use dialog_query::query::Application;
 use dialog_search_tree::Cache;
 use dialog_search_tree::nodes;
 use std::iter::once;
+use std::mem::take;
 use std::slice::from_ref;
 use std::sync::Arc;
 
@@ -133,6 +134,14 @@ pub struct TransactionBatch {
     /// then records every layer's revision in the session's own layer
     /// (see [`record_revisions`]).
     revisions: bool,
+    /// The chains this one staged on the session's durable layers, by
+    /// layer: what the chain wrote into each, committed on its branch.
+    /// Published before the primary's, which carries the pointer fact
+    /// naming each one's tip.
+    durables: Vec<(Entity, TransactionBatch)>,
+    /// The session's durable layers, by name, whose revisions the
+    /// publish records beside the memory layers'.
+    lines: Vec<(Entity, Branch)>,
 }
 
 /// The facts `changes` retracts that `overlay` holds. A transaction's
@@ -315,8 +324,22 @@ impl BatchPublish {
             overlay,
             overlay_retractions,
             revisions,
+            durables,
+            lines,
         } = self.batch;
         let tip = snapshot.revision();
+        // The durable layers publish first, bottom to top: the primary
+        // carries the pointer facts naming their tips, so it publishes
+        // last. A lost compare-and-swap on any of them fails the publish
+        // before the primary moves, and the dispatch re-runs from the new
+        // heads.
+        for (_, durable) in durables {
+            Box::pin(durable.publish().perform(env)).await?;
+        }
+        let heads: Vec<(Entity, Option<Revision>)> = lines
+            .iter()
+            .map(|(layer, branch)| (layer.clone(), branch.revision()))
+            .collect();
 
         if chain.is_empty() {
             // Nothing staged. A same-value publish would bump the cell
@@ -338,7 +361,7 @@ impl BatchPublish {
             retract_from_overlay(&overlay, overlay_retractions)?;
             apply_shares(&memories, shares)?;
             if revisions {
-                record_revisions(&memories, &overlay, &tip)?;
+                record_revisions(&memories, &heads, &overlay, &tip)?;
             }
             return Ok(tip);
         }
@@ -355,7 +378,7 @@ impl BatchPublish {
         // tick lands as its own instant, in the order the ticks ran.
         apply_shares(&memories, shares)?;
         if revisions {
-            record_revisions(&memories, &overlay, &tip)?;
+            record_revisions(&memories, &heads, &overlay, &tip)?;
         }
 
         // Only now that the head has actually advanced do the staged
@@ -617,7 +640,13 @@ impl TransactionCommit<&Branch> {
             .map(|session| session.memories.clone())
             .unwrap_or_default();
         memories.push((session_layer(), overlay.clone()));
-        let (outcome, induced, shares) = Box::pin(mint_link(
+        let lines: Vec<(Entity, Branch)> = self
+            .session
+            .iter()
+            .flat_map(|session| session.durables.iter())
+            .map(|durable| (durable.layer.clone(), durable.branch.clone()))
+            .collect();
+        let (outcome, induced, shares, durables) = Box::pin(mint_link(
             View::at(Live::Branch(branch), base.as_ref()),
             |profile, issuer| branch.commit_identity(profile, issuer),
             self.changes,
@@ -626,6 +655,7 @@ impl TransactionCommit<&Branch> {
             self.canonicalize,
             None,
             self.session,
+            Vec::new(),
             env,
         ))
         .await?;
@@ -659,6 +689,8 @@ impl TransactionCommit<&Branch> {
                 overlay,
                 overlay_retractions: retractions,
                 revisions,
+                durables,
+                lines,
             },
             Outcome::Minted(minted) => {
                 let Minted {
@@ -688,6 +720,8 @@ impl TransactionCommit<&Branch> {
                     overlay,
                     overlay_retractions: retractions,
                     revisions,
+                    durables,
+                    lines,
                 }
             }
         })
@@ -742,8 +776,18 @@ impl TransactionCommit<TransactionBatch> {
         let amending = amend.is_some();
         let retractions = overlay_retractions(&self.changes, &batch.overlay);
         batch.revisions |= self.session.is_some();
+        if let Some(session) = &self.session {
+            for durable in &session.durables {
+                if !batch.lines.iter().any(|(layer, _)| *layer == durable.layer) {
+                    batch
+                        .lines
+                        .push((durable.layer.clone(), durable.branch.clone()));
+                }
+            }
+        }
+        let staged = take(&mut batch.durables);
 
-        let (outcome, induced, shares) = Box::pin(mint_link(
+        let (outcome, induced, shares, durables) = Box::pin(mint_link(
             View::at(Live::Snapshot(&batch.snapshot), Some(&base)),
             |_, issuer| (line.clone(), origin_of(&line, issuer)),
             self.changes,
@@ -752,9 +796,11 @@ impl TransactionCommit<TransactionBatch> {
             self.canonicalize,
             amend,
             self.session,
+            staged,
             env,
         ))
         .await?;
+        batch.durables = durables;
         induced.assert(&mut batch.induced);
         batch.shares.extend(shares);
         batch.overlay_retractions.extend(retractions);
@@ -827,10 +873,11 @@ fn apply_shares(
 /// session's own row names its revision before the rows are written.
 fn record_revisions(
     memories: &[(Entity, Ephemeral)],
+    durables: &[(Entity, Option<Revision>)],
     overlay: &Ephemeral,
     tip: &Revision,
 ) -> Result<(), CommitError> {
-    overlay.apply(revision_rows(Some(tip), memories, overlay))?;
+    overlay.apply(revision_rows(Some(tip), durables, memories, overlay))?;
     Ok(())
 }
 
@@ -904,8 +951,9 @@ async fn mint_link<Env>(
     canonicalize: bool,
     amend: Option<Amended>,
     session: Option<SessionContext>,
+    staged: Vec<(Entity, TransactionBatch)>,
     env: &Env,
-) -> Result<(Outcome, Changes, Vec<Vec<(Entity, Changes)>>), CommitError>
+) -> Result<Link, CommitError>
 where
     Env: Provider<BlobSize>
         + Provider<BlobImport>
@@ -944,7 +992,13 @@ where
     // or minted; one named for `memory:` is the primary's.
     let held: Vec<Entity> = session
         .iter()
-        .flat_map(|session| session.memories.iter().map(|(layer, _)| layer.clone()))
+        .flat_map(|session| {
+            session
+                .memories
+                .iter()
+                .map(|(layer, _)| layer.clone())
+                .chain(session.durables.iter().map(|durable| durable.layer.clone()))
+        })
         .chain(once(session_layer()))
         .collect();
     let mut changes = changes;
@@ -987,8 +1041,17 @@ where
     if let Some(session) = &session {
         let source = view.to_source();
         transients.merge(
-            revision_stimulus(view.revision(), &session.memories, source.overlay())
-                .into_layer(session_layer()),
+            revision_stimulus(
+                view.revision(),
+                &session
+                    .durables
+                    .iter()
+                    .map(|durable| (durable.layer.clone(), durable.revision()))
+                    .collect::<Vec<_>>(),
+                &session.memories,
+                source.overlay(),
+            )
+            .into_layer(session_layer()),
         );
     }
     let mut changes = Box::pin(succession::settle(
@@ -1034,6 +1097,19 @@ where
             ticks.push(derived);
         }
     }
+    let durables = match &session {
+        Some(session) => {
+            Box::pin(commit_durables(
+                &session.durables,
+                &mut ticks,
+                &mut changes,
+                staged,
+                env,
+            ))
+            .await?
+        }
+        None => staged,
+    };
     let touches = touches_rules(&changes);
     let touches_rule_facts = touches_rule_facts(&changes);
     let previous = view.revision().cloned();
@@ -1063,7 +1139,90 @@ where
             );
         }
     }
-    Ok((outcome, induced, ticks))
+    Ok((outcome, induced, ticks, durables))
+}
+
+/// What [`mint_link`] mints: the link's outcome on the primary, the
+/// transients its rules emitted, its writes into memory layers tick by
+/// tick, and the chains it staged on durable layers, by layer.
+type Link = (
+    Outcome,
+    Changes,
+    Vec<Vec<(Entity, Changes)>>,
+    Vec<(Entity, TransactionBatch)>,
+);
+
+/// Take the writes into `durables` out of `ticks` and commit each
+/// layer's, every tick of them together, on the layer's branch: as a
+/// link of the chain `staged` holds for it, or as the first link of a
+/// chain built on the head the dispatch pinned. Each layer a write moved
+/// gets its pointer fact in `changes`, the primary's writes, naming the
+/// tip it is staged at. Answers the chains, by layer, `staged` among
+/// them. Nothing is published: the primary's publish publishes them
+/// first.
+async fn commit_durables<Env>(
+    durables: &[DurableLayer],
+    ticks: &mut Vec<Vec<(Entity, Changes)>>,
+    changes: &mut Changes,
+    mut staged: Vec<(Entity, TransactionBatch)>,
+    env: &Env,
+) -> Result<Vec<(Entity, TransactionBatch)>, CommitError>
+where
+    Env: Provider<BlobSize>
+        + Provider<BlobImport>
+        + Provider<Get>
+        + Provider<BlobRead>
+        + Provider<Put>
+        + Provider<Import>
+        + Provider<nodes::Write<CorpusNode>>
+        + ConditionalSync
+        + Provider<Resolve>
+        + Provider<Identify>
+        + Provider<Attest>
+        + Provider<ArchiveLoad>
+        + Provider<nodes::Read<CorpusNode>>
+        + Provider<nodes::Preload<CorpusNode>>
+        + Provider<BlobLoad>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + Holds
+        + ConditionalSync
+        + 'static,
+{
+    if durables.is_empty() {
+        return Ok(staged);
+    }
+    let mut writes: Vec<(Entity, Changes)> = Vec::new();
+    for tick in ticks.iter_mut() {
+        let (into, rest): (Vec<_>, Vec<_>) = take(tick)
+            .into_iter()
+            .partition(|(layer, _)| durables.iter().any(|durable| durable.layer == *layer));
+        *tick = rest;
+        merge_shares(&mut writes, into);
+    }
+    ticks.retain(|tick| !tick.is_empty());
+    for (layer, share) in writes {
+        let batch = match staged.iter().position(|(held, _)| *held == layer) {
+            Some(at) => {
+                let (_, chain) = staged.remove(at);
+                Box::pin(chain.transaction().integrate(share).commit().perform(env)).await?
+            }
+            None => {
+                let Some(durable) = durables.iter().find(|durable| durable.layer == layer) else {
+                    continue;
+                };
+                Box::pin(durable.transaction().integrate(share).commit().perform(env)).await?
+            }
+        };
+        Pointer {
+            layer: layer.clone(),
+            revision: tree_revision(&batch.revision()),
+        }
+        .assert(changes);
+        staged.push((layer, batch));
+    }
+    Ok(staged)
 }
 
 #[cfg(test)]

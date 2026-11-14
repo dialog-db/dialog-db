@@ -406,6 +406,11 @@ pub struct Subscription<Q: Application> {
     /// the retained results were evaluated, parallel to the session's
     /// layers: what a maintained poll rewinds each layer to.
     memory_sequences: Vec<u64>,
+    /// The head each of the session's durable layers stood at when the
+    /// retained results were evaluated, parallel to the session's
+    /// durable layers. A durable layer that moved re-evaluates the
+    /// query: its tree is not diffed against the demand cover.
+    durable_heads: Vec<Option<Revision>>,
     /// The demand cover recorded during the last evaluation.
     demand: Demand,
     /// The last evaluation's full result, retained to compute the
@@ -470,6 +475,7 @@ impl<Q: Application> Subscription<Q> {
             overlay_sequence: 0,
             session,
             memory_sequences: vec![0; layers],
+            durable_heads: Vec::new(),
             demand: Demand::new(),
             results: Vec::new(),
             fixpoint: Arc::new(Mutex::new(None)),
@@ -776,11 +782,13 @@ where
         let current = self.branch.revision();
         let sequence = self.branch.overlay().revision().sequence;
         let sequences = self.memory_sequences_now();
+        let durables = self.durable_heads_now();
         if self.initialized {
             let head_moved = current != self.revision;
             let overlay_moved = sequence != self.overlay_sequence;
             let memories_moved = sequences != self.memory_sequences;
-            if !head_moved && !overlay_moved && !memories_moved {
+            let durables_moved = durables != self.durable_heads;
+            if !head_moved && !overlay_moved && !memories_moved && !durables_moved {
                 return Ok(None);
             }
             // A head-dependent result — one that read
@@ -789,7 +797,9 @@ where
             // metadata facts are overlay-injected, invisible to the
             // tree diff below. Skip the gate and re-evaluate when the
             // head moved; an overlay-only move leaves them alone.
-            if !(head_moved && self.demand.depends_on_head()) {
+            // A durable layer that moved is read afresh: its tree is not
+            // diffed against the cover, so the query re-evaluates.
+            if !durables_moved && !(head_moved && self.demand.depends_on_head()) {
                 let mut touched = Touched::Nothing;
                 if head_moved {
                     touched = touched.merge(self.touched(env, &current).await?);
@@ -854,6 +864,7 @@ where
         self.revision = current;
         self.overlay_sequence = sequence;
         self.memory_sequences = sequences;
+        self.durable_heads = durables;
         self.initialized = true;
         Ok(Some(delta))
     }
@@ -876,12 +887,36 @@ where
             .collect()
     }
 
+    /// The head each of the session's durable layers stands at now, in
+    /// the session's order; none without a session.
+    fn durable_heads_now(&self) -> Vec<Option<Revision>> {
+        self.session
+            .iter()
+            .flat_map(|session| session.durables().iter())
+            .map(|(_, branch)| branch.revision())
+            .collect()
+    }
+
+    /// `primary` followed by the session's durable layers, each as its
+    /// branch stands now, with the names their rows bind `in` to.
+    fn lines(&self, primary: Source) -> (Vec<Source>, Vec<Option<Entity>>) {
+        let mut sources = vec![primary];
+        let mut names = vec![None];
+        for (layer, branch) in self.session.iter().flat_map(|session| session.durables()) {
+            sources.push(Source::from(branch.clone()));
+            names.push(Some(layer.clone()));
+        }
+        (sources, names)
+    }
+
     /// What the subscription reads: the branch, and through a session
-    /// its memory layers.
+    /// its durable layers and its memory layers.
     fn composite(&self) -> Composite {
+        let (sources, names) = self.lines(Source::from(self.branch.clone()));
         Composite {
-            sources: vec![Source::from(self.branch.clone())],
+            sources,
             memories: self.memories(),
+            names,
         }
     }
 
@@ -900,9 +935,13 @@ where
             .zip(&self.memory_sequences)
             .map(|((layer, memory), sequence)| Some((layer, rewound(&memory, *sequence)?)))
             .collect::<Option<Vec<_>>>()?;
+        // The durable layers stand where they were pinned: a poll that
+        // finds one moved re-evaluates instead of maintaining.
+        let (sources, names) = self.lines(Source::from(self.branch.view(pinned, overlay)));
         Some(Composite {
-            sources: vec![Source::from(self.branch.view(pinned, overlay))],
+            sources,
             memories,
+            names,
         })
     }
 

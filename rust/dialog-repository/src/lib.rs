@@ -46,7 +46,7 @@ pub use placement::{
 /// A session: the primary branch and the layers its schema declares.
 pub mod session;
 pub use session::invoke::{Invocation, MAX_RERUNS};
-pub use session::{Arrivals, OpenSession, Session, SessionEnv};
+pub use session::{Arrivals, OpenSession, Session, SessionEnv, SyncEnv, SyncError, SyncSession};
 
 /// Streaming-merge and tombstone helpers used by the query-session
 /// composition layer.

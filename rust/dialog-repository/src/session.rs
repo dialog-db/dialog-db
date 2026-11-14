@@ -58,6 +58,18 @@
 //! **channel** instead, `control:<name>`, a layer declared with
 //! [`Store::Control`] whose rows stay until the consumer retracts them.
 //!
+//! A layer declared with [`Store::Durable`], `memory:<name>`, is a
+//! branch: the repository's branch `<name>`, opened with the session and
+//! read as a line beside the primary, its rows binding `in` to
+//! `memory:<name>` ([`Session::durable`] hands the branch out). A write
+//! into it is committed on that branch as part of the dispatch's
+//! publication, and the primary records the revision it lands at as a
+//! pointer fact, `memory:<name> dialog.layer/revision <tree>`, in the
+//! same dispatch: the layers publish bottom to top, the primary last,
+//! and a lost compare-and-swap on any of them re-runs the dispatch from
+//! the new heads. [`Session::sync`] pulls and pushes the primary and
+//! every durable layer with upstreams.
+//!
 //! Every session has its own layer, [`SESSION`], whether or not the
 //! schema declares it: a table in memory, the session's alone, gone
 //! when the process is. It is how a session addresses the process-local
@@ -95,8 +107,10 @@
 
 pub mod arrivals;
 pub mod invoke;
+pub mod sync;
 
 pub use arrivals::Arrivals;
+pub use sync::{SyncEnv, SyncError, SyncSession};
 
 use std::iter::once;
 use std::sync::Arc;
@@ -116,11 +130,12 @@ use dialog_search_tree::nodes;
 use parking_lot::RwLock;
 use tokio::sync::Notify;
 
+use crate::RepositoryMemoryExt as _;
 use crate::placement::{
-    Layers, Selection, Store, control_layer, memory_layer, selected, session_layer,
+    Layers, Selection, Store, control_layer, durable_branch, memory_layer, selected, session_layer,
 };
 use crate::repository::branch::session::Composite;
-use crate::repository::branch::transaction::SessionContext;
+use crate::repository::branch::transaction::{DurableLayer, SessionContext};
 use crate::repository::source::Source;
 use crate::{Branch, CommitError, Ephemeral, QueryLayer, RemoteSite, Transaction};
 
@@ -202,18 +217,34 @@ impl OpenSession {
         // every session's, whatever the schema says of them: a
         // declaration naming one builds nothing apart.
         let (memory, own, control) = (memory_layer(), session_layer(), control_layer());
-        let layers = layers
-            .layers()
-            .into_iter()
-            .filter(|(entity, _)| *entity != memory && *entity != own && *entity != control)
-            .map(|(entity, store)| match store {
-                Store::Memory | Store::Control => (entity, Ephemeral::new()),
-            })
-            .collect();
+        let mut memories = Vec::new();
+        let mut durables = Vec::new();
+        for (entity, store) in layers.layers() {
+            if entity == memory || entity == own || entity == control {
+                continue;
+            }
+            match store {
+                Store::Memory | Store::Control => memories.push((entity, Ephemeral::new())),
+                // A durable layer is the repository's branch it names,
+                // opened through `env` as any branch is.
+                Store::Durable => {
+                    let name = durable_branch(&entity)?;
+                    let branch = self
+                        .primary
+                        .subject()
+                        .branch(name)
+                        .open()
+                        .perform(env)
+                        .await?;
+                    durables.push((entity, branch));
+                }
+            }
+        }
         Ok(Session {
             inner: Arc::new(Inner {
                 primary: self.primary,
-                layers,
+                layers: memories,
+                durables,
                 declared: RwLock::new(self.declared),
                 control: Ephemeral::new(),
                 landed: Notify::new(),
@@ -230,6 +261,10 @@ struct Inner {
     /// primary's process-local store ([`Branch::overlay`]), read with the
     /// primary.
     layers: Vec<(Entity, Ephemeral)>,
+    /// The durable layers the schema declares, each with the entity that
+    /// names it, `memory:<name>`, and the branch `<name>` it is, in the
+    /// order the schema lists them.
+    durables: Vec<(Entity, Branch)>,
     declared: RwLock<Changes>,
     /// The loopback, [`CONTROL`](crate::CONTROL), as the session holds
     /// it between dispatches: empty, but for the one instant each
@@ -290,14 +325,35 @@ impl Session {
     }
 
     /// The layers this session holds beside the primary, by name: its
-    /// own, [`SESSION`](crate::SESSION), first, then the ones the schema
-    /// declares, in the schema's order. The loopback,
+    /// own, [`SESSION`](crate::SESSION), first, then the memory layers
+    /// the schema declares, in the schema's order, then its durable
+    /// layers, in the schema's order. The loopback,
     /// [`CONTROL`](crate::CONTROL), holds no row between dispatches and
     /// is not among them, though [`layer`](Self::layer) hands it out.
     pub fn layers(&self) -> Vec<Entity> {
         once(session_layer())
             .chain(self.inner.layers.iter().map(|(layer, _)| layer.clone()))
+            .chain(self.inner.durables.iter().map(|(layer, _)| layer.clone()))
             .collect()
+    }
+
+    /// The branch the durable layer `name` is, if the session holds one
+    /// by that name: the repository's branch `<name>` of
+    /// `memory:<name>`, declared with [`Store::Durable`]. A durable layer
+    /// holds no [`Ephemeral`]: [`layer`](Self::layer) answers `None` for
+    /// it.
+    pub fn durable(&self, name: &Entity) -> Option<&Branch> {
+        self.inner
+            .durables
+            .iter()
+            .find(|(layer, _)| layer == name)
+            .map(|(_, branch)| branch)
+    }
+
+    /// The durable layers this session holds, by name, with the branch
+    /// each is, in the schema's order.
+    pub fn durables(&self) -> &[(Entity, Branch)] {
+        &self.inner.durables
     }
 
     /// Select `layer`, or clear the selection with `None`: a dispatch
@@ -354,11 +410,19 @@ impl Session {
     }
 
     /// The layers a transaction through this session reads and induces
-    /// over, pinned as `primary`.
-    fn composite(&self, primary: Source) -> Composite {
+    /// over: the primary pinned as `primary`, each durable layer as
+    /// `durables` pins it, and the memory layers.
+    fn composite(&self, primary: Source, durables: &[DurableLayer]) -> Composite {
+        let mut sources = vec![primary];
+        let mut names = vec![None];
+        for durable in durables {
+            sources.push(durable.source());
+            names.push(Some(durable.layer.clone()));
+        }
         Composite {
-            sources: vec![primary],
+            sources,
             memories: self.memories(),
+            names,
         }
     }
 
@@ -372,6 +436,9 @@ impl Session {
         for (name, memory) in &self.inner.layers {
             layer = layer.with_memory(name.clone(), memory);
         }
+        for (name, branch) in &self.inner.durables {
+            layer = layer.with_line(name.clone(), branch);
+        }
         layer
     }
 
@@ -382,9 +449,16 @@ impl Session {
     pub fn transaction(&self) -> Transaction<&Branch> {
         let transaction = self.inner.primary.transaction();
         let primary = transaction.view().to_source();
+        let durables: Vec<DurableLayer> = self
+            .inner
+            .durables
+            .iter()
+            .map(|(layer, branch)| DurableLayer::pin(layer.clone(), branch.clone()))
+            .collect();
         transaction.with_session(SessionContext {
-            composite: self.composite(primary),
+            composite: self.composite(primary, &durables),
             memories: self.inner.layers.clone(),
+            durables,
         })
     }
 }
@@ -396,6 +470,7 @@ mod tests {
 
     use super::*;
     use crate::helpers::test_repo;
+    use crate::placement::tree_revision;
     use crate::{LayerDeclaration, PublishError};
     use anyhow::Result;
     use dialog_common::ConditionalSend;
@@ -408,6 +483,8 @@ mod tests {
     use dialog_query::query::Output as _;
     use dialog_query::types::Scalar;
     use dialog_query::{AttributeQuery, InductiveRule, Term};
+    #[cfg(any(feature = "integration-tests", feature = "web-integration-tests"))]
+    use dialog_remote_s3::helpers::S3Address;
     use dialog_storage::provider::storage::VolatileSpace;
     use futures_util::future::join;
     use std::fmt::Debug;
@@ -2713,6 +2790,570 @@ mod tests {
             "a read of every layer finds it in none"
         );
         assert_eq!(branch.revision(), before, "nothing durable was written");
+        Ok(())
+    }
+
+    /// The durable layer `memory:notes`, declared in `branch`'s tree.
+    async fn declare_notes(branch: &Branch, env: &Operator) -> Result<Entity> {
+        let notes: Entity = "memory:notes".parse()?;
+        branch
+            .transaction()
+            .assert(LayerDeclaration::new(notes.clone(), Store::Durable))
+            .commit()
+            .publish()
+            .perform(env)
+            .await?;
+        branch.refresh(env).await?;
+        Ok(notes)
+    }
+
+    /// `doc/note` of `doc` as `text`, written into `at`.
+    fn note(doc: &Entity, text: &str, at: &Entity) -> impl Statement {
+        dialog_query::the!("doc/note")
+            .of(doc.clone())
+            .is(text.to_string())
+            .at(at.clone())
+    }
+
+    /// The claims of `the` on `of` that `branch`'s committed tree holds,
+    /// every claim of the cell, read past the session store: what the
+    /// branch itself stores.
+    async fn stored(
+        branch: &Branch,
+        env: &Operator,
+        the: &str,
+        of: &Entity,
+    ) -> Result<Vec<String>> {
+        use futures_util::TryStreamExt as _;
+        let selector = Selector::new()
+            .the(the.parse::<dialog_corpus::Relation>()?)
+            .of(of.clone());
+        let source = Source::from(branch.clone());
+        let views: Vec<dialog_corpus::FactView> = crate::select_from_source(&source, env, selector)
+            .await?
+            .try_collect()
+            .await?;
+        let mut rows = Vec::with_capacity(views.len());
+        for view in views {
+            rows.push(format!("{:?}", view.to_owned()?.is));
+        }
+        rows.sort();
+        Ok(rows)
+    }
+
+    /// The pointer fact a primary holding `branch`'s head as a durable
+    /// layer's revision carries, as [`stored`] renders it.
+    fn pointer_to(branch: &Branch) -> Result<String> {
+        let revision = branch
+            .revision()
+            .ok_or_else(|| anyhow::anyhow!("the layer's branch has a head"))?;
+        Ok(format!("{:?}", tree_revision(&revision)))
+    }
+
+    /// The `doc/note` values `query` reads through `session`, each with
+    /// the layer its `in` binds, sorted. A row with no layer stamped is
+    /// the primary's.
+    async fn notes_read(
+        session: &Session,
+        env: &Operator,
+        query: AttributeQuery,
+    ) -> Result<Vec<String>> {
+        let claims: Vec<dialog_query::Claim> =
+            session.query().select(query).perform(env).try_vec().await?;
+        let mut rows: Vec<String> = claims
+            .iter()
+            .map(|claim| {
+                format!(
+                    "{:?} in {}",
+                    claim.is,
+                    claim
+                        .layer()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| crate::MEMORY.to_string())
+                )
+            })
+            .collect();
+        rows.sort();
+        Ok(rows)
+    }
+
+    /// `doc/note` of every entity, with the value a variable.
+    fn note_query() -> AttributeQuery {
+        AttributeQuery::from(
+            Term::<QueryRelation>::from(QueryRelation::from(
+                "doc/note".parse::<dialog_corpus::Relation>().unwrap(),
+            ))
+            .of(Term::<Entity>::var("e"))
+            .is(Term::<String>::var("v")),
+        )
+    }
+
+    /// A schema declaring `memory:notes` durable opens a session holding
+    /// it as the repository's `notes` branch, with no memory cell of its
+    /// own. A write `in: memory:notes` is committed on that branch and
+    /// lands nowhere in the primary's tree, and the primary gains the
+    /// pointer fact naming the layer's new revision: one claim, which the
+    /// next write into the layer succeeds.
+    #[dialog_common::test]
+    async fn it_commits_a_write_into_a_durable_layer_on_its_branch() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let notes = declare_notes(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        assert_eq!(session.layers(), vec![session_layer(), notes.clone()]);
+        let layer = session.durable(&notes).expect("the notes layer").clone();
+        assert_eq!(layer.name(), "notes");
+        assert!(session.layer(&notes).is_none(), "no memory cell holds it");
+        assert_eq!(layer.revision(), None, "the branch starts empty");
+
+        let doc: Entity = "doc:1".parse()?;
+        session
+            .transact(note(&doc, "first", &notes))
+            .perform(&operator)
+            .await?;
+        let on_layer = repo.branch("notes").open().perform(&operator).await?;
+        assert_eq!(
+            stored(&on_layer, &operator, "doc/note", &doc).await?,
+            vec!["String(\"first\")".to_string()],
+            "the write is committed on the layer's branch"
+        );
+        assert!(
+            stored(&branch, &operator, "doc/note", &doc)
+                .await?
+                .is_empty(),
+            "the primary's tree holds none of it"
+        );
+        assert!(held(branch.overlay(), "doc/note", &doc)?.is_empty());
+        assert_eq!(
+            stored(&branch, &operator, "dialog.layer/revision", &notes).await?,
+            vec![pointer_to(&on_layer)?],
+            "the primary points at the layer's new revision"
+        );
+
+        session
+            .transact(note(&doc, "second", &notes))
+            .perform(&operator)
+            .await?;
+        on_layer.refresh(&operator).await?;
+        assert_eq!(
+            stored(&on_layer, &operator, "doc/note", &doc).await?,
+            vec![
+                "String(\"first\")".to_string(),
+                "String(\"second\")".to_string()
+            ]
+        );
+        assert_eq!(
+            stored(&branch, &operator, "dialog.layer/revision", &notes).await?,
+            vec![pointer_to(&on_layer)?],
+            "the new pointer succeeds the old one"
+        );
+        Ok(())
+    }
+
+    /// A read with `in` a variable binds a row of the durable layer to
+    /// `memory:notes`, and the primary's row to `memory:`; one with `in`
+    /// bound to `memory:notes` reads the layer alone.
+    #[dialog_common::test]
+    async fn it_reads_a_durable_layer_as_a_line_named_for_it() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let notes = declare_notes(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        session
+            .transact(note(&doc, "kept", &notes))
+            .assert(note(&doc, "primary", &crate::memory_layer()))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            notes_read(
+                &session,
+                &operator,
+                note_query().with_layer(Term::var("where"))
+            )
+            .await?,
+            vec![
+                "String(\"kept\") in memory:notes".to_string(),
+                "String(\"primary\") in memory:".to_string(),
+            ],
+            "`in` unbound reads every layer and binds each row's"
+        );
+        assert_eq!(
+            notes_read(
+                &session,
+                &operator,
+                note_query()
+                    .with_layer(Term::Constant(dialog_corpus::Value::Entity(notes.clone())))
+            )
+            .await?,
+            vec!["String(\"kept\") in memory:notes".to_string()],
+            "`in` bound to the durable layer reads it alone"
+        );
+        assert_eq!(
+            notes_read(
+                &session,
+                &operator,
+                note_query().with_layer(Term::Constant(dialog_corpus::Value::Entity(
+                    crate::memory_layer()
+                )))
+            )
+            .await?,
+            vec!["String(\"primary\") in memory:".to_string()],
+            "`in` bound to the primary reads it alone"
+        );
+        Ok(())
+    }
+
+    /// A dispatch whose publish of the durable layer loses its
+    /// compare-and-swap, because another handle moved the layer's branch
+    /// under it, re-runs from the new heads and lands once on each
+    /// branch: one commit on the layer after the other writer's, one on
+    /// the primary, which points at the layer's tip.
+    #[dialog_common::test]
+    async fn it_re_runs_a_dispatch_whose_durable_layer_moved_under_it() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let notes = declare_notes(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        session
+            .transact(note(&doc, "first", &notes))
+            .perform(&operator)
+            .await?;
+        let primary_before = branch.revision().expect("a head");
+
+        // Another handle of the layer's branch moves it; the session's
+        // handle is stale, so its publish of the layer loses the CAS.
+        let other = repo.branch("notes").open().perform(&operator).await?;
+        let moved = other
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/note")
+                    .of("doc:2".parse::<Entity>()?)
+                    .is("other".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_ne!(
+            session.durable(&notes).expect("notes").revision().as_ref(),
+            Some(&moved),
+            "the session's handle has not seen the move"
+        );
+
+        let published = session
+            .transact(note(&doc, "second", &notes))
+            .perform(&operator)
+            .await?;
+        let layer = session.durable(&notes).expect("notes");
+        let tip = layer.revision().expect("the layer has a head");
+        assert_eq!(
+            tip.version().edition,
+            moved.version().edition.successor(),
+            "the layer took one commit, after the other writer's"
+        );
+        assert_eq!(
+            published.version().edition,
+            primary_before.version().edition.successor(),
+            "the primary took one commit"
+        );
+        assert_eq!(
+            stored(layer, &operator, "doc/note", &"doc:2".parse()?).await?,
+            vec!["String(\"other\")".to_string()],
+            "the other writer's commit stands"
+        );
+        assert_eq!(
+            stored(layer, &operator, "doc/note", &doc).await?,
+            vec![
+                "String(\"first\")".to_string(),
+                "String(\"second\")".to_string()
+            ]
+        );
+        assert_eq!(
+            stored(&branch, &operator, "dialog.layer/revision", &notes).await?,
+            vec![pointer_to(layer)?],
+            "the primary points at the layer's tip"
+        );
+        Ok(())
+    }
+
+    /// A write `in: memory:missing`, a layer declared nowhere, is refused
+    /// with `UnboundLayer` before anything is committed: the primary and
+    /// the durable layer stay where they were, and no `missing` branch
+    /// is written.
+    #[dialog_common::test]
+    async fn it_refuses_a_write_into_a_durable_layer_declared_nowhere() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let notes = declare_notes(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        session
+            .transact(note(&doc, "kept", &notes))
+            .perform(&operator)
+            .await?;
+        let primary = branch.revision();
+        let layer = session.durable(&notes).expect("notes").revision();
+        let missing: Entity = "memory:missing".parse()?;
+
+        let refused = session
+            .transact(note(&doc, "lost", &notes))
+            .assert(note(&doc, "lost", &missing))
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(
+                &refused,
+                Err(CommitError::UnboundLayer { layer, .. }) if *layer == missing.to_string()
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(branch.revision(), primary, "the primary did not move");
+        let on_layer = repo.branch("notes").open().perform(&operator).await?;
+        assert_eq!(on_layer.revision(), layer, "the layer did not move");
+        assert_eq!(
+            stored(&on_layer, &operator, "doc/note", &doc).await?,
+            vec!["String(\"kept\")".to_string()]
+        );
+        let nowhere = repo.branch("missing").open().perform(&operator).await?;
+        assert_eq!(nowhere.revision(), None, "no branch was written for it");
+        Ok(())
+    }
+
+    /// `session.sync()` pulls a durable layer whose branch pulls from an
+    /// upstream before the primary, and records where the pull left it as
+    /// the primary's pointer fact; the pulled rows read with `in` bound to
+    /// the layer. It pushes the layer to the upstream it pushes to. A
+    /// memory layer, and a primary with no upstream, are left alone.
+    #[dialog_common::test]
+    async fn it_syncs_a_durable_layer_and_records_where_the_pull_left_it() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let notes = declare_notes(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let upstream = repo
+            .branch("notes-upstream")
+            .open()
+            .perform(&operator)
+            .await?;
+        let doc: Entity = "doc:1".parse()?;
+        upstream
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/note")
+                    .of(doc.clone())
+                    .is("upstream".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let layer = session.durable(&notes).expect("notes");
+        layer.set_upstream(&upstream).perform(&operator).await?;
+
+        session
+            .sync(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            layer.revision(),
+            upstream.revision(),
+            "the layer was pulled"
+        );
+        assert_eq!(
+            stored(&branch, &operator, "dialog.layer/revision", &notes).await?,
+            vec![pointer_to(layer)?],
+            "the primary points where the pull left the layer"
+        );
+        assert_eq!(
+            notes_read(
+                &session,
+                &operator,
+                note_query()
+                    .with_layer(Term::Constant(dialog_corpus::Value::Entity(notes.clone())))
+            )
+            .await?,
+            vec!["String(\"upstream\") in memory:notes".to_string()]
+        );
+
+        session
+            .transact(note(&doc, "local", &notes))
+            .perform(&operator)
+            .await?;
+        let pointed = branch.revision();
+        session
+            .sync(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
+        upstream.refresh(&operator).await?;
+        assert_eq!(
+            upstream.revision(),
+            layer.revision(),
+            "the layer was pushed"
+        );
+        assert_eq!(
+            branch.revision(),
+            pointed,
+            "a pointer that already names the layer is not written again"
+        );
+        Ok(())
+    }
+
+    /// A subscription through a session reads its durable layers too: a
+    /// write into one is a delta on the next poll, read afresh since the
+    /// layer's tree moved, and the subscription then agrees with a fresh
+    /// read.
+    #[dialog_common::test]
+    async fn it_subscribes_to_a_durable_layer_through_a_session() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let notes = declare_notes(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let every = || note_query().with_layer(Term::var("where"));
+        let mut subscription = session.subscribe(every());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert!(initial.asserted.is_empty());
+
+        let doc: Entity = "doc:1".parse()?;
+        session
+            .transact(note(&doc, "kept", &notes))
+            .perform(&operator)
+            .await?;
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("the layer moved");
+        let asserted: Vec<String> = delta
+            .asserted
+            .iter()
+            .map(|claim| {
+                format!(
+                    "{:?} in {:?}",
+                    claim.is,
+                    claim.layer().map(ToString::to_string)
+                )
+            })
+            .collect();
+        assert_eq!(
+            asserted,
+            vec!["String(\"kept\") in Some(\"memory:notes\")".to_string()]
+        );
+        assert!(delta.retracted.is_empty());
+        assert!(subscription.poll(&operator).await?.is_none());
+        assert_eq!(
+            notes_read(&session, &operator, every()).await?,
+            vec!["String(\"kept\") in memory:notes".to_string()]
+        );
+        Ok(())
+    }
+
+    /// Two replicas of a space sync a session through one S3 upstream:
+    /// the first writes into its primary and its durable layer and syncs;
+    /// the second, whose primary and layer track the same remote
+    /// branches, syncs and reads the same rows with the same `in`.
+    #[cfg(any(feature = "integration-tests", feature = "web-integration-tests"))]
+    #[dialog_common::test]
+    async fn it_syncs_a_durable_layer_to_a_second_replica(s3: S3Address) -> Result<()> {
+        use crate::RepositoryExt as _;
+        use crate::helpers::connect;
+        use dialog_peer::helpers::unique_name;
+        use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
+
+        let (operator, profile) = test_session_with_peer().await;
+        let site = crate::SiteAddress::from(
+            S3SiteAddress::builder(&s3.endpoint)
+                .region("us-east-1")
+                .bucket(&s3.bucket)
+                .build()?,
+        );
+        profile
+            .secrets()
+            .site(&site)
+            .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+            .perform(&profile)
+            .await?;
+
+        let first = profile
+            .space(unique_name("first"))
+            .create()
+            .perform(&operator)
+            .await?;
+        let origin = connect("origin", site.clone(), first.did(), &operator).await?;
+        let main = first.branch("main").open().perform(&operator).await?;
+        let notes = declare_notes(&main, &operator).await?;
+        let session = main.session().perform(&operator).await?;
+        main.set_upstream(origin.branch("main").open().perform(&operator).await?)
+            .perform(&operator)
+            .await?;
+        session
+            .durable(&notes)
+            .expect("notes")
+            .set_upstream(origin.branch("notes").open().perform(&operator).await?)
+            .perform(&operator)
+            .await?;
+        let doc: Entity = "doc:1".parse()?;
+        session
+            .transact(note(&doc, "kept", &notes))
+            .assert(note(&doc, "primary", &crate::memory_layer()))
+            .perform(&operator)
+            .await?;
+        session
+            .sync(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
+
+        let second = profile
+            .space(unique_name("second"))
+            .open()
+            .perform(&operator)
+            .await?;
+        let origin = connect("origin", site, first.did(), &operator).await?;
+        let replica = second.branch("main").open().perform(&operator).await?;
+        replica
+            .set_upstream(origin.branch("main").open().perform(&operator).await?)
+            .perform(&operator)
+            .await?;
+        replica
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
+        let mirrored = replica.session().perform(&operator).await?;
+        mirrored
+            .durable(&notes)
+            .expect("the declaration replicated with the primary")
+            .set_upstream(origin.branch("notes").open().perform(&operator).await?)
+            .perform(&operator)
+            .await?;
+        mirrored
+            .sync(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
+
+        let every = note_query().with_layer(Term::var("where"));
+        assert_eq!(
+            notes_read(&mirrored, &operator, every.clone()).await?,
+            notes_read(&session, &operator, every).await?,
+            "the second replica reads the same rows with the same `in`"
+        );
+        assert_eq!(
+            notes_read(
+                &mirrored,
+                &operator,
+                note_query().with_layer(Term::var("where"))
+            )
+            .await?,
+            vec![
+                "String(\"kept\") in memory:notes".to_string(),
+                "String(\"primary\") in memory:".to_string(),
+            ]
+        );
         Ok(())
     }
 }
