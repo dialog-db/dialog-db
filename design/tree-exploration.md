@@ -147,13 +147,15 @@ What has to be built in dialog:
 3. Built: `dialog.branch/tree` and `tree/span`'s `node` are `node:`
    entities; a spill and a blob hash are `asset:` entities; a span and
    an entry each have an entity.
-4. Not built: a handler that reacts to a dispatched command with an
-   effect and answers with a command, and the probe and fetch commands
-   on top of it. It belongs with the session and layers work
-   (dialog-db/dialog-db#795, #721), which has been told of the need.
+4. Built, on the session stack (dialog-db/dialog-db#795 to #805, merged
+   into the draft branch at `claude/layers-5`): `Holdings`, a handler
+   registered with `Session::handle` (#797) that answers
+   `dialog.node.probe/node` and `dialog.node.fetch/node` with commands
+   a space's rule captures on a memory layer.
 
 Still open in what is built
 ([design-accessors](tree-exploration/design-accessors.md), last two
 sections): reaching a span's or an entry's details by its own entity;
 the ops an index node buffers, which no resolver yields; the name
-`fanout-bits`.
+`fanout-bits`; a fetch that actually brings a node from a remote, which
+no test here does.

@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* The problem and the approach (top story). Three of the four things to build in dialog are built and tested on the draft branch: the readings over a decoded node, the five resolvers, the entities. That an index node's buffered ops are readable by no resolver. | *Where are we at?* Building. The fourth thing, a handler for commands, is not built and belongs with the session work in #795. |
-| **Agenda** | *What do we need to know?* The maintainer's word on what building settled without them: a span's and an entry's entity being its place, `fanout-bits`, `of` taking an entity only. Whether buffered ops are to be exposed, and as what. How a row's details are reached by its own entity. | *Where are we going?* The handler, once #795's session lands; then tonk: pin, a query step that is not a concept, the component, and the removal of its reader. |
+| **Status** | *What do we know?* The problem and the approach (top story). Three of the four things to build in dialog are built and tested on the draft branch: the readings over a decoded node, the five resolvers, the entities. That an index node's buffered ops are readable by no resolver. | *Where are we at?* Building. All four things are built on the draft branch, which now sits on top of the session stack (`claude/layers-5`) instead of beside it. |
+| **Agenda** | *What do we need to know?* The maintainer's word on what building settled without them: a span's and an entry's entity being its place, `fanout-bits`, `of` taking an entity only. Whether buffered ops are to be exposed, and as what. How a row's details are reached by its own entity. | *Where are we going?* The stack session's answer on which branch to follow and what shifted. Then tonk: pin, a query step that is not a concept, the component, and the removal of its reader. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -702,3 +702,37 @@ carrying this and on #795.
 **Decided.** In building, by the agent, for the maintainer to overturn:
 the row entities, the cost, `fanout-bits`, `of` as an entity only
 ([design-accessors](design-accessors.md), "As built").
+
+## 2026-11-14, Building: on top of the session stack; the handler is built
+
+**Asked.** The maintainer: the stack session is doing more work to align
+with what was discussed here, and both its views and the maintainer's
+have shifted; get its status, and build on top of it, not beside it.
+
+**Learned.** From GitHub, not yet from that session, which was asked
+and had not answered when this was written: the stack is #795 ← #797 ←
+#800 ← #803 ← #805, with a further step on control layers and channels
+in progress. #797 is the piece the held decision was waiting for:
+`Session::handle` registers a handler that is offered a dispatch's
+commands after it has published and whose answer is dispatched as the
+next tick's stimulus. Its own test models a fetch of a node answered
+with a command a rule captures on a memory layer.
+
+The stack touches none of the resolver's files. `claude/layers-5` was
+merged into the draft branch; the conflicts were the changelog and the
+design index. Dialog 0.4.0 was released in between, so this topic's
+changelog entries moved under the new Unreleased.
+
+`Holdings` (`rust/dialog-repository/src/session/holdings.rs`) is the
+handler for the two node commands, as decided in
+[design-held](design-held.md): it answers with commands and asserts
+nothing. A handler is offered commands and no environment, so it keeps
+the one it was made with. Tested through a session: a probe of a held
+node and of an unknown one are captured on a memory layer by a rule,
+a fetch that finds the node nowhere leaves it not held, an entity that
+is no node is not answered, and nothing is committed.
+
+Not tested: a fetch that brings a node from a remote. Not known: what
+shifted in the stack session's plan and the maintainer's.
+
+**Decided.** Nothing new. The draft branch follows the stack from here.

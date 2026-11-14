@@ -45,6 +45,7 @@ pub use placement::{
 
 /// A session: the primary branch and the layers its schema declares.
 pub mod session;
+pub use session::holdings::Holdings;
 pub use session::invoke::{
     Answering, Commands, Dispatched, FEED_CAPACITY, Handler, HandlerError, Invocation, Lost,
     MAX_ANSWERS, MAX_RERUNS,

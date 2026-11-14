@@ -81,6 +81,7 @@ embedder decoding blocks for it, and the reading and decoding of a node
 belong to the environment, which already does both for the tree. A
 handle that is an entity is what a rule needs to make a node, a span or
 an entry the subject of a concept.
+
 #### Compatibility and migration
 
 - Nothing stored changes: `dialog.branch/tree` is
@@ -90,6 +91,45 @@ an entry the subject of a concept.
   `tree/blob` or `tree/manifest`, a snake_case manifest slot, or a
   base58 string as `of`, or that reads `dialog.branch/tree` as text, no
   longer compiles or no longer matches, and has to be re-authored.
+
+### A session learns what its replica holds of a tree by command
+
+Argued in [design/tree-exploration.md](./design/tree-exploration.md).
+Built on the session's handlers
+([#797](https://github.com/dialog-db/dialog-db/pull/797)).
+
+A tree resolver fetches a node the replica lacks, so that what a query
+answers does not depend on what happened to be local. That left a
+consumer no way to know, before it asked, whether asking for a node
+would fetch it.
+
+`Holdings` is a handler dialog provides for that
+(`session.handle(Arc::new(Holdings::of(&branch, env)))`). It takes two
+commands and answers each with a command of the same entity:
+
+- `dialog.node.probe/node`, the node to ask about, is answered with
+  `dialog.node.probed/node` and `dialog.node.probed/local`: whether the
+  replica holds the node, with nothing fetched.
+- `dialog.node.fetch/node`, the node to bring local, is answered with
+  `dialog.node.fetched/node` and `dialog.node.fetched/local`: whether
+  the replica holds it, having tried.
+
+What this changes for you:
+
+- `Holdings` and the command names in `dialog_repository::session::holdings`
+  are new. A session that does not register the handler behaves as
+  before.
+- The handler asserts nothing. A space keeps an answer with a rule, and
+  where the rule's attribute is placed is where it is kept: on a memory
+  layer it is read and subscribed to through the session, never
+  committed or synced, and gone with the session. A space with no such
+  rule gets nothing.
+- A command whose value is not a `node:` entity is not answered.
+
+Why: whether a block is held changes with no commit, so a query step
+that reported it would answer the same query differently from one
+moment to the next. As a command's answer captured by a rule, it enters
+a query as a fact of a layer the query has pinned.
 
 ### A memory layer mints one instant per tick that changed it
 

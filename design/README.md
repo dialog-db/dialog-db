@@ -83,5 +83,4 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   **Building.** The one embedder that shows the tree reads blocks
   through machinery of its own. A node is a handle that five accessors
   read, the environment decoding once; what a replica holds is learned
-  and changed by commands. The resolvers are built; the command
-  handler waits on the session work.
+  and changed by commands. Built on top of the session stack.

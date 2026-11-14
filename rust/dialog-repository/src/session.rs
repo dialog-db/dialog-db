@@ -80,6 +80,7 @@
 //! [`SESSION`]: crate::SESSION
 //! [`CONTROL`]: crate::CONTROL
 
+pub mod holdings;
 pub mod invoke;
 
 use std::iter::once;
@@ -2113,6 +2114,128 @@ mod tests {
             }
             Ok(answers)
         }))
+    }
+
+    /// Declare a memory layer `state` and two rules that keep there
+    /// what [`Holdings`](crate::Holdings) answers: whether a node is
+    /// held, as last learned from a probe or a fetch.
+    async fn declare_holdings(branch: &Branch, env: &Operator) -> Result<Entity> {
+        use crate::session::holdings::{FETCHED, FETCHED_LOCAL, PROBED, PROBED_LOCAL};
+        let state = layer("state");
+        let capture = |node: &str, local: &str| -> Result<InductiveRule> {
+            Ok(serde_json::from_value(serde_json::json!({
+                "assert!": {
+                    "with": {
+                        "held": {
+                            "the": "node/held", "as": "Boolean", "pick": "last",
+                            "in": "session:state"
+                        }
+                    }
+                },
+                "when": [
+                    {
+                        "assert": {
+                            "with": {
+                                "node": { "the": node, "as": "Entity" },
+                                "local": { "the": local, "as": "Boolean" }
+                            }
+                        },
+                        "where": {
+                            "this": { "?": { "name": "command" } },
+                            "node": { "?": { "name": "this" } },
+                            "local": { "?": { "name": "held" } }
+                        }
+                    }
+                ]
+            }))?)
+        };
+        branch
+            .transaction()
+            .assert(LayerDeclaration::new(state.clone(), Store::Memory))
+            .assert(capture(PROBED, PROBED_LOCAL)?)
+            .assert(capture(FETCHED, FETCHED_LOCAL)?)
+            .commit()
+            .publish()
+            .perform(env)
+            .await?;
+        branch.refresh(env).await?;
+        Ok(state)
+    }
+
+    fn node_command(the: &str, command: &str, node: &Entity) -> impl Statement {
+        AttributeStatement {
+            the: QueryRelation::from(the.parse::<dialog_corpus::Relation>().unwrap()),
+            of: command.parse::<Entity>().expect("entity"),
+            is: dialog_corpus::Value::Entity(node.clone()),
+            cause: None,
+            cardinality: None,
+            pick: None,
+        }
+    }
+
+    /// Whether a node is held is asked by command and answered with one:
+    /// a probe of a node the replica holds is captured as held, a probe
+    /// of one it does not as not held, and a fetch that finds the node
+    /// nowhere leaves it not held. Nothing is committed, an entity that
+    /// is no node is not answered, and the probe fetches nothing.
+    #[dialog_common::test]
+    async fn it_learns_what_it_holds_by_command() -> Result<()> {
+        use crate::session::holdings::{FETCH, Holdings, PROBE};
+
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_holdings(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        session.handle(Arc::new(Holdings::of(&branch, operator.clone())));
+
+        let root = Entity::from_node(branch.revision().expect("a revision").tree.hash())?;
+        let elsewhere = Entity::from_node(&[7u8; 32])?;
+        let other: Entity = "user:alice".parse()?;
+        let before = branch.revision();
+
+        session
+            .invoke(node_command(PROBE, "probe:1", &root))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            held(&memory, "node/held", &root)?,
+            vec!["Boolean(true)".to_string()],
+            "the root of a tree this replica wrote is held"
+        );
+
+        session
+            .invoke(node_command(PROBE, "probe:2", &elsewhere))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            held(&memory, "node/held", &elsewhere)?,
+            vec!["Boolean(false)".to_string()],
+            "a node the replica never had is not held"
+        );
+
+        session
+            .invoke(node_command(FETCH, "fetch:1", &elsewhere))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            held(&memory, "node/held", &elsewhere)?,
+            vec!["Boolean(false)".to_string()],
+            "a fetch that finds the node nowhere leaves it not held"
+        );
+
+        session
+            .invoke(node_command(PROBE, "probe:3", &other))
+            .perform(&operator)
+            .await?;
+        assert!(
+            held(&memory, "node/held", &other)?.is_empty(),
+            "an entity that is no node is not answered"
+        );
+
+        assert_eq!(branch.revision(), before, "nothing was committed");
+        Ok(())
     }
 
     fn fetch(command: &str, node: &Entity) -> impl Statement {
