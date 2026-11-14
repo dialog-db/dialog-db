@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The approach is decided: format 4 writes a pattern, a release writes it always and reads the earlier ones for one release cycle, with `Branch::upgrade_rules` as the migration. Patterns are the one addition: a rule has one head, records ask nothing, a rule about syntax is not stored. A pattern is named by its parts already, so no name moves. | **Building**, on `feat/rule-format-4` over the patterns build. |
-| **Agenda** | Whether the maintainer wants other words for a pattern than `map`, `list`. What one entity holds once two releases have each written its body. | The build, its changelog entry with the compatibility note, and the notation storing a rule that holds a struct. |
+| **Agenda** | **What a map's key is: a name, text, or any value** ([the form of a pattern](design-pattern-form.md)); the `match` form the maintainer settled on 2026-11-14 waits on it. What one entity holds once two releases have each written its body. | The build, its changelog entry with the compatibility note, and the notation storing a rule that holds a struct. |
 
 ## Candidate problems
 
@@ -49,3 +49,19 @@
 - The plan of the patterns topic left the words of that form undecided. Decided by the agent as a [matrix](design-pattern-form.md): a word for the shape, which is not shaped as the name of a type.
 
 **Decided.** By the maintainer: the approach. By the agent, until said otherwise: the problem's words, and the words of a pattern.
+
+## 2026-11-14, Designing: a pattern is written as what it is, under `match`
+
+**Asked.** The agent asked whether its words, `map`, `rest`, `list`, `run`, stand. The maintainer, by voice: is this JSON; "is there any reason why you wouldn't just use a map as it is", an array for a list, and `...` as a key for the rest.
+
+**Learned.**
+
+- The agent's one reason for a word a shape: a map with one entry is already a variable (`?`) or a constant (the name of a type), so a bare map where a parameter stands could be read as either. The maintainer took a wrapper for that, "to stay consistent", and named it: `match`, over `pattern` and `#`.
+- Shown `"..."` as a bare string among a list's items, he refused it. `...` is a key in both shapes, and in a list it is the one entry of the last item.
+- The form is drawn in [design-pattern-form.md](design-pattern-form.md).
+- Building it, the agent found what the conversation did not say: the form writes a key as text, and a map pattern holds a key of any type. The notation keys `{author: ?who}` by a symbol. So the form as decided cannot write every pattern #778 can hold, and the agent's remark in the conversation, that only a key ending in `:` is at stake, was short of it.
+- A symbol cannot be `?`, `...` or end in `:`. Were a map's key a name, the form would have no case to refuse.
+
+**Decided.** By the maintainer: `match`, a map as a map, a list as an array, `...` as a key. Not decided, and his: what a map's key is. Nothing of the form is built until it is, since the answer is either a change to #778 or a change to the form.
+
+#799 writes the agent's words until then and stays a draft. The topic stays in Building: this is the decision the build opened, moved.
