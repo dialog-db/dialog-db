@@ -4,23 +4,24 @@ use super::transaction::induction_ignores;
 use crate::repository::archive::erased;
 use crate::repository::archive::persist;
 use crate::repository::source::{Live, View};
+use crate::schema::DidExt as _;
 use crate::{
     Branch, CommitError, Index, PublishError, RemoteSite, RepositoryMemoryExt as _, Revision,
     Snapshot, TreeReference, origin_of,
 };
-use dialog_capability::{Did, Fork, Provider};
+use dialog_capability::{Capability, Did, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_corpus::ArchiveDelta;
 use dialog_corpus::history::{
-    Context, Edition, Origin, RevisionRecord, TreeHistory, Version, extend_skips,
+    Context, DelegationRecord, Edition, Origin, RevisionRecord, TreeHistory, Version, extend_skips,
 };
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::tree::{Stamp, WriteScope};
 use dialog_corpus::{Datum, DialogCorpusError, Entity, Instruction, Key, NUMBER_BAND, State};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
-use dialog_effects::authority::{Attest, Identify, OperatorExt};
+use dialog_effects::authority::{Attest, Identify, Operator, OperatorExt};
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
@@ -904,6 +905,14 @@ where
         let mut entries = record.entries(batch.manifest())?;
         // The context region's changed entries ride with the record.
         entries.entries.extend(region);
+        // The session's delegation, which proves the profile the record
+        // names, rides with the record the first time this branch's tree
+        // holds it; later commits by the same session find it there.
+        if let Some(delegation) = session_delegation(&authority)
+            && !delegation.is_in(&tree, &store, &delta).await?
+        {
+            entries = entries.and(delegation.entries(batch.manifest())?);
+        }
         // The caller's machinery entries (blob-index tombstones) ride the same
         // batch as the revision record, so one seal covers data, record,
         // and entries together.
@@ -938,6 +947,18 @@ where
             context,
         })))
     }
+}
+
+/// The delegation by which the session `authority` acts for its profile,
+/// as the fact recorded on the session key: what proves the profile its
+/// revision records name. `None` for an operator acting as itself or
+/// holding no session delegation.
+pub(super) fn session_delegation(authority: &Capability<Operator>) -> Option<DelegationRecord> {
+    let delegation = authority.delegation()?;
+    Some(DelegationRecord::new(
+        authority.did().this(),
+        delegation.to_vec(),
+    ))
 }
 
 #[cfg(test)]
