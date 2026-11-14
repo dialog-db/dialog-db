@@ -171,24 +171,77 @@ the ticks.
 5. Write-only links. Channels (8a): a one-tick layer with a transport,
    sapling's worker to daemon link first.
 
+## The control channel
+
+14. A dispatch's commands, once it has published, are the session's
+    **output**: every command invoked or dispatched by a rule in any
+    tick, in order, once (`Session::commands()`, a feed a reader polls
+    by sequence, bounded like a layer's instants). Nothing else sees a
+    command: it lands on no layer, so no query and no subscription can
+    observe it, and that is right, since a command is an event, not
+    state. What observes commands is a **consumer** of the feed.
+
+15. A consumer answers by invoking: a command naming the one it
+    answers by that command's entity, which is the stimulus of a new
+    tick, where a rule captures what it wants of the answer on the
+    layer the attribute is placed on. A page learns the outcome
+    through the subscription it already holds. No reply body, no side
+    channel to the asking page: the asker is a field of the command.
+
+16. One feed per session, not a channel per target. A command's
+    address is the capability it names, its attribute domain, and
+    optionally the subject (DID) whose capability it is; absent, this
+    session's own. Routing by capability is what a consumer does, and
+    what discovery (Open) answers. A channel per target would be a
+    second registry.
+
+17. Three transports carry the same feed. In process: a `Handler`
+    registered on the session, run by the invoke loop after each
+    publish, its answers chained until none answers. Kernel to host:
+    the world's `application.send` carries the dispatches out and
+    `channel.receive` brings the answers in, as the feed and an invoke
+    do. Peer to peer: an invocation over a relay (#764), signed by the
+    session and verified by the provider.
+
+18. A handler runs only after the dispatch it answers has published,
+    so a dispatch stays a function of head and stimulus: a lost
+    compare-and-swap re-runs no effect. A handler's answer is a
+    dispatch with its own compare-and-swap, re-run from the new head
+    when it loses, so the answer's writes need no isolation of their
+    own (tonk's `TODO(stm)` on command outcomes).
+
+What this dissolves in tonk's worker: the pre-commit capture of
+transients and `spawn_dispatch` (the feed records every dispatch
+after it publishes); `CommandRegistry::match_transients` (a consumer
+matches the feed's commands by attribute, as it does today, or dialog
+decodes the concept for it); `CommandOrigin.repo` and `.branch` (a
+session is a branch); `CommandOrigin.client` and `notify_navigate`
+(the asking site is a field of the command, as `SiteSelect` already
+carries, and a navigation is a fact on the site's session layer the
+page subscribes to); the two vocabularies selected by origin
+(handlers are registered per session, so a space's session holds a
+space's and the profile's holds the profile's). What stays: the
+`Provider<C>` impls, which are the effects.
+
 ## Open
 
-- Handlers: what performs an effect for a command. Today a batch
-  exposes the commands its rules dispatched (`TransactionBatch::induced`)
-  and the embedder runs its own handlers on them after the publish.
-  Through a session that should be the session's job: a handler is
-  registered on the session for a command concept, built in (dialog's
-  own, such as "fetch this node") or the embedder's (tonk's command
-  providers) through one mechanism; after a dispatch publishes, the
-  session runs the handlers on the commands that tick chain dispatched
-  and no rule consumed, and each handler's answer is a command
-  dispatched as the stimulus of a new tick, correlated by the request
-  command's entity (`of`). A subscription never sees a command; it
-  sees what a rule captures of the answer, on whatever layer the
-  attribute is placed. Running handlers after the publish, not inside
-  the chain, keeps a dispatch a pure function of head and stimulus,
-  so a lost compare-and-swap re-runs no effect. Raised by the
-  tree-exploration design (`design/tree-exploration.md`).
+- Discovery. A provider announces what it performs as facts: the
+  capability (a command concept), the provider's DID, when the
+  announcement expires. Announcements are TTL'd rows of a layer, as
+  mDNS records are of a scope: an in-process handler's in the session's
+  own memory layer, a peer's arriving through a layer with upstreams,
+  so they are queried like any fact and a page can list what it may
+  ask for. An invoke of a foreign capability is a command with a
+  subject; the session's routing consumer reads the announcements,
+  picks a provider, carries the command over the transport that
+  reaches it (17), and the answer comes back on the feed naming the
+  command's entity. Whether "invoke" is a command of its own (`invoke`
+  with a target and a payload) or implicit in the subject: leaning
+  implicit, so one notation serves a local and a remote capability and
+  only the routing consumer knows transports. Still open: how an
+  announcement proves the provider may offer the capability (a
+  delegation beside the row), and what the asker proves to the provider
+  (its chain, which #764 already carries).
 - Whether a channel's one-tick lifetime is enough, or the sender needs
   to know the message was handled. A message port buffers until the
   other end runs; a channel whose receiver's session is closed drops
