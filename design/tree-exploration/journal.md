@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* The problem, accepted. The approach, decided in four parts and written in the top story: a node is a handle and accessors read it, the environment decoding once; five accessors expose everything; what is held is learned and changed by commands; a consumer asks the accessors directly. What of the draft branch stays and what comes out. | *Where are we at?* Building: decided, not started. The last sitting decided; building is for a later session, after the top story has been read cold. |
-| **Agenda** | *What do we need to know?* The name of the fanout parameter. Whether the maintainer agrees that accessors yield no entity per span or entry (the agent's reading, not their words). Open hypotheses the build will settle: the decoders taking a node; a resolver binding a slot absent; a subscription over an accessor; dialog reacting to a command with an effect, and whether that is built on #795's session (a request kept on a memory layer, a subscriber that performs it, an answer invoked) or as a hook in dispatch. | *Where are we going?* A later session builds the four items listed in the top story, the first three before the fourth. Tonk's side is its own work. |
+| **Status** | *What do we know?* The problem and the approach in four parts (top story). That the accessors must serve concepts as well as direct queries, in the maintainer's words. That a rule over an accessor installs and reads only what a fact names (tested), and that asked for a node no fact names it reads the node before asking the fact (tested). | *Where are we at?* Designing, backtracked from Building: the accessor set is reopened in one respect. |
+| **Agenda** | *What do we need to know?* What a span's and an entry's entity is made of. How a row's details are reached by that entity. How the planner is made to ask a fact before an accessor. The fanout parameter's name (`fanout-bits` proposed against `fanout-factor`). Open hypotheses for the build as before. | *Where are we going?* The three open points of [design-accessors](design-accessors.md), then Building. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -593,3 +593,41 @@ builds (`notes/layers.md`, #721). Not run.
 **Decided.** Nothing new. The held decision's second dependency is
 met by #795 once it lands; its first is still to be built, and where
 (on the session, or in dispatch) is a build decision.
+
+## 2026-11-14, Building back to Designing: concepts must work too
+
+**Asked.** Is the agent's reading right that accessors yield no entity
+per span or entry? The maintainer: "It should work through concepts, as
+in be complementary, independent of whether tonk-display is changed to
+view resolvers directly." And on the name: "maybe fanout-factor is
+better".
+
+**Learned.** The reading was wrong and is struck. The accessors serve
+both a direct query and a concept, and neither waits on the other.
+
+What that asks of the design was checked by a test on the draft branch
+before writing anything down (`it_reads_only_the_nodes_a_fact_names`):
+
+- A rule whose body is a fact naming nodes and `tree/node` over them
+  compiles, lists exactly the named nodes (2 block reads in a tree of
+  21) and looks one up with 1. So the worry of 2026-11-12, that a rule
+  over a step requiring its node cannot install, is answered without
+  listing and without changing what a rule is: the rule names its nodes
+  by a fact, and "held" facts are such a fact.
+- Asked by `this` for a node no fact names: no row, and 1 block read.
+  The planner ran the accessor first. Costs: an accessor is 200, a
+  concept read with its entity given is more. If the fact is "held",
+  that read is a fetch. This breaks what the held decision was for, and
+  is new.
+
+`fanout-factor`: a tree's branching factor is its fanout, so the name
+would be read as the thing it is meant not to be. Put back to the
+maintainer with `fanout-bits`.
+
+**Decided.** By the maintainer: concepts and direct queries both. A
+span and an entry carry an entity. Not decided: the three open points
+now in [design-accessors](design-accessors.md).
+
+**Backtracked.** From Building to Designing. The approach was declared
+whole on the agent's reading of an answer the maintainer had not given;
+the reading was wrong. Nothing had been built on it.

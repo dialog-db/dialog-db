@@ -1,6 +1,6 @@
 # A consumer that can only query cannot draw a branch's search tree
 
-Phase: **Building.** See the [design index](README.md) for what the
+Phase: **Designing.** See the [design index](README.md) for what the
 phases mean, and the [journal](tree-exploration/journal.md) for where the
 topic stands.
 
@@ -114,11 +114,17 @@ whether the answer is kept and where. A consumer asks before it reads,
 so a read never fetches by surprise, and an accessor's answer never
 depends on what happened to be local.
 
-**A consumer asks the accessors directly**
-([direction](tree-exploration/direction.md), column 7). Every
-difficulty met while fitting the old resolvers to a page came from
-putting a concept and a rule between the two. A space that wants a
-concept of nodes can still write the rule.
+**A consumer asks the accessors directly, or through a concept; both
+work** ([direction](tree-exploration/direction.md), column 7 beside
+columns 2 and 3). The maintainer, 2026-11-14: the two are
+complementary, and working through concepts does not depend on an
+embedder learning to ask an accessor directly. A rule over an accessor
+installs when another premise names the nodes, and the facts a space
+keeps about what it holds can be that premise. Three things are open
+for the concept path ([design-accessors](tree-exploration/design-accessors.md),
+last section): what a span's and an entry's entity is made of, how a
+row's details are reached by that entity, and the planner running an
+accessor before the fact that would rule its node out.
 
 Not taken on here:
 
@@ -145,5 +151,5 @@ What has to be built in dialog, for whoever builds it:
    top of it.
 
 Of the draft branch `worker/affectionate-pascal-iey41u`: the `node:`
-entity stays. The `entry:` entity and listing when no node is given are
-not part of the approach and come out.
+entity stays; an entity for an entry stays in some form, to be decided
+with a span's; listing when no node is given comes out.

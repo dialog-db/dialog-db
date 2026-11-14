@@ -5064,6 +5064,136 @@ mod resolver_tests {
         Ok(())
     }
 
+    /// A concept of nodes whose rule names its nodes by a fact: the rule
+    /// installs without any accessor listing, asked for everything it
+    /// reads the nodes the facts name and no others, and asked for one
+    /// node by `this` it reads that node alone. A node no fact names is
+    /// no row, and is read all the same (see the last assertion).
+    #[dialog_common::test]
+    async fn it_reads_only_the_nodes_a_fact_names() -> anyhow::Result<()> {
+        use crate::helpers::Counting;
+        use dialog_query::concept::query::ConceptQuery;
+        use dialog_query::rule::DeductiveRuleDescriptor;
+        use dialog_query::{ConceptConclusion, Parameters};
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
+
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": {
+                "kind": { "the": "probe/node-kind", "as": "text:" }
+            }},
+            "when": [
+                {
+                    "assert": { "with": {
+                        "known": { "the": "probe/known", "as": "text:" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "known": { "?": { "name": "known" } }
+                    }
+                },
+                {
+                    "assert": "tree/node",
+                    "where": {
+                        "of": { "?": { "name": "this" } },
+                        "kind": { "?": { "name": "kind" } }
+                    }
+                }
+            ]
+        }))?;
+        let rule = descriptor.compile().expect("the rule compiles");
+        let conclusion = rule.conclusion().clone();
+        branch
+            .transaction()
+            .assert(&rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        // Name two nodes of the tree as it now stands: its root and one
+        // child. The facts are session facts, so naming them moves no root.
+        let revision = branch.revision().expect("branch has a revision");
+        let root = ToBase58::to_base58(&revision.tree.hash()[..]);
+        let all = reachable(&branch, &operator, &root).await?;
+        let mut others = all.iter().filter(|node| **node != root);
+        let entity = |reference: &String| -> anyhow::Result<Entity> {
+            let hash =
+                <[u8; 32]>::try_from(FromBase58::from_base58(reference.as_str()).unwrap()).unwrap();
+            Ok(Entity::from_node(&hash)?)
+        };
+        let named = entity(others.next().expect("the root has children"))?;
+        let unnamed = entity(others.next().expect("the root has two children"))?;
+        let root_entity = entity(&root)?;
+        branch
+            .overlay()
+            .assert(
+                the!("probe/known")
+                    .of(root_entity.clone())
+                    .is("yes".to_string()),
+            )?
+            .assert(the!("probe/known").of(named.clone()).is("yes".to_string()))?;
+
+        let select = |this: Term<Entity>| {
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), this.into());
+            terms.insert("kind".into(), Term::var("kind"));
+            ConceptQuery {
+                predicate: conclusion.clone(),
+                terms,
+            }
+        };
+
+        let listing = Counting::new(operator.clone());
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .select(select(Term::var("this")))
+            .perform(&listing)
+            .try_vec()
+            .await?;
+        let listed: BTreeSet<Entity> = rows.iter().map(|row| row.entity().clone()).collect();
+        assert_eq!(
+            listed,
+            BTreeSet::from([root_entity, named.clone()]),
+            "asked for everything, the nodes the facts name"
+        );
+        assert!(all.len() > 2, "the tree has nodes no fact names");
+        assert_eq!(listing.block_reads(), 2, "and no other node is read");
+
+        let lookup = Counting::new(operator.clone());
+        let one: Vec<ConceptConclusion> = branch
+            .query()
+            .select(select(Term::from(named)))
+            .perform(&lookup)
+            .try_vec()
+            .await?;
+        assert_eq!(one.len(), 1, "a named node is one row: {one:?}");
+        assert_eq!(lookup.block_reads(), 1, "read alone");
+
+        let miss = Counting::new(operator.clone());
+        let none: Vec<ConceptConclusion> = branch
+            .query()
+            .select(select(Term::from(unnamed)))
+            .perform(&miss)
+            .try_vec()
+            .await?;
+        assert!(none.is_empty(), "a node no fact names is no row: {none:?}");
+        // The planner runs the accessor before the fact that would rule
+        // the node out, since the accessor is the cheaper step once
+        // `this` is given. Where the fact stands for "this node is held",
+        // that order fetches a node nobody said to fetch. Pinned so a
+        // change to the order shows; the order wanted is the other one,
+        // and zero reads.
+        assert_eq!(
+            miss.block_reads(),
+            1,
+            "the node is read before the fact is asked"
+        );
+        Ok(())
+    }
+
     /// `tree/key` and `tree/entry` name an entry by the same entity, and
     /// no two entries of a segment share one.
     #[dialog_common::test]
