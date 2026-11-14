@@ -21,7 +21,7 @@ held the inner evaluation of both of its arms (rows sorted on the entity,
 and rows in rule order) inline, side by side, at 5.8 KB each. Its caller
 moved the stream when it was returned and again when it boxed it, so a
 concept read copied about 25 KB before it read a row. Each arm now boxes
-the evaluation it drives, and the stream is a few hundred bytes. A
+the evaluation it drives, and the stream is under 1 KB. A
 concept descriptor's fields are now shared, so the clones a query makes of
 it on every evaluation (into its plan, its rule lookup, its renamed
 premises) no longer copy every field name and attribute.
