@@ -1366,7 +1366,7 @@ fn it_installs_a_rule_that_holds_a_pattern() {
     assert_ne!(changes, Changes::new(), "the rule is staged");
 
     let mut again = Changes::new();
-    again.assert(&card_rule([2, 1, 0]).expect("compiles"));
+    again.assert(card_rule([2, 1, 0]).expect("compiles"));
     assert_eq!(again, changes, "under one name, with one body");
 }
 
