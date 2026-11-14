@@ -27,6 +27,7 @@
 
 use core::fmt;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::mem::take;
 use std::sync::{Arc, OnceLock};
 
 use dialog_common::Blake3Hash;
@@ -300,7 +301,7 @@ impl Staged {
     /// Take the writes into layers out of the store, leaving the writes
     /// bound for the primary.
     pub(crate) fn take_shares(&mut self) -> Vec<(Entity, Changes)> {
-        std::mem::take(&mut Arc::make_mut(&mut self.0).shares)
+        take(&mut Arc::make_mut(&mut self.0).shares)
     }
 
     /// This store read as the layer named `layer` (`in:`): what a read

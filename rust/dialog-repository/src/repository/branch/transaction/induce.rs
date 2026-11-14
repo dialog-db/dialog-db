@@ -53,6 +53,7 @@ use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
+use crate::placement::memory_layer;
 use crate::repository::archive::erased;
 use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
@@ -1439,7 +1440,7 @@ fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenH
                 },
                 _ => None,
             }
-            .filter(|layer| *layer != crate::placement::memory_layer());
+            .filter(|layer| *layer != memory_layer());
             cells.push((attribute, value, field.descriptor().pick().clone(), layer));
         }
         heads.push((this, cells));

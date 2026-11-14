@@ -53,6 +53,7 @@ use dialog_effects::memory::{Current, Publish, Resolve, Version as MemoryVersion
 use dialog_query::query::Application;
 use dialog_search_tree::Cache;
 use dialog_search_tree::nodes;
+use std::iter::once;
 use std::slice::from_ref;
 use std::sync::Arc;
 
@@ -901,7 +902,7 @@ where
     let held: Vec<Entity> = session
         .iter()
         .flat_map(|session| session.memories.iter().map(|(layer, _)| layer.clone()))
-        .chain(std::iter::once(session_layer()))
+        .chain(once(session_layer()))
         .collect();
     let mut changes = changes;
     let (mut shares, primary) = route_shares(changes.take_shares(), &held)?;

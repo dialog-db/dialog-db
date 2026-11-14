@@ -105,6 +105,13 @@ impl AttributeQueryAll {
         &self.layer
     }
 
+    /// Whether this scan binds each row's layer to a named variable: a
+    /// read that asks which layer a row came from, and so reads the same
+    /// cell on two layers as two rows.
+    pub(crate) fn binds_layer(&self) -> bool {
+        self.layer.name().is_some()
+    }
+
     /// Whether a row read from `layer` is one this scan reads: any row
     /// unless the scan names a constant layer the row's differs from. A
     /// store that reads one layer stamps none, and every row is its.
