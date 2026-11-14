@@ -225,6 +225,27 @@ space's and the profile's holds the profile's). What stays: the
 
 ## Open
 
+- Channels as layers, named by address. The maintainer's proposal,
+  which subsumes 14 to 17 and revises 7 and 16: a command is a fact
+  whose attribute is placed `in:` a channel layer, so asserting a
+  command is asserting a concept, with nothing special about it. A
+  channel layer's rows live one tick and it has a transport.
+  `channel:self` is the loopback: what lands in it is the next tick's
+  stimulus of this session, which is exactly what a transient is
+  today, and a command with no `in:` defaults to it as a fact with no
+  `in:` defaults to the primary. `channel:host` is the embedder, read
+  by the embedder as the layer's instants (`Ephemeral::since`), which
+  makes `Session::commands()` of #797 a special case of reading a
+  channel layer. Layers then read as addresses: `channel:self`,
+  `channel:host`, `memory:shared`, `memory:local`, `session:space`,
+  `session:tab`. Several providers of one capability: either two
+  attributes of one name placed on two channels, chosen by the rule
+  that asserts (static), or one channel whose rows carry the
+  provider's DID as an address field, Bloom's `@address`, filled by a
+  rule over the announcements (dynamic). Choosing is a rule's
+  decision over data, never a router's; fan-out is one row per
+  provider. Leaning: adopt, and rework #797 so that `Handler` is
+  sugar over a consumer of `channel:host` and the feed goes.
 - Discovery. A provider announces what it performs as facts: the
   capability (a command concept), the provider's DID, when the
   announcement expires. Announcements are TTL'd rows of a layer, as
