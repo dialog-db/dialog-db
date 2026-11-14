@@ -31,10 +31,14 @@ rest. Each numbered sentence is an invariant; where this differs from
 
 ## Attributes
 
-5. An attribute is placed on exactly one layer: `in: :session`. With
-   no `in:`, the primary. The layer is part of the attribute's
-   identity: `site/path in: :session` and `site/path in: :space` are
-   two attributes that share a name and a type.
+5. A row has a layer as it has a subject and a value: `in` is a
+   dimension of the fact, beside `the`, `of` and `is`, and no part of
+   the attribute's identity. `site/path` is one attribute wherever its
+   rows lie; the same cell on two layers is two cells, each electing
+   its own claim under the attribute's pick, and a read with `in`
+   unbound returns both, each with its layer bound. Where a row goes
+   is said by the `in` of the descriptor that writes it (Open, "`in:`
+   as a term"); with none, the primary.
 
 6. A query names the layer it reads the way a Datomic query names its
    db: left out, it reads the primary. Joining across layers, picking
@@ -284,6 +288,19 @@ space's and the profile's holds the profile's). What stays: the
   primary carries the trees its pointers name. There is no second
   class of head conflict, since there is no second head. A memory
   layer records no pointer.
+- Subscriptions are the mechanism for effects. `Session::subscribe`
+  already maintains a query incrementally across every layer, so an
+  embedder observes a channel by subscribing to the concept it
+  handles, and `Session::commands()` of #797 goes. One condition
+  follows, and it decides a channel's lifetime: a subscription is a
+  view of state, so a row asserted and retracted between two polls is
+  no delta at all. A channel a subscriber consumes therefore keeps
+  its rows until the consumer retracts them, which is the
+  acknowledgement; the one-tick lifetime is only for `channel:self`,
+  which no subscriber reads. Order is the rows' own (a time or
+  sequence field, as tonk's commands carry); "once" is the retraction;
+  "exactly one of several handlers" is a claim a handler asserts
+  before it acts, decided by the layer's pick.
 - The `session:` layer. Every session mints one, declared or not: it
   replaces `Branch::overlay`, the process-local store a branch has
   today. The revisions the overlay injects now (`dialog.branch/tree`,
