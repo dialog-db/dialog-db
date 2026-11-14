@@ -173,6 +173,22 @@ the ticks.
 
 ## Open
 
+- Handlers: what performs an effect for a command. Today a batch
+  exposes the commands its rules dispatched (`TransactionBatch::induced`)
+  and the embedder runs its own handlers on them after the publish.
+  Through a session that should be the session's job: a handler is
+  registered on the session for a command concept, built in (dialog's
+  own, such as "fetch this node") or the embedder's (tonk's command
+  providers) through one mechanism; after a dispatch publishes, the
+  session runs the handlers on the commands that tick chain dispatched
+  and no rule consumed, and each handler's answer is a command
+  dispatched as the stimulus of a new tick, correlated by the request
+  command's entity (`of`). A subscription never sees a command; it
+  sees what a rule captures of the answer, on whatever layer the
+  attribute is placed. Running handlers after the publish, not inside
+  the chain, keeps a dispatch a pure function of head and stimulus,
+  so a lost compare-and-swap re-runs no effect. Raised by the
+  tree-exploration design (`design/tree-exploration.md`).
 - Whether a channel's one-tick lifetime is enough, or the sender needs
   to know the message was handled. A message port buffers until the
   other end runs; a channel whose receiver's session is closed drops
