@@ -18,6 +18,7 @@ pub(crate) use succession::ReadSettlement;
 pub(crate) use succession::{settle, stored_claims};
 
 use crate::Commit;
+use crate::placement::control_layer;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::session::{Composite, shared_metadata};
 use crate::repository::source::{Live, View};
@@ -184,9 +185,11 @@ impl<L: Line> Transaction<L> {
         self
     }
 
-    /// Dispatch a claim as a *transient* fact (a command): visible to
-    /// reads and to inductive-rule bodies during this commit, seeding
-    /// commit-time induction, but never committed to the branch.
+    /// Dispatch a claim as a *transient* fact (a command): a write into
+    /// [`control:`](crate::CONTROL), as `.at(control_layer())` is.
+    /// Visible to reads and to inductive-rule bodies during this commit
+    /// as a row of `control:`, seeding commit-time induction, but never
+    /// committed to the branch.
     pub fn dispatch<C: Statement>(mut self, claim: C) -> Self {
         self.transients.assert(claim);
         self
@@ -231,13 +234,16 @@ impl<L: Line> Transaction<L> {
 
 impl<L: Line> Transaction<L> {
     /// The staged layers [`Transaction::query`] reads over the line:
-    /// the durable writes, then the transients. Shared, not copied.
+    /// the durable writes, then the transients, read as rows of
+    /// [`control:`](crate::CONTROL). Shared, not copied.
     fn layers(&self) -> Vec<Staged> {
-        let mut layers: Vec<Staged> = [&self.changes, &self.transients]
-            .into_iter()
-            .filter(|layer| !layer.is_empty())
-            .cloned()
-            .collect();
+        let mut layers: Vec<Staged> = Vec::with_capacity(2);
+        if !self.changes.is_empty() {
+            layers.push(self.changes.clone());
+        }
+        if !self.transients.is_empty() {
+            layers.push(self.transients.clone().in_layer(control_layer()));
+        }
         // Each share is read as the layer it is written into.
         for (layer, share) in self.changes.shares() {
             layers.push(Staged::from(share.clone()).in_layer(layer.clone()));
