@@ -43,6 +43,15 @@ What this changes for you:
   there, and a head under `last` succeeds the layer's own row of the
   cell. Before, a round read only the layer as the dispatch began, so
   such a rule did not fire within the dispatch.
+- The transaction's own writes into a layer are read the same way and
+  are stimulus of the first round: a rule premised on the layer's row
+  fires on them in the same dispatch. Before, they were routed away
+  before induction and no rule saw them until the next dispatch.
+- A write under `last` into `session:`, the transaction's own or a
+  rule's head, succeeds the row the layer already holds within the
+  dispatch, so a chain of rules over `session:` runs as one over a
+  declared layer does. Before, the held row stood above the write and
+  the next round read it instead.
 - A maintained subscription over a session reads the several instants
   in order and still equals a fresh evaluation.
 

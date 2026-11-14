@@ -53,6 +53,7 @@ use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
+use crate::Ephemeral;
 use crate::placement::{follows_selection, memory_layer, session_layer};
 use crate::repository::archive::erased;
 use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
@@ -1546,6 +1547,31 @@ fn written_heads(
         heads.push((this, cells));
     }
     Ok(heads)
+}
+
+/// What the writes of `share` under `last` into the session's own layer
+/// succeed: the rows `own` holds of each such cell, other than the one
+/// written, as retractions. The session's own layer is read live and
+/// its row of a cell stands above a write staged for it, so without the
+/// retraction a round would read the row the layer held, not the write.
+pub(crate) fn succession_in_own(own: &Ephemeral, share: &Changes) -> Changes {
+    let mut retractions = Changes::new();
+    for (of, the, change) in share.iter() {
+        let Change::Assert(is, Pick::Last) = change else {
+            continue;
+        };
+        for held in own.scan(&Selector::new().the(the.clone()).of(of.clone())) {
+            if held.is != *is {
+                dialog_corpus::Update::dissociate(
+                    &mut retractions,
+                    the.clone(),
+                    of.clone(),
+                    held.is,
+                );
+            }
+        }
+    }
+    retractions
 }
 
 /// The writes into layers among `changes`, as instructions: what a round's

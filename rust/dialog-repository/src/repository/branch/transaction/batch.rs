@@ -19,7 +19,7 @@
 //! re-run the transaction against the fresh head, minting fresh
 //! versions; nothing staged is ever rewritten.
 
-use super::induce::induce;
+use super::induce::{induce, succession_in_own};
 use super::succession;
 use super::{
     Line, Transaction, TransactionCommit, carry_footprint, touches_rule_facts, touches_rules,
@@ -987,6 +987,10 @@ where
     // read each layer as that tick leaves it, and they are stimulus of
     // the first round, as the link's writes into the primary are.
     for (layer, share) in &shares {
+        if *layer == session_layer() {
+            let source = view.to_source();
+            changes.merge(succession_in_own(source.overlay(), share).into_layer(layer.clone()));
+        }
         changes.merge(share.clone().into_layer(layer.clone()));
     }
     let (induced, rounds) = induce(
