@@ -178,11 +178,14 @@ pub(crate) fn revision_rows(
     rows
 }
 
-/// The `dialog.layer/revision` rows of the layers that moved since `own`
-/// last recorded them: the rows of [`revision_rows`] whose value `own`
-/// does not hold. What a dispatch through a session takes as stimulus,
-/// so a rule premised on a layer's revision fires when the layer moved,
-/// and on the first dispatch, which finds nothing recorded.
+/// The change in the `dialog.layer/revision` rows since `own` last
+/// recorded them: for each layer whose revision `own` does not hold,
+/// the retraction of the row it holds and the row as it stands now.
+/// What a dispatch through a session takes as stimulus, so a rule
+/// premised on a layer's revision fires when the layer moved, and on
+/// the first dispatch, which finds nothing recorded. The retraction
+/// matters: the recorded row stands in `session:` above the dispatch's
+/// own rows, and would be elected over the new one.
 pub(crate) fn revision_stimulus(
     primary: Option<&Revision>,
     memories: &[(Entity, Ephemeral)],
@@ -193,6 +196,9 @@ pub(crate) fn revision_stimulus(
         let recorded = own.scan(&Selector::new().the(revision_attr()).of(layer.clone()));
         if recorded.iter().any(|fact| fact.is == revision) {
             continue;
+        }
+        for fact in recorded {
+            rows.dissociate(revision_attr(), layer.clone(), fact.is);
         }
         rows.associate(revision_attr(), layer, revision, Pick::Last);
     }
