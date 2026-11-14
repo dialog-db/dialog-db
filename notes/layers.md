@@ -44,14 +44,27 @@ rest. Each numbered sentence is an invariant; where this differs from
 ## Commands
 
 7. A **command** is the scratch: it exists for one tick and is never
-   stored. It has no `in:`. A command that must reach another peer is
-   not a command but a fact of a replicated layer, which its handler
-   retracts.
+   stored. It has no `in:`, so it is dispatched into this session. A
+   command for another session goes through a **channel** (see 8a):
+   not stored either, but carried.
 
 8. A command is the stimulus of the tick after the one in which it
    was dispatched. A dispatch from outside happens between ticks, so
    it starts the next one. The writes a transaction carries beside a
    command are stimulus of the same tick.
+
+8a. A **channel** is a scratch with a transport: a layer whose facts
+   live for one tick, linked write-only in the session that sends and
+   read-only in the session that receives, and carried between them.
+   In Bloom's terms the three collections are one grid: a table is
+   durable, a scratch lives one tick, a channel lives one tick and has
+   a transport. Lifetime, like store and upstreams, is a deployment
+   fact of a layer. A space coordinating with the persona space that
+   opened it (consent, identity, a request and its reply) uses two
+   channels, one each way, the way a message port has two ends. What
+   is dispatched into a channel is received once, in order, and is
+   not merged with an equal dispatch from elsewhere, which a fact in a
+   replicated layer would be.
 
 ## Ticks
 
@@ -149,6 +162,18 @@ the ticks.
 
 ## Open
 
+- Whether a channel's one-tick lifetime is enough, or the sender needs
+  to know the message was handled. A message port buffers until the
+  other end runs; a channel whose receiver's session is closed drops
+  the message unless the sender keeps it, and a kept message is an
+  outbox: a fact of a durable layer the receiver's handler retracts
+  (what 7 said before 8a). The axis is not channel versus branch but
+  whether delivery must survive the receiver being away. Leaning: a
+  channel is fire-and-forget; anything that must survive is a fact.
+- What a channel's transport is between two sessions of one process
+  (a tonk space and its persona) and between two peers: the former
+  needs no replication, the latter is the peer protocol carrying a
+  one-tick layer.
 - Whether a tick cap is wanted at all, and what a dispatch that hits
   it should leave behind. Leaning: fail the dispatch, publish nothing.
 - How the schema names a layer that is another branch of the same
