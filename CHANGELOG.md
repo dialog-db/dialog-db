@@ -14,6 +14,91 @@ says how to cut a release.
 
 ## Unreleased
 
+### `control:` is the layer a command lives in for one tick, a channel is a layer its consumer empties, and a provider reads what arrives in either
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[notes/layers.md](./notes/layers.md) (points 7 to 18, and "Open").
+
+A command used to be a fact apart: dispatched into a transaction, read
+by the rules of one tick, then kept by the session in a command feed
+that handlers and readers drained. It is now a row of a layer.
+`control:`, the loopback every session has, holds what a dispatch
+writes into it for one tick: a command dispatched, a write
+`.at(control_layer())`, and a rule head landing there. Each is the
+next tick's stimulus, read as a row of `control:`, and is gone after
+that tick. Once a dispatch has published, its commands stand in the
+session's `control:` layer for one instant and leave it in the next, so
+the layer's instants are every command, in order, once, and nothing of
+them stays. A channel, `control:<name>`, is a layer for a consumer
+outside the invoke loop or the process: what lands in it stays until
+the consumer retracts it. A provider reads either through
+`Session::arrivals`, which yields each newly asserted row of its query
+once and drops retractions, and answers by invoking.
+
+What this changes for you:
+
+- A rule premise whose descriptor names `in: control:` reads the
+  tick's commands alone; one binding `in` to a variable binds a
+  command's to `control:`. A transaction's query reads its dispatched
+  transients as rows of `control:` too. A premise naming no layer reads
+  them as before.
+- A rule head cell whose descriptor names `in: control:`, and a write
+  `.at(control_layer())`, are dispatches: the next tick's stimulus, in
+  no layer and never committed, whether or not the concept carries the
+  `dialog.concept/transient` marker. A command head (one whose concept
+  carries the marker) lands its cells that name no layer in `control:`
+  as before, and now lands a cell that names another layer, a channel
+  say, in that layer, where before the layer it named was ignored.
+- `Store::Control` is new: `LayerDeclaration::new(entity,
+  Store::Control)` declares a channel, stored as `dialog.layer/store
+  "control"`. A session builds it in memory, as it builds a
+  `Store::Memory` layer, and writes into it are routed and land tick by
+  tick as into any layer the session holds. Declaring bare `control:`
+  builds nothing apart.
+- `Session::arrivals(layer, query)` and `Arrivals` are new: a reader
+  of what arrives in `control:` or a channel. `poll` yields the rows of
+  the query the layer's assertions since the last read make, evaluated
+  over those rows alone; `next` waits for the session's next dispatch
+  while there are none. `Session::layer(&control_layer())` hands out
+  the loopback, which holds nothing between dispatches.
+- `Session::commands()`, `Commands`, `Dispatched`, `Lost` and
+  `FEED_CAPACITY` are gone: read `control:` with
+  `Session::arrivals(&control_layer(), query)` instead, or a channel's
+  instants with `Ephemeral::since`. A reader that falls further behind
+  than a layer's instants reach reads what the layer holds now: on a
+  channel nothing is lost; the commands that stood in `control:`
+  meanwhile are.
+- `Handler`, `HandlerError`, `Answering`, `Session::handle` and
+  `MAX_ANSWERS` are gone: a provider reads its commands with
+  `Session::arrivals` and answers with `Session::invoke`, a dispatch
+  with its own compare-and-swap. `Invocation::perform` publishes once
+  and no longer chains answers.
+- `CommitError::AnswerDivergence` and `CommitError::Handler` are gone:
+  nothing runs an answer inside an invocation, so neither can happen.
+  A provider's own failure is the provider's to report.
+
+Why: a command is state of one tick, so the place it lives is a layer,
+and observing it is reading that layer, not a mechanism apart. A
+channel that keeps its rows until its consumer retracts them loses
+nothing to a consumer that was not polling, where a view polled after
+a one-tick row came and went sees nothing. Commands reach `control:`
+only after their dispatch has published, so a dispatch re-run from a
+moved head re-runs no effect, and an answer needs no isolation of its
+own.
+
+#### Compatibility and migration
+
+- A channel's declaration, `dialog.layer/store "control"` on the
+  channel's entity, is a new stored value, replicated with the
+  primary like every layer declaration. 0.4.0 and earlier know no
+  layer declarations and read it as an ordinary fact. A build of this
+  release line from before this change opens no session on a primary
+  that declares a channel: it refuses the declaration with
+  `CommitError::InvalidPlacement`. Nothing already stored is
+  rewritten, and nothing has to be run.
+- Commands were never stored and still are not: `control:` and every
+  channel are process-local, as memory layers are.
+
 ### A memory layer mints one instant per tick that changed it
 
 [#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
