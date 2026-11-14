@@ -395,10 +395,12 @@ fn it_is_written_one_way() {
     ));
 }
 
-/// A leaf is written to the wire as a term is. A map, a list or a
-/// tuple has no wire form and is refused.
+/// A leaf is written as a term is. A map, a list or a tuple is written
+/// under the word for its shape, which is neither `?`, as a variable
+/// is, nor the name of a type, as a constant is, so each reads back as
+/// what it was.
 #[dialog_common::test]
-fn it_has_no_wire_form_above_a_leaf() {
+fn it_writes_a_pattern_under_the_word_for_its_shape() {
     assert_eq!(
         serde_json::to_value(var("x")).expect("a leaf is written"),
         serde_json::json!({"?": {"name": "x"}})
@@ -408,8 +410,33 @@ fn it_has_no_wire_form_above_a_leaf() {
     assert_eq!(read, var("x"));
 
     let composite = Pattern::map([("a".to_string(), var("x"))]).expect("a pattern");
-    let refused = serde_json::to_value(&composite).expect_err("no wire form");
-    assert!(refused.to_string().contains("no wire form"), "{refused}");
+    let written = serde_json::to_value(&composite).expect("a map is written");
+    assert_eq!(
+        written,
+        serde_json::json!({"map": [["a", {"?": {"name": "x"}}]]})
+    );
+    let read: Pattern = serde_json::from_value(written).expect("reads");
+    assert_eq!(read, composite);
+
+    // A constant that is a record is a constant still, under the name
+    // of its type.
+    let constant = Pattern::Term(Term::Constant(map(&[("a", text("b"))])));
+    let bytes = serde_ipld_dagcbor::to_vec(&constant).expect("a constant is written");
+    let read: Pattern = serde_ipld_dagcbor::from_slice(&bytes).expect("reads");
+    assert_eq!(read, constant);
+
+    // What is under a word and is not that shape is refused.
+    for unread in [
+        serde_json::json!({"map": {"a": 1}}),
+        serde_json::json!({"map": [["a"]]}),
+        serde_json::json!({"list": 1}),
+        serde_json::json!({"tuple": "a"}),
+    ] {
+        assert!(
+            serde_json::from_value::<Pattern>(unread.clone()).is_err(),
+            "{unread}"
+        );
+    }
 }
 
 fn entity(uri: &str) -> Entity {
@@ -1392,7 +1419,7 @@ fn it_holds_a_pattern_under_a_name() {
         serde_json::json!({
             "this": { "?": { "name": "note" } },
             "payload": {
-                "map": [[{ "symbol:": "/title" }, { "?": { "name": "title" } }]],
+                "map": [["title", { "?": { "name": "title" } }]],
                 "rest": { "?": { "name": "rest" } },
             },
         })
