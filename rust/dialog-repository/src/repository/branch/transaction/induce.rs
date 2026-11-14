@@ -1501,6 +1501,9 @@ mod oracle {
 }
 
 #[cfg(test)]
+mod subject_tests;
+
+#[cfg(test)]
 mod tests {
     use dialog_effects::archive::Load as ArchiveLoad;
     use dialog_effects::blob::Load as BlobLoad;
