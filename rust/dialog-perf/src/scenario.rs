@@ -51,6 +51,14 @@ pub struct Spec {
     /// Runtime CPU dispatch makes the difference; zero where it is under
     /// 0.2%. Rough: five runs on one model and one on each of three others.
     pub cross_cpu_pct: f64,
+    /// Growth in instructions outside the allocator, in percent, allowed
+    /// on top of the tolerance in every comparison: what the heap's
+    /// layout still moves outside the allocator, from one run of a
+    /// binary to the next. glibc's `memcmp` and `memcpy` take another
+    /// path where an operand lies near a page boundary, and where the
+    /// operands lie is the layout's. Zero where six sweeps of one
+    /// binary spread under 0.25%; each other scenario states its spread.
+    pub layout_pct: f64,
     prepare: Prepare,
 }
 
@@ -69,6 +77,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 1000,
             about: "one transaction asserting two facts per entity under `all`, committed and published",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(commit::batch(size)),
         },
         Spec {
@@ -76,6 +85,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 100,
             about: "one commit per entity: the per-commit cost of records, signing and publication",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(commit::rows(size)),
         },
         Spec {
@@ -83,6 +93,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 100,
             about: "one commit per entity, each also re-asserting one standing fact: the per-commit cost of a key every commit rewrites",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(commit::hot_key(size)),
         },
         Spec {
@@ -94,6 +105,7 @@ pub fn catalog() -> Vec<Spec> {
             // megabyte is copied by `realloc` or not with the heap's
             // layout. Outside the allocator it repeats to 0.04%.
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(commit::succeed(size)),
         },
         Spec {
@@ -101,6 +113,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 200,
             about: "one transaction writing under `last` to a relation a rule also derives: the commit settles each cell through the rule",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(commit::derived(size)),
         },
         Spec {
@@ -108,6 +121,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 300,
             about: "a transaction that reads the cell it just wrote, for every entity, then commits: the library-install shape",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(transaction::reads(size)),
         },
         Spec {
@@ -115,6 +129,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 200,
             about: "one point read on a replica that adopted, by root, a head `size` one-commit origins deep: the first query of a device that faults blocks in",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(replica::first_query(size)),
         },
         Spec {
@@ -122,6 +137,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "two hundred single-entity reads of one attribute over a seeded branch",
             cross_cpu_pct: 0.9,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(read::point(size)),
         },
         Spec {
@@ -129,6 +145,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "one concept read over a single attribute, every entity",
             cross_cpu_pct: 0.2,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(read::scan(size)),
         },
         Spec {
@@ -136,6 +153,10 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "one two-attribute concept read: the planner's join",
             cross_cpu_pct: 0.0,
+            // Outside the allocator, six sweeps of one binary spread
+            // 0.46%: the same 18,000 `memcmp` calls from `Match::combine`
+            // over the same names retired 390 K to 474 K instructions.
+            layout_pct: 1.0,
             prepare: |size| Box::pin(read::join(size)),
         },
         Spec {
@@ -158,6 +179,9 @@ pub fn catalog() -> Vec<Spec> {
             // cold loads read (12% of the phase), retired 13,672,977 on
             // every model; the allocator moved by up to 197 K.
             cross_cpu_pct: 0.3,
+            // Outside the allocator, six sweeps of one binary spread
+            // 0.26%, in `memcmp` and `memcpy` as `query-join` does.
+            layout_pct: 1.0,
             prepare: |size| Box::pin(member::view(size)),
         },
         Spec {
@@ -165,6 +189,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "one read of a concept a committed rule derives from two stored attributes, every entity",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(rule::scan(size)),
         },
         Spec {
@@ -172,6 +197,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "two hundred single-entity reads of a concept a committed rule derives",
             cross_cpu_pct: 2.4,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(rule::point(size)),
         },
         Spec {
@@ -179,6 +205,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 20,
             about: "one read of a transitive closure over `size` chains of depth 25, derived by a base and a recursive rule",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(rule::recursive(size)),
         },
         Spec {
@@ -186,6 +213,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 1000,
             about: "one read of a ranked field four rules each state a case for, elected best first, every entity",
             cross_cpu_pct: 0.5,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(rule::ranked(size)),
         },
         Spec {
@@ -193,6 +221,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 100,
             about: "one transaction committing `size` rules, then the first read of the last one: discovery and hydration cold",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(rule::install(size)),
         },
         Spec {
@@ -200,6 +229,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "two hundred single-entity reads of a concept a rule derives, each read carrying the rule in its own overlay",
             cross_cpu_pct: 0.3,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(rule::overlay(size)),
         },
         Spec {
@@ -207,6 +237,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "two hundred rounds of a session-overlay fact that is no rule, then a single-entity read of a concept a committed rule derives",
             cross_cpu_pct: 0.3,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(rule::session(size)),
         },
         Spec {
@@ -214,6 +245,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 500,
             about: "one transaction asserting a fact per entity that a chain of three inductive rules relays: a round of induction per link",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(commit::dispatch(size)),
         },
         Spec {
@@ -221,6 +253,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 1000,
             about: "one transaction asserting a timestamp, a price, a count and a size per item: how numbers key",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(number::commit(size)),
         },
         Spec {
@@ -228,6 +261,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "two hundred single-item reads of a float price",
             cross_cpu_pct: 0.4,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(number::point(size)),
         },
         Spec {
@@ -235,6 +269,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "one read of every item's float price: a number decoded per row",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(number::scan(size)),
         },
         Spec {
@@ -242,6 +277,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "twenty reads of the ten items in a window of integer timestamps, the window pushed into the scan",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(number::narrow(size)),
         },
         Spec {
@@ -249,6 +285,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "one read of every item priced at 500 or more, about half, the bound pushed into the scan",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(number::wide(size)),
         },
         Spec {
@@ -256,6 +293,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "one read of the tenth of items with the largest size, a relation holding naturals, integers and floats",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(number::mixed(size)),
         },
         Spec {
@@ -263,6 +301,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 1000,
             about: "a commit that moves ten entities to a better-ranked case, then the subscription's poll",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(subscribe::repoll(size)),
         },
         Spec {
@@ -270,6 +309,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 200,
             about: "a commit adding one note, then the poll of a subscription per note and one to the list",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(subscribe::fanout(size)),
         },
         Spec {
@@ -277,6 +317,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 200,
             about: "a device's pull of a note another device committed, then the poll of its subscription per note and one to the list",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(subscribe::pulled(size)),
         },
         Spec {
@@ -284,6 +325,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "two hundred single-entity reads through a second branch of the repository at the same head: the nodes one branch read answer another's",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(read::sibling(size)),
         },
         Spec {
@@ -291,6 +333,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "one snapshot export streaming every block of a tree the branch's own commit left warm",
             cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
             prepare: |size| Box::pin(export::walk(size)),
         },
     ]

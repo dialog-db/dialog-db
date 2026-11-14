@@ -24,7 +24,7 @@ poll) off the record, then its **measured phase**, and reports:
 | `outcome` | what the phase produced: rows read, facts committed | exact |
 | `counters` | archive blocks read and written (and their bytes), the engine's own steps: rule resolutions, rule hydrations, cell settlements, commits, tree writes, and any measure the scenario adds (`first-query` adds the root frame's bytes) | steps exact; blocks within two, bytes within 15% |
 | `instructions_outside_allocator` | instructions the phase retired under callgrind, less every call into the allocator from outside it, callees included | within 1% (and 50 K) |
-| `allocations` | the phase's calls into the allocator (`alloc`, `free`, `realloc`), the bytes it asked for, and the bytes its `realloc`s started from | calls within 16, bytes within 8 KB |
+| `allocations` | the phase's calls into the allocator (`alloc`, `free`, `realloc`), the bytes it asked for, and the bytes its `realloc`s started from | within 1%, or 16 calls and 8 KB |
 | `instructions` | every instruction the phase retired, under callgrind | shown, not gated |
 
 The counters come from the tracing spans the engine emits
@@ -57,6 +57,13 @@ it takes every call into an allocator entry point (`malloc`, `free`,
 with the call's inclusive cost, so the copy a moving `realloc` makes
 goes with it. What is left repeats to 0.38% at most and under 0.1% in
 most scenarios, with no seed fixed and address randomization on.
+What is left of the layout's effect is in glibc's `memcmp` and
+`memcpy`, which take another path where an operand lies near a page
+boundary: `query-join` made the same 18,000 comparisons over the same
+names in two runs, at 390 K and 474 K instructions. Its 0.46% and
+`query-member`'s 0.26% are past what the 1% tolerance should absorb, so
+those two are allowed 1% more (`layout_pct` in the catalog, each with
+its measured spread).
 
 The allocator is held by its counts instead, taken in the process by
 a global allocator that passes every call to the system one and counts

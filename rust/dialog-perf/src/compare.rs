@@ -49,11 +49,15 @@ pub struct Tolerance {
     /// Absolute growth in instructions outside the allocator always
     /// allowed, so a tiny phase is not gated on noise.
     pub instructions_slack: u64,
-    /// Absolute growth in calls into the allocator allowed: six sweeps
-    /// of one binary moved them by six at most.
+    /// Relative growth in the allocator's counts allowed, in percent:
+    /// the instructions' allowance, so both agree on what size of
+    /// change needs a re-recorded baseline.
+    pub allocation_pct: f64,
+    /// Absolute growth in calls into the allocator always allowed: six
+    /// sweeps of one binary moved them by six at most.
     pub allocation_slack: u64,
-    /// Absolute growth in the allocator's byte counts allowed: six
-    /// sweeps of one binary moved them by 2 KB at most.
+    /// Absolute growth in the allocator's byte counts always allowed:
+    /// six sweeps of one binary moved them by 2 KB at most.
     pub allocation_bytes_slack: u64,
     /// Relative growth in byte counts allowed, in percent. A seam that
     /// lands a block earlier or later changes which leaf a read loads,
@@ -78,6 +82,7 @@ impl Default for Tolerance {
         Self {
             instructions_pct: 1.0,
             instructions_slack: 50_000,
+            allocation_pct: 1.0,
             allocation_slack: 16,
             allocation_bytes_slack: 8192,
             bytes_pct: 15.0,
@@ -592,13 +597,14 @@ fn compare_reports(
             } else {
                 0.0
             };
+            let layout_pct = spec(name).map_or(0.0, |spec| spec.layout_pct);
             gate.check(
                 out,
                 OUTSIDE,
                 before,
                 after,
                 tolerance.instructions_slack,
-                tolerance.instructions_pct + cross_cpu_pct,
+                tolerance.instructions_pct + cross_cpu_pct + layout_pct,
             );
             format!("{OUTSIDE} {}", change(before, after))
         }
@@ -650,7 +656,14 @@ fn compare_reports(
             } else {
                 tolerance.allocation_slack
             };
-            gate.check(out, &allocation(kind), before, after, slack, 0.0);
+            gate.check(
+                out,
+                &allocation(kind),
+                before,
+                after,
+                slack,
+                tolerance.allocation_pct,
+            );
         }
     } else if !sweep && new.instructions.is_some() {
         out.regressions.push(format!(
@@ -811,6 +824,32 @@ mod tests {
         compare_reports(&base, &new, &Tolerance::default(), &sweep(&[]), &mut cross);
         assert!(cross.passed(), "{:?}", cross.regressions);
         assert!(cross.markdown().contains("rule-point +2.4%"));
+    }
+
+    /// A scenario the heap's layout still moves outside the allocator is
+    /// allowed its stated spread on top of the tolerance in every
+    /// comparison: query-join's 1% lets +1.5% through, not +2.1%, and a
+    /// scenario with none is held to 1%.
+    #[test]
+    fn a_layout_allowance_widens_its_scenario_only() {
+        let passes = |name: &str, after: u64| {
+            let mut base = measured(100_000_000, &[]);
+            base.scenario = name.into();
+            let mut new = measured(after, &[]);
+            new.scenario = name.into();
+            let mut comparison = Comparison::default();
+            compare_reports(
+                &base,
+                &new,
+                &Tolerance::default(),
+                &Against::Baseline,
+                &mut comparison,
+            );
+            comparison.passed()
+        };
+        assert!(passes("query-join", 101_500_000));
+        assert!(!passes("query-join", 102_100_000));
+        assert!(!passes("query-scan-unknown", 101_500_000));
     }
 
     /// A row that beats its file past the allowance is a stale baseline:
@@ -988,53 +1027,33 @@ mod tests {
         }
     }
 
-    /// Calls into the allocator are held to their slack whatever the
-    /// count: 16 more passes, 17 more fails, and a kind the baseline
+    /// Calls into the allocator are held to the larger of their slack
+    /// and 1% of the baseline: on 1,000 calls 16 more pass and 17 fail;
+    /// on 300,000, 3,000 more pass and 3,001 fail. A kind the baseline
     /// never called counts from zero.
     #[test]
-    fn allocator_calls_are_gated_to_their_slack() {
-        let base = allocating(&[("alloc.calls", 300_000), ("free.calls", 200_000)]);
-        let check = |new: &Report| {
+    fn allocator_calls_are_gated_to_their_slack_or_one_percent() {
+        let passes = |base: &Report, new: &Report| {
             let mut comparison = Comparison::default();
             compare_reports(
-                &base,
+                base,
                 new,
                 &Tolerance::default(),
                 &Against::Baseline,
                 &mut comparison,
             );
-            comparison
+            comparison.passed()
         };
-        assert!(
-            check(&allocating(&[
-                ("alloc.calls", 300_016),
-                ("free.calls", 200_000)
-            ]))
-            .passed()
-        );
-        let more = check(&allocating(&[
-            ("alloc.calls", 300_017),
-            ("free.calls", 200_000),
-        ]));
-        assert!(
-            matches!(
-                more.rows
-                    .iter()
-                    .find(|row| row.metric == "allocator.alloc.calls")
-                    .map(|row| row.verdict),
-                Some(Verdict::Regressed)
-            ),
-            "{:?}",
-            more.rows
-        );
-        assert!(
-            !check(&allocating(&[
-                ("alloc.calls", 300_000),
-                ("free.calls", 200_000),
-                ("realloc.calls", 100)
-            ]))
-            .passed()
-        );
+        let small = allocating(&[("alloc.calls", 1_000)]);
+        assert!(passes(&small, &allocating(&[("alloc.calls", 1_016)])));
+        assert!(!passes(&small, &allocating(&[("alloc.calls", 1_017)])));
+        let large = allocating(&[("alloc.calls", 300_000)]);
+        assert!(passes(&large, &allocating(&[("alloc.calls", 303_000)])));
+        assert!(!passes(&large, &allocating(&[("alloc.calls", 303_001)])));
+        assert!(!passes(
+            &large,
+            &allocating(&[("alloc.calls", 300_000), ("realloc.calls", 100)])
+        ));
     }
 
     /// A baseline recorded before the allocator was split out gates
