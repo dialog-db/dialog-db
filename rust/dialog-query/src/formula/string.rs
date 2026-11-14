@@ -122,6 +122,92 @@ impl Like {
     }
 }
 
+/// Tokens formula that breaks text into words, one row per word.
+///
+/// A word is a run of characters that are Unicode letters or digits, or
+/// that appear in `keep`; every other character separates words and is
+/// dropped. This is the rule of SQLite FTS5's `unicode61` tokenizer,
+/// with `keep` as its `tokenchars`. Keeping a sigil keeps it on the word
+/// it starts: with `keep` set to `"@"`, `"ask @gozala, please"` yields
+/// `ask`, `@gozala` and `please`, and `"foo@bar.com"` yields `foo@bar`
+/// and `com`.
+///
+/// `at` is the word's place among the words of `of`, counting from zero,
+/// so a word that occurs twice yields two rows, and words next to each
+/// other can be joined by their places.
+#[derive(Debug, Clone, Formula)]
+pub struct Tokens {
+    /// Text to break into words
+    pub of: String,
+    /// Characters that belong to words besides letters and digits
+    pub keep: String,
+    /// A word of `of`
+    #[output(cost = 3)]
+    pub is: String,
+    /// The word's place among the words of `of`, from zero
+    #[output]
+    pub at: u32,
+}
+
+impl Tokens {
+    /// One row per word of `of`, in order.
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
+        words(&input.of, &input.keep)
+            .into_iter()
+            .enumerate()
+            .map(|(at, word)| Tokens {
+                of: input.of.clone(),
+                keep: input.keep.clone(),
+                is: word.to_owned(),
+                at: at as u32,
+            })
+            .collect()
+    }
+}
+
+/// The words of `text`: runs of letters, digits and characters in `keep`.
+fn words<'a>(text: &'a str, keep: &str) -> Vec<&'a str> {
+    text.split(|character: char| !(character.is_alphanumeric() || keep.contains(character)))
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// Replace formula that replaces every occurrence of `find` in `of` with
+/// `with`.
+///
+/// Text without `find` comes back unchanged, so this does not filter:
+/// guard it with [`Like`] when only text containing `find` should pass.
+/// An empty `find` occurs nowhere, and also leaves `of` unchanged.
+#[derive(Debug, Clone, Formula)]
+pub struct Replace {
+    /// Text to replace in
+    pub of: String,
+    /// Text to look for
+    pub find: String,
+    /// Text to put in its place
+    pub with: String,
+    /// `of` with every `find` replaced by `with`
+    #[output(cost = 2)]
+    pub is: String,
+}
+
+impl Replace {
+    /// Replace every `find` in `of` with `with`.
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
+        let is = if input.find.is_empty() {
+            input.of.clone()
+        } else {
+            input.of.replace(&input.find, &input.with)
+        };
+        vec![Replace {
+            of: input.of.clone(),
+            find: input.find.clone(),
+            with: input.with.clone(),
+            is,
+        }]
+    }
+}
+
 /// Matches a string against a simple glob pattern.
 ///
 /// `*` matches zero or more characters, `?` matches exactly one character.
@@ -658,5 +744,131 @@ mod tests {
     fn it_matches_like_escaped_backslash() {
         assert!(glob_match("a\\\\b", "a\\b"));
         assert!(!glob_match("a\\\\b", "axb"));
+    }
+
+    /// The `(is, at)` rows `text/tokens` yields for `of` and `keep`.
+    fn tokens(of: &str, keep: &str) -> Vec<(String, u32)> {
+        let mut terms = Parameters::new();
+        terms.insert("of".to_string(), Term::var("of"));
+        terms.insert("keep".to_string(), Term::var("keep"));
+        terms.insert("is".to_string(), Term::var("word"));
+        terms.insert("at".to_string(), Term::var("at"));
+
+        let mut input = Match::new();
+        input.bind(&Term::var("of"), of.to_string().into()).unwrap();
+        input
+            .bind(&Term::var("keep"), keep.to_string().into())
+            .unwrap();
+
+        let app: FormulaQuery = Tokens::apply(terms).expect("apply should work").into();
+        app.compute(input)
+            .expect("Tokens failed")
+            .iter()
+            .map(|row| {
+                let word =
+                    String::try_from(row.lookup(&Term::var("word")).unwrap().content().unwrap())
+                        .unwrap();
+                let at = u32::try_from(row.lookup(&Term::var("at")).unwrap().content().unwrap())
+                    .unwrap();
+                (word, at)
+            })
+            .collect()
+    }
+
+    fn words_of(of: &str, keep: &str) -> Vec<String> {
+        tokens(of, keep).into_iter().map(|(word, _)| word).collect()
+    }
+
+    #[dialog_common::test]
+    fn it_tokenizes_into_words_with_their_places() {
+        assert_eq!(
+            tokens("ask @gozala, please", "@"),
+            vec![
+                ("ask".to_string(), 0),
+                ("@gozala".to_string(), 1),
+                ("please".to_string(), 2),
+            ]
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_separates_words_at_punctuation_not_in_keep() {
+        assert_eq!(
+            words_of("(@gozala) @jack. @eileen's", "@"),
+            vec!["@gozala", "@jack", "@eileen", "s"]
+        );
+        assert_eq!(words_of("@gozala", ""), vec!["gozala"]);
+    }
+
+    #[dialog_common::test]
+    fn it_keeps_a_sigil_inside_a_word_where_it_occurs() {
+        assert_eq!(words_of("foo@bar.com", "@"), vec!["foo@bar", "com"]);
+        assert_eq!(words_of("@jack-smith", "@-"), vec!["@jack-smith"]);
+        assert_eq!(words_of("@jack-smith", "@"), vec!["@jack", "smith"]);
+    }
+
+    #[dialog_common::test]
+    fn it_tokenizes_letters_and_digits_of_any_script() {
+        assert_eq!(
+            words_of("#тег 東京 x2\n\tñu", "#"),
+            vec!["#тег", "東京", "x2", "ñu"]
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_yields_a_row_for_each_occurrence_of_a_word() {
+        assert_eq!(
+            tokens("@jack and @jack", "@"),
+            vec![
+                ("@jack".to_string(), 0),
+                ("and".to_string(), 1),
+                ("@jack".to_string(), 2),
+            ]
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_yields_no_rows_for_text_without_words() {
+        assert!(tokens("", "@").is_empty());
+        assert!(tokens(" ,.;\n !", "").is_empty());
+    }
+
+    fn replace(of: &str, find: &str, with: &str) -> Vec<String> {
+        let mut terms = Parameters::new();
+        terms.insert("of".to_string(), Term::var("of"));
+        terms.insert("find".to_string(), Term::var("find"));
+        terms.insert("with".to_string(), Term::var("with"));
+        terms.insert("is".to_string(), Term::var("result"));
+
+        let mut input = Match::new();
+        for (name, value) in [("of", of), ("find", find), ("with", with)] {
+            input
+                .bind(&Term::var(name), value.to_string().into())
+                .unwrap();
+        }
+
+        let app: FormulaQuery = Replace::apply(terms).expect("apply should work").into();
+        app.compute(input)
+            .expect("Replace failed")
+            .iter()
+            .map(|row| {
+                String::try_from(row.lookup(&Term::var("result")).unwrap().content().unwrap())
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[dialog_common::test]
+    fn it_replaces_every_occurrence() {
+        assert_eq!(replace("@gozala", "@", ""), vec!["gozala"]);
+        assert_eq!(replace("a, b, c", ", ", " and "), vec!["a and b and c"]);
+        assert_eq!(replace("@a@b", "@", ""), vec!["ab"]);
+    }
+
+    #[dialog_common::test]
+    fn it_leaves_text_without_the_find_unchanged() {
+        assert_eq!(replace("gozala", "@", ""), vec!["gozala"]);
+        assert_eq!(replace("gozala", "", "x"), vec!["gozala"]);
+        assert_eq!(replace("", "@", "x"), vec![""]);
     }
 }

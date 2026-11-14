@@ -1,8 +1,9 @@
 //! Built-in formulas for common data transformations
 //!
 //! - Mathematical operations (sum, difference, product, quotient, modulo)
-//! - String operations (concatenate, length, uppercase, lowercase)
-//! - Type conversions (to_string, parse_number)
+//! - String operations (concatenate, length, uppercase, lowercase, like,
+//!   tokens, replace)
+//! - Type conversions (to_string, parse_number, parse_entity)
 //! - Boolean logic (and, or, not)
 
 /// Bindings for reading/writing values during formula evaluation.
@@ -31,7 +32,8 @@ pub mod conversions;
 pub mod logic;
 /// Mathematical operation formulas (sum, difference, product, quotient, modulo)
 pub mod math;
-/// String manipulation formulas (concatenate, length, uppercase, lowercase, like)
+/// String manipulation formulas (concatenate, length, uppercase, lowercase, like,
+/// tokens, replace)
 pub mod string;
 
 /// Attribute decomposition (attribute-parts)
@@ -44,13 +46,15 @@ pub mod position;
 pub mod revision;
 
 pub use attribute::AttributeParts as AttributePartsFormula;
-pub use conversions::{ParseFloat, ParseSignedInteger, ParseUnsignedInteger, ToString};
+pub use conversions::{
+    ParseEntity, ParseFloat, ParseSignedInteger, ParseUnsignedInteger, ToString,
+};
 pub use key::{KeyPart as KeyPartFormula, SeparatorPart as SeparatorPartFormula};
 pub use logic::{And, Not, Or};
 pub use math::{Difference, Floor, Modulo, Product, Quotient, Round, Sum, Truncate};
 pub use position::{Position as PositionFormula, PositionParts as PositionPartsFormula};
 pub use revision::{Revision as RevisionFormula, RevisionParent as RevisionParentFormula};
-pub use string::{Concatenate, Length, Like, Lowercase, Uppercase};
+pub use string::{Concatenate, Length, Like, Lowercase, Replace, Tokens, Uppercase};
 
 use crate::Parameters;
 use crate::Predicate;

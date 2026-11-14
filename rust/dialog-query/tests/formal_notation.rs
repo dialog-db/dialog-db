@@ -980,6 +980,18 @@ fn it_round_trips_all_formula_selectors() {
             json!({"text": {"?":{"name":"a"}}, "pattern": {"?":{"name":"b"}}, "is": {"?":{"name":"r"}}}),
         ),
         (
+            "text/tokens",
+            json!({"of": {"?":{"name":"a"}}, "keep": {"?":{"name":"b"}}, "is": {"?":{"name":"r"}}, "at": {"?":{"name":"n"}}}),
+        ),
+        (
+            "text/replace",
+            json!({"of": {"?":{"name":"a"}}, "find": {"?":{"name":"b"}}, "with": {"?":{"name":"c"}}, "is": {"?":{"name":"r"}}}),
+        ),
+        (
+            "entity/parse",
+            json!({"text": {"?":{"name":"a"}}, "is": {"?":{"name":"r"}}}),
+        ),
+        (
             "boolean/and",
             json!({"left": {"?":{"name":"a"}}, "right": {"?":{"name":"b"}}, "is": {"?":{"name":"r"}}}),
         ),

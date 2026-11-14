@@ -5,11 +5,13 @@ use crate::error::EvaluationError;
 use crate::formula::bindings::Bindings;
 use crate::formula::cache::FormulaCache;
 use crate::formula::cell::Cells;
-use crate::formula::conversions::{self, ParseFloat, ParseSignedInteger, ParseUnsignedInteger};
+use crate::formula::conversions::{
+    self, ParseEntity, ParseFloat, ParseSignedInteger, ParseUnsignedInteger,
+};
 use crate::formula::logic::{And, Not, Or};
 use crate::formula::math::{Difference, Floor, Modulo, Product, Quotient, Round, Sum, Truncate};
 use crate::formula::number::Numeric;
-use crate::formula::string::{Concatenate, Length, Like, Lowercase, Uppercase};
+use crate::formula::string::{Concatenate, Length, Like, Lowercase, Replace, Tokens, Uppercase};
 use crate::selection::{Match, Selection};
 use crate::term::Term;
 use crate::types::Any;
@@ -122,6 +124,8 @@ define_formulas! {
     "text/upper-case"         => Uppercase(Uppercase, super::string::UppercaseQuery),
     "text/lower-case"         => Lowercase(Lowercase, super::string::LowercaseQuery),
     "text/like"               => Like(Like, super::string::LikeQuery),
+    "text/tokens"             => Tokens(Tokens, super::string::TokensQuery),
+    "text/replace"            => Replace(Replace, super::string::ReplaceQuery),
 
     "boolean/and"             => And(And, super::logic::AndQuery),
     "boolean/or"              => Or(Or, super::logic::OrQuery),
@@ -131,6 +135,7 @@ define_formulas! {
     "unsigned-integer/parse"  => ParseUnsignedInteger(ParseUnsignedInteger, conversions::ParseUnsignedIntegerQuery),
     "signed-integer/parse"    => ParseSignedInteger(ParseSignedInteger, conversions::ParseSignedIntegerQuery),
     "float/parse"             => ParseFloat(ParseFloat, conversions::ParseFloatQuery),
+    "entity/parse"            => ParseEntity(ParseEntity, conversions::ParseEntityQuery),
 
     "dialog/revision"         => Revision(super::revision::Revision, super::revision::RevisionQuery),
     "dialog/revision-parent"  => RevisionParent(super::revision::RevisionParent, super::revision::RevisionParentQuery),
@@ -440,6 +445,37 @@ mod tests {
             is: Term::var("matches"),
         });
         assert_round_trip(fq, "text/like", &["text", "pattern", "is"]);
+    }
+
+    #[test]
+    fn it_serializes_tokens_formula() {
+        let fq = FormulaQuery::Tokens(Query::<Tokens> {
+            of: Term::var("text"),
+            keep: Term::var("keep"),
+            is: Term::var("word"),
+            at: Term::var("at"),
+        });
+        assert_round_trip(fq, "text/tokens", &["of", "keep", "is", "at"]);
+    }
+
+    #[test]
+    fn it_serializes_replace_formula() {
+        let fq = FormulaQuery::Replace(Query::<Replace> {
+            of: Term::var("text"),
+            find: Term::var("find"),
+            with: Term::var("with"),
+            is: Term::var("replaced"),
+        });
+        assert_round_trip(fq, "text/replace", &["of", "find", "with", "is"]);
+    }
+
+    #[test]
+    fn it_serializes_parse_entity_formula() {
+        let fq = FormulaQuery::ParseEntity(Query::<ParseEntity> {
+            text: Term::var("text"),
+            is: Term::var("entity"),
+        });
+        assert_round_trip(fq, "entity/parse", &["text", "is"]);
     }
 
     #[test]

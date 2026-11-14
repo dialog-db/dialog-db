@@ -14,6 +14,33 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule can break text into words, replace in it, and read an entity from it
+
+Three formulas let a rule find references in text and resolve them without
+a client parsing the text first. `text/tokens` breaks `of` into words, one
+row per word with its place `at`: a word is a run of Unicode letters and
+digits plus the characters listed in `keep`, as in SQLite FTS5's
+`unicode61` tokenizer with `tokenchars`. `text/replace` replaces every
+`find` in `of` with `with`. `entity/parse` reads text as an entity URI,
+the inverse of `text/from` on an entity, and yields no row for text that is
+not one. Together with `text/like` and `text/concatenate` they turn the
+`@gozala` in a memo's body into the name entity `id:gozala`, whose referent
+the rule links to.
+
+What this changes for you:
+
+- New formulas `text/tokens { of, keep, is, at }`,
+  `text/replace { of, find, with, is }` and `entity/parse { text, is }`,
+  as `Tokens`, `Replace` and `ParseEntity` in `dialog_query::formula`.
+- A bare constant in a formula premise is not conformed to the cell's type,
+  so a text constant that parses as a URI, such as `"id:"`, must be written
+  tagged, `{ "text:": "id:" }`, or it reads as an entity.
+
+Why: mentions in tonk's memos were parsed by the client, which asserted
+them alongside the memo, because no rule could read words out of text. A
+rule now derives them from the body itself, for every client and agent
+alike.
+
 ### A tree reads a node from its block or from rows a store keeps it in
 
 [#733](https://github.com/dialog-db/dialog-db/pull/733),
@@ -297,6 +324,10 @@ most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
 
 ### Compatibility and migration
 
+- Rules that use `text/tokens`, `text/replace` or `entity/parse` are new
+  stored rules: an older release does not know these formulas, so it cannot
+  evaluate such a rule. Nothing already stored is rewritten or read
+  differently.
 - Nothing an existing space holds changes or is read differently for the
   single-file archive: it is a new provider a space opts into. A space
   opened with `Chronicle` does not read an `fs` archive's directory of

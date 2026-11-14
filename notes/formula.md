@@ -65,10 +65,10 @@ While `#[derive(Formula)]` can define new formula types, they must be registered
 - `Sum` ("math/sum"), `Difference` ("math/difference"), `Product` ("math/product"), `Quotient` ("math/quotient"), `Modulo` ("math/modulo"), `Floor` ("math/floor"), `Round` ("math/round"), `Truncate` ("math/truncate")
 
 **Strings** (`dialog_query::formula::string`):
-- `Concatenate` ("text/concatenate"), `Length` ("text/length"), `Uppercase` ("text/upper-case"), `Lowercase` ("text/lower-case"), `Like` ("text/like")
+- `Concatenate` ("text/concatenate"), `Length` ("text/length"), `Uppercase` ("text/upper-case"), `Lowercase` ("text/lower-case"), `Like` ("text/like"), `Tokens` ("text/tokens"), `Replace` ("text/replace")
 
 **Logic** (`dialog_query::formula::logic`):
 - `And` ("boolean/and"), `Or` ("boolean/or"), `Not` ("boolean/not")
 
 **Conversions** (`dialog_query::formula::conversions`):
-- `ToString` ("text/from"), `ParseUnsignedInteger` ("unsigned-integer/parse"), `ParseSignedInteger` ("signed-integer/parse"), `ParseFloat` ("float/parse")
+- `ToString` ("text/from"), `ParseUnsignedInteger` ("unsigned-integer/parse"), `ParseSignedInteger` ("signed-integer/parse"), `ParseFloat` ("float/parse"), `ParseEntity` ("entity/parse")

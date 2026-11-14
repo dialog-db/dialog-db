@@ -1677,6 +1677,143 @@ mod tests {
         Ok(())
     }
 
+    /// Links a posted memo to whoever its `@name`s name: the body breaks
+    /// into words keeping `@`, the words that start with `@` lose it, and
+    /// each handle becomes the name entity `id:<handle>`, whose referent
+    /// is what the memo links to.
+    fn mention_rule() -> InductiveRule {
+        serde_json::from_value(json!({
+            "description": "Link a memo to the targets of the names it mentions",
+            "assert!": {
+                "with": {
+                    "mention": { "the": "memo/mention", "as": "entity:", "pick": "all:" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "id": { "the": "cmd.memo-post/id", "as": "entity:" },
+                            "body": { "the": "cmd.memo-post/body", "as": "text:" }
+                        }
+                    },
+                    "where": {
+                        "id": { "?": { "name": "this" } },
+                        "body": { "?": { "name": "body" } }
+                    }
+                },
+                {
+                    "assert": "text/tokens",
+                    "where": {
+                        "of": { "?": { "name": "body" } },
+                        "keep": "@",
+                        "is": { "?": { "name": "word" } },
+                        "at": { "?": { "name": "at" } }
+                    }
+                },
+                {
+                    "assert": "text/like",
+                    "where": {
+                        "text": { "?": { "name": "word" } },
+                        "pattern": "@*",
+                        "is": { "?": { "name": "word" } }
+                    }
+                },
+                {
+                    "assert": "text/replace",
+                    "where": {
+                        "of": { "?": { "name": "word" } },
+                        "find": "@",
+                        "with": "",
+                        "is": { "?": { "name": "handle" } }
+                    }
+                },
+                {
+                    "assert": "text/concatenate",
+                    "where": {
+                        "first": { "text:": "id:" },
+                        "second": { "?": { "name": "handle" } },
+                        "is": { "?": { "name": "uri" } }
+                    }
+                },
+                {
+                    "assert": "entity/parse",
+                    "where": {
+                        "text": { "?": { "name": "uri" } },
+                        "is": { "?": { "name": "name" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": {
+                            "referent": { "the": "name/referent", "as": "entity:" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "name" } },
+                        "referent": { "?": { "name": "mention" } }
+                    }
+                }
+            ]
+        }))
+        .expect("mention rule compiles")
+    }
+
+    /// A memo's mentions resolve through names to their targets, with no
+    /// client parsing the body: `@gozala,` and `@jack` link, the `bar`
+    /// inside `foo@bar.com` does not though a name `bar` exists, and
+    /// `@nobody`, which names nothing, links nothing.
+    #[dialog_common::test]
+    async fn it_links_a_memo_to_the_targets_of_its_mentions() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let gozala: Entity = "person:gozala".parse()?;
+        let jack: Entity = "person:jack".parse()?;
+        let bar: Entity = "person:bar".parse()?;
+        let mut transaction = branch.transaction().assert(mention_rule());
+        for (name, target) in [("gozala", &gozala), ("jack", &jack), ("bar", &bar)] {
+            let name: Entity = format!("id:{name}").parse()?;
+            transaction = transaction.assert(
+                dialog_query::the!("name/referent")
+                    .of(name)
+                    .is(target.clone()),
+            );
+        }
+        transaction.commit().publish().perform(&operator).await?;
+        branch.refresh(&operator).await?;
+
+        let memo: Entity = "memo:1".parse()?;
+        let command: Entity = "cmd:1".parse()?;
+        branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.memo-post/id")
+                    .of(command.clone())
+                    .is(memo.clone()),
+            )
+            .dispatch(
+                dialog_query::the!("cmd.memo-post/body").of(command).is(
+                    "@gozala, can you and @jack look? Mail foo@bar.com, not @nobody.".to_string(),
+                ),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let mut mentions = values(&branch, &operator, "memo/mention", &memo).await?;
+        mentions.sort_by_key(|value| format!("{value:?}"));
+        assert_eq!(
+            mentions,
+            vec![Value::Entity(gozala), Value::Entity(jack)],
+            "the memo links to the targets of the names it mentions, and only those"
+        );
+        Ok(())
+    }
+
     /// The increment rule over a counter declared `integer:`: the band
     /// stores a non-negative count as a natural whatever type wrote it,
     /// so the body's integer view must read the stored natural.

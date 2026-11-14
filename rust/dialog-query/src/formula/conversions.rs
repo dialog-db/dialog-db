@@ -3,7 +3,7 @@
 //! This module provides formulas for converting between different types,
 //! including string conversion and number parsing operations.
 
-use crate::{Formula, Value, formula::Input};
+use crate::{Entity, Formula, Value, formula::Input};
 
 /// ToString formula that converts any supported type to string
 #[derive(Debug, Clone, Formula)]
@@ -102,6 +102,33 @@ impl ParseFloat {
             Ok(number) => vec![ParseFloat {
                 text: input.text,
                 is: number,
+            }],
+            Err(_) => vec![],
+        }
+    }
+}
+
+/// Parse a string into an entity: the inverse of [`ToString`] on one.
+///
+/// Any URI names an entity, so `"id:gozala"` parses to the entity a
+/// published name `gozala` lives at. Text that is not a URI yields no
+/// row.
+#[derive(Debug, Clone, Formula)]
+pub struct ParseEntity {
+    /// String to parse
+    pub text: String,
+    /// The entity the string names
+    #[output(cost = 2)]
+    pub is: Entity,
+}
+
+impl ParseEntity {
+    /// Parse the text as an entity URI, returning empty on failure
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
+        match input.text.trim().parse::<Entity>() {
+            Ok(entity) => vec![ParseEntity {
+                text: input.text,
+                is: entity,
             }],
             Err(_) => vec![],
         }
@@ -235,6 +262,71 @@ mod tests {
         assert_eq!(matches.len(), 1);
         let proof = query_copy.realize(matches[0].clone())?;
         assert_eq!(proof.is, "42");
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_parses_an_entity() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let query = Query::<ParseEntity> {
+            text: Term::from("id:gozala".to_string()),
+            is: Term::var("entity"),
+        };
+        let results = query.perform(&source).try_vec().await?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].is, "id:gozala".parse::<Entity>()?);
+        Ok(())
+    }
+
+    /// `entity/parse` reads back what `text/from` writes of an entity.
+    #[dialog_common::test]
+    async fn it_parses_the_text_of_an_entity_back_to_it() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let entity = Entity::new()?;
+        let text = Query::<ToString> {
+            value: Term::from(entity.clone()).into(),
+            is: Term::var("text"),
+        }
+        .perform(&source)
+        .try_vec()
+        .await?;
+        let parsed = Query::<ParseEntity> {
+            text: Term::from(text[0].is.clone()),
+            is: Term::var("entity"),
+        }
+        .perform(&source)
+        .try_vec()
+        .await?;
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].is, entity);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_parses_no_entity_from_text_that_is_not_a_uri() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        for text in ["", "gozala", "id gozala", ":gozala"] {
+            let query = Query::<ParseEntity> {
+                text: Term::from(text.to_string()),
+                is: Term::var("entity"),
+            };
+            let results = query.perform(&source).try_vec().await?;
+            assert!(results.is_empty(), "{text:?} must parse to no entity");
+        }
         Ok(())
     }
 

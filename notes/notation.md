@@ -1311,6 +1311,36 @@ A pure computation, similar to formulas in a spreadsheet. Given bound input fiel
 }
 ```
 
+**Tokens**: Breaks a string into words, one result per word. A word is a run of Unicode letters and digits, plus any character listed in `keep`; every other character separates words. `at` is the word's place among the words, from zero, so a repeated word gives one result per occurrence.
+
+```json
+{
+  "assert": "text/tokens",
+  "where": {
+    "of": { "?": { "name": "body" } },
+    "keep": "@",
+    "is": { "?": { "name": "word" } },
+    "at": { "?": { "name": "place" } }
+  }
+}
+```
+
+With `keep` set to `"@"`, `"ask @gozala, please"` gives `ask`, `@gozala` and `please`.
+
+**Replace**: Replaces every occurrence of `find` with `with`. Text without `find` comes back unchanged, so guard it with `text/like` to pass only text that contains it.
+
+```json
+{
+  "assert": "text/replace",
+  "where": {
+    "of": { "?": { "name": "word" } },
+    "find": "@",
+    "with": "",
+    "is": { "?": { "name": "handle" } }
+  }
+}
+```
+
 <details>
 <summary>TextFormula</summary>
 <pre>
@@ -1361,6 +1391,28 @@ A pure computation, similar to formulas in a spreadsheet. Given bound input fiel
       "is":      { "$ref": "#/$defs/Term", "description": "Derived: the matched text (empty if no match)." }
     },
     "required": ["text", "pattern", "is"]
+  },
+  "text/tokens": {
+    "type": "object",
+    "description": "Breaks a string into words: runs of letters, digits and characters in keep. One result per word.",
+    "properties": {
+      "of":   { "$ref": "#/$defs/Term", "description": "Text to break into words." },
+      "keep": { "$ref": "#/$defs/Term", "description": "Characters that belong to words besides letters and digits." },
+      "is":   { "$ref": "#/$defs/Term", "description": "Derived: a word." },
+      "at":   { "$ref": "#/$defs/Term", "description": "Derived: the word's place among the words, from zero." }
+    },
+    "required": ["of", "keep", "is", "at"]
+  },
+  "text/replace": {
+    "type": "object",
+    "description": "Replaces every occurrence of find in of with with.",
+    "properties": {
+      "of":   { "$ref": "#/$defs/Term", "description": "Text to replace in." },
+      "find": { "$ref": "#/$defs/Term", "description": "Text to look for." },
+      "with": { "$ref": "#/$defs/Term", "description": "Text to put in its place." },
+      "is":   { "$ref": "#/$defs/Term", "description": "Derived: of with every find replaced." }
+    },
+    "required": ["of", "find", "with", "is"]
   }
 }
 </pre>
