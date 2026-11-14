@@ -309,12 +309,14 @@ space's and the profile's holds the profile's). What stays: the
   polls less often than ticks happen sees nothing of a row asserted
   and retracted in between, so its channel keeps rows until the
   consumer retracts them.
-- Names. Proposed: `effect:` for the loopback (`channel:self` above),
-  `session:` and `memory:` as the layers every session has, durable
-  layers by their branch's name. Open what distinguishes `memory:`
-  from `session:` once `session:` exists: lifetime (a tick, a session,
-  a process) would name them, and then `effect:` is a name for a
-  purpose among names for lifetimes.
+- Names. Decided. A layer's name says its store, and the bare prefix
+  is that store's default: `memory:` is the primary, the base durable
+  branch, and `memory:shared` or `memory:local` another durable layer,
+  a branch the primary points at; `session:` is the layer every
+  session mints, and `session:tab` another in-memory layer of the
+  session's life; `effect:` is the loopback, one tick. "Memory" is the
+  word the codebase already uses for what persists (`dialog-effects`'
+  memory cells), not for RAM.
 - The `session:` layer. Every session mints one, declared or not: it
   replaces `Branch::overlay`, the process-local store a branch has
   today. The revisions the overlay injects now (`dialog.branch/tree`,
