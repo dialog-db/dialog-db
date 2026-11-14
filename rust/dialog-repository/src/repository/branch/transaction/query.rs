@@ -62,7 +62,7 @@ use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
 use dialog_search_tree::nodes;
 
-use crate::repository::branch::session::{QueryEnv, shared_metadata};
+use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
 use crate::{RemoteSite, Staged};
 use std::slice::from_ref;
@@ -81,11 +81,25 @@ use std::slice::from_ref;
 pub struct TransactionQuery<'a> {
     view: View<'a>,
     layers: Vec<Staged>,
+    /// The layers a transaction through a session reads beside its
+    /// line, with the guide that leads the read; `None` for a transaction
+    /// on the line alone.
+    composite: Option<Composite>,
 }
 
 impl<'a> TransactionQuery<'a> {
     pub(crate) fn new(view: View<'a>, layers: Vec<Staged>) -> Self {
-        Self { view, layers }
+        Self {
+            view,
+            layers,
+            composite: None,
+        }
+    }
+
+    /// Read `composite`, a session's layers, instead of the line alone.
+    pub(crate) fn over(mut self, composite: Composite) -> Self {
+        self.composite = Some(composite);
+        self
     }
 
     /// Stage a query against this transaction's view. Call
@@ -94,6 +108,7 @@ impl<'a> TransactionQuery<'a> {
         TransactionSelectQuery {
             view: self.view,
             layers: self.layers,
+            composite: self.composite,
             query,
         }
     }
@@ -103,6 +118,7 @@ impl<'a> TransactionQuery<'a> {
 pub struct TransactionSelectQuery<'a, Q> {
     view: View<'a>,
     layers: Vec<Staged>,
+    composite: Option<Composite>,
     query: Q,
 }
 
@@ -141,6 +157,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
         let TransactionSelectQuery {
             view,
             layers,
+            composite,
             query,
         } = self;
         async_stream::try_stream! {
@@ -160,8 +177,9 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // uses is what guarantees identical behavior — fact reads,
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
-            let sources = vec![view.into_source()];
-            let query_env = QueryEnv::new(sources.clone(), overlay, env).with_layers(layers);
+            let composite = composite.unwrap_or_else(|| Composite::of(view.into_source()));
+            let sources = composite.sources.clone();
+            let query_env = QueryEnv::over(composite, overlay, env).with_layers(layers);
             let results = Box::pin(query.perform(&query_env));
             // Mid-transaction queries drive the ambient preload queue
             // like any other evaluation (see `crate::repository::fetch`).

@@ -620,6 +620,27 @@ pub enum CommitError {
     /// [`Snapshot::commit`](crate::Snapshot::commit).
     #[error("A snapshot cannot be advanced through a reference; transact it instead")]
     Detached,
+
+    /// A placement declaration carries a value that is not a layer, or a
+    /// layer declaration one that names no store.
+    #[error("Placement of {attribute} names no layer: {value}")]
+    InvalidPlacement {
+        /// The attribute declared, or `dialog.layer/store of <layer>`.
+        attribute: String,
+        /// The value found.
+        value: String,
+    },
+
+    /// A write is placed on a layer the session does not hold: the
+    /// primary declares no such layer, or declares one the session could
+    /// not build.
+    #[error("Attribute {attribute} is placed on layer {layer}, which this session does not hold")]
+    UnboundLayer {
+        /// The attribute written.
+        attribute: String,
+        /// The layer its placement names.
+        layer: String,
+    },
 }
 
 /// Errors specific to a pull operation.

@@ -729,6 +729,30 @@ impl Ephemeral {
         changes
     }
 
+    /// What [`export`](Self::export) carries of `attributes`: their
+    /// tombstones, then the facts held under them. Read by attribute, so
+    /// it costs what the line holds of them, not everything it holds.
+    pub(crate) fn export_of(&self, attributes: &[Relation]) -> Changes {
+        let state = self.state.read();
+        let mut changes = Changes::new();
+        for fact in state.shadowed.values() {
+            if attributes.contains(&fact.the) {
+                changes.dissociate(fact.the.clone(), fact.of.clone(), fact.is.clone());
+            }
+        }
+        for fact in state.facts.iter() {
+            if attributes.contains(&fact.the) {
+                changes.associate(
+                    fact.the.clone(),
+                    fact.of.clone(),
+                    fact.is.clone(),
+                    dialog_corpus::Pick::All,
+                );
+            }
+        }
+        changes
+    }
+
     /// Drop every fact and tombstone recorded for entities that fail
     /// `keep`, outright rather than by tombstoning. The
     /// garbage-collection primitive for per-client facts keyed by
@@ -832,6 +856,25 @@ impl Ephemeral {
             state
                 .shadowed
                 .values()
+                .map(|fact| sort_key(fact, manifest))
+                .collect(),
+        )
+    }
+
+    /// The tombstones of the facts `keep` admits by attribute, keyed under
+    /// `manifest`: what a read guided by placement takes of this store's
+    /// tombstones, as it takes its rows.
+    pub(crate) fn tombstones_where(
+        &self,
+        manifest: &Manifest,
+        keep: impl Fn(&str) -> bool,
+    ) -> Arc<HashSet<SortKey>> {
+        let state = self.state.read();
+        Arc::new(
+            state
+                .shadowed
+                .values()
+                .filter(|fact| keep(fact.the.as_str()))
                 .map(|fact| sort_key(fact, manifest))
                 .collect(),
         )

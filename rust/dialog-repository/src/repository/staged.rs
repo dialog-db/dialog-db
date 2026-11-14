@@ -233,6 +233,19 @@ impl Staged {
 
     /// Apply a batch, each `(entity, attribute)` cell's writes in the
     /// order they were recorded.
+    /// This store's writes split by attribute: those `selects` accepts,
+    /// and the rest, each as a store of its own in the order the writes
+    /// were made. The assets go with the rest.
+    pub(crate) fn partition<F: Fn(&Relation) -> bool>(&self, selects: F) -> (Staged, Staged) {
+        let mut taken = Changes::new();
+        let mut rest = self.0.assets.clone();
+        for (the, of, change) in &self.0.log {
+            let into = if selects(the) { &mut taken } else { &mut rest };
+            into.put_cell(the.clone(), of.clone(), vec![change.clone()]);
+        }
+        (Staged::from(taken), Staged::from(rest))
+    }
+
     pub(crate) fn apply(&mut self, mut changes: Changes) {
         if changes.is_empty() {
             return;
@@ -292,9 +305,25 @@ impl Staged {
     /// what this store reads as over it.
     pub(crate) fn export(&self) -> Changes {
         let mut changes = self.0.assets.clone();
+        self.put_cells(&mut changes, |_| true);
+        changes
+    }
+
+    /// The cells of the attributes `selects` accepts, as
+    /// [`export`](Self::export) leaves them, without the assets.
+    pub(crate) fn export_cells<F: Fn(&Relation) -> bool>(&self, selects: F) -> Changes {
+        let mut changes = Changes::new();
+        self.put_cells(&mut changes, selects);
+        changes
+    }
+
+    fn put_cells<F: Fn(&Relation) -> bool>(&self, changes: &mut Changes, selects: F) {
         let mut cells: Vec<(Relation, Entity)> = Vec::new();
         let mut writes: HashMap<(Relation, Entity), Vec<Change>> = HashMap::new();
         for (the, of, change) in &self.0.log {
+            if !selects(the) {
+                continue;
+            }
             let key = (the.clone(), of.clone());
             if !writes.contains_key(&key) {
                 cells.push(key.clone());
@@ -306,7 +335,6 @@ impl Staged {
             let (the, of) = key;
             changes.put_cell(the, of, squash(cell, &|_| true));
         }
-        changes
     }
 
     /// Whether nothing was written.

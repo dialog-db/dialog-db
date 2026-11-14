@@ -54,7 +54,7 @@ use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
 use crate::repository::archive::erased;
-use crate::repository::branch::session::{QueryEnv, shared_metadata};
+use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
 use crate::rules::{
     TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
@@ -76,6 +76,7 @@ pub(crate) const MAX_ROUNDS: u32 = 16;
 /// dispatched `transients` are not part of it.
 pub(crate) async fn induce<Env>(
     view: &View<'_>,
+    composite: &Composite,
     changes: &mut Changes,
     transients: Changes,
     env: &Env,
@@ -224,8 +225,8 @@ where
         // transaction query uses, so rule bodies read exactly what a
         // mid-transaction query would: the writes as staged layers
         // beside the shared metadata.
-        let view = QueryEnv::new(
-            vec![view.to_source()],
+        let view = QueryEnv::over(
+            composite.clone(),
             shared_metadata(from_ref(view), &operator),
             env,
         )
@@ -1319,24 +1320,27 @@ async fn emit_matches<'a>(
             continue;
         }
         let mut head = Changes::new();
+        // The cells placed on a memory layer. The layer elects among its
+        // own rows of a cell, so a head landing there keeps its pick and
+        // succeeds no claim of the line.
+        let mut shared = Changes::new();
         for (attribute, value, pick) in cells {
+            let into = if !transient_head && view.lands_in_memory(&attribute).await? {
+                &mut shared
+            } else {
+                &mut head
+            };
             match rule.polarity() {
                 // A retracting head dissociates the exact bound
                 // triple, cardinality-independent.
                 Polarity::Retract => {
-                    dialog_corpus::Update::dissociate(&mut head, attribute, this.clone(), value);
+                    dialog_corpus::Update::dissociate(into, attribute, this.clone(), value);
                 }
                 // An asserting head writes as the field's pick says: a
                 // set appends, and a choosing pick succeeds the claim
                 // it elects, resolved against the view at commit.
                 Polarity::Assert => {
-                    dialog_corpus::Update::associate(
-                        &mut head,
-                        attribute,
-                        this.clone(),
-                        value,
-                        pick,
-                    );
+                    dialog_corpus::Update::associate(into, attribute, this.clone(), value, pick);
                 }
             }
         }
@@ -1344,6 +1348,18 @@ async fn emit_matches<'a>(
         if transient_head {
             head.assert(transients);
             continue;
+        }
+        for instruction in shared.into_instructions() {
+            if is_novel(view, &instruction).await? {
+                match instruction {
+                    Instruction::Assert(a, policy) => {
+                        dialog_corpus::Update::associate(novelty, a.the, a.of, a.is, policy)
+                    }
+                    Instruction::Retract(a) => {
+                        dialog_corpus::Update::dissociate(novelty, a.the, a.of, a.is)
+                    }
+                }
+            }
         }
         // A head written by succession elects the claim it succeeds
         // against the round view, as a transaction's own writes do
@@ -1507,6 +1523,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::Composite;
     use crate::helpers::test_repo;
     use crate::repository::source::Live;
     use crate::rules::Transient;
@@ -3757,8 +3774,10 @@ mod tests {
             .assert(&mut transients);
 
         let mut changes = Changes::new();
+        let view = Live::from(&branch).pin();
         super::induce(
-            &Live::from(&branch).pin(),
+            &view,
+            &Composite::of(view.to_source()),
             &mut changes,
             transients,
             &operator,
