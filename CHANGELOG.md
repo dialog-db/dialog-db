@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A rule that leaves a premise's subject unnamed fires for the entity a commit wrote
 
-[#PR](https://github.com/dialog-db/dialog-db/pull/PR), fixes
+[#802](https://github.com/dialog-db/dialog-db/pull/802), fixes
 [#801](https://github.com/dialog-db/dialog-db/issues/801)
 
 Commit-time induction starts a rule from each row a commit changed. It
