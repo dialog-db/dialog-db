@@ -144,27 +144,6 @@ where
     }
 }
 
-/// Whether the conservative key span `[lower, upper)` — `upper` absent
-/// meaning open to the top of the key space — meets any range in `scope`.
-///
-/// A link's separator is a LOWER bound, and the separator invariant puts
-/// the next link's separator strictly above this subtree's maximum key,
-/// so `[own separator, next separator)` contains the subtree's true span.
-/// Bounding it this way can only over-retain, never over-drop.
-fn span_intersects(
-    lower: &[u8],
-    upper: Option<&[u8]>,
-    scope: &[core::ops::RangeInclusive<Vec<u8>>],
-) -> bool {
-    scope.iter().any(|range| {
-        lower <= range.end().as_slice()
-            && match upper {
-                Some(upper) => upper > range.start().as_slice(),
-                None => true,
-            }
-    })
-}
-
 /// The walk shared by [`Traversable::traverse_available`] and
 /// [`Traversable::traverse_available_within`]; `scope` of `None` keeps
 /// every child.
@@ -235,58 +214,39 @@ where
                 };
 
                 if let NodeBody::Index(index) = node.body() {
-                    let links = index.links()?;
                     match scope {
                         None => {
-                            for link in links {
+                            for link in index.links()? {
                                 queue.push_back(link.node);
                             }
                         }
                         Some(scope) => {
-                            // A node's separator describes its STORED
-                            // content only: it is also the node's routing
-                            // key and the input to its rank, so a
-                            // buffered op may sit outside the span its
-                            // own node advertises (see
-                            // `ArchivedIndex::upper_bound`). Span alone
-                            // therefore cannot decide relevance.
-                            //
-                            // The buffers settle it exactly, with no
-                            // derivation: an op routes to exactly one
-                            // link and is stored in THAT link's buffer
-                            // (`link_novelty`), so asking each link's own
-                            // buffer says precisely which children carry
-                            // in-scope novelty. Re-deriving the routing
-                            // from separators would not agree with
-                            // `route`, which sends a key below the first
-                            // separator to child 0 rather than to no
-                            // child, and a walk that credited such a key
-                            // to nobody would drop content the scope
-                            // needs.
-                            //
-                            // A buffer that fails to decode cannot prove
-                            // itself out of scope, so its node's children
-                            // are all kept: over-retaining is safe,
-                            // over-dropping loses content.
-                            let in_scope = |key: &[u8]| {
-                                scope.iter().any(|range| {
-                                    key >= range.start().as_slice()
-                                        && key <= range.end().as_slice()
-                                })
-                            };
-                            for (at, link) in links.iter().enumerate() {
-                                let upper =
-                                    links.get(at + 1).map(|next| next.separator.as_slice());
-                                let buffered = match index.buffer_for(at) {
-                                    Some(buffer) => buffer
-                                        .any_key::<Key>(&in_scope)
-                                        .unwrap_or(true),
-                                    None => false,
-                                };
-                                if buffered
-                                    || span_intersects(&link.separator, upper, scope)
-                                {
-                                    queue.push_back(link.node.clone());
+                            // Keep exactly the children a read of the
+                            // scope descends into. A read routes by the
+                            // separators alone (`ArchivedIndex::route`,
+                            // with a key below every separator clamped to
+                            // child 0) and merges only the buffer of the
+                            // link it took, and a write buffers each op on
+                            // the link that same rule picks, so an op in
+                            // a link's buffer lies in that link's routed
+                            // span. The spans therefore settle relevance
+                            // by themselves: no buffer is decoded, and no
+                            // separator is rebuilt, which on a tree whose
+                            // every block is local was most of a walk.
+                            let mut kept = vec![false; index.len()];
+                            for range in scope {
+                                let first = index.route(range.start())?;
+                                let last = index
+                                    .children_within(core::ops::Bound::Included(range.end()))?
+                                    .max(first + 1)
+                                    .min(index.len());
+                                for keep in kept.iter_mut().take(last).skip(first) {
+                                    *keep = true;
+                                }
+                            }
+                            for (at, keep) in kept.into_iter().enumerate() {
+                                if keep {
+                                    queue.push_back(index.hash_at(at)?.clone());
                                 }
                             }
                         }
@@ -502,11 +462,10 @@ mod tests {
     /// child it routes to.
     ///
     /// This pins the direction the scoped walk must never take: dropping a
-    /// child whose in-scope content the walk cannot see from separators
-    /// alone. The buffers say exactly which child carries what -- an op
-    /// routes to one link and lives in that link's buffer -- so the walk
-    /// asks each link's own buffer rather than re-deriving the routing from
-    /// spans, which does not agree with `route` at the edges.
+    /// child whose in-scope content sits below every stored key. Such an
+    /// op routes to child 0 (a key below every separator clamps there), so
+    /// the walk keeps child 0 for a scope below the first separator, as
+    /// the read it warms for descends into it.
     #[dialog_common::test]
     async fn it_keeps_a_child_whose_only_in_scope_content_is_buffered() -> Result<()> {
         let mut storage = Blocks::new();
@@ -587,6 +546,93 @@ mod tests {
         assert_eq!(
             found, 4,
             "a scoped walk must surface in-scope ops that live only as novelty"
+        );
+        Ok(())
+    }
+
+    /// In-scope ops buffered between two stored regions are reached, and
+    /// the walk decodes no buffer to reach them: the spans a read routes by
+    /// are where a write buffered them.
+    #[dialog_common::test]
+    async fn it_reaches_ops_buffered_between_stored_regions() -> Result<()> {
+        let mut storage = Blocks::new();
+        let tree = tagged_tree(&mut storage, &[0, 3], 1200).await?;
+
+        let mut hitchhiker = crate::HitchhikerTree::open(&tree);
+        for i in 0..4u32 {
+            let mut key = [0u8; 5];
+            key[0] = 1;
+            key[1..].copy_from_slice(&i.to_be_bytes());
+            hitchhiker = hitchhiker.insert(key, vec![0u8; 8], &storage).await?;
+        }
+        let mut delta = Delta::zero();
+        let root = hitchhiker.persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().clone());
+        }
+        let tree = PersistentTree::<[u8; 5], Vec<u8>>::at(crate::helpers::test_catalog(), root);
+
+        let scope = [tag_span(1)];
+        let before = crate::helpers::buffer_decodes();
+        let mut nodes = Vec::new();
+        {
+            let visits = tree.traverse_available_within(&storage, &scope);
+            futures_util::pin_mut!(visits);
+            while let Some(visit) = visits.next().await {
+                if let Visit::Present(node) = visit? {
+                    nodes.push(node);
+                }
+            }
+        }
+        assert_eq!(
+            crate::helpers::buffer_decodes() - before,
+            0,
+            "the walk decides which children to keep without decoding a buffer"
+        );
+
+        assert!(
+            nodes.iter().any(|node| matches!(
+                node.body(),
+                crate::NodeBody::Index(index) if index.novelty_len() > 0
+            )),
+            "fixture: the walk must pass buffers it could have decoded"
+        );
+        let visited = nodes.len();
+        let mut found = 0usize;
+        for node in &nodes {
+            match node.body() {
+                crate::NodeBody::Segment(segment) => {
+                    segment.for_each_entry::<[u8; 5], _>(|key, _| {
+                        if key[0] == 1 {
+                            found += 1;
+                        }
+                        Ok(())
+                    })?;
+                }
+                crate::NodeBody::Index(index) => {
+                    found += index
+                        .all_novelty::<[u8; 5]>()?
+                        .into_iter()
+                        .filter(|entry| entry.key[0] == 1)
+                        .count();
+                }
+            }
+        }
+
+        let mut all = 0usize;
+        {
+            let visits = tree.traverse_available(&storage);
+            futures_util::pin_mut!(visits);
+            while let Some(visit) = visits.next().await {
+                if matches!(visit?, Visit::Present(_)) {
+                    all += 1;
+                }
+            }
+        }
+        assert_eq!(found, 4, "every in-scope op is reached, buffered or stored");
+        assert!(
+            visited < all,
+            "the scope still prunes: visited {visited} of {all}"
         );
         Ok(())
     }

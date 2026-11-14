@@ -81,6 +81,394 @@ embedder decoding blocks for it, and the reading and decoding of a node
 belong to the environment, which already does both for the tree. A
 handle that is an entity is what a rule needs to make a node, a span or
 an entry the subject of a concept.
+#### Compatibility and migration
+
+- Nothing stored changes: `dialog.branch/tree` is
+  derived from the branch when a query runs and was never written, and
+  resolver rows are read off blocks. An older release reads everything
+  this one writes. A rule stored on a branch that uses `tree/key`,
+  `tree/blob` or `tree/manifest`, a snake_case manifest slot, or a
+  base58 string as `of`, or that reads `dialog.branch/tree` as text, no
+  longer compiles or no longer matches, and has to be re-authored.
+
+### A memory layer mints one instant per tick that changed it
+
+[#805](https://github.com/dialog-db/dialog-db/pull/805), argued in
+[notes/layers.md](./notes/layers.md) (point 12).
+
+A dispatch through a session runs in ticks: the transaction's own
+writes are the first, and each induction round after it is one more.
+A memory layer used to take a dispatch's writes as one instant holding
+the merged result, so a reader of its instants could not see the states
+the rules saw in between. It now takes each tick's writes as an
+instant of its own, in tick order. The instants are still minted only
+once the primary's commit publishes: a dispatch is one unit of
+publication, and a refused publish shows in no layer.
+
+What this changes for you:
+
+- A dispatch whose rules write a memory layer in several rounds mints
+  that many instants there, and `Ephemeral::since` yields each
+  intermediate state in order. A tick that writes no layer mints
+  nothing in it.
+- `TransactionBatch::shares` returns the shares tick by tick,
+  `&[Vec<(Entity, Changes)>]`, one entry per tick that wrote a layer,
+  in place of one merged entry per layer.
+- An induction round now reads what the rounds before it wrote into a
+  layer, as that layer will hold it once the ticks land: a rule
+  premised on a memory layer's row fires on an earlier round's head
+  there, and a head under `last` succeeds the layer's own row of the
+  cell. Before, a round read only the layer as the dispatch began, so
+  such a rule did not fire within the dispatch.
+- The transaction's own writes into a layer are read the same way and
+  are stimulus of the first round: a rule premised on the layer's row
+  fires on them in the same dispatch. Before, they were routed away
+  before induction and no rule saw them until the next dispatch.
+- A write under `last` into `session:`, the transaction's own or a
+  rule's head, succeeds the row the layer already holds within the
+  dispatch, so a chain of rules over `session:` runs as one over a
+  declared layer does. Before, the held row stood above the write and
+  the next round read it instead.
+- A maintained subscription over a session reads the several instants
+  in order and still equals a fresh evaluation.
+
+Why: a subscriber, or a rule premised on a layer's revision, should see
+the ticks the rules ran through, so a maintained view equals a fresh
+evaluation after any sequence of ticks.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten: memory
+  layers are process-local. A session's memory layers mint more
+  instants per dispatch, which a reader pinned to an older sequence
+  sees as more instants, not a different state.
+
+### Every session has its own layer, `session:`, which records the layers' revisions and which layer is selected
+
+[#803](https://github.com/dialog-db/dialog-db/pull/803), argued in
+[notes/layers.md](./notes/layers.md) ("The `session:` layer").
+
+A session now holds its own layer, `session:`, whether or not the
+primary's schema declares it: it is the branch's process-local store,
+the one `Branch::overlay` has always handed out, now addressed as a
+layer. After each dispatch publishes, the session writes into it one
+`dialog.layer/revision` row per layer under `last`: of `memory:` the
+primary's tree hash, of each declared layer and of `session:` itself
+the hash of its instant chain. Of the same rows, as the layers stood when
+the dispatch began, those the session has not recorded are the
+dispatch's stimulus, so a rule premised on a layer's revision fires
+when the layer moved (and on the first dispatch, which finds nothing
+recorded). A row
+`session: dialog.session/layer <layer>` selects a layer: while one is
+selected, a write with no layer named, and a rule head whose descriptor
+names none, lands in it instead of the primary. Machinery under
+`dialog.` (rules, layer declarations, the revision rows) never follows
+the selection.
+
+What this changes for you:
+
+- `Session::layers()` lists `session:` first, and `Session::layer` of
+  `session_layer()` returns the branch's overlay. A declaration of
+  `session:` in the schema no longer builds a second store.
+- `Session::select(Option<Entity>)` and `Session::selected()` are new.
+  A selection takes effect from the next dispatch; selecting a layer the
+  session does not hold makes a commit that would land a write in it
+  fail with `CommitError::UnboundLayer`, and nothing is written.
+- `revision_attr()` (`dialog.layer/revision`) and `selection_attr()`
+  (`dialog.session/layer`) are new.
+- Every dispatch through a session now mints one instant in `session:`
+  and runs induction even when it writes nothing else. A commit on a
+  branch outside a session writes no revision rows and ignores the
+  selection.
+
+Why: the session's own layer replaces `Branch::overlay` as a mechanism
+apart, so a layer's revision becomes a row a rule or a subscription
+reads like any other, and the layer a write lands in becomes data a
+rule or the embedder sets, the way an image editor's stroke lands on
+the selected layer.
+
+#### Compatibility and migration
+
+- The `session:` rows are process-local: they live in the branch's
+  overlay, which is never committed or synced. Nothing stored or synced
+  changes, and nothing is rewritten.
+
+### A session's handlers answer a dispatch's commands
+
+[#797](https://github.com/dialog-db/dialog-db/pull/797), argued in
+[notes/layers.md](./notes/layers.md) ("Handlers").
+
+A command is scratch: it lives one tick and lands on no layer, so
+nothing could react to it with an effect. Now a session holds
+handlers (`Session::handle`), built into dialog or registered by the
+embedder through the same `Handler` trait. Once a dispatch has
+published, every command of it, the one invoked and the ones its rules
+dispatched in any tick, is offered to each handler; what they answer is
+dispatched as the next tick's stimulus, where a rule captures what it
+wants of the answer on the layer its attribute is placed on, and a
+subscription through the session sees the capture. The chain ends when
+no handler answers.
+
+What this changes for you:
+
+- `Handler`, `HandlerError`, `Answering` (a handler over a function) and
+  `Session::handle` are new. A handler sees commands as `Changes` and
+  answers with `Changes`; an answer names the command it answers by that
+  command's entity.
+- `Invocation::perform` now runs the handlers after each publish and
+  chains their answers, so one `invoke` can publish several times. It
+  still returns the head the last dispatch left the primary at.
+- `Session::commands()` is new: a reader of the session's command feed,
+  the control channel. Each `poll` yields every dispatch since the last,
+  in order and once, as `Dispatched { sequence, revision, commands }`.
+  A consumer outside the session's process, or one that answers in its
+  own time, reads it and answers by invoking through the session; the
+  feed holds `FEED_CAPACITY` dispatches, and a reader it moved past is
+  told with `Lost` and starts over with `catch_up`.
+- `CommitError::AnswerDivergence` is new: handlers that keep answering
+  are stopped after `MAX_ANSWERS` dispatches. `CommitError::Handler` is
+  new: a handler's failure fails the invocation. Both come after the
+  dispatch they follow has published; what it wrote stands.
+- A session with no handler behaves as before.
+
+Why: an embedder's command handlers (tonk's command providers) and
+dialog's own effects, such as fetching a tree node a page asked for,
+need one way to observe a command and answer it, and the answer has to
+enter the session as a fact on a pinned layer rather than as something
+a query could observe outside any revision. Running handlers after the
+publish keeps a dispatch a function of head and stimulus, so a lost
+compare-and-swap re-runs no effect.
+
+### A row has a layer, `in`, and a session reads and writes its layers as one
+
+[#795](https://github.com/dialog-db/dialog-db/pull/795) and
+[#800](https://github.com/dialog-db/dialog-db/pull/800), argued in
+[notes/layers.md](./notes/layers.md).
+
+Where a fact lies is now a dimension of the row, beside `the`, `of` and
+`is`: its layer, `in`. An attribute descriptor may name it (`in:`), a
+constant layer or a variable a concept field binds; a statement may
+name it for every fact it writes (`Statement::at`). A read with `in`
+unbound reads every layer and binds each row's; one with `in` bound
+reads that layer alone; a write lands in the layer named, the primary
+with none. `LayerDeclaration` (`dialog.layer/store`) declares a layer
+beside the primary, backed for now by memory. `Branch::session()` opens
+a `Session` over the primary: it mints a memory layer for every declared
+layer, reads the composite, and commits a transaction by routing each
+write to its layer. `Session::invoke` drives it: one dispatch is one
+publication, re-run from the new head when the head moved under it.
+The primary's share is minted and published as before; a layer's share
+is applied only after the publish wins its compare-and-swap, so a lost
+head leaves no layer changed. A rule head whose descriptor names a
+layer lands there, keeping its pick, and succeeds no claim of the
+primary. The layers every session has are named: `memory:` is the
+primary, `session:` the branch's process-local store (what
+`Branch::overlay` holds), `control:` the loopback a command lands in.
+
+What this changes for you:
+
+- `AttributeDescriptor::in_layer` and `layer`, the descriptor's `in` on
+  the wire, `Attribution::layer`, `Claim::layer`, and `Statement::at`
+  are new. `AttributeQuery::with_layer` reads a layer by a term.
+  `Selector::in_layer` and `FactView::layer` carry the layer through a
+  store that reads several.
+- `Changes` keeps writes into layers apart (`associate_in`,
+  `dissociate_in`, `take_shares`, `iter_in`, `into_layer`), serialized
+  under an `in` key beside `facts` and `assets`. `into_instructions`
+  yields the writes bound for the primary alone.
+- `Branch::session()`, `OpenSession::declare`, `Session::{query,
+  transaction, layer, layers, declare, declared}` are new. A branch
+  read or committed directly, with no session, behaves as before, and
+  a write `.at(session:)` through it lands in the branch's overlay.
+- `Session::invoke(command)` and `Session::transact(facts)` drive a
+  session: each returns an `Invocation` whose `perform` commits and
+  publishes as one unit, and re-runs the whole dispatch from the new
+  head when the publish loses its compare-and-swap, up to `MAX_RERUNS`
+  times before reporting `PublishError::VersionMismatch`. A dispatch
+  that writes only to memory layers publishes nothing and returns the
+  unchanged head.
+- `Session::subscribe(query)` is new: a standing query over the primary
+  and every layer the session holds. A commit to the primary, a share a
+  dispatch lands in a memory layer, and a write to the primary's session
+  overlay each propagate as a result delta on the next poll, maintained
+  incrementally from the layer's instants as an overlay change is. A
+  maintained subscription through a session equals a fresh evaluation
+  after any sequence of dispatches (pinned by a seeded churn test).
+- `CommitError::UnboundLayer` is new: a write named for a layer the
+  session does not hold is refused before anything is settled or
+  minted. `CommitError::InvalidPlacement` is new: a layer declaration
+  whose value names no store is refused.
+- The corpus write gate admits `dialog.layer/*` from an application
+  write, as it admits `dialog.rule/*`.
+
+Why: local state that moves at frame rate, replicated state and
+ephemeral state peers learn of are different layers, not different
+kinds of fact. A row's layer being a term lets one set of rules act
+across layers and choose where a write lands from data, the way a
+stroke lands on the layer an editor's tool is on, and lets a session
+recreate every layer from the primary's declarations when it opens.
+
+#### Compatibility and migration
+
+- A replica that declares no layer stores and syncs exactly what it did.
+  Layer declarations are ordinary facts under `dialog.layer/`; an older
+  release reads them as facts it does not understand and ignores them.
+  A batch of `Changes` that writes into a layer serializes with an `in`
+  key an older release does not read; one that writes into none
+  serializes as before. Nothing is rewritten.
+
+## 0.4.0 (2026-11-14)
+
+### A prefetch hint a query took but did not finish is resumed by the next query
+
+[#770](https://github.com/dialog-db/dialog-db/pull/770), argued in
+[notes/fetch-scheduler.md](./notes/fetch-scheduler.md) ("A hint outlives
+the driver that took it").
+
+Every evaluation (a query, a subscription, a query inside a transaction)
+drives the env's queue of prefetch hints while it is polled, walking each
+hinted range so its blocks are local before a read asks for them. A hint
+it took lived only in that evaluation: when its stream ended or was
+dropped, an unfinished walk was dropped with it and no later evaluation
+saw the hint again. Now an evaluation that ends with walks unfinished
+hands their hints back to the queue, and whichever evaluation runs next
+resumes them. A resumed walk starts again from the root, but what earlier
+attempts fetched is already local, so it gets further each time.
+
+What this changes for you:
+
+- On a replica whose remote is slow relative to its queries, a hinted
+  range is fetched in full across the queries that follow, where before
+  it stayed partly remote and the range's own read fetched the rest.
+- `PreloadQueue::pending()` counts a hint a dropped evaluation handed
+  back; it no longer drops to zero the moment a driver takes a hint whose
+  walk never ends inside that evaluation.
+- A hint handed back goes through the same path as a new one: refused
+  with a zero `FetchBudget`, not enqueued twice while the same selector is
+  pending, and behind fresher hints under the same 1,024-per-rank bound.
+
+Why: speculation should be driven by whichever consumer is running, not
+lost with the one that popped it; on wasm a query regularly ended before
+its walk did, so the hint it existed for was wasted.
+
+### A read's warm walk picks children by the read's own routing, and decodes no buffer
+
+Refs [#762](https://github.com/dialog-db/dialog-db/issues/762).
+
+A query on a branch whose repository tracks a remote warms the ranges it
+is about to read with a scoped walk of the tree
+(`Traversable::traverse_available_within`). At each index node the walk
+decoded the write buffer of every link to see whether a buffered op fell
+in its scope. It now keeps exactly the children a read of the scope
+descends into, found by binary search on the node's separators
+(`ArchivedIndex::route` and `children_within`), with no buffer decoded and
+no separator rebuilt. A write buffers each op on the link that same rule
+picks, so the children kept are the ones that can hold in-scope content,
+buffered or stored.
+
+What this changes for you:
+
+- A view read on a member that tracks a remote and holds every block
+  costs a third fewer instructions (the `query-member` perf scenario:
+  181.8 M to 120.2 M), and no longer grows with how many links hold
+  buffered ops.
+- A scoped walk (a warm walk, or a download `within` a scope) may keep
+  child 0 of a node for a scope below its first separator, one path to the
+  leftmost leaf it did not keep before, because a read of that scope
+  descends there too.
+- `dialog_search_tree::helpers::buffer_decodes()` counts the novelty
+  buffers the calling thread has decoded, for tests.
+
+Why: on a member whose blocks are all local, the walk was most of a view
+read, and its cost rose with every change that left more ops buffered.
+
+### A typed variable reads the values of its type through a concept, as it does through a scan
+
+[#782](https://github.com/dialog-db/dialog-db/pull/782),
+[design/typed-read-of-untyped-field.md](./design/typed-read-of-untyped-field.md).
+
+A variable's type says which values it reads, and an attribute's type is
+part of which attribute it is. A scan of an attribute into a variable
+typed as text passes over a number stored under it, and so does a read of
+a recursive concept. A read of a concept that is not recursive did not: a
+value of another type under a field that declares no type failed the
+whole query with `Variable ?x of kind String cannot bind UnsignedInt(7)`.
+It now takes such a value for a fact of another attribute, so every way
+a concept is read agrees.
+
+What this changes for you:
+
+- A query that reads a concept field into a typed variable no longer
+  fails when the field holds a value of another type for some entity. It
+  yields the rows whose value the variable reads.
+- A variable that reads a type or nothing (`Option<T>`) is bound absent
+  for an entity whose only values are of another type, as it is for an
+  entity with no value. A value of the variable's type that disagrees
+  with what the variable is already bound to is still no row.
+- Where a pick elects one of an entity's values (`max:`, `top:`, a field
+  a rule derives), a typed variable elects among the values of its type.
+  A greater value of another type no longer takes the place of the one
+  the variable reads.
+
+Why: which of a concept's rows a caller's terms match should not depend
+on whether a rule makes the concept recursive, which the caller cannot
+see. `Match::bind` already says a value a type does not read is a
+mismatch that "callers that filter rows treat as a non-match"; the plain
+concept read was the one caller that did not.
+
+### A rule seeded by several rows of one entity is evaluated once when they agree
+
+[#763](https://github.com/dialog-db/dialog-db/pull/763), [#762](https://github.com/dialog-db/dialog-db/issues/762)
+
+Commit-time induction evaluated a seeded rule once per changed row a
+premise names. Rows of one entity that each bind one distinct field of
+the premise, a single attribute read under `last`, are now bound into
+one evaluation first. When it finds any match, it finds every match the
+rows find one by one: a seeded read yields a row's value only when the
+round view elects it, so every field then reads its row's value either
+way. When it finds none (an overlay row, a derived candidate or another
+claim stands above one of the rows, or the rest of the body fails), the
+rows are seeded one by one, as before. Every other row seeds alone.
+
+What this changes for you:
+
+- What induction writes is unchanged. The matches of one firing keep
+  the order seeding the rows one by one finds them in, so when two of
+  them write one transient cell under `last`, the same one wins. In
+  this crate's tests every seeded firing also seeds its rows one by one,
+  writes those matches the same way, and checks that the novelty and
+  transients are the same.
+- A command whose event names several fields of a premise evaluates the
+  rule once. On a tonk-shaped replica, a warm command's median fell from
+  6.9–8.7 ms to 4.7–5.9 ms; 1,861 of 1,900 groups found their match
+  together while building and pulling, 200 of 220 in warm commands.
+
+Why: an event's fields are one binding; evaluating it once per field
+repeated the same joins.
+
+### A rule seeded by several rows of one change writes its head once
+
+[#761](https://github.com/dialog-db/dialog-db/pull/761)
+
+Commit-time induction evaluates a rule once for each changed row a
+premise names, with that row bound. A command whose event carries
+several of a premise's fields seeds the rule once per field, and every
+evaluation finds the same binding. Each wrote the rule's head again: a
+`set assignee` event of eight fields wrote its assignee and its activity
+record eight times over, and each copy seeded the next round's rules
+again. A firing now writes each distinct head once.
+
+What this changes for you:
+
+- What a commit stores is unchanged: the copies were the same claims,
+  and a set holds a claim once.
+- A commit that fires rules writes fewer ops into the tree. On a
+  tonk-shaped replica, a warm command wrote 177–198 ops before and 26–33
+  now, and its median time fell from 12.7–14.1 ms to 7.1–9.2 ms.
+
+Why: the copies were most of what a warm command wrote, so they filled
+the tree's root buffer on nearly every commit, and each overflow
+rewrote the leaves it sheds into.
 
 ### A pull says how much it downloads, and can bring along only what the replica holds
 
@@ -371,6 +759,7 @@ that embodies the model should not depend on a store. #755 made the tree
 ask its environment for nodes; this makes the layer above it ask for
 everything else the same way, so what a store is and where it is stay the
 environment's business.
+
 ### A tree asks its environment for nodes, and the environment keeps them
 
 [design/tree-node-reads.md](./design/tree-node-reads.md), planned in
@@ -695,7 +1084,7 @@ module should not be pinned by a library that uses one call of it.
 
 ### A pull or a push that meets another revision under its own head's version is refused
 
-Fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
+[#707](https://github.com/dialog-db/dialog-db/pull/707), fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
 
 Two replicas writing with one key on one branch share an origin, since
 an origin derives from the branch and the issuer. When both build on the
@@ -799,6 +1188,8 @@ Why: the memo speaks for heads that landed, and a context remembered
 before the publish speaks for one that may never land.
 
 ### Distinct members inserted between the same neighbours get distinct positions
+
+[#729](https://github.com/dialog-db/dialog-db/pull/729).
 
 A position's fractional tail comes from a bias derived from the member's
 identity. The bias was the first six base62 digits of the identity bytes,
@@ -1285,7 +1676,7 @@ the walk read as it went, not because its reads depended on each other.
 
 ### A reset moves a branch forward only
 
-Fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
+[#686](https://github.com/dialog-db/dialog-db/pull/686), fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
 
 `Branch::reset` now refuses a revision that does not hold the branch's
 head, and the head does not move. A reset back to an older head, or onto
@@ -2639,13 +3030,6 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
-- **Tree resolvers.** Nothing stored changes: `dialog.branch/tree` is
-  derived from the branch when a query runs and was never written, and
-  resolver rows are read off blocks. An older release reads everything
-  this one writes. A rule stored on a branch that uses `tree/key`,
-  `tree/blob` or `tree/manifest`, a snake_case manifest slot, or a
-  base58 string as `of`, or that reads `dialog.branch/tree` as text, no
-  longer compiles or no longer matches, and has to be re-authored.
 - Nothing stored or synced changes for the file store's lock; only the
   lock files beside its cells do. A lock file the previous release left
   behind holds a bare PID, which this release reads as a holder: one

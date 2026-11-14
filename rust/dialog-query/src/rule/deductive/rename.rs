@@ -76,22 +76,28 @@ fn rename_proposition(proposition: &Proposition, map: &Rename) -> Result<Proposi
             terms: rename_parameters(&query.terms, map),
             predicate: query.predicate.clone(),
         }),
-        Proposition::Attribute(query) => Proposition::Attribute(Box::new(AttributeQuery::new(
-            rename_term(query.the(), map),
-            rename_term(query.of(), map),
-            rename_term(query.is(), map),
-            rename_term(query.cause(), map),
-            Some(query.cardinality()),
-        ))),
+        Proposition::Attribute(query) => Proposition::Attribute(Box::new(
+            AttributeQuery::new(
+                rename_term(query.the(), map),
+                rename_term(query.of(), map),
+                rename_term(query.is(), map),
+                rename_term(query.cause(), map),
+                Some(query.cardinality()),
+            )
+            .with_layer(rename_term(query.layer(), map)),
+        )),
         Proposition::OptionalAttribute(query) => {
             let inner = query.query();
-            Proposition::OptionalAttribute(Box::new(OptionalAttributeQuery::new(
-                rename_term(inner.the(), map),
-                rename_term(inner.of(), map),
-                rename_term(inner.is(), map),
-                rename_term(inner.cause(), map),
-                Some(inner.cardinality()),
-            )))
+            Proposition::OptionalAttribute(Box::new(
+                OptionalAttributeQuery::new(
+                    rename_term(inner.the(), map),
+                    rename_term(inner.of(), map),
+                    rename_term(inner.is(), map),
+                    rename_term(inner.cause(), map),
+                    Some(inner.cardinality()),
+                )
+                .with_layer(rename_term(inner.layer(), map)),
+            ))
         }
         // Formulas, resolvers and constraints rebuild from their own
         // parameter maps, so a constant never leaves its typed form.

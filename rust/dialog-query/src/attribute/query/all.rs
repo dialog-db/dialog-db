@@ -16,7 +16,7 @@ use crate::{
 };
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
-use dialog_corpus::{Cause, DialogCorpusError, Fact, Select};
+use dialog_corpus::{Cause, DialogCorpusError, Fact, Select, memory_layer};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
@@ -38,6 +38,10 @@ pub struct AttributeQueryAll {
     is: Term<Any>,
     /// The cause/provenance
     cause: Term<Cause>,
+    /// The layer the facts are read from (`in:`): a constant reads one
+    /// layer, a named variable reads every layer and binds the one each
+    /// row came from, blank reads every layer.
+    layer: Term<Entity>,
     /// Internal handle for claim storage.
     source: Term<Record>,
 }
@@ -85,7 +89,38 @@ impl AttributeQueryAll {
             of,
             is,
             cause,
+            layer: Term::blank(),
             source,
+        }
+    }
+
+    /// This scan over `layer` (`in:`). See the field.
+    pub fn with_layer(mut self, layer: Term<Entity>) -> Self {
+        self.layer = layer;
+        self
+    }
+
+    /// The layer term (`in:`).
+    pub fn layer(&self) -> &Term<Entity> {
+        &self.layer
+    }
+
+    /// Whether this scan binds each row's layer to a named variable: a
+    /// read that asks which layer a row came from, and so reads the same
+    /// cell on two layers as two rows.
+    pub(crate) fn binds_layer(&self) -> bool {
+        self.layer.name().is_some()
+    }
+
+    /// Whether a row read from `layer` is one this scan reads: any row
+    /// unless the scan names a constant layer the row's differs from. A
+    /// row with no layer stamped is the primary's, `memory:`.
+    pub(crate) fn reads_from(&self, layer: Option<&Entity>) -> bool {
+        match (&self.layer, layer) {
+            (Term::Constant(Value::Entity(wanted)), Some(layer)) => wanted == layer,
+            (Term::Constant(Value::Entity(wanted)), None) => *wanted == memory_layer(),
+            (Term::Constant(_), _) => false,
+            _ => true,
         }
     }
 
@@ -167,10 +202,17 @@ impl AttributeQueryAll {
         candidate: &mut Match,
         fact: Fact,
         version: Option<(Edition, [u8; 32])>,
+        layer: Option<Entity>,
     ) -> Result<(), EvaluationError> {
-        let claim = Claim::from(fact);
+        let mut claim = Claim::from(fact);
+        claim.layer = layer;
         let standing = Standing::new(version, claim.cause().clone());
-        candidate.reserve(4);
+        candidate.reserve(5);
+        // A row with no layer stamped is the primary's.
+        if let Some(name) = self.layer.shared_name() {
+            let layer = claim.layer.clone().unwrap_or_else(memory_layer);
+            candidate.bind_variable(name, self.layer.binding_kind(), Value::Entity(layer))?;
+        }
         if let Some(name) = self.the.shared_name() {
             candidate.bind_variable(name, self.the.binding_kind(), Value::from(claim.the()))?;
         }
@@ -218,6 +260,7 @@ impl AttributeQueryAll {
             || absent(self.of.name())
             || absent(self.is.name())
             || absent(self.cause.name())
+            || absent(self.layer.name())
     }
 
     /// True when a fact inhabits the scan's typed slots: the value
@@ -269,12 +312,14 @@ impl AttributeQueryAll {
             Err(_) => self.is.clone(),
         };
         let cause = self.cause.resolve(source);
+        let layer = self.layer.resolve(source);
 
         Self {
             the,
             of,
             is,
             cause,
+            layer,
             source: self.source.clone(),
         }
     }
@@ -339,6 +384,18 @@ impl AttributeQueryAll {
             },
         );
 
+        // The layer never constrains the lookup by itself: bound, it
+        // narrows the read to one layer; unbound, the scan binds it.
+        schema.insert(
+            "in".to_string(),
+            Field {
+                description: "The layer the relation is read from".to_string(),
+                content_type: Some(Kind::from(Type::Entity)),
+                requirement: Requirement::Optional,
+                cardinality: Cardinality::One,
+            },
+        );
+
         schema
     }
 
@@ -362,6 +419,7 @@ impl AttributeQueryAll {
         params.insert("of".to_string(), Term::<Any>::from(&self.of));
         params.insert("is".to_string(), self.is.clone());
         params.insert("cause".to_string(), Term::<Any>::from(&self.cause));
+        params.insert("in".to_string(), Term::<Any>::from(&self.layer));
         params
     }
 
@@ -420,6 +478,10 @@ impl AttributeQueryAll {
                     // rather than failing the query.
                     let fact = fact?;
                     let standing = fact.standing();
+                    let layer = fact.layer().cloned();
+                    if !selection.reads_from(layer.as_ref()) {
+                        continue;
+                    }
                     let fact = match fact.to_owned() {
                         Ok(fact) => fact,
                         Err(DialogCorpusError::CorruptEntry(reason)) => {
@@ -434,7 +496,7 @@ impl AttributeQueryAll {
                         continue;
                     };
                     let mut extension = base.clone();
-                    selector.merge(&mut extension, fact, standing)?;
+                    selector.merge(&mut extension, fact, standing, layer)?;
                     yield extension;
                 }
             }
@@ -618,8 +680,17 @@ impl TryFrom<&AttributeQueryAll> for Selector<Constrained> {
             }
         }
 
-        selector.ok_or_else(|| EvaluationError::EmptySelector {
+        let selector = selector.ok_or_else(|| EvaluationError::EmptySelector {
             message: "At least one field must be constrained".to_string(),
+        })?;
+        Ok(match &from.layer {
+            Term::Constant(layer) => {
+                let layer = Entity::try_from(layer.clone()).map_err(|_| {
+                    EvaluationError::Store("Could not convert value to Entity".to_string())
+                })?;
+                selector.in_layer(layer)
+            }
+            Term::Variable { .. } => selector,
         })
     }
 }
@@ -710,6 +781,9 @@ impl Display for AttributeQueryAll {
         write!(f, "of: {},", self.of)?;
         write!(f, "is: {},", self.is)?;
         write!(f, "cause: {},", self.cause)?;
+        if !self.layer.is_blank() {
+            write!(f, "in: {},", self.layer)?;
+        }
         write!(f, "}}")
     }
 }

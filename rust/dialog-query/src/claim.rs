@@ -19,9 +19,20 @@ pub struct Claim {
     pub is: Value,
     /// The cause (provenance hash) of this claim
     pub cause: Cause,
+    /// The layer the claim was read from (`in:`), when the read was over
+    /// several layers and the row is not the primary's; `None` is the
+    /// primary, `memory:`.
+    #[serde(rename = "in", default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<Entity>,
 }
 
 impl Claim {
+    /// The layer this claim was read from; `None` is the primary,
+    /// `memory:`.
+    pub fn layer(&self) -> Option<&Entity> {
+        self.layer.as_ref()
+    }
+
     /// Get the attribute for this claim
     pub fn the(&self) -> &Relation {
         &self.the
@@ -69,6 +80,7 @@ impl From<Fact> for Claim {
             of: fact.of,
             is: fact.is,
             cause: fact.cause.unwrap_or(Cause([0; 32])),
+            layer: None,
         }
     }
 }
@@ -80,6 +92,7 @@ impl From<&Fact> for Claim {
             of: fact.of.clone(),
             is: fact.is.clone(),
             cause: fact.cause.clone().unwrap_or(Cause([0; 32])),
+            layer: None,
         }
     }
 }

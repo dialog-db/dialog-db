@@ -14,7 +14,7 @@ use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
-use dialog_corpus::{Cause, DialogCorpusError, Fact, FactView, Select};
+use dialog_corpus::{Cause, DialogCorpusError, Fact, FactView, Select, memory_layer};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::pin::Pin;
@@ -45,10 +45,19 @@ fn materialize_winner(winner: FactView) -> Result<Option<Winner>, DialogCorpusEr
 fn challenged(
     source: &Term<Record>,
     candidate: &Match,
+    per_layer: bool,
 ) -> Result<Selector<Constrained>, EvaluationError> {
     let claim = candidate.prove(source)?;
     let attribute = CorpusRelation::try_from(Value::from(claim.the().clone()))?;
-    Ok(Selector::new().the(attribute).of(claim.of().clone()))
+    let selector = Selector::new().the(attribute).of(claim.of().clone());
+    // A read that binds each row's layer elects within the layer: the
+    // challengers are the layer's own, the primary's for a row with no
+    // layer stamped. Any other read elects across the layers as one cell.
+    Ok(if per_layer {
+        selector.in_layer(claim.layer.clone().unwrap_or_else(memory_layer))
+    } else {
+        selector
+    })
 }
 
 /// Winner verification.
@@ -80,9 +89,11 @@ where
             Some(Cause::try_from(candidate.lookup(&Term::from(cause_term))?.content()?)?)
         };
 
-        let challengers =
-            Provider::<Select<'_>>::execute(env, challenged(selector.source(), &candidate)?)
-                .await?;
+        let challengers = Provider::<Select<'_>>::execute(
+            env,
+            challenged(selector.source(), &candidate, selector.binds_layer())?,
+        )
+        .await?;
 
         let mut winner: Option<FactView> = None;
         for await each in challengers {
@@ -168,6 +179,18 @@ impl AttributeQueryOnly {
         self.query.cause()
     }
 
+    /// The layer term (`in:`). See [`AttributeQueryAll::layer`].
+    pub fn layer(&self) -> &Term<Entity> {
+        self.query.layer()
+    }
+
+    /// This scan over `layer` (`in:`).
+    pub fn with_layer(self, layer: Term<Entity>) -> Self {
+        Self {
+            query: self.query.with_layer(layer),
+        }
+    }
+
     /// Get the source term (internal claim handle).
     pub fn source(&self) -> &Term<Record> {
         self.query.source()
@@ -244,7 +267,8 @@ impl AttributeQueryOnly {
                     resolved.of().clone(),
                     Term::blank(),
                     resolved.cause().clone(),
-                );
+                )
+                .with_layer(resolved.layer().clone());
                 (&scan).try_into().ok()
             } else {
                 None
@@ -287,21 +311,32 @@ impl AttributeQueryOnly {
                         resolved.of().clone(),
                         Term::blank(),
                         resolved.cause().clone(),
-                    );
+                    )
+                    .with_layer(resolved.layer().clone());
+                    // A read binding each row's layer elects within the
+                    // layer, so the same cell on two layers is two rows;
+                    // any other read elects across the layers as one cell.
+                    let per_layer = selector.binds_layer();
 
                     let mut candidate: Option<FactView> = None;
 
                     let stream = Provider::<Select<'_>>::execute(env, (&scan).try_into()?).await?;
                     for await fact in stream {
                         let fact = fact?;
+                        if !scan.reads_from(fact.layer()) {
+                            continue;
+                        }
 
                         candidate = Some(match candidate.take() {
                             Some(current) => {
                                 // Group membership compares the raw key
                                 // bytes; nothing materializes while the
-                                // window slides within a group.
+                                // window slides within a group. A cell is
+                                // a cell of one layer, so a row of another
+                                // layer closes the group.
                                 if current.the_bytes()? == fact.the_bytes()?
                                     && current.of_bytes()? == fact.of_bytes()?
+                                    && (!per_layer || current.layer() == fact.layer())
                                 {
                                     current.elect(fact)?
                                 } else {
@@ -312,6 +347,7 @@ impl AttributeQueryOnly {
                                     // (`CorruptEntry`) is a corrupt tree
                                     // entry: drop the group's yield rather
                                     // than failing the query.
+                                    let layer = current.layer().cloned();
                                     match materialize_winner(current)?.and_then(
                                         |(winner, standing)| {
                                             selector.admit(winner).map(|winner| (winner, standing))
@@ -323,7 +359,7 @@ impl AttributeQueryOnly {
                                                 .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
                                         {
                                             let mut extension = base.clone();
-                                            selector.merge(&mut extension, winner, standing)?;
+                                            selector.merge(&mut extension, winner, standing, layer)?;
                                             yield extension;
                                         }
                                         _ => {}
@@ -338,6 +374,7 @@ impl AttributeQueryOnly {
                     // Yield the final group's winner (unless its stored
                     // bytes are corrupt; see the group-close arm above).
                     if let Some(winner) = candidate.take() {
+                        let layer = winner.layer().cloned();
                         match materialize_winner(winner)?.and_then(|(winner, standing)| {
                             selector.admit(winner).map(|winner| (winner, standing))
                         }) {
@@ -347,7 +384,7 @@ impl AttributeQueryOnly {
                                     .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
                             {
                                 let mut extension = base.clone();
-                                selector.merge(&mut extension, winner, standing)?;
+                                selector.merge(&mut extension, winner, standing, layer)?;
                                 yield extension;
                             }
                             _ => {}
@@ -366,8 +403,9 @@ impl AttributeQueryOnly {
                     // premise probing the same entities only ever hints
                     // into the leaf the challenge is already fetching.
                     let source = selector.source().clone();
+                    let per_layer = selector.binds_layer();
                     let candidates = Box::pin(pipelined(candidates, env, move |candidate| {
-                        challenged(&source, candidate).ok()
+                        challenged(&source, candidate, per_layer).ok()
                     }));
                     for await candidate in candidates {
                         let candidate = candidate?;

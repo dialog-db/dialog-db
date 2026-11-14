@@ -33,6 +33,11 @@ pub struct Attribution {
     /// a `last` field's write succeeds the claim the cell holds, an
     /// `all` field's lands beside the others.
     pub pick: Pick,
+    /// The layer the write lands in (`in:`), when the descriptor names
+    /// one or the instance binds the descriptor's variable; the primary
+    /// otherwise.
+    #[serde(rename = "in", default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<Entity>,
 }
 
 /// What an attribute's `the` holds: one relation, or every entry of a
@@ -285,6 +290,12 @@ pub struct AttributeDescriptor {
     /// carries [`among`](Self::among). The cardinality is the pick's
     /// arity.
     pick: Pick,
+    /// The layer the attribute's facts are read from and written to
+    /// (`in:`): a constant layer, or a variable a concept field binds. A
+    /// read with none, or with the variable unbound, reads every layer;
+    /// a write with none lands in the primary. No part of the
+    /// attribute's identity: one attribute's rows may lie on any layer.
+    layer: Option<Term<Entity>>,
 }
 
 /// The wire form of an [`AttributeDescriptor`]: `the` is one relation
@@ -305,6 +316,8 @@ struct Wire {
     /// The preview spelling of `pick`, read and never written.
     #[serde(default, skip_serializing)]
     select: Option<PickName>,
+    #[serde(rename = "in", default, skip_serializing_if = "Option::is_none")]
+    layer: Option<Term<Entity>>,
 }
 
 /// A pick as the wire spells it: its entity alone (`all:`), the values
@@ -416,6 +429,7 @@ impl TryFrom<Wire> for AttributeDescriptor {
             content_type,
             among,
             pick,
+            layer: wire.layer,
         };
         match descriptor.pick_error() {
             Some(reason) => Err(reason),
@@ -453,6 +467,7 @@ impl From<AttributeDescriptor> for Wire {
             content,
             pick: Some(name).filter(|name| *name != implied),
             select: None,
+            layer: descriptor.layer,
         }
     }
 }
@@ -483,7 +498,46 @@ impl AttributeDescriptor {
             content_type,
             among: Vec::new(),
             pick: cardinality.pick(),
+            layer: None,
         }
+    }
+
+    /// This descriptor reading and writing `layer` (`in:`): a constant
+    /// layer, or a variable a concept field binds.
+    pub fn in_layer(mut self, layer: Term<Entity>) -> Self {
+        self.layer = Some(layer);
+        self
+    }
+
+    /// The layer the attribute reads from and writes to, when the
+    /// descriptor names one. See [`in_layer`](Self::in_layer).
+    pub fn layer(&self) -> Option<&Term<Entity>> {
+        self.layer.as_ref()
+    }
+
+    /// The layer a write through this descriptor lands in, when the
+    /// descriptor names a constant one.
+    pub fn constant_layer(&self) -> Option<Entity> {
+        match &self.layer {
+            Some(Term::Constant(layer)) => Entity::try_from(layer.clone()).ok(),
+            _ => None,
+        }
+    }
+
+    /// The layer term of a premise over this descriptor, as `parameters`
+    /// bind it: the descriptor's constant, the caller's term for the
+    /// descriptor's variable, or the variable itself.
+    fn layer_term(&self, parameters: &Parameters) -> Option<Term<Entity>> {
+        let layer = self.layer.as_ref()?;
+        let name = layer.name()?;
+        Some(match parameters.get(name).cloned() {
+            Some(Term::Variable {
+                name: Some(name), ..
+            }) => Term::var(name.clone()),
+            Some(Term::Variable { name: None, .. }) => Term::blank(),
+            Some(Term::Constant(value)) => Term::Constant(value),
+            None => layer.clone(),
+        })
     }
 
     /// This descriptor reading `then` after its relation, in rank
@@ -683,6 +737,7 @@ impl AttributeDescriptor {
                 the,
                 is: value.clone(),
                 pick: self.pick.clone(),
+                layer: self.constant_layer(),
             })
         } else {
             Err(FieldTypeError::TypeMismatch {
@@ -749,13 +804,19 @@ impl AttributeDescriptor {
             None => Term::blank(),
         };
 
-        Ok(AttributeQuery::new(
+        let query = AttributeQuery::new(
             self.the().term("the"),
             of,
             is,
             cause,
             Some(self.cardinality()),
-        ))
+        );
+        Ok(
+            match self.layer_term(&parameters).or_else(|| self.layer.clone()) {
+                Some(layer) => query.with_layer(layer),
+                None => query,
+            },
+        )
     }
 
     /// The attribute's identity: its merkle reference under

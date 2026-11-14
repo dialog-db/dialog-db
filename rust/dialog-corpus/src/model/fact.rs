@@ -206,6 +206,10 @@ impl Fact {
 #[derive(Clone, Debug)]
 pub struct FactView {
     backing: Backing,
+    /// The layer this row was read from, when the read was over several
+    /// and the row is not the primary's (see
+    /// [`with_layer`](Self::with_layer)).
+    layer: Option<Entity>,
 }
 
 #[derive(Clone, Debug)]
@@ -241,6 +245,7 @@ impl From<Fact> for FactView {
                 fact: Box::new(fact),
                 standing: None,
             },
+            layer: None,
         }
     }
 }
@@ -262,6 +267,7 @@ impl FactView {
                 datum,
                 spilled,
             },
+            layer: None,
         }
     }
 
@@ -279,6 +285,7 @@ impl FactView {
                 fact: Box::new(fact),
                 standing: Some((edition, [0; 32])),
             },
+            layer: None,
         }
     }
 
@@ -319,6 +326,21 @@ impl FactView {
         self.versions()
             .map(|version| (version.edition, make_reference(version.key_bytes())))
             .max()
+    }
+
+    /// This row as read from `layer`: what a read over several layers
+    /// stamps on each row of a layer beside the primary, so a query can
+    /// bind or filter by where a row came from. The primary's rows are
+    /// left bare: no layer is [`memory:`](crate::MEMORY).
+    pub fn with_layer(mut self, layer: Entity) -> Self {
+        self.layer = Some(layer);
+        self
+    }
+
+    /// The layer this row was read from, when the read stamped one;
+    /// `None` is the primary, [`memory:`](crate::MEMORY).
+    pub fn layer(&self) -> Option<&Entity> {
+        self.layer.as_ref()
     }
 
     /// The [`Cause`] of this fact, if any, without touching the key.

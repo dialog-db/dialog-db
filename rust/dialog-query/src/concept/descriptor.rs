@@ -352,10 +352,25 @@ impl ConceptDescriptor {
         let mut relations = vec![];
         for (name, field) in self.with().iter() {
             if let Some(value) = model.attributes.get(name) {
-                let relation = field
+                let mut relation = field
                     .descriptor()
                     .resolve(value.clone())
                     .map_err(|e| e.at(name.to_string()))?;
+                // A field whose descriptor reads a variable layer (`in:
+                // ?where`) lands where the instance binds that variable.
+                if let Some(layer) = field.descriptor().layer().and_then(Term::name) {
+                    match model.attributes.get(layer) {
+                        Some(Value::Entity(layer)) => relation.layer = Some(layer.clone()),
+                        Some(other) => {
+                            return Err(TypeError::TypeMismatch {
+                                binding: layer.to_string(),
+                                expected: Type::Entity,
+                                actual: Box::new(Term::Constant(other.clone())),
+                            });
+                        }
+                        None => {}
+                    }
+                }
                 relations.push(relation);
             } else if !field.is_optional() {
                 return Err(TypeError::OmittedRequirement {
@@ -507,6 +522,22 @@ impl From<&ConceptDescriptor> for Schema {
                     cardinality: field.cardinality(),
                 },
             );
+            // A variable layer (`in: ?where`) is a slot of the concept
+            // too: bound, it narrows the field's read to one layer;
+            // unbound, the read binds it to where each row came from.
+            if let Some(layer) = field.descriptor().layer().and_then(Term::name)
+                && !schema.contains(layer)
+            {
+                schema.insert(
+                    layer.into(),
+                    Field {
+                        description: format!("The layer `{name}` is read from"),
+                        content_type: Some(Kind::from(Type::Entity)),
+                        requirement: Requirement::Optional,
+                        cardinality: Cardinality::One,
+                    },
+                );
+            }
         }
 
         // A collection field's key rides as its own operand: the
@@ -582,17 +613,31 @@ impl Statement for ConceptStatement {
         // succeeds the claim its cell holds, and is a no-op when the
         // cell already reads as the written value.
         for attribution in self.with {
-            update.associate(
-                attribution.the,
-                self.this.clone(),
-                attribution.is,
-                attribution.pick,
-            );
+            match attribution.layer {
+                Some(layer) => update.associate_in(
+                    layer,
+                    attribution.the,
+                    self.this.clone(),
+                    attribution.is,
+                    attribution.pick,
+                ),
+                None => update.associate(
+                    attribution.the,
+                    self.this.clone(),
+                    attribution.is,
+                    attribution.pick,
+                ),
+            }
         }
     }
     fn retract(self, update: &mut impl Update) {
         for attribution in self.with {
-            update.dissociate(attribution.the, self.this.clone(), attribution.is);
+            match attribution.layer {
+                Some(layer) => {
+                    update.dissociate_in(layer, attribution.the, self.this.clone(), attribution.is)
+                }
+                None => update.dissociate(attribution.the, self.this.clone(), attribution.is),
+            }
         }
     }
 }

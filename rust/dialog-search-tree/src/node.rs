@@ -2,6 +2,8 @@ mod persistent;
 pub use persistent::*;
 
 mod archive;
+#[cfg(any(test, feature = "helpers"))]
+pub(crate) use archive::buffer_decodes;
 
 mod attribution;
 pub use attribution::*;
