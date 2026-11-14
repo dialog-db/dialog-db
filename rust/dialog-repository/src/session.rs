@@ -909,10 +909,14 @@ mod tests {
                 let mut rows: Vec<String> = claims
                     .iter()
                     .map(|claim| {
+                        // A row with no layer stamped is the primary's.
                         format!(
                             "{:?} in {}",
                             claim.is,
-                            claim.layer().map(ToString::to_string).unwrap_or_default()
+                            claim
+                                .layer()
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| crate::MEMORY.to_string())
                         )
                     })
                     .collect();
