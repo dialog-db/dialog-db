@@ -118,7 +118,7 @@ fn head_reference(conclusion: &ConceptDescriptor) -> Reference {
 /// A premise's proposition: a concept application by its concept and
 /// bindings, anything else by its wire form.
 ///
-/// An equality a side of which is a map, a list or a tuple of terms has
+/// An equality a side of which is a map or a list of terms has
 /// no wire form. It is referenced as its wire form would be read, with
 /// each side by its [`pattern_reference`], so an equality between two
 /// terms has the reference it always had.
@@ -149,8 +149,8 @@ pub(crate) fn proposition(proposition: &Proposition) -> Option<Reference> {
     proposition_reference(proposition)
 }
 
-/// A pattern, by its parts: a leaf as the term it is, and a map, a list
-/// or a tuple of terms as a map from its shape to its parts' references,
+/// A pattern, by its parts: a leaf as the term it is, and a map
+/// or a list of terms as a map from its shape to its parts' references,
 /// with what takes the entries or items it did not name beside them.
 /// The same pattern has the same reference however its map's entries
 /// were given, and no layout of a value of the shape is part of it.
@@ -186,12 +186,11 @@ fn pattern_reference(pattern: &Pattern) -> Option<Reference> {
             }
             Type::MAP.map(shape)
         }
-        Pattern::Tuple(items) => Type::MAP.map([(text("tuple:"), parts(items)?)]),
     })
 }
 
-/// What a concept application binds under `name`: a term, or the map,
-/// list or tuple of terms it holds there.
+/// What a concept application binds under `name`: a term, or the map
+/// or list of terms it holds there.
 fn binding_reference(query: &ConceptQuery, name: &str) -> Option<Option<Reference>> {
     match query.terms.shape(name) {
         Some(pattern) => Some(Some(pattern_reference(pattern)?)),

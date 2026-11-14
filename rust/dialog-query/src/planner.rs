@@ -49,7 +49,7 @@ impl Planner {
     /// premises have been ordered. Returns an error if some premise's
     /// prerequisites can never be satisfied by the others.
     pub fn plan(mut self, scope: &Environment) -> Result<Conjunction, TypeError> {
-        // A concept premise that holds a map, a list or a tuple of
+        // A concept premise that holds a map or a list of
         // terms is planned as the concept over the whole value and an
         // equality between the whole and the pattern. A rule's body
         // arrives lowered, and this is then a scan that finds nothing.

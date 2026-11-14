@@ -17,7 +17,7 @@ use std::collections::HashSet;
 /// otherwise; an `Optional` slot is bound. A negation never binds,
 /// its slots are requirements only.
 ///
-/// A slot that holds a map, a list or a tuple of terms is judged by the
+/// A slot that holds a map or a list of terms is judged by the
 /// variables inside it: it is bound when every one of them is, a slot
 /// the premise binds binds each of them that is not, and a slot the
 /// premise requires requires each of them that is not. A blank inside
@@ -76,8 +76,8 @@ pub(crate) fn categorize(
     (binds, requires)
 }
 
-/// What a parameter holds, as feasibility reads it: a term, or a map,
-/// a list or a tuple of terms judged by the variables inside it.
+/// What a parameter holds, as feasibility reads it: a term, or a map
+/// or a list of terms judged by the variables inside it.
 enum Slot<'a> {
     Term(&'a Term<Any>),
     Shape(&'a Pattern),

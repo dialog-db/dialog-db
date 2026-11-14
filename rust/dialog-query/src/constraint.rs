@@ -122,7 +122,7 @@ impl Constraint {
         };
         match self {
             Constraint::Equality(_) => {
-                // A side may be a map, a list or a tuple of terms, which
+                // A side may be a map or a list of terms, which
                 // no single term stands for.
                 let side = |name: &str| {
                     terms

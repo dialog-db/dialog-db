@@ -252,8 +252,8 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
 /// a stored form.
 ///
 /// A rule the stored rule format cannot write is refused here, with the
-/// reason [`DeductiveRule::storable`] gives: one that holds a map, a
-/// list or a tuple of terms, which format 3 has no way to write. An
+/// reason [`DeductiveRule::storable`] gives: one that holds a map or
+/// a list of terms, which format 3 has no way to write. An
 /// assertion has no error to return, so the refusal is a panic that
 /// carries that reason, as it already is for a rule whose body reads an
 /// attribute through a raw scan. Ask
@@ -277,8 +277,8 @@ fn stored(storable: Result<(), TypeError>, entity: impl FnOnce() -> Entity) -> E
 /// trigger footprint over derivation. Retracting the same rule erases
 /// those facts, uninstalling it.
 ///
-/// A rule the stored format cannot write (one that holds a map, a list
-/// or a tuple of terms) has no `source` to assert. A target that is
+/// A rule the stored format cannot write (one that holds a map
+/// or a list of terms) has no `source` to assert. A target that is
 /// never stored, the changes a query lays over a line, is asked to
 /// hold the rule itself ([`Update::hold`]) and is given the other
 /// facts, which name it. A target that is committed refuses, and the

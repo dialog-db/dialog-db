@@ -302,7 +302,7 @@ pub enum TypeError {
         reason: String,
     },
 
-    /// A rule holds a pattern of a map, a list or a tuple, and the
+    /// A rule holds a pattern of a map or a list, and the
     /// stored rule format has no way to write one. The rule runs where
     /// it was built, and cannot be installed.
     #[error(

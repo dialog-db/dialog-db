@@ -25,7 +25,7 @@ pub type Rename = BTreeMap<String, String>;
 pub fn variables(premises: &[Premise]) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for premise in premises {
-        // The variables inside a map, a list or a tuple of terms are
+        // The variables inside a map or a list of terms are
         // the premise's own; the variable standing for the whole is not
         // one anybody wrote.
         let parameters = premise.parameters();

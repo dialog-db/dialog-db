@@ -4,7 +4,7 @@
 //! Supports bidirectional inference: if one term is bound, the other will be
 //! inferred to have the same value.
 //!
-//! Either side may be a [`Pattern`]. A map, a list or a tuple of terms is
+//! Either side may be a [`Pattern`]. A map or a list of terms is
 //! bound when every variable inside it is, and is then the value it
 //! builds. Where the other side is bound instead, the pattern takes that
 //! value apart and binds the variables inside it.
@@ -39,7 +39,7 @@ const EQUALITY_COST: usize = 1;
 /// 3. **Error on Unbound**: When neither term is bound, the constraint cannot be evaluated
 ///    and raises a `ConstraintViolation` error.
 ///
-/// A side that is a map, a list or a tuple of terms ([`Equality::between`])
+/// A side that is a map or a list of terms ([`Equality::between`])
 /// is bound when every variable inside it is. Inferring it from the other
 /// side takes the other side's value apart, and a value that is not of the
 /// pattern's shape filters the match.
@@ -60,7 +60,7 @@ pub struct Equality {
 }
 
 /// The kind a side of an equality has: a leaf's own, and a record for a
-/// map, a list or a tuple, which is what a value of that shape is kept
+/// map or a list, which is what a value of that shape is kept
 /// as.
 fn kind_of(side: &Pattern) -> Option<Kind> {
     match side {
@@ -79,7 +79,7 @@ impl Equality {
     }
 
     /// Creates an equality constraint between two patterns: a term, or a
-    /// map, a list or a tuple of terms.
+    /// map or a list of terms.
     pub fn between(this: impl Into<Pattern>, is: impl Into<Pattern>) -> Self {
         Self {
             this: this.into(),
@@ -218,8 +218,8 @@ impl Equality {
         }
     }
 
-    /// One row of an equality a side of which is a map, a list or a
-    /// tuple of terms. A side every variable of which has a value is
+    /// One row of an equality a side of which is a map
+    /// or a list of terms. A side every variable of which has a value is
     /// that value: with both, the row passes when they are one value;
     /// with one, the other side takes it apart, binding its variables,
     /// and a value it does not match filters the row. A side that is

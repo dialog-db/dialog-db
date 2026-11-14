@@ -153,7 +153,7 @@ impl InductiveRule {
     }
 
     /// Whether this rule can be stored, and so installed. A rule that
-    /// holds a map, a list or a tuple of terms cannot: the stored rule
+    /// holds a map or a list of terms cannot: the stored rule
     /// format has no way to write a pattern (see
     /// [`DeductiveRule::storable`](crate::DeductiveRule::storable)).
     pub fn storable(&self) -> Result<(), TypeError> {

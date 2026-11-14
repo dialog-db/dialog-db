@@ -164,21 +164,20 @@ fn it_takes_a_list_apart_and_binds_a_run() {
         Some(&Composite::list([text("b"), text("c")]).into())
     );
 
-    // A list is not a tuple, and neither is a map.
-    assert!(unify(&Pattern::tuple([var("x"), var("y"), var("z")]), &list).is_none());
+    // A map is no list.
     assert!(unify(&exact, &note()).is_none());
     assert!(unify(&exact, &text("abc")).is_none());
 }
 
-/// A tuple pattern takes a tuple of exactly its items apart, and
-/// patterns nest as values do.
+/// A list pattern with no run takes a list of exactly its items apart,
+/// and patterns nest as values do.
 #[dialog_common::test]
 fn it_takes_nested_shapes_apart() {
     let place: Value = Composite::map([
         (text("name"), text("Home")),
         (
             text("at"),
-            Composite::tuple([Value::Float(45.5), Value::Float(-122.5)]).into(),
+            Composite::list([Value::Float(45.5), Value::Float(-122.5)]).into(),
         ),
         (
             text("tags"),
@@ -195,7 +194,7 @@ fn it_takes_nested_shapes_apart() {
         ("name".to_string(), var("name")),
         (
             "at".to_string(),
-            Pattern::tuple([var("latitude"), var("longitude")]),
+            Pattern::list([var("latitude"), var("longitude")]),
         ),
         (
             "tags".to_string(),
@@ -210,13 +209,13 @@ fn it_takes_nested_shapes_apart() {
 
     let wrong = Pattern::map([
         ("name".to_string(), var("name")),
-        ("at".to_string(), Pattern::tuple([var("latitude")])),
+        ("at".to_string(), Pattern::list([var("latitude")])),
         ("tags".to_string(), var("tags")),
     ])
     .expect("a pattern");
     assert!(
         unify(&wrong, &place).is_none(),
-        "a tuple of two is not one of one"
+        "a list of two is not one of one"
     );
 }
 
@@ -355,7 +354,7 @@ fn it_knows_its_variables() {
         ("title".to_string(), var("title")),
         (
             "at".to_string(),
-            Pattern::tuple([var("x"), Pattern::from(Value::UnsignedInt(1)), var("x")]),
+            Pattern::list([var("x"), Pattern::from(Value::UnsignedInt(1)), var("x")]),
         ),
     ])
     .expect("a pattern") else {
@@ -395,8 +394,8 @@ fn it_is_written_one_way() {
     ));
 }
 
-/// A leaf is written to the wire as a term is. A map, a list or a
-/// tuple has no wire form and is refused.
+/// A leaf is written to the wire as a term is. A map or a list has no
+/// wire form and is refused.
 #[dialog_common::test]
 fn it_has_no_wire_form_above_a_leaf() {
     assert_eq!(
@@ -1204,7 +1203,7 @@ fn it_refuses_adding_a_number_to_a_text_bound_inside_a_map() {
     .expect("a number is added to a number bound inside a map");
 }
 
-/// A map, a list or a tuple stands only where a record can be read:
+/// A map or a list stands only where a record can be read:
 /// under a field that reads text it is refused, and so is a rest that
 /// another premise needs to be a number.
 #[dialog_common::test]
