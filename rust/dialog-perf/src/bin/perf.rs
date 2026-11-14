@@ -23,6 +23,10 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use dialog_perf::{Against, SweepConfig, Tolerance, catalog, compare_dirs, run, sweep};
 
+/// Counts the measured phase's calls into the allocator.
+#[global_allocator]
+static ALLOCATOR: dialog_perf::allocator::Counting = dialog_perf::allocator::Counting;
+
 /// The engine's cost matrix: counters and instruction counts per scenario.
 #[derive(Debug, Parser)]
 #[command(name = "perf", version, about)]
@@ -77,7 +81,7 @@ struct CompareArgs {
     /// New sweep directory (e.g. `target/perf-current`).
     new: PathBuf,
 
-    /// Instruction growth allowed, in percent.
+    /// Growth allowed in instructions outside the allocator, in percent.
     #[arg(long, default_value_t = Tolerance::default().instructions_pct)]
     threshold: f64,
 

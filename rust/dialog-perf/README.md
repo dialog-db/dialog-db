@@ -23,7 +23,9 @@ poll) off the record, then its **measured phase**, and reports:
 |---|---|---|
 | `outcome` | what the phase produced: rows read, facts committed | exact |
 | `counters` | archive blocks read and written (and their bytes), the engine's own steps: rule resolutions, rule hydrations, cell settlements, commits, tree writes, and any measure the scenario adds (`first-query` adds the root frame's bytes) | steps exact; blocks within two, bytes within 15% |
-| `instructions` | instructions the phase retired, under callgrind | within 3% |
+| `instructions_outside_allocator` | instructions the phase retired under callgrind, less every call into the allocator from outside it, callees included | within 1% (and 50 K) |
+| `allocations` | the phase's calls into the allocator (`alloc`, `free`, `realloc`), the bytes it asked for, and the bytes its `realloc`s started from | calls within 16, bytes within 8 KB |
+| `instructions` | every instruction the phase retired, under callgrind | shown, not gated |
 
 The counters come from the tracing spans the engine emits
 (`resolve_bundle`, `resolve_rules`, `hydrate_rule`, `settle_cell`,
@@ -38,7 +40,40 @@ and a later commit's leaf seams still land a block or two apart.
 The instruction count is callgrind's, over the measured phase alone:
 collection starts off and toggles on the `dialog_perf_measured` symbol
 the harness calls the phase through. It stands in for the wall clock
-without the noise; on one binary it repeats to well under a percent.
+without the noise.
+
+The total does not repeat between runs of one binary: six sweeps
+spread by up to 8% (`commit-succeed`), 2% for `rule-point`. About a
+quarter of the instructions are the system allocator's, and its cost
+per call depends on the heap's layout. The layout depends on the
+random seeds the process draws, hash keys among them, and on its
+environment. Fixing every seed made the total repeat exactly, but
+only for that seed: a change that moves one allocation draws another
+layout, so a fixed seed hides the variance without removing it.
+
+The gate therefore splits the allocator out. From the callgrind output
+it takes every call into an allocator entry point (`malloc`, `free`,
+`realloc`, the Rust shims, ...) from a function outside the allocator,
+with the call's inclusive cost, so the copy a moving `realloc` makes
+goes with it. What is left repeats to 0.38% at most and under 0.1% in
+most scenarios, with no seed fixed and address randomization on.
+
+The allocator is held by its counts instead, taken in the process by
+a global allocator that passes every call to the system one and counts
+only during the measured phase (callgrind counts calls whether it is
+collecting or not). Besides the calls, it counts the bytes asked for
+and the bytes each `realloc` started from: what the allocator may have
+to copy. Whether a `realloc` does copy depends on the layout; what it
+may copy depends on how the code grows its buffers, so a buffer grown
+without a `reserve` shows there. Six sweeps moved the calls by six at
+most and the bytes by 2 KB.
+
+The total is still shown, ungated, so a review sees what the binary
+costs.
+
+What this misses: what each call costs inside the allocator, which
+also moves with the sizes asked for and with fragmentation. A change of
+that kind shows in the total alone.
 
 ## Running
 
@@ -78,17 +113,12 @@ instructions are held to the tolerance; when not (GitHub's runner pool
 mixes several), each scenario is allowed its measured cross-CPU spread
 on top (`cross_cpu_pct` in the catalog, from eight identical sweeps in
 #653: rough, and meant to go once the measured build stops dispatching
-on CPU features, #652).
+on CPU features, #652). Those spreads were measured on the total and
+are carried over to the instructions outside the allocator unmeasured,
+until sweeps on each CPU model measure them again.
 
 Use `--release`: the baselines are recorded under the release profile,
 and `compare` refuses to compare across profiles.
-
-A scenario whose instruction count is known to vary between runs of
-one binary past the allowance is marked volatile in the catalog, with
-the reason, and the gate holds its counters alone until the variance
-is understood. `commit-succeed` is one: its commit's tree write varies
-by up to 12% between runs of one binary, every counter equal, in the
-delete path's forced merges.
 
 ## When the gate fails
 
@@ -96,9 +126,12 @@ delete path's forced merges.
   for the same workload. Find out why before anything else; a
   resolution or settlement that runs once per row where it ran once
   per query is this crate's reason to exist.
-- **Instructions grew past 3%.** Run the scenario under
+- **Instructions outside the allocator grew past 1%.** Run
   `callgrind_annotate --inclusive=yes target/perf-current/<scenario>.callgrind`
   on both heads and diff the inclusive costs.
+- **Allocator calls or bytes grew.** Something allocates per row, or
+  per step, that did not, or grows a buffer it used to reserve; the
+  callers of `malloc` and `realloc` in the same annotation say where.
 - **The outcome changed.** The workload answers differently: either a
   wrong answer, or a scenario whose shape changed. Both are a bug or a
   deliberate change to pin, never a re-baseline.

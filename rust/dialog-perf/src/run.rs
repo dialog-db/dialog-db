@@ -29,7 +29,9 @@ pub fn run(scenario: &str, size: Option<usize>) -> Result<Report> {
 
     let started = Instant::now();
     let mut outcome = Err(anyhow!("the measured phase did not run"));
+    crate::allocator::start();
     crate::measured(|| outcome = runtime.block_on(prepared.measure()));
+    let allocations = crate::allocator::stop();
     let elapsed = started.elapsed();
     let outcome = outcome.with_context(|| format!("measuring {scenario}"))?;
 
@@ -42,6 +44,7 @@ pub fn run(scenario: &str, size: Option<usize>) -> Result<Report> {
         outcome,
         counters: since(&before, &after),
         instructions: None,
-        volatile: spec.volatile,
+        instructions_outside_allocator: None,
+        allocations,
     })
 }
