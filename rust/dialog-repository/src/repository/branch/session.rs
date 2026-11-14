@@ -750,6 +750,13 @@ impl<'a> QueryEnv<'a> {
         Ok(Some((guide.clone(), map.clone())))
     }
 
+    /// The placements a guided read reads by, resolved as
+    /// [`guided`](Self::guided) resolves them; `None` for a read that no
+    /// guide leads.
+    pub(crate) async fn placements(&self) -> Result<Option<Arc<PlacementMap>>, DialogCorpusError> {
+        Ok(self.guided().await?.map(|(_, map)| map))
+    }
+
     /// Whether a write under `the` lands on a memory layer this read is
     /// guided over, where the layer elects among its own rows of the
     /// cell as it does for a transaction's own write to it. `false` for

@@ -101,10 +101,11 @@ use dialog_storage::Blake3Hash;
 use futures_util::stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
-use super::session::{QueryEnv, QueryLayer};
+use super::session::{Composite, QueryEnv, QueryLayer};
+use crate::placement::PlacementMap;
 use crate::repository::archive::erased;
 use crate::repository::source::Source;
-use crate::{Branch, Ephemeral, Index, RemoteSite, Revision};
+use crate::{Branch, Ephemeral, Index, RemoteSite, Revision, Session};
 
 /// How many touched entities a maintained poll re-derives at once.
 /// Measured on the catch-up soak's hundred-entity poll (#646): a
@@ -397,6 +398,19 @@ pub struct Subscription<Q: Application> {
     /// minted since this sequence are the delta instead
     /// ([`Ephemeral::since`](crate::Ephemeral::since)).
     overlay_sequence: u64,
+    /// The session the subscription reads through, if any: its memory
+    /// layers are read beside the branch, each attribute from the layer
+    /// it is placed on, and each layer is observed as the branch's
+    /// session overlay is (see [`Session::subscribe`]).
+    session: Option<Session>,
+    /// The sequence each of the session's memory layers stood at when
+    /// the retained results were evaluated, parallel to the session's
+    /// layers: what a maintained poll rewinds each layer to.
+    memory_sequences: Vec<u64>,
+    /// The placements the last evaluation read by, through a session.
+    /// They are outside every demand cover, so a poll compares them
+    /// itself and evaluates afresh when they moved.
+    placed: Option<Arc<PlacementMap>>,
     /// The demand cover recorded during the last evaluation.
     demand: Demand,
     /// The last evaluation's full result, retained to compute the
@@ -427,11 +441,41 @@ impl Branch {
     /// result delta on their next poll, maintained incrementally from
     /// the overlay's instants like a tree change.
     pub fn subscribe<Q: Application>(&self, query: Q) -> Subscription<Q> {
+        Subscription::over(self.clone(), None, query)
+    }
+}
+
+impl Session {
+    /// Register a standing query over this session: the primary and
+    /// every layer it holds, each attribute read from the layer it is
+    /// placed on. The subscription evaluates on its first
+    /// [`poll`](Subscription::poll) and is incrementally gated
+    /// afterwards: a commit to the primary, a share a dispatch lands in
+    /// a memory layer, and a write to the primary's session overlay each
+    /// propagate as a result delta, maintained incrementally from the
+    /// layer's instants like a tree change. A placement that moved
+    /// re-evaluates the query, since which layer a row is read from
+    /// changed.
+    pub fn subscribe<Q: Application>(&self, query: Q) -> Subscription<Q> {
+        Subscription::over(self.primary().clone(), Some(self.clone()), query)
+    }
+}
+
+impl<Q: Application> Subscription<Q> {
+    /// A standing query over `branch`, read through `session` when there
+    /// is one.
+    fn over(branch: Branch, session: Option<Session>, query: Q) -> Self {
+        let layers = session
+            .as_ref()
+            .map_or(0, |session| session.memories().len());
         Subscription {
-            branch: self.clone(),
+            branch,
             query,
             revision: None,
             overlay_sequence: 0,
+            session,
+            memory_sequences: vec![0; layers],
+            placed: None,
             demand: Demand::new(),
             results: Vec::new(),
             fixpoint: Arc::new(Mutex::new(None)),
@@ -737,19 +781,28 @@ where
     {
         let current = self.branch.revision();
         let sequence = self.branch.overlay().revision().sequence;
+        let sequences = self.memory_sequences_now();
         if self.initialized {
             let head_moved = current != self.revision;
             let overlay_moved = sequence != self.overlay_sequence;
-            if !head_moved && !overlay_moved {
+            let memories_moved = sequences != self.memory_sequences;
+            if !head_moved && !overlay_moved && !memories_moved {
                 return Ok(None);
             }
+            // A guided read takes each attribute from the layer it is
+            // placed on; a placement that moved changes what every row
+            // of the attribute reads as, outside any cover. Evaluate
+            // afresh.
+            let placed = self.placements(env).await?;
+            let placements_moved = placed != self.placed;
+            self.placed = placed;
             // A head-dependent result — one that read
             // `dialog.branch/tree` & co — changes on every commit by
             // construction (the binding itself moves), and those
             // metadata facts are overlay-injected, invisible to the
             // tree diff below. Skip the gate and re-evaluate when the
             // head moved; an overlay-only move leaves them alone.
-            if !(head_moved && self.demand.depends_on_head()) {
+            if !(head_moved && self.demand.depends_on_head()) && !placements_moved {
                 let mut touched = Touched::Nothing;
                 if head_moved {
                     touched = touched.merge(self.touched(env, &current).await?);
@@ -757,10 +810,14 @@ where
                 if overlay_moved && !matches!(touched, Touched::Rules) {
                     touched = touched.merge(self.touched_overlay(self.overlay_sequence));
                 }
+                if memories_moved && !matches!(touched, Touched::Rules) {
+                    touched = touched.merge(self.touched_memories());
+                }
                 match touched {
                     Touched::Nothing => {
                         self.revision = current;
                         self.overlay_sequence = sequence;
+                        self.memory_sequences = sequences;
                         return Ok(None);
                     }
                     Touched::Facts {
@@ -774,6 +831,7 @@ where
                             self.maintenances += 1;
                             self.revision = current;
                             self.overlay_sequence = sequence;
+                            self.memory_sequences = sequences;
                             return Ok(Some(delta));
                         }
                         // Not maintainable for this query/rule shape:
@@ -808,8 +866,121 @@ where
         self.demand = demand;
         self.revision = current;
         self.overlay_sequence = sequence;
+        self.memory_sequences = sequences;
+        if !self.initialized {
+            self.placed = self.placements(env).await?;
+        }
         self.initialized = true;
         Ok(Some(delta))
+    }
+
+    /// The memory layers the subscription reads through its session, in
+    /// the session's order; none without a session.
+    fn memories(&self) -> Vec<Ephemeral> {
+        self.session
+            .as_ref()
+            .map(Session::memories)
+            .unwrap_or_default()
+    }
+
+    /// The sequence each memory layer stands at now, parallel to
+    /// [`memories`](Self::memories).
+    fn memory_sequences_now(&self) -> Vec<u64> {
+        self.memories()
+            .iter()
+            .map(|memory| memory.revision().sequence)
+            .collect()
+    }
+
+    /// What the subscription reads: the branch, and through a session
+    /// its memory layers under the session's guide as it stands now.
+    fn composite(&self) -> Composite {
+        Composite {
+            sources: vec![Source::from(self.branch.clone())],
+            memories: self.memories(),
+            guide: self.session.as_ref().map(Session::guide),
+        }
+    }
+
+    /// The composite as the last evaluation read it: the branch at its
+    /// pinned revision under its session overlay rewound to the pinned
+    /// sequence, and each memory layer rewound the same way, in the same
+    /// order, so the guide still names each layer. `None` when nothing
+    /// is pinned yet, or a store's ring no longer reaches back to its
+    /// pinned sequence.
+    fn before(&self) -> Option<Composite> {
+        let pinned = self.revision.clone()?;
+        let overlay = rewound(self.branch.overlay(), self.overlay_sequence)?;
+        let memories = self
+            .memories()
+            .iter()
+            .zip(&self.memory_sequences)
+            .map(|(memory, sequence)| rewound(memory, *sequence))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Composite {
+            sources: vec![Source::from(self.branch.view(pinned, overlay))],
+            memories,
+            guide: self.session.as_ref().map(Session::guide),
+        })
+    }
+
+    /// The placements a read through the session reads by now, or
+    /// `None` for a subscription that reads no session.
+    async fn placements<'a, Env>(
+        &self,
+        env: &'a Env,
+    ) -> Result<Option<Arc<PlacementMap>>, EvaluationError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<ArchiveLoad>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<nodes::Write<CorpusNode>>
+            + Provider<BlobLoad>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
+            + Holds
+            + ConditionalSync
+            + 'static,
+    {
+        if self.session.is_none() {
+            return Ok(None);
+        }
+        let operator = Identify
+            .perform(env)
+            .await
+            .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
+        let layer = QueryLayer::from(&self.branch);
+        let overlay = layer.overlay(&operator);
+        let query_env: QueryEnv<'a> = QueryEnv::over(self.composite(), overlay, env);
+        query_env
+            .placements()
+            .await
+            .map_err(|error| EvaluationError::Store(format!("resolve the placements: {error}")))
+    }
+
+    /// Classify what the session's memory layers changed since their
+    /// pinned sequences, within the demand cover, as
+    /// [`touched_overlay`](Self::touched_overlay) does for the branch's
+    /// session overlay. A pin a layer's ring no longer reaches is
+    /// [`Touched::Rules`], which recomputes.
+    fn touched_memories(&self) -> Touched {
+        let mut touched = Touched::Nothing;
+        for (memory, sequence) in self.memories().iter().zip(&self.memory_sequences) {
+            let Some(instants) = memory.since(*sequence) else {
+                return Touched::Rules;
+            };
+            touched = touched.merge(touched_by(&self.demand, instants));
+            if matches!(touched, Touched::Rules) {
+                return touched;
+            }
+        }
+        touched
     }
 
     /// Classify what the changes between the pinned root and
@@ -1027,12 +1198,9 @@ where
                 // clone, no generator-local borrows) so the poll
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
-                let query_env: QueryEnv<'a> = QueryEnv::new(
-                    vec![Source::from(self.branch.clone())],
-                    overlay.clone(),
-                    env,
-                )
-                .with_demand(self.demand.clone());
+                let query_env: QueryEnv<'a> =
+                    QueryEnv::over(self.composite(), overlay.clone(), env)
+                        .with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
                 // The poll reports the rows that moved. What a rule
                 // reads of a single-valued attribute is the one claim
@@ -1090,15 +1258,9 @@ where
                 // recomputes.
                 let before: OnceLock<Option<QueryEnv<'a>>> = OnceLock::new();
                 let view = || {
-                    let pinned = self.revision.clone()?;
-                    let rewound = rewound(self.branch.overlay(), self.overlay_sequence)?;
                     Some(
-                        QueryEnv::new(
-                            vec![Source::from(self.branch.view(pinned, rewound))],
-                            overlay.clone(),
-                            env,
-                        )
-                        .with_demand(self.demand.clone()),
+                        QueryEnv::over(self.before()?, overlay.clone(), env)
+                            .with_demand(self.demand.clone()),
                     )
                 };
                 match affected_entities(concept, asserted, retracted, &query_env, || {
@@ -1226,8 +1388,7 @@ where
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
             let mut query_env: QueryEnv<'a> =
-                QueryEnv::new(vec![Source::from(self.branch.clone())], overlay, env)
-                    .with_demand(demand.clone());
+                QueryEnv::over(self.composite(), overlay, env).with_demand(demand.clone());
             // Recursive concept subscriptions retain their fixpoint
             // across polls: a recompute rebuilds into the retained
             // table so a later additions-only poll can extend it.
@@ -1292,13 +1453,12 @@ where
                 .anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let query_env: QueryEnv<'a> =
-                QueryEnv::new(vec![Source::from(self.branch.clone())], overlay, env)
-                    .with_demand(self.demand.clone())
-                    .with_fixpoint(
-                        concept.this(),
-                        Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
-                    );
+            let query_env: QueryEnv<'a> = QueryEnv::over(self.composite(), overlay, env)
+                .with_demand(self.demand.clone())
+                .with_fixpoint(
+                    concept.this(),
+                    Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
+                );
             // Driven for the same reason `evaluate` is: the
             // continuation's reads warm through the ambient queue.
             let queue = Provider::<Speculation>::execute(env, ()).await;

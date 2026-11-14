@@ -49,6 +49,14 @@ What this changes for you:
 - A guided read takes each attribute from the layer it is placed on
   alone. A row of that attribute found on another layer is reported as a
   `Divergence` (`Session::divergences`), not read.
+- `Session::subscribe(query)` is new: a standing query over the primary
+  and every layer the session holds. A commit to the primary, a share a
+  dispatch lands in a memory layer, and a write to the primary's session
+  overlay each propagate as a result delta on the next poll, maintained
+  incrementally from the layer's instants as an overlay change is. A
+  placement that moves under the query evaluates it afresh. A maintained
+  subscription through a session equals a fresh evaluation after any
+  sequence of dispatches (pinned by a seeded churn test).
 - `CommitError::UnboundLayer` is new: a write whose attribute is placed
   on a layer the session does not hold is refused before anything is
   settled or minted. `CommitError::InvalidPlacement` is new: a placement

@@ -247,8 +247,17 @@ impl Session {
         self.inner.divergences.take()
     }
 
+    /// The memory layers this session holds, in the schema's order.
+    pub(crate) fn memories(&self) -> Vec<Ephemeral> {
+        self.inner
+            .layers
+            .iter()
+            .map(|(_, memory)| memory.clone())
+            .collect()
+    }
+
     /// How a read of this session meets each layer.
-    fn guide(&self) -> Arc<Guide> {
+    pub(crate) fn guide(&self) -> Arc<Guide> {
         Arc::new(Guide {
             lines: vec![GuidedLayer {
                 entity: self.inner.primary.subject().did().this(),
@@ -273,12 +282,7 @@ impl Session {
     fn composite(&self, primary: Source) -> Composite {
         Composite {
             sources: vec![primary],
-            memories: self
-                .inner
-                .layers
-                .iter()
-                .map(|(_, memory)| memory.clone())
-                .collect(),
+            memories: self.memories(),
             guide: Some(self.guide()),
         }
     }
@@ -764,6 +768,288 @@ mod tests {
         assert!(
             held(&memory, "ui/selected", &doc)?.is_empty(),
             "no share landed"
+        );
+        Ok(())
+    }
+
+    /// The selected flags, as `(entity, value)` strings, sorted.
+    fn selected(claims: &[dialog_query::Claim]) -> Vec<String> {
+        let mut rows: Vec<String> = claims
+            .iter()
+            .map(|claim| format!("{} {:?}", claim.of, claim.is))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// `ui/selected` of every entity, with the value a variable.
+    fn selected_query() -> AttributeQuery {
+        AttributeQuery::from(
+            Term::<QueryRelation>::from(QueryRelation::from(
+                "ui/selected".parse::<dialog_corpus::Relation>().unwrap(),
+            ))
+            .of(Term::<Entity>::var("e"))
+            .is(Term::<bool>::var("v")),
+        )
+    }
+
+    /// What a fresh evaluation of `query` through the session reads.
+    async fn fresh(
+        session: &Session,
+        env: &Operator,
+        query: AttributeQuery,
+    ) -> Result<Vec<String>> {
+        let claims: Vec<dialog_query::Claim> =
+            session.query().select(query).perform(env).try_vec().await?;
+        Ok(selected(&claims))
+    }
+
+    fn flag(doc: &Entity, value: bool) -> impl Statement {
+        dialog_query::the!("ui/selected").of(doc.clone()).is(value)
+    }
+
+    /// A subscription through a session reads every layer, and a share a
+    /// dispatch lands in a memory layer propagates as a delta on the
+    /// next poll, maintained from the layer's instants. A commit to the
+    /// primary outside the cover advances the pins for free.
+    #[dialog_common::test]
+    async fn it_subscribes_through_a_session() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        declare_state(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        let mut subscription = session.subscribe(selected_query());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert!(initial.asserted.is_empty());
+
+        session
+            .transact(flag(&doc, true))
+            .perform(&operator)
+            .await?;
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("a share landed in the state layer");
+        assert_eq!(
+            selected(&delta.asserted),
+            vec![format!("{doc} Boolean(true)")]
+        );
+        assert!(delta.retracted.is_empty());
+        assert_eq!(
+            subscription.maintenances(),
+            1,
+            "maintained from the layer's instants"
+        );
+        assert_eq!(subscription.recomputes(), 1);
+
+        session
+            .transact(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .perform(&operator)
+            .await?;
+        assert!(
+            subscription.poll(&operator).await?.is_none(),
+            "a commit outside the cover changes nothing"
+        );
+
+        session
+            .transact(Changes::new())
+            .retract(flag(&doc, true))
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("retracted");
+        assert!(delta.asserted.is_empty());
+        assert_eq!(
+            selected(&delta.retracted),
+            vec![format!("{doc} Boolean(true)")]
+        );
+        assert!(subscription.poll(&operator).await?.is_none());
+        Ok(())
+    }
+
+    /// A placement that moves under a standing query re-evaluates it:
+    /// the rows the layer holds stop being read once the attribute is
+    /// placed elsewhere, and are read again when it is placed back.
+    #[dialog_common::test]
+    async fn it_re_evaluates_a_subscription_when_a_placement_moves() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        session
+            .transact(flag(&doc, true))
+            .perform(&operator)
+            .await?;
+        let mut subscription = session.subscribe(selected_query());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            selected(&initial.asserted),
+            vec![format!("{doc} Boolean(true)")]
+        );
+
+        // The attribute moves to the primary: the layer's row is a
+        // divergence now, not a reading.
+        session
+            .transact(Changes::new())
+            .retract(Placement::new("ui/selected".parse()?, state.clone()))
+            .perform(&operator)
+            .await?;
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("placement moved");
+        assert_eq!(
+            selected(&delta.retracted),
+            vec![format!("{doc} Boolean(true)")]
+        );
+        assert_eq!(
+            subscription.results().len(),
+            0,
+            "{:?}",
+            fresh(&session, &operator, selected_query()).await?
+        );
+        assert_eq!(
+            subscription.recomputes(),
+            2,
+            "a moved placement evaluates afresh"
+        );
+
+        session
+            .transact(Placement::new("ui/selected".parse()?, state))
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("placed back");
+        assert_eq!(
+            selected(&delta.asserted),
+            vec![format!("{doc} Boolean(true)")]
+        );
+        Ok(())
+    }
+
+    /// A small deterministic generator for the churn below.
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// Through any sequence of dispatches across the primary and a
+    /// memory layer, with a rule landing on the layer and a placement
+    /// moving under the query, a maintained subscription equals a fresh
+    /// evaluation after every step.
+    #[dialog_common::test]
+    async fn it_agrees_with_a_fresh_evaluation_through_session_churn() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let docs: Vec<Entity> = (1..=4)
+            .map(|index| format!("doc:{index}").parse())
+            .collect::<Result<_, _>>()?;
+        let counter: Entity = "ctr:1".parse()?;
+        session
+            .transact(count(&counter, 1))
+            .perform(&operator)
+            .await?;
+        let mut subscription = session.subscribe(selected_query());
+        subscription.poll(&operator).await?;
+
+        let mut moves = 0;
+        let mut placed = true;
+        for seed in [7u64, 99, 2024] {
+            let mut rng = Xorshift(seed);
+            for step in 0..24 {
+                let doc = docs[rng.below(docs.len() as u64) as usize].clone();
+                let label = match rng.below(6) {
+                    0 => {
+                        session
+                            .transact(flag(&doc, true))
+                            .perform(&operator)
+                            .await?;
+                        "select"
+                    }
+                    1 => {
+                        session
+                            .transact(flag(&doc, false))
+                            .perform(&operator)
+                            .await?;
+                        "deselect"
+                    }
+                    2 => {
+                        session
+                            .transact(Changes::new())
+                            .retract(flag(&doc, true))
+                            .perform(&operator)
+                            .await?;
+                        "retract"
+                    }
+                    3 => {
+                        session
+                            .invoke(
+                                dialog_query::the!("cmd.increment/counter")
+                                    .of("cmd:1".parse::<Entity>()?)
+                                    .is(counter.clone()),
+                            )
+                            .assert(
+                                dialog_query::the!("doc/title")
+                                    .of(doc.clone())
+                                    .is(format!("Title {step}")),
+                            )
+                            .perform(&operator)
+                            .await?;
+                        "increment and title"
+                    }
+                    4 => {
+                        let placement = Placement::new("ui/selected".parse()?, state.clone());
+                        if placed {
+                            session
+                                .transact(Changes::new())
+                                .retract(placement)
+                                .perform(&operator)
+                                .await?;
+                        } else {
+                            session.transact(placement).perform(&operator).await?;
+                        }
+                        placed = !placed;
+                        moves += 1;
+                        "move the placement"
+                    }
+                    _ => "nothing",
+                };
+                subscription.poll(&operator).await?;
+                let mut retained = selected(subscription.results());
+                retained.sort();
+                assert_eq!(
+                    retained,
+                    fresh(&session, &operator, selected_query()).await?,
+                    "seed {seed} step {step} ({label}): the maintained result drifted"
+                );
+            }
+        }
+        assert!(moves > 0, "the churn moved the placement");
+        assert_eq!(
+            subscription.recomputes(),
+            1 + moves,
+            "only the first poll and a moved placement evaluate afresh"
         );
         Ok(())
     }
