@@ -19,14 +19,14 @@ pub(crate) use succession::{settle, stored_claims};
 
 use crate::Commit;
 use crate::repository::branch::asset::store_assets;
-use crate::repository::branch::session::shared_metadata;
+use crate::repository::branch::session::{Composite, shared_metadata};
 use crate::repository::source::{Live, View};
 use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
-use crate::{Branch, CommitError, PublishError, RemoteSite, Revision, Snapshot, Staged};
+use crate::{Branch, CommitError, Ephemeral, PublishError, RemoteSite, Revision, Snapshot, Staged};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::tree::CorpusNode;
-use dialog_corpus::{Changes, Statement};
+use dialog_corpus::{Changes, Entity, Statement};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -88,6 +88,21 @@ pub struct Transaction<L: Line> {
     /// [`Staged`]); exported to a [`Changes`] batch once, at commit.
     changes: Staged,
     transients: Staged,
+    /// The session this transaction commits through, if one: its layers,
+    /// which its reads and its induction see, and its placements, which
+    /// route the writes.
+    session: Option<SessionContext>,
+}
+
+/// What a transaction through a [`Session`](crate::Session) carries: the
+/// composite its reads and its induction see, the declarations the
+/// session holds, which its commit resolves the placements over, and the
+/// memory layers that take their shares once the commit publishes.
+#[derive(Clone)]
+pub(crate) struct SessionContext {
+    pub(crate) composite: Composite,
+    pub(crate) declared: Changes,
+    pub(crate) memories: Vec<(Entity, Ephemeral)>,
 }
 
 /// What a [`Transaction`] runs on: a `&`[`Branch`], a `&`[`Snapshot`]
@@ -147,7 +162,16 @@ impl<L: Line> Transaction<L> {
             pinned,
             changes: Staged::default(),
             transients: Staged::default(),
+            session: None,
         }
+    }
+
+    /// Commit through `session`: induction reads its layers, and the
+    /// writes placed outside the primary are handed back as the shares of
+    /// its memory layers instead of landing in the tree.
+    pub(crate) fn with_session(mut self, session: SessionContext) -> Self {
+        self.session = Some(session);
+        self
     }
 
     /// Assert a claim into this transaction.
@@ -202,6 +226,7 @@ impl<L: Line> Transaction<L> {
             allow_empty: false,
             canonicalize: false,
             amend: false,
+            session: self.session.clone(),
         }
     }
 }
@@ -228,11 +253,15 @@ impl Transaction<&Branch> {
     /// stream before the merge. Dispatched transients are part of the
     /// view too. The transaction itself stays open and committable.
     pub fn query(&self) -> TransactionQuery<'_> {
-        TransactionQuery::new(self.view(), self.layers())
+        let query = TransactionQuery::new(self.view(), self.layers());
+        match &self.session {
+            Some(session) => query.over(session.composite.clone()),
+            None => query,
+        }
     }
 
     /// The branch at the revision this transaction pinned.
-    fn view(&self) -> View<'_> {
+    pub(crate) fn view(&self) -> View<'_> {
         View::at(
             Live::Branch(self.line),
             self.pinned.as_ref().map(|edition| &edition.content),
@@ -297,6 +326,7 @@ pub struct TransactionCommit<L: Line> {
     pub(super) allow_empty: bool,
     pub(super) canonicalize: bool,
     pub(super) amend: bool,
+    pub(super) session: Option<SessionContext>,
 }
 
 impl<L: Line> TransactionCommit<L> {
@@ -363,8 +393,9 @@ impl TransactionCommit<&Snapshot> {
         }
         let view = View::at(Live::Snapshot(snapshot), Some(&previous));
         let operator = Identify.perform(env).await?;
+        let composite = Composite::of(view.to_source());
         let mut changes = Box::pin(succession::settle(
-            vec![view.to_source()],
+            composite.clone(),
             shared_metadata(from_ref(&view), &operator),
             &self.changes,
             env,
@@ -373,7 +404,7 @@ impl TransactionCommit<&Snapshot> {
         // A snapshot commit reports only its revision: the transients
         // induction emitted surface on a staged
         // [`TransactionBatch::induced`] alone.
-        induce::induce(&view, &mut changes, self.transients, env).await?;
+        induce::induce(&view, &composite, &mut changes, self.transients, env).await?;
 
         let touches_rules = touches_rules(&changes);
         let touches_rule_facts = touches_rule_facts(&changes);

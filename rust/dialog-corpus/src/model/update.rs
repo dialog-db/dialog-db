@@ -10,7 +10,6 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::mem::take;
-use std::mem::take;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::vec::IntoIter;

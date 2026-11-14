@@ -25,9 +25,11 @@ use super::{
     Line, Transaction, TransactionCommit, carry_footprint, touches_rule_facts, touches_rules,
 };
 use crate::Ephemeral;
+use crate::placement::{Placements, declaration_attrs};
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
-use crate::repository::branch::session::shared_metadata;
+use crate::repository::branch::session::{Composite, shared_metadata};
+use crate::repository::branch::transaction::SessionContext;
 use crate::repository::source::{Caches, Live, View};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
@@ -39,7 +41,7 @@ use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::tree::WriteScope;
-use dialog_corpus::{Change, Changes, Entity, Fact, Selector, Statement, Update as _};
+use dialog_corpus::{Change, Changes, Entity, Fact, Relation, Selector, Statement, Update as _};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
@@ -110,6 +112,13 @@ pub struct TransactionBatch {
     /// links, across every round of every link. See
     /// [`induced`](Self::induced).
     induced: Changes,
+    /// The writes of this chain placed outside the primary, by the layer
+    /// each is placed on, as a session routes them: what its memory
+    /// layers take once the chain publishes. Empty for a chain committed
+    /// on the branch alone.
+    shares: Vec<(Entity, Changes)>,
+    /// The session's memory layers, by name, that take the shares.
+    memories: Vec<(Entity, Ephemeral)>,
     /// The branch's session overlay, and the facts the staged links
     /// retract that only it holds: retracted from it once the publish
     /// lands, so what a transaction read is what its publish leaves.
@@ -199,6 +208,14 @@ impl TransactionBatch {
         &self.induced
     }
 
+    /// The writes placed outside the primary that this chain's commits
+    /// made, the ones their rules derived included, by the layer each is
+    /// placed on: what the session's memory layers take once the chain
+    /// publishes.
+    pub fn shares(&self) -> &[(Entity, Changes)] {
+        &self.shares
+    }
+
     /// Start the next transaction on this chain. Its commit extends the
     /// batch by one more staged revision.
     pub fn transaction(self) -> Transaction<TransactionBatch> {
@@ -281,6 +298,8 @@ impl BatchPublish {
             records,
             contexts,
             induced: _,
+            shares,
+            memories,
             overlay,
             overlay_retractions,
         } = self.batch;
@@ -304,6 +323,7 @@ impl BatchPublish {
             }
             advance_watermark(&induction, &tip, Some(tip.version()), env).await?;
             retract_from_overlay(&overlay, overlay_retractions)?;
+            apply_shares(&memories, shares)?;
             return Ok(tip);
         }
 
@@ -314,6 +334,9 @@ impl BatchPublish {
             .and_then(|(_, record)| record.parents.first().cloned());
         head.publish(tip.clone(), env).await?;
         retract_from_overlay(&overlay, overlay_retractions)?;
+        // The memory layers take their shares only now that the primary's
+        // commit is published: a refused publish shows in no layer.
+        apply_shares(&memories, shares)?;
 
         // Only now that the head has actually advanced do the staged
         // records and context enter the branch's shared memos: they are
@@ -564,7 +587,12 @@ impl TransactionCommit<&Branch> {
         let overlay = branch.overlay().clone();
         let retractions = overlay_retractions(&self.changes, &overlay);
 
-        let (outcome, induced) = Box::pin(mint_link(
+        let memories = self
+            .session
+            .as_ref()
+            .map(|session| session.memories.clone())
+            .unwrap_or_default();
+        let (outcome, induced, shares) = Box::pin(mint_link(
             View::at(Live::Branch(branch), base.as_ref()),
             |profile, issuer| branch.commit_identity(profile, issuer),
             self.changes,
@@ -572,6 +600,7 @@ impl TransactionCommit<&Branch> {
             self.allow_empty,
             self.canonicalize,
             None,
+            self.session,
             env,
         ))
         .await?;
@@ -600,6 +629,8 @@ impl TransactionCommit<&Branch> {
                 records: branch.records(),
                 contexts: branch.contexts(),
                 induced,
+                shares,
+                memories,
                 overlay,
                 overlay_retractions: retractions,
             },
@@ -626,6 +657,8 @@ impl TransactionCommit<&Branch> {
                     records: branch.records(),
                     contexts: branch.contexts(),
                     induced,
+                    shares,
+                    memories,
                     overlay,
                     overlay_retractions: retractions,
                 }
@@ -682,7 +715,7 @@ impl TransactionCommit<TransactionBatch> {
         let amending = amend.is_some();
         let retractions = overlay_retractions(&self.changes, &batch.overlay);
 
-        let (outcome, induced) = Box::pin(mint_link(
+        let (outcome, induced, shares) = Box::pin(mint_link(
             View::at(Live::Snapshot(&batch.snapshot), Some(&base)),
             |_, issuer| (line.clone(), origin_of(&line, issuer)),
             self.changes,
@@ -690,10 +723,12 @@ impl TransactionCommit<TransactionBatch> {
             self.allow_empty,
             self.canonicalize,
             amend,
+            self.session,
             env,
         ))
         .await?;
         induced.assert(&mut batch.induced);
+        merge_shares(&mut batch.shares, shares);
         batch.overlay_retractions.extend(retractions);
 
         if let Outcome::Minted(minted) = outcome {
@@ -728,6 +763,69 @@ impl TransactionCommit<TransactionBatch> {
     }
 }
 
+/// Fold `more` shares into `shares`, layer by layer.
+fn merge_shares(shares: &mut Vec<(Entity, Changes)>, more: Vec<(Entity, Changes)>) {
+    for (layer, changes) in more {
+        match shares.iter_mut().find(|(held, _)| *held == layer) {
+            Some((_, held)) => held.merge(changes),
+            None => shares.push((layer, changes)),
+        }
+    }
+}
+
+/// Land each layer's share in it. A share of a layer the session does not
+/// hold was refused at commit, so none is left over here.
+fn apply_shares(
+    memories: &[(Entity, Ephemeral)],
+    shares: Vec<(Entity, Changes)>,
+) -> Result<(), CommitError> {
+    for (layer, changes) in shares {
+        if let Some((_, memory)) = memories.iter().find(|(held, _)| *held == layer) {
+            memory.apply(changes)?;
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a write of `the` placed on a layer `session` does not hold.
+fn refuse_unbound(
+    the: &Relation,
+    placements: &Placements,
+    session: &SessionContext,
+) -> Result<(), CommitError> {
+    if let Some(layer) = placements.layer_of(the)
+        && !session.memories.iter().any(|(held, _)| held == layer)
+    {
+        return Err(CommitError::UnboundLayer {
+            attribute: the.to_string(),
+            layer: layer.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// `shares` split by the layer each write is placed on, in the order the
+/// layers are first met.
+fn by_layer(shares: Changes, placements: &Placements) -> Vec<(Entity, Changes)> {
+    let mut by_layer: Vec<(Entity, Changes)> = Vec::new();
+    for (of, the, change) in shares.iter() {
+        let Some(layer) = placements.layer_of(the) else {
+            continue;
+        };
+        let at = match by_layer.iter().position(|(held, _)| held == layer) {
+            Some(at) => at,
+            None => {
+                by_layer.push((layer.clone(), Changes::new()));
+                by_layer.len() - 1
+            }
+        };
+        by_layer[at]
+            .1
+            .put_cell(the.clone(), of.clone(), vec![change.clone()]);
+    }
+    by_layer
+}
+
 /// NaN is not a value: a commit that would write one is refused before
 /// anything lands, as deserialization and the rule compiler refuse it.
 fn refuse_nan<'a>(changes: impl Iterator<Item = &'a Change>) -> Result<(), CommitError> {
@@ -748,8 +846,14 @@ fn refuse_nan<'a>(changes: impl Iterator<Item = &'a Change>) -> Result<(), Commi
 /// builds on: run commit-time induction over the batch, then [`Mint`]
 /// the settled changes on the line `line` names, carrying the trigger
 /// footprint forward. Nothing is published or adopted — the caller owns
-/// what happens to the [`Outcome`] and to the transients induction
-/// emitted, returned alongside it.
+/// what happens to the [`Outcome`], to the transients induction emitted,
+/// and to the shares, returned alongside it.
+///
+/// Through a `session`, settlement and induction read the session's
+/// composite, and the writes placed outside the primary, the ones the
+/// rules derived included, are taken out before anything is settled or
+/// minted and returned as the shares: the tree never holds a fact placed
+/// on a memory layer.
 #[allow(clippy::too_many_arguments)]
 async fn mint_link<Env>(
     view: View<'_>,
@@ -759,8 +863,9 @@ async fn mint_link<Env>(
     allow_empty: bool,
     canonicalize: bool,
     amend: Option<Amended>,
+    session: Option<SessionContext>,
     env: &Env,
-) -> Result<(Outcome, Changes), CommitError>
+) -> Result<(Outcome, Changes, Vec<(Entity, Changes)>), CommitError>
 where
     Env: Provider<BlobSize>
         + Provider<BlobImport>
@@ -789,14 +894,53 @@ where
 {
     refuse_nan(changes.log().iter().map(|(_, _, change)| change))?;
     let operator = Identify.perform(env).await?;
+    // Through a session, the placements in force for this commit: the
+    // primary's, the session's own and the batch's. A write placed on a
+    // layer the session does not hold is refused before anything is
+    // settled or minted.
+    let (placements, composite) = match &session {
+        Some(session) => {
+            let declared = changes.export_cells(|the| declaration_attrs().contains(the));
+            let placements =
+                Placements::resolve(&view.to_source(), &session.declared, &declared, env).await?;
+            for (the, _, _) in changes.log() {
+                refuse_unbound(the, &placements, session)?;
+            }
+            (Some(placements), session.composite.clone())
+        }
+        None => (None, Composite::of(view.to_source())),
+    };
+    let places = |the: &Relation| {
+        placements
+            .as_ref()
+            .is_some_and(|placements| placements.layer_of(the).is_some())
+    };
+    let (shares, changes) = match &placements {
+        Some(_) => changes.partition(places),
+        None => (Staged::default(), changes),
+    };
     let mut changes = Box::pin(succession::settle(
-        vec![view.to_source()],
+        composite.clone(),
         shared_metadata(from_ref(&view), &operator),
         &changes,
         env,
     ))
     .await?;
-    let induced = induce(&view, &mut changes, transients, env).await?;
+    let induced = induce(&view, &composite, &mut changes, transients, env).await?;
+    let mut shares = shares.export();
+    if let (Some(placements), Some(session)) = (&placements, &session) {
+        // What the rules derived onto a layer goes with the shares; a
+        // layer the session does not hold refuses it as a write.
+        let derived = changes.take_cells(places);
+        for (_, the, _) in derived.iter() {
+            refuse_unbound(the, placements, session)?;
+        }
+        shares.merge(derived);
+    }
+    let shares = match &placements {
+        Some(placements) => by_layer(shares, placements),
+        None => Vec::new(),
+    };
     let touches = touches_rules(&changes);
     let touches_rule_facts = touches_rule_facts(&changes);
     let previous = view.revision().cloned();
@@ -826,7 +970,7 @@ where
             );
         }
     }
-    Ok((outcome, induced))
+    Ok((outcome, induced, shares))
 }
 
 #[cfg(test)]

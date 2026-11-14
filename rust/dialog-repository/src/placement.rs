@@ -32,7 +32,7 @@
 
 pub(crate) mod guide;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use dialog_corpus::selector::Constrained;
@@ -352,17 +352,6 @@ impl Placements {
         }
     }
 
-    /// What backs `layer`, if a declaration names it.
-    pub(crate) fn store_of(&self, layer: &Entity) -> Option<Store> {
-        if let Some(store) = self.layers.get(layer) {
-            return Some(*store);
-        }
-        match self.committed_layers.get(layer) {
-            Some(store) if self.layers_retracted.get(layer) != Some(store) => Some(*store),
-            _ => None,
-        }
-    }
-
     /// Every layer declared, with what backs it, in no particular order.
     pub(crate) fn layers(&self) -> Vec<(Entity, Store)> {
         let mut layers: HashMap<Entity, Store> = self
@@ -375,7 +364,7 @@ impl Placements {
             layers.insert(layer.clone(), *store);
         }
         let mut layers: Vec<(Entity, Store)> = layers.into_iter().collect();
-        layers.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        layers.sort_by_key(|a| a.0.to_string());
         layers
     }
 
@@ -410,12 +399,6 @@ impl PlacementMap {
     }
 }
 
-/// The placement declarations of `changes`, in their order.
-pub(crate) fn declarations_of(changes: &Changes) -> Changes {
-    let attrs = declaration_attrs();
-    changes.clone().take_cells(|the| attrs.contains(the))
-}
-
 /// The placement declarations `store` holds, as its
 /// [`export`](crate::Ephemeral::export) carries them.
 pub(crate) fn declarations_held(store: &crate::Ephemeral) -> Changes {
@@ -441,12 +424,6 @@ pub(crate) fn pending_declarations(
         pending.apply(layer.export_cells(|the| attrs.contains(the)));
     }
     pending.export()
-}
-
-/// Whether a batch writes a placement declaration.
-pub(crate) fn touches_placements(changes: &Changes) -> bool {
-    let attrs = declaration_attrs();
-    changes.iter().any(|(_, the, _)| attrs.contains(the))
 }
 
 /// Selector for every committed `dialog.attribute/in` declaration.
@@ -501,21 +478,6 @@ pub(crate) fn elected(views: Vec<FactView>) -> Result<Vec<Fact>, DialogCorpusErr
         }
     }
     cells.iter().map(FactView::to_owned).collect()
-}
-
-/// The attributes of `changes` that are placed outside the primary under
-/// `placements`, each with its layer.
-pub(crate) fn placed(changes: &Changes, placements: &Placements) -> HashMap<Relation, Entity> {
-    let mut placed = HashMap::new();
-    let mut seen: HashSet<&Relation> = HashSet::new();
-    for (_, the, _) in changes.iter() {
-        if seen.insert(the)
-            && let Some(layer) = placements.layer_of(the)
-        {
-            placed.insert(the.clone(), layer.clone());
-        }
-    }
-    placed
 }
 
 #[cfg(test)]

@@ -14,6 +14,53 @@ says how to cut a release.
 
 ## Unreleased
 
+### An attribute is placed on a layer, and a session routes each write to the layer its attribute is placed on
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[notes/layers.md](./notes/layers.md).
+
+A branch's schema now says where each attribute's facts live. `Placement`
+(`dialog.attribute/in`) places an attribute on a layer; `LayerDeclaration`
+(`dialog.layer/store`) declares a layer beside the primary, backed for
+now by memory. An attribute placed nowhere lives in the primary, as it
+always did. `Branch::session()` opens a `Session` over the primary: it
+mints a memory layer for every declared layer, reads the composite of the
+primary and those layers, and commits a transaction by routing each write
+to the layer its attribute is placed on. The primary's share is minted
+and published as before; a memory layer's share is applied only after
+the publish wins its compare-and-swap, so a lost head leaves no layer
+changed. A rule head whose attribute is placed on a memory layer lands
+there too, keeping its pick, and succeeds no claim of the primary.
+
+What this changes for you:
+
+- `Branch::session()`, `OpenSession::declare`, `Session::{query,
+  transaction, layer, layers, declare, declared, divergences}` are new.
+  A branch read or committed directly, with no session, behaves as
+  before.
+- A guided read takes each attribute from the layer it is placed on
+  alone. A row of that attribute found on another layer is reported as a
+  `Divergence` (`Session::divergences`), not read.
+- `CommitError::UnboundLayer` is new: a write whose attribute is placed
+  on a layer the session does not hold is refused before anything is
+  settled or minted. `CommitError::InvalidPlacement` is new: a placement
+  or layer declaration whose value names no layer or no store is refused.
+- The corpus write gate admits `dialog.attribute/*` and `dialog.layer/*`
+  from an application write, as it admits `dialog.rule/*`.
+
+Why: local state that moves at frame rate, replicated state and
+ephemeral state peers learn of are different layers, not different
+kinds of fact. Placing an attribute on a layer in the schema lets one
+set of rules act across them, and lets a session recreate every layer
+from the primary's declarations when it opens.
+
+#### Compatibility and migration
+
+- A replica that declares no placement stores and syncs exactly what it
+  did. Placements and layer declarations are ordinary facts under
+  `dialog.attribute/` and `dialog.layer/`; an older release reads them as
+  facts it does not understand and ignores them. Nothing is rewritten.
+
 ### A prefetch hint a query took but did not finish is resumed by the next query
 
 [#770](https://github.com/dialog-db/dialog-db/pull/770), argued in

@@ -38,7 +38,12 @@ pub use repository::*;
 
 /// Attribute placement: which layer an attribute's facts live in.
 pub mod placement;
+pub use placement::guide::Divergence;
 pub use placement::{LayerDeclaration, Placement, Store, attribute_entity};
+
+/// A session: the primary branch and the layers its schema declares.
+pub mod session;
+pub use session::{OpenSession, Session, SessionEnv};
 
 /// Streaming-merge and tombstone helpers used by the query-session
 /// composition layer.

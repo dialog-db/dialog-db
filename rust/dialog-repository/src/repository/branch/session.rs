@@ -750,6 +750,28 @@ impl<'a> QueryEnv<'a> {
         Ok(Some((guide.clone(), map.clone())))
     }
 
+    /// Whether a write under `the` lands on a memory layer this read is
+    /// guided over, where the layer elects among its own rows of the
+    /// cell as it does for a transaction's own write to it. `false` for
+    /// a read that no guide leads, and for the machinery under
+    /// `dialog.`, which every layer holds.
+    pub(crate) async fn lands_in_memory(
+        &self,
+        the: &dialog_corpus::Relation,
+    ) -> Result<bool, DialogCorpusError> {
+        let Some((guide, map)) = self.guided().await? else {
+            return Ok(false);
+        };
+        let attribute = the.to_string();
+        if attribute.starts_with("dialog.") {
+            return Ok(false);
+        }
+        Ok(guide
+            .memories
+            .iter()
+            .any(|layer| guide.placed(layer, &map, &attribute)))
+    }
+
     /// What a read settlement observes of this environment: the lines'
     /// heads, then the revision of every overlay read with them (see
     /// [`overlays`](Self::overlays)).
@@ -804,7 +826,12 @@ impl<'a> QueryEnv<'a> {
                 .unwrap_or_else(|| super::transaction::ReadSettlement::new(self.pending_edition()));
             // A settlement that failed partway is not kept: the next
             // read starts it again.
-            Box::pin(settlement.advance(&self.sources, &self.overlay, layer, self.env))
+            let composite = Composite {
+                sources: self.sources.clone(),
+                memories: self.memories.clone(),
+                guide: self.guide.clone(),
+            };
+            Box::pin(settlement.advance(&composite, &self.overlay, layer, self.env))
                 .await
                 .map_err(failed)?;
             let settlements: Vec<CellSettlement> = cells
