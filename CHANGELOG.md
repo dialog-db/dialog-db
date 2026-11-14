@@ -60,6 +60,12 @@ What this changes for you:
   relation, which takes the decision out of the cycle, or make the
   decision in an inductive rule, which runs at commit over the settled
   value.
+- A quarantine says what it was made over. `Quarantine::tested` names
+  the cycle's plainest absence test: the rule making it (`by`), the
+  relation tested (`target`) and how (`absence`). `Tested` is new, and
+  `Absence::Decided` is a `last` read the rule decides on, apart from
+  `Absence::Elected`, a ranked read. Code building a `Quarantine` by its
+  fields names the new one.
 - `Polarity::Electing` carries `decides` beside `ranked`.
 
 Why: a rule set has to mean one thing whatever else is installed. The

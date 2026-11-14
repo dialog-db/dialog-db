@@ -134,6 +134,17 @@ impl Polarity {
         )
     }
 
+    /// How the edge tests for absence, when it does.
+    fn absence(self) -> Option<Absence> {
+        match self {
+            Polarity::Negative => Some(Absence::Negated),
+            Polarity::Optional => Some(Absence::Optional),
+            Polarity::Electing { ranked: true, .. } => Some(Absence::Elected),
+            Polarity::Electing { decides: true, .. } => Some(Absence::Decided),
+            Polarity::Electing { .. } | Polarity::Positive | Polarity::Aggregating => None,
+        }
+    }
+
     /// How plainly the edge tests for absence: an `unless` or an
     /// optional read most, an election next.
     fn strength(self) -> u8 {
@@ -153,8 +164,23 @@ pub enum Absence {
     Negated,
     /// A set-widened (optional) read.
     Optional,
-    /// A read under a choosing pick.
+    /// A read under a ranking pick (`top`, a relation chain, `max`,
+    /// `min`).
     Elected,
+    /// A read under `last` whose value the rule decides on.
+    Decided,
+}
+
+/// The absence test a quarantined rule's cycle ran through: what made
+/// the cycle one with no stratified meaning.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tested {
+    /// The rule making the test; `None` for a concept's selecting read.
+    pub by: Option<Entity>,
+    /// The relation or concept tested, inside the cycle.
+    pub target: Entity,
+    /// How it is tested.
+    pub absence: Absence,
 }
 
 /// A rule the analysis set aside: it closed a cycle through an absence
@@ -168,6 +194,9 @@ pub struct Quarantine {
     pub concept: Entity,
     /// The concepts of the cycle it closed, sorted.
     pub cycle: Vec<Entity>,
+    /// The cycle's plainest absence test, the one the rule was set
+    /// aside over: which rule tests what, and how.
+    pub tested: Option<Tested>,
 }
 
 /// An absence test inside a dependency cycle: some rule concluding
@@ -793,10 +822,18 @@ impl ProgramAnalysis {
                 .find(|edges| edges.rule.as_ref() == Some(&rule))
                 .map(|edges| edges.concept.clone())
                 .expect("the chosen rule is one of the program's");
+            let tested = test.and_then(|test| {
+                Some(Tested {
+                    absence: test.polarity.absence()?,
+                    by: test.owner,
+                    target: test.target,
+                })
+            });
             quarantined.push(Quarantine {
                 rule,
                 concept,
                 cycle: cycle.clone(),
+                tested,
             });
         };
 
@@ -833,21 +870,15 @@ impl ProgramAnalysis {
                 if component[index_of[node]] != component[index_of[target]] {
                     continue;
                 }
-                let absence = match polarity {
-                    Polarity::Negative => Absence::Negated,
-                    Polarity::Optional => Absence::Optional,
-                    polarity @ Polarity::Electing { .. } if polarity.tests_absence() => {
-                        Absence::Elected
-                    }
-                    Polarity::Electing { .. } => continue,
-                    Polarity::Aggregating => {
-                        violations.push(AggregationViolation {
-                            concept: node.clone(),
-                            aggregated: target.clone(),
-                        });
-                        continue;
-                    }
-                    Polarity::Positive => continue,
+                if *polarity == Polarity::Aggregating {
+                    violations.push(AggregationViolation {
+                        concept: node.clone(),
+                        aggregated: target.clone(),
+                    });
+                    continue;
+                }
+                let Some(absence) = polarity.absence() else {
+                    continue;
                 };
                 absences.push(AbsenceInCycle {
                     concept: node.clone(),
@@ -1213,6 +1244,11 @@ mod tests {
                 rule: closing.this(),
                 concept: ProgramAnalysis::node(&a),
                 cycle,
+                tested: Some(Tested {
+                    by: Some(negating.this()),
+                    target: ProgramAnalysis::node(&a),
+                    absence: Absence::Negated,
+                }),
             }]
         );
         assert!(analysis.absences().is_empty(), "no cycle is left to report");

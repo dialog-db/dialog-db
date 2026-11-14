@@ -11,7 +11,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::query::Application as _;
 use crate::query::Output as _;
 use crate::rule::DeductiveRuleDescriptor;
-use crate::session::RuleRegistry;
+use crate::session::{Absence, RuleRegistry};
 use crate::source::test::TestEnv;
 use crate::the;
 use crate::types::Any;
@@ -1137,13 +1137,19 @@ async fn a_rule_deciding_on_a_last_value_inside_its_cycle_is_set_aside() -> anyh
     let mut inside = RuleRegistry::new();
     inside.register(carry_label()?)?;
     inside.register(decides.clone())?;
-    let quarantined: Vec<Entity> = inside
-        .analysis()?
-        .quarantined()
-        .iter()
-        .map(|set_aside| set_aside.rule.clone())
-        .collect();
-    assert_eq!(quarantined, vec![decides.this()]);
+    let analysis = inside.analysis()?;
+    let [set_aside] = analysis.quarantined() else {
+        anyhow::bail!("one rule is set aside: {:?}", analysis.quarantined());
+    };
+    assert_eq!(set_aside.rule, decides.this());
+    assert_eq!(
+        set_aside
+            .tested
+            .as_ref()
+            .map(|tested| (&tested.by, tested.absence)),
+        Some((&Some(decides.this()), Absence::Decided)),
+        "the record says which rule decided, and that it did"
+    );
     let source = TestEnv::new(&branch, &operator, inside);
     let labels = relation_under(&source, "x/label", "last").await?;
     assert!(
