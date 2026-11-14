@@ -166,17 +166,32 @@ the ticks.
    by subscriptions over a channel, below). The layers every session
    has are named `memory:`, `session:` and `control:`. Induction's
    rounds are the ticks; they keep their name in the code.
-2. The `session:` layer as the session's own, minted whether or not
-   the schema declares it, replacing `Branch::overlay`; the revisions
-   of every layer as its rows, written before induction runs; the
-   selected layer as a row of it (`dialog.session/layer`), which a
-   write of a non-command attribute with no `in` lands in, the
-   primary when none is selected; machinery under `dialog.` never
-   follows the selection.
-3. A tick mints its instants in the memory layers as it ends, not at
-   the end of the dispatch, so a subscriber sees the ticks in order
-   (point 12). Today a dispatch lands each layer's share once, after
-   the publish.
+2. Done, in [#803](https://github.com/dialog-db/dialog-db/pull/803),
+   on [#800](https://github.com/dialog-db/dialog-db/pull/800), which
+   made `in` a dimension of the row: the `session:` layer as the
+   session's own, held whether or not the schema declares it, the
+   store `Branch::overlay` hands out under its older name; the
+   revision of every layer as its rows (`dialog.layer/revision`,
+   base58, under `last`), recorded once a dispatch publishes, and the
+   change in them since the last recording (the retraction of the
+   recorded row, then the row as it stands) as the dispatch's
+   stimulus, so a rule premised on a layer's revision fires when the
+   layer moved; the selected layer as a row of `session:`
+   (`dialog.session/layer`), which a write with no `in` lands in, the
+   primary when none is selected, the selected cells moved out of the
+   primary before anything settles; machinery under `dialog.` never
+   follows the selection. Decided on the way: a row with no layer
+   stamped is the primary's, `memory:`, as a write with no `in` is,
+   so the common read moves nothing per row (the Perf gate caught the
+   stamping).
+3. Done, in [#805](https://github.com/dialog-db/dialog-db/pull/805):
+   each tick that changes a memory layer mints one instant there, in
+   tick order, minted at publish (point 11 holds: a refused publish
+   shows in no layer), so a subscriber sees the ticks in order. The
+   rounds read each layer as the ticks before them leave it, the
+   link's own layer writes are the first tick and the first round's
+   stimulus, and a `last` write into `session:` succeeds the row the
+   layer holds within the dispatch.
 4. `control:` as a layer with a one-tick lifetime, replacing
    transients and the `transient` marker; channels to the embedder as
    layers whose rows stay until the consumer retracts them; providers
