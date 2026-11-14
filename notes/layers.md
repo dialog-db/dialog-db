@@ -1,151 +1,156 @@
-# Layers
+# Layers, commands, ticks
 
-Status: the model that the stack work (#578, #720) converges on. One
-page; each numbered sentence is an invariant, and the randomized
-subscription harness checks the ones a test can reach. Where this
-differs from `state-layers.md`, this is the intent and that is the
-history.
+Status: the model the stack work converges on, after the review of
+2026-11. Four words: layers, attributes, commands, ticks. Rules do the
+rest. Each numbered sentence is an invariant; where this differs from
+`state-layers.md`, this is the intent and that is the history.
 
-## The picture
+## Layers
 
-The mental model is an image editor's layers. What you see is the
-composite: every layer read as one, the upper occluding the lower. A
-layer can be locked (a read-only link), hidden (unlinked, or not in this
-stack), or a linked file that shows another document at the revision
-you last saw (a durable layer linked beneath another, whose head the
-encloser recorded). Where a pixel lives is a property of the pixel's
-kind, not of the brush: a placement says which layer an attribute's
-facts are on, and a write goes there whatever handle made it.
+1. A **layer** is a table of facts. It persists across ticks until its
+   facts are retracted. Two things about a layer are deployment, not
+   semantics: what backs it (memory or disk) and whether it has
+   upstreams (none, or peers it pulls from and pushes to). A session
+   layer is a table in memory. A device-local layer is a table on disk
+   with no upstream. A replicated layer is the same with upstreams.
+   There are no kinds of layer.
 
-## One primitive
+2. One layer is the **primary**: the one whose schema defines the
+   others. Opening a session on a branch builds, from that schema,
+   every layer the branch declares beside it, and links them. Primary
+   is a role, not a kind: a device branch with no upstream can be the
+   primary of a session as well as a replicated one.
 
-1. A **layer** holds facts and has a **kind**. There are four:
+3. A link is **read**, **write**, or both. A write into a layer linked
+   read-only is refused before anything changes; a read never includes
+   a layer linked write-only.
 
-   | kind         | lives in | survives a restart | reaches peers | a fact stays until          |
-   |--------------|----------|--------------------|---------------|-----------------------------|
-   | `replicated` | a branch | yes                | yes           | retracted                   |
-   | `durable`    | a branch | yes                | no            | retracted                   |
-   | `memory`     | memory   | no                 | no            | retracted                   |
-   | `event`      | memory   | no                 | no            | the commit after it entered |
+4. The picture is an image editor's: the composite is what you read,
+   every layer at once; a read-only link is a locked layer; a layer not
+   linked into this session is hidden.
 
-   A channel is a `memory` or `event` layer with a transport.
-   A branch's session store is a `memory` layer. There is no other
-   store of facts.
+## Attributes
 
-2. A **stack** is an ordered list of layers, each bound under one or
-   more **scope** names. The bottom is the widest and slowest. Which
-   layer stands under a name is wiring, local to the process, in
-   memory. It is never a fact.
+5. An attribute is placed on exactly one layer: `in: :session`. With
+   no `in:`, the primary. The layer is part of the attribute's
+   identity: `site/path in: :session` and `site/path in: :space` are
+   two attributes that share a name and a type.
 
-3. The **schema** is on the bottom and replicates with it: each
-   attribute's **placement** (the scope it lives in), the repository's
-   default scope, and each scope's **kind**. A stack refuses to bind a
-   layer of another kind under a scope, at `link`.
+6. A query names the layer it reads the way a Datomic query names its
+   db: left out, it reads the primary. Joining across layers, picking
+   a winner between two attributes of one name, and copying a value
+   from one layer to another are rules, not features of placement.
 
-4. A process may hold its own declarations in a stack
-   (`Stack::declare`). They outrank the bottom's, yield to a
-   transaction's own, and reach no layer.
+## Commands
 
-## Reads
+7. A **command** is the scratch: it exists for one tick and is never
+   stored. It has no `in:`. A command that must reach another peer is
+   not a command but a fact of a replicated layer, which its handler
+   retracts.
 
-5. A read of a stack takes each attribute only from the layers of its
-   placement. A fact found elsewhere is a divergence, reported once,
-   read by nothing.
+8. A command is the stimulus of the tick after the one in which it
+   was dispatched. A dispatch from outside happens between ticks, so
+   it starts the next one. The writes a transaction carries beside a
+   command are stimulus of the same tick.
 
-6. A durable encloser (`replicated` or `durable`) captures: it records
-   the head of each layer it links as a fact of its own, so the pairing
-   survives a restart and replicates with it. That is how a replica one
-   pulls from or pushes to can be a layer, a pull being the advance of
-   the stack, and how a profile can be a layer beneath a space, so a
-   query for grants finds them all. A memory encloser records nothing
-   and reads what it links live.
+## Ticks
 
-7. A subscription's maintained result equals a fresh evaluation,
-   after any sequence of commits, memory writes and clears, on a branch
-   or a stack. (The randomized invariant.)
+9. A **tick** evaluates the inductive rules once, over the layers as
+   they stand plus the tick's stimulus. Everything the rules assert,
+   facts and commands alike, lands at the start of the next tick and
+   is its stimulus. Nothing a rule writes is visible in the tick that
+   wrote it.
 
-## Writes
+10. Ticks chain until a tick writes nothing. Durable writes are staged
+    as the ticks run and published once, when they stop. A tick that
+    writes only to memory, or only dispatches, commits nothing. A
+    chain longer than the cap (16 today, a guard against a command
+    that re-dispatches itself) fails the dispatch.
 
-8. A transaction's write goes to the layer its attribute's placement
-   names. A write placed on a scope the stack does not bind, or binds
-   read-only, fails before any layer changes.
+11. A dispatch is one unit of publication: all its ticks stage on the
+    heads captured when it began, publish bottom to top, and a lost
+    compare-and-set re-runs the whole dispatch from the new heads and
+    the original command. A tick is a function of state and stimulus,
+    so a re-run is safe.
 
-9. A commit induces over the whole stack to a fixpoint (at most 16
-   rounds), then routes each fact, then stages one chain per branch
-   layer and publishes bottom to top. Rules fire on every fact that
-   **entered** any layer since the last commit, from this transaction,
-   from another writer, from a pull, or over a channel, each exactly
-   once.
+12. Each tick that changes a memory layer mints one instant there, so
+    a subscriber sees the ticks in order, and a maintained
+    subscription equals a fresh evaluation after any sequence of
+    ticks. (The randomized invariant.)
 
-10. A fact in an `event` layer is offered to the rules once, in the
-    commit it enters in (the next commit, for one asserted from
-    outside; the same commit, for one the transaction writes), is read
-    by queries and subscriptions as a stored fact while it is held, and
-    is retracted by the commit after the one it entered in, whether or
-    not anything handled it. (This replaces transients, dispatch and
-    witnesses.)
+## Driving it
 
-11. An event reaches a rule body the way a dispatched transient does:
-    in the first round of the commit only, never as a stored fact of
-    the view. So a rule over an event and the state it changes (a click
-    and the count it increments) fires once and settles. A rule's head
-    placed on an event layer is a transient of the next round, and is
-    stored in the layer for a tick too: a rule carries an event forward
-    by deriving one.
+13. `branch.session()` opens a session: the stack the branch's schema
+    describes, with the branch as primary. `session.invoke(command)`
+    runs the ticks, stages, publishes and retries. `session.transact(
+    facts)` writes without a command (imports, seeds, tests).
+    `session.sync()` pulls and pushes the layers with upstreams; it is
+    a separate call.
 
-12. A command that must be handled later, by a rule or a writer that
-    is not there yet, is a fact of a `memory` layer: a rule installed
-    later fires over what is stored, as any installed rule does, and
-    the handler retracts it. There is no queue kind; a memory layer is
-    one.
+## Two examples, tick by tick
 
-13. Movement between kinds of state is a rule: one attribute per
-    scope, and a rule that reads one and writes another. The same
-    attribute never lives in two scopes.
+**A click increments a counter.** Rule: `count ← prev + 1 when
+click(c) ∧ count(c, prev)`, `count in: :space`.
 
-## Peers
+| tick | stimulus | rules see | rules write |
+|---|---|---|---|
+| 1 | `click(c)` | click, count = 1 | count = 2 |
+| 2 | count = 2 | count = 2, no click | nothing |
 
-14. A channel delivers a layer's state, not its history: a peer that
-    fell behind reconciles against what the layer holds. The instant
-    stream is an optimisation of that, never the only path.
+Two ticks, one publish. The rule never sees count = 2 beside the
+click, so it fires once. (With the click visible to a second round in
+the same tick, it would derive 3, then 4: the loop the earlier
+`event`-layer design hit.)
 
-15. A channel sends what a commit wrote only once the commit
-    published; a commit that fails sends nothing.
+**A command cascade.** Rules: `open(doc) when navigate(path) ∧
+site(path, doc)` dispatches `open`; `selected ← doc when open(doc)`,
+`selected in: :session`.
+
+| tick | stimulus | rules write |
+|---|---|---|
+| 1 | `navigate(p)` | dispatch `open(d)` |
+| 2 | `open(d)` | selected = d |
+| 3 | selected = d | nothing |
+
+Three ticks; nothing durable was written, so nothing commits; the
+session layer minted two instants, and a subscription over `selected`
+reports one delta.
 
 ## What this removes
 
-Transients, `dispatch`, `TransientAttribute`, witness rounds and
-`Committed::derived`, once sapling and tonk are on input layers;
-`Branch::overlay` as a mechanism apart from a layer; link facts and
-capture for memory enclosers (a memory encloser keeps its wiring in
-memory); snapshots in stacks.
+Scopes as names standing for sets of layers, and the default scope;
+the `event` and `queue` layer kinds and `dialog.scope/kind`;
+`TransientAttribute` and the witness rounds, once commands are the
+scratch everywhere; `Channel` as a type apart from a layer with
+upstreams and a transport; `Branch::overlay` as a mechanism apart from
+the session layer of a one-layer stack; the consumer's own
+advance-and-retry loop.
 
 ## What this keeps
 
-Placements and guided reads, divergences, read-only links, one layer
-under several scopes, capture and descriptor identities for durable
-enclosers, holds until publish, the entered watch, channels, the
-randomized invariant.
+Placement (now attribute → one layer), guided reads and divergences,
+read-only links, capture by a durable encloser, holds until publish,
+`Committed::derived`, `Stack::declare` for a process's own
+placements, the randomized invariant, induction's rounds, which are
+the ticks.
 
 ## Order
 
-1. Scope kinds and the `event` layer (dialog-db/dialog-db#722). Then
-   migrate sapling's and tonk's commands onto them, and delete
-   transients.
-2. `Branch::overlay` becomes a `memory` layer; `branch.query()` is a
-   one-layer stack.
-3. Memory enclosers read live and keep no link facts; capture stays
-   for durable enclosers.
-4. Channels reconcile by state; sapling's worker–daemon link first,
-   iroh second.
-5. A replica as a layer (pull as advance), and a profile as a layer
-   beneath a space.
+1. #720 lands as the engine.
+2. `round` becomes `tick` in names and docs; a tick mints its instants
+   in the memory layers as it ends, not at the end of the dispatch.
+3. `branch.session()`, `invoke`, `transact`, `sync`; the stack built
+   from the primary's schema. Sapling and tonk move onto `invoke` and
+   delete their wiring and retry code.
+4. `in:` on attributes; scopes go; `Branch::overlay` becomes the
+   session layer.
+5. Write-only links. A transport for a layer with upstreams in memory
+   (sapling's worker–daemon link first); `Channel` goes.
 
 ## Open
 
-- A command in a memory layer that nothing ever handles: a clock (a
-  periodic `compact` event) retracts by age, or it stays. Leaning: it
-  stays, and the inspector shows it.
-- Placements from a `replicated` layer that is not the bottom (a peer's
-  space above a shared one): a higher durable layer outranks a lower.
-  Not built.
+- Whether a tick cap is wanted at all, and what a dispatch that hits
+  it should leave behind. Leaning: fail the dispatch, publish nothing.
+- How the schema names a layer that is another branch of the same
+  repository (device, index), so a session can open it unaided; a
+  foreign repository's branch (a profile) stays an explicit link.
