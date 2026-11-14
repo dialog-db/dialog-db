@@ -62,6 +62,7 @@ impl<'a> KeyCursor<'a> {
     }
 
     /// The next key and its position, or `None` past the last.
+    #[inline]
     pub fn next_key(&mut self) -> Result<Option<(usize, &[u8])>, DialogSearchTreeError> {
         match self {
             KeyCursor::Columnar(leaf) => leaf.next_key(),
@@ -146,6 +147,7 @@ impl<Value: rkyv::Archive> Clone for BufferView<'_, Value> {
 
 impl<'a, Value: rkyv::Archive> IndexView<'a, Value> {
     /// Number of children in this index.
+    #[inline]
     pub fn len(&self) -> usize {
         match self {
             IndexView::Archived(index) => index.len(),
@@ -154,10 +156,12 @@ impl<'a, Value: rkyv::Archive> IndexView<'a, Value> {
     }
 
     /// Whether this index holds no children.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    #[inline]
     fn check(&self, at: usize) -> Result<(), DialogSearchTreeError> {
         if at < self.len() {
             Ok(())
@@ -167,6 +171,7 @@ impl<'a, Value: rkyv::Archive> IndexView<'a, Value> {
     }
 
     /// The full separator of the child at `at`.
+    #[inline]
     pub fn separator(&self, at: usize) -> Result<Vec<u8>, DialogSearchTreeError> {
         match self {
             IndexView::Archived(index) => index.separator(at),
@@ -178,6 +183,7 @@ impl<'a, Value: rkyv::Archive> IndexView<'a, Value> {
     }
 
     /// The content hash of the child at `at`.
+    #[inline]
     pub fn hash_at(&self, at: usize) -> Result<&'a Blake3Hash, DialogSearchTreeError> {
         match self {
             IndexView::Archived(index) => index.hash_at(at),
@@ -189,6 +195,7 @@ impl<'a, Value: rkyv::Archive> IndexView<'a, Value> {
     }
 
     /// The rough size of the child subtree at `at`, for query planning.
+    #[inline]
     pub fn scale_at(&self, at: usize) -> Result<Scale, DialogSearchTreeError> {
         match self {
             IndexView::Archived(index) => index.scale_at(at),
@@ -206,6 +213,7 @@ impl<'a, Value: rkyv::Archive> IndexView<'a, Value> {
     }
 
     /// The child at `at`, materialized as an owned [`Link`].
+    #[inline]
     pub fn link_at(&self, at: usize) -> Result<Link, DialogSearchTreeError> {
         if let IndexView::Archived(index) = self {
             return index.link_at(at);
@@ -218,6 +226,7 @@ impl<'a, Value: rkyv::Archive> IndexView<'a, Value> {
     }
 
     /// All children, materialized as owned [`Link`]s in child order.
+    #[inline]
     pub fn links(&self) -> Result<Vec<Link>, DialogSearchTreeError> {
         match self {
             IndexView::Archived(index) => index.links(),
@@ -226,6 +235,7 @@ impl<'a, Value: rkyv::Archive> IndexView<'a, Value> {
     }
 
     /// Whether any child's content hash equals `hash`.
+    #[inline]
     pub fn contains_hash(&self, hash: &Blake3Hash) -> bool {
         match self {
             IndexView::Archived(index) => index.contains_hash(hash),
@@ -444,6 +454,7 @@ impl<'a, Value: rkyv::Archive> BufferView<'a, Value> {
     }
 
     /// A streaming decoder over this buffer's keys, in entry order.
+    #[inline]
     pub fn keys<Key: self::Key>(&self) -> Result<KeyCursor<'a>, DialogSearchTreeError> {
         match self {
             BufferView::Archived(buffer) => Ok(KeyCursor::Columnar(buffer.keys::<Key>()?)),
@@ -569,6 +580,7 @@ where
 
 impl<'a, Value: self::Value> SegmentView<'a, Value> {
     /// Number of entries in this segment.
+    #[inline]
     pub fn len(&self) -> usize {
         match self {
             SegmentView::Archived(segment) => segment.len(),
@@ -577,6 +589,7 @@ impl<'a, Value: self::Value> SegmentView<'a, Value> {
     }
 
     /// Whether this segment holds no entries.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -590,6 +603,7 @@ impl<'a, Value: self::Value> SegmentView<'a, Value> {
     }
 
     /// The archived value of the entry at `at`, read in place.
+    #[inline]
     pub fn value_at(&self, at: usize) -> Result<&'a Value::Archived, DialogSearchTreeError> {
         match self {
             SegmentView::Archived(segment) => segment.value_at(at),
@@ -606,6 +620,7 @@ impl<'a, Value: self::Value> SegmentView<'a, Value> {
     }
 
     /// A streaming decoder over this segment's keys, in entry order.
+    #[inline]
     pub fn keys<Key: self::Key>(&self) -> Result<KeyCursor<'a>, DialogSearchTreeError> {
         match self {
             SegmentView::Archived(segment) => Ok(KeyCursor::Columnar(segment.keys::<Key>()?)),
