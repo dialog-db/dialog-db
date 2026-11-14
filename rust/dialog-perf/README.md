@@ -24,7 +24,7 @@ poll) off the record, then its **measured phase**, and reports:
 | `outcome` | what the phase produced: rows read, facts committed | exact |
 | `counters` | archive blocks read and written (and their bytes), the engine's own steps: rule resolutions, rule hydrations, cell settlements, commits, tree writes, and any measure the scenario adds (`first-query` adds the root frame's bytes) | steps exact; blocks within two, bytes within 15% |
 | `instructions_outside_allocator` | instructions the phase retired under callgrind, less every call into the allocator from outside it, callees included | within 1% (and 50 K) |
-| `allocations` | calls into the allocator from outside it, by kind: `alloc`, `realloc`, `free` | within 64 calls |
+| `allocations` | the phase's calls into the allocator (`alloc`, `free`, `realloc`), the bytes it asked for, and the bytes its `realloc`s started from | calls within 16, bytes within 8 KB |
 | `instructions` | every instruction the phase retired, under callgrind | shown, not gated |
 
 The counters come from the tracing spans the engine emits
@@ -56,15 +56,24 @@ it takes every call into an allocator entry point (`malloc`, `free`,
 `realloc`, the Rust shims, ...) from a function outside the allocator,
 with the call's inclusive cost, so the copy a moving `realloc` makes
 goes with it. What is left repeats to 0.38% at most and under 0.1% in
-most scenarios, with no seed fixed and address randomization on. The
-allocator is held by its call counts, which hash order moves by a few
-dozen. The total is still shown beside them, so a review sees what the
-binary costs; growth there with neither gated number moving is the
-allocator's, and the call counts say whether more calls are why.
+most scenarios, with no seed fixed and address randomization on.
 
-What this misses: a change that costs more inside the allocator for
-the same number of calls, such as a buffer grown without a `reserve`
-that `realloc` now copies more of.
+The allocator is held by its counts instead, taken in the process by
+a global allocator that passes every call to the system one and counts
+only during the measured phase (callgrind counts calls whether it is
+collecting or not). Besides the calls, it counts the bytes asked for
+and the bytes each `realloc` started from: what the allocator may have
+to copy. Whether a `realloc` does copy depends on the layout; what it
+may copy depends on how the code grows its buffers, so a buffer grown
+without a `reserve` shows there. Six sweeps moved the calls by six at
+most and the bytes by 2 KB.
+
+The total is still shown, ungated, so a review sees what the binary
+costs.
+
+What this misses: what each call costs inside the allocator, which
+also moves with the sizes asked for and with fragmentation. A change of
+that kind shows in the total alone.
 
 ## Running
 
@@ -118,9 +127,9 @@ and `compare` refuses to compare across profiles.
 - **Instructions outside the allocator grew past 1%.** Run
   `callgrind_annotate --inclusive=yes target/perf-current/<scenario>.callgrind`
   on both heads and diff the inclusive costs.
-- **Allocator calls grew past 64.** Something allocates per row, or
-  per step, that did not; the callers of `malloc` in the same
-  annotation say where.
+- **Allocator calls or bytes grew.** Something allocates per row, or
+  per step, that did not, or grows a buffer it used to reserve; the
+  callers of `malloc` and `realloc` in the same annotation say where.
 - **The outcome changed.** The workload answers differently: either a
   wrong answer, or a scenario whose shape changed. Both are a bug or a
   deliberate change to pin, never a re-baseline.

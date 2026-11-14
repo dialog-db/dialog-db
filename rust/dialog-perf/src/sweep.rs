@@ -6,7 +6,7 @@
 //! measured phase. Collection starts off and toggles on the
 //! `dialog_perf_measured` symbol, so the setup is not in the count.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -102,93 +102,82 @@ fn run_child(exe: &Path, scenario: &str, config: &SweepConfig) -> Result<Report>
         }
         let text = fs::read_to_string(&callgrind_out)
             .with_context(|| format!("reading {}", callgrind_out.display()))?;
-        let allocator = allocator(&text);
         report.instructions = Some(instructions);
-        report.instructions_outside_allocator =
-            Some(instructions.saturating_sub(allocator.instructions));
-        report.allocations = allocator.calls;
+        report.instructions_outside_allocator = Some(instructions.saturating_sub(allocator(&text)));
     }
     Ok(report)
 }
 
-/// The allocator's entry points, by the kind of call each one is: the
-/// C allocator's, and Rust's global-allocator shims, which an
-/// over-aligned `realloc` copies in itself rather than in the C one.
-const ENTRY: [(&str, &str); 22] = [
-    ("malloc", "alloc"),
-    ("calloc", "alloc"),
-    ("posix_memalign", "alloc"),
-    ("aligned_alloc", "alloc"),
-    ("memalign", "alloc"),
-    ("valloc", "alloc"),
-    ("pvalloc", "alloc"),
-    ("__rust_alloc", "alloc"),
-    ("__rust_alloc_zeroed", "alloc"),
-    ("__rdl_alloc", "alloc"),
-    ("__rdl_alloc_zeroed", "alloc"),
-    ("__rg_alloc", "alloc"),
-    ("__rg_alloc_zeroed", "alloc"),
-    ("realloc", "realloc"),
-    ("__rust_realloc", "realloc"),
-    ("__rdl_realloc", "realloc"),
-    ("__rg_realloc", "realloc"),
-    ("free", "free"),
-    ("cfree", "free"),
-    ("__rust_dealloc", "free"),
-    ("__rdl_dealloc", "free"),
-    ("__rg_dealloc", "free"),
+/// The allocator's entry points: the C allocator's, and Rust's
+/// global-allocator shims, which an over-aligned `realloc` copies in
+/// itself rather than in the C one, and in which the harness's counting
+/// allocator runs.
+const ENTRY: [&str; 22] = [
+    "malloc",
+    "calloc",
+    "posix_memalign",
+    "aligned_alloc",
+    "memalign",
+    "valloc",
+    "pvalloc",
+    "realloc",
+    "free",
+    "cfree",
+    "__rust_alloc",
+    "__rust_alloc_zeroed",
+    "__rust_realloc",
+    "__rust_dealloc",
+    "__rdl_alloc",
+    "__rdl_alloc_zeroed",
+    "__rdl_realloc",
+    "__rdl_dealloc",
+    "__rg_alloc",
+    "__rg_alloc_zeroed",
+    "__rg_realloc",
+    "__rg_dealloc",
 ];
 
-/// What the measured phase spent in the allocator, from a callgrind
-/// output file.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct Allocator {
-    /// The inclusive cost of every call into an entry point from outside
-    /// the allocator: the allocator's own work, and what it calls, such
-    /// as the copy a `realloc` makes when it moves a block.
-    instructions: u64,
-    /// Those calls, counted by kind (`alloc`, `realloc`, `free`).
-    calls: BTreeMap<String, u64>,
-}
+/// The harness's counting allocator ([`crate::allocator::Counting`]):
+/// its methods are entry points too.
+const ENTRY_TYPE: &str = "<dialog_perf::allocator::Counting as ";
 
-/// The allocator's share of a callgrind output: every call from a
-/// function outside the allocator to one of its entry points, with the
-/// call's inclusive cost. A caller is inside the allocator when it is an
-/// entry point itself or is defined in glibc's `malloc.c` or `arena.c`,
-/// so a call `realloc` makes to `malloc` is not counted twice.
-///
-/// Callgrind records calls only while it collects, so these are the
-/// measured phase's own. Counting them from the output rather than by
-/// wrapping the allocator adds nothing to the instructions measured.
+/// The instructions the measured phase spent in the allocator, from a
+/// callgrind output: the inclusive cost of every call from a function
+/// outside the allocator to one of its entry points, so what the
+/// allocator calls, such as the copy a `realloc` makes when it moves a
+/// block, is counted with it. A caller is inside the allocator when it
+/// is an entry point itself or is defined in glibc's `malloc.c` or
+/// `arena.c`, so a call `realloc` makes to `malloc` is not counted
+/// twice.
 ///
 /// The format compresses names: `(id) name` the first time, `(id)`
 /// after, one table for functions and one for files. A `calls=` line is
 /// followed by the line holding the call's inclusive cost, its last
-/// field. Recursion suffixes (`'2`) are dropped.
-fn allocator(text: &str) -> Allocator {
+/// field. Recursion suffixes (`'2`) are dropped. Callgrind counts a
+/// call's cost only while it collects, so this is the measured phase's;
+/// it counts the calls themselves whether it collects or not, so those
+/// are counted in the process instead ([`crate::allocator`]).
+fn allocator(text: &str) -> u64 {
     let entry = |name: &str| {
-        ENTRY
-            .iter()
-            .find(|(entry, _)| *entry == name)
-            .map(|(_, kind)| *kind)
+        let name = unrecursed(name);
+        ENTRY.contains(&name) || name.starts_with(ENTRY_TYPE)
     };
     let mut functions: HashMap<String, String> = HashMap::new();
     let mut files: HashMap<String, String> = HashMap::new();
     let mut file = String::new();
     let mut inside = false;
-    let mut callee: Option<&str> = None;
-    let mut pending: Option<(&str, u64)> = None;
-    let mut out = Allocator::default();
+    let mut into_allocator = false;
+    let mut pending = false;
+    let mut instructions = 0;
     for line in text.lines() {
-        if let Some((kind, count)) = pending.take() {
+        if pending {
+            pending = false;
             if !inside {
-                let cost = line
+                instructions += line
                     .split_whitespace()
                     .nth(1)
                     .and_then(|n| n.parse::<u64>().ok())
                     .unwrap_or(0);
-                out.instructions += cost;
-                *out.calls.entry(kind.to_string()).or_default() += count;
             }
             continue;
         }
@@ -203,24 +192,17 @@ fn allocator(text: &str) -> Allocator {
             resolve(&mut files, spec);
         } else if let Some(spec) = line.strip_prefix("fn=") {
             let name = resolve(&mut functions, spec);
-            inside = entry(unrecursed(&name)).is_some()
+            inside = entry(&name)
                 || ["/malloc/", "malloc.c", "arena.c"]
                     .iter()
                     .any(|part| file.contains(part));
         } else if let Some(spec) = line.strip_prefix("cfn=") {
-            callee = entry(unrecursed(&resolve(&mut functions, spec)));
-        } else if let Some(rest) = line.strip_prefix("calls=")
-            && let Some(kind) = callee
-        {
-            let count = rest
-                .split_whitespace()
-                .next()
-                .and_then(|n| n.parse::<u64>().ok())
-                .unwrap_or(0);
-            pending = Some((kind, count));
+            into_allocator = entry(&resolve(&mut functions, spec));
+        } else if line.starts_with("calls=") {
+            pending = into_allocator;
         }
     }
-    out
+    instructions
 }
 
 /// A compressed name: `(id) name` defines `id`, `(id)` refers to it.
@@ -292,7 +274,7 @@ calls=2 0x10
 cfn=(5) realloc'2
 calls=1 0x30
 7 900
-cfn=(6) __rust_dealloc
+cfn=(6) <dialog_perf::allocator::Counting as core::alloc::global::GlobalAlloc>::dealloc
 calls=4 0x30
 7 40
 fl=(2) ./malloc/./malloc/malloc.c
@@ -304,15 +286,6 @@ cfn=(3)
 calls=1 0x20
 9 700
 ";
-        let allocator = allocator(text);
-        assert_eq!(allocator.instructions, 120 + 80 + 900 + 40);
-        assert_eq!(
-            allocator.calls,
-            BTreeMap::from([
-                ("alloc".to_string(), 5),
-                ("free".to_string(), 4),
-                ("realloc".to_string(), 1),
-            ])
-        );
+        assert_eq!(allocator(text), 120 + 80 + 900 + 40);
     }
 }

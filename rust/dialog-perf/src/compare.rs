@@ -8,7 +8,7 @@
 //! Instructions are callgrind's, and gated outside the allocator: the
 //! total varies with the heap's layout between runs of one binary (see
 //! [`Report::instructions`]), so it is shown and not gated, and the
-//! allocator is held by its call counts instead. The allowance on the
+//! allocator is held by its call and byte counts instead. The allowance on the
 //! instructions covers what is left (hash order) and toolchain drift,
 //! not work.
 //!
@@ -49,9 +49,12 @@ pub struct Tolerance {
     /// Absolute growth in instructions outside the allocator always
     /// allowed, so a tiny phase is not gated on noise.
     pub instructions_slack: u64,
-    /// Absolute growth in calls into the allocator allowed: the order
-    /// of hash maps moves them by up to 37 between runs of one binary.
+    /// Absolute growth in calls into the allocator allowed: six sweeps
+    /// of one binary moved them by six at most.
     pub allocation_slack: u64,
+    /// Absolute growth in the allocator's byte counts allowed: six
+    /// sweeps of one binary moved them by 2 KB at most.
+    pub allocation_bytes_slack: u64,
     /// Relative growth in byte counts allowed, in percent. A seam that
     /// lands a block earlier or later changes which leaf a read loads,
     /// and with it the bytes, by a tenth with the block count the same;
@@ -75,7 +78,8 @@ impl Default for Tolerance {
         Self {
             instructions_pct: 1.0,
             instructions_slack: 50_000,
-            allocation_slack: 64,
+            allocation_slack: 16,
+            allocation_bytes_slack: 8192,
             bytes_pct: 15.0,
             bytes_slack: 1024,
             block_slack: 2,
@@ -457,9 +461,9 @@ fn one_sided(out: &mut Comparison, report: &Report, base_side: bool) {
 /// The gated instruction count's metric name.
 const OUTSIDE: &str = "instructions.outside_allocator";
 
-/// The metric name of the calls into the allocator of one kind.
-fn allocation(kind: &str) -> String {
-    format!("allocator.{kind}.calls")
+/// The metric name of one of the allocator's counts.
+fn allocation(key: &str) -> String {
+    format!("allocator.{key}")
 }
 
 /// One scenario's rows: how each is judged and where its verdict goes.
@@ -641,14 +645,12 @@ fn compare_reports(
         for kind in kinds {
             let before = base.allocations.get(kind).copied().unwrap_or(0);
             let after = new.allocations.get(kind).copied().unwrap_or(0);
-            gate.check(
-                out,
-                &allocation(kind),
-                before,
-                after,
-                tolerance.allocation_slack,
-                0.0,
-            );
+            let slack = if kind.ends_with(".bytes") {
+                tolerance.allocation_bytes_slack
+            } else {
+                tolerance.allocation_slack
+            };
+            gate.check(out, &allocation(kind), before, after, slack, 0.0);
         }
     } else if !sweep && new.instructions.is_some() {
         out.regressions.push(format!(
@@ -986,12 +988,12 @@ mod tests {
         }
     }
 
-    /// Calls into the allocator are held to the slack hash order needs,
-    /// whatever the count: 64 more passes, 65 more fails, and a kind the
-    /// baseline never called counts from zero.
+    /// Calls into the allocator are held to their slack whatever the
+    /// count: 16 more passes, 17 more fails, and a kind the baseline
+    /// never called counts from zero.
     #[test]
     fn allocator_calls_are_gated_to_their_slack() {
-        let base = allocating(&[("alloc", 300_000), ("free", 200_000)]);
+        let base = allocating(&[("alloc.calls", 300_000), ("free.calls", 200_000)]);
         let check = |new: &Report| {
             let mut comparison = Comparison::default();
             compare_reports(
@@ -1003,8 +1005,17 @@ mod tests {
             );
             comparison
         };
-        assert!(check(&allocating(&[("alloc", 300_064), ("free", 200_000)])).passed());
-        let more = check(&allocating(&[("alloc", 300_065), ("free", 200_000)]));
+        assert!(
+            check(&allocating(&[
+                ("alloc.calls", 300_016),
+                ("free.calls", 200_000)
+            ]))
+            .passed()
+        );
+        let more = check(&allocating(&[
+            ("alloc.calls", 300_017),
+            ("free.calls", 200_000),
+        ]));
         assert!(
             matches!(
                 more.rows
@@ -1018,9 +1029,9 @@ mod tests {
         );
         assert!(
             !check(&allocating(&[
-                ("alloc", 300_000),
-                ("free", 200_000),
-                ("realloc", 100)
+                ("alloc.calls", 300_000),
+                ("free.calls", 200_000),
+                ("realloc.calls", 100)
             ]))
             .passed()
         );
@@ -1037,7 +1048,7 @@ mod tests {
         };
         let new = Report {
             instructions: Some(10_000_000),
-            ..allocating(&[("alloc", 5)])
+            ..allocating(&[("alloc.calls", 5)])
         };
         let mut comparison = Comparison::default();
         compare_reports(

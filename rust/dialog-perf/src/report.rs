@@ -33,9 +33,9 @@ pub struct Report {
     /// Gated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions_outside_allocator: Option<u64>,
-    /// Calls the measured phase made into the allocator from outside it,
-    /// by kind (`alloc`, `realloc`, `free`). They vary between runs by a
-    /// few dozen, with the order of hash maps. Gated with that slack.
+    /// The measured phase's calls into the allocator and their bytes
+    /// (see [`crate::allocator`]): `alloc.calls`, `alloc.bytes`,
+    /// `free.calls`, `realloc.calls`, `realloc.from.bytes`. Gated.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub allocations: BTreeMap<String, u64>,
 }

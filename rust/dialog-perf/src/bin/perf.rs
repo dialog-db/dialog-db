@@ -23,6 +23,10 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use dialog_perf::{Against, SweepConfig, Tolerance, catalog, compare_dirs, run, sweep};
 
+/// Counts the measured phase's calls into the allocator.
+#[global_allocator]
+static ALLOCATOR: dialog_perf::allocator::Counting = dialog_perf::allocator::Counting;
+
 /// The engine's cost matrix: counters and instruction counts per scenario.
 #[derive(Debug, Parser)]
 #[command(name = "perf", version, about)]
