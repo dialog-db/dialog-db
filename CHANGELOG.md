@@ -45,7 +45,7 @@ Its two cells are a stand-in, and this entry is not to be released as it
 reads: the formula is to take one record once a rule can build one, and
 the entities it names will change with it.
 
-### A parameter holds a pattern: a term, or a map, a list or a tuple of terms
+### A parameter holds a pattern: a term, or a map or a list of terms
 
 [#778](https://github.com/dialog-db/dialog-db/pull/778),
 [design/patterns.md](./design/patterns.md),
@@ -58,7 +58,7 @@ the entities it names will change with it.
 
 A premise was applied to parameters that each held one variable or one
 constant, so a rule could not say a value by its shape. A parameter now
-holds a `Pattern`: a term, or a map, a list or a tuple of patterns.
+holds a `Pattern`: a term, or a map or a list of patterns.
 Where the value is bound the pattern takes it apart and binds the
 variables inside it, and a value that does not match drops the row.
 Where every variable inside it is bound the pattern is the value, a
@@ -71,12 +71,11 @@ What this changes for you:
   with no rest is the map of exactly its entries; `with_rest` binds the
   entries it did not name, as a map, and a blank rest takes them and
   binds nothing. A list pattern with no run is the list of exactly its
-  items; `with_run` binds the ones after them, as a list. A tuple
-  pattern is the tuple of exactly its items.
+  items; `with_run` binds the ones after them, as a list.
 - `Parameters::set` binds a name to a pattern, and `shape`, `pattern`,
   `slot`, `shapes`, `leaves` and `map_terms` look inside. `insert`, `get` and
-  `iter` take and give terms as before: for a name that holds a map, a
-  list or a tuple, `get` gives the variable that stands for the whole
+  `iter` take and give terms as before: for a name that holds a map or
+  a list, `get` gives the variable that stands for the whole
   value. Code that collects the variables a premise mentions from
   `iter` should collect them from `leaves`.
 - `Equality`'s `this` and `is` are `Pattern`s, were `Term<Any>`.
@@ -90,8 +89,8 @@ What this changes for you:
   `DeductiveRule::analysis().premises()` lists one premise more than
   was written.
 - A pattern has no wire form. Serializing `Parameters`, a
-  `ConceptQuery`, an `Equality` or a rule that holds a map, a list or a
-  tuple of terms is an error that says so. A pattern with no variable
+  `ConceptQuery`, an `Equality` or a rule that holds a map or a list
+  of terms is an error that says so. A pattern with no variable
   is the constant it builds and is written as one.
 - A rule that holds a pattern has an identity and runs registered, and
   cannot be stored: `DeductiveRule::storable` and
@@ -107,7 +106,7 @@ What this changes for you:
   the thing back, so an implementation of `Update` that is committed
   needs no change and goes on refusing the rule.
 - A premise is feasible by the variables inside its patterns: a
-  parameter that holds a map, a list or a tuple is bound when every
+  parameter that holds a map or a list is bound when every
   variable inside it is, and a premise that binds it binds each of them.
   A rule whose pattern can never be bound fails to compile with
   `TypeError::RequiredBindings`, which names the variables inside the
@@ -117,7 +116,7 @@ What this changes for you:
   inside one keeps the type it was written with, so a rule that binds a
   text inside a map and adds a number to it fails to compile with
   `TypeError::TypeInference`, as one that adds a number to a text field
-  does. A map, a list or a tuple under a field that reads only text, and
+  does. A map or a list under a field that reads only text, and
   a rest or a run another premise needs to be a number, fail the same
   way. A variable written with no type inside a pattern is any present
   value.
@@ -136,7 +135,7 @@ takes a form apart needs a value made of values where a term stands.
 One pattern that both builds and takes apart lets the planner order the
 premises, as it does for every other premise.
 
-### A record can hold a map, a list or a tuple of values
+### A record can hold a map or a list of values
 
 [#778](https://github.com/dialog-db/dialog-db/pull/778),
 [design/patterns.md](./design/patterns.md),
@@ -144,14 +143,14 @@ premises, as it does for every other premise.
 
 A value was a scalar or a `Record`, bytes dialog did not look into. A
 `Composite` is a value made of values: a map from a value to a value
-that holds no key twice, a list, or a tuple, nested as deep as it is
-written. It is kept whole as a `Value::Record`: one version byte,
+that holds no key twice, or a list, nested as deep as it is written,
+as the IPLD data model has them. There is no tuple: a notation that has
+one writes it as a list. It is kept whole as a `Value::Record`: one version byte,
 `0x01`, then the dag-cbor of its parts. So a composite is a claim's
 value like any other: it is stored, keyed, compared, spilled and synced
 as the bytes it is. Its name is not a hash of those bytes. A composite
-is named by the merkle reference of its parts, a map under `map:`, a
-list under `list:` and a tuple under `tuple:`, each part by its own
-reference, so a later layout of the bytes moves no name.
+is named by the merkle reference of its parts, a map under `map:` and
+a list under `list:`, each part by its own reference, so a later layout of the bytes moves no name.
 
 What this changes for you:
 
@@ -170,7 +169,6 @@ What this changes for you:
 - `Value::reference` of a record that holds a composite is the
   reference of its parts. Of any other record it is what it was,
   `RECORD.reference_of(bytes)`.
-- `dialog_corpus::identity::TUPLE` is the type tuples are named under.
 - Equality, ordering, `Value::to_bytes`, `Value::to_reference` (the
   address a spilled value is stored under) and the key encoding treat a
   record as its bytes, as before.

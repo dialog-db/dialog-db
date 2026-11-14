@@ -10,10 +10,9 @@
 //! - raw bytes, referenced by their BLAKE3 hash like any blob;
 //! - [`ENTITY`], [`SYMBOL`] and [`RECORD`], whose content is their text or
 //!   bytes;
-//! - a composite, a record that holds a map, a list or a tuple of values
-//!   (see [`Composite`](crate::Composite)): a map under [`Type::MAP`], a
-//!   list under [`Type::LIST`] and a tuple under [`TUPLE`], whose content
-//!   is its parts' references. Its name is its parts', not its bytes', so
+//! - a composite, a record that holds a map or a list of values (see
+//!   [`Composite`](crate::Composite)): a map under [`Type::MAP`] and a
+//!   list under [`Type::LIST`], whose content is its parts' references. Its name is its parts', not its bytes', so
 //!   no layout of the bytes moves it. Any other record is named by its
 //!   bytes under [`RECORD`], as every record was before.
 //!
@@ -52,12 +51,6 @@ pub const SYMBOL: Type = Type::from_reference(Reference::from_hex(
 /// The type of records: opaque bytes.
 pub const RECORD: Type = Type::from_reference(Reference::from_hex(
     "419cfed454524033b3fc368ea2d718640f0ac99760c033353c4120c822c19589",
-));
-/// The type of tuples, `tuple:`: the items' references, in order, as a
-/// list's are. A tuple and a list of the same items are two values, so
-/// they are named under two types.
-pub const TUPLE: Type = Type::from_reference(Reference::from_hex(
-    "6578edaf51160bf60892d3d6889b7972e8f8776b200b18d6d62ac3025b616381",
 ));
 
 /// A number's identity content: its [`dialog_number`] encoding.
@@ -113,7 +106,6 @@ mod tests {
             ("entity:", ENTITY),
             ("symbol:", SYMBOL),
             ("record:", RECORD),
-            ("tuple:", TUPLE),
         ] {
             assert_eq!(Type::named(name), Ok(ty), "{name}");
         }

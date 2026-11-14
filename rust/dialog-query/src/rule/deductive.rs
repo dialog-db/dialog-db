@@ -448,7 +448,7 @@ impl DeductiveRule {
     }
 
     /// Whether this rule can be stored, and so installed. A rule that
-    /// holds a map, a list or a tuple of terms cannot: the stored rule
+    /// holds a map or a list of terms cannot: the stored rule
     /// format writes a variable or a constant where a parameter stands
     /// and has no way to write a pattern. Such a rule has an identity
     /// and runs where it was built, and

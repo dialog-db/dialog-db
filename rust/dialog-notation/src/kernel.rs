@@ -39,8 +39,8 @@ pub enum Term {
     Symbol(String),
     /// An application of a formula, standing for its `is:` value.
     Formula(Box<Formula>),
-    /// A struct, `{key value}`, or a tuple, `[a b]`. With no variable in
-    /// it, it is a value; with one, a pattern.
+    /// A struct, `{key value}`, or a list, `[a b]` or `'(a b)`. With no
+    /// variable in it, it is a value; with one, a pattern.
     Struct(Syntax),
 }
 
@@ -174,12 +174,13 @@ fn term(node: &Syntax) -> Result<Term, Error> {
         Syntax::Reference(name) => Term::Symbol(name.clone()),
         application if application.is_formula() => Term::Formula(Box::new(formula(application)?)),
         Syntax::Map(_) | Syntax::Tuple(_) => Term::Struct(node.clone()),
-        // `'(1 2 3)`: quoted, a `( )` is the list of what it holds.
+        // `'(1 2 3)`: quoted, a `( )` is the list of what it holds, the
+        // same list `[1 2 3]` is.
         quoted if quoted.applies() == Some(QUOTE) => Term::Struct(node.clone()),
         Syntax::Application(..) => {
             return Err(Error::Refused(format!(
                 "{node} is not a term: it applies no formula, and a list where a value stands \
-                 is quoted, `'(1 2 3)`"
+                 is `[1 2 3]`, or quoted, `'(1 2 3)`"
             )));
         }
         other => return Err(Error::Refused(format!("{other} is not a term"))),

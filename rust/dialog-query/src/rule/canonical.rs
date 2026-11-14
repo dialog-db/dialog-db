@@ -175,7 +175,7 @@ pub(crate) fn canonicalize(
         let Some(shape) = encode_premise(shape) else {
             return Ok(None);
         };
-        // A variable inside a map, a list or a tuple of terms occurs
+        // A variable inside a map or a list of terms occurs
         // in the premise as any other does, at its place in the
         // pattern.
         let parameters = premise.parameters();
@@ -536,7 +536,7 @@ fn without_descriptions(premise: &Premise) -> Premise {
 /// A premise's encoding: its polarity, then its proposition. `None`
 /// for a premise the formal notation cannot express.
 ///
-/// A premise that holds a map, a list or a tuple of terms has no wire
+/// A premise that holds a map or a list of terms has no wire
 /// form to encode. It has a reference (see
 /// [`reference`](crate::rule::reference)), which is a function of the
 /// premise and of nothing else, and that orders it and tells it apart

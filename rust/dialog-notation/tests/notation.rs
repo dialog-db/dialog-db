@@ -983,11 +983,11 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     applies.sort();
     let mut expected = vec![
         format!(
-            "(syntax.form {} is: {{operand: {{items: '({{name: \"t\" type: :variable}}) terms: {{}} type: :parameters}} operator: {{name: /todo type: :reference}} type: :application}})",
+            "(syntax.form {} is: {{operand: {{items: [{{name: \"t\" type: :variable}}] terms: {{}} type: :parameters}} operator: {{name: /todo type: :reference}} type: :application}})",
             entities[0]
         ),
         format!(
-            "(syntax.form {} is: {{operand: {{items: '({{name: \"t\" type: :variable}}) terms: {{state: {{type: :constant value: :open}}}} type: :parameters}} operator: {{name: /todo type: :reference}} type: :application}})",
+            "(syntax.form {} is: {{operand: {{items: [{{name: \"t\" type: :variable}}] terms: {{state: {{type: :constant value: :open}}}} type: :parameters}} operator: {{name: /todo type: :reference}} type: :application}})",
             entities[1]
         ),
     ];
@@ -1026,20 +1026,16 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     .await?;
     assert_eq!(named.len(), 3, "{named:?}");
 
-    // The parts of a node are a list, which `( )` takes apart and
-    // `[ ]`, a tuple, does not: the kept tuple of two parts.
-    let pair = "(query (syntax.form ?f is: {type: :tuple items: '(_ _)}))";
-    let pairs = report(&mut notebook, pair).await?;
-    assert_eq!(pairs.len(), 1, "{pairs:?}");
-    assert!(pairs[0].contains(&entities[3]));
-    assert_eq!(
-        report(
-            &mut notebook,
-            "(query (syntax.form ?f is: {type: :tuple items: [_ _]}))",
-        )
-        .await?,
-        Vec::<String>::new()
-    );
+    // The parts of a node are a list, which `'( )` and `[ ]` both take
+    // apart: the kept tuple of two parts.
+    for pair in [
+        "(query (syntax.form ?f is: {type: :tuple items: '(_ _)}))",
+        "(query (syntax.form ?f is: {type: :tuple items: [_ _]}))",
+    ] {
+        let pairs = report(&mut notebook, pair).await?;
+        assert_eq!(pairs.len(), 1, "{pair}: {pairs:?}");
+        assert!(pairs[0].contains(&entities[3]));
+    }
     // And by a run: every application whose first part is a variable.
     let first = report(
         &mut notebook,
@@ -1052,10 +1048,11 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     Ok(())
 }
 
-/// A list is `'(1 2 3)` where a value stands: quoted, as in lisp, so
-/// that it is not read as applying `1`. `... ?run` after its items is
-/// the ones after them, and `...` alone takes them and binds nothing. A
-/// list comes back written as it went in.
+/// A list is `[1 2 3]` where a value stands, or `'(1 2 3)`, quoted as in
+/// lisp so that it is not read as applying `1`. Both say the one list the
+/// data model has, and either takes a kept one apart. `... ?run` after
+/// its items is the ones after them, and `...` alone takes them and binds
+/// nothing. A list comes back written `[ ]`, however it went in.
 #[dialog_common::test]
 async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
     let mut notebook = Notebook::open().await?;
@@ -1067,60 +1064,68 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
                (assert! (xyz.note note:4 about: {tags: '("math" {by: "Ada"})}))"#,
         )
         .await?;
+    let one = r#"(xyz.note note:1 tags: ["math" "engines" "looms"])"#;
+    let two = r#"(xyz.note note:2 tags: ["math"])"#;
+    let three = r#"(xyz.note note:3 tags: ["math" "engines"])"#;
+    let sorted = |mut rows: Vec<String>| {
+        rows.sort();
+        rows
+    };
 
-    // Whole, under a variable: a list is printed `( )` and a tuple `[ ]`.
-    let mut whole = report(&mut notebook, "(query (xyz.note ?n tags: ?tags))").await?;
-    whole.sort();
+    // Whole, under a variable: a list is printed `[ ]`, quoted or not
+    // where it was written.
     assert_eq!(
-        whole,
-        vec![
-            r#"(xyz.note note:1 tags: '("math" "engines" "looms"))"#,
-            r#"(xyz.note note:2 tags: '("math"))"#,
-            r#"(xyz.note note:3 tags: ["math" "engines"])"#,
-        ]
+        sorted(report(&mut notebook, "(query (xyz.note ?n tags: ?tags))").await?),
+        vec![one, two, three]
     );
-    // A list pattern with no run is the list of exactly its items.
+    // A list pattern with no run is the list of exactly its items, in
+    // either spelling, whichever spelling wrote the list.
     assert_eq!(
         report(&mut notebook, "(query (xyz.note ?n tags: '(?only)))").await?,
-        vec![r#"(xyz.note note:2 tags: '("math"))"#]
+        vec![two]
     );
-    // With a run it is a list that starts with them.
     assert_eq!(
-        report(
-            &mut notebook,
-            "(query (xyz.note ?n tags: '(?first ?second ... ?more)))"
-        )
-        .await?,
-        vec![r#"(xyz.note note:1 tags: '("math" "engines" "looms"))"#]
+        report(&mut notebook, "(query (xyz.note ?n tags: [?only]))").await?,
+        vec![two]
     );
-    let mut starts = report(
-        &mut notebook,
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.note ?n tags: '(?a ?b)))").await?,
+        vec![three]
+    );
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.note ?n tags: [?a ?b ?c]))").await?,
+        vec![one]
+    );
+    // With a run it is a list that starts with them. A run may take
+    // nothing.
+    for starts in [
+        "(query (xyz.note ?n tags: '(?first ?second ... ?more)))",
+        "(query (xyz.note ?n tags: [?first ?second ... ?more]))",
+    ] {
+        assert_eq!(
+            sorted(report(&mut notebook, starts).await?),
+            vec![one, three],
+            "{starts}"
+        );
+    }
+    for starts in [
         r#"(query (xyz.note ?n tags: '("math" ... ?more)))"#,
-    )
-    .await?;
-    starts.sort();
-    assert_eq!(
-        starts,
-        vec![
-            r#"(xyz.note note:1 tags: '("math" "engines" "looms"))"#,
-            r#"(xyz.note note:2 tags: '("math"))"#,
-        ]
-    );
-    // A list is not a tuple, nor a tuple a list.
-    assert_eq!(
-        report(&mut notebook, "(query (xyz.note ?n tags: [?a ?b]))").await?,
-        vec![r#"(xyz.note note:3 tags: ["math" "engines"])"#]
-    );
+        r#"(query (xyz.note ?n tags: ["math" ...]))"#,
+    ] {
+        assert_eq!(
+            sorted(report(&mut notebook, starts).await?),
+            vec![one, two, three],
+            "{starts}"
+        );
+    }
     // A list with no variable in it is the value, and what a row prints
     // reads back as it.
-    assert_eq!(
-        report(
-            &mut notebook,
-            r#"(query (xyz.note ?n tags: '("math" "engines" "looms")))"#
-        )
-        .await?,
-        vec![r#"(xyz.note note:1 tags: '("math" "engines" "looms"))"#]
-    );
+    for whole in [
+        r#"(query (xyz.note ?n tags: '("math" "engines" "looms")))"#,
+        r#"(query (xyz.note ?n tags: ["math" "engines" "looms"]))"#,
+    ] {
+        assert_eq!(report(&mut notebook, whole).await?, vec![one], "{whole}");
+    }
     // Inside a struct, and a struct inside it.
     assert_eq!(
         report(
@@ -1128,7 +1133,7 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
             "(query (xyz.note ?n about: {tags: '(_ {by: ?who})}))"
         )
         .await?,
-        vec![r#"(xyz.note note:4 about: {tags: '("math" {by: "Ada"})})"#]
+        vec![r#"(xyz.note note:4 about: {tags: ["math" {by: "Ada"}]})"#]
     );
 
     // A list has no labelled part.
@@ -1148,7 +1153,7 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
         .await?;
     assert_eq!(
         report(&mut notebook, "(query (xyz.note ?n tags: '(:open ...)))").await?,
-        vec!["(xyz.note note:5 tags: '(:open :done))"]
+        vec!["(xyz.note note:5 tags: [:open :done])"]
     );
     let bare = notebook
         .submit(r#"(query (xyz.note ?n tags: ("math" "engines")))"#)

@@ -114,23 +114,10 @@ impl Query {
     }
 }
 
-/// A value, as the tree that says it.
+/// A value, as the tree that says it. A list is said as `[a b]`: the data
+/// model has one sequence, and `[ ]` is how it is written where a value
+/// stands.
 fn written(value: &Value) -> Syntax {
-    shown(value, false)
-}
-
-/// [`written`], where `quoted` says the value stands inside a quoted
-/// list, in which a list has no quote of its own.
-fn shown(value: &Value, quoted: bool) -> Syntax {
-    let apply = |operator: Syntax, items: Vec<Syntax>| {
-        Syntax::Application(
-            Box::new(operator),
-            Parameters {
-                items,
-                ..Parameters::default()
-            },
-        )
-    };
     match value {
         Value::Record(_) if matches!(value.composite(), Ok(Some(_))) => {
             match value.composite() {
@@ -141,33 +128,14 @@ fn shown(value: &Value, quoted: bool) -> Syntax {
                             // was written as.
                             let key = match data::spelled(key) {
                                 Some(label) => Syntax::Reference(label),
-                                None => shown(key, quoted),
+                                None => written(key),
                             };
-                            (key, shown(value, quoted))
+                            (key, written(value))
                         })
                         .collect(),
                 ),
-                Ok(Some(Composite::Tuple(items))) => {
-                    Syntax::Tuple(items.iter().map(|item| shown(item, quoted)).collect())
-                }
-                // A list is `'(a b)`: `( )` with its first item where
-                // an operator stands, quoted.
                 Ok(Some(Composite::List(items))) => {
-                    let list = match items.split_first() {
-                        Some((first, others)) => apply(
-                            shown(first, true),
-                            others.iter().map(|item| shown(item, true)).collect(),
-                        ),
-                        // The list of nothing has no tree: `( )` has a
-                        // first part. It is printed as it would be
-                        // written and does not read back.
-                        None => Syntax::Reference("()".into()),
-                    };
-                    if quoted {
-                        list
-                    } else {
-                        apply(Syntax::Reference(QUOTE.into()), vec![list])
-                    }
+                    Syntax::Tuple(items.iter().map(written).collect())
                 }
                 _ => Syntax::Blank,
             }
@@ -329,7 +297,7 @@ fn id(formula: &Formula) -> Result<Option<Entity>, Error> {
     Ok(Some(entity))
 }
 
-/// The pattern a struct, a tuple or a list is. A key written as a label is a
+/// The pattern a struct or a list is, a list written `[a b]` or `'(a b)`. A key written as a label is a
 /// symbol of no domain; any other key is the value it is written as.
 /// `name` says what a variable goes by where the pattern stands, and
 /// what a blank, given no name, is there.
@@ -359,6 +327,45 @@ fn shape(
             ))),
         }
     }
+    /// The list `items` are, and `... ?run` after them for the ones
+    /// after them, as a list.
+    fn sequence(
+        node: &Syntax,
+        mut items: Vec<&Syntax>,
+        name: &mut dyn FnMut(Option<&str>) -> Variable<Any>,
+        quoted: bool,
+    ) -> Result<Pattern, Error> {
+        let dots = |part: &Syntax| matches!(part, Syntax::Reference(symbol) if symbol == REST);
+        let run = match items.iter().position(|item| dots(item)) {
+            Some(at) if at + 2 == items.len() => {
+                let taken = rest(items[at + 1], name)?;
+                items.truncate(at);
+                Some(taken)
+            }
+            Some(at) if at + 1 == items.len() => {
+                items.truncate(at);
+                Some(name(None))
+            }
+            Some(_) => {
+                return Err(Error::Refused(format!(
+                    "{node}: `...` stands after the items of a list, with what takes \
+                     the ones after them"
+                )));
+            }
+            None => None,
+        };
+        let list = ListPattern::new(
+            items
+                .into_iter()
+                .map(|item| walk(item, name, quoted))
+                .collect::<Result<Vec<_>, Error>>()?,
+        );
+        Ok(match run {
+            Some(run) => list.with_run(run),
+            None => list,
+        }
+        .into())
+    }
     fn walk(
         node: &Syntax,
         name: &mut dyn FnMut(Option<&str>) -> Variable<Any>,
@@ -386,12 +393,9 @@ fn shape(
                 }
                 .into()
             }
-            Syntax::Tuple(items) => Pattern::tuple(
-                items
-                    .iter()
-                    .map(|item| walk(item, name, quoted))
-                    .collect::<Result<Vec<_>, Error>>()?,
-            ),
+            // `[a b]` is the list of what it holds: the data model has no
+            // tuple, so a tuple where a value stands is a list.
+            Syntax::Tuple(items) => sequence(node, items.iter().collect(), name, quoted)?,
             // `'(1 2 3)`: what is quoted is not applied, and a `( )` in
             // it is the list of what it holds.
             Syntax::Application(_, operand) if !quoted && node.applies() == Some(QUOTE) => {
@@ -413,41 +417,12 @@ fn shape(
                         "{node} is a list, and a list has no part labelled `{label}:`"
                     )));
                 }
-                let mut items: Vec<&Syntax> =
-                    std::iter::once(&**first).chain(&operand.items).collect();
-                let run = match items.iter().position(|item| dots(item)) {
-                    Some(at) if at + 2 == items.len() => {
-                        let taken = rest(items[at + 1], name)?;
-                        items.truncate(at);
-                        Some(taken)
-                    }
-                    Some(at) if at + 1 == items.len() => {
-                        items.truncate(at);
-                        Some(name(None))
-                    }
-                    Some(_) => {
-                        return Err(Error::Refused(format!(
-                            "{node}: `...` stands after the items of a list, with what takes \
-                             the ones after them"
-                        )));
-                    }
-                    None => None,
-                };
-                let list = ListPattern::new(
-                    items
-                        .into_iter()
-                        .map(|item| walk(item, name, quoted))
-                        .collect::<Result<Vec<_>, Error>>()?,
-                );
-                match run {
-                    Some(run) => list.with_run(run),
-                    None => list,
-                }
-                .into()
+                let items = std::iter::once(&**first).chain(&operand.items).collect();
+                sequence(node, items, name, quoted)?
             }
             Syntax::Application(..) => {
                 return Err(Error::Refused(format!(
-                    "{node} where a value stands: a list is quoted, `'(1 2 3)`"
+                    "{node} where a value stands: a list is `[1 2 3]`, or quoted, `'(1 2 3)`"
                 )));
             }
             // A name with a `/` in it is the symbol it says, as it is

@@ -1042,6 +1042,29 @@ Not examined yet. They are columns, not recommendations.
 
 **Decided.** The more specific rule wins: of the rules that apply, the ones whose pattern leaves the least to `...`. It is the one rule there is about which rule applies. CI is green on the head that has all of 2026-11-13, on native, web and across the two.
 
+## 2026-11-14, Designing: the data model has no tuple, the notation does
+
+**Asked.** Where a tuple and a list part ways once they are values. The agent had built the two as two values (#778) and proposed, when told the data model has no tuple, to drop the tuple from the notation too.
+
+**Learned.**
+
+- The maintainer: "in the dialog's Value:: type there in no tuple there are maps and lists like in IPLD data model but tuple is not a thing. In our notation however tuple is the thing, but that does not mean it should have a representation in the data model". The agent's proposal mixed the two and is withdrawn.
+- The two meet in one place, where a value stands. There `[a b]` and `'(a b)` are one list:
+
+```
+ written              the tree (syntax)            the value kept     read back
+ [1 2 3]              :tuple, items                list               [1 2 3]
+ '(1 2 3)             :application of quote        list               [1 2 3]
+ [?a ?b ... ?more]    :tuple                       a list pattern     takes apart either
+ '(?a ?b ... ?more)   :application of quote        a list pattern     takes apart either
+```
+
+- That is lossy in one spot: `'(1 2 3)` kept as a value comes back `[1 2 3]`. The agent offered to keep the node in the value so that it would not be; the maintainer: "I'm ok with stored lists coming out as tuples I suppose", and "I'd imagine you can destructure stored tuple either with list or tuple". Taken.
+- The syntax tree loses nothing: a `:tuple` node and an application of `quote` are told apart by `type`, which is what a macro and the printer of source read. Only a value, once kept, does not say how it was spelled.
+- Built. #778 loses the tuple value, the tuple pattern and the type `tuple:`. Here `[ ]` where a value stands compiles to a list pattern, with `... ?run` after its items as the quoted list had, and a kept list prints `[ ]`. The printing of `'( )` for a value, and its stand-in for the list of nothing, are gone with it; `[]` is the list of nothing.
+
+**Decided.** By the maintainer: one sequence in the data model, two spellings of it in the notation, printed back as `[ ]`.
+
 ## The queue
 
 In order. One is asked, answered and written down before the next.
@@ -1049,7 +1072,7 @@ In order. One is asked, answered and written down before the next.
 1. Decided 2026-11-14: the more specific rule wins. Built 2026-11-13: the reader that gives `...` no meaning, the quoted list, the record's refusals, a read that says every field or `...`, a struct's last key.
 1. Decided 2026-11-13: the new format always, the old read for one cycle. To build next: format 4 on #778, with the migration.
 2. Whether a rule that leaves a premise's subject unnamed fires only for the entity written (#789, #791). It changes what a commit writes on main.
-3. Answered 2026-11-13 by the quote: `'(:open :done)`, `'()`.
+3. Answered 2026-11-13 by the quote, and 2026-11-14 by the list: `'(:open :done)` and `[:open :done]` are one list, and `[]` is the list of nothing.
 4. Whether descriptions are `dialog.meta/description` or stay under `syntax.meta`.
 5. Review of #777 and the open questions of #778.
 6. The agent's choices standing until said otherwise: the blank-line rule for comments; a refused document keeps no definition; a rest stands after a struct's entries; `(all …)` or a spread in a template.
