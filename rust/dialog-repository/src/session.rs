@@ -26,15 +26,19 @@
 //!     .await?;
 //! let session = branch.session().perform(&env).await?;
 //! session
-//!     .transaction()
-//!     .assert(dialog_query::the!("ui/selected").of("doc:1".parse()?).is(true))
-//!     .commit()
-//!     .publish()
+//!     .transact(dialog_query::the!("ui/selected").of("doc:1".parse()?).is(true))
 //!     .perform(&env)
 //!     .await?;
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! A session is driven by dispatch ([`Session::invoke`], and
+//! [`Session::transact`] for writes with no command): each dispatch is
+//! one unit of publication, re-run from the new head when the primary's
+//! head moved under it (see [`invoke`]). [`Session::transaction`] is the
+//! same commit without the re-run, for a caller that handles a lost head
+//! itself.
 //!
 //! What the session holds of its own are its **declarations**
 //! ([`Session::declare`]): placements and layers this process declares
@@ -43,6 +47,8 @@
 //! no peer.
 //!
 //! [`placement::guide`]: crate::placement::guide
+
+pub mod invoke;
 
 use std::sync::Arc;
 
@@ -565,6 +571,104 @@ mod tests {
         assert_eq!(
             read::<u64>(session.query(), &operator, "counter/count", &counter).await?,
             vec!["UnsignedInt(3)".to_string()]
+        );
+        Ok(())
+    }
+
+    /// A dispatch whose head moved under it is re-run from the new head
+    /// with the original stimulus: the other writer's commit and this
+    /// one's both stand, the rule fires once on the re-run alone, and the
+    /// memory layer takes exactly the re-run's share.
+    #[dialog_common::test]
+    async fn it_re_runs_a_dispatch_from_the_head_that_moved_under_it() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        let counter: Entity = "ctr:1".parse()?;
+        session
+            .transact(count(&counter, 1))
+            .perform(&operator)
+            .await?;
+        // Another handle moves the head; this session's handle is stale.
+        let other = repo.branch("main").open().perform(&operator).await?;
+        let moved = other
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of("doc:2".parse::<Entity>()?)
+                    .is("Other".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let doc: Entity = "doc:1".parse()?;
+        let published = session
+            .invoke(
+                dialog_query::the!("cmd.increment/counter")
+                    .of("cmd:1".parse::<Entity>()?)
+                    .is(counter.clone()),
+            )
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            published.version().edition,
+            moved.version().edition.successor(),
+            "the re-run published on the moved head"
+        );
+        assert_eq!(
+            committed::<String>(&branch, &operator, "doc/title", &doc).await?,
+            vec!["String(\"Notes\")".to_string()]
+        );
+        assert_eq!(
+            committed::<String>(&branch, &operator, "doc/title", &"doc:2".parse()?).await?,
+            vec!["String(\"Other\")".to_string()],
+            "the other writer's commit stands"
+        );
+        assert_eq!(
+            held(&memory, "counter/count", &counter)?,
+            vec!["UnsignedInt(2)".to_string()],
+            "the rule fired once, on the re-run"
+        );
+        Ok(())
+    }
+
+    /// A dispatch that writes only to memory layers publishes nothing: the
+    /// primary's head stays, and the dispatch reports it.
+    #[dialog_common::test]
+    async fn it_publishes_nothing_for_a_dispatch_that_writes_only_to_memory() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        let counter: Entity = "ctr:1".parse()?;
+        let before = session
+            .transact(count(&counter, 1))
+            .perform(&operator)
+            .await?;
+        let after = session
+            .invoke(
+                dialog_query::the!("cmd.increment/counter")
+                    .of("cmd:1".parse::<Entity>()?)
+                    .is(counter.clone()),
+            )
+            .perform(&operator)
+            .await?;
+        assert_eq!(after, before, "nothing durable was written");
+        assert_eq!(branch.revision(), Some(before));
+        assert_eq!(
+            held(&memory, "counter/count", &counter)?,
+            vec!["UnsignedInt(2)".to_string()]
         );
         Ok(())
     }

@@ -26,8 +26,9 @@ now by memory. An attribute placed nowhere lives in the primary, as it
 always did. `Branch::session()` opens a `Session` over the primary: it
 mints a memory layer for every declared layer, reads the composite of the
 primary and those layers, and commits a transaction by routing each write
-to the layer its attribute is placed on. The primary's share is minted
-and published as before; a memory layer's share is applied only after
+to the layer its attribute is placed on. `Session::invoke` drives it:
+one dispatch is one publication, re-run from the new head when the head
+moved under it. The primary's share is minted and published as before; a memory layer's share is applied only after
 the publish wins its compare-and-swap, so a lost head leaves no layer
 changed. A rule head whose attribute is placed on a memory layer lands
 there too, keeping its pick, and succeeds no claim of the primary.
@@ -38,6 +39,13 @@ What this changes for you:
   transaction, layer, layers, declare, declared, divergences}` are new.
   A branch read or committed directly, with no session, behaves as
   before.
+- `Session::invoke(command)` and `Session::transact(facts)` drive a
+  session: each returns an `Invocation` whose `perform` commits and
+  publishes as one unit, and re-runs the whole dispatch from the new
+  head when the publish loses its compare-and-swap, up to `MAX_RERUNS`
+  times before reporting `PublishError::VersionMismatch`. A dispatch
+  that writes only to memory layers publishes nothing and returns the
+  unchanged head.
 - A guided read takes each attribute from the layer it is placed on
   alone. A row of that attribute found on another layer is reported as a
   `Divergence` (`Session::divergences`), not read.
