@@ -53,7 +53,7 @@ use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
-use crate::placement::memory_layer;
+use crate::placement::{follows_selection, memory_layer};
 use crate::repository::archive::erased;
 use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
@@ -74,12 +74,18 @@ pub(crate) const MAX_ROUNDS: u32 = 16;
 /// they are visible to rule bodies for exactly one round.
 ///
 /// Returns every transient a rule head emitted, across all rounds. The
-/// dispatched `transients` are not part of it.
+/// dispatched `transients` are not part of it. The writes `transients`
+/// names for a layer are stimulus too, read as rows of that layer.
+///
+/// `selected` is the layer a session selects: a durable head cell whose
+/// descriptor names no layer lands there, unless its attribute is
+/// machinery under `dialog.`.
 pub(crate) async fn induce<Env>(
     view: &View<'_>,
     composite: &Composite,
     changes: &mut Changes,
     transients: Changes,
+    selected: Option<&Entity>,
     env: &Env,
 ) -> Result<Changes, CommitError>
 where
@@ -115,6 +121,7 @@ where
     // missed one is caught up.
     let mut stimulus: Vec<Instruction> = changes.clone().into_instructions();
     stimulus.extend(transients.clone().into_instructions());
+    stimulus.extend(layered_instructions(&transients));
     stimulus.extend(lag_delta(view, env).await?);
     let mut induced = Changes::new();
     if stimulus.is_empty() {
@@ -231,10 +238,21 @@ where
             shared_metadata(from_ref(view), &operator),
             env,
         )
-        .with_layers(vec![
-            Staged::from(changes.clone()),
-            Staged::from(transient_overlay.clone()),
-        ]);
+        .with_layers(
+            [
+                Staged::from(changes.clone()),
+                Staged::from(transient_overlay.clone()),
+            ]
+            .into_iter()
+            .chain(
+                transient_overlay
+                    .clone()
+                    .take_shares()
+                    .into_iter()
+                    .map(|(layer, share)| Staged::from(share).in_layer(layer)),
+            )
+            .collect(),
+        );
 
         // Close the touched set over derivation: a base-fact write
         // reaches inductive rules premised on the derived concepts it
@@ -291,6 +309,7 @@ where
                 fire(
                     &rule,
                     transient_head,
+                    selected,
                     &view,
                     &mut novelty,
                     &mut emitted_transients,
@@ -300,6 +319,7 @@ where
                 fire_seeded(
                     &rule,
                     transient_head,
+                    selected,
                     &assert_rows,
                     &view,
                     &mut novelty,
@@ -979,6 +999,7 @@ async fn select<'a>(
 async fn fire<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    selected: Option<&Entity>,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
@@ -992,7 +1013,16 @@ async fn fire<'a>(
     if matches.is_empty() {
         return Ok(());
     }
-    emit_matches(rule, transient_head, matches, view, novelty, transients).await
+    emit_matches(
+        rule,
+        transient_head,
+        selected,
+        matches,
+        view,
+        novelty,
+        transients,
+    )
+    .await
 }
 
 /// The reach of a rule's concept premises, split by polarity:
@@ -1032,6 +1062,7 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 async fn fire_seeded<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    selected: Option<&Entity>,
     rows: &[Fact],
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
@@ -1041,12 +1072,22 @@ async fn fire_seeded<'a>(
     #[cfg(test)]
     let before = (novelty.clone(), transients.clone());
     if !matches.is_empty() {
-        emit_matches(rule, transient_head, matches, view, novelty, transients).await?;
+        emit_matches(
+            rule,
+            transient_head,
+            selected,
+            matches,
+            view,
+            novelty,
+            transients,
+        )
+        .await?;
     }
     #[cfg(test)]
     oracle::agrees(
         rule,
         transient_head,
+        selected,
         rows,
         view,
         before,
@@ -1296,12 +1337,16 @@ type WrittenHead = (Entity, Vec<(Relation, Value, Pick, Option<Entity>)>);
 async fn emit_matches<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    selected: Option<&Entity>,
     matches: Vec<Match>,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
-    let heads = written_heads(rule, &matches)?;
+    // A transient head is a command: it lands in no layer, so it never
+    // follows the selection.
+    let selected = selected.filter(|_| !transient_head);
+    let heads = written_heads(rule, selected, &matches)?;
 
     // A seeded rule is evaluated once per stimulus row a premise names,
     // so an event that carries several of a premise's fields finds the
@@ -1393,8 +1438,14 @@ async fn emit_matches<'a>(
 
 /// The head each of `matches` writes, in order: its subject and the
 /// cells of the fields it binds. A match that leaves `this` unbound
-/// writes nothing and is left out.
-fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenHead>, CommitError> {
+/// writes nothing and is left out. A cell whose descriptor names no
+/// layer lands in `selected`, the layer a session selects, unless its
+/// attribute is machinery under `dialog.`.
+fn written_heads(
+    rule: &InductiveRule,
+    selected: Option<&Entity>,
+    matches: &[Match],
+) -> Result<Vec<WrittenHead>, CommitError> {
     let conclusion = rule.conclusion();
     let mut heads: Vec<WrittenHead> = Vec::with_capacity(matches.len());
     for matched in matches {
@@ -1428,9 +1479,10 @@ fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenH
                 }
             };
             // The layer the cell lands in (`in:`): the descriptor's
-            // constant, or the layer the body bound its variable to; the
-            // primary's own name is no layer apart.
-            let layer = match field.descriptor().layer() {
+            // constant, or the layer the body bound its variable to, or,
+            // with none named, the selected one; the primary's own name
+            // is no layer apart.
+            let named = match field.descriptor().layer() {
                 Some(Term::Constant(layer)) => Entity::try_from(layer.clone()).ok(),
                 Some(Term::Variable {
                     name: Some(name), ..
@@ -1439,6 +1491,11 @@ fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenH
                     _ => None,
                 },
                 _ => None,
+            };
+            let layer = match named {
+                Some(layer) => Some(layer),
+                None if follows_selection(&attribute) => selected.cloned(),
+                None => None,
             }
             .filter(|layer| *layer != memory_layer());
             cells.push((attribute, value, field.descriptor().pick().clone(), layer));
@@ -1517,7 +1574,7 @@ async fn is_novel_in<'a>(
 mod oracle {
     use super::{InductiveRule, QueryEnv, Seeding, emit_matches, seeded_matches};
     use crate::CommitError;
-    use dialog_corpus::{Changes, Fact};
+    use dialog_corpus::{Changes, Entity, Fact};
     use std::cell::Cell;
 
     // Per thread: the test runtime drives each test on one thread.
@@ -1540,9 +1597,11 @@ mod oracle {
     /// grouped firing started from, writes the `novelty` and
     /// `transients` the grouped firing wrote; panics with both when it
     /// does not.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn agrees(
         rule: &InductiveRule,
         transient_head: bool,
+        selected: Option<&Entity>,
         rows: &[Fact],
         view: &QueryEnv<'_>,
         before: (Changes, Changes),
@@ -1555,6 +1614,7 @@ mod oracle {
             emit_matches(
                 rule,
                 transient_head,
+                selected,
                 per_row,
                 view,
                 &mut expected_novelty,
@@ -3838,6 +3898,7 @@ mod tests {
             &Composite::of(view.to_source()),
             &mut changes,
             transients,
+            None,
             &operator,
         )
         .await?;

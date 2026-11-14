@@ -96,7 +96,7 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::nodes;
 use parking_lot::RwLock;
 
-use crate::placement::{Layers, Store, memory_layer, session_layer};
+use crate::placement::{Layers, Selection, Store, memory_layer, selected, session_layer};
 use crate::repository::branch::session::Composite;
 use crate::repository::branch::transaction::SessionContext;
 use crate::repository::source::Source;
@@ -265,6 +265,33 @@ impl Session {
         once(session_layer())
             .chain(self.inner.layers.iter().map(|(layer, _)| layer.clone()))
             .collect()
+    }
+
+    /// Select `layer`, or clear the selection with `None`: a dispatch
+    /// writing the session's own layer's `dialog.session/layer` row of
+    /// [`SESSION`](crate::SESSION), under `last`. While a layer is
+    /// selected, a write with no layer named, and a rule head whose
+    /// descriptor names none, lands in it rather than the primary,
+    /// except a write under `dialog.` (rules, layer declarations,
+    /// revisions), which never follows the selection. Selecting
+    /// [`MEMORY`](crate::MEMORY) is selecting the primary. A selected
+    /// layer the session does not hold refuses the commit that would
+    /// land a write in it with [`CommitError::UnboundLayer`].
+    ///
+    /// The selection takes effect from the dispatch after the one that
+    /// writes it, once it has published.
+    pub fn select(&self, layer: Option<Entity>) -> invoke::Invocation {
+        match (layer, self.selected()) {
+            (Some(layer), _) => self.transact(Selection(layer)),
+            (None, Some(current)) => self.transact(Changes::new()).retract(Selection(current)),
+            (None, None) => self.transact(Changes::new()),
+        }
+    }
+
+    /// The layer selected in the session's own layer, if any (see
+    /// [`select`](Self::select)).
+    pub fn selected(&self) -> Option<Entity> {
+        selected(self.inner.primary.overlay())
     }
 
     /// Hold `declaration` in this session: a
@@ -572,7 +599,11 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let own = crate::session_layer();
         let session = branch.session().perform(&operator).await?;
-        assert_eq!(session.layers(), vec![own.clone()], "undeclared, still held");
+        assert_eq!(
+            session.layers(),
+            vec![own.clone()],
+            "undeclared, still held"
+        );
 
         let doc: Entity = "doc:1".parse()?;
         session
@@ -584,7 +615,9 @@ mod tests {
             vec!["Boolean(true)".to_string()],
             "a write into `session:` lands in the branch's overlay"
         );
-        branch.overlay().assert(primary_flag(&"doc:2".parse()?, true))?;
+        branch
+            .overlay()
+            .assert(primary_flag(&"doc:2".parse()?, true))?;
         let layer = session.layer(&own).expect("the session's own layer");
         assert_eq!(
             held(layer, "ui/selected", &"doc:2".parse()?)?,
@@ -887,6 +920,328 @@ mod tests {
             held(&memory, "ui/selected", &doc)?.is_empty(),
             "no share landed"
         );
+        Ok(())
+    }
+
+    /// The `dialog.layer/revision` row `own` holds of `layer`, as text.
+    fn revision_of(own: &Ephemeral, layer: &Entity) -> Result<Vec<String>> {
+        held(own, "dialog.layer/revision", layer)
+    }
+
+    /// The primary's revision as its `dialog.layer/revision` row names it.
+    fn tree_text(revision: &crate::Revision) -> String {
+        use base58::ToBase58 as _;
+        let tree: &[u8] = revision.tree.hash();
+        format!("{:?}", dialog_corpus::Value::String(tree.to_base58()))
+    }
+
+    /// After each dispatch publishes, the session's own layer holds one
+    /// `dialog.layer/revision` row per layer, under `last`: a second
+    /// dispatch replaces the rows the first wrote, and the primary's row
+    /// follows the primary's head.
+    #[dialog_common::test]
+    async fn it_records_each_layers_revision_in_its_own_layer() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let own_name = crate::session_layer();
+        let own = session.layer(&own_name).expect("its own layer").clone();
+        let memory = crate::memory_layer();
+        let doc: Entity = "doc:1".parse()?;
+
+        let mut primary_rows = Vec::new();
+        for title in ["First", "Second"] {
+            let revision = session
+                .transact(
+                    dialog_query::the!("doc/title")
+                        .of(doc.clone())
+                        .is(title.to_string()),
+                )
+                .assert(flag(&doc, title == "First", &state))
+                .perform(&operator)
+                .await?;
+            let rows = own.scan(&Selector::new().the(crate::revision_attr()));
+            assert_eq!(rows.len(), 3, "one row per layer: {rows:?}");
+            for layer in [&memory, &state, &own_name] {
+                assert_eq!(revision_of(&own, layer)?.len(), 1, "one row of {layer}");
+            }
+            let primary = revision_of(&own, &memory)?;
+            assert_eq!(primary, vec![tree_text(&revision)], "the published tree");
+            primary_rows.push(primary);
+        }
+        assert_ne!(
+            primary_rows[0], primary_rows[1],
+            "the primary's row moved with its head"
+        );
+        Ok(())
+    }
+
+    /// A rule premised on `dialog.layer/revision` fires on every dispatch,
+    /// with the revisions the layers stood at as the dispatch began.
+    #[dialog_common::test]
+    async fn it_fires_a_rule_premised_on_a_layers_revision() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let watch: InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": {
+                    "revision": {
+                        "the": "seen/revision", "as": "Text", "pick": "last",
+                        "in": "session:state"
+                    }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": { "revision": { "the": "dialog.layer/revision", "as": "Text" } }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "revision": { "?": { "name": "revision" } }
+                    }
+                }
+            ]
+        }))?;
+        branch
+            .transaction()
+            .assert(watch)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory_name = crate::memory_layer();
+        let memory = session.layer(&state).expect("the state layer").clone();
+        let own = session
+            .layer(&crate::session_layer())
+            .expect("its own layer")
+            .clone();
+        let doc: Entity = "doc:1".parse()?;
+
+        let start = branch.revision().expect("a revision");
+        session
+            .transact(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            held(&memory, "seen/revision", &memory_name)?,
+            vec![tree_text(&start)],
+            "the rule fired, on the primary's revision as the dispatch began"
+        );
+
+        let recorded = revision_of(&own, &memory_name)?;
+        session
+            .transact(flag(&doc, true, &state))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            held(&memory, "seen/revision", &memory_name)?,
+            recorded,
+            "it fires again, on the revision the last dispatch recorded"
+        );
+        Ok(())
+    }
+
+    /// While a layer is selected, a write naming no layer lands in it,
+    /// and the primary's head does not move for it; machinery under
+    /// `dialog.` still lands in the primary; with the selection cleared,
+    /// the same write lands in the primary again.
+    #[dialog_common::test]
+    async fn it_lands_a_write_naming_no_layer_in_the_selected_layer() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        let doc: Entity = "doc:1".parse()?;
+        let title = |text: &str| {
+            dialog_query::the!("doc/title")
+                .of(doc.clone())
+                .is(text.to_string())
+        };
+
+        assert_eq!(session.selected(), None);
+        session
+            .select(Some(state.clone()))
+            .perform(&operator)
+            .await?;
+        assert_eq!(session.selected(), Some(state.clone()));
+
+        let before = branch.revision();
+        session.transact(title("Notes")).perform(&operator).await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            held(&memory, "doc/title", &doc)?,
+            vec!["String(\"Notes\")".to_string()],
+            "the write lands in the selected layer"
+        );
+        assert!(
+            committed::<String>(&branch, &operator, "doc/title", &doc)
+                .await?
+                .is_empty(),
+            "and not in the tree"
+        );
+        assert_eq!(branch.revision(), before, "the primary's head stays");
+
+        let other = layer("other");
+        session
+            .transact(LayerDeclaration::new(other.clone(), Store::Memory))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_ne!(branch.revision(), before, "the declaration committed");
+        assert_eq!(
+            committed::<String>(&branch, &operator, "dialog.layer/store", &other).await?,
+            vec!["String(\"memory\")".to_string()],
+            "a declaration never follows the selection"
+        );
+        assert!(held(&memory, "dialog.layer/store", &other)?.is_empty());
+
+        session.select(None).perform(&operator).await?;
+        assert_eq!(session.selected(), None, "the selection is cleared");
+        session.transact(title("Other")).perform(&operator).await?;
+        assert_eq!(
+            committed::<String>(&branch, &operator, "doc/title", &doc).await?,
+            vec!["String(\"Other\")".to_string()],
+            "with none selected, the write lands in the primary"
+        );
+        assert_eq!(
+            held(&memory, "doc/title", &doc)?,
+            vec!["String(\"Notes\")".to_string()],
+            "and not in the layer"
+        );
+        Ok(())
+    }
+
+    /// A rule head whose descriptor names no layer follows the selection.
+    #[dialog_common::test]
+    async fn it_lands_a_rule_head_naming_no_layer_in_the_selected_layer() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let mark: InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "note": { "the": "doc/note", "as": "Text", "pick": "last" } }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "doc": { "the": "cmd.mark/doc", "as": "Entity" },
+                            "note": { "the": "cmd.mark/note", "as": "Text" }
+                        }
+                    },
+                    "where": {
+                        "doc": { "?": { "name": "this" } },
+                        "note": { "?": { "name": "note" } }
+                    }
+                }
+            ]
+        }))?;
+        branch
+            .transaction()
+            .assert(mark)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        session
+            .select(Some(state.clone()))
+            .perform(&operator)
+            .await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        let command: Entity = "cmd:1".parse()?;
+        let mut marked = Changes::new();
+        dialog_query::the!("cmd.mark/doc")
+            .of(command.clone())
+            .is(doc.clone())
+            .assert(&mut marked);
+        dialog_query::the!("cmd.mark/note")
+            .of(command)
+            .is("hi".to_string())
+            .assert(&mut marked);
+        let before = branch.revision();
+        session.invoke(marked).perform(&operator).await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            held(&memory, "doc/note", &doc)?,
+            vec!["String(\"hi\")".to_string()],
+            "the head lands in the selected layer"
+        );
+        assert!(
+            committed::<String>(&branch, &operator, "doc/note", &doc)
+                .await?
+                .is_empty()
+        );
+        assert_eq!(branch.revision(), before, "nothing reached the tree");
+        Ok(())
+    }
+
+    /// A selected layer the session does not hold refuses the commit
+    /// that would land a write in it, and nothing is written: not the
+    /// tree, not a layer.
+    #[dialog_common::test]
+    async fn it_refuses_a_write_into_a_selected_layer_the_session_does_not_hold() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        let nowhere = layer("nowhere");
+        session
+            .select(Some(nowhere.clone()))
+            .perform(&operator)
+            .await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        let before = branch.revision();
+        let refused = session
+            .transact(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .assert(flag(&doc, true, &state))
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(
+                &refused,
+                Err(CommitError::UnboundLayer { attribute, layer })
+                    if attribute == "doc/title" && *layer == nowhere.to_string()
+            ),
+            "{:?}",
+            refused.err()
+        );
+        branch.refresh(&operator).await?;
+        assert_eq!(branch.revision(), before, "the head stays");
+        assert!(
+            committed::<String>(&branch, &operator, "doc/title", &doc)
+                .await?
+                .is_empty()
+        );
+        assert!(
+            held(&memory, "ui/selected", &doc)?.is_empty(),
+            "the layer stays"
+        );
+        assert!(held(branch.overlay(), "doc/title", &doc)?.is_empty());
         Ok(())
     }
 

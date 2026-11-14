@@ -304,6 +304,34 @@ impl Staged {
         take(&mut Arc::make_mut(&mut self.0).shares)
     }
 
+    /// Take out every write bound for the primary whose attribute
+    /// `selects` accepts, in the order the transaction made them, and
+    /// return them as a batch bound for the primary; the writes that
+    /// stay, the writes into layers and the asset changes are kept as
+    /// they were. A store none of whose writes is selected is left as it
+    /// is.
+    pub(crate) fn take_cells<F: Fn(&Relation) -> bool>(&mut self, selects: F) -> Changes {
+        let mut taken = Changes::new();
+        if !self.0.log.iter().any(|(the, _, _)| selects(the)) {
+            return taken;
+        }
+        let mut kept = State {
+            assets: self.0.assets.clone(),
+            shares: self.0.shares.clone(),
+            layer: self.0.layer.clone(),
+            ..State::default()
+        };
+        for (the, of, change) in &self.0.log {
+            if selects(the) {
+                taken.put_cell(the.clone(), of.clone(), vec![change.clone()]);
+            } else {
+                kept.apply_change(the, of, change);
+            }
+        }
+        self.0 = Arc::new(kept);
+        taken
+    }
+
     /// This store read as the layer named `layer` (`in:`): what a read
     /// over a transaction stamps on the rows of one share.
     pub(crate) fn in_layer(mut self, layer: Entity) -> Self {

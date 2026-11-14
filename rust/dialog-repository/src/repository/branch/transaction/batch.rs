@@ -25,7 +25,7 @@ use super::{
     Line, Transaction, TransactionCommit, carry_footprint, touches_rule_facts, touches_rules,
 };
 use crate::Ephemeral;
-use crate::placement::{memory_layer, session_layer};
+use crate::placement::{follows_selection, memory_layer, revision_rows, selected, session_layer};
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::branch::session::{Composite, shared_metadata};
@@ -125,6 +125,10 @@ pub struct TransactionBatch {
     /// lands, so what a transaction read is what its publish leaves.
     overlay: Ephemeral,
     overlay_retractions: Vec<Fact>,
+    /// Whether the chain was committed through a session: its publish
+    /// then records every layer's revision in the session's own layer
+    /// (see [`record_revisions`]).
+    revisions: bool,
 }
 
 /// The facts `changes` retracts that `overlay` holds. A transaction's
@@ -303,6 +307,7 @@ impl BatchPublish {
             memories,
             overlay,
             overlay_retractions,
+            revisions,
         } = self.batch;
         let tip = snapshot.revision();
 
@@ -325,6 +330,9 @@ impl BatchPublish {
             advance_watermark(&induction, &tip, Some(tip.version()), env).await?;
             retract_from_overlay(&overlay, overlay_retractions)?;
             apply_shares(&memories, shares)?;
+            if revisions {
+                record_revisions(&memories, &overlay, &tip)?;
+            }
             return Ok(tip);
         }
 
@@ -338,6 +346,9 @@ impl BatchPublish {
         // The memory layers take their shares only now that the primary's
         // commit is published: a refused publish shows in no layer.
         apply_shares(&memories, shares)?;
+        if revisions {
+            record_revisions(&memories, &overlay, &tip)?;
+        }
 
         // Only now that the head has actually advanced do the staged
         // records and context enter the branch's shared memos: they are
@@ -591,6 +602,7 @@ impl TransactionCommit<&Branch> {
         // The layers a write named for them lands in once the commit
         // publishes: the session's, and the branch's own session overlay
         // as `session:`.
+        let revisions = self.session.is_some();
         let mut memories = self
             .session
             .as_ref()
@@ -638,6 +650,7 @@ impl TransactionCommit<&Branch> {
                 memories,
                 overlay,
                 overlay_retractions: retractions,
+                revisions,
             },
             Outcome::Minted(minted) => {
                 let Minted {
@@ -666,6 +679,7 @@ impl TransactionCommit<&Branch> {
                     memories,
                     overlay,
                     overlay_retractions: retractions,
+                    revisions,
                 }
             }
         })
@@ -719,6 +733,7 @@ impl TransactionCommit<TransactionBatch> {
         };
         let amending = amend.is_some();
         let retractions = overlay_retractions(&self.changes, &batch.overlay);
+        batch.revisions |= self.session.is_some();
 
         let (outcome, induced, shares) = Box::pin(mint_link(
             View::at(Live::Snapshot(&batch.snapshot), Some(&base)),
@@ -789,6 +804,20 @@ fn apply_shares(
             memory.apply(changes)?;
         }
     }
+    Ok(())
+}
+
+/// Record in the session's own layer, `overlay`, the revision every
+/// layer of the session stands at once `tip` has published: one
+/// `dialog.layer/revision` row per layer under `last`, so each publish
+/// replaces the rows the one before wrote and mints one instant. The
+/// session's own row names its revision before the rows are written.
+fn record_revisions(
+    memories: &[(Entity, Ephemeral)],
+    overlay: &Ephemeral,
+    tip: &Revision,
+) -> Result<(), CommitError> {
+    overlay.apply(revision_rows(Some(tip), memories, overlay))?;
     Ok(())
 }
 
@@ -905,8 +934,33 @@ where
         .chain(once(session_layer()))
         .collect();
     let mut changes = changes;
-    let (mut shares, primary) = route_shares(changes.take_shares(), &held)?;
+    let mut transients = transients;
+    let mut shares = changes.take_shares();
+    // Through a session, the layer its own layer selects takes the
+    // writes named for no layer, but the machinery under `dialog.`,
+    // before anything is settled: the primary never settles a cell that
+    // will not land in it. The selected layer is routed as any named
+    // one, so one the session does not hold refuses the commit.
+    let selection = session
+        .as_ref()
+        .and_then(|_| selected(view.to_source().overlay()))
+        .filter(|layer| *layer != memory_layer());
+    if let Some(layer) = &selection {
+        let moved = changes.take_cells(follows_selection);
+        merge_shares(&mut shares, moved.into_layer(layer.clone()).take_shares());
+    }
+    let (mut shares, primary) = route_shares(shares, &held)?;
     changes.apply(primary);
+    // Through a session, the revision every layer stands at as the
+    // dispatch begins is its stimulus, read as rows of `session:`: a
+    // rule premised on a layer's revision fires once per dispatch.
+    if let Some(session) = &session {
+        let source = view.to_source();
+        transients.merge(
+            revision_rows(view.revision(), &session.memories, source.overlay())
+                .into_layer(session_layer()),
+        );
+    }
     let mut changes = Box::pin(succession::settle(
         composite.clone(),
         shared_metadata(from_ref(&view), &operator),
@@ -914,7 +968,15 @@ where
         env,
     ))
     .await?;
-    let induced = induce(&view, &composite, &mut changes, transients, env).await?;
+    let induced = induce(
+        &view,
+        &composite,
+        &mut changes,
+        transients,
+        selection.as_ref(),
+        env,
+    )
+    .await?;
     // What the rules derived into a layer goes with the shares, routed
     // the same way.
     let (derived, primary) = route_shares(changes.take_shares(), &held)?;

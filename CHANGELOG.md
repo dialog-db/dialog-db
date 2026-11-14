@@ -14,6 +14,54 @@ says how to cut a release.
 
 ## Unreleased
 
+### Every session has its own layer, `session:`, which records the layers' revisions and which layer is selected
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[notes/layers.md](./notes/layers.md) ("The `session:` layer").
+
+A session now holds its own layer, `session:`, whether or not the
+primary's schema declares it: it is the branch's process-local store,
+the one `Branch::overlay` has always handed out, now addressed as a
+layer. After each dispatch publishes, the session writes into it one
+`dialog.layer/revision` row per layer under `last`: of `memory:` the
+primary's tree hash, of each declared layer and of `session:` itself
+the hash of its instant chain. The same rows, as the layers stood when
+the dispatch began, are the dispatch's stimulus, so a rule premised on
+a layer's revision fires once per dispatch. A row
+`session: dialog.session/layer <layer>` selects a layer: while one is
+selected, a write with no layer named, and a rule head whose descriptor
+names none, lands in it instead of the primary. Machinery under
+`dialog.` (rules, layer declarations, the revision rows) never follows
+the selection.
+
+What this changes for you:
+
+- `Session::layers()` lists `session:` first, and `Session::layer` of
+  `session_layer()` returns the branch's overlay. A declaration of
+  `session:` in the schema no longer builds a second store.
+- `Session::select(Option<Entity>)` and `Session::selected()` are new.
+  A selection takes effect from the next dispatch; selecting a layer the
+  session does not hold makes a commit that would land a write in it
+  fail with `CommitError::UnboundLayer`, and nothing is written.
+- `revision_attr()` (`dialog.layer/revision`) and `selection_attr()`
+  (`dialog.session/layer`) are new.
+- Every dispatch through a session now mints one instant in `session:`
+  and runs induction even when it writes nothing else. A commit on a
+  branch outside a session writes no revision rows and ignores the
+  selection.
+
+Why: the session's own layer replaces `Branch::overlay` as a mechanism
+apart, so a layer's revision becomes a row a rule or a subscription
+reads like any other, and the layer a write lands in becomes data a
+rule or the embedder sets, the way an image editor's stroke lands on
+the selected layer.
+
+#### Compatibility and migration
+
+- The `session:` rows are process-local: they live in the branch's
+  overlay, which is never committed or synced. Nothing stored or synced
+  changes, and nothing is rewritten.
+
 ### A session's handlers answer a dispatch's commands
 
 [#797](https://github.com/dialog-db/dialog-db/pull/797), argued in

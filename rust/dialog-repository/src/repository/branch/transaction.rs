@@ -407,7 +407,7 @@ impl TransactionCommit<&Snapshot> {
         // A snapshot commit reports only its revision: the transients
         // induction emitted surface on a staged
         // [`TransactionBatch::induced`] alone.
-        induce::induce(&view, &composite, &mut changes, self.transients, env).await?;
+        induce::induce(&view, &composite, &mut changes, self.transients, None, env).await?;
 
         let touches_rules = touches_rules(&changes);
         let touches_rule_facts = touches_rule_facts(&changes);

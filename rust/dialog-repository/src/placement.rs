@@ -35,12 +35,17 @@ use dialog_corpus::{
 use dialog_query::the;
 use futures_util::TryStreamExt as _;
 
-use crate::CommitError;
 use crate::repository::source::Source;
+use crate::{CommitError, Ephemeral, Revision};
 use crate::{Erased, select_from_source};
+use base58::ToBase58 as _;
 
 // The declaration attribute is parsed once: every session open asks for it.
 static STORE_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.layer/store").into());
+// The revision and selection attributes are written on every dispatch
+// through a session.
+static REVISION_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.layer/revision").into());
+static SELECTION_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.session/layer").into());
 
 /// The name of the primary: the base durable branch of a session.
 pub const MEMORY: &str = "memory:";
@@ -69,6 +74,103 @@ pub fn control_layer() -> Entity {
 /// what backs it.
 pub(crate) fn store_attr() -> Relation {
     STORE_ATTR.clone()
+}
+
+/// The `dialog.layer/revision` attribute: of a layer's entity, the
+/// revision the layer stands at, as text. A session writes one row of it
+/// per layer into [`SESSION`] after each dispatch publishes.
+pub fn revision_attr() -> Relation {
+    REVISION_ATTR.clone()
+}
+
+/// The `dialog.session/layer` attribute: of [`SESSION`], the layer a
+/// write with no layer named lands in while it is set (see
+/// [`Session::select`](crate::Session::select)).
+pub fn selection_attr() -> Relation {
+    SELECTION_ATTR.clone()
+}
+
+/// Whether a write of `the` with no layer named follows the session's
+/// selected layer: every attribute does but the machinery under
+/// `dialog.` (rules, layer declarations, revisions, the selection
+/// itself), which lands in the primary or where it names.
+pub(crate) fn follows_selection(the: &Relation) -> bool {
+    !the.as_str().starts_with("dialog.")
+}
+
+/// The layer `own`, a session's own layer, holds as selected, if any:
+/// its `dialog.session/layer` row of [`SESSION`].
+pub(crate) fn selected(own: &Ephemeral) -> Option<Entity> {
+    own.scan(&Selector::new().the(selection_attr()).of(session_layer()))
+        .into_iter()
+        .find_map(|fact| match fact.is {
+            Value::Entity(layer) => Some(layer),
+            _ => None,
+        })
+}
+
+/// [`Statement`] selecting `layer` in a session's own layer: its
+/// `dialog.session/layer` row of [`SESSION`], under `last`, written into
+/// [`SESSION`]. See [`Session::select`](crate::Session::select).
+pub(crate) struct Selection(pub(crate) Entity);
+
+impl Statement for Selection {
+    fn assert(self, update: &mut impl Update) {
+        update.associate_in(
+            session_layer(),
+            selection_attr(),
+            session_layer(),
+            Value::Entity(self.0),
+            Pick::Last,
+        );
+    }
+
+    fn retract(self, update: &mut impl Update) {
+        update.dissociate_in(
+            session_layer(),
+            selection_attr(),
+            session_layer(),
+            Value::Entity(self.0),
+        );
+    }
+}
+
+/// The `dialog.layer/revision` rows of a session's layers as they stand:
+/// of [`MEMORY`] the tree of `primary`'s revision, base58 as
+/// `dialog.branch/tree` renders it (none for a primary with no
+/// revision); of each of `memories` and of [`SESSION`], `own`, the hash
+/// of its instant chain, in hex. Each under `last`, bound for no layer.
+pub(crate) fn revision_rows(
+    primary: Option<&Revision>,
+    memories: &[(Entity, Ephemeral)],
+    own: &Ephemeral,
+) -> Changes {
+    let hex = |memory: &Ephemeral| {
+        let hash = memory.revision().hash;
+        let mut text = String::with_capacity(64);
+        for byte in hash.as_bytes() {
+            text.push_str(&format!("{byte:02x}"));
+        }
+        Value::String(text)
+    };
+    let mut rows = Changes::new();
+    if let Some(revision) = primary {
+        let tree: &[u8] = revision.tree.hash();
+        rows.associate(
+            revision_attr(),
+            memory_layer(),
+            Value::String(tree.to_base58()),
+            Pick::Last,
+        );
+    }
+    let session = session_layer();
+    for (layer, memory) in memories {
+        if *layer != session {
+            rows.associate(revision_attr(), layer.clone(), hex(memory), Pick::Last);
+        }
+    }
+    rows.associate(revision_attr(), session, hex(own), Pick::Last);
+    rows
 }
 
 /// What backs a layer a session builds from the primary's schema.
