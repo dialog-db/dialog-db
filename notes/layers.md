@@ -192,11 +192,19 @@ the ticks.
    link's own layer writes are the first tick and the first round's
    stimulus, and a `last` write into `session:` succeeds the row the
    layer holds within the dispatch.
-4. `control:` as a layer with a one-tick lifetime, replacing
-   transients and the `transient` marker; channels to the embedder as
-   layers whose rows stay until the consumer retracts them; providers
-   as subscriptions over the command concept; `Session::commands()`
-   and `Handler` go.
+4. Done, in [#807](https://github.com/dialog-db/dialog-db/pull/807):
+   `control:` as a layer, holding what a dispatch writes into it for
+   one tick (a command, a write `.at(control:)`, a head naming
+   `in: control:`), read as rows of `control:` by a premise naming it
+   or binding `in`; the `transient` marker stays, for now, as what
+   marks a concept a command. Channels `control:<name>` declared with
+   `Store::Control`, in memory, their rows kept until the consumer
+   retracts them. Providers read what arrives
+   (`Session::arrivals(layer, query)`: the layer's newly asserted
+   rows through a query, each once, retractions dropped, `poll` or
+   `next`) and answer by invoking. `Session::commands()`, `Handler`
+   and the feed are gone; a dispatch's commands stand in `control:`
+   for one instant once it has published (point 18).
 5. Sapling and tonk move onto `invoke` and subscriptions over
    channels, and delete their wiring, registry and retry code.
 6. Durable layers: `Store::Durable`, the pointer fact in the primary,
