@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | Four pieces of work each reach something format 3 cannot write. A rule's name does not hold the format's number. Adding patterns in memory moved neither the name nor the bytes of a rule that holds none, pinned by a test. A release skips a rule whose body it cannot read and says nothing. | **Diagnosing.** A problem is proposed and not cut. The stamping decision is drawn as a [matrix](stamping.md) ahead of its phase, because it is what the patterns work waits on. |
-| **Agenda** | Whether the proposed problem is the problem. Which stamping policy. What one entity holds when two releases write one rule with two bodies. Whether several heads can be added without respelling a rule of one. | The maintainer cuts the problem statement and decides stamping. Then a writer that stamps a body, built with patterns as the first addition. |
+| **Status** | The approach is decided: format 4 writes a pattern, a release writes it always and reads the earlier ones for one release cycle, with `Branch::upgrade_rules` as the migration. Patterns are the one addition: a rule has one head, records ask nothing, a rule about syntax is not stored. A pattern is named by its parts already, so no name moves. | **Building**, on `feat/rule-format-4` over the patterns build. |
+| **Agenda** | Whether the maintainer wants other words for a pattern than `map`, `list`, `tuple`. What one entity holds once two releases have each written its body. | The build, its changelog entry with the compatibility note, and the notation storing a rule that holds a struct. |
 
 ## Candidate problems
 
@@ -36,3 +36,16 @@
 ```
 
 **Decided.** Not decided. The stamping policy is the maintainer's. The [matrix](stamping.md) stands on problem 2 above, which he has not cut.
+
+## 2026-11-14, Building: the new format always, and the words of a pattern
+
+**Asked.** On 2026-11-13, which number a writer stamps. The maintainer did not follow the question, and answered what he wants: "I think we should switch to a new format and maintain old one for backwrards compatibility for one release cycle while offering migration. In version after we'll remove support for old formulas."
+
+**Learned.**
+
+- The question was put as a column to pick and did not say the case the columns differ in. Said again as two peers on one space, one upgraded, the answer is the first column of the matrix: the latest.
+- The scope is patterns alone. Since the description was written a rule has one head, and a rule about syntax is held by the notation and not stored.
+- The patterns build already names a pattern by its parts, spells a rule that holds one canonically, and orders its premises. What was missing is small: a written form for a pattern and for parameters that hold one, and the number.
+- The plan of the patterns topic left the words of that form undecided. Decided by the agent as a [matrix](design-pattern-form.md): a word for the shape, which is not shaped as the name of a type.
+
+**Decided.** By the maintainer: the approach. By the agent, until said otherwise: the problem's words, and the words of a pattern.

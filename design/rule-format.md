@@ -1,6 +1,6 @@
 # A stored rule says less than a rule can
 
-**Phase: Diagnosing.** What follows is the situation, not yet a problem statement. The [journal](rule-format/journal.md) proposes one, the [ledger](rule-format/claims.md) says what is known, and [stamping](rule-format/stamping.md) lays out the decision the patterns work waits on.
+**Phase: Building.** The maintainer decided the approach on 2026-11-13, and format 4 is being built on top of the patterns build. The [journal](rule-format/journal.md) has how it got here, the [ledger](rule-format/claims.md) what is known, [stamping](rule-format/stamping.md) the matrix the decision was read off, and [the form of a pattern](rule-format/design-pattern-form.md) the one decision the build opened.
 
 ## Description
 
@@ -44,3 +44,25 @@ What each of the four would ask of a body, as read so far and not as a plan:
 A hypothesis this opens, the agent's, 2026-11-11: **a format that only adds leaves every rule it does not touch where it is.** If a rule that holds no pattern, one head and no syntax keeps its canonical parts, it keeps its entity, and its body can go on being written as format 3. Then each of the four can be added when it is ready, a rule is written in the lowest format that can say it, and nothing is migrated. Confirmed by a test that a rule of terms alone has one entity and one body before and after a pattern can be written. The first half is run, 2026-11-12: `it_keeps_the_name_and_the_bytes_of_a_rule_format_3_wrote` writes out the entity and the body of two rules of terms and passes on main and, unchanged, on `feat/patterns`, where a pattern can be held and not yet written. Refuted if the canonical spelling of an old rule has to change to make room, as it might for several heads.
 
 A stored format changes here, so whatever is built is a breaking change with a compatibility note (`.claude/rules/versioning-and-changelog.md`).
+
+## Problem
+
+A rule that holds a map, a list or a tuple of terms runs where it is built and cannot be kept. It has a name and no bytes, so it is not installed on a branch, not synced, and not there the next time the branch is opened.
+
+Of the four pieces of work in the description, patterns are the one left. Records ask nothing new of a body. A rule has one head since 2026-11-13, so several heads are no addition. A rule about syntax is not stored yet, and is not part of this.
+
+## Approach
+
+Format 4 writes what format 3 wrote, and a map, a list or a tuple of terms where a parameter stands.
+
+```
+ a release       writes      reads               migrates
+ this one        4, always   4, 3, 2, 1, 0       Branch::upgrade_rules rewrites what it finds in 4
+ the one after   4           4                   -
+```
+
+- **The new format always** (Irakli, 2026-11-13): "switch to a new format and maintain old one for backwrards compatibility for one release cycle while offering migration. In version after we'll remove support" for the old ones. It is the first column of the [stamping matrix](rule-format/stamping.md).
+- A rule that holds no pattern is written as it was, but for the number: one byte of its body moves, and its name does not.
+- A rule that holds a pattern keeps the name it has had since it could be built: it is named by its parts, and the bytes are new.
+- What the other direction costs, said to the maintainer and taken as accepted for one cycle: a release that reads up to 3 skips every rule this one writes, a rule of plain terms too, and says nothing. It lasts until every peer of a space has upgraded.
+- A pattern is written under the word for its shape: [the form of a pattern](rule-format/design-pattern-form.md).
