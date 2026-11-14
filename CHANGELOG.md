@@ -14,6 +14,49 @@ says how to cut a release.
 
 ## Unreleased
 
+### A memory layer mints one instant per tick that changed it
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[notes/layers.md](./notes/layers.md) (point 12).
+
+A dispatch through a session runs in ticks: the transaction's own
+writes are the first, and each induction round after it is one more.
+A memory layer used to take a dispatch's writes as one instant holding
+the merged result, so a reader of its instants could not see the states
+the rules saw in between. It now takes each tick's writes as an
+instant of its own, in tick order. The instants are still minted only
+once the primary's commit publishes: a dispatch is one unit of
+publication, and a refused publish shows in no layer.
+
+What this changes for you:
+
+- A dispatch whose rules write a memory layer in several rounds mints
+  that many instants there, and `Ephemeral::since` yields each
+  intermediate state in order. A tick that writes no layer mints
+  nothing in it.
+- `TransactionBatch::shares` returns the shares tick by tick,
+  `&[Vec<(Entity, Changes)>]`, one entry per tick that wrote a layer,
+  in place of one merged entry per layer.
+- An induction round now reads what the rounds before it wrote into a
+  layer, as that layer will hold it once the ticks land: a rule
+  premised on a memory layer's row fires on an earlier round's head
+  there, and a head under `last` succeeds the layer's own row of the
+  cell. Before, a round read only the layer as the dispatch began, so
+  such a rule did not fire within the dispatch.
+- A maintained subscription over a session reads the several instants
+  in order and still equals a fresh evaluation.
+
+Why: a subscriber, or a rule premised on a layer's revision, should see
+the ticks the rules ran through, so a maintained view equals a fresh
+evaluation after any sequence of ticks.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten: memory
+  layers are process-local. A session's memory layers mint more
+  instants per dispatch, which a reader pinned to an older sequence
+  sees as more instants, not a different state.
+
 ### Every session has its own layer, `session:`, which records the layers' revisions and which layer is selected
 
 [#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in

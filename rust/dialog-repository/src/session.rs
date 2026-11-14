@@ -923,6 +923,59 @@ mod tests {
             held(&memory, "ui/selected", &doc)?.is_empty(),
             "no share landed"
         );
+
+        // A batch staged before the head moved carries a share for each
+        // tick that wrote the layer, and lands none of them when its
+        // publish loses the compare-and-swap.
+        let counter: Entity = "ctr:1".parse()?;
+        session.primary().refresh(&operator).await?;
+        session
+            .transact(count(&counter, 1, &state))
+            .perform(&operator)
+            .await?;
+        let start = memory.revision();
+        let batch = session
+            .transaction()
+            .assert(flag(&doc, true, &state))
+            .dispatch(
+                dialog_query::the!("cmd.increment/counter")
+                    .of("cmd:1".parse::<Entity>()?)
+                    .is(counter.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            batch.shares().len(),
+            2,
+            "the transaction's own write and the rule's are two ticks"
+        );
+        other.refresh(&operator).await?;
+        other
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of("doc:3".parse::<Entity>()?)
+                    .is("Third".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let refused = batch.publish().perform(&operator).await;
+        assert!(
+            matches!(
+                refused,
+                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
+            ),
+            "the moved head refuses the publish: {refused:?}"
+        );
+        assert_eq!(memory.revision(), start, "no tick landed an instant");
+        assert!(held(&memory, "ui/selected", &doc)?.is_empty());
+        assert_eq!(
+            held(&memory, "counter/count", &counter)?,
+            vec!["UnsignedInt(1)".to_string()]
+        );
         Ok(())
     }
 
@@ -1454,6 +1507,346 @@ mod tests {
         Ok(())
     }
 
+    /// Declare, beside [`declare_state`]'s counter, a rule stepping the
+    /// count the state layer holds to the next one a primary table of
+    /// `succ/from` and `succ/to` names, and the table: 2 steps to 3,
+    /// 3 to 4, and 4 to nothing. A count of 2 therefore steps twice, in
+    /// two ticks, and stops.
+    async fn declare_steps(branch: &Branch, env: &Operator) -> Result<()> {
+        let step: InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": {
+                    "count": {
+                        "the": "counter/count", "as": "UnsignedInteger", "pick": "last",
+                        "in": "session:state"
+                    }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "count": {
+                                "the": "counter/count", "as": "UnsignedInteger", "pick": "last",
+                                "in": "session:state"
+                            }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "count": { "?": { "name": "prev" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": {
+                            "from": { "the": "succ/from", "as": "UnsignedInteger" },
+                            "to": { "the": "succ/to", "as": "UnsignedInteger" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "step" } },
+                        "from": { "?": { "name": "prev" } },
+                        "to": { "?": { "name": "count" } }
+                    }
+                }
+            ]
+        }))?;
+        let mut transaction = branch.transaction().assert(step);
+        for (index, (from, to)) in [(2u64, 3u64), (3, 4)].into_iter().enumerate() {
+            let entity: Entity = format!("step:{index}").parse()?;
+            transaction = transaction
+                .assert(dialog_query::the!("succ/from").of(entity.clone()).is(from))
+                .assert(dialog_query::the!("succ/to").of(entity).is(to));
+        }
+        transaction.commit().publish().perform(env).await?;
+        branch.refresh(env).await?;
+        Ok(())
+    }
+
+    /// `counter/count` of every entity, with the value a variable.
+    fn count_query() -> AttributeQuery {
+        AttributeQuery::from(
+            Term::<QueryRelation>::from(QueryRelation::from(
+                "counter/count".parse::<dialog_corpus::Relation>().unwrap(),
+            ))
+            .of(Term::<Entity>::var("e"))
+            .is(Term::<u64>::var("v")),
+        )
+    }
+
+    /// The `counter/count` values each instant asserts, instant by instant.
+    fn counts(instants: &[crate::Instant]) -> Vec<Vec<String>> {
+        instants
+            .iter()
+            .map(|instant| {
+                instant
+                    .asserted
+                    .iter()
+                    .filter(|fact| fact.the.to_string() == "counter/count")
+                    .map(|fact| format!("{:?}", fact.is))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A dispatch whose rules write the same memory cell in three ticks
+    /// mints three instants in the layer, in tick order: a reader of the
+    /// layer's instants sees each count the rules saw, and a
+    /// subscription polled after the dispatch equals a fresh evaluation
+    /// without evaluating afresh.
+    #[dialog_common::test]
+    async fn it_mints_one_instant_per_tick_that_wrote_a_layer() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        declare_steps(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        let counter: Entity = "ctr:1".parse()?;
+        session
+            .transact(count(&counter, 1, &state))
+            .perform(&operator)
+            .await?;
+        let mut subscription = session.subscribe(count_query());
+        subscription.poll(&operator).await?;
+
+        let start = memory.revision().sequence;
+        session
+            .invoke(
+                dialog_query::the!("cmd.increment/counter")
+                    .of("cmd:1".parse::<Entity>()?)
+                    .is(counter.clone()),
+            )
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            memory.revision().sequence,
+            start + 3,
+            "the increment and the two steps are three ticks"
+        );
+        let instants = memory.since(start).expect("the ring reaches back");
+        assert_eq!(
+            counts(&instants),
+            vec![
+                vec!["UnsignedInt(2)".to_string()],
+                vec!["UnsignedInt(3)".to_string()],
+                vec!["UnsignedInt(4)".to_string()],
+            ],
+            "each tick's count, in order"
+        );
+        assert_eq!(
+            held(&memory, "counter/count", &counter)?,
+            vec!["UnsignedInt(4)".to_string()]
+        );
+
+        subscription.poll(&operator).await?;
+        let mut retained = selected(subscription.results());
+        retained.sort();
+        assert_eq!(retained, fresh(&session, &operator, count_query()).await?);
+        assert_eq!(retained, vec![format!("{counter} UnsignedInt(4)")]);
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "the instants were maintained, in order"
+        );
+        Ok(())
+    }
+
+    /// A tick that writes no memory layer mints nothing there: a
+    /// dispatch whose own writes land in the primary and whose rule
+    /// writes the layer mints one instant, one writing the layer in both
+    /// ticks mints two, and one writing only the primary mints none.
+    #[dialog_common::test]
+    async fn it_mints_nothing_in_a_layer_for_a_tick_that_wrote_none() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        let counter: Entity = "ctr:1".parse()?;
+        let doc: Entity = "doc:1".parse()?;
+        session
+            .transact(count(&counter, 1, &state))
+            .perform(&operator)
+            .await?;
+        let increment = || {
+            dialog_query::the!("cmd.increment/counter")
+                .of("cmd:1".parse::<Entity>().expect("an entity"))
+                .is(counter.clone())
+        };
+
+        let start = memory.revision().sequence;
+        session
+            .invoke(increment())
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            memory.revision().sequence,
+            start + 1,
+            "only the rule's tick wrote the layer"
+        );
+
+        let start = memory.revision().sequence;
+        session
+            .invoke(increment())
+            .assert(flag(&doc, true, &state))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            memory.revision().sequence,
+            start + 2,
+            "the dispatch's own tick and the rule's both wrote the layer"
+        );
+
+        let start = memory.revision().sequence;
+        session
+            .transact(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Other".to_string()),
+            )
+            .perform(&operator)
+            .await?;
+        assert_eq!(memory.revision().sequence, start, "no tick wrote the layer");
+        assert_eq!(
+            held(&memory, "counter/count", &counter)?,
+            vec!["UnsignedInt(3)".to_string()]
+        );
+        Ok(())
+    }
+
+    /// Declare a chain of documents in the primary, `doc:1` to `doc:4`
+    /// by `doc/next`, and two rules selecting into the state layer: a
+    /// `cmd.spread/doc` command selects its document, and a selected
+    /// document selects the next one. A spread from `doc:1` writes the
+    /// layer in a tick per document it newly selects.
+    async fn declare_spread(branch: &Branch, env: &Operator) -> Result<()> {
+        let spread: InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": {
+                    "selected": { "the": "ui/selected", "as": "Boolean", "in": "session:state" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": { "doc": { "the": "cmd.spread/doc", "as": "Entity" } }
+                    },
+                    "where": { "doc": { "?": { "name": "this" } } }
+                },
+                { "assert": "==", "where": { "this": { "?": { "name": "selected" } }, "is": true } }
+            ]
+        }))?;
+        let follow: InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": {
+                    "selected": { "the": "ui/selected", "as": "Boolean", "in": "session:state" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "selected": {
+                                "the": "ui/selected", "as": "Boolean", "in": "session:state"
+                            }
+                        }
+                    },
+                    "where": { "this": { "?": { "name": "prev" } }, "selected": true }
+                },
+                {
+                    "assert": {
+                        "with": { "next": { "the": "doc/next", "as": "Entity" } }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "prev" } },
+                        "next": { "?": { "name": "this" } }
+                    }
+                },
+                { "assert": "==", "where": { "this": { "?": { "name": "selected" } }, "is": true } }
+            ]
+        }))?;
+        let mut transaction = branch.transaction().assert(spread).assert(follow);
+        for index in 1..4 {
+            transaction = transaction.assert(
+                dialog_query::the!("doc/next")
+                    .of(format!("doc:{index}").parse::<Entity>()?)
+                    .is(format!("doc:{}", index + 1).parse::<Entity>()?),
+            );
+        }
+        transaction.commit().publish().perform(env).await?;
+        branch.refresh(env).await?;
+        Ok(())
+    }
+
+    /// A spread whose rules select the same chain in successive ticks
+    /// mints an instant per tick that selected a document, and a
+    /// subscription polled after it reads the instants in order.
+    #[dialog_common::test]
+    async fn it_spreads_a_selection_one_tick_at_a_time() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        declare_spread(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        let mut subscription = session.subscribe(selected_query());
+        subscription.poll(&operator).await?;
+
+        let start = memory.revision().sequence;
+        session
+            .invoke(
+                dialog_query::the!("cmd.spread/doc")
+                    .of("cmd:1".parse::<Entity>()?)
+                    .is("doc:1".parse::<Entity>()?),
+            )
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            memory.revision().sequence,
+            start + 4,
+            "one tick per document the spread selected"
+        );
+        let selected_in: Vec<Vec<String>> = memory
+            .since(start)
+            .expect("the ring reaches back")
+            .iter()
+            .map(|instant| {
+                instant
+                    .asserted
+                    .iter()
+                    .map(|fact| fact.of.to_string())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            selected_in,
+            (1..=4)
+                .map(|index| vec![format!("doc:{index}")])
+                .collect::<Vec<_>>(),
+            "the chain, a document per tick, in order"
+        );
+        subscription.poll(&operator).await?;
+        let mut retained = selected(subscription.results());
+        retained.sort();
+        assert_eq!(
+            retained,
+            fresh(&session, &operator, selected_query()).await?
+        );
+        assert_eq!(retained.len(), 4);
+        assert_eq!(subscription.recomputes(), 1);
+        Ok(())
+    }
+
     /// A small deterministic generator for the churn below.
     struct Xorshift(u64);
 
@@ -1474,7 +1867,8 @@ mod tests {
 
     /// Through any sequence of dispatches across the primary and a
     /// memory layer, with a rule landing on the layer and the same cell
-    /// written in both, a maintained subscription equals a fresh
+    /// written in both, and rules writing the layer in several ticks of
+    /// one dispatch, a maintained subscription equals a fresh
     /// evaluation after every step, and nothing after the first poll
     /// evaluates afresh.
     #[dialog_common::test]
@@ -1483,6 +1877,7 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
+        declare_spread(&branch, &operator).await?;
         let session = branch.session().perform(&operator).await?;
         let docs: Vec<Entity> = (1..=4)
             .map(|index| format!("doc:{index}").parse())
@@ -1499,7 +1894,7 @@ mod tests {
             let mut rng = Xorshift(seed);
             for step in 0..24 {
                 let doc = docs[rng.below(docs.len() as u64) as usize].clone();
-                let label = match rng.below(6) {
+                let label = match rng.below(7) {
                     0 => {
                         session
                             .transact(flag(&doc, true, &state))
@@ -1544,6 +1939,17 @@ mod tests {
                             .perform(&operator)
                             .await?;
                         "select in the primary"
+                    }
+                    5 => {
+                        session
+                            .invoke(
+                                dialog_query::the!("cmd.spread/doc")
+                                    .of("cmd:2".parse::<Entity>()?)
+                                    .is(doc.clone()),
+                            )
+                            .perform(&operator)
+                            .await?;
+                        "spread"
                     }
                     _ => "nothing",
                 };

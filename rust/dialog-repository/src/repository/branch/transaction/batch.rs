@@ -115,11 +115,12 @@ pub struct TransactionBatch {
     /// links, across every round of every link. See
     /// [`induced`](Self::induced).
     induced: Changes,
-    /// The writes of this chain placed outside the primary, by the layer
-    /// each is placed on, as a session routes them: what its memory
-    /// layers take once the chain publishes. Empty for a chain committed
-    /// on the branch alone.
-    shares: Vec<(Entity, Changes)>,
+    /// The writes of this chain placed outside the primary, tick by
+    /// tick in the order the ticks ran, each tick's by the layer each is
+    /// placed on, as a session routes them: what its memory layers take
+    /// once the chain publishes, one instant per tick that wrote a layer.
+    /// Empty for a chain committed on the branch alone.
+    shares: Vec<Vec<(Entity, Changes)>>,
     /// The session's memory layers, by name, that take the shares.
     memories: Vec<(Entity, Ephemeral)>,
     /// The branch's session overlay, and the facts the staged links
@@ -216,10 +217,13 @@ impl TransactionBatch {
     }
 
     /// The writes placed outside the primary that this chain's commits
-    /// made, the ones their rules derived included, by the layer each is
-    /// placed on: what the session's memory layers take once the chain
-    /// publishes.
-    pub fn shares(&self) -> &[(Entity, Changes)] {
+    /// made, the ones their rules derived included, tick by tick: one
+    /// entry per tick that wrote a layer, in the order the ticks ran,
+    /// each holding that tick's writes by the layer each is placed on.
+    /// A link's own writes are its first tick, and each induction round
+    /// after it is one more. Once the chain publishes, each layer takes
+    /// each tick's writes as an instant of its own, in this order.
+    pub fn shares(&self) -> &[Vec<(Entity, Changes)>] {
         &self.shares
     }
 
@@ -346,7 +350,8 @@ impl BatchPublish {
         head.publish(tip.clone(), env).await?;
         retract_from_overlay(&overlay, overlay_retractions)?;
         // The memory layers take their shares only now that the primary's
-        // commit is published: a refused publish shows in no layer.
+        // commit is published: a refused publish shows in no layer. Each
+        // tick lands as its own instant, in the order the ticks ran.
         apply_shares(&memories, shares)?;
         if revisions {
             record_revisions(&memories, &overlay, &tip)?;
@@ -750,7 +755,7 @@ impl TransactionCommit<TransactionBatch> {
         ))
         .await?;
         induced.assert(&mut batch.induced);
-        merge_shares(&mut batch.shares, shares);
+        batch.shares.extend(shares);
         batch.overlay_retractions.extend(retractions);
 
         if let Outcome::Minted(minted) = outcome {
@@ -795,15 +800,20 @@ fn merge_shares(shares: &mut Vec<(Entity, Changes)>, more: Vec<(Entity, Changes)
     }
 }
 
-/// Land each layer's share in it. A share of a layer the session does not
-/// hold was refused at commit, so none is left over here.
+/// Land each tick's share of each layer in it, tick by tick in the order
+/// the ticks ran: a layer mints one instant per tick that changed it, so
+/// a reader of its instants sees every state the rules saw. A share of a
+/// layer the session does not hold was refused at commit, so none is
+/// left over here.
 fn apply_shares(
     memories: &[(Entity, Ephemeral)],
-    shares: Vec<(Entity, Changes)>,
+    ticks: Vec<Vec<(Entity, Changes)>>,
 ) -> Result<(), CommitError> {
-    for (layer, changes) in shares {
-        if let Some((_, memory)) = memories.iter().find(|(held, _)| *held == layer) {
-            memory.apply(changes)?;
+    for shares in ticks {
+        for (layer, changes) in shares {
+            if let Some((_, memory)) = memories.iter().find(|(held, _)| *held == layer) {
+                memory.apply(changes)?;
+            }
         }
     }
     Ok(())
@@ -880,8 +890,9 @@ fn refuse_nan<'a>(changes: impl Iterator<Item = &'a Change>) -> Result<(), Commi
 /// Through a `session`, settlement and induction read the session's
 /// composite, and the writes placed outside the primary, the ones the
 /// rules derived included, are taken out before anything is settled or
-/// minted and returned as the shares: the tree never holds a fact placed
-/// on a memory layer.
+/// minted and returned as the shares, tick by tick: the link's own
+/// writes first, then each induction round's that wrote a layer. The
+/// tree never holds a fact placed on a memory layer.
 #[allow(clippy::too_many_arguments)]
 async fn mint_link<Env>(
     view: View<'_>,
@@ -893,7 +904,7 @@ async fn mint_link<Env>(
     amend: Option<Amended>,
     session: Option<SessionContext>,
     env: &Env,
-) -> Result<(Outcome, Changes, Vec<(Entity, Changes)>), CommitError>
+) -> Result<(Outcome, Changes, Vec<Vec<(Entity, Changes)>>), CommitError>
 where
     Env: Provider<BlobSize>
         + Provider<BlobImport>
@@ -951,7 +962,7 @@ where
         let moved = changes.take_cells(follows_selection);
         merge_shares(&mut shares, moved.into_layer(layer.clone()).take_shares());
     }
-    let (mut shares, primary) = route_shares(shares, &held)?;
+    let (shares, primary) = route_shares(shares, &held)?;
     changes.apply(primary);
     // Through a session, the revision of every layer that moved since the
     // session last recorded it is the dispatch's stimulus, read as rows of
@@ -972,7 +983,7 @@ where
         env,
     ))
     .await?;
-    let induced = induce(
+    let (induced, rounds) = induce(
         &view,
         &composite,
         &mut changes,
@@ -981,11 +992,23 @@ where
         env,
     )
     .await?;
-    // What the rules derived into a layer goes with the shares, routed
-    // the same way.
-    let (derived, primary) = route_shares(changes.take_shares(), &held)?;
-    changes.merge(primary);
-    merge_shares(&mut shares, derived);
+    // The link's own writes into layers are its first tick; what the
+    // rules derived into a layer follows, one tick per round that wrote
+    // one, routed the same way. Induction left every round's writes in
+    // `changes` too, merged, for the rounds to read: they land tick by
+    // tick instead, so the merged copy is dropped.
+    changes.take_shares();
+    let mut ticks = Vec::with_capacity(1 + rounds.len());
+    if !shares.is_empty() {
+        ticks.push(shares);
+    }
+    for round in rounds {
+        let (derived, primary) = route_shares(round, &held)?;
+        changes.merge(primary);
+        if !derived.is_empty() {
+            ticks.push(derived);
+        }
+    }
     let touches = touches_rules(&changes);
     let touches_rule_facts = touches_rule_facts(&changes);
     let previous = view.revision().cloned();
@@ -1015,7 +1038,7 @@ where
             );
         }
     }
-    Ok((outcome, induced, shares))
+    Ok((outcome, induced, ticks))
 }
 
 #[cfg(test)]

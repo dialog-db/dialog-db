@@ -73,9 +73,14 @@ pub(crate) const MAX_ROUNDS: u32 = 16;
 /// durable novelty into `changes`. Transients never enter `changes`;
 /// they are visible to rule bodies for exactly one round.
 ///
-/// Returns every transient a rule head emitted, across all rounds. The
-/// dispatched `transients` are not part of it. The writes `transients`
-/// names for a layer are stimulus too, read as rows of that layer.
+/// Returns every transient a rule head emitted, across all rounds, and
+/// the writes each round's heads landed in a layer, one entry per round
+/// that wrote one, in round order: each round is a tick, and a layer
+/// takes each tick's writes as an instant of its own. The dispatched
+/// `transients` are not part of either. The writes `transients` names
+/// for a layer are stimulus too, read as rows of that layer. The
+/// layered writes stay in `changes` as well, merged, which is how each
+/// round's view reads every earlier round's.
 ///
 /// `selected` is the layer a session selects: a durable head cell whose
 /// descriptor names no layer lands there, unless its attribute is
@@ -87,7 +92,7 @@ pub(crate) async fn induce<Env>(
     transients: Changes,
     selected: Option<&Entity>,
     env: &Env,
-) -> Result<Changes, CommitError>
+) -> Result<(Changes, Vec<Vec<(Entity, Changes)>>), CommitError>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
@@ -124,8 +129,9 @@ where
     stimulus.extend(layered_instructions(&transients));
     stimulus.extend(lag_delta(view, env).await?);
     let mut induced = Changes::new();
+    let mut ticks = Vec::new();
     if stimulus.is_empty() {
-        return Ok(induced);
+        return Ok((induced, ticks));
     }
 
     // Committed trigger structures, resolved once per induction: the
@@ -232,27 +238,36 @@ where
         // round's transients, through the same layered QueryEnv a
         // transaction query uses, so rule bodies read exactly what a
         // mid-transaction query would: the writes as staged layers
-        // beside the shared metadata.
-        let view = QueryEnv::over(
-            composite.clone(),
-            shared_metadata(from_ref(view), &operator),
-            env,
-        )
-        .with_layers(
-            [
-                Staged::from(changes.clone()),
-                Staged::from(transient_overlay.clone()),
-            ]
-            .into_iter()
-            .chain(
-                transient_overlay
-                    .clone()
-                    .take_shares()
+        // beside the shared metadata. Each layer's writes, the earlier
+        // rounds' heads landing in it among them, are read as that
+        // layer, so a round reads the state the ticks before it left. A
+        // memory layer the composite holds reads them as a copy of
+        // itself with them applied, as the ticks will land at publish,
+        // so a head under `last` succeeds the layer's own row of the
+        // cell; a layer it does not hold reads them as a staged layer.
+        let written = Staged::from(changes.clone());
+        let mut round = composite.clone();
+        let mut shares: Vec<Staged> = Vec::new();
+        for (layer, share) in written.shares() {
+            match round.memories.iter_mut().find(|(held, _)| held == layer) {
+                Some((_, memory)) => *memory = memory.extending(share.clone()),
+                None => shares.push(Staged::from(share.clone()).in_layer(layer.clone())),
+            }
+        }
+        let view = QueryEnv::over(round, shared_metadata(from_ref(view), &operator), env)
+            .with_layers(
+                [written, Staged::from(transient_overlay.clone())]
                     .into_iter()
-                    .map(|(layer, share)| Staged::from(share).in_layer(layer)),
-            )
-            .collect(),
-        );
+                    .chain(shares)
+                    .chain(
+                        transient_overlay
+                            .clone()
+                            .take_shares()
+                            .into_iter()
+                            .map(|(layer, share)| Staged::from(share).in_layer(layer)),
+                    )
+                    .collect(),
+            );
 
         // Close the touched set over derivation: a base-fact write
         // reaches inductive rules premised on the derived concepts it
@@ -333,15 +348,25 @@ where
         // emissions to the next round's stimulus. The incoming
         // transients simply expire — nothing entered `changes`, so
         // there is no sweep.
+        // The round's writes into layers are its tick: kept apart, so
+        // each layer takes them as one instant, and folded into
+        // `changes` too, so the next round's view reads them.
         stimulus = layered_instructions(&novelty);
         stimulus.extend(novelty.clone().into_instructions());
         stimulus.extend(emitted_transients.clone().into_instructions());
+        let shares = novelty.take_shares();
+        for (layer, share) in &shares {
+            share.clone().into_layer(layer.clone()).assert(changes);
+        }
+        if !shares.is_empty() {
+            ticks.push(shares);
+        }
         novelty.assert(changes);
         emitted_transients.clone().assert(&mut induced);
         transient_overlay = emitted_transients;
     }
 
-    Ok(induced)
+    Ok((induced, ticks))
 }
 
 /// The committed side of trigger dispatch for one induction run: the
