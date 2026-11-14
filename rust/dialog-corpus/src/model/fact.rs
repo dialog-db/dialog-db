@@ -207,7 +207,8 @@ impl Fact {
 pub struct FactView {
     backing: Backing,
     /// The layer this row was read from, when the read was over several
-    /// (see [`with_layer`](Self::with_layer)).
+    /// and the row is not the primary's (see
+    /// [`with_layer`](Self::with_layer)).
     layer: Option<Entity>,
 }
 
@@ -328,14 +329,16 @@ impl FactView {
     }
 
     /// This row as read from `layer`: what a read over several layers
-    /// stamps on each row, so a query can bind or filter by where a row
-    /// came from.
+    /// stamps on each row of a layer beside the primary, so a query can
+    /// bind or filter by where a row came from. The primary's rows are
+    /// left bare: no layer is [`memory:`](crate::MEMORY).
     pub fn with_layer(mut self, layer: Entity) -> Self {
         self.layer = Some(layer);
         self
     }
 
-    /// The layer this row was read from, when the read stamped one.
+    /// The layer this row was read from, when the read stamped one;
+    /// `None` is the primary, [`memory:`](crate::MEMORY).
     pub fn layer(&self) -> Option<&Entity> {
         self.layer.as_ref()
     }

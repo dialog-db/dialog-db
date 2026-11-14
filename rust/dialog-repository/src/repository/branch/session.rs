@@ -1015,9 +1015,11 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // by the line's session tombstones. Each line's stream is
         // filtered with the tombstones keyed under its own manifest, and
         // borrows only `self.env`.
-        // Every row is stamped with the layer it is read from, so a read
-        // binds a row's `in` and a read naming one layer (`in:` bound)
-        // takes that layer's streams alone.
+        // Every row of a layer beside the primary is stamped with the
+        // layer it is read from, so a read binds a row's `in` and a read
+        // naming one layer (`in:` bound) takes that layer's streams alone.
+        // The primary's rows are left bare: no layer is `memory:`, and
+        // the common read moves nothing per row.
         let wanted = input.layer().cloned();
         let reads = |layer: &Entity| wanted.as_ref().is_none_or(|wanted| wanted == layer);
         for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
@@ -1030,10 +1032,12 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
             if !succeeded.is_empty() {
                 hidden = hidden.facts(hidden_in(&line.manifest));
             }
-            lines.push(stamped(
-                filter_hidden(raw, hidden, line.manifest.clone()),
-                layer,
-            ));
+            let rows = filter_hidden(raw, hidden, line.manifest.clone());
+            lines.push(if index == 0 {
+                rows
+            } else {
+                stamped(rows, layer)
+            });
         }
 
         // Each line's session overlay, read live. Filtered by the
@@ -1140,8 +1144,8 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // the transaction: a read over the transaction elects as a read
         // after the commit will.
         for (index, layer) in self.layers().iter().enumerate() {
-            let named = layer.layer().cloned().unwrap_or_else(memory_layer);
-            if !reads(&named) {
+            let stamp = layer.layer().cloned();
+            if !reads(stamp.as_ref().unwrap_or(&memory_layer())) {
                 continue;
             }
             let rows = layer.select_within(&window, &manifest);
@@ -1156,10 +1160,13 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
                 .map(|fact| sort_key(fact, &manifest))
                 .collect();
             let pending = pending();
-            let rows: FactStream<'a> =
-                Box::pin(stream::iter(rows.into_iter().map(move |fact| {
-                    Ok(FactView::pending(fact, pending).with_layer(named.clone()))
-                })));
+            let rows: FactStream<'a> = Box::pin(stream::iter(rows.into_iter().map(move |fact| {
+                let view = FactView::pending(fact, pending);
+                Ok(match &stamp {
+                    Some(layer) => view.with_layer(layer.clone()),
+                    None => view,
+                })
+            })));
             if held.is_empty() {
                 staged.push(rows);
             } else {

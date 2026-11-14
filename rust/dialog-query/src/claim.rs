@@ -20,13 +20,15 @@ pub struct Claim {
     /// The cause (provenance hash) of this claim
     pub cause: Cause,
     /// The layer the claim was read from (`in:`), when the read was over
-    /// several layers and stamped it.
+    /// several layers and the row is not the primary's; `None` is the
+    /// primary, `memory:`.
     #[serde(rename = "in", default, skip_serializing_if = "Option::is_none")]
     pub layer: Option<Entity>,
 }
 
 impl Claim {
-    /// The layer this claim was read from, when known.
+    /// The layer this claim was read from; `None` is the primary,
+    /// `memory:`.
     pub fn layer(&self) -> Option<&Entity> {
         self.layer.as_ref()
     }

@@ -47,27 +47,29 @@ static STORE_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.layer/stor
 static REVISION_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.layer/revision").into());
 static SELECTION_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.session/layer").into());
 
-/// The name of the primary: the base durable branch of a session.
-pub const MEMORY: &str = "memory:";
+pub use dialog_corpus::{MEMORY, memory_layer};
+
 /// The name of the layer every session mints: in memory, the session's
 /// own, gone when the session is.
 pub const SESSION: &str = "session:";
 /// The name of the loopback: where a command lands, for one tick.
 pub const CONTROL: &str = "control:";
 
-/// The entity of the primary, [`MEMORY`].
-pub fn memory_layer() -> Entity {
-    MEMORY.parse().expect("a bare scheme is an entity")
-}
+// The layer entities are parsed once: a read asks for them per line it
+// reads, a commit per head it writes.
+static SESSION_LAYER: LazyLock<Entity> =
+    LazyLock::new(|| SESSION.parse().expect("a bare scheme is an entity"));
+static CONTROL_LAYER: LazyLock<Entity> =
+    LazyLock::new(|| CONTROL.parse().expect("a bare scheme is an entity"));
 
 /// The entity of the session's own layer, [`SESSION`].
 pub fn session_layer() -> Entity {
-    SESSION.parse().expect("a bare scheme is an entity")
+    SESSION_LAYER.clone()
 }
 
 /// The entity of the loopback, [`CONTROL`].
 pub fn control_layer() -> Entity {
-    CONTROL.parse().expect("a bare scheme is an entity")
+    CONTROL_LAYER.clone()
 }
 
 /// The `dialog.layer/store` declaration attribute: of a layer's entity,
