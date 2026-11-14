@@ -45,6 +45,29 @@
 //! ([`Session::handle`], [`invoke::Handler`]) answer its commands, and
 //! their answers are the next tick's stimulus.
 //!
+//! Every session has its own layer, [`SESSION`], whether or not the
+//! schema declares it: a table in memory, the session's alone, gone
+//! when the process is. It is how a session addresses the process-local
+//! store a branch has always had: [`Session::layer`] hands it out for
+//! [`session_layer`](crate::session_layer), a write `.at(session_layer())`
+//! lands in it once the dispatch publishes, and a read binds its rows'
+//! `in` to it. [`Branch::overlay`] stays, as the same store under its
+//! older name: what is written through one is read through the other.
+//!
+//! After each dispatch publishes, the session records in its own layer
+//! the revision every layer stands at, one `dialog.layer/revision` row
+//! per layer, under `last`: of [`MEMORY`] the primary's tree, of each
+//! declared layer its instant chain, and of [`SESSION`] its own as it
+//! stood before the row was written. The same rows, as the layers stood
+//! when the dispatch began, are its stimulus, so a rule premised on a
+//! layer's revision fires once per dispatch.
+//!
+//! The session's own layer also holds which layer is **selected**
+//! ([`Session::select`]): while one is, a write with no layer named
+//! lands in it rather than the primary, as a stroke lands on the layer
+//! an image editor has selected. The machinery under `dialog.` (rules,
+//! layer declarations, the revision rows) never follows the selection.
+//!
 //! What the session holds of its own are its **declarations**
 //! ([`Session::declare`]): layers this process declares for itself,
 //! which outrank what the primary's tree and session store declare, and
@@ -56,6 +79,7 @@
 
 pub mod invoke;
 
+use std::iter::once;
 use std::sync::Arc;
 
 use dialog_capability::{Fork, Provider};
@@ -72,7 +96,7 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::nodes;
 use parking_lot::RwLock;
 
-use crate::placement::{Layers, Store};
+use crate::placement::{Layers, Store, memory_layer, session_layer};
 use crate::repository::branch::session::Composite;
 use crate::repository::branch::transaction::SessionContext;
 use crate::repository::source::Source;
@@ -152,9 +176,14 @@ impl OpenSession {
     pub async fn perform<Env: SessionEnv>(self, env: &Env) -> Result<Session, CommitError> {
         let primary = Source::from(self.primary.clone());
         let layers = Layers::resolve(&primary, &self.declared, env).await?;
+        // The primary and the session's own layer are every session's,
+        // whatever the schema says of them: a declaration naming either
+        // builds nothing apart.
+        let (memory, own) = (memory_layer(), session_layer());
         let layers = layers
             .layers()
             .into_iter()
+            .filter(|(entity, _)| *entity != memory && *entity != own)
             .map(|(entity, store)| match store {
                 Store::Memory => (entity, Ephemeral::new()),
             })
@@ -174,7 +203,10 @@ impl OpenSession {
 struct Inner {
     primary: Branch,
     /// The layers the schema declares, each with the entity that names
-    /// it, in the order the schema lists them.
+    /// it, in the order the schema lists them. The session's own layer,
+    /// [`SESSION`](crate::SESSION), is not among them: it is the
+    /// primary's process-local store ([`Branch::overlay`]), read with the
+    /// primary.
     layers: Vec<(Entity, Ephemeral)>,
     declared: RwLock<Changes>,
     /// What answers a dispatch's commands, in registration order. See
@@ -210,8 +242,15 @@ impl Session {
         &self.inner.primary
     }
 
-    /// The layer the schema declares as `name`, if the session built one.
+    /// The layer named `name`, if the session holds one: the session's
+    /// own, [`SESSION`](crate::SESSION), which every session has, or one
+    /// the schema declares. The session's own is the primary's
+    /// process-local store, the one [`Branch::overlay`] hands out: a
+    /// clone of either shares its state.
     pub fn layer(&self, name: &Entity) -> Option<&Ephemeral> {
+        if *name == session_layer() {
+            return Some(self.inner.primary.overlay());
+        }
         self.inner
             .layers
             .iter()
@@ -219,12 +258,12 @@ impl Session {
             .map(|(_, memory)| memory)
     }
 
-    /// The layers this session holds beside the primary, by name.
+    /// The layers this session holds beside the primary, by name: its
+    /// own, [`SESSION`](crate::SESSION), first, then the ones the schema
+    /// declares, in the schema's order.
     pub fn layers(&self) -> Vec<Entity> {
-        self.inner
-            .layers
-            .iter()
-            .map(|(layer, _)| layer.clone())
+        once(session_layer())
+            .chain(self.inner.layers.iter().map(|(layer, _)| layer.clone()))
             .collect()
     }
 
@@ -247,8 +286,9 @@ impl Session {
         self.inner.declared.read().clone()
     }
 
-    /// The memory layers this session holds, by name, in the schema's
-    /// order.
+    /// The memory layers the schema declares, by name, in the schema's
+    /// order. The session's own layer is not among them: a commit and a
+    /// read take it from the primary, as its session overlay.
     pub(crate) fn memories(&self) -> Vec<(Entity, Ephemeral)> {
         self.inner.layers.clone()
     }
@@ -266,6 +306,8 @@ impl Session {
     /// with `in` unbound reads them all and binds each row's layer; one
     /// with `in` bound reads that layer alone.
     pub fn query(&self) -> QueryLayer<'_> {
+        // The primary's line reads its session overlay as `session:`, so
+        // the session's own layer is read once, with the primary.
         let mut layer = QueryLayer::from(&self.inner.primary);
         for (name, memory) in &self.inner.layers {
             layer = layer.with_memory(name.clone(), memory);
@@ -460,8 +502,8 @@ mod tests {
         let session = branch.session().perform(&operator).await?;
         assert_eq!(
             session.layers(),
-            vec![state.clone()],
-            "the schema's layer is built"
+            vec![crate::session_layer(), state.clone()],
+            "the session's own layer comes first, then the schema's"
         );
         let memory = session.layer(&state).expect("the state layer").clone();
 
@@ -515,6 +557,85 @@ mod tests {
         assert_eq!(
             read::<String>(session.query(), &operator, "doc/title", &doc).await?,
             vec!["String(\"Notes\")".to_string()]
+        );
+        Ok(())
+    }
+
+    /// Every session has its own layer, declared or not: it is the
+    /// primary's process-local store, so what is written through one name
+    /// is read through the other, and a read binds its rows once, to
+    /// `session:`. A schema that declares `session:` builds nothing apart.
+    #[dialog_common::test]
+    async fn it_holds_its_own_layer_whether_or_not_the_schema_declares_it() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let own = crate::session_layer();
+        let session = branch.session().perform(&operator).await?;
+        assert_eq!(session.layers(), vec![own.clone()], "undeclared, still held");
+
+        let doc: Entity = "doc:1".parse()?;
+        session
+            .transact(flag(&doc, true, &own))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            held(branch.overlay(), "ui/selected", &doc)?,
+            vec!["Boolean(true)".to_string()],
+            "a write into `session:` lands in the branch's overlay"
+        );
+        branch.overlay().assert(primary_flag(&"doc:2".parse()?, true))?;
+        let layer = session.layer(&own).expect("the session's own layer");
+        assert_eq!(
+            held(layer, "ui/selected", &"doc:2".parse()?)?,
+            vec!["Boolean(true)".to_string()],
+            "a write into the overlay is read through `session:`"
+        );
+
+        let claims: Vec<dialog_query::Claim> = session
+            .query()
+            .select(selected_query().with_layer(Term::var("where")))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let mut rows: Vec<String> = claims
+            .iter()
+            .map(|claim| {
+                format!(
+                    "{} in {}",
+                    claim.of,
+                    claim.layer().map(ToString::to_string).unwrap_or_default()
+                )
+            })
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                format!("{doc} in session:"),
+                "doc:2 in session:".to_string()
+            ],
+            "each row is read once, as `session:`"
+        );
+
+        // A schema that declares `session:` gets the same one layer.
+        branch
+            .transaction()
+            .assert(LayerDeclaration::new(own.clone(), Store::Memory))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let declared = branch.session().perform(&operator).await?;
+        assert_eq!(declared.layers(), vec![own.clone()]);
+        assert!(
+            !held(
+                declared.layer(&own).expect("its own layer"),
+                "ui/selected",
+                &doc
+            )?
+            .is_empty(),
+            "still the branch's overlay"
         );
         Ok(())
     }
