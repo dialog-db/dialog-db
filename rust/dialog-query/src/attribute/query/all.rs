@@ -117,7 +117,8 @@ impl AttributeQueryAll {
     /// store that reads one layer stamps none, and every row is its.
     pub(crate) fn reads_from(&self, layer: Option<&Entity>) -> bool {
         match (&self.layer, layer) {
-            (Term::Constant(wanted), Some(layer)) => *wanted == Value::Entity(layer.clone()),
+            (Term::Constant(Value::Entity(wanted)), Some(layer)) => wanted == layer,
+            (Term::Constant(_), Some(_)) => false,
             _ => true,
         }
     }

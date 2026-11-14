@@ -50,19 +50,28 @@ pub const SESSION: &str = "session:";
 /// The name of the loopback: where a command lands, for one tick.
 pub const CONTROL: &str = "control:";
 
+// The layer entities are parsed once: a read asks for them per line it
+// reads, a commit per head it writes.
+static MEMORY_LAYER: LazyLock<Entity> =
+    LazyLock::new(|| MEMORY.parse().expect("a bare scheme is an entity"));
+static SESSION_LAYER: LazyLock<Entity> =
+    LazyLock::new(|| SESSION.parse().expect("a bare scheme is an entity"));
+static CONTROL_LAYER: LazyLock<Entity> =
+    LazyLock::new(|| CONTROL.parse().expect("a bare scheme is an entity"));
+
 /// The entity of the primary, [`MEMORY`].
 pub fn memory_layer() -> Entity {
-    MEMORY.parse().expect("a bare scheme is an entity")
+    MEMORY_LAYER.clone()
 }
 
 /// The entity of the session's own layer, [`SESSION`].
 pub fn session_layer() -> Entity {
-    SESSION.parse().expect("a bare scheme is an entity")
+    SESSION_LAYER.clone()
 }
 
 /// The entity of the loopback, [`CONTROL`].
 pub fn control_layer() -> Entity {
-    CONTROL.parse().expect("a bare scheme is an entity")
+    CONTROL_LAYER.clone()
 }
 
 /// The `dialog.layer/store` declaration attribute: of a layer's entity,
