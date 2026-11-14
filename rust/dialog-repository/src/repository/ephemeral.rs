@@ -58,7 +58,7 @@ use crate::rules::is_rule_attribute;
 
 /// The rules a line holds as they are, each under the entity its facts
 /// name it by: a rule that has an identity and no stored body (one that
-/// holds a map, a list or a tuple of terms), laid over a line for a
+/// holds a map or a list of terms), laid over a line for a
 /// query. Its `dialog.rule/*` index facts are among the line's facts,
 /// and its body is here, where a stored rule's is bytes under
 /// `dialog.rule/source`.

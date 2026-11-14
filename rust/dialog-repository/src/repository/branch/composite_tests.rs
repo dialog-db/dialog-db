@@ -30,7 +30,7 @@ fn records(the: &str) -> ConceptDescriptor {
 }
 
 /// A composite round-trips through a branch as a claim's value: a map
-/// that holds a list and a tuple, and one large enough to be stored
+/// that holds two lists, and one large enough to be stored
 /// apart from its key. What is read is the value that was asserted,
 /// and it is the composite it was made from.
 #[dialog_common::test]
@@ -48,7 +48,7 @@ async fn it_round_trips_a_composite_as_a_claims_value() -> Result<()> {
         ),
         (
             text("at"),
-            Composite::tuple([Value::Float(45.5), Value::Float(-122.6)]).into(),
+            Composite::list([Value::Float(45.5), Value::Float(-122.6)]).into(),
         ),
     ])?;
     let large = Composite::list([text(&"x".repeat(8192)), Value::UnsignedInt(u128::MAX)]);

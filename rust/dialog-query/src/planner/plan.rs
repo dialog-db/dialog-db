@@ -341,7 +341,7 @@ where
     let premise = inner.as_premise();
     let shared: Vec<String> = premise
         .parameters()
-        // The variables inside a map, a list or a tuple of terms too:
+        // The variables inside a map or a list of terms too:
         // a candidate binds those, never the whole.
         .leaves()
         .filter_map(|term| term.name().map(String::from))

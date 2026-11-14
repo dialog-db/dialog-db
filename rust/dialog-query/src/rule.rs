@@ -257,7 +257,7 @@ fn compile_rule_as<T: Compile>(
             other => other,
         })
         .collect();
-    // A concept premise that holds a map, a list or a tuple of terms
+    // A concept premise that holds a map or a list of terms
     // reads the whole value into a variable, and an equality between
     // that variable and the pattern follows it, so everything that
     // analyses or evaluates the body meets terms only.

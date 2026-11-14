@@ -203,7 +203,7 @@ struct ConceptQueryIn {
 impl Serialize for ConceptQuery {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::Error as _;
-        // A map, a list or a tuple of terms has no wire form. Written
+        // A map or a list of terms has no wire form. Written
         // as the variable standing for the whole it would read back as
         // another query.
         if let Some((name, pattern)) = self.terms.shapes().next() {
@@ -512,7 +512,7 @@ impl ConceptQuery {
                 .conformed()
                 .evaluate_erased(Box::pin(selection), env, false);
         }
-        // A parameter that is a map, a list or a tuple of terms: the
+        // A parameter that is a map or a list of terms: the
         // concept is read with a variable standing for the whole value
         // in its place. Where the pattern's variables are bound the
         // whole is built first and the concept is read by it. What the
@@ -539,8 +539,8 @@ impl ConceptQuery {
     }
 
     /// This application as the concept is read: each slot holding the
-    /// term a premise reads there, the whole where it holds a map, a
-    /// list or a tuple (see [`Parameters::plain`]). An application of
+    /// term a premise reads there, the whole where it holds a map or
+    /// a list (see [`Parameters::plain`]). An application of
     /// terms alone is a clone.
     fn plain(&self) -> Self {
         ConceptQuery {
@@ -549,8 +549,8 @@ impl ConceptQuery {
         }
     }
 
-    /// Evaluates the application. Where its terms hold a map, a list
-    /// or a tuple, which `apart` says, the concept is read with the
+    /// Evaluates the application. Where its terms hold a map
+    /// or a list, which `apart` says, the concept is read with the
     /// whole of each in its slot ([`Parameters::plain`]), and each row
     /// it yields has what the concept bound each whole to taken apart
     /// by its pattern; a row that does not match is dropped (see

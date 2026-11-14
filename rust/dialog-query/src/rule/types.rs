@@ -147,7 +147,7 @@ impl TypeEnv {
         // premise types still decides the output.
         let mut signed: Vec<SignedImage> = Vec::new();
         // The variables a pattern makes hold a record: what an equality
-        // sets equal to a map, a list or a tuple, a rest and a run.
+        // sets equal to a map or a list, a rest and a run.
         // Checked once every premise has contributed (see
         // [`Self::check_records`]).
         let mut records: Vec<String> = Vec::new();
@@ -180,7 +180,7 @@ impl TypeEnv {
                 let Some((param, shape)) = params.slot(slot_name) else {
                     continue;
                 };
-                // A slot holding a map, a list or a tuple of terms is
+                // A slot holding a map or a list of terms is
                 // typed by its shape and its leaves, not as the
                 // variable standing for the whole.
                 if let Some(pattern) = shape {
@@ -214,8 +214,8 @@ impl TypeEnv {
                 }
             }
 
-            // A variable an equality sets equal to a map, a list or a
-            // tuple holds a record, in every row that passes it.
+            // A variable an equality sets equal to a map
+            // or a list holds a record, in every row that passes it.
             if let Proposition::Constraint(Constraint::Equality(equality)) = proposition {
                 for (shape, other) in [
                     (&equality.this, &equality.is),
@@ -369,7 +369,7 @@ impl TypeEnv {
         Ok(())
     }
 
-    /// Contribute a map, a list or a tuple of terms standing in a slot
+    /// Contribute a map or a list of terms standing in a slot
     /// of kind `slot`. The pattern's type follows from its shape and
     /// its leaves:
     ///
@@ -429,12 +429,6 @@ impl TypeEnv {
                     Self::infer_leaves(ctx, part, records)?;
                 }
                 Self::infer_remainder(ctx, list.run(), records, leaf)
-            }
-            Pattern::Tuple(items) => {
-                for part in items {
-                    Self::infer_leaves(ctx, part, records)?;
-                }
-                Ok(())
             }
         }
     }

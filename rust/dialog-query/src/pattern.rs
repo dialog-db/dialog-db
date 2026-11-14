@@ -4,7 +4,6 @@
 //! Pattern = Variable | Constant              the leaves: what a Term is
 //!         | Map   { key: Pattern ... , rest }
 //!         | List  [ Pattern ... , run ]
-//!         | Tuple ( Pattern ... )
 //! ```
 //!
 //! A pattern stands where a value does. Where the value is bound, the
@@ -23,7 +22,6 @@
 //! - A list pattern with no run is the list of exactly its items. With
 //!   a run it matches a list that starts with its items and binds the
 //!   ones after them to the run, as a list.
-//! - A tuple pattern is the tuple of exactly its items.
 //!
 //! A pattern that holds a blank cannot be built, since a blank is never
 //! bound. It can only take a value apart.
@@ -45,8 +43,8 @@ use crate::term::Term;
 use crate::try_stream;
 use crate::types::Any;
 
-/// What a parameter holds: a variable, a constant, or a map, a list or
-/// a tuple of patterns. See the [module](self).
+/// What a parameter holds: a variable, a constant, or a map or a list
+/// of patterns. See the [module](self).
 ///
 /// A pattern is no larger than a [`Term<Any>`], so what holds a
 /// pattern where it held a term (an [`Equality`]'s two sides) is the
@@ -59,8 +57,6 @@ pub enum Pattern {
     Map(MapPattern),
     /// A list of patterns.
     List(ListPattern),
-    /// A tuple of patterns.
-    Tuple(Vec<Pattern>),
 }
 
 const _: () = assert!(size_of::<Pattern>() == size_of::<Term<Any>>());
@@ -185,11 +181,6 @@ impl Pattern {
         Pattern::List(ListPattern::new(items.into_iter().map(Into::into)))
     }
 
-    /// The pattern of a tuple of exactly `items`.
-    pub fn tuple<P: Into<Pattern>>(items: impl IntoIterator<Item = P>) -> Self {
-        Pattern::Tuple(items.into_iter().map(Into::into).collect())
-    }
-
     /// The leaf this pattern is, when it is one.
     pub fn as_term(&self) -> Option<&Term<Any>> {
         match self {
@@ -204,7 +195,7 @@ impl Pattern {
     }
 
     /// An equality between this pattern and `other`: where one side is
-    /// bound the other is inferred from it, a map, a list or a tuple by
+    /// bound the other is inferred from it, a map or a list by
     /// taking the value apart.
     ///
     /// ```no_run
@@ -224,7 +215,7 @@ impl Pattern {
         Premise::from(Constraint::Equality(Equality::between(self, other)))
     }
 
-    /// Whether this pattern is a map, a list or a tuple.
+    /// Whether this pattern is a map or a list.
     pub fn is_composite(&self) -> bool {
         !matches!(self, Pattern::Term(_))
     }
@@ -251,11 +242,6 @@ impl Pattern {
                     pattern.collect(terms);
                 }
                 terms.extend(list.run.as_deref());
-            }
-            Pattern::Tuple(items) => {
-                for pattern in items {
-                    pattern.collect(terms);
-                }
             }
         }
     }
@@ -330,9 +316,6 @@ impl Pattern {
                 items: list.items.iter().map(|item| item.map_terms(f)).collect(),
                 run: list.run.as_deref().map(|run| Box::new(f(run))),
             }),
-            Pattern::Tuple(items) => {
-                Pattern::Tuple(items.iter().map(|item| item.map_terms(f)).collect())
-            }
         }
     }
 
@@ -386,13 +369,6 @@ impl Pattern {
                     items.extend(others.iter().cloned());
                 }
                 Composite::list(items)
-            }
-            Pattern::Tuple(patterns) => {
-                let mut items = Vec::with_capacity(patterns.len());
-                for pattern in patterns {
-                    items.push(pattern.build(row)?);
-                }
-                Composite::tuple(items)
             }
         };
         Some(Value::from(composite))
@@ -465,17 +441,6 @@ impl Pattern {
                     )),
                 }
             }
-            (Pattern::Tuple(patterns), Composite::Tuple(items)) => {
-                if patterns.len() != items.len() {
-                    return Ok(false);
-                }
-                for (part, item) in patterns.iter().zip(items.iter()) {
-                    if !part.unify(item, row)? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
             _ => Ok(false),
         }
     }
@@ -530,8 +495,8 @@ impl From<ListPattern> for Pattern {
 }
 
 /// How a pattern is written: `?name` for a variable, `_` for a blank, a
-/// constant as its value, `{key: pattern, ...rest}` for a map, `[item,
-/// ...run]` for a list and `(item, item)` for a tuple. Two patterns
+/// constant as its value, `{key: pattern, ...rest}` for a map and `[item,
+/// ...run]` for a list. Two patterns
 /// written alike are one pattern but for the types their variables
 /// declare.
 impl fmt::Display for Pattern {
@@ -579,21 +544,11 @@ impl fmt::Display for Pattern {
                 rest(list.items.is_empty(), list.run.as_deref(), f)?;
                 write!(f, "]")
             }
-            Pattern::Tuple(items) => {
-                write!(f, "(")?;
-                for (index, pattern) in items.iter().enumerate() {
-                    if index > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{pattern}")?;
-                }
-                write!(f, ")")
-            }
         }
     }
 }
 
-/// A leaf is written as a [`Term`] is. A map, a list or a tuple has no
+/// A leaf is written as a [`Term`] is. A map or a list has no
 /// wire form yet, and is refused.
 impl serde::Serialize for Pattern {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -621,7 +576,7 @@ static WHOLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// pattern that value is built from or taken apart by.
 ///
 /// A premise reads a variable or a constant in each slot. So a premise
-/// one of whose parameters is a map, a list or a tuple runs with a
+/// one of whose parameters is a map or a list runs with a
 /// variable there, the whole, and the pattern is applied around it:
 /// [`build`] binds the whole from the pattern where the pattern's
 /// variables are bound before the premise runs, and `take_apart`
@@ -664,7 +619,7 @@ impl Shape {
     }
 }
 
-/// Whether `proposition` holds a map, a list or a tuple of terms. Only
+/// Whether `proposition` holds a map or a list of terms. Only
 /// a concept application and an equality can: every other premise is a
 /// struct of terms. Asked of every premise a rule is spelled from, so
 /// it builds no parameters to answer.
@@ -678,7 +633,7 @@ pub(crate) fn holds_shape(proposition: &Proposition) -> bool {
     }
 }
 
-/// The first map, list or tuple of terms `premises` hold, as it is
+/// The first map or list of terms `premises` hold, as it is
 /// written, when they hold one.
 pub(crate) fn held<'a>(premises: impl IntoIterator<Item = &'a Premise>) -> Option<String> {
     premises.into_iter().find_map(|premise| {
@@ -690,7 +645,7 @@ pub(crate) fn held<'a>(premises: impl IntoIterator<Item = &'a Premise>) -> Optio
     })
 }
 
-/// The premises of a conjunction with every map, list and tuple a
+/// The premises of a conjunction with every map and list a
 /// positive concept premise holds moved out of it: the premise is left
 /// reading the variable that stands for the whole value, and an
 /// equality between that variable and the pattern follows it.
@@ -766,8 +721,8 @@ pub fn build<'a, M: Selection + 'a>(shapes: Arc<[Shape]>, selection: M) -> impl 
     }
 }
 
-/// After a premise ran with `terms`: match what the whole of each map,
-/// list and tuple they hold is bound to in `row` against its pattern,
+/// After a premise ran with `terms`: match what the whole of each map
+/// and list they hold is bound to in `row` against its pattern,
 /// binding the variables inside it. `None` for a row that does not
 /// match, which is dropped. A whole bound to nothing (an optional field
 /// with no value) matches no pattern. A whole the premise left unbound
