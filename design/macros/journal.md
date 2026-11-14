@@ -1070,7 +1070,7 @@ Not examined yet. They are columns, not recommendations.
 In order. One is asked, answered and written down before the next.
 
 1. Decided 2026-11-14: the more specific rule wins. Built 2026-11-13: the reader that gives `...` no meaning, the quoted list, the record's refusals, a read that says every field or `...`, a struct's last key.
-1. Decided 2026-11-13: the new format always, the old read for one cycle. To build next: format 4 on #778, with the migration.
+1. Decided 2026-11-13: the new format always, the old read for one cycle. Built 2026-11-14 as #799, on #778, a draft: every rule body is written in format 4, a rule that holds a pattern is kept, and the bytes format 3 wrote are pinned as reading back. Not yet here: this branch still refuses a struct in a rule that writes, until #799 is merged in and the notebook stops holding such rules aside.
 2. Whether a rule that leaves a premise's subject unnamed fires only for the entity written (#789, #791). It changes what a commit writes on main.
 3. Answered 2026-11-13 by the quote, and 2026-11-14 by the list: `'(:open :done)` and `[:open :done]` are one list, and `[]` is the list of nothing.
 4. Whether descriptions are `dialog.meta/description` or stay under `syntax.meta`.
