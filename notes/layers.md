@@ -207,9 +207,18 @@ the ticks.
    for one instant once it has published (point 18).
 5. Sapling and tonk move onto `invoke` and subscriptions over
    channels, and delete their wiring, registry and retry code.
-6. Durable layers: `Store::Durable`, the pointer fact in the primary,
-   `session.sync()` pulling and pushing the primary and every layer
-   with upstreams. Discovery as announcements.
+6. Done, in [#808](https://github.com/dialog-db/dialog-db/pull/808):
+   a durable layer is a branch the primary points at, declared
+   `memory:<branch> dialog.layer/store "durable"` as a fact of the
+   primary, read as a line stamped with its name, written by one
+   commit per dispatch on its branch with the pointer fact
+   (`dialog.layer/revision`, the tree, base58) in the primary's own
+   commit, published bottom to top, no memory cells. `Session::sync`
+   pulls the layers then the primary, writes a pointer where a pull
+   left a layer the primary does not point at, and pushes the layers
+   then the primary. Open: whether the declaration carries upstream
+   facts (today upstreams are each branch's own, set per replica), and
+   discovery as announcements.
 
 ## The control channel
 
