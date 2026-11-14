@@ -1257,24 +1257,25 @@ fn it_types_a_pattern_by_its_shape() {
     );
 }
 
-/// A rule that holds a pattern runs where it was built and cannot be
-/// stored: format 3 of a rule body has no way to write a pattern, and
-/// says so. The rule has an identity, by its parts, and no body.
+/// A rule that holds a pattern is stored: format 4 of a rule body
+/// writes a map, a list or a tuple of terms where a parameter stands.
+/// The body reads back as the rule it was, under the name it had before
+/// it could be written, and encodes to the bytes it was read from.
 #[dialog_common::test]
-fn it_refuses_to_store_a_rule_that_holds_a_pattern() {
+fn it_stores_a_rule_that_holds_a_pattern() {
     let rule = card_rule([0, 1, 2]).expect("compiles");
-    assert!(rule.try_this().is_some(), "it has an identity");
-    assert_eq!(rule.try_encode(), None, "and no stored body");
-    let refused = rule.storable().expect_err("it holds a pattern");
-    assert!(
-        matches!(&refused, TypeError::UnstorablePattern { format, .. } if *format == body::FORMAT),
-        "{refused:?}"
-    );
-    let reason = refused.to_string();
-    assert!(reason.contains("format 3"), "{reason}");
-    assert!(reason.contains("no way to write a pattern"), "{reason}");
+    let named = rule.try_this().expect("it has an identity");
+    let stored = rule.try_encode().expect("and a stored body");
+    let read = DeductiveRule::decode(&stored).expect("the body reads back");
+    assert_eq!(read.try_this(), Some(named.clone()));
+    assert_eq!(read.try_encode(), Some(stored.clone()));
 
-    // Two rules that differ only inside their patterns are two rules.
+    // However its premises were given, it is one body.
+    let reordered = card_rule([2, 0, 1]).expect("compiles");
+    assert_eq!(reordered.try_encode(), Some(stored.clone()));
+
+    // Two rules that differ only inside their patterns are two rules,
+    // of two bodies.
     let other = DeductiveRule::new(
         card(),
         vec![
@@ -1295,44 +1296,53 @@ fn it_refuses_to_store_a_rule_that_holds_a_pattern() {
         ],
     )
     .expect("compiles");
-    assert_ne!(other.try_this(), rule.try_this());
+    assert_ne!(other.try_this(), Some(named));
+    assert_ne!(other.try_encode(), Some(stored));
+}
 
-    // A rule with no pattern is stored as before.
+/// A rule that holds no pattern is written in format 4 as format 3
+/// wrote it, but for the number: the body an earlier release stored
+/// reads as the same rule, under the same name, and is written again as
+/// what this release writes.
+#[dialog_common::test]
+fn it_reads_what_format_3_wrote_as_the_rule_format_4_writes() {
     let plain = DeductiveRule::new(
         concept("heading", "note/heading", "text:"),
         vec![read("note/title", "text:", var("heading"))],
     )
     .expect("compiles");
-    assert_eq!(plain.storable(), Ok(()));
-    assert!(plain.try_encode().is_some());
+    let current = plain.try_encode().expect("a body");
+    let earlier = body::encode_as(3, &plain.canonical_descriptor()).expect("a body");
+    assert_ne!(earlier, current, "the number is in the body");
+    assert_eq!(earlier.len(), current.len(), "and nothing else differs");
+    assert_eq!(
+        earlier
+            .iter()
+            .zip(&current)
+            .filter(|(before, after)| before != after)
+            .count(),
+        1
+    );
+
+    let read = DeductiveRule::decode(&earlier).expect("format 3 is read");
+    assert_eq!(read.try_this(), plain.try_this());
+    assert_eq!(read.try_encode(), Some(current));
 }
 
-/// Installing a rule that holds a pattern is refused, with the reason:
-/// asserting it stages nothing and panics, since an assertion has no
-/// error to return.
-///
-/// Native only: the test catches the panic, and a wasm test cannot
-/// unwind. What a wasm build does is the same refusal, which
-/// [`it_refuses_to_store_a_rule_that_holds_a_pattern`] pins on both
-/// targets through `storable`, the check the assertion makes.
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn it_refuses_to_install_a_rule_that_holds_a_pattern() {
+/// Asserting a rule that holds a pattern stages it with its body, as
+/// asserting any rule does.
+#[dialog_common::test]
+fn it_installs_a_rule_that_holds_a_pattern() {
     use crate::statement::Changes;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     let rule = card_rule([0, 1, 2]).expect("compiles");
     let mut changes = Changes::new();
-    let refused = catch_unwind(AssertUnwindSafe(|| {
-        changes.assert(&rule);
-    }))
-    .expect_err("the assertion is refused");
-    let reason = refused
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_default();
-    assert!(reason.contains("no way to write a pattern"), "{reason}");
-    assert_eq!(changes, Changes::new(), "nothing was staged");
+    changes.assert(&rule);
+    assert_ne!(changes, Changes::new(), "the rule is staged");
+
+    let mut again = Changes::new();
+    again.assert(&card_rule([2, 1, 0]).expect("compiles"));
+    assert_eq!(again, changes, "under one name, with one body");
 }
 
 /// Parameters hold a pattern under a name. A premise reads a term
@@ -1374,10 +1384,38 @@ fn it_holds_a_pattern_under_a_name() {
     assert_eq!(renamed.shape("payload"), Some(&expected));
     assert_eq!(renamed.get("payload"), Some(&Shape::whole_of(&expected)));
 
-    // A pattern has no wire form, so the parameters holding one are
-    // not written.
-    let refused = serde_json::to_value(&terms).expect_err("no wire form");
-    assert!(refused.to_string().contains("no wire form"), "{refused}");
+    // Written, each name holds what it was given: a term as a term is
+    // written, and the pattern under the word for its shape.
+    let written = serde_json::to_value(&terms).expect("parameters are written");
+    assert_eq!(
+        written,
+        serde_json::json!({
+            "this": { "?": { "name": "note" } },
+            "payload": {
+                "map": [[{ "symbol:": "/title" }, { "?": { "name": "title" } }]],
+                "rest": { "?": { "name": "rest" } },
+            },
+        })
+    );
+    let read: Parameters = serde_json::from_value(written).expect("and read back");
+    assert_eq!(read, terms);
+    let bytes = serde_ipld_dagcbor::to_vec(&terms).expect("as dag-cbor too");
+    let read: Parameters = serde_ipld_dagcbor::from_slice(&bytes).expect("and read back");
+    assert_eq!(read, terms);
+
+    // A list with a run and a tuple, each under its word.
+    for pattern in [
+        Pattern::List(ListPattern::new([var("first")]).with_run(Term::var("others"))),
+        Pattern::List(ListPattern::new([var("only")])),
+        Pattern::Tuple(vec![
+            var("left"),
+            Pattern::Map(shape(&[("at", var("right"))])),
+        ]),
+    ] {
+        let bytes = serde_ipld_dagcbor::to_vec(&pattern).expect("a pattern is written");
+        let read: Pattern = serde_ipld_dagcbor::from_slice(&bytes).expect("and read back");
+        assert_eq!(read, pattern);
+    }
 }
 
 /// Two premises holding one pattern share its whole, since with its

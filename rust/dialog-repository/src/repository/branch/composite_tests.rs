@@ -141,9 +141,8 @@ fn heading_rule() -> Result<DeductiveRule> {
 /// A rule that holds a pattern is laid over a branch for one query and
 /// run, with nothing of it stored: the branch holds a note whose
 /// record has a title and one whose record has none, and the rule
-/// derives a heading for the first alone. The overlay names the rule
-/// by its facts and holds no body for it, and the same rule is still
-/// refused by a batch that would be committed.
+/// derives a heading for the first alone. The overlay holds the rule as
+/// it holds any, by its facts and its body.
 #[dialog_common::test]
 async fn it_runs_a_rule_that_holds_a_pattern_laid_over_a_branch() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -175,7 +174,6 @@ async fn it_runs_a_rule_that_holds_a_pattern_laid_over_a_branch() -> Result<()> 
         .await?;
 
     let rule = heading_rule()?;
-    assert!(rule.storable().is_err(), "the rule has no stored body");
 
     let headings = || {
         let mut terms = Parameters::new();
@@ -203,8 +201,10 @@ async fn it_runs_a_rule_that_holds_a_pattern_laid_over_a_branch() -> Result<()> 
         "the overlay names the rule"
     );
     assert!(
-        facts.iter().all(|fact| fact.the != source_attr()),
-        "nothing is written of the rule's body"
+        facts
+            .iter()
+            .any(|fact| fact.of == rule.this() && fact.the == source_attr()),
+        "with its body, as any rule"
     );
     let rows = layer
         .select(headings())
@@ -229,30 +229,58 @@ async fn it_runs_a_rule_that_holds_a_pattern_laid_over_a_branch() -> Result<()> 
     Ok(())
 }
 
-/// A batch that would be committed refuses the rule a layer runs: it
-/// holds bytes only, and the rule has none. The refusal says why, and
-/// nothing is staged.
-///
-/// Native only: the refusal is a panic, which `wasm32-unknown-unknown`
-/// aborts on and cannot catch. The refusal's reason is covered on both
-/// targets by `storable`, asserted in
-/// `it_runs_a_rule_that_holds_a_pattern_laid_over_a_branch`.
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn it_refuses_to_commit_the_rule_a_layer_runs() -> Result<()> {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+/// A rule that holds a pattern is installed like any other: committed,
+/// it is stored on the branch with its body, and the branch derives
+/// from it with nothing laid over.
+#[dialog_common::test]
+async fn it_installs_a_rule_that_holds_a_pattern_on_a_branch() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
 
+    let titled = Composite::map([
+        (text("title"), text("Buy milk")),
+        (text("done"), Value::Boolean(false)),
+    ])?;
+    let untitled = Composite::map([(text("done"), Value::Boolean(true))])?;
+    let milk: Entity = "id:milk".parse()?;
+    let chore: Entity = "id:chore".parse()?;
     let rule = heading_rule()?;
-    let mut changes = Changes::new();
-    let refused = catch_unwind(AssertUnwindSafe(|| {
-        (&rule).assert(&mut changes);
-    }))
-    .expect_err("the assertion is refused");
-    let reason = refused
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_default();
-    assert!(reason.contains("no way to write a pattern"), "{reason}");
-    assert_eq!(changes, Changes::new(), "nothing was staged");
+    branch
+        .transaction()
+        .assert(
+            the!("note/payload")
+                .of(milk.clone())
+                .is(RecordBytes(titled.to_bytes())),
+        )
+        .assert(
+            the!("note/payload")
+                .of(chore.clone())
+                .is(RecordBytes(untitled.to_bytes())),
+        )
+        .assert(&rule)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::var("this"));
+    terms.insert("heading".into(), Term::var("heading"));
+    let rows = branch
+        .query()
+        .select(ConceptQuery {
+            predicate: concept("heading", "note/heading", "text:"),
+            terms,
+        })
+        .perform(&operator)
+        .try_vec()
+        .await?;
+    assert_eq!(rows.len(), 1, "the note whose record has a title");
+    assert_eq!(*rows[0].entity(), milk);
+    assert_eq!(
+        rows[0].source().value_of("heading"),
+        Some(&text("Buy milk"))
+    );
     Ok(())
 }

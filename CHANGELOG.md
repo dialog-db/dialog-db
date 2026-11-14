@@ -14,6 +14,48 @@ says how to cut a release.
 
 ## Unreleased
 
+### A stored rule holds a pattern: rule bodies are written in format 4
+
+[#PR](https://github.com/dialog-db/dialog-db/pull/PR),
+[design/rule-format.md](./design/rule-format.md),
+[design/rule-format/design-pattern-form.md](./design/rule-format/design-pattern-form.md)
+
+A rule that held a map, a list or a tuple of terms ran where it was
+built and could not be kept: format 3 of a rule body wrote a variable or
+a constant where a parameter stands and nothing else. Format 4 writes a
+pattern there too, under the word for its shape, so such a rule is
+installed, synced and read back like any other. Every rule body this
+release writes is format 4.
+
+```
+{ "map":   [[key, pattern], …], "rest": term }
+{ "list":  [pattern, …],        "run":  term }
+{ "tuple": [pattern, …] }
+```
+
+What this changes for you:
+
+- A rule that holds a pattern is asserted into a transaction and
+  committed. It was refused before, by a panic.
+- `DeductiveRule::storable`, `InductiveRule::storable` and
+  `TypeError::UnstorablePattern` are gone: there is nothing they refuse.
+  `try_encode` gives such a rule a body.
+- `Pattern` and `Parameters` are written and read by serde wherever a
+  rule or a query is, JSON included. Serializing one that held a map, a
+  list or a tuple was an error.
+- `Branch::with(&rule)` lays a rule that holds a pattern over a branch
+  with its body among the facts it lays, as it does any rule. It kept
+  the rule in memory beside them before.
+- `rule::body::FORMAT` is 4.
+
+Why: structs, lists and tuples in the rules of the notation
+([#773](https://github.com/dialog-db/dialog-db/pull/773)) have to be
+kept on a branch, and a rule that derives an entity from a record is a
+rule that holds a pattern. One format written always, with the earlier
+ones read for one release cycle, is the maintainer's choice over writing
+each rule in the lowest format that can say it
+([stamping](./design/rule-format/stamping.md)).
+
 ### A parameter holds a pattern: a term, or a map, a list or a tuple of terms
 
 [#778](https://github.com/dialog-db/dialog-db/pull/778),
@@ -58,23 +100,15 @@ What this changes for you:
   a variable and an equality between that variable and the pattern, so
   `DeductiveRule::analysis().premises()` lists one premise more than
   was written.
-- A pattern has no wire form. Serializing `Parameters`, a
-  `ConceptQuery`, an `Equality` or a rule that holds a map, a list or a
-  tuple of terms is an error that says so. A pattern with no variable
-  is the constant it builds and is written as one.
-- A rule that holds a pattern has an identity and runs registered, and
-  cannot be stored: `DeductiveRule::storable` and
-  `InductiveRule::storable` return `TypeError::UnstorablePattern`,
-  `try_encode` returns `None`, and asserting the rule into a
-  transaction panics with that reason, as asserting a rule whose body
-  reads an attribute through a raw scan already did.
-- Such a rule is laid over a branch for one query and run:
-  `Branch::with(rule)` and `QueryLayer::with(rule)` keep the rule as it
-  is, under the name its facts give it, and write nothing of its body.
-  `Update` has a new method for that, `hold`, which a target that is
-  never stored answers by keeping what it is given. Its default gives
-  the thing back, so an implementation of `Update` that is committed
-  needs no change and goes on refusing the rule.
+- A pattern is written where a parameter stands, and a rule that holds
+  one is stored and installed like any other: see the entry above. A
+  pattern with no variable is the constant it builds and is written as
+  one.
+- A rule that holds a pattern is laid over a branch for one query and
+  run with `Branch::with(rule)` and `QueryLayer::with(rule)`. `Update`
+  has a method `hold`, which a target that is never stored answers by
+  keeping what it is given; nothing reaches it now that every rule has
+  a body.
 - A premise is feasible by the variables inside its patterns: a
   parameter that holds a map, a list or a tuple is bound when every
   variable inside it is, and a premise that binds it binds each of them.
@@ -2858,13 +2892,20 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
-- Nothing stored or synced changes for patterns: the stored rule format
-  is format 3 as before and has no way to write a pattern, so a rule
-  that holds one is never stored, and an older replica never meets one.
-  Laid over a branch for a query, such a rule is kept in memory beside
-  the query's changes and no fact holds its body. Nothing is rewritten
-  on upgrade and an embedder runs nothing. One
-  rule changes identity between releases: a rule whose body holds a
+- **Rule bodies are format 4.** An older replica holds rule bodies in
+  format 3 or earlier. This release reads them all as before, and
+  `Branch::upgrade_rules` rewrites each in format 4. No rule changes
+  its entity: a rule that holds no pattern is the same body but for the
+  number, and a rule that holds a pattern is named by its parts, as it
+  has been since it could be built. Until an embedder runs
+  `upgrade_rules`, a rule this release writes again has both bodies
+  under its entity, which read as one rule. **An older release cannot
+  read what this one writes**: it refuses a body of a later format by
+  its number and skips the rule, a rule of plain terms too, so on a
+  space shared with a peer that has not upgraded, that peer derives
+  nothing from rules written here until it does. The release after this
+  one reads format 4 only, so run `upgrade_rules` on this one.
+- One rule changes identity between releases: a rule whose body holds a
   record constant that is a composite is named by the composite's parts
   here and by its bytes in an older release, so each release finds the
   body the other stored under an entity it does not derive and leaves
