@@ -14,6 +14,31 @@ says how to cut a release.
 
 ## Unreleased
 
+### A concept read copies no inner evaluation, and a concept's descriptor clones without copying its fields
+
+[#806](https://github.com/dialog-db/dialog-db/pull/806)
+
+Every evaluation of a concept built a stream of about 12.5 KB, because it
+held the inner evaluation of both of its arms (rows sorted on the entity,
+and rows in rule order) inline, side by side, at 5.8 KB each. Its caller
+moved the stream when it was returned and again when it boxed it, so a
+concept read copied about 25 KB before it read a row. Each arm now boxes
+the evaluation it drives, and the stream is under 1 KB. A
+concept descriptor's fields are now shared, so the clones a query makes of
+it on every evaluation (into its plan, its rule lookup, its renamed
+premises) no longer copy every field name and attribute.
+
+What this changes for you:
+
+- A point read of a concept costs 16 to 26% fewer instructions: the
+  `read-point` perf scenario goes from 23.0 M to 17.1 M, `rule-point` from
+  51.6 M to 39.8 M, `rule-recursive` from 801.6 M to 636.1 M. Scans and
+  commits do not move.
+- No API, result, stored fact or wire format changes.
+
+Why: copying that stream was 28% of the instructions of a single-entity
+read of a rule-derived concept, more than the read's tree scans.
+
 ### A tree reads a node from its block or from rows a store keeps it in
 
 [#733](https://github.com/dialog-db/dialog-db/pull/733),
