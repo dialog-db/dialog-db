@@ -62,7 +62,8 @@ compare-and-swap re-runs no effect.
 
 ### A row has a layer, `in`, and a session reads and writes its layers as one
 
-[#795](https://github.com/dialog-db/dialog-db/pull/795), argued in
+[#795](https://github.com/dialog-db/dialog-db/pull/795) and
+[#800](https://github.com/dialog-db/dialog-db/pull/800), argued in
 [notes/layers.md](./notes/layers.md).
 
 Where a fact lies is now a dimension of the row, beside `the`, `of` and
