@@ -1034,11 +1034,19 @@ Not examined yet. They are columns, not recommendations.
 
 **Decided.** By the maintainer: both. Still to ask: whether, of the rules that apply to a form, the ones that name the most win.
 
+## 2026-11-14, Designing: the more specific rule wins
+
+**Asked.** Whether, of the rules that apply to a form, the ones that name the most win, or the two command rules of the prelude are written so that they cannot both match. Shown as a picture, since the question did not read in words.
+
+**Learned.** The maintainer: "More specific rule matching is what I'd expect also so it makes sense to me". The other way needed a pattern to say that a form has no part without a label, which the record has no words for: `{... ?fields}` takes every entry, `of:` too.
+
+**Decided.** The more specific rule wins: of the rules that apply, the ones whose pattern leaves the least to `...`. It is the one rule there is about which rule applies. CI is green on the head that has all of 2026-11-13, on native, web and across the two.
+
 ## The queue
 
 In order. One is asked, answered and written down before the next.
 
-1. To ask: whether, of the rules that apply to a form, the ones that name the most win (the agent's, built to make two rules of the prelude one answer). Built 2026-11-13: the reader that gives `...` no meaning, the quoted list, the record's refusals, a read that says every field or `...`, a struct's last key.
+1. Decided 2026-11-14: the more specific rule wins. Built 2026-11-13: the reader that gives `...` no meaning, the quoted list, the record's refusals, a read that says every field or `...`, a struct's last key.
 1. Decided 2026-11-13: the new format always, the old read for one cycle. To build next: format 4 on #778, with the migration.
 2. Whether a rule that leaves a premise's subject unnamed fires only for the entity written (#789, #791). It changes what a commit writes on main.
 3. Answered 2026-11-13 by the quote: `'(:open :done)`, `'()`.
