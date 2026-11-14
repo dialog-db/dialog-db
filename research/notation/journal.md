@@ -911,6 +911,21 @@ The list misreading is gone and the to-do holds. The note slipped to name matchi
 
 **Decision.** The spec's line paragraph takes the R42 wording.
 
+## 2026-11-14 — R43: `in:` as #795 built it
+
+**Question.** The one [planned](results/r43-plan.md): R41 tested a model of places that #795 does not have (a read naming its place, an attribute taking its place as a parameter). With `in:` as built, an attribute fixed on one layer and a read seeing every layer at once, do readers see a conclusion from a session draft among the notes? Does a sentence saying where conclusions land help?
+
+**Method.** Clean runner, 20 readers each on the placement paragraph alone and with "a rule's conclusion lands on the layer of the attribute it concludes".
+
+**Results.** [r43](results/r43.md).
+
+| document | draft's note shows | gone after the session |
+|---|---|---|
+| placement alone | 20 of 20 | 20 of 20 |
+| with "lands" | 20 of 20 | 17 of 20 |
+
+**Decision.** The spec's `in:` paragraph is the placement paragraph alone. R41's place results measured the wrong model and are set aside.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
