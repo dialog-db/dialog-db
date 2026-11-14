@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### An attribute is placed on a layer, and a session routes each write to the layer its attribute is placed on
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[#795](https://github.com/dialog-db/dialog-db/pull/795), argued in
 [notes/layers.md](./notes/layers.md).
 
 A branch's schema now says where each attribute's facts live. `Placement`
