@@ -184,7 +184,21 @@ the ticks.
 - What a channel's transport is between two sessions of one process
   (a tonk space and its persona) and between two peers: the former
   needs no replication, the latter is the peer protocol carrying a
-  one-tick layer.
+  one-tick layer. [#764](https://github.com/dialog-db/dialog-db/pull/764)
+  is the first such transport: a `Relay` performs a UCAN site's
+  operations for code that has no network, and tonk's kernel world
+  (`plan/persona-capabilities.md`) makes every ask of a space to its
+  persona an invocation the kernel signs and the host performs. What
+  travels is therefore not a fact but an invocation: a command with a
+  subject, arguments, proofs and a signer, answered with a result. A
+  channel's message has to be that, so the receiver can check who
+  asked and with what authority, and so the reply has somewhere to
+  land. In those terms `session.invoke(cmd)` and a channel are one
+  API: invoke on a session whose transport is a relay. The reply is
+  the stimulus of the caller's next tick, correlated by the
+  invocation's identity. The host boots the receiver it relays to, so
+  within one process the receiver is never away; across devices it
+  can be, and that is where the first bullet bites.
 - Whether a tick cap is wanted at all, and what a dispatch that hits
   it should leave behind. Leaning: fail the dispatch, publish nothing.
 - How the schema names a layer that is another branch of the same
