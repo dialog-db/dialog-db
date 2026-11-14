@@ -880,6 +880,27 @@ On a line, 17 of 20 read the policy as the concept field's, so `a` keeps its new
 
 **Decision.** None yet. A line per variable misleads where a variable is an entity or appears in two calls; in place is what the maintainer finds hard to read.
 
+## 2026-11-14 — R41: rechecking on attribute lines
+
+**Question.** The one [planned](results/r41-plan.md): after settling on one line per attribute, by full name, as a claim (`(xyz.todo/title of: ?i is: ?t as: :text pick: :last in: ?where)`), do readers still expect what R39 and R40 measured? And what do they expect of `in:` and rule conclusions?
+
+**Method.** Clean runner, 20 readers per document: R39's note and to-do translated, the to-do without the one-field example, R40's list case, and two documents where a rule concludes notes from drafts kept in memory.
+
+**Results.** [r41](results/r41.md).
+
+| document | reads right |
+|---|---|
+| note | 13 of 20 (R39: 20) |
+| to-do | 20 of 20 (R39: 18) |
+| to-do, no example | 14 of 20 (R39: 10) |
+| list | 20 of 20 (R40: 3) |
+| `in:` from a parameter, replica read | 19 of 20 |
+| `in:` fixed on the draft, replica read | 6 of 20 give the design's answer |
+
+The list misreading is gone and the to-do holds. The note slipped to name matching ("concludes `memo`, not `note`"), likely because the new paragraph calls a line a read. On `in:`, 14 of 20 kept a draft's note out of a replica read even where the design shows it, and half of all `place` readers gave a conclusion no place at all.
+
+**Decision.** Keep the spelling. Reword the line paragraph, and decide where a conclusion is kept before writing its sentence.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
