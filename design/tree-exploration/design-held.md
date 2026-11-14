@@ -25,6 +25,36 @@ said what to do about each (2026-11-13):
    more widely than this decision needs: a way to assert, retract,
    deduce and induce into the overlay.
 
+**What dialog-db/dialog-db#795 does for these two (read 2026-11-14;
+open, not merged, not run here).**
+
+The second is answered, by a different route than a new kind of rule
+head. A space's schema declares a layer kept in memory
+(`dialog.layer/store`) and places an attribute on it
+(`dialog.attribute/in`); a session opened on the branch holds that
+layer, and "a rule head whose attribute is placed on a memory layer
+lands there". So a rule that keeps a command's answer keeps it in the
+session by placing the answer's attribute, and the fact is gone when
+the session is. `Session::subscribe` sees it. Nothing is committed, so
+the consequence below does not arise.
+
+The first is not in it. #795 dispatches a command
+(`Session::invoke`) and runs the rules over it; nothing in it performs
+an effect in reaction to a command or answers one. Its note
+(`notes/layers.md`, #721) describes that as open and later work: a
+command "answered with a result", where "the reply is the stimulus of
+the caller's next tick", under channels (its point 8a and follow-up 5).
+
+It does supply what a handler can be built from without a new hook in
+dispatch, which is the agent's reading and is untested: a rule turns
+the request command into a fact on a memory layer; whoever handles it
+subscribes to that attribute through the session, performs the effect,
+and invokes the answer as a command, which starts the next tick; a rule
+retracts the request.
+
+It applies only through a session: "a branch read, committed or
+subscribed directly, with no session, behaves exactly as before."
+
 A consequence of committing in the meantime, for whoever writes the
 rule: a committed fact syncs, and what one replica holds is not what
 another holds, so the fact has to say whose holding it is (the replica

@@ -87,4 +87,7 @@
 | The manifest is folded into `tree/node` | opinion | the maintainer, 2026-11-14 | decided |
 | Why `tree/manifest` was a resolver of its own | hypothesis | not found: `notes/tree-relations.md` gives no reason; this clone's history does not reach the commit | open; nothing rests on it |
 | An accessor's rows need no entity; a space that wants a concept of nodes writes a rule and chooses one | hypothesis | the agent's reading of the maintainer's words above; confirmed or struck by the maintainer | open; the approach is written on it |
+| In #795 a rule head whose attribute is placed on a memory layer lands in that layer, which a session holds in memory and subscribes through | fact | dialog-db/dialog-db#795 description and changelog entry; `rust/dialog-repository/src/session.rs` module doc on `claude/layers-1` at `8e2cb3e`; open, not merged, its tests not run here | holds as described |
+| #795 performs no effect in reaction to a command and returns no answer to one | fact | no handler, effect or reply in the diff of `rust/dialog-repository/src` on `claude/layers-1`; its description lists channels as not done; `notes/layers.md` (#721) describes a command "answered with a result" under Open | holds by search |
+| A command's handler can be built on #795 as a request fact on a memory layer, a subscriber that performs it, and an invoked answer | hypothesis | confirmed by a test on #795's branch that does it for one command; refuted if a subscription cannot observe a request within the dispatch that made it and before it is retracted | open |
 

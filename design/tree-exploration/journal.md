@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | *What do we know?* The problem, accepted. The approach, decided in four parts and written in the top story: a node is a handle and accessors read it, the environment decoding once; five accessors expose everything; what is held is learned and changed by commands; a consumer asks the accessors directly. What of the draft branch stays and what comes out. | *Where are we at?* Building: decided, not started. The last sitting decided; building is for a later session, after the top story has been read cold. |
-| **Agenda** | *What do we need to know?* The name of the fanout parameter. Whether the maintainer agrees that accessors yield no entity per span or entry (the agent's reading, not their words). Open hypotheses the build will settle: the decoders taking a node; a resolver binding a slot absent; a subscription over an accessor; dialog reacting to a command with an effect. | *Where are we going?* A later session builds the four items listed in the top story, the first three before the fourth. Tonk's side is its own work. |
+| **Agenda** | *What do we need to know?* The name of the fanout parameter. Whether the maintainer agrees that accessors yield no entity per span or entry (the agent's reading, not their words). Open hypotheses the build will settle: the decoders taking a node; a resolver binding a slot absent; a subscription over an accessor; dialog reacting to a command with an effect, and whether that is built on #795's session (a request kept on a memory layer, a subscriber that performs it, an answer invoked) or as a hook in dispatch. | *Where are we going?* A later session builds the four items listed in the top story, the first three before the fourth. Tonk's side is its own work. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -566,3 +566,30 @@ open hypotheses, each of which the build confirms or refutes in its
 first days; none was measured here.
 
 Nothing is built in this sitting.
+
+## 2026-11-14, Building: what #795 does for the held decision
+
+**Asked.** The maintainer: look at #795 to see whether it addresses
+getting a command's response back and storing it in the session.
+
+**Learned.** Read: the pull request's description and changelog entry,
+`session.rs` and `session/invoke.rs` on its branch, and the note it
+builds (`notes/layers.md`, #721). Not run.
+
+- Storing it in the session: yes. An attribute placed on a
+  memory layer is written there by a rule's head and read and
+  subscribed to through the session. This replaces what the held
+  decision called "a rule head that writes to the overlay", and it is
+  declared by the space's schema, so a component can bring its own
+  layer and placements as data.
+- Getting the response back: no. #795 dispatches commands and runs
+  rules; no effect is performed and no answer comes back. The note puts
+  a command "answered with a result" under channels, which #795 lists
+  as not done.
+- It gives the pieces a handler could be made of (a subscription
+  through the session, and `invoke` to start the next tick with the
+  answer), which is a reading and not a test.
+
+**Decided.** Nothing new. The held decision's second dependency is
+met by #795 once it lands; its first is still to be built, and where
+(on the session, or in dispatch) is a build decision.
