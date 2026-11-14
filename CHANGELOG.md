@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A memory layer mints one instant per tick that changed it
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[#805](https://github.com/dialog-db/dialog-db/pull/805), argued in
 [notes/layers.md](./notes/layers.md) (point 12).
 
 A dispatch through a session runs in ticks: the transaction's own
