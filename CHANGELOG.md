@@ -95,17 +95,18 @@ an entry the subject of a concept.
 ### A session learns what its replica holds of a tree by command
 
 Argued in [design/tree-exploration.md](./design/tree-exploration.md).
-Built on the session's handlers
-([#797](https://github.com/dialog-db/dialog-db/pull/797)).
+Built on the session's `control:` layer and arrivals
+([#807](https://github.com/dialog-db/dialog-db/pull/807)).
 
 A tree resolver fetches a node the replica lacks, so that what a query
 answers does not depend on what happened to be local. That left a
 consumer no way to know, before it asked, whether asking for a node
 would fetch it.
 
-`Holdings` is a handler dialog provides for that
-(`session.handle(Arc::new(Holdings::of(&branch, env)))`). It takes two
-commands and answers each with a command of the same entity:
+`Holdings` is the provider dialog has for that
+(`Holdings::serve(&session)`, then `poll` after a dispatch). It reads two
+commands as they arrive in `control:` and answers each by invoking a
+command of the same entity:
 
 - `dialog.node.probe/node`, the node to ask about, is answered with
   `dialog.node.probed/node` and `dialog.node.probed/local`: whether the
@@ -117,9 +118,8 @@ commands and answers each with a command of the same entity:
 What this changes for you:
 
 - `Holdings` and the command names in `dialog_repository::session::holdings`
-  are new. A session that does not register the handler behaves as
-  before.
-- The handler asserts nothing. A space keeps an answer with a rule, and
+  are new. A session nobody serves them for behaves as before.
+- The provider asserts nothing. A space keeps an answer with a rule, and
   where the rule's attribute is placed is where it is kept: on a memory
   layer it is read and subscribed to through the session, never
   committed or synced, and gone with the session. A space with no such
@@ -130,6 +130,90 @@ Why: whether a block is held changes with no commit, so a query step
 that reported it would answer the same query differently from one
 moment to the next. As a command's answer captured by a rule, it enters
 a query as a fact of a layer the query has pinned.
+### `control:` is the layer a command lives in for one tick, a channel is a layer its consumer empties, and a provider reads what arrives in either
+
+[#807](https://github.com/dialog-db/dialog-db/pull/807), argued in
+[notes/layers.md](./notes/layers.md) (points 7 to 18, and "Open").
+
+A command used to be a fact apart: dispatched into a transaction, read
+by the rules of one tick, then kept by the session in a command feed
+that handlers and readers drained. It is now a row of a layer.
+`control:`, the loopback every session has, holds what a dispatch
+writes into it for one tick: a command dispatched, a write
+`.at(control_layer())`, and a rule head landing there. Each is the
+next tick's stimulus, read as a row of `control:`, and is gone after
+that tick. Once a dispatch has published, its commands stand in the
+session's `control:` layer for one instant and leave it in the next, so
+the layer's instants are every command, in order, once, and nothing of
+them stays. A channel, `control:<name>`, is a layer for a consumer
+outside the invoke loop or the process: what lands in it stays until
+the consumer retracts it. A provider reads either through
+`Session::arrivals`, which yields each newly asserted row of its query
+once and drops retractions, and answers by invoking.
+
+What this changes for you:
+
+- A rule premise whose descriptor names `in: control:` reads the
+  tick's commands alone; one binding `in` to a variable binds a
+  command's to `control:`. A transaction's query reads its dispatched
+  transients as rows of `control:` too. A premise naming no layer reads
+  them as before.
+- A rule head cell whose descriptor names `in: control:`, and a write
+  `.at(control_layer())`, are dispatches: the next tick's stimulus, in
+  no layer and never committed, whether or not the concept carries the
+  `dialog.concept/transient` marker. A command head (one whose concept
+  carries the marker) lands its cells that name no layer in `control:`
+  as before, and now lands a cell that names another layer, a channel
+  say, in that layer, where before the layer it named was ignored.
+- `Store::Control` is new: `LayerDeclaration::new(entity,
+  Store::Control)` declares a channel, stored as `dialog.layer/store
+  "control"`. A session builds it in memory, as it builds a
+  `Store::Memory` layer, and writes into it are routed and land tick by
+  tick as into any layer the session holds. Declaring bare `control:`
+  builds nothing apart.
+- `Session::arrivals(layer, query)` and `Arrivals` are new: a reader
+  of what arrives in `control:` or a channel. `poll` yields the rows of
+  the query the layer's assertions since the last read make, evaluated
+  over those rows alone; `next` waits for the session's next dispatch
+  while there are none. `Session::layer(&control_layer())` hands out
+  the loopback, which holds nothing between dispatches.
+- `Session::commands()`, `Commands`, `Dispatched`, `Lost` and
+  `FEED_CAPACITY` are gone: read `control:` with
+  `Session::arrivals(&control_layer(), query)` instead, or a channel's
+  instants with `Ephemeral::since`. A reader that falls further behind
+  than a layer's instants reach reads what the layer holds now: on a
+  channel nothing is lost; the commands that stood in `control:`
+  meanwhile are.
+- `Handler`, `HandlerError`, `Answering`, `Session::handle` and
+  `MAX_ANSWERS` are gone: a provider reads its commands with
+  `Session::arrivals` and answers with `Session::invoke`, a dispatch
+  with its own compare-and-swap. `Invocation::perform` publishes once
+  and no longer chains answers.
+- `CommitError::AnswerDivergence` and `CommitError::Handler` are gone:
+  nothing runs an answer inside an invocation, so neither can happen.
+  A provider's own failure is the provider's to report.
+
+Why: a command is state of one tick, so the place it lives is a layer,
+and observing it is reading that layer, not a mechanism apart. A
+channel that keeps its rows until its consumer retracts them loses
+nothing to a consumer that was not polling, where a view polled after
+a one-tick row came and went sees nothing. Commands reach `control:`
+only after their dispatch has published, so a dispatch re-run from a
+moved head re-runs no effect, and an answer needs no isolation of its
+own.
+
+#### Compatibility and migration
+
+- A channel's declaration, `dialog.layer/store "control"` on the
+  channel's entity, is a new stored value, replicated with the
+  primary like every layer declaration. 0.4.0 and earlier know no
+  layer declarations and read it as an ordinary fact. A build of this
+  release line from before this change opens no session on a primary
+  that declares a channel: it refuses the declaration with
+  `CommitError::InvalidPlacement`. Nothing already stored is
+  rewritten, and nothing has to be run.
+- Commands were never stored and still are not: `control:` and every
+  channel are process-local, as memory layers are.
 
 ### A memory layer mints one instant per tick that changed it
 

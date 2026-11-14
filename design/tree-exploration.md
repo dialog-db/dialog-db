@@ -147,11 +147,11 @@ What has to be built in dialog:
 3. Built: `dialog.branch/tree` and `tree/span`'s `node` are `node:`
    entities; a spill and a blob hash are `asset:` entities; a span and
    an entry each have an entity.
-4. Built, on the session stack (dialog-db/dialog-db#795 to #805, merged
-   into the draft branch at `claude/layers-5`): `Holdings`, a handler
-   registered with `Session::handle` (#797) that answers
-   `dialog.node.probe/node` and `dialog.node.fetch/node` with commands
-   a space's rule captures on a memory layer.
+4. Built, on the session stack (dialog-db/dialog-db#795 to #807, merged
+   into the draft branch at `claude/layers-6`): `Holdings`, a provider
+   that reads `dialog.node.probe/node` and `dialog.node.fetch/node` as
+   they arrive in `control:` (`Session::arrivals`, #807) and answers
+   each by invoking a command a space's rule captures on a memory layer.
 
 Still open in what is built
 ([design-accessors](tree-exploration/design-accessors.md), last two

@@ -26,7 +26,8 @@ use super::{
 };
 use crate::Ephemeral;
 use crate::placement::{
-    follows_selection, memory_layer, revision_rows, revision_stimulus, selected, session_layer,
+    control_layer, follows_selection, memory_layer, revision_rows, revision_stimulus, selected,
+    session_layer,
 };
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
@@ -962,6 +963,20 @@ where
         let moved = changes.take_cells(follows_selection);
         merge_shares(&mut shares, moved.into_layer(layer.clone()).take_shares());
     }
+    // A write into the loopback, `control:`, is a dispatch: the first
+    // tick's stimulus, landing in no layer.
+    let control = control_layer();
+    let shares: Vec<(Entity, Changes)> = shares
+        .into_iter()
+        .filter_map(|(layer, share)| {
+            if layer == control {
+                transients.merge(share);
+                None
+            } else {
+                Some((layer, share))
+            }
+        })
+        .collect();
     let (shares, primary) = route_shares(shares, &held)?;
     changes.apply(primary);
     // Through a session, the revision of every layer that moved since the

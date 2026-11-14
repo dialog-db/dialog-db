@@ -41,9 +41,22 @@
 //! one unit of publication, re-run from the new head when the primary's
 //! head moved under it (see [`invoke`]). [`Session::transaction`] is the
 //! same commit without the re-run, for a caller that handles a lost head
-//! itself. Once a dispatch has published, the session's handlers
-//! ([`Session::handle`], [`invoke::Handler`]) answer its commands, and
-//! their answers are the next tick's stimulus.
+//! itself.
+//!
+//! A command is a write into [`CONTROL`], the loopback: one dispatched
+//! ([`Invocation::dispatch`](invoke::Invocation::dispatch)), one written
+//! `.at(control_layer())`, or a rule head landing there (its descriptor
+//! names `in: control:`, or its concept carries the
+//! `dialog.concept/transient` marker). It is the stimulus of the next
+//! tick, read as a row of `control:` by a rule premised on it, and gone
+//! after that tick. Once a dispatch has published, its commands land in
+//! the session's `control:` layer as one instant and leave it in the
+//! next: a **provider**, something that performs an effect, reads them
+//! there with [`Session::arrivals`], each once, and answers by invoking
+//! ([`Session::invoke`]), naming the command it answers by its entity.
+//! A provider outside the invoke loop, or outside the process, reads a
+//! **channel** instead, `control:<name>`, a layer declared with
+//! [`Store::Control`] whose rows stay until the consumer retracts them.
 //!
 //! Every session has its own layer, [`SESSION`], whether or not the
 //! schema declares it: a table in memory, the session's alone, gone
@@ -80,8 +93,11 @@
 //! [`SESSION`]: crate::SESSION
 //! [`CONTROL`]: crate::CONTROL
 
+pub mod arrivals;
 pub mod holdings;
 pub mod invoke;
+
+pub use arrivals::Arrivals;
 
 use std::iter::once;
 use std::sync::Arc;
@@ -99,8 +115,11 @@ use dialog_effects::blob::{
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::nodes;
 use parking_lot::RwLock;
+use tokio::sync::Notify;
 
-use crate::placement::{Layers, Selection, Store, memory_layer, selected, session_layer};
+use crate::placement::{
+    Layers, Selection, Store, control_layer, memory_layer, selected, session_layer,
+};
 use crate::repository::branch::session::Composite;
 use crate::repository::branch::transaction::SessionContext;
 use crate::repository::source::Source;
@@ -180,16 +199,16 @@ impl OpenSession {
     pub async fn perform<Env: SessionEnv>(self, env: &Env) -> Result<Session, CommitError> {
         let primary = Source::from(self.primary.clone());
         let layers = Layers::resolve(&primary, &self.declared, env).await?;
-        // The primary and the session's own layer are every session's,
-        // whatever the schema says of them: a declaration naming either
-        // builds nothing apart.
-        let (memory, own) = (memory_layer(), session_layer());
+        // The primary, the session's own layer and the loopback are
+        // every session's, whatever the schema says of them: a
+        // declaration naming one builds nothing apart.
+        let (memory, own, control) = (memory_layer(), session_layer(), control_layer());
         let layers = layers
             .layers()
             .into_iter()
-            .filter(|(entity, _)| *entity != memory && *entity != own)
+            .filter(|(entity, _)| *entity != memory && *entity != own && *entity != control)
             .map(|(entity, store)| match store {
-                Store::Memory => (entity, Ephemeral::new()),
+                Store::Memory | Store::Control => (entity, Ephemeral::new()),
             })
             .collect();
         Ok(Session {
@@ -197,8 +216,8 @@ impl OpenSession {
                 primary: self.primary,
                 layers,
                 declared: RwLock::new(self.declared),
-                handlers: RwLock::new(Vec::new()),
-                feed: RwLock::new(invoke::Feed::default()),
+                control: Ephemeral::new(),
+                landed: Notify::new(),
             }),
         })
     }
@@ -213,12 +232,15 @@ struct Inner {
     /// primary.
     layers: Vec<(Entity, Ephemeral)>,
     declared: RwLock<Changes>,
-    /// What answers a dispatch's commands, in registration order. See
-    /// [`Session::handle`].
-    handlers: RwLock<Vec<Arc<dyn invoke::Handler>>>,
-    /// The session's dispatches, for readers of its command feed. See
-    /// [`Session::commands`].
-    feed: RwLock<invoke::Feed>,
+    /// The loopback, [`CONTROL`](crate::CONTROL), as the session holds
+    /// it between dispatches: empty, but for the one instant each
+    /// published dispatch's commands stand in it, so its instants are
+    /// every command, in order, once. A dispatch's own ticks read their
+    /// commands as rows of `control:` without it.
+    control: Ephemeral,
+    /// Woken once each dispatch through the session has published and
+    /// landed its commands: what [`Arrivals::next`] waits on.
+    landed: Notify,
 }
 
 /// The primary branch and the layers its schema declares, read and
@@ -247,13 +269,19 @@ impl Session {
     }
 
     /// The layer named `name`, if the session holds one: the session's
-    /// own, [`SESSION`](crate::SESSION), which every session has, or one
-    /// the schema declares. The session's own is the primary's
-    /// process-local store, the one [`Branch::overlay`] hands out: a
-    /// clone of either shares its state.
+    /// own, [`SESSION`](crate::SESSION), which every session has, the
+    /// loopback, [`CONTROL`](crate::CONTROL), which every session has
+    /// too, or one the schema declares (a memory layer or a channel).
+    /// The session's own is the primary's process-local store, the one
+    /// [`Branch::overlay`] hands out: a clone of either shares its state.
+    /// The loopback holds nothing between dispatches; its instants are
+    /// the commands of each published dispatch (see [`invoke`]).
     pub fn layer(&self, name: &Entity) -> Option<&Ephemeral> {
         if *name == session_layer() {
             return Some(self.inner.primary.overlay());
+        }
+        if *name == control_layer() {
+            return Some(&self.inner.control);
         }
         self.inner
             .layers
@@ -264,7 +292,9 @@ impl Session {
 
     /// The layers this session holds beside the primary, by name: its
     /// own, [`SESSION`](crate::SESSION), first, then the ones the schema
-    /// declares, in the schema's order.
+    /// declares, in the schema's order. The loopback,
+    /// [`CONTROL`](crate::CONTROL), holds no row between dispatches and
+    /// is not among them, though [`layer`](Self::layer) hands it out.
     pub fn layers(&self) -> Vec<Entity> {
         once(session_layer())
             .chain(self.inner.layers.iter().map(|(layer, _)| layer.clone()))
@@ -367,11 +397,9 @@ mod tests {
 
     use super::*;
     use crate::helpers::test_repo;
-    use crate::{Answering, FEED_CAPACITY, Handler, HandlerError, Lost, MAX_ANSWERS};
     use crate::{LayerDeclaration, PublishError};
     use anyhow::Result;
     use dialog_common::ConditionalSend;
-    use dialog_corpus::Pick;
     use dialog_corpus::Selector;
     use dialog_peer::Peer;
     use dialog_peer::helpers::test_session_with_peer;
@@ -382,8 +410,8 @@ mod tests {
     use dialog_query::types::Scalar;
     use dialog_query::{AttributeQuery, InductiveRule, Term};
     use dialog_storage::provider::storage::VolatileSpace;
+    use futures_util::future::join;
     use std::fmt::Debug;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     type Operator = Peer<VolatileSpace, dialog_peer::Session>;
 
@@ -2096,26 +2124,6 @@ mod tests {
         Ok(state)
     }
 
-    /// A handler answering every `cmd.fetch/node` with `cmd.fetched/node`
-    /// of the same command, counting its calls.
-    fn fetcher(calls: Arc<AtomicUsize>) -> Arc<dyn Handler> {
-        use dialog_corpus::{Change, Update as _};
-        Arc::new(Answering(move |commands: &Changes| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            let fetch: dialog_corpus::Relation = "cmd.fetch/node".parse().expect("attribute");
-            let fetched: dialog_corpus::Relation = "cmd.fetched/node".parse().expect("attribute");
-            let mut answers = Changes::new();
-            for (of, the, change) in commands.iter() {
-                if *the == fetch
-                    && let Change::Assert(node, _) = change
-                {
-                    answers.associate(fetched.clone(), of.clone(), node.clone(), Pick::All);
-                }
-            }
-            Ok(answers)
-        }))
-    }
-
     /// Declare a memory layer `state` and two rules that keep there
     /// what [`Holdings`](crate::Holdings) answers: whether a node is
     /// held, as last learned from a probe or a fetch.
@@ -2177,7 +2185,7 @@ mod tests {
     /// a probe of a node the replica holds is captured as held, a probe
     /// of one it does not as not held, and a fetch that finds the node
     /// nowhere leaves it not held. Nothing is committed, an entity that
-    /// is no node is not answered, and the probe fetches nothing.
+    /// is no node is not answered, and nothing stays in `control:`.
     #[dialog_common::test]
     async fn it_learns_what_it_holds_by_command() -> Result<()> {
         use crate::session::holdings::{FETCH, Holdings, PROBE};
@@ -2188,7 +2196,7 @@ mod tests {
         let state = declare_holdings(&branch, &operator).await?;
         let session = branch.session().perform(&operator).await?;
         let memory = session.layer(&state).expect("the state layer").clone();
-        session.handle(Arc::new(Holdings::of(&branch, operator.clone())));
+        let mut holdings = Holdings::serve(&session);
 
         let root = Entity::from_node(branch.revision().expect("a revision").tree.hash())?;
         let elsewhere = Entity::from_node(&[7u8; 32])?;
@@ -2199,6 +2207,7 @@ mod tests {
             .invoke(node_command(PROBE, "probe:1", &root))
             .perform(&operator)
             .await?;
+        holdings.poll(&operator).await?;
         assert_eq!(
             held(&memory, "node/held", &root)?,
             vec!["Boolean(true)".to_string()],
@@ -2209,6 +2218,7 @@ mod tests {
             .invoke(node_command(PROBE, "probe:2", &elsewhere))
             .perform(&operator)
             .await?;
+        holdings.poll(&operator).await?;
         assert_eq!(
             held(&memory, "node/held", &elsewhere)?,
             vec!["Boolean(false)".to_string()],
@@ -2219,6 +2229,7 @@ mod tests {
             .invoke(node_command(FETCH, "fetch:1", &elsewhere))
             .perform(&operator)
             .await?;
+        holdings.poll(&operator).await?;
         assert_eq!(
             held(&memory, "node/held", &elsewhere)?,
             vec!["Boolean(false)".to_string()],
@@ -2229,12 +2240,25 @@ mod tests {
             .invoke(node_command(PROBE, "probe:3", &other))
             .perform(&operator)
             .await?;
+        holdings.poll(&operator).await?;
         assert!(
             held(&memory, "node/held", &other)?.is_empty(),
             "an entity that is no node is not answered"
         );
 
         assert_eq!(branch.revision(), before, "nothing was committed");
+        assert_eq!(
+            holdings.poll(&operator).await?,
+            0,
+            "its own answers are no commands of its own"
+        );
+        assert!(
+            session
+                .layer(&crate::control_layer())
+                .expect("control:")
+                .is_empty(),
+            "nothing stays in control:"
+        );
         Ok(())
     }
 
@@ -2244,21 +2268,58 @@ mod tests {
             .is(node.clone())
     }
 
-    /// A command a dispatch leaves to the session's handlers is answered
-    /// with a command, dispatched as the next tick's stimulus, where a
-    /// rule captures it on the layer its attribute is placed on; a
-    /// subscription through the session sees the capture, and nothing
-    /// durable is written.
+    /// `cmd.fetch/node` of every command, with the node a variable: the
+    /// command a fetching provider performs.
+    fn fetch_query() -> AttributeQuery {
+        AttributeQuery::from(
+            Term::<QueryRelation>::from(QueryRelation::from(
+                "cmd.fetch/node".parse::<dialog_corpus::Relation>().unwrap(),
+            ))
+            .of(Term::<Entity>::var("command"))
+            .is(Term::<Entity>::var("node")),
+        )
+    }
+
+    /// The answer to the fetch `command` reads: `cmd.fetched/node` of the
+    /// same command, naming it by its entity.
+    fn fetched(command: &dialog_query::Claim) -> Result<impl Statement + use<>> {
+        let dialog_corpus::Value::Entity(node) = &command.is else {
+            anyhow::bail!("a fetch names a node, not {:?}", command.is);
+        };
+        Ok(dialog_query::the!("cmd.fetched/node")
+            .of(command.of.clone())
+            .is(node.clone()))
+    }
+
+    /// The entities of `claims`, as text, sorted.
+    fn subjects(claims: &[dialog_query::Claim]) -> Vec<String> {
+        let mut subjects: Vec<String> = claims.iter().map(|claim| claim.of.to_string()).collect();
+        subjects.sort();
+        subjects
+    }
+
+    /// A provider reads each command a published dispatch leaves in
+    /// `control:`, once, as a row of `control:`, and answers by invoking:
+    /// the answer is the next tick's stimulus, where a rule captures it on
+    /// the state layer. A subscription through the session sees the
+    /// capture, nothing durable is written, the expiry of the command is
+    /// no arrival, and nothing stays in `control:`.
     #[dialog_common::test]
-    async fn it_answers_a_command_through_a_handler() -> Result<()> {
+    async fn it_answers_a_command_through_a_provider() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_fetch(&branch, &operator).await?;
         let session = branch.session().perform(&operator).await?;
         let memory = session.layer(&state).expect("the state layer").clone();
-        let calls = Arc::new(AtomicUsize::new(0));
-        session.handle(fetcher(calls.clone()));
+        let control = crate::control_layer();
+        let mut fetches = session
+            .arrivals(&control, fetch_query())
+            .expect("every session has control:");
+        assert!(
+            fetches.poll(&operator).await?.is_empty(),
+            "nothing dispatched yet"
+        );
         let node: Entity = "node:1".parse()?;
         let mut subscription = session.subscribe(AttributeQuery::from(
             Term::<QueryRelation>::from(QueryRelation::from(
@@ -2277,200 +2338,520 @@ mod tests {
         );
         let before = branch.revision();
 
-        let after = session
+        session
             .invoke(fetch("cmd:1", &node))
             .perform(&operator)
             .await?;
+        assert!(
+            held(&memory, "node/fetched", &node)?.is_empty(),
+            "nothing answered yet"
+        );
+        let commands = fetches.poll(&operator).await?;
+        assert_eq!(subjects(&commands), vec!["cmd:1".to_string()]);
+        assert_eq!(
+            commands[0].layer(),
+            Some(&control),
+            "read as a row of control:"
+        );
+        for command in &commands {
+            session.invoke(fetched(command)?).perform(&operator).await?;
+        }
 
-        assert_eq!(Some(after), before, "nothing durable was written");
+        assert_eq!(branch.revision(), before, "nothing durable was written");
         assert_eq!(
             held(&memory, "node/fetched", &node)?,
             vec!["Entity(cmd:1)".to_string()],
             "the rule captured the answer on the state layer"
         );
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "offered the fetch, then the answer it did not take"
-        );
         let delta = subscription.poll(&operator).await?.expect("the capture");
         assert_eq!(delta.asserted.len(), 1);
         assert_eq!(delta.asserted[0].of, node);
-        Ok(())
-    }
-
-    /// Handlers that answer every command with another are stopped at
-    /// the bound, with `AnswerDivergence`, and nothing of theirs lands.
-    #[dialog_common::test]
-    async fn it_stops_handlers_that_never_stop_answering() -> Result<()> {
-        use dialog_corpus::Update as _;
-        let (operator, peer) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &peer).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-        let state = declare_fetch(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
-        session.handle(Arc::new(Answering(|commands: &Changes| {
-            let mut answers = Changes::new();
-            for (of, _, _) in commands.iter() {
-                answers.associate(
-                    "cmd.again/node".parse().expect("attribute"),
-                    of.clone(),
-                    dialog_corpus::Value::Boolean(true),
-                    Pick::All,
-                );
-            }
-            Ok(answers)
-        })));
-        let before = branch.revision();
-        let refused = session
-            .invoke(fetch("cmd:1", &"node:1".parse()?))
-            .perform(&operator)
-            .await;
         assert!(
-            matches!(refused, Err(CommitError::AnswerDivergence(MAX_ANSWERS))),
-            "{refused:?}"
+            fetches.poll(&operator).await?.is_empty(),
+            "read once: the answer is no fetch, and the expiry is no arrival"
         );
-        assert_eq!(branch.revision(), before);
-        assert!(held(&memory, "node/fetched", &"node:1".parse()?)?.is_empty());
+        assert!(
+            session.layer(&control).expect("control:").is_empty(),
+            "nothing stays in control:"
+        );
         Ok(())
     }
 
-    /// A handler that fails fails the invocation with `Handler`, after
-    /// the dispatch it answers has published: what the dispatch wrote
-    /// stands, since the effect runs only once the writes are durable.
+    /// A provider waiting for the next batch is woken by the dispatch that
+    /// lands one, and reads it.
     #[dialog_common::test]
-    async fn it_reports_a_handler_that_fails_after_the_dispatch_published() -> Result<()> {
+    async fn it_wakes_a_provider_waiting_for_the_next_dispatch() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         declare_fetch(&branch, &operator).await?;
         let session = branch.session().perform(&operator).await?;
-        session.handle(Arc::new(Answering(|_: &Changes| {
-            Err(HandlerError("no network".into()))
-        })));
-        let doc: Entity = "doc:1".parse()?;
-        let failed = session
-            .invoke(fetch("cmd:1", &"node:1".parse()?))
-            .assert(
-                dialog_query::the!("doc/title")
-                    .of(doc.clone())
-                    .is("Notes".to_string()),
-            )
-            .perform(&operator)
-            .await;
-        match failed {
-            Err(CommitError::Handler(reason)) => assert_eq!(reason, "no network"),
-            other => panic!("expected the handler's failure, got {other:?}"),
-        }
-        assert_eq!(
-            committed::<String>(&branch, &operator, "doc/title", &doc).await?,
-            vec!["String(\"Notes\")".to_string()],
-            "the dispatch published before its handler ran"
-        );
+        let mut fetches = session
+            .arrivals(&crate::control_layer(), fetch_query())
+            .expect("every session has control:");
+        let node: Entity = "node:1".parse()?;
+        let (commands, invoked) = join(fetches.next(&operator), async {
+            session
+                .invoke(fetch("cmd:1", &node))
+                .perform(&operator)
+                .await
+        })
+        .await;
+        invoked?;
+        assert_eq!(subjects(&commands?), vec!["cmd:1".to_string()]);
         Ok(())
     }
 
-    /// A consumer outside the invoke loop reads the session's command
-    /// feed, in order and once, and answers by invoking: the answer is a
-    /// dispatch of its own, which the feed records too, and the rule
-    /// captures it as it captures a handler's answer.
+    /// Declare, beside [`declare_fetch`]'s capture, a channel
+    /// `control:host`: a layer for a consumer outside the invoke loop.
+    async fn declare_host(branch: &Branch, env: &Operator) -> Result<(Entity, Entity)> {
+        let state = declare_fetch(branch, env).await?;
+        let host: Entity = "control:host".parse()?;
+        branch
+            .transaction()
+            .assert(LayerDeclaration::new(host.clone(), Store::Control))
+            .commit()
+            .publish()
+            .perform(env)
+            .await?;
+        branch.refresh(env).await?;
+        Ok((state, host))
+    }
+
+    /// A consumer of a channel reads the rows the dispatches wrote there,
+    /// each once, as rows of the channel, and answers by invoking, retracting
+    /// what it consumed. The rows stay until then; after, the channel holds
+    /// nothing, and the consumer reads nothing: its own retraction is no
+    /// arrival.
     #[dialog_common::test]
-    async fn it_feeds_each_dispatch_to_a_reader_that_answers_by_invoking() -> Result<()> {
-        use dialog_corpus::{Change, Update as _};
+    async fn it_reads_a_channel_until_its_consumer_retracts_the_rows() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let state = declare_fetch(&branch, &operator).await?;
+        let (state, host) = declare_host(&branch, &operator).await?;
         let session = branch.session().perform(&operator).await?;
+        assert!(session.layers().contains(&host), "the channel is held");
         let memory = session.layer(&state).expect("the state layer").clone();
-        let mut feed = session.commands();
-        assert!(feed.poll()?.is_empty(), "nothing dispatched yet");
+        let channel = session.layer(&host).expect("the channel").clone();
+        let mut fetches = session.arrivals(&host, fetch_query()).expect("the channel");
+        assert!(fetches.poll(&operator).await?.is_empty());
+        let before = branch.revision();
         let node: Entity = "node:1".parse()?;
-        session
-            .invoke(fetch("cmd:1", &node))
-            .perform(&operator)
-            .await?;
-        session
-            .invoke(fetch("cmd:2", &node))
-            .perform(&operator)
-            .await?;
-        assert!(
-            held(&memory, "node/fetched", &node)?.is_empty(),
-            "no handler: nothing answered yet"
-        );
-
-        let dispatches = feed.poll()?;
-        assert_eq!(
-            dispatches
-                .iter()
-                .map(|dispatched| dispatched.sequence)
-                .collect::<Vec<_>>(),
-            vec![1, 2]
-        );
-        let fetch_attr: dialog_corpus::Relation = "cmd.fetch/node".parse()?;
-        let mut answers = Changes::new();
-        for dispatched in &dispatches {
-            for (of, the, change) in dispatched.commands.iter() {
-                if *the == fetch_attr
-                    && let Change::Assert(is, _) = change
-                {
-                    answers.associate(
-                        "cmd.fetched/node".parse()?,
-                        of.clone(),
-                        is.clone(),
-                        Pick::All,
-                    );
-                }
-            }
+        for command in ["cmd:1", "cmd:2"] {
+            session
+                .transact(fetch(command, &node).at(host.clone()))
+                .perform(&operator)
+                .await?;
         }
-        session.invoke(answers).perform(&operator).await?;
+        assert_eq!(
+            held(&channel, "cmd.fetch/node", &"cmd:1".parse()?)?,
+            vec!["Entity(node:1)".to_string()],
+            "a channel's row outlives its dispatch"
+        );
+        assert!(held(&memory, "node/fetched", &node)?.is_empty());
+
+        let commands = fetches.poll(&operator).await?;
+        assert_eq!(
+            subjects(&commands),
+            vec!["cmd:1".to_string(), "cmd:2".to_string()]
+        );
+        assert!(
+            commands
+                .iter()
+                .all(|command| command.layer() == Some(&host))
+        );
+        let mut answer = session.transact(Changes::new());
+        for command in &commands {
+            answer = answer
+                .dispatch(fetched(command)?)
+                .retract(fetch(&command.of.to_string(), &node).at(host.clone()));
+        }
+        answer.perform(&operator).await?;
+
         assert_eq!(
             held(&memory, "node/fetched", &node)?,
             vec!["Entity(cmd:1)".to_string(), "Entity(cmd:2)".to_string()]
         );
-        let answered = feed.poll()?;
-        assert_eq!(answered.len(), 1, "the answer was one dispatch");
-        assert_eq!(answered[0].sequence, 3);
-        assert!(feed.poll()?.is_empty(), "read once");
+        assert!(channel.is_empty(), "the consumer retracted what it read");
+        assert!(
+            fetches.poll(&operator).await?.is_empty(),
+            "read once: a retraction is no arrival"
+        );
+        assert_eq!(branch.revision(), before, "nothing durable was written");
         Ok(())
     }
 
-    /// A reader the feed moved past is told so, and starts over from the
-    /// newest dispatch.
+    /// A consumer that was not reading loses nothing: a channel keeps
+    /// every row until it is retracted, so a reader built after the rows
+    /// landed reads every one, and so does a reader the layer's bounded
+    /// instants moved past, from what the channel holds.
     #[dialog_common::test]
-    async fn it_tells_a_reader_the_feed_moved_past_it() -> Result<()> {
+    async fn it_keeps_a_channels_rows_for_a_consumer_that_was_not_reading() -> Result<()> {
+        // One more than the instants a layer keeps.
+        const PAST_THE_INSTANTS: usize = 1025;
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        declare_fetch(&branch, &operator).await?;
+        let (_, host) = declare_host(&branch, &operator).await?;
         let session = branch.session().perform(&operator).await?;
-        let mut feed = session.commands();
+        let mut behind = session.arrivals(&host, fetch_query()).expect("the channel");
         let node: Entity = "node:1".parse()?;
-        for index in 0..=FEED_CAPACITY {
+        for index in 0..PAST_THE_INSTANTS {
             session
-                .invoke(fetch(&format!("cmd:{index}"), &node))
+                .transact(fetch(&format!("cmd:{index}"), &node).at(host.clone()))
                 .perform(&operator)
                 .await?;
         }
-        let lost = feed.poll();
-        assert!(
-            matches!(
-                lost,
-                Err(Lost {
-                    behind: 0,
-                    oldest: 2
-                })
-            ),
-            "{lost:?}"
+        assert_eq!(
+            session.layer(&host).expect("the channel").len(),
+            PAST_THE_INSTANTS,
+            "every row is still there"
         );
-        feed.catch_up();
-        assert!(feed.poll()?.is_empty());
+        let mut late = session.arrivals(&host, fetch_query()).expect("the channel");
+        assert_eq!(late.poll(&operator).await?.len(), PAST_THE_INSTANTS);
+        assert!(late.poll(&operator).await?.is_empty());
+        assert_eq!(
+            behind.poll(&operator).await?.len(),
+            PAST_THE_INSTANTS,
+            "moved past, it reads what the channel holds"
+        );
+        assert!(behind.poll(&operator).await?.is_empty());
+        Ok(())
+    }
+
+    /// [`declare_state`]'s counter, with its command premise read from
+    /// `control:` alone (`in: control:`).
+    async fn declare_state_on_control(branch: &Branch, env: &Operator) -> Result<Entity> {
+        let state = layer("state");
+        let increment: InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": {
+                    "count": {
+                        "the": "counter/count", "as": "UnsignedInteger", "pick": "last",
+                        "in": "session:state"
+                    }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "counter": {
+                                "the": "cmd.increment/counter", "as": "Entity", "in": "control:"
+                            }
+                        }
+                    },
+                    "where": { "counter": { "?": { "name": "this" } } }
+                },
+                {
+                    "assert": {
+                        "with": {
+                            "count": {
+                                "the": "counter/count", "as": "UnsignedInteger", "pick": "last",
+                                "in": "session:state"
+                            }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "count": { "?": { "name": "prev" } }
+                    }
+                },
+                {
+                    "assert": "math/sum",
+                    "where": {
+                        "of": { "?": { "name": "prev" } },
+                        "with": 1,
+                        "is": { "?": { "name": "count" } }
+                    }
+                }
+            ]
+        }))?;
+        branch
+            .transaction()
+            .assert(LayerDeclaration::new(state.clone(), Store::Memory))
+            .assert(increment)
+            .commit()
+            .publish()
+            .perform(env)
+            .await?;
+        branch.refresh(env).await?;
+        Ok(state)
+    }
+
+    /// `cmd.increment/counter` of `command`, naming `counter`.
+    fn increment(command: &str, counter: &Entity) -> impl Statement + use<> {
+        dialog_query::the!("cmd.increment/counter")
+            .of(command.parse::<Entity>().expect("entity"))
+            .is(counter.clone())
+    }
+
+    /// A rule premised on `in: control:` fires on the commands of its
+    /// tick and not on the next tick's: a dispatched increment steps the
+    /// count once, though the step lands as the next tick's stimulus and
+    /// the rule reads it there. A write `.at(control_layer())` is a
+    /// command too, and the same attribute written into the primary is
+    /// not one: it steps nothing.
+    #[dialog_common::test]
+    async fn it_fires_a_rule_premised_on_control_on_its_ticks_commands_alone() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state_on_control(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        let counter: Entity = "ctr:1".parse()?;
         session
-            .invoke(fetch("cmd:again", &node))
+            .transact(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
-        assert_eq!(feed.poll()?.len(), 1);
+
+        session
+            .invoke(increment("cmd:1", &counter))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            held(&memory, "counter/count", &counter)?,
+            vec!["UnsignedInt(2)".to_string()],
+            "one step, in the tick the command was stimulus of"
+        );
+
+        session
+            .transact(increment("cmd:2", &counter))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            committed::<Entity>(
+                &branch,
+                &operator,
+                "cmd.increment/counter",
+                &"cmd:2".parse()?
+            )
+            .await?,
+            vec![format!("Entity({counter})")],
+            "written into the primary"
+        );
+        assert_eq!(
+            held(&memory, "counter/count", &counter)?,
+            vec!["UnsignedInt(2)".to_string()],
+            "a row of the primary is no command"
+        );
+
+        session
+            .transact(increment("cmd:3", &counter).at(crate::control_layer()))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            held(&memory, "counter/count", &counter)?,
+            vec!["UnsignedInt(3)".to_string()],
+            "a write into control: is a command"
+        );
+        Ok(())
+    }
+
+    /// Declare a memory layer `state` and three rules over a
+    /// `cmd.ping/target` command: one records, in `state`, the layer the
+    /// ping is read from (`in` bound to a variable); one answers it with a
+    /// `cmd.pong/target` whose descriptor names `in: control:`; one, premised
+    /// on that pong `in: control:`, records it in `state`.
+    async fn declare_ping(branch: &Branch, env: &Operator) -> Result<Entity> {
+        let state = layer("state");
+        let seen: InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "seen": { "the": "log/seen", "as": "Entity", "in": "session:state" } }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "target": {
+                                "the": "cmd.ping/target", "as": "Entity",
+                                "in": { "?": { "name": "at" } }
+                            }
+                        }
+                    },
+                    "where": {
+                        "target": { "?": { "name": "this" } },
+                        "at": { "?": { "name": "seen" } }
+                    }
+                }
+            ]
+        }))?;
+        let pong: InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "pong": { "the": "cmd.pong/target", "as": "Entity", "in": "control:" } }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": { "target": { "the": "cmd.ping/target", "as": "Entity" } }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "target": { "?": { "name": "pong" } }
+                    }
+                }
+            ]
+        }))?;
+        let ponged: InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": {
+                    "ponged": { "the": "log/ponged", "as": "Boolean", "in": "session:state" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "target": { "the": "cmd.pong/target", "as": "Entity", "in": "control:" }
+                        }
+                    },
+                    "where": { "target": { "?": { "name": "this" } } }
+                },
+                { "assert": "==", "where": { "this": { "?": { "name": "ponged" } }, "is": true } }
+            ]
+        }))?;
+        branch
+            .transaction()
+            .assert(LayerDeclaration::new(state.clone(), Store::Memory))
+            .assert(seen)
+            .assert(pong)
+            .assert(ponged)
+            .commit()
+            .publish()
+            .perform(env)
+            .await?;
+        branch.refresh(env).await?;
+        Ok(state)
+    }
+
+    /// `cmd.ping/target` of `command`, naming `target`.
+    fn ping(command: &str, target: &Entity) -> impl Statement + use<> {
+        dialog_query::the!("cmd.ping/target")
+            .of(command.parse::<Entity>().expect("entity"))
+            .is(target.clone())
+    }
+
+    /// `the` of every entity, its value an entity, read from wherever
+    /// `in` binds.
+    fn anywhere(the: &str) -> AttributeQuery {
+        AttributeQuery::from(
+            Term::<QueryRelation>::from(QueryRelation::from(
+                the.parse::<dialog_corpus::Relation>().unwrap(),
+            ))
+            .of(Term::<Entity>::var("e"))
+            .is(Term::<Entity>::var("v")),
+        )
+        .with_layer(Term::var("where"))
+    }
+
+    /// A read binding `in` sees a command stamped `control:` during the
+    /// tick that dispatched it, a transaction's read as a rule's; and a
+    /// rule head whose descriptor names `in: control:` is a dispatch: the
+    /// next tick's stimulus, read as a row of `control:`, and in no layer
+    /// once its tick is over.
+    #[dialog_common::test]
+    async fn it_reads_a_command_as_a_row_of_control_during_its_tick() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_ping(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        let control = crate::control_layer();
+        let target: Entity = "doc:1".parse()?;
+
+        let transaction = session.transaction().dispatch(ping("cmd:1", &target));
+        let claims: Vec<dialog_query::Claim> = transaction
+            .query()
+            .select(anywhere("cmd.ping/target"))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].layer(), Some(&control), "a transaction reads it");
+
+        let before = branch.revision();
+        let mut pongs = session
+            .arrivals(&control, anywhere("cmd.pong/target"))
+            .expect("every session has control:");
+        session
+            .invoke(ping("cmd:1", &target))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            held(&memory, "log/seen", &target)?,
+            vec![format!("Entity({control})")],
+            "the rule bound the ping's layer to control:"
+        );
+        assert_eq!(
+            held(&memory, "log/ponged", &target)?,
+            vec!["Boolean(true)".to_string()],
+            "the pong was the next tick's stimulus, read from control:"
+        );
+        assert_eq!(
+            subjects(&pongs.poll(&operator).await?),
+            vec!["cmd:1".to_string()],
+            "the pong is a command of the dispatch"
+        );
+        for the in ["cmd.ping/target", "cmd.pong/target"] {
+            let rows: Vec<dialog_query::Claim> = session
+                .query()
+                .select(anywhere(the))
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert!(rows.is_empty(), "{the} is in no layer after its tick");
+        }
+        assert_eq!(branch.revision(), before, "nothing durable was written");
+        Ok(())
+    }
+
+    /// A write `.at(control_layer())` of an attribute no concept marks as
+    /// a command is a dispatch all the same: a provider reads it once its
+    /// dispatch has published, and it leaves nothing in any layer.
+    #[dialog_common::test]
+    async fn it_dispatches_a_write_into_control_and_keeps_it_nowhere() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let control = crate::control_layer();
+        let mut arrivals = session
+            .arrivals(&control, selected_query())
+            .expect("every session has control:");
+        let before = branch.revision();
+        let doc: Entity = "doc:1".parse()?;
+        session
+            .transact(flag(&doc, true, &control))
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            selected(&arrivals.poll(&operator).await?),
+            vec![format!("{doc} Boolean(true)")],
+            "dispatched"
+        );
+        assert!(
+            committed::<bool>(&branch, &operator, "ui/selected", &doc)
+                .await?
+                .is_empty()
+        );
+        assert!(held(branch.overlay(), "ui/selected", &doc)?.is_empty());
+        assert!(held(session.layer(&state).expect("state"), "ui/selected", &doc)?.is_empty());
+        assert!(session.layer(&control).expect("control:").is_empty());
+        assert!(
+            fresh(
+                &session,
+                &operator,
+                selected_query().with_layer(Term::var("where"))
+            )
+            .await?
+            .is_empty(),
+            "a read of every layer finds it in none"
+        );
+        assert_eq!(branch.revision(), before, "nothing durable was written");
         Ok(())
     }
 }

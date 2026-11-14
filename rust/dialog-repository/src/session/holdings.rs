@@ -7,12 +7,10 @@
 //! function of the handle it is given, and it leaves one thing a query
 //! cannot say: whether asking for a node would fetch it.
 //!
-//! That is asked by command, before the query is issued. [`Holdings`]
-//! answers such commands ([`Holdings::answers`]), and is wired to a
-//! session as a handler ([`Session::handle`](crate::Session::handle)).
-//! How a session offers commands to what answers them is being redrawn
-//! (a provider as a subscription over the command, in the layers work);
-//! the wiring here follows it, and what is answered does not change:
+//! That is asked by command, before the query is issued. [`Holdings`] is
+//! the provider dialog has for it: it reads the node commands a
+//! session's dispatches leave in [`control:`](crate::CONTROL)
+//! ([`Session::arrivals`]) and answers each by invoking.
 //!
 //! | command | answered with |
 //! |---|---|
@@ -23,7 +21,7 @@
 //! stood when asked, with nothing fetched; for a fetch, after trying, so
 //! `false` means no place the replica knows of had the node.
 //!
-//! The handler asserts nothing. Its answer is a command, dispatched as
+//! The provider asserts nothing. Its answer is a command, dispatched as
 //! the next tick's stimulus, and a rule of the space decides whether to
 //! keep it and where. A space that wants to show what it holds places an
 //! attribute on a memory layer and captures the answer there: the fact
@@ -33,29 +31,30 @@
 //! no use for is ignored.
 //!
 //! ```no_run
-//! # use std::sync::Arc;
 //! # use dialog_repository::{Branch, Holdings, SessionEnv};
-//! # async fn example<Env>(branch: Branch, env: Env) -> anyhow::Result<()>
-//! # where Env: SessionEnv + Clone {
+//! # async fn example(branch: Branch, env: impl SessionEnv) -> anyhow::Result<()> {
 //! let session = branch.session().perform(&env).await?;
-//! session.handle(Arc::new(Holdings::of(&branch, env.clone())));
+//! let mut holdings = Holdings::serve(&session);
 //! let root: dialog_corpus::Entity = "node:8QsR69j39jU7acb4H9VfsSpR2SrHJ6f2PPKHoosnsAPr".parse()?;
 //! session
 //!     .invoke(dialog_query::the!("dialog.node.probe/node").of("probe:1".parse()?).is(root))
 //!     .perform(&env)
 //!     .await?;
+//! // Answer what that dispatch asked.
+//! holdings.poll(&env).await?;
 //! # Ok(())
 //! # }
 //! ```
 
-use dialog_capability::Provider;
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
+use dialog_common::Blake3Hash;
 use dialog_corpus::tree::CorpusNode;
-use dialog_corpus::{Change, Changes, Entity, Pick, Relation, Update as _, Value};
+use dialog_corpus::{Changes, Entity, Pick, Update as _, Value};
 use dialog_effects::archive::prelude::CatalogScope;
+use dialog_query::attribute::Relation;
+use dialog_query::{AttributeQuery, EvaluationError, Term};
 use dialog_search_tree::nodes;
 
-use crate::{Branch, Handler, HandlerError};
+use crate::{Arrivals, CommitError, Session, SessionEnv, control_layer};
 
 /// The command asking whether a node is held: its value is the node.
 pub const PROBE: &str = "dialog.node.probe/node";
@@ -72,103 +71,107 @@ pub const FETCHED: &str = "dialog.node.fetched/node";
 /// tried.
 pub const FETCHED_LOCAL: &str = "dialog.node.fetched/local";
 
-/// The handler for the node commands: see the [module docs](self).
-///
-/// It reads through an environment of its own, the one it was given
-/// when it was made, since a handler is offered commands and nothing
-/// else. That environment decides what "held" and "fetched" mean: a
-/// node read asked for [locally](nodes::Read::locally) answers from what
-/// the replica holds, and one not so asked hydrates from wherever the
-/// subject's blocks live and keeps what arrives.
-pub struct Holdings<Env> {
-    env: Env,
-    catalog: CatalogScope,
+/// The provider could not answer.
+#[derive(Debug, thiserror::Error)]
+pub enum HoldingsError {
+    /// Reading the commands that arrived failed.
+    #[error("reading the node commands: {0}")]
+    Arrivals(#[from] EvaluationError),
+    /// Reading a node failed, as distinct from the node not being there.
+    #[error("reading a node: {0}")]
+    Read(String),
+    /// Dispatching the answers failed.
+    #[error("answering the node commands: {0}")]
+    Answer(#[from] CommitError),
 }
 
-impl<Env> Holdings<Env> {
-    /// The handler for the nodes of `branch`'s tree, reading through
-    /// `env`.
-    pub fn of(branch: &Branch, env: Env) -> Self {
+/// The provider of the node commands for one session: see the
+/// [module docs](self).
+///
+/// What "held" and "fetched" mean is the environment's: a node read
+/// asked for [locally](nodes::Read::locally) answers from what the
+/// replica holds, and one not so asked hydrates from wherever the
+/// subject's blocks live and keeps what arrives.
+pub struct Holdings {
+    session: Session,
+    catalog: CatalogScope,
+    probes: Arrivals<AttributeQuery>,
+    fetches: Arrivals<AttributeQuery>,
+}
+
+/// The query for the commands of one attribute: every command and the
+/// node it names.
+fn commands(the: &str) -> AttributeQuery {
+    let the: dialog_corpus::Relation = the.parse().expect("a node command's attribute");
+    AttributeQuery::from(
+        Term::<Relation>::from(Relation::from(the))
+            .of(Term::<Entity>::var("command"))
+            .is(Term::<Entity>::var("node")),
+    )
+}
+
+impl Holdings {
+    /// Provide the node commands for `session`, from here on: a command
+    /// dispatched before this is not answered.
+    pub fn serve(session: &Session) -> Self {
+        let control = control_layer();
+        let arrivals = |the| {
+            session
+                .arrivals(&control, commands(the))
+                .expect("every session has control:")
+        };
         Self {
-            env,
-            catalog: branch.archive().index(),
+            session: session.clone(),
+            catalog: session.primary().archive().index(),
+            probes: arrivals(PROBE),
+            fetches: arrivals(FETCH),
         }
     }
-}
 
-impl<Env> Holdings<Env>
-where
-    Env: Provider<nodes::Read<CorpusNode>> + ConditionalSend + ConditionalSync,
-{
-    /// Whether the replica holds `node`, fetching it first when `fetch`.
-    async fn holds(&self, node: [u8; 32], fetch: bool) -> Result<bool, String> {
-        let read = nodes::Read::<CorpusNode>::new(self.catalog.clone(), Blake3Hash::from(node));
-        let read = if fetch { read } else { read.locally() };
-        read.perform(&self.env)
-            .await
-            .map(|found| found.is_some())
-            .map_err(|error| format!("reading a node: {error}"))
-    }
-
-    /// The answers to the node commands among `commands`: for each
-    /// [`PROBE`] and [`FETCH`] whose value is a `node:` entity, the two
-    /// facts of its answer, on the command's own entity. Any other
-    /// command is left out.
+    /// Answer the node commands that arrived since the last call, in one
+    /// dispatch: every probe, then every fetch. Returns how many it
+    /// answered. A command whose value is not a `node:` entity is not
+    /// this provider's and is not answered.
     ///
-    /// This is the whole of what the handler does, and it does not
-    /// depend on how a session offers commands and takes answers: the
-    /// [`Handler`] below is one way of wiring it, and a provider that
-    /// reads commands some other way calls this and invokes what it
-    /// returns.
-    pub async fn answers(&self, commands: &Changes) -> Result<Changes, String> {
-        let relation =
-            |name: &str| -> Relation { name.parse().expect("a node command's attribute") };
-        let (probe, fetch) = (relation(PROBE), relation(FETCH));
-
-        // What is asked, read off the commands before anything is
-        // awaited: a command whose value names no node is not this
-        // handler's, and is left out of its answer.
+    /// Call it after a dispatch that may have asked, or in a loop of
+    /// one's own; nothing here waits.
+    pub async fn poll<Env: SessionEnv>(&mut self, env: &Env) -> Result<usize, HoldingsError> {
         let mut asked = Vec::new();
-        for (command, the, change) in commands.iter() {
-            let fetching = if *the == fetch {
-                true
-            } else if *the == probe {
-                false
-            } else {
-                continue;
-            };
-            let Change::Assert(Value::Entity(node), _) = change else {
-                continue;
-            };
-            let Some(hash) = node.node_hash() else {
-                continue;
-            };
-            asked.push((command.clone(), node.clone(), hash, fetching));
+        for (arrivals, fetching) in [(&mut self.probes, false), (&mut self.fetches, true)] {
+            for command in arrivals.poll(env).await? {
+                let Value::Entity(node) = command.is else {
+                    continue;
+                };
+                let Some(hash) = node.node_hash() else {
+                    continue;
+                };
+                asked.push((command.of, node, hash, fetching));
+            }
+        }
+        if asked.is_empty() {
+            return Ok(0);
         }
 
         let mut answers = Changes::new();
-        for (command, node, hash, fetching) in asked {
-            let local = self.holds(hash, fetching).await?;
-            let (about, held) = if fetching {
+        for (command, node, hash, fetching) in &asked {
+            let read =
+                nodes::Read::<CorpusNode>::new(self.catalog.clone(), Blake3Hash::from(*hash));
+            let read = if *fetching { read } else { read.locally() };
+            let local = read
+                .perform(env)
+                .await
+                .map_err(|error| HoldingsError::Read(error.to_string()))?
+                .is_some();
+            let (about, held) = if *fetching {
                 (FETCHED, FETCHED_LOCAL)
             } else {
                 (PROBED, PROBED_LOCAL)
             };
-            answer(&mut answers, &command, about, Value::Entity(node));
-            answer(&mut answers, &command, held, Value::Boolean(local));
+            answer(&mut answers, command, about, Value::Entity(node.clone()));
+            answer(&mut answers, command, held, Value::Boolean(local));
         }
-        Ok(answers)
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Env> Handler for Holdings<Env>
-where
-    Env: Provider<nodes::Read<CorpusNode>> + ConditionalSend + ConditionalSync,
-{
-    async fn answer(&self, commands: &Changes) -> Result<Changes, HandlerError> {
-        self.answers(commands).await.map_err(HandlerError)
+        self.session.invoke(answers).perform(env).await?;
+        Ok(asked.len())
     }
 }
 

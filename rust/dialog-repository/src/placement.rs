@@ -19,6 +19,14 @@
 //! in-memory layer every session has, [`CONTROL`] the loopback a command
 //! lands in.
 //!
+//! [`CONTROL`] holds a row for one tick: what a dispatch writes into it
+//! (`.at(control_layer())`, a rule head whose descriptor names
+//! `in: control:`, or a command, whose concept carries the
+//! `dialog.concept/transient` marker) is the next tick's stimulus, read
+//! as a row of `control:`, and is gone after that tick. A **channel**,
+//! `control:<name>`, is a layer for a consumer outside the dispatch
+//! ([`Store::Control`]): its rows stay until the consumer retracts them.
+//!
 //! The declarations in force are resolved from three places, each
 //! outranking the one before: the primary's tree, the primary's session
 //! store, and what the session itself holds
@@ -205,12 +213,40 @@ pub(crate) fn revision_stimulus(
     rows
 }
 
+/// Take the writes into [`CONTROL`] out of `changes`, as a batch bound
+/// for no layer: what a dispatch carries as the next tick's stimulus
+/// rather than writing anywhere. The writes into every other layer stay.
+pub(crate) fn take_dispatched(changes: &mut Changes) -> Changes {
+    let mut dispatched = Changes::new();
+    if !changes.has_shares() {
+        return dispatched;
+    }
+    let control = control_layer();
+    for (layer, share) in changes.take_shares() {
+        if layer == control {
+            dispatched.merge(share);
+        } else {
+            changes.merge(share.into_layer(layer));
+        }
+    }
+    dispatched
+}
+
 /// What backs a layer a session builds from the primary's schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Store {
     /// A table in memory: the session mints it when it opens, and it is
     /// gone when the session is.
     Memory,
+    /// A channel, `control:<name>`: a table in memory the session mints
+    /// when it opens, for a consumer outside the dispatch (the embedder,
+    /// another process). What lands in it stays until the consumer
+    /// retracts it, so a consumer that was not reading loses nothing:
+    /// it reads the layer's instants ([`Ephemeral::since`]) or
+    /// [`Session::arrivals`](crate::Session::arrivals), and retracts
+    /// what it consumed. Bare [`CONTROL`], the loopback, is every
+    /// session's, and declaring it builds nothing.
+    Control,
 }
 
 impl Store {
@@ -218,6 +254,7 @@ impl Store {
     pub fn as_str(&self) -> &'static str {
         match self {
             Store::Memory => "memory",
+            Store::Control => "control",
         }
     }
 
@@ -226,6 +263,7 @@ impl Store {
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "memory" => Some(Store::Memory),
+            "control" => Some(Store::Control),
             _ => None,
         }
     }
@@ -435,5 +473,47 @@ mod tests {
         assert_eq!(memory_layer().to_string(), MEMORY);
         assert_eq!(session_layer().to_string(), SESSION);
         assert_eq!(control_layer().to_string(), CONTROL);
+    }
+
+    /// A store names itself as its declaration's text, and that text
+    /// names it back.
+    #[dialog_common::test]
+    fn it_reads_back_every_store_it_names() {
+        for store in [Store::Memory, Store::Control] {
+            assert_eq!(Store::parse(store.as_str()), Some(store));
+        }
+        assert_eq!(Store::parse("durable"), None);
+    }
+
+    /// Taking the writes into `control:` out of a batch leaves the
+    /// writes into the primary and into every other layer in it.
+    #[dialog_common::test]
+    fn it_takes_the_writes_into_control_out_of_a_batch() -> anyhow::Result<()> {
+        let the: Relation = "cmd.ping/target".parse()?;
+        let of: Entity = "cmd:1".parse()?;
+        let state: Entity = "session:state".parse()?;
+        let mut changes = Changes::new();
+        changes.associate(the.clone(), of.clone(), Value::Boolean(true), Pick::All);
+        changes.associate_in(
+            control_layer(),
+            the.clone(),
+            of.clone(),
+            Value::Boolean(false),
+            Pick::All,
+        );
+        changes.associate_in(
+            state.clone(),
+            the.clone(),
+            of.clone(),
+            Value::UnsignedInt(1u32.into()),
+            Pick::All,
+        );
+        let dispatched = take_dispatched(&mut changes);
+        assert_eq!(dispatched.iter().count(), 1);
+        assert!(!dispatched.has_shares());
+        assert_eq!(changes.iter().count(), 1, "the primary's write stays");
+        let layers: Vec<&Entity> = changes.iter_in().map(|(layer, ..)| layer).collect();
+        assert_eq!(layers, vec![&state], "the other layer's write stays");
+        Ok(())
     }
 }

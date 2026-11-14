@@ -16,11 +16,14 @@
 //!    (branch ⊕ durable changes ⊕ this round's transients). Sibling
 //!    rules in a round read identical state.
 //! 3. Bound heads emit facts by cardinality (`Replace` for one,
-//!    `Assert` for many). A head concept carrying the
-//!    `dialog.concept/transient` marker routes to the next round's
-//!    stimulus and is never committed; a durable head passes a novelty
-//!    check (an instruction that leaves the view unchanged contributes
-//!    nothing) and folds into the commit.
+//!    `Assert` for many). A head cell landing in
+//!    [`control:`](crate::CONTROL), the loopback, routes to the next
+//!    round's stimulus and is never committed: one whose descriptor
+//!    names `in: control:`, and every cell naming no layer of a head
+//!    concept carrying the `dialog.concept/transient` marker (a
+//!    command). A durable head passes a novelty check (an instruction
+//!    that leaves the view unchanged contributes nothing) and folds into
+//!    the commit.
 //! 4. The loop ends when a round produces no novelty and no
 //!    transients, or errors after [`MAX_ROUNDS`] rounds — the runaway
 //!    guard for self-feeding cascades.
@@ -54,7 +57,9 @@ use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
 use crate::Ephemeral;
-use crate::placement::{follows_selection, memory_layer, session_layer};
+use crate::placement::{
+    control_layer, follows_selection, memory_layer, session_layer, take_dispatched,
+};
 use crate::repository::archive::erased;
 use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
@@ -72,7 +77,9 @@ pub(crate) const MAX_ROUNDS: u32 = 16;
 
 /// Run commit-time induction over `changes` + `transients`, folding
 /// durable novelty into `changes`. Transients never enter `changes`;
-/// they are visible to rule bodies for exactly one round.
+/// they are visible to rule bodies for exactly one round, as rows of
+/// [`control:`](crate::CONTROL). A write of `changes` or of `transients`
+/// into `control:` is a transient too.
 ///
 /// Returns every transient a rule head emitted, across all rounds, and
 /// the writes each round's heads landed in a layer, one entry per round
@@ -90,7 +97,7 @@ pub(crate) async fn induce<Env>(
     view: &View<'_>,
     composite: &Composite,
     changes: &mut Changes,
-    transients: Changes,
+    mut transients: Changes,
     selected: Option<&Entity>,
     env: &Env,
 ) -> Result<(Changes, Vec<Vec<(Entity, Changes)>>), CommitError>
@@ -114,6 +121,13 @@ where
         + ConditionalSync
         + 'static,
 {
+    // A write into the loopback is a dispatch: it is this tick's
+    // stimulus, read as a row of `control:`, and lands nowhere.
+    let dispatched = take_dispatched(&mut transients);
+    transients.merge(dispatched);
+    let dispatched = take_dispatched(changes);
+    transients.merge(dispatched);
+
     // Transients never commit, so an asset among them would be dropped:
     // refuse the commit before anything is written instead.
     if transients.has_assets() {
@@ -148,9 +162,11 @@ where
     // overlay of the round view, which does not change across rounds.
     let operator = Identify.perform(env).await?;
 
-    // This round's transient facts. Round 1 sees the dispatched
-    // commands; round N+1 sees only the transients round N emitted —
-    // a transient lives for exactly one round.
+    // This round's transient facts, the rows of `control:`. Round 1
+    // sees the dispatched commands; round N+1 sees only the transients
+    // round N emitted — a transient lives for exactly one round. Their
+    // writes into other layers (a session's revision rows) are read as
+    // those layers.
     let mut transient_overlay = transients;
 
     let mut round: u32 = 0;
@@ -256,15 +272,15 @@ where
                 None => shares.push(Staged::from(share.clone()).in_layer(layer.clone())),
             }
         }
+        let mut control = transient_overlay.clone();
+        let transient_shares = control.take_shares();
         let view = QueryEnv::over(round, shared_metadata(from_ref(view), &operator), env)
             .with_layers(
-                [written, Staged::from(transient_overlay.clone())]
+                [written, Staged::from(control).in_layer(control_layer())]
                     .into_iter()
                     .chain(shares)
                     .chain(
-                        transient_overlay
-                            .clone()
-                            .take_shares()
+                        transient_shares
                             .into_iter()
                             .map(|(layer, share)| Staged::from(share).in_layer(layer)),
                     )
@@ -1358,9 +1374,12 @@ fn bind_seed(
 /// subject, then each field's attribute, value and pick.
 type WrittenHead = (Entity, Vec<(Relation, Value, Pick, Option<Entity>)>);
 
-/// Emit a rule's head for every produced match: transient heads into
-/// `transients`, durable heads (novelty-checked against the frozen
-/// view) into `novelty`.
+/// Emit a rule's head for every produced match: the cells landing in
+/// `control:` into `transients`, the rest (novelty-checked against the
+/// frozen view) into `novelty`. A cell lands in `control:` when its
+/// descriptor names it (`in: control:`), or names no layer and the head
+/// is a command (`transient_head`); a command's cell naming another
+/// layer, a channel say, lands there as any head does.
 async fn emit_matches<'a>(
     rule: &InductiveRule,
     transient_head: bool,
@@ -1370,8 +1389,8 @@ async fn emit_matches<'a>(
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
-    // A transient head is a command: it lands in no layer, so it never
-    // follows the selection.
+    // A transient head is a command: a cell of it naming no layer lands
+    // in `control:`, so it never follows the selection.
     let selected = selected.filter(|_| !transient_head);
     let heads = written_heads(rule, selected, &matches)?;
 
@@ -1389,11 +1408,14 @@ async fn emit_matches<'a>(
         }
     }
 
+    let control = control_layer();
     for ((this, cells), first) in heads.into_iter().zip(first) {
         if !first {
             continue;
         }
         let mut head = Changes::new();
+        // The cells landing in the loopback: the next round's stimulus.
+        let mut dispatched = Changes::new();
         // The cells whose descriptor names a layer (`in:`) other than
         // the primary. The layer elects among its own rows of a cell,
         // so a head landing there keeps its pick and succeeds no claim
@@ -1406,11 +1428,33 @@ async fn emit_matches<'a>(
                 is: value,
                 cause: None,
             };
+            let layer = match layer {
+                None if transient_head => Some(control.clone()),
+                layer => layer,
+            };
+            if layer.as_ref() == Some(&control) {
+                match rule.polarity() {
+                    Polarity::Retract => dialog_corpus::Update::dissociate(
+                        &mut dispatched,
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                    ),
+                    Polarity::Assert => dialog_corpus::Update::associate(
+                        &mut dispatched,
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                        pick,
+                    ),
+                }
+                continue;
+            }
             match (layer, rule.polarity()) {
-                (Some(layer), Polarity::Retract) if !transient_head => {
+                (Some(layer), Polarity::Retract) => {
                     shared.push((layer, Instruction::Retract(fact)));
                 }
-                (Some(layer), Polarity::Assert) if !transient_head => {
+                (Some(layer), Polarity::Assert) => {
                     // The session's own layer is read live, and its row of
                     // the cell stands above a write staged for it: a head
                     // under `last` landing there retracts that row, so the
@@ -1444,8 +1488,8 @@ async fn emit_matches<'a>(
             }
         }
 
-        if transient_head {
-            head.assert(transients);
+        dispatched.assert(transients);
+        if shared.is_empty() && head.is_empty() {
             continue;
         }
         for (layer, instruction) in shared {

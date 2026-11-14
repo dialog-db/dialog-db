@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* The problem and the approach (top story). Three of the four things to build in dialog are built and tested on the draft branch: the readings over a decoded node, the five resolvers, the entities. That an index node's buffered ops are readable by no resolver. | *Where are we at?* Building. All four things are built on the draft branch, which now sits on top of the session stack (`claude/layers-5`) instead of beside it. |
-| **Agenda** | *What do we need to know?* The maintainer's word on what building settled without them: a span's and an entry's entity being its place, `fanout-bits`, `of` taking an entity only. Whether buffered ops are to be exposed, and as what. How a row's details are reached by its own entity. | *Where are we going?* When `claude/layers-6` is pushed and verified: merge it, and re-wire `Holdings` from `Session::handle` to the provider it brings. Then tonk: pin, a query step that is not a concept, the component, and the removal of its reader. |
+| **Status** | *What do we know?* The problem and the approach (top story). Three of the four things to build in dialog are built and tested on the draft branch: the readings over a decoded node, the five resolvers, the entities. That an index node's buffered ops are readable by no resolver. | *Where are we at?* Building. All four things are built on the draft branch, which now sits on top of the session stack (`claude/layers-6`) instead of beside it. |
+| **Agenda** | *What do we need to know?* The maintainer's word on what building settled without them: a span's and an entry's entity being its place, `fanout-bits`, `of` taking an entity only. Whether buffered ops are to be exposed, and as what. How a row's details are reached by its own entity. | *Where are we going?* Tonk: pin, a query step that is not a concept, the component, and the removal of its reader. In dialog: the points still open in what is built. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -775,3 +775,31 @@ tree would have to turn one into the other, and no formula does.
 
 **Decided.** Nothing. The draft branch stays on `layers-5` until
 `layers-6` is announced.
+
+## 2026-11-14, Building: on `layers-6`; the node commands are a provider
+
+**Asked.** Nothing new of the maintainer. The stack session announced
+`claude/layers-6` (#807) pushed and verified, with the provider API.
+
+**Learned.** As that session said it would: `Session::handle` and
+`Handler` are gone; a published dispatch's commands stand in `control:`
+for one tick; `Session::arrivals(layer, query)` yields the rows of a
+query that newly arrive in a layer, each once; a provider answers by
+invoking.
+
+`claude/layers-6` was merged into the draft branch and `Holdings`
+re-wired: `Holdings::serve(&session)` holds two readers of `control:`,
+one per command, and `poll` answers what arrived in one dispatch. It
+no longer keeps an environment of its own, since a provider is handed
+one when it is polled. The commands, the answers and the test's
+assertions did not change; the test gained two: the provider's own
+answers are not commands to it, and nothing stays in `control:`.
+
+`poll` does not wait. A provider that should run on its own needs a
+loop around it, or a `next` that waits on either reader; neither is
+built.
+
+1,793 tests in the three crates, their doc tests, the workspace clippy
+gate and a wasm check pass on the merge.
+
+**Decided.** Nothing.
