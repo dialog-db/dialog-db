@@ -113,7 +113,9 @@ instructions are held to the tolerance; when not (GitHub's runner pool
 mixes several), each scenario is allowed its measured cross-CPU spread
 on top (`cross_cpu_pct` in the catalog, from eight identical sweeps in
 #653: rough, and meant to go once the measured build stops dispatching
-on CPU features, #652).
+on CPU features, #652). Those spreads were measured on the total and
+are carried over to the instructions outside the allocator unmeasured,
+until sweeps on each CPU model measure them again.
 
 Use `--release`: the baselines are recorded under the release profile,
 and `compare` refuses to compare across profiles.

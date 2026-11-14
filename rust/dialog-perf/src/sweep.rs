@@ -103,7 +103,15 @@ fn run_child(exe: &Path, scenario: &str, config: &SweepConfig) -> Result<Report>
         let text = fs::read_to_string(&callgrind_out)
             .with_context(|| format!("reading {}", callgrind_out.display()))?;
         report.instructions = Some(instructions);
-        report.instructions_outside_allocator = Some(instructions.saturating_sub(allocator(&text)));
+        let allocator =
+            allocator(&text).with_context(|| format!("reading {scenario}'s callgrind output"))?;
+        // The allocator's calls are part of what was collected; a figure
+        // past the total is a misread output, not a cost.
+        anyhow::ensure!(
+            allocator <= instructions,
+            "{scenario}: {allocator} instructions in the allocator, past the {instructions} collected"
+        );
+        report.instructions_outside_allocator = Some(instructions - allocator);
     }
     Ok(report)
 }
@@ -152,12 +160,14 @@ const ENTRY_TYPE: &str = "<dialog_perf::allocator::Counting as ";
 ///
 /// The format compresses names: `(id) name` the first time, `(id)`
 /// after, one table for functions and one for files. A `calls=` line is
-/// followed by the line holding the call's inclusive cost, its last
-/// field. Recursion suffixes (`'2`) are dropped. Callgrind counts a
+/// followed by the line holding the call's inclusive cost: its position
+/// (one column, `positions: line`) and then its one event
+/// (`events: Ir`). An output in any other shape is refused rather than
+/// misread. Recursion suffixes (`'2`) are dropped. Callgrind counts a
 /// call's cost only while it collects, so this is the measured phase's;
 /// it counts the calls themselves whether it collects or not, so those
 /// are counted in the process instead ([`crate::allocator`]).
-fn allocator(text: &str) -> u64 {
+fn allocator(text: &str) -> Result<u64> {
     let entry = |name: &str| {
         let name = unrecursed(name);
         ENTRY.contains(&name) || name.starts_with(ENTRY_TYPE)
@@ -170,6 +180,19 @@ fn allocator(text: &str) -> u64 {
     let mut pending = false;
     let mut instructions = 0;
     for line in text.lines() {
+        if let Some(positions) = line.strip_prefix("positions:") {
+            anyhow::ensure!(
+                positions.trim() == "line",
+                "callgrind positions `{}`, not `line`",
+                positions.trim()
+            );
+        } else if let Some(events) = line.strip_prefix("events:") {
+            anyhow::ensure!(
+                events.trim() == "Ir",
+                "callgrind events `{}`, not `Ir`",
+                events.trim()
+            );
+        }
         if pending {
             pending = false;
             if !inside {
@@ -202,7 +225,7 @@ fn allocator(text: &str) -> u64 {
             pending = into_allocator;
         }
     }
-    instructions
+    Ok(instructions)
 }
 
 /// A compressed name: `(id) name` defines `id`, `(id)` refers to it.
@@ -286,6 +309,35 @@ cfn=(3)
 calls=1 0x20
 9 700
 ";
-        assert_eq!(allocator(text), 120 + 80 + 900 + 40);
+        assert_eq!(allocator(text).unwrap(), 120 + 80 + 900 + 40);
+    }
+
+    /// Without debug information for the C library the allocator's own
+    /// functions carry no file, and the entry points' names alone keep a
+    /// call `realloc` makes to `malloc` from being counted twice.
+    #[dialog_common::test]
+    fn it_counts_the_allocator_without_file_names() {
+        let text = "\
+positions: line
+events: Ir
+fl=(1) ???
+fn=(1) caller
+cfn=(2) realloc
+calls=1 0x10
+4 500
+fn=(2)
+cfn=(3) malloc
+calls=1 0x20
+9 200
+";
+        assert_eq!(allocator(text).unwrap(), 500);
+    }
+
+    /// An output with another position or event layout is refused, not
+    /// read by the wrong column.
+    #[dialog_common::test]
+    fn it_refuses_a_callgrind_output_of_another_shape() {
+        assert!(allocator("positions: instr line\nevents: Ir\n").is_err());
+        assert!(allocator("positions: line\nevents: Ir Dr\n").is_err());
     }
 }

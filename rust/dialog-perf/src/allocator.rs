@@ -21,6 +21,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 pub struct Counting;
 
 static ON: AtomicBool = AtomicBool::new(false);
+/// Set by every call, so a phase that allocates nothing still reads as
+/// counted when [`Counting`] is the global allocator.
+static INSTALLED: AtomicBool = AtomicBool::new(false);
 static ALLOC: AtomicU64 = AtomicU64::new(0);
 static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 static FREE: AtomicU64 = AtomicU64::new(0);
@@ -28,6 +31,7 @@ static REALLOC: AtomicU64 = AtomicU64::new(0);
 static REALLOC_FROM_BYTES: AtomicU64 = AtomicU64::new(0);
 
 fn alloced(layout: Layout) {
+    INSTALLED.store(true, Relaxed);
     if ON.load(Relaxed) {
         ALLOC.fetch_add(1, Relaxed);
         ALLOC_BYTES.fetch_add(layout.size() as u64, Relaxed);
@@ -57,6 +61,7 @@ unsafe impl GlobalAlloc for Counting {
 
     #[inline(never)]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        INSTALLED.store(true, Relaxed);
         if ON.load(Relaxed) {
             FREE.fetch_add(1, Relaxed);
         }
@@ -66,6 +71,7 @@ unsafe impl GlobalAlloc for Counting {
 
     #[inline(never)]
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        INSTALLED.store(true, Relaxed);
         if ON.load(Relaxed) {
             REALLOC.fetch_add(1, Relaxed);
             REALLOC_FROM_BYTES.fetch_add(layout.size() as u64, Relaxed);
@@ -84,8 +90,7 @@ pub fn start() {
 }
 
 /// Stop counting and return the counts, keyed as a report keeps them;
-/// empty when [`Counting`] is not the global allocator, which leaves
-/// every count at zero.
+/// empty when [`Counting`] is not the global allocator.
 pub fn stop() -> BTreeMap<String, u64> {
     ON.store(false, Relaxed);
     let counts = [
@@ -95,7 +100,7 @@ pub fn stop() -> BTreeMap<String, u64> {
         ("realloc.calls", REALLOC.load(Relaxed)),
         ("realloc.from.bytes", REALLOC_FROM_BYTES.load(Relaxed)),
     ];
-    if counts.iter().all(|(_, count)| *count == 0) {
+    if !INSTALLED.load(Relaxed) {
         return BTreeMap::new();
     }
     counts
