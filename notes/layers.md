@@ -246,23 +246,45 @@ space's and the profile's holds the profile's). What stays: the
   decision over data, never a router's; fan-out is one row per
   provider. Leaning: adopt, and rework #797 so that `Handler` is
   sugar over a consumer of `channel:host` and the feed goes.
-- `in:` as a term, not only a declaration. The maintainer's picture is
-  an image editor's: a stroke lands on the layer the tool is on, chosen
-  per stroke, not per colour. So a write names its layer: a
-  transaction's `in:` for the batch, a claim's `in:` in notation, and
-  on a rule an `in:` on the head and on each premise, constant or a
-  variable. A variable on a head is Bloom's `@address`, bound by the
-  rule from data (the row's own field, the announcements); a variable
-  on a premise binds which layer a row came from, so "whose" is read,
-  not stored. Precedence: the write's `in:` over the attribute's
-  placement over the primary. A placement then pins: a write of a
-  placed attribute to another layer is refused (`UnboundLayer` already
-  does this for a layer the session lacks), and a divergence is a row
-  of a placed attribute found elsewhere; an unplaced attribute may lie
-  on any layer the write names. This replaces the alternative of an
-  "active layer" fact and copy rules, which makes every write two
-  steps. Nothing here needs a new write path: a commit already
-  partitions a batch into `(layer, Changes)` shares.
+- `in:` as a term of the attribute descriptor. The maintainer's picture
+  is an image editor's: a stroke lands on the layer the tool is on,
+  chosen per stroke, not per colour. So `in` sits beside `as` and
+  `pick` in the descriptor of each attribute a concept reads or
+  writes, constant or a variable, and a variable is a field of the
+  concept like any other:
+
+  ```clj
+  (concept (todo ?i list: ?l title: ?t state: ?s at: ?where)
+    (xyz.todo/title of: ?i is: ?t as: :text pick: :last in: ?where)
+    (xyz.todo/state of: ?i is: ?s as: [:open :done] pick: :last in: ?where)
+    (xyz.list/task of: ?l is: ?i as: :entity pick: :all in: ?where))
+  ```
+
+  Asserting a `todo` with `at: layer:x` writes each cell there;
+  querying with `at:` bound reads that layer alone, unbound unions the
+  layers and binds `?where` to the one each row came from. A rule head
+  needs nothing of its own: its concept's descriptor carries the `in`.
+  A variable `in` on a head is Bloom's `@address`, bound by the rule
+  from data. Precedence: the descriptor's `in` over the attribute's
+  placement over the primary; a placement pins, so a constant `in`
+  that contradicts it is refused at analysis and a variable `in` over
+  a placed attribute has one candidate. The primary's own layer entity
+  is the branch's subject. This replaces an "active layer" fact and
+  copy rules, which make every write two steps, and it replaces any
+  `in` on the transaction, which would be outside the query engine.
+  Engine shape: the descriptor and the attribute statement gain `in`;
+  a cell of `Changes` carries its layer; a scanned row carries the
+  layer it came from (the guided read already knows it per stream);
+  a constant `in` picks streams, a variable unions them and binds.
+- Layers as facts of the bottom layer, not of a meta branch. A layer
+  that is a branch is declared where every layer is, in the primary,
+  so the set of layers is under the primary's root hash. Open whether
+  the primary also records each branch layer's revision, the way a
+  submodule pointer does: then one root hash names the whole
+  composite's state, a subscription pins once, and a sync is one
+  commit of moved pointers; but a push carries pointers a peer may not
+  have pulled yet, and two peers moving one pointer conflict on the
+  primary's head. A memory layer records no revision either way.
 - Layers that are branches. The meta branch already keeps which
   branches exist, their revisions and their upstreams (tonk's
   `tonk.dialog.replica/active-branch`, `xyz.tonk.branch/name`). A
