@@ -123,6 +123,8 @@ from the primary's declarations when it opens.
   `dialog.attribute/` and `dialog.layer/`; an older release reads them as
   facts it does not understand and ignores them. Nothing is rewritten.
 
+## 0.4.0 (2026-11-14)
+
 ### A prefetch hint a query took but did not finish is resumed by the next query
 
 [#770](https://github.com/dialog-db/dialog-db/pull/770), argued in
@@ -888,7 +890,7 @@ module should not be pinned by a library that uses one call of it.
 
 ### A pull or a push that meets another revision under its own head's version is refused
 
-Fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
+[#707](https://github.com/dialog-db/dialog-db/pull/707), fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
 
 Two replicas writing with one key on one branch share an origin, since
 an origin derives from the branch and the issuer. When both build on the
@@ -992,6 +994,8 @@ Why: the memo speaks for heads that landed, and a context remembered
 before the publish speaks for one that may never land.
 
 ### Distinct members inserted between the same neighbours get distinct positions
+
+[#729](https://github.com/dialog-db/dialog-db/pull/729).
 
 A position's fractional tail comes from a bias derived from the member's
 identity. The bias was the first six base62 digits of the identity bytes,
@@ -1478,7 +1482,7 @@ the walk read as it went, not because its reads depended on each other.
 
 ### A reset moves a branch forward only
 
-Fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
+[#686](https://github.com/dialog-db/dialog-db/pull/686), fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
 
 `Branch::reset` now refuses a revision that does not hold the branch's
 head, and the head does not move. A reset back to an older head, or onto
