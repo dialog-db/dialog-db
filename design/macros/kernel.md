@@ -140,9 +140,9 @@ A rule may also say something about a form without refusing it:
 
 ## Describing things
 
-A description is a fact about an entity, `dialog.meta/description`, never part of what the entity is. Dialog's descriptors already carry a description and leave it out of identity (`without_description`), and the stored body of a rule drops it; tonk keeps it as `dialog.meta/description` today.
+A description is a fact about an entity, `syntax.meta/description`, never part of what the entity is. Dialog's descriptors already carry a description and leave it out of identity (`without_description`), and the stored body of a rule drops it; tonk keeps it as `dialog.meta/description` today.
 
-Built 2026-11-13, and changed in two ways. What a form is for is said in a comment right above it, not in a `description:` part (Irakli: `description:` does not belong in a concept). And Dialog-DB refuses `dialog.meta/` from a transaction, since `dialog.` is kept for what it writes itself, so the proof of concept keeps the fact as `syntax.meta/description`. Whether dialog lets `dialog.meta/` through is open.
+Built 2026-11-13, and changed in two ways. What a form is for is said in a comment right above it, not in a `description:` part (Irakli: `description:` does not belong in a concept). And Dialog-DB refuses `dialog.meta/` from a transaction, since `dialog.` is kept for what it writes itself, so the fact is `syntax.meta/description`. Decided 2026-11-14 (Irakli): `dialog.` stays closed, as it is reserved so that nothing written from outside can upset the indexes the database keeps, and a description is metadata like any other, under a domain of the notation's own. `syntax` is that domain: `syntax.form` is the kept form, `syntax.meta` what is said about one.
 
 - A comment right above a `rule`, and one that ends its line, are the rule's description. It lands as that fact on the rule's entity. The kernel rule still carries it as `description:`, which is how it reaches the compiler.
 - A concept's comment is kept with its form. It is not a fact yet: a definition has no entity until syntax is kept on a branch.
@@ -156,7 +156,7 @@ Built 2026-11-13, and changed in two ways. What a form is for is said in a comme
 - What has no form of its own, such as an attribute, is described with a plain write:
 
   ```clj
-  (assert! (dialog.meta xyz.todo/text description: "What is to be done."))
+  (assert! (syntax.meta xyz.todo/text description: "What is to be done."))
   ```
 
 - Finding is a query, since the descriptions are facts:
@@ -164,11 +164,11 @@ Built 2026-11-13, and changed in two ways. What a form is for is said in a comme
   ```clj
   (query (dialog.name ?thing is: ?name)
     (dialog.name ?thing is: ?name)
-    (dialog.meta ?thing description: ?text)
+    (syntax.meta ?thing description: ?text)
     (:like ?text : "%list%"))
   ```
 
-In the model that answers `?name = todo`. Any other labelled part of a rule is kept the same way, under `dialog.meta`.
+In the model that answers `?name = todo`. Any other labelled part of a rule is kept the same way, under `syntax.meta`.
 
 ## The to-do, expanded
 
