@@ -1,4 +1,4 @@
-//! A value made of values: a map, a list or a tuple.
+//! A value made of values: a map or a list.
 //!
 //! A composite is kept whole as a [`Value::Record`]: one version byte,
 //! then the dag-cbor of its parts.
@@ -8,7 +8,6 @@
 //! version   = 0x01
 //! item      = { "map:":   [[part, part], ...] }     entries by their keys as written
 //!           | { "list:":  [part, ...] }
-//!           | { "tuple:": [part, ...] }
 //! part      = [type, bytes]                          a value, as a claim writes one
 //! ```
 //!
@@ -48,7 +47,6 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use crate::identity::TUPLE;
 use crate::{
     DialogCorpusError, NUMBER_BAND, Value, ValueDataType, decode_value, encode_key_value_owned,
 };
@@ -123,11 +121,9 @@ pub enum Composite {
     Map(CompositeMap),
     /// Values in order, of any number.
     List(CompositeItems),
-    /// Values in order, each place its own.
-    Tuple(CompositeItems),
 }
 
-/// The items of a list or a tuple, each as a part is kept. Reads as a
+/// The items of a list, each as a part is kept. Reads as a
 /// slice of values.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct CompositeItems(Vec<Value>);
@@ -280,11 +276,6 @@ impl Composite {
         Composite::List(CompositeItems::new(items))
     }
 
-    /// A tuple of `items`.
-    pub fn tuple(items: impl IntoIterator<Item = Value>) -> Self {
-        Composite::Tuple(CompositeItems::new(items))
-    }
-
     /// The bytes this composite is kept as: the version byte, then the
     /// dag-cbor of its parts. One composite has one byte string.
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -292,7 +283,6 @@ impl Composite {
         let (shape, parts) = match self {
             Composite::Map(map) => (MAP, map.len()),
             Composite::List(items) => (LIST, items.len()),
-            Composite::Tuple(items) => (TUPLE_SHAPE, items.len()),
         };
         write::head(write::MAP, 1, &mut bytes);
         write::head(write::TEXT, shape.len() as u64, &mut bytes);
@@ -306,7 +296,7 @@ impl Composite {
                     write::part(&entry.value, &mut bytes);
                 }
             }
-            Composite::List(items) | Composite::Tuple(items) => {
+            Composite::List(items) => {
                 for item in items.iter() {
                     write::part(item, &mut bytes);
                 }
@@ -337,9 +327,8 @@ impl Composite {
     }
 
     /// The composite's name: the merkle reference of its parts. A map
-    /// is named under [`Type::MAP`], a list under [`Type::LIST`] and a
-    /// tuple under [`TUPLE`], each part by its own
-    /// [`Value::reference`]. The bytes the composite is kept as are not
+    /// is named under [`Type::MAP`] and a list under [`Type::LIST`],
+    /// each part by its own [`Value::reference`]. The bytes the composite is kept as are not
     /// part of it.
     pub fn reference(&self) -> Reference {
         self.reference_within(NAMED_DEPTH)
@@ -430,7 +419,7 @@ impl<'a> Naming<'a> {
                     &entry.value
                 })
             }
-            Composite::List(items) | Composite::Tuple(items) => items.get(at),
+            Composite::List(items) => items.get(at),
         }
     }
 
@@ -442,7 +431,6 @@ impl<'a> Naming<'a> {
                 Type::MAP.map(entries.iter().map(|[key, value]| (*key, *value)))
             }
             Composite::List(_) => Type::LIST.list(self.names),
-            Composite::Tuple(_) => TUPLE.list(self.names),
         }
     }
 }
@@ -537,8 +525,6 @@ pub(crate) mod type_and_bytes {
 const MAP: &str = "map:";
 /// The name a list's parts are written under.
 const LIST: &str = "list:";
-/// The name a tuple's parts are written under.
-const TUPLE_SHAPE: &str = "tuple:";
 
 /// The dag-cbor a composite is written as. Written by hand, since
 /// nothing here can fail: a composite is text, arrays and `(type,
@@ -612,8 +598,6 @@ enum Stored {
     Map(Vec<(Owned, Owned)>),
     #[serde(rename = "list:")]
     List(Vec<Owned>),
-    #[serde(rename = "tuple:")]
-    Tuple(Vec<Owned>),
 }
 
 impl<'de> Deserialize<'de> for Read {
@@ -627,7 +611,6 @@ impl<'de> Deserialize<'de> for Read {
             )
             .map_err(D::Error::custom)?,
             Stored::List(items) => Composite::list(values(items)),
-            Stored::Tuple(items) => Composite::tuple(values(items)),
         }))
     }
 }
@@ -665,8 +648,6 @@ mod tests {
         Map(Vec<(Part<'a>, Part<'a>)>),
         #[serde(rename = "list:")]
         List(Vec<Part<'a>>),
-        #[serde(rename = "tuple:")]
-        Tuple(Vec<Part<'a>>),
     }
 
     /// The bytes written by hand are the dag-cbor serde writes for the
@@ -675,21 +656,11 @@ mod tests {
     fn it_writes_the_dag_cbor_serde_writes() {
         let long = Value::Bytes(vec![7; 70_000]);
         let values = every_value();
-        let parts = || values.iter().chain([&long]).map(Part).collect::<Vec<_>>();
-        for (composite, written) in [
-            (
-                Composite::list(values.iter().chain([&long]).cloned()),
-                Written::List(parts()),
-            ),
-            (
-                Composite::tuple(values.iter().chain([&long]).cloned()),
-                Written::Tuple(parts()),
-            ),
-        ] {
-            let mut expected = vec![COMPOSITE_VERSION];
-            serde_ipld_dagcbor::to_writer(&mut expected, &written).expect("encodes");
-            assert_eq!(composite.to_bytes(), expected);
-        }
+        let list = Composite::list(values.iter().chain([&long]).cloned());
+        let written = Written::List(values.iter().chain([&long]).map(Part).collect());
+        let mut expected = vec![COMPOSITE_VERSION];
+        serde_ipld_dagcbor::to_writer(&mut expected, &written).expect("encodes");
+        assert_eq!(list.to_bytes(), expected);
 
         let map = Composite::map([(text("a"), long.clone())]).expect("a map");
         let mut expected = vec![COMPOSITE_VERSION];
@@ -770,19 +741,18 @@ mod tests {
         record
     }
 
-    /// A list, a tuple and a map of every type of value come back as
-    /// they were written.
+    /// A list and a map of every type of value come back as they were
+    /// written.
     #[dialog_common::test]
     fn it_round_trips_every_shape_over_every_value() {
         let list = Composite::list(every_value());
-        let tuple = Composite::tuple(every_value());
         let map = Composite::map(
             every_value()
                 .into_iter()
                 .zip(every_value().into_iter().rev()),
         )
         .expect("no key twice");
-        for composite in [list, tuple, map] {
+        for composite in [list, map] {
             let value = Value::from(&composite);
             assert!(matches!(value, Value::Record(_)));
             assert_eq!(value.composite(), Ok(Some(composite)));
@@ -795,10 +765,10 @@ mod tests {
     fn it_nests_as_deep_as_written() {
         let inner = Composite::map([(text("x"), Value::UnsignedInt(1))]).expect("a map");
         let middle = Composite::list([Value::from(&inner), text("beside")]);
-        let outer = Composite::tuple([Value::from(&middle), Value::Boolean(false)]);
+        let outer = Composite::list([Value::from(&middle), Value::Boolean(false)]);
 
-        let Some(Composite::Tuple(items)) = Value::from(&outer).composite().expect("reads") else {
-            panic!("a tuple");
+        let Some(Composite::List(items)) = Value::from(&outer).composite().expect("reads") else {
+            panic!("a list");
         };
         let Some(Composite::List(items)) = items[0].composite().expect("reads") else {
             panic!("a list");
@@ -928,9 +898,8 @@ mod tests {
         );
     }
 
-    /// A composite is named by its parts: a map under the map type, a
-    /// list under the list type, a tuple under its own, each part by its
-    /// own reference. The name is not a hash of the bytes.
+    /// A composite is named by its parts: a map under the map type and
+    /// a list under the list type, each part by its own reference. The name is not a hash of the bytes.
     #[dialog_common::test]
     fn it_names_a_composite_by_its_parts() {
         let parts = [text("a"), Value::UnsignedInt(2)];
@@ -940,10 +909,6 @@ mod tests {
         assert_eq!(list.reference(), Type::LIST.list(references()));
         assert_eq!(Value::from(&list).reference(), list.reference());
         assert_ne!(list.reference(), RECORD.reference_of(&list.to_bytes()));
-
-        let tuple = Composite::tuple(parts.clone());
-        assert_eq!(tuple.reference(), TUPLE.list(references()));
-        assert_ne!(tuple.reference(), list.reference());
 
         let map = Composite::map([(parts[0].clone(), parts[1].clone())]).expect("a map");
         assert_eq!(
@@ -1250,20 +1215,20 @@ mod tests {
 
     /// Composites nested in composites are named from the inside out,
     /// each by the names of its parts: a map by each entry's key and
-    /// value, whatever order they were given in, a list and a tuple by
-    /// their items in order.
+    /// value, whatever order they were given in, and a list by its
+    /// items in order.
     #[dialog_common::test]
     fn it_names_composites_nested_in_composites_by_their_parts() {
-        let pair = Composite::tuple([text("t"), Value::Boolean(false)]);
+        let pair = Composite::list([text("t"), Value::Boolean(false)]);
         let map = Composite::map([
             (text("k"), Value::UnsignedInt(1)),
             (text("j"), Value::from(&pair)),
         ])
         .expect("a map");
         let list = Composite::list([Value::from(&map), text("z"), Value::from(&map)]);
-        let outer = Composite::tuple([Value::from(&list), Value::Boolean(true)]);
+        let outer = Composite::list([Value::from(&list), Value::Boolean(true)]);
 
-        let pair_name = TUPLE.list([text("t").reference(), Value::Boolean(false).reference()]);
+        let pair_name = Type::LIST.list([text("t").reference(), Value::Boolean(false).reference()]);
         assert_eq!(pair.reference(), pair_name);
         let map_name = Type::MAP.map([
             (text("j").reference(), pair_name),
@@ -1272,7 +1237,7 @@ mod tests {
         assert_eq!(map.reference(), map_name);
         let list_name = Type::LIST.list([map_name, text("z").reference(), map_name]);
         assert_eq!(list.reference(), list_name);
-        let outer_name = TUPLE.list([list_name, Value::Boolean(true).reference()]);
+        let outer_name = Type::LIST.list([list_name, Value::Boolean(true).reference()]);
         assert_eq!(outer.reference(), outer_name);
         assert_eq!(Value::from(&outer).reference(), outer_name);
     }

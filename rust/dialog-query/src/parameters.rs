@@ -11,12 +11,12 @@ use std::sync::Arc;
 /// inputs and outputs as named parameters. A `Parameters` instance binds
 /// each parameter name to a [`Pattern`]: a leaf, which is a
 /// [`Term<Any>`] (a concrete constant or a named variable that will be
-/// resolved during query evaluation), or a map, a list or a tuple of
+/// resolved during query evaluation), or a map or a list of
 /// patterns.
 ///
 /// A premise reads a term in each of its slots, and [`get`](Self::get)
 /// and [`iter`](Self::iter) give it one whatever the parameter holds: a
-/// leaf as it is, and for a map, a list or a tuple the variable that
+/// leaf as it is, and for a map or a list the variable that
 /// stands for the whole value (its *whole*, see [`Shape`]). The premise
 /// is run with that variable and the pattern is applied around it, so a
 /// premise that knows nothing of patterns keeps working. Whatever asks
@@ -40,8 +40,8 @@ use std::sync::Arc;
 pub struct Parameters(Arc<Held>);
 
 /// What parameters hold: under each name the term a premise reads
-/// there, and beside them the patterns of the names that hold a map, a
-/// list or a tuple.
+/// there, and beside them the patterns of the names that hold a map or
+/// a list.
 ///
 /// The shapes are kept apart so that parameters that hold terms alone,
 /// which is nearly all of them, are the map of terms they were before a
@@ -52,7 +52,7 @@ pub struct Parameters(Arc<Held>);
 struct Held {
     /// Under each name a leaf, or the whole of the shape held there.
     terms: BTreeMap<String, Term<Any>>,
-    /// The map, list or tuple each name holds, for the names that hold
+    /// The map or list each name holds, for the names that hold
     /// one, in name order; `None` when no name holds one. Every name
     /// here is also in `terms`.
     shapes: Option<Box<Shapes>>,
@@ -91,7 +91,7 @@ impl Held {
 }
 
 /// Each name with what it holds: a term as a term is written, and a
-/// map, a list or a tuple of terms as a [`Pattern`] is.
+/// map or a list of terms as a [`Pattern`] is.
 impl Serialize for Parameters {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if !self.has_shapes() {
@@ -128,7 +128,7 @@ impl Parameters {
 
     /// Returns the term a premise reads under the given name, if it has
     /// one: the leaf the parameter holds, or the variable standing for
-    /// the whole value where it holds a map, a list or a tuple.
+    /// the whole value where it holds a map or a list.
     pub fn get(&self, name: &str) -> Option<&Term<Any>> {
         self.0.terms.get(name)
     }
@@ -143,13 +143,13 @@ impl Parameters {
     }
 
     /// Returns what the given name is bound to: the term a premise
-    /// reads there, and the map, list or tuple pattern it stands for
+    /// reads there, and the map or list pattern it stands for
     /// when the parameter holds one.
     pub fn slot(&self, name: &str) -> Option<(&Term<Any>, Option<&Pattern>)> {
         self.get(name).map(|term| (term, self.shape(name)))
     }
 
-    /// Returns the map, list or tuple pattern the given name is bound
+    /// Returns the map or list pattern the given name is bound
     /// to, when it is bound to one.
     pub fn shape(&self, name: &str) -> Option<&Pattern> {
         self.0
@@ -215,8 +215,8 @@ impl Parameters {
         self.0.terms.keys()
     }
 
-    /// Returns an iterator over the parameters that hold a map, a list
-    /// or a tuple, with the pattern each holds.
+    /// Returns an iterator over the parameters that hold a map
+    /// or a list, with the pattern each holds.
     pub fn shapes(&self) -> impl Iterator<Item = (&String, &Pattern)> {
         self.0
             .shapes()
@@ -224,13 +224,13 @@ impl Parameters {
             .map(|(name, shape)| (name, shape.as_ref()))
     }
 
-    /// Whether any parameter holds a map, a list or a tuple.
+    /// Whether any parameter holds a map or a list.
     pub fn has_shapes(&self) -> bool {
         self.0.shapes.is_some()
     }
 
     /// Every leaf these parameters hold: the terms of the leaf
-    /// parameters, and the terms inside each map, list and tuple. The
+    /// parameters, and the terms inside each map and list. The
     /// wholes are not among them.
     pub fn leaves(&self) -> impl Iterator<Item = &Term<Any>> {
         self.0.terms.iter().flat_map(|(name, term)| {
@@ -243,8 +243,8 @@ impl Parameters {
     }
 
     /// Every leaf these parameters hold, each under an address: a leaf
-    /// parameter under its name, and a leaf inside a map, a list or a
-    /// tuple under the parameter's name and its place in the pattern as
+    /// parameter under its name, and a leaf inside a map
+    /// or a list under the parameter's name and its place in the pattern as
     /// written. Renaming variables moves no address.
     pub fn addressed(&self) -> Vec<(String, &Term<Any>)> {
         let mut leaves = Vec::with_capacity(self.0.terms.len());
@@ -264,7 +264,7 @@ impl Parameters {
     }
 
     /// These parameters with every leaf replaced by what `f` gives for
-    /// it, inside a map, a list or a tuple too. A whole follows the
+    /// it, inside a map or a list too. A whole follows the
     /// pattern it stands for.
     pub fn map_terms(&self, f: impl Fn(&Term<Any>) -> Term<Any>) -> Parameters {
         let mut mapped = Parameters::new();
@@ -278,8 +278,8 @@ impl Parameters {
     }
 
     /// These parameters as a premise is run with them, every one a
-    /// leaf, and the shapes to apply around the premise: for each map,
-    /// list or tuple, the variable now standing in its slot and the
+    /// leaf, and the shapes to apply around the premise: for each map
+    /// or list, the variable now standing in its slot and the
     /// pattern. See [`Shape`].
     pub fn lowered(&self) -> (Parameters, Vec<Shape>) {
         self.lowered_with(Shape::of)
@@ -313,7 +313,7 @@ impl Parameters {
 
     /// These parameters as a premise is run with them, every one a
     /// leaf: under each name the term [`get`](Self::get) answers, the
-    /// whole where the name holds a map, a list or a tuple. Parameters
+    /// whole where the name holds a map or a list. Parameters
     /// that hold terms alone are shared, not copied.
     pub fn plain(&self) -> Parameters {
         if self.0.shapes.is_none() {

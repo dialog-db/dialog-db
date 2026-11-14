@@ -164,7 +164,7 @@ impl<'a> QueryLayer<'a> {
     /// A deductive rule is a `Statement` too, so `.with(rule)` folds it
     /// into the overlay — the query resolves it as a transient rule
     /// without persisting it. A rule that cannot be stored, one that
-    /// holds a map, a list or a tuple of terms, is laid over too: the
+    /// holds a map or a list of terms, is laid over too: the
     /// overlay keeps the rule as it is, under the name its facts give
     /// it, and nothing is written of its body.
     pub fn with<S: Statement>(mut self, statement: S) -> Self {

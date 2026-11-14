@@ -164,21 +164,20 @@ fn it_takes_a_list_apart_and_binds_a_run() {
         Some(&Composite::list([text("b"), text("c")]).into())
     );
 
-    // A list is not a tuple, and neither is a map.
-    assert!(unify(&Pattern::tuple([var("x"), var("y"), var("z")]), &list).is_none());
+    // A map is no list.
     assert!(unify(&exact, &note()).is_none());
     assert!(unify(&exact, &text("abc")).is_none());
 }
 
-/// A tuple pattern takes a tuple of exactly its items apart, and
-/// patterns nest as values do.
+/// A list pattern with no run takes a list of exactly its items apart,
+/// and patterns nest as values do.
 #[dialog_common::test]
 fn it_takes_nested_shapes_apart() {
     let place: Value = Composite::map([
         (text("name"), text("Home")),
         (
             text("at"),
-            Composite::tuple([Value::Float(45.5), Value::Float(-122.5)]).into(),
+            Composite::list([Value::Float(45.5), Value::Float(-122.5)]).into(),
         ),
         (
             text("tags"),
@@ -195,7 +194,7 @@ fn it_takes_nested_shapes_apart() {
         ("name".to_string(), var("name")),
         (
             "at".to_string(),
-            Pattern::tuple([var("latitude"), var("longitude")]),
+            Pattern::list([var("latitude"), var("longitude")]),
         ),
         (
             "tags".to_string(),
@@ -210,13 +209,13 @@ fn it_takes_nested_shapes_apart() {
 
     let wrong = Pattern::map([
         ("name".to_string(), var("name")),
-        ("at".to_string(), Pattern::tuple([var("latitude")])),
+        ("at".to_string(), Pattern::list([var("latitude")])),
         ("tags".to_string(), var("tags")),
     ])
     .expect("a pattern");
     assert!(
         unify(&wrong, &place).is_none(),
-        "a tuple of two is not one of one"
+        "a list of two is not one of one"
     );
 }
 
@@ -355,7 +354,7 @@ fn it_knows_its_variables() {
         ("title".to_string(), var("title")),
         (
             "at".to_string(),
-            Pattern::tuple([var("x"), Pattern::from(Value::UnsignedInt(1)), var("x")]),
+            Pattern::list([var("x"), Pattern::from(Value::UnsignedInt(1)), var("x")]),
         ),
     ])
     .expect("a pattern") else {
@@ -395,8 +394,8 @@ fn it_is_written_one_way() {
     ));
 }
 
-/// A leaf is written as a term is. A map, a list or a tuple is written
-/// under the word for its shape, which is neither `?`, as a variable
+/// A leaf is written as a term is. A map or a list is written under
+/// the word for its shape, which is neither `?`, as a variable
 /// is, nor the name of a type, as a constant is, so each reads back as
 /// what it was.
 #[dialog_common::test]
@@ -430,7 +429,6 @@ fn it_writes_a_pattern_under_the_word_for_its_shape() {
         serde_json::json!({"map": {"a": 1}}),
         serde_json::json!({"map": [["a"]]}),
         serde_json::json!({"list": 1}),
-        serde_json::json!({"tuple": "a"}),
     ] {
         assert!(
             serde_json::from_value::<Pattern>(unread.clone()).is_err(),
@@ -1231,7 +1229,7 @@ fn it_refuses_adding_a_number_to_a_text_bound_inside_a_map() {
     .expect("a number is added to a number bound inside a map");
 }
 
-/// A map, a list or a tuple stands only where a record can be read:
+/// A map or a list stands only where a record can be read:
 /// under a field that reads text it is refused, and so is a rest that
 /// another premise needs to be a number.
 #[dialog_common::test]
@@ -1285,7 +1283,7 @@ fn it_types_a_pattern_by_its_shape() {
 }
 
 /// A rule that holds a pattern is stored: format 4 of a rule body
-/// writes a map, a list or a tuple of terms where a parameter stands.
+/// writes a map or a list of terms where a parameter stands.
 /// The body reads back as the rule it was, under the name it had before
 /// it could be written, and encodes to the bytes it was read from.
 #[dialog_common::test]
@@ -1430,14 +1428,11 @@ fn it_holds_a_pattern_under_a_name() {
     let read: Parameters = serde_ipld_dagcbor::from_slice(&bytes).expect("and read back");
     assert_eq!(read, terms);
 
-    // A list with a run and a tuple, each under its word.
+    // A list, with a run and with none, and a map inside one.
     for pattern in [
         Pattern::List(ListPattern::new([var("first")]).with_run(Term::var("others"))),
         Pattern::List(ListPattern::new([var("only")])),
-        Pattern::Tuple(vec![
-            var("left"),
-            Pattern::Map(shape(&[("at", var("right"))])),
-        ]),
+        Pattern::list([var("left"), Pattern::Map(shape(&[("at", var("right"))]))]),
     ] {
         let bytes = serde_ipld_dagcbor::to_vec(&pattern).expect("a pattern is written");
         let read: Pattern = serde_ipld_dagcbor::from_slice(&bytes).expect("and read back");

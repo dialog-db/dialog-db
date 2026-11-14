@@ -12,11 +12,11 @@
 //! holds exactly what the rule's identity holds, so every spelling of
 //! one rule stores the same bytes, and a rule's body is found by
 //! encoding the rule. What the author wrote is not stored. Where a
-//! parameter stands it writes a variable, a constant, or a map, a list
-//! or a tuple of them (see [`Pattern`](crate::Pattern)).
+//! parameter stands it writes a variable, a constant, or a map or a
+//! list of them (see [`Pattern`](crate::Pattern)).
 //!
-//! Format 3 wrote the same spelling and had no way to write a map, a
-//! list or a tuple of terms, so a rule that held one had no body. A
+//! Format 3 wrote the same spelling and had no way to write a map or a
+//! list of terms, so a rule that held one had no body. A
 //! rule that holds none is written in format 4 as it was in format 3,
 //! but for the number. Format 2 wrote the authored descriptor, with every constant tagged
 //! by the entity naming its type (`{"text:": "foo:"}`), so a constant
