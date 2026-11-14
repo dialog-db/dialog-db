@@ -246,12 +246,12 @@ space's and the profile's holds the profile's). What stays: the
   decision over data, never a router's; fan-out is one row per
   provider. Leaning: adopt, and rework #797 so that `Handler` is
   sugar over a consumer of `channel:host` and the feed goes.
-- `in:` as a term of the attribute descriptor. The maintainer's picture
+- `in:` as a term of the attribute descriptor. Decided. The picture
   is an image editor's: a stroke lands on the layer the tool is on,
-  chosen per stroke, not per colour. So `in` sits beside `as` and
-  `pick` in the descriptor of each attribute a concept reads or
-  writes, constant or a variable, and a variable is a field of the
-  concept like any other:
+  chosen per stroke, not per colour. `in` sits beside `as` and `pick`
+  in the descriptor of each attribute a concept reads or writes, a
+  constant or a variable, and a variable is a field of the concept
+  like any other:
 
   ```clj
   (concept (todo ?i list: ?l title: ?t state: ?s at: ?where)
@@ -260,62 +260,39 @@ space's and the profile's holds the profile's). What stays: the
     (xyz.list/task of: ?l is: ?i as: :entity pick: :all in: ?where))
   ```
 
-  Asserting a `todo` with `at: layer:x` writes each cell there;
-  querying with `at:` bound reads that layer alone, unbound unions the
-  layers and binds `?where` to the one each row came from. A rule head
-  needs nothing of its own: its concept's descriptor carries the `in`.
-  A variable `in` on a head is Bloom's `@address`, bound by the rule
-  from data. Precedence: the descriptor's `in` over the attribute's
-  placement over the primary; a placement pins, so a constant `in`
-  that contradicts it is refused at analysis and a variable `in` over
-  a placed attribute has one candidate. The primary's own layer entity
-  is the branch's subject. This replaces an "active layer" fact and
-  copy rules, which make every write two steps, and it replaces any
-  `in` on the transaction, which would be outside the query engine.
-  Engine shape: the descriptor and the attribute statement gain `in`;
-  a cell of `Changes` carries its layer; a scanned row carries the
-  layer it came from (the guided read already knows it per stream);
-  a constant `in` picks streams, a variable unions them and binds.
-- Layers as facts of the bottom layer, not of a meta branch. A layer
-  that is a branch is declared where every layer is, in the primary,
-  so the set of layers is under the primary's root hash. Open whether
-  the primary also records each branch layer's revision, the way a
-  submodule pointer does: then one root hash names the whole
-  composite's state, a subscription pins once, and a sync is one
-  commit of moved pointers; but a push carries pointers a peer may not
-  have pulled yet, and two peers moving one pointer conflict on the
-  primary's head. A memory layer records no revision either way.
-- Layers that are branches. The meta branch already keeps which
-  branches exist, their revisions and their upstreams (tonk's
-  `tonk.dialog.replica/active-branch`, `xyz.tonk.branch/name`). A
-  layer with `dialog.layer/store "branch"` is one of them, opened as a
-  source of the composite (a composite already has several sources),
-  and `session.sync()` pushes and pulls the primary and every branch
-  layer with its own upstreams. Such a layer is a queue when the sender
-  asserts commands into it and the recipient retracts them once
-  handled: order from the branch's commits, once from the retraction,
-  and the retraction is the acknowledgement the sender reads on its
-  next pull. The recipient's rules fire on arrival already: a pull's
-  novelty is induction's stimulus through the watermark lag. This is
-  the durable end of the channel question above; `channel:self` and
-  `channel:host` are the one-tick end. Both are layers.
-- Discovery. A provider announces what it performs as facts: the
-  capability (a command concept), the provider's DID, when the
-  announcement expires. Announcements are TTL'd rows of a layer, as
-  mDNS records are of a scope: an in-process handler's in the session's
-  own memory layer, a peer's arriving through a layer with upstreams,
-  so they are queried like any fact and a page can list what it may
-  ask for. An invoke of a foreign capability is a command with a
-  subject; the session's routing consumer reads the announcements,
-  picks a provider, carries the command over the transport that
-  reaches it (17), and the answer comes back on the feed naming the
-  command's entity. Whether "invoke" is a command of its own (`invoke`
-  with a target and a payload) or implicit in the subject: leaning
-  implicit, so one notation serves a local and a remote capability and
-  only the routing consumer knows transports. Still open: how an
-  announcement proves the provider may offer the capability (a
-  delegation beside the row), and what the asker proves to the provider
-  (its chain, which #764 already carries).
+  Asserting a `todo` with `at:` bound writes each cell there. Reading
+  with `at:` bound reads that layer alone; unbound, the read unions
+  every layer and binds `?where` to the one each row came from, and a
+  query narrows by binding. A descriptor with no `in` reads and writes
+  the primary. A rule head needs nothing of its own: its concept's
+  descriptor carries the `in`, and a variable there is Bloom's
+  `@address`, bound by the rule from data. The descriptor is the only
+  source of placement, so `dialog.attribute/in` of #795 goes, and
+  with it the placement map, the guide's per-attribute filter and
+  divergences: a read takes a row from a layer because its `in` names
+  that layer, bound or constant. `dialog.layer/store` stays: a layer
+  must be declared to be written. Engine shape: the descriptor and the
+  attribute statement gain `in`; a cell of `Changes` carries its
+  layer; a scanned row carries the layer it came from; a constant `in`
+  picks streams, a variable unions them and binds.
+- Durable layers. Decided: a layer that is a branch is declared in the
+  primary like every layer, and the primary records its revision as a
+  fact, the way a submodule pointer does, so one root hash names the
+  whole composite's state. A durable layer has no memory cell of its
+  own: its tree is rooted by the pointer fact, the primary's one
+  compare-and-swap moves every pointer at once, and a sync of the
+  primary carries the trees its pointers name. There is no second
+  class of head conflict, since there is no second head. A memory
+  layer records no pointer.
+- The `session:` layer. Every session mints one, declared or not: it
+  replaces `Branch::overlay`, the process-local store a branch has
+  today. The revisions the overlay injects now (`dialog.branch/tree`,
+  `dialog.branch/edition`, `dialog.branch/revision`) become rows of
+  `session:`, one per layer, the session layer's own revision among
+  them, written before induction runs so the tick reads them and their
+  change is its stimulus like any row's. A subscription that depends
+  on the head then depends on rows of a layer it reads, not on a
+  special case.
 - Whether a channel's one-tick lifetime is enough, or the sender needs
   to know the message was handled. A message port buffers until the
   other end runs; a channel whose receiver's session is closed drops
