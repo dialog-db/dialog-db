@@ -153,27 +153,40 @@ the ticks.
 
 ## Order
 
-1. Done, in [#795](https://github.com/dialog-db/dialog-db/pull/795),
-   rebuilt on `main` rather than ported from #578 and #720: `in:` on
-   attributes (`Placement`, `LayerDeclaration`), guided reads and
-   divergences, `branch.session()` building the memory layers from
-   the primary's schema, `invoke` and `transact` with the re-run from
-   a moved head, a rule head landing on its placed layer with its
-   pick, `Session::subscribe` over the composite with the churn
-   invariant. Induction's rounds are the ticks; they keep their name
-   in the code.
-2. A tick mints its instants in the memory layers as it ends, not at
+1. Done, in [#795](https://github.com/dialog-db/dialog-db/pull/795)
+   and [#797](https://github.com/dialog-db/dialog-db/pull/797), rebuilt
+   on `main` rather than ported from #578 and #720, and reshaped on
+   the branch that follows them: `in` as a dimension of the row and a
+   term of the attribute descriptor, with `Statement::at` for a write;
+   `LayerDeclaration`; `branch.session()` building the memory layers
+   from the primary's schema; `invoke` and `transact` with the re-run
+   from a moved head; a rule head landing in the layer its descriptor
+   names, with its pick; `Session::subscribe` over the composite with
+   the churn invariant; handlers and the command feed (to be replaced
+   by subscriptions over a channel, below). The layers every session
+   has are named `memory:`, `session:` and `control:`. Induction's
+   rounds are the ticks; they keep their name in the code.
+2. The `session:` layer as the session's own, minted whether or not
+   the schema declares it, replacing `Branch::overlay`; the revisions
+   of every layer as its rows, written before induction runs; the
+   selected layer as a row of it (`dialog.session/layer`), which a
+   write of a non-command attribute with no `in` lands in, the
+   primary when none is selected; machinery under `dialog.` never
+   follows the selection.
+3. A tick mints its instants in the memory layers as it ends, not at
    the end of the dispatch, so a subscriber sees the ticks in order
    (point 12). Today a dispatch lands each layer's share once, after
    the publish.
-3. Sapling and tonk move onto `invoke` and delete their wiring and
-   retry code. `Branch::overlay` becomes the session layer of a
-   session with no declared layers.
-4. `sync` on a session: pull and push every layer with upstreams.
-   Layers that are other branches of the repository (device, index),
-   named by the schema; layers on disk (`store: disk`).
-5. Write-only links. Channels (8a): a one-tick layer with a transport,
-   sapling's worker to daemon link first.
+4. `control:` as a layer with a one-tick lifetime, replacing
+   transients and the `transient` marker; channels to the embedder as
+   layers whose rows stay until the consumer retracts them; providers
+   as subscriptions over the command concept; `Session::commands()`
+   and `Handler` go.
+5. Sapling and tonk move onto `invoke` and subscriptions over
+   channels, and delete their wiring, registry and retry code.
+6. Durable layers: `Store::Durable`, the pointer fact in the primary,
+   `session.sync()` pulling and pushing the primary and every layer
+   with upstreams. Discovery as announcements.
 
 ## The control channel
 
