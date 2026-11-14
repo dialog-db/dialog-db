@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A stored rule holds a pattern: rule bodies are written in format 4
 
-[#PR](https://github.com/dialog-db/dialog-db/pull/PR),
+[#799](https://github.com/dialog-db/dialog-db/pull/799),
 [design/rule-format.md](./design/rule-format.md),
 [design/rule-format/design-pattern-form.md](./design/rule-format/design-pattern-form.md)
 
