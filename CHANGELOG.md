@@ -14,6 +14,23 @@ says how to cut a release.
 
 ## Unreleased
 
+### A tree write sizes its segments before filling them
+
+When a write regroups a window of entries into segments, each segment
+is now moved out in one step at its final size, and a merged stretch
+is allocated at its final size, where both grew entry by entry. The
+trees written are the same.
+
+What this changes for you:
+
+- A commit that rewrites many entries copies far less: the perf
+  scenario that succeeds a standing claim on 500 entities retires 26%
+  fewer instructions, and its reallocations start from 50 MB in all
+  where they started from 530 MB.
+
+Why: a growing vector is copied each time it outgrows its allocation,
+and a write regroups large windows many times over.
+
 ## 0.4.0 (2026-11-14)
 
 ### A prefetch hint a query took but did not finish is resumed by the next query

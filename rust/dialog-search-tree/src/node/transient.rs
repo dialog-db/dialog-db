@@ -2120,7 +2120,7 @@ where
     D: Distribution,
 {
     let mut groups: Vec<Node<Key, Value>> = vec![];
-    let mut pending: Vec<SegmentEntry<Key, Value>> = vec![];
+    let mut pending: Vec<SegmentEntry<Key, Value>>;
     // The last key of the previously sealed group; None while sealing the
     // first group, whose separator comes from the floor instead.
     let mut previous_last: Option<Key> = None;
@@ -2168,25 +2168,32 @@ where
             weights[start..end].iter().sum::<usize>() - (end - start) * manifest.entry_overhead()
         })
     };
+    // Each group moves out of the entries in one step, sized to the group
+    // (`take` over the vector's iterator has an exact length): a group
+    // grown entry by entry was reallocated, and copied, as it filled.
+    let ends = cut_after
+        .iter()
+        .enumerate()
+        .filter_map(|(at, cut)| cut.then_some(at + 1));
+    let mut rest = entries.into_iter();
     let mut group_start = 0usize;
-    for (at, entry) in entries.into_iter().enumerate() {
-        pending.push(entry);
-        if cut_after[at] {
-            seal::<Key, Value, D>(
-                &mut pending,
-                &mut previous_last,
-                &mut groups,
-                &floor,
-                forced_start[group_start],
-                manifest,
-                origin_for(group_start, at + 1),
-                group_weight(group_start, at + 1),
-            );
-            group_start = at + 1;
-        }
+    for end in ends {
+        pending = rest.by_ref().take(end - group_start).collect();
+        seal::<Key, Value, D>(
+            &mut pending,
+            &mut previous_last,
+            &mut groups,
+            &floor,
+            forced_start[group_start],
+            manifest,
+            origin_for(group_start, end),
+            group_weight(group_start, end),
+        );
+        group_start = end;
     }
 
-    if !pending.is_empty() {
+    if group_start < count {
+        pending = rest.collect();
         seal::<Key, Value, D>(
             &mut pending,
             &mut previous_last,
