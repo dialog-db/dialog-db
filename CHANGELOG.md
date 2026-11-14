@@ -14,6 +14,52 @@ says how to cut a release.
 
 ## Unreleased
 
+### A session's handlers answer a dispatch's commands
+
+[#797](https://github.com/dialog-db/dialog-db/pull/797), argued in
+[notes/layers.md](./notes/layers.md) ("Handlers").
+
+A command is scratch: it lives one tick and lands on no layer, so
+nothing could react to it with an effect. Now a session holds
+handlers (`Session::handle`), built into dialog or registered by the
+embedder through the same `Handler` trait. Once a dispatch has
+published, every command of it, the one invoked and the ones its rules
+dispatched in any tick, is offered to each handler; what they answer is
+dispatched as the next tick's stimulus, where a rule captures what it
+wants of the answer on the layer its attribute is placed on, and a
+subscription through the session sees the capture. The chain ends when
+no handler answers.
+
+What this changes for you:
+
+- `Handler`, `HandlerError`, `Answering` (a handler over a function) and
+  `Session::handle` are new. A handler sees commands as `Changes` and
+  answers with `Changes`; an answer names the command it answers by that
+  command's entity.
+- `Invocation::perform` now runs the handlers after each publish and
+  chains their answers, so one `invoke` can publish several times. It
+  still returns the head the last dispatch left the primary at.
+- `Session::commands()` is new: a reader of the session's command feed,
+  the control channel. Each `poll` yields every dispatch since the last,
+  in order and once, as `Dispatched { sequence, revision, commands }`.
+  A consumer outside the session's process, or one that answers in its
+  own time, reads it and answers by invoking through the session; the
+  feed holds `FEED_CAPACITY` dispatches, and a reader it moved past is
+  told with `Lost` and starts over with `catch_up`.
+- `CommitError::AnswerDivergence` is new: handlers that keep answering
+  are stopped after `MAX_ANSWERS` dispatches. `CommitError::Handler` is
+  new: a handler's failure fails the invocation. Both come after the
+  dispatch they follow has published; what it wrote stands.
+- A session with no handler behaves as before.
+
+Why: an embedder's command handlers (tonk's command providers) and
+dialog's own effects, such as fetching a tree node a page asked for,
+need one way to observe a command and answer it, and the answer has to
+enter the session as a fact on a pinned layer rather than as something
+a query could observe outside any revision. Running handlers after the
+publish keeps a dispatch a function of head and stimulus, so a lost
+compare-and-swap re-runs no effect.
+
 ### An attribute is placed on a layer, and a session routes each write to the layer its attribute is placed on
 
 [#795](https://github.com/dialog-db/dialog-db/pull/795), argued in
