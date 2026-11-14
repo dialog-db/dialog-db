@@ -631,3 +631,41 @@ now in [design-accessors](design-accessors.md).
 **Backtracked.** From Building to Designing. The approach was declared
 whole on the agent's reading of an answer the maintainer had not given;
 the reading was wrong. Nothing had been built on it.
+
+## 2026-11-14, Designing: what the layers session says about handlers
+
+**Asked.** The maintainer asked that the use case be relayed to the
+session that owns #795 and #721: a session command for a node's
+locality answered with a command that rules capture in the session, and
+tonk's command handlers expressible the same way, "ideally as a session
+subscription that can do the job and then invoke a command back as a
+response". Relayed; that session replied. What follows is its account,
+not checked here.
+
+**Learned.** Attributed to the layers session:
+
+- A subscription cannot observe a dispatched command, and a request
+  should not be made a fact so that one can. What reacts to a command
+  with an effect is a handler.
+- A handler is registered on the session per command concept, dialog's
+  own or an embedder's, one mechanism. A dispatch runs its ticks to a
+  fixed point and publishes; the commands the chain dispatched and no
+  rule consumed are handed to the handlers
+  (`TransactionBatch::induced()` holds them today); each answer is
+  dispatched as a new invocation and starts the next chain. Handlers
+  run after the publish, never inside the chain, so a lost
+  compare-and-swap re-runs no effect.
+- An answer is correlated with its request by the command's entity.
+- `notes/layers.md` on #721 now lists this under Open.
+
+It also proposed making "is this node held?" a query-time accessor that
+never fetches, keeping only the fetch as a command. *Those two cannot
+both be true:* that is the third column of
+[design-held](design-held.md), which the maintainer set aside because
+the same query would answer differently once a block arrived. The relay
+had not told that session of the idempotence constraint; a correction
+was sent. The proposal is recorded and not taken up.
+
+**Decided.** Nothing. The maintainer's wish for a handler to be a
+subscription is answered, by that session, as: not a subscription, a
+handler run by the session's invoke loop.
