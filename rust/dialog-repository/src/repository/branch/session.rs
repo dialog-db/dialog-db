@@ -40,7 +40,9 @@ use tokio::sync::OnceCell;
 
 use crate::CommitError;
 use crate::REGISTRY;
-use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped};
+use crate::layer::{Hidden, MergeKeys, filter_hidden, guide_rows, merge_grouped};
+use crate::placement::guide::{Guide, GuidedLayer};
+use crate::placement::{PlacementMap, Placements, declarations_held, pending_declarations};
 use crate::repository::archive::TreeEnv;
 use crate::repository::branch::select::line_manifest;
 use crate::repository::ephemeral::Window;
@@ -107,7 +109,36 @@ use crate::{Branch, Ephemeral, RemoteSite, Snapshot, Staged};
 #[derive(Default, Clone)]
 pub struct QueryLayer<'a> {
     lines: Vec<Live<'a>>,
+    /// Memory layers read beside the lines, live.
+    memories: Vec<&'a Ephemeral>,
+    /// How a read meets each layer, for a session's layer: a row is read
+    /// only from the layer its attribute is placed on. `None` for a read
+    /// that no guide leads.
+    guide: Option<Arc<Guide>>,
     changes: Changes,
+}
+
+/// The lines a query env reads, owned: every tree line, pinned, plus
+/// every memory layer, live. What a [`QueryLayer`] resolves to when a
+/// query is performed, and what a [`Session`](crate::Session) hands its
+/// induction.
+#[derive(Default, Clone)]
+pub(crate) struct Composite {
+    pub(crate) sources: Vec<Source>,
+    pub(crate) memories: Vec<Ephemeral>,
+    /// How a read meets each layer. See [`Guide`].
+    pub(crate) guide: Option<Arc<Guide>>,
+}
+
+impl Composite {
+    /// A composite of one tree line.
+    pub(crate) fn of(source: Source) -> Self {
+        Self {
+            sources: vec![source],
+            memories: Vec::new(),
+            guide: None,
+        }
+    }
 }
 
 impl<'a> QueryLayer<'a> {
@@ -137,8 +168,38 @@ impl<'a> QueryLayer<'a> {
     pub fn join(mut self, other: impl Into<QueryLayer<'a>>) -> Self {
         let other = other.into();
         self.lines.extend(other.lines);
+        self.memories.extend(other.memories);
+        if other.guide.is_some() {
+            self.guide = other.guide;
+        }
         other.changes.assert(&mut self.changes);
         self
+    }
+
+    /// Read `memory` beside the lines, live: a layer of a session.
+    pub(crate) fn with_memory(mut self, memory: &'a Ephemeral) -> Self {
+        self.memories.push(memory);
+        self
+    }
+
+    /// Lead every read of this layer by `guide`.
+    pub(crate) fn guided(mut self, guide: Arc<Guide>) -> Self {
+        self.guide = Some(guide);
+        self
+    }
+
+    /// The lines pinned as `views`, with the memory layers and the
+    /// guide, owned: what one query reads.
+    pub(crate) fn composite(&self, views: Vec<View<'a>>) -> Composite {
+        Composite {
+            sources: views.into_iter().map(View::into_source).collect(),
+            memories: self
+                .memories
+                .iter()
+                .map(|memory| (*memory).clone())
+                .collect(),
+            guide: self.guide.clone(),
+        }
     }
 
     /// The branches this layer reads from, in join order.
@@ -320,7 +381,16 @@ impl<'a> From<Live<'a>> for QueryLayer<'a> {
     fn from(line: Live<'a>) -> Self {
         Self {
             lines: vec![line],
-            changes: Changes::new(),
+            ..Self::default()
+        }
+    }
+}
+
+impl<'a> From<&'a Ephemeral> for QueryLayer<'a> {
+    fn from(memory: &'a Ephemeral) -> Self {
+        Self {
+            memories: vec![memory],
+            ..Self::default()
         }
     }
 }
@@ -340,8 +410,8 @@ impl<'a> From<&'a Snapshot> for QueryLayer<'a> {
 impl From<Changes> for QueryLayer<'_> {
     fn from(changes: Changes) -> Self {
         Self {
-            lines: Vec::new(),
             changes,
+            ..Self::default()
         }
     }
 }
@@ -402,8 +472,9 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             // revisions the lines stood at now.
             let views = layer.pin();
             let overlay = layer.overlay_at(&views, &operator);
-            let sources: Vec<Source> = views.into_iter().map(View::into_source).collect();
-            let query_env = QueryEnv::new(sources.clone(), overlay, env);
+            let composite = layer.composite(views);
+            let sources = composite.sources.clone();
+            let query_env = QueryEnv::over(composite, overlay, env);
             let results = Box::pin(query.perform(&query_env));
             // The query's own stream drives the env's preload queue:
             // evaluator hints (its own and any concurrent evaluation's)
@@ -488,6 +559,18 @@ pub(crate) struct QueryEnv<'a> {
     /// erased lifetimes in `QueryEnv<'0>: Provider<Select<'1>>` hit
     /// rustc's #100013 limitation; a named lifetime does not).
     sources: Vec<Source>,
+    /// The memory layers read beside the lines, live. Their rows stand
+    /// where a line's session overlay's do, and their tombstones hide
+    /// facts in every line.
+    memories: Vec<Ephemeral>,
+    /// How a read meets each layer, for a session: a row is read only
+    /// from the layer its attribute is placed on. `None` for a read
+    /// that no guide leads.
+    guide: Option<Arc<Guide>>,
+    /// The placements a guided read reads by, resolved on the first read
+    /// and shared by clones: those of the first line, with what the guide
+    /// and the query's overlay declare laid over.
+    placements: Arc<OnceCell<Arc<PlacementMap>>>,
     /// The query's own overlay: caller-asserted facts and the
     /// auto-injected metadata, held as a line (see
     /// [`QueryLayer::overlay`]) and read under the lines' format.
@@ -561,6 +644,10 @@ struct Format {
     /// Per line, in line order: its manifest and the tombstone sets its
     /// streams are filtered with.
     lines: Vec<LineFormat>,
+    /// Every fact the per-query changes and the staged layers retract,
+    /// keyed under `manifest`: what a memory layer's stream is filtered
+    /// with.
+    staged: Hidden,
 }
 
 /// One line's manifest and the tombstone sets its streams are filtered
@@ -602,6 +689,9 @@ impl<'a> QueryEnv<'a> {
     pub(crate) fn new(sources: Vec<Source>, overlay: Ephemeral, env: &'a Erased) -> Self {
         Self {
             sources,
+            memories: Vec::new(),
+            guide: None,
+            placements: Arc::new(OnceCell::new()),
             overlay,
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
@@ -614,11 +704,50 @@ impl<'a> QueryEnv<'a> {
         }
     }
 
+    /// A runtime env over `composite`: its lines, its memory layers and
+    /// its guide (see [`new`](Self::new)).
+    pub(crate) fn over(composite: Composite, overlay: Ephemeral, env: &'a Erased) -> Self {
+        let Composite {
+            sources,
+            memories,
+            guide,
+        } = composite;
+        let mut env = Self::new(sources, overlay, env);
+        env.memories = memories;
+        env.guide = guide;
+        env
+    }
+
     /// Read `layers` above the lines too: a transaction's writes, held
     /// so reading them costs a range read however many there are.
     pub(crate) fn with_layers(mut self, layers: Vec<Staged>) -> Self {
         self.layers = layers;
         self
+    }
+
+    /// The guide of this read, with the placements it reads by, resolved
+    /// from the first line once and shared by clones, over the pending
+    /// declarations the read sees: what the guide holds, then what the
+    /// query's overlay and the staged layers declare. `None` for a read
+    /// that no guide leads.
+    async fn guided(&self) -> Result<Option<(Arc<Guide>, Arc<PlacementMap>)>, DialogCorpusError> {
+        let (Some(guide), Some(primary)) = (&self.guide, self.sources.first()) else {
+            return Ok(None);
+        };
+        let map = self
+            .placements
+            .get_or_try_init(|| async {
+                let pending = pending_declarations(
+                    [guide.declared.clone(), declarations_held(&self.overlay)],
+                    &self.layers,
+                );
+                Placements::resolve(primary, &Changes::new(), &pending, self.env)
+                    .await
+                    .map(|placements| Arc::new(placements.map()))
+                    .map_err(|error| DialogCorpusError::Storage(error.to_string()))
+            })
+            .await?;
+        Ok(Some((guide.clone(), map.clone())))
     }
 
     /// What a read settlement observes of this environment: the lines'
@@ -643,6 +772,7 @@ impl<'a> QueryEnv<'a> {
         self.sources
             .iter()
             .map(Source::overlay)
+            .chain(self.memories.iter())
             .chain(once(&self.overlay))
     }
 
@@ -771,11 +901,23 @@ impl QueryEnv<'_> {
                 } else {
                     MergeKeys::Fields
                 };
+                // A guided read takes the tombstones of a layer only for the
+                // attributes it reads from that layer, as it does its rows.
+                let guided = self.guided().await?;
+                let held = |store: &Ephemeral, layer: Option<&GuidedLayer>, line: &Manifest| match (
+                    &guided, layer,
+                ) {
+                    (Some((guide, map)), Some(layer)) => store
+                        .tombstones_where(line, |attribute| guide.placed(layer, map, attribute)),
+                    _ => store.tombstones(line),
+                };
+                let guide = guided.as_ref().map(|(guide, _)| guide);
                 let lines = self
                     .sources
                     .iter()
                     .zip(lines)
-                    .map(|(source, line)| {
+                    .enumerate()
+                    .map(|(index, (source, line))| {
                         let changes = self.overlay.tombstones(&line);
                         // Every set is shared, never merged, so this costs
                         // nothing per query however much the layers or the
@@ -784,7 +926,18 @@ impl QueryEnv<'_> {
                         for layer in layers {
                             staged = staged.facts(layer.tombstones(&line));
                         }
-                        let tombstones = staged.clone().facts(source.overlay().tombstones(&line));
+                        let mut tombstones = staged.clone().facts(held(
+                            source.overlay(),
+                            guide.and_then(|guide| guide.lines.get(index)),
+                            &line,
+                        ));
+                        for (at, memory) in self.memories.iter().enumerate() {
+                            tombstones = tombstones.facts(held(
+                                memory,
+                                guide.and_then(|guide| guide.memories.get(at)),
+                                &line,
+                            ));
+                        }
                         LineFormat {
                             manifest: line,
                             staged,
@@ -792,10 +945,15 @@ impl QueryEnv<'_> {
                         }
                     })
                     .collect();
+                let mut staged = Hidden::default().facts(self.overlay.tombstones(&manifest));
+                for layer in &self.layers {
+                    staged = staged.facts(layer.tombstones(&manifest));
+                }
                 Ok(Format {
                     manifest,
                     keys,
                     lines,
+                    staged,
                 })
             })
             .await
@@ -806,6 +964,9 @@ impl Clone for QueryEnv<'_> {
     fn clone(&self) -> Self {
         Self {
             sources: self.sources.clone(),
+            memories: self.memories.clone(),
+            guide: self.guide.clone(),
+            placements: self.placements.clone(),
             overlay: self.overlay.clone(),
             layers: self.layers.clone(),
             format: self.format.clone(),
@@ -903,8 +1064,16 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // by the line's session tombstones. Each line's stream is
         // filtered with the tombstones keyed under its own manifest, and
         // borrows only `self.env`.
-        for (source, line) in self.sources.iter().zip(&format.lines) {
-            let raw = select_from_source(source, self.env, input.clone()).await?;
+        // A session's read is guided by placement: each line yields only
+        // the rows of the attributes placed on it.
+        let guided = self.guided().await?;
+        for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
+            let mut raw = select_from_source(source, self.env, input.clone()).await?;
+            if let Some((guide, map)) = &guided
+                && let Some(layer) = guide.lines.get(index)
+            {
+                raw = guide_rows(raw, guide.clone(), layer.clone(), map.clone());
+            }
             let mut hidden = line.tombstones.within(&input);
             if !succeeded.is_empty() {
                 hidden = hidden.facts(hidden_in(&line.manifest));
@@ -941,19 +1110,27 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // key range is built once, and not at all when they are empty.
         let window = Window::new(&input);
         let mut session = None;
-        for (source, line) in self.sources.iter().zip(&format.lines) {
-            let rows = source.overlay().select_within(&window, &line.manifest);
+        let newest = || {
+            self.sources
+                .iter()
+                .filter_map(|source| source.revision())
+                .map(|revision| revision.edition.successor())
+                .fold(pending(), |newest, edition| newest.max(edition))
+                .successor()
+        };
+        for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
+            let mut rows = source.overlay().select_within(&window, &line.manifest);
+            // A line's session store is memory of that layer: a guided read
+            // takes from it only the attributes placed on the layer.
+            if let Some((guide, map)) = &guided
+                && let Some(layer) = guide.lines.get(index)
+            {
+                rows.retain(|fact| guide.admits(layer, map, fact.the.as_str()));
+            }
             if rows.is_empty() {
                 continue;
             }
-            let session = *session.get_or_insert_with(|| {
-                self.sources
-                    .iter()
-                    .filter_map(|source| source.revision())
-                    .map(|revision| revision.edition.successor())
-                    .fold(pending(), |newest, edition| newest.max(edition))
-                    .successor()
-            });
+            let session = *session.get_or_insert_with(newest);
             let rows: FactStream<'a> = Box::pin(stream::iter(
                 rows.into_iter()
                     .map(move |fact| Ok(FactView::pending(fact, session))),
@@ -963,6 +1140,27 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
                 line.staged.clone(),
                 line.manifest.clone(),
             ));
+        }
+
+        // Each memory layer, read live and filtered the same way: a
+        // layer's own tombstones hide facts beneath it, never its own. Its
+        // rows stand where a session overlay's do.
+        for (index, memory) in self.memories.iter().enumerate() {
+            let mut rows = memory.select_within(&window, &manifest);
+            if let Some((guide, map)) = &guided
+                && let Some(layer) = guide.memories.get(index)
+            {
+                rows.retain(|fact| guide.admits(layer, map, fact.the.as_str()));
+            }
+            if rows.is_empty() {
+                continue;
+            }
+            let session = *session.get_or_insert_with(newest);
+            let rows: FactStream<'a> = Box::pin(stream::iter(
+                rows.into_iter()
+                    .map(move |fact| Ok(FactView::pending(fact, session))),
+            ));
+            sessions.push(filter_hidden(rows, format.staged.clone(), manifest.clone()));
         }
 
         // Overlay stream — the per-query changes, read in the lines'
@@ -1835,6 +2033,9 @@ impl<'a> QueryEnv<'a> {
         for source in &self.sources {
             rules.extend(self.durable_rules(source, index, key).await?);
             rules.extend(self.overlay_rules(source.overlay(), index, key, manifest)?);
+        }
+        for memory in &self.memories {
+            rules.extend(self.overlay_rules(memory, index, key, manifest)?);
         }
         rules.extend(self.overlay_rules(&self.overlay, index, key, manifest)?);
         for layer in &self.layers {

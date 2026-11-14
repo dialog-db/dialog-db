@@ -26,12 +26,40 @@
 //!   suppress facts in the underlying branch view.
 
 use std::collections::HashSet;
+use std::future::ready;
 use std::sync::Arc;
+
+use crate::placement::PlacementMap;
+use crate::placement::guide::{Guide, GuidedLayer};
 
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{Cause, FactStream, FactView, Selector, SortKey, sort_key};
 use dialog_search_tree::Manifest;
 use futures_util::{StreamExt, stream};
+
+/// The rows of `inner` that a read guided by `guide` takes from `layer`,
+/// under the placements `map`: each other row is a divergence of
+/// placement, which the guide reports and the read skips.
+pub(crate) fn guide_rows<'a>(
+    inner: FactStream<'a>,
+    guide: Arc<Guide>,
+    layer: GuidedLayer,
+    map: Arc<PlacementMap>,
+) -> FactStream<'a> {
+    Box::pin(inner.filter(move |row| {
+        let keep = match row {
+            Ok(view) => match view.the_bytes() {
+                Ok(the) => match str::from_utf8(&the) {
+                    Ok(the) => guide.admits(&layer, &map, the),
+                    Err(_) => guide.admits(&layer, &map, &String::from_utf8_lossy(&the)),
+                },
+                Err(_) => true,
+            },
+            Err(_) => true,
+        };
+        ready(keep)
+    }))
+}
 
 /// Merge sorted fact streams into one stream whose order matches
 /// what a single physical probabilistic search tree containing every input would

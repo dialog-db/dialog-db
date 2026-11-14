@@ -36,6 +36,10 @@
 mod repository;
 pub use repository::*;
 
+/// Attribute placement: which layer an attribute's facts live in.
+pub mod placement;
+pub use placement::{LayerDeclaration, Placement, Store, attribute_entity};
+
 /// Streaming-merge and tombstone helpers used by the query-session
 /// composition layer.
 pub(crate) mod layer;
