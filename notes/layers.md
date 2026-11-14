@@ -301,6 +301,20 @@ space's and the profile's holds the profile's). What stays: the
   sequence field, as tonk's commands carry); "once" is the retraction;
   "exactly one of several handlers" is a claim a handler asserts
   before it acts, decided by the layer's pick.
+- Command providers subscribe to the command concept, through a helper
+  that drops retractions, so they see commands and not a view. The
+  `transient` marker stays for this change; commands become plain
+  concepts later. In process, the invoke loop polls the helper once
+  per tick, so no command is missed. Out of process, a consumer that
+  polls less often than ticks happen sees nothing of a row asserted
+  and retracted in between, so its channel keeps rows until the
+  consumer retracts them.
+- Names. Proposed: `effect:` for the loopback (`channel:self` above),
+  `session:` and `memory:` as the layers every session has, durable
+  layers by their branch's name. Open what distinguishes `memory:`
+  from `session:` once `session:` exists: lifetime (a tick, a session,
+  a process) would name them, and then `effect:` is a name for a
+  purpose among names for lifetimes.
 - The `session:` layer. Every session mints one, declared or not: it
   replaces `Branch::overlay`, the process-local store a branch has
   today. The revisions the overlay injects now (`dialog.branch/tree`,
