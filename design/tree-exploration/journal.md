@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* The problem, accepted. What is held is decided: two commands with handlers built into dialog, each answering with a second command that a rule in the space places. How a node is read is decided: accessors over a handle, the environment decoding once. That a rule's head is committed or transient today, never the overlay. That dialog dispatches commands as transient facts and reacts with inductive rules at commit, and has no built-in reaction that performs an effect. Use cases are drafted (nine). A strategy matrix exists with six columns, the sixth born from the decision on what is held. | *Where are we at?* Directing. The matrix is written and not read by the maintainer. |
-| **Agenda** | *What do we need to know?* The maintainer's marks on the drafted accessor set ([design-accessors](design-accessors.md)) and its seven open points. Whether a node has to be a concept (asked 2026-11-13, not answered). Whether a tree node has to be reachable as a concept, or whether a consumer asking a resolver directly is enough (asked 2026-11-13, not answered): every difficulty in columns 2 to 5 of the strategy comes from the concept. For [design-resolvers](design-resolvers.md): what a decoding formula's row is; whether the block travels as bytes or as a record. Whether writing to the overlay from rules is its own topic. Whether the use cases are right (asked, not answered). For column 6 of the strategy and for the held decision alike: how dialog reacts to a command with an effect and answers with a command. For column 5: whether a record reaches a page whole. For column 4: what a decoding formula's rows would be, which the maintainer has not said. Which rows the maintainer weighs most. | *Where are we going?* The maintainer reads the use cases and the matrix; the open cells are checked; a direction is chosen. |
+| **Status** | *What do we know?* The problem, accepted. The approach, decided in four parts and written in the top story: a node is a handle and accessors read it, the environment decoding once; five accessors expose everything; what is held is learned and changed by commands; a consumer asks the accessors directly. What of the draft branch stays and what comes out. | *Where are we at?* Building: decided, not started. The last sitting decided; building is for a later session, after the top story has been read cold. |
+| **Agenda** | *What do we need to know?* The name of the fanout parameter. Whether the maintainer agrees that accessors yield no entity per span or entry (the agent's reading, not their words). Open hypotheses the build will settle: the decoders taking a node; a resolver binding a slot absent; a subscription over an accessor; dialog reacting to a command with an effect. | *Where are we going?* A later session builds the four items listed in the top story, the first three before the fourth. Tonk's side is its own work. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
 
@@ -533,3 +533,36 @@ waits on the strategy question of whether a node must be a concept.
 
 **Decided.** By the maintainer: the handle is `node:`. The accessor set
 is a draft.
+
+## 2026-11-14, Designing to Building: the accessor set is decided
+
+**Asked.** Must a node be reachable as a concept, or is asking the
+accessors directly enough? Not answered in those terms. The maintainer:
+"I think mostly makes sense. We should expose all info and not hide any;
+as I said it's really a way to expose node info to the query engine. I
+think folding manifest may make sense, I don't recall why it wasn't
+before."
+
+**Learned.** "Expose all" settles four of the seven open points at
+once: the raw block is in, the three unexposed manifest fields are in,
+a blob record's row holds everything with what does not apply absent,
+and the stored fanout parameter is what is yielded. Why the manifest
+was a resolver of its own could not be found: the note that introduced
+the resolvers gives no reason and this clone's history is too shallow
+to reach the commit.
+
+The concept question, asked three times, was not answered directly. The
+agent read the maintainer's description of the accessors' purpose as an
+answer (they expose a node to the query engine; what is built on them is
+the builder's) and wrote the approach on that reading, marked as a
+reading, in [design-accessors](design-accessors.md) and on the agenda.
+If it is wrong, what changes is one thing: whether a span and an entry
+carry an entity.
+
+**Decided.** By the maintainer: the accessor set, with everything
+exposed and the manifest folded in. With that the approach is whole and
+is written in the top story. Phase moves to Building. It rests on four
+open hypotheses, each of which the build confirms or refutes in its
+first days; none was measured here.
+
+Nothing is built in this sitting.

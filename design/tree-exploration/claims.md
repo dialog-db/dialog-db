@@ -83,4 +83,8 @@
 | A node's handle is its `node:` entity; `asset:` is for what a node points at in the blob store | opinion | the maintainer, 2026-11-13, on the agent's recommendation | decided |
 | The manifest has three fields no resolver yields: `entry_overhead`, `key_overhead`, `link_overhead` | fact | `ManifestSummary` in `rust/dialog-corpus/src/inspect.rs` against `TreeManifestQuery` in `rust/dialog-query/src/resolver.rs` | holds |
 | A row can bind a slot absent | fact | `Match::bind_absent` in `rust/dialog-query/src/selection/match.rs` | holds; not tried from a resolver |
+| An accessor exposes everything a node holds and hides nothing | opinion | the maintainer, 2026-11-14: "it's really a way to expose node info to the query engine" | decided |
+| The manifest is folded into `tree/node` | opinion | the maintainer, 2026-11-14 | decided |
+| Why `tree/manifest` was a resolver of its own | hypothesis | not found: `notes/tree-relations.md` gives no reason; this clone's history does not reach the commit | open; nothing rests on it |
+| An accessor's rows need no entity; a space that wants a concept of nodes writes a rule and chooses one | hypothesis | the agent's reading of the maintainer's words above; confirmed or struck by the maintainer | open; the approach is written on it |
 

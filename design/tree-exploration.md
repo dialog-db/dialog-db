@@ -1,6 +1,6 @@
 # A consumer that can only query cannot draw a branch's search tree
 
-Phase: **Designing.** See the [design index](README.md) for what the
+Phase: **Building.** See the [design index](README.md) for what the
 phases mean, and the [journal](tree-exploration/journal.md) for where the
 topic stands.
 
@@ -83,3 +83,67 @@ As the maintainer first gave it:
 
 > The dialog query engine cannot be used to inspect the underlying tree,
 > which causes the embedder to implement side channels to do it.
+
+## Approach
+
+Decided over 2026-11-12 to 2026-11-14; each decision's matrix is beside
+this file.
+
+**A node is an opaque thing with a handle, and accessors read parts of
+it** ([design-resolvers](tree-exploration/design-resolvers.md)). The
+handle is the node's entity, `node:<hash>`. An accessor is a query step
+that takes the handle, asks the environment for the decoded node, and
+yields one part of it as rows. The environment reads, checks and decodes
+a node once and keeps it, as it already does for the tree; no accessor
+decodes, and no block travels in a row unless a query asks for its
+bytes. What a node points at in the blob store is an `asset:` entity.
+
+**Five accessors expose everything a node holds**
+([design-accessors](tree-exploration/design-accessors.md)): `tree/node`
+(what it is and the format it was written under), `tree/span` (an
+index's children with what the node holds about each), `tree/entry` (a
+segment's entries whole), `tree/value` (a spilled value) and
+`tree/block` (the raw block). Each requires its handle, so no query
+reads a tree it was not pointed at.
+
+**What a replica holds is learned and changed by commands, not by
+queries** ([design-held](tree-exploration/design-held.md)). One command
+asks whether a node's block is local; one fetches it. Dialog handles
+both and answers each with a second command; a rule in the space decides
+whether the answer is kept and where. A consumer asks before it reads,
+so a read never fetches by surprise, and an accessor's answer never
+depends on what happened to be local.
+
+**A consumer asks the accessors directly**
+([direction](tree-exploration/direction.md), column 7). Every
+difficulty met while fitting the old resolvers to a page came from
+putting a concept and a rule between the two. A space that wants a
+concept of nodes can still write the rule.
+
+Not taken on here:
+
+- A way for rules to write to the overlay. Wanted by the maintainer;
+  until it exists a rule that keeps a command's answer commits it, and
+  the fact must name the replica it is true of.
+- Goal-directed evaluation of recursive rules
+  (`notes/goal-directed-fixpoint.md`). The approach does not need it.
+- The embedder's side: a tonk page cannot send a query step that is not
+  a concept, and tonk's tree reader is still woven into its worker, wire
+  format, page bundle and display routing. Removing it is tonk's work,
+  made possible by this.
+
+What has to be built in dialog, for whoever builds it:
+
+1. The `inspect` decoders take a decoded node instead of bytes.
+2. The accessors ask `nodes::Read<CorpusNode>` and project; `tree/key`,
+   `tree/blob` and `tree/manifest` go; names become kebab-case; a slot
+   that does not apply is bound absent.
+3. `dialog.branch/tree` and `tree/span`'s `node` are `node:` entities
+   (on the draft branch); a spill and a blob hash are `asset:` entities.
+4. A built-in reaction to a dispatched command that performs an effect
+   and dispatches a command in answer; the probe and fetch commands on
+   top of it.
+
+Of the draft branch `worker/affectionate-pascal-iey41u`: the `node:`
+entity stays. The `entry:` entity and listing when no node is given are
+not part of the approach and come out.
