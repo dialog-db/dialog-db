@@ -2013,6 +2013,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-stack"
+version = "0.5.0-rc.5"
+dependencies = [
+ "anyhow",
+ "dialog-common",
+ "dialog-corpus",
+ "dialog-query",
+ "dialog-repository",
+ "serde_json",
+]
+
+[[package]]
 name = "dialog-storage"
 version = "0.5.0-rc.5"
 dependencies = [

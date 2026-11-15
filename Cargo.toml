@@ -44,6 +44,7 @@ members = [
     "rust/dialog-perf",
     "rust/dialog-repository",
     "rust/dialog-soak",
+    "rust/dialog-stack",
     "rust/dialog-varsig",
     "rust/merkle-reference",
     "rust/wbg-pool",
@@ -295,6 +296,10 @@ version = "0.5.0-rc.5"
 
 [workspace.dependencies.dialog-repository]
 path = "./rust/dialog-repository"
+version = "0.5.0-rc.5"
+
+[workspace.dependencies.dialog-stack]
+path = "./rust/dialog-stack"
 version = "0.5.0-rc.5"
 
 [workspace.dependencies.dialog-ucan-core]

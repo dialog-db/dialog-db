@@ -14,6 +14,47 @@ says how to cut a release.
 
 ## Unreleased
 
+### The stack has a crate of its own, `dialog-stack`, which re-exports it from `dialog-repository`
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+point 1).
+
+The maintainer decided that the stack gets a separate crate later and
+its name now. `dialog-stack` is that crate's seam: it re-exports the
+stack from `dialog-repository` under one roof, and its README is the
+crate's front page, a guide for an embedder, with every example
+compiled as a doc test. No code moved. When it does, an embedder that
+imports from `dialog_stack` changes no import.
+
+What this changes for you:
+
+- `dialog-stack` is a new workspace crate, released with the others at
+  the workspace version. It re-exports `Stack`, `OpenStack`,
+  `StackEnv`, `OpenStackEnv`, `SyncStack`, `SyncEnv`, `SyncError`,
+  `Layer`, `LayerType`, `LayerDeclaration`, `Durable`, `Ephemeral`,
+  `Channel`, `Arrivals`, `Invocation`, `Attempt`, `InvocationReport`,
+  `MAX_RERUNS`, `Effect`, `EffectReport`, `Provider`, `Command`,
+  `Failure`, `Backup`, `LayerBackup`, `CommitError`, `Download`, the
+  layer names (`MEMORY`, `SESSION`, `CONTROL`, `memory_layer`,
+  `session_layer`, `control_layer`) and the attribute functions of the
+  facts a stack writes (`layer_type_attr`, `layer_branch_attr`,
+  `revision_attr`, `selection_attr`, `invoked_attr`, `answered_attr`,
+  `failed_attr`, `unhandled_attr`, `progress_attr`, `provided_attr`).
+- Nothing in `dialog-repository` changes: every name above is still
+  exported there.
+
+Why: the stack is moving into its own crate, and an embedder (tonk is
+the first) should take its imports from where the stack will live, so
+the move does not touch them. The README gives the stack one place
+that explains it from opening to backup.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes. `dialog_repository::Stack` and
+  `dialog_stack::Stack` are the same type, as is every other name the
+  crate re-exports, so the two imports mix freely.
+
 ### A stack's `session:` is its own store, apart from `Branch::overlay`, and `Stack::backup` and `OpenStack::restore` carry it to another stack
 
 [#817](https://github.com/dialog-db/dialog-db/pull/817), argued in
