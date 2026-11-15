@@ -5,7 +5,7 @@
 //! A provider subscribes to the command concept it performs, on the
 //! channel the commands land in: the loopback, [`control:`](crate::CONTROL),
 //! where every published dispatch's commands land, or another
-//! [`Channel`](crate::Channel) the stack holds. A channel's outside end
+//! [`Channel`] the stack holds. A channel's outside end
 //! is a log of ticks, one per published dispatch that wrote into it, and
 //! [`Arrivals`] reads it from its own position, yielding the rows of its
 //! query those ticks assert, each once, oldest first. A row lives one

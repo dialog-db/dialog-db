@@ -466,7 +466,7 @@ impl Stack {
     }
 
     /// The channel named `name`, creating it if the stack holds none of
-    /// that name: [`control_layer`](crate::control_layer) is the
+    /// that name: [`control_layer`] is the
     /// loopback, a channel the schema declares is the one the stack built
     /// when it opened, and any other entity is a new channel, listed by
     /// [`layers`](Self::layers) from then on. Creating one asserts

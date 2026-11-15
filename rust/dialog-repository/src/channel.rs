@@ -53,6 +53,8 @@
 //! ```
 
 use std::collections::VecDeque;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::mem::take;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -187,7 +189,7 @@ impl Channel {
     /// dispatch taking it. A send after this is the next dispatch's.
     pub(crate) fn take(&self, also: Changes) -> Changes {
         let mut state = self.shared.state.lock();
-        let mut taken = std::mem::take(&mut state.sent);
+        let mut taken = take(&mut state.sent);
         taken.merge(also);
         taken
     }
@@ -197,7 +199,7 @@ impl Channel {
     pub(crate) fn restore(&self, taken: Changes) {
         let mut state = self.shared.state.lock();
         let mut sent = taken;
-        sent.merge(std::mem::take(&mut state.sent));
+        sent.merge(take(&mut state.sent));
         state.sent = sent;
     }
 
@@ -273,8 +275,8 @@ impl Channel {
     }
 }
 
-impl std::fmt::Debug for Channel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for Channel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Channel")
             .field("entity", &self.shared.entity)
             .field("sequence", &self.sequence())

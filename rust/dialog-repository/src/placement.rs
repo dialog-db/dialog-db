@@ -431,7 +431,7 @@ pub enum LayerType {
     /// `session:`, an in-memory layer: the stack mints it when it opens,
     /// and it is gone when the stack is.
     Session,
-    /// `channel:`, a channel ([`Channel`](crate::Channel)): a layer
+    /// `channel:`, a channel ([`Channel`]): a layer
     /// whose rows live one tick, with two ends. What the outside end
     /// sends is read by the next dispatch's first tick as rows of the
     /// channel; what a dispatch writes into it lands on the outside end
