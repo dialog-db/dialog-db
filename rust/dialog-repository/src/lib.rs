@@ -56,7 +56,8 @@ pub use stack::effect::{
 pub use stack::invoke::{Attempt, Invocation, InvocationReport, MAX_RERUNS};
 pub use stack::{
     Arrivals, Backup, Durable, Layer, LayerBackup, OpenStack, OpenStackEnv, QueryHash, Stack,
-    StackEnv, Subscriber, SyncEnv, SyncError, SyncStack,
+    StackBatch, StackBatchPublish, StackCommit, StackEnv, StackPublish, StackTransaction,
+    Subscriber, SyncEnv, SyncError, SyncStack,
 };
 
 /// Streaming-merge and tombstone helpers used by the query-session

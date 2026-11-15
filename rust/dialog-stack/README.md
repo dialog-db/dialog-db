@@ -243,12 +243,19 @@ written), how many ticks it ran, and the commands it landed on
 
 [`Stack::transaction`] is the same commit without the re-run, for a
 caller that handles a lost head itself: its publish fails with
-`PublishError::VersionMismatch` and lands nothing.
+`PublishError::VersionMismatch` and lands nothing. A publish that wins
+reports as an invocation does. `.commit().publish().perform(&env)`
+returns an [`InvocationReport`], and so does a staged chain's
+`batch.publish().perform(&env)` ([`StackBatch`]), naming the commands
+every link of the chain landed. An embedder that resolves a command
+against a head of its choosing, through a [`StackTransaction`], runs
+the stack's providers over it as an invoker does, with
+`report.effect().perform(&env)`.
 
 ```rust,no_run
 # use dialog_corpus::{Entity, Statement as _};
 # use dialog_stack::{Stack, StackEnv};
-# async fn example(stack: Stack, env: impl StackEnv) -> anyhow::Result<()> {
+# async fn example(stack: Stack, env: impl StackEnv + Clone + dialog_common::ConditionalSend) -> anyhow::Result<()> {
 let doc: Entity = "doc:1".parse()?;
 let tab: Entity = "session:tab".parse()?;
 // No layer named: the primary.
@@ -260,9 +267,21 @@ println!("published {:?} in {} ticks", report.revision(), report.ticks());
 
 // `.at(..)` names the layer.
 stack
-    .assert(dialog_query::the!("ui/selected").of(doc).is(true).at(tab))
+    .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true).at(tab))
     .perform(&env)
     .await?;
+
+// A transaction built by hand, with a command written into `control:`.
+let report = stack
+    .transaction()
+    .assert(dialog_query::the!("doc/title").of(doc.clone()).is("Final".to_string()))
+    .assert(dialog_query::the!("doc/index").of(doc).is(true).at(dialog_stack::control_layer()))
+    .commit()
+    .publish()
+    .perform(&env)
+    .await?;
+println!("landed {} commands", report.commands().len());
+report.effect().perform(&env).await?;
 # Ok(())
 # }
 ```

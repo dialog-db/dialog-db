@@ -14,6 +14,61 @@ says how to cut a release.
 
 ## Unreleased
 
+### A stack transaction's publish reports like an invocation, so its commands reach the stack's providers
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD).
+
+`Stack::transaction()` now returns a `StackTransaction`, the
+stack-bound counterpart of a branch `Transaction`, and its publish
+returns an `InvocationReport`, the type `Invocation::perform` returns:
+the revision the publish left the primary at, the ticks its induction
+ran, and the commands it landed on `control:`, with `effect()` to run
+the stack's providers over them. That holds for the one-step
+`.commit().publish().perform(&env)` and for a staged chain:
+`.commit().perform(&env)` returns a `StackBatch`, whose next links are
+stack transactions too, and its `publish().perform(&env)` reports the
+commands of every link. A publish that loses its compare-and-swap
+still fails with `PublishError::VersionMismatch`, lands nothing and
+reports nothing; it is not re-run. `Branch::transaction()` is
+unchanged, and its publish still returns a `Revision`.
+
+What this changes for you:
+
+- A stack transaction's publish returns an `InvocationReport`, not a
+  `Revision`: `let revision = stack.transaction()...publish().perform(&env).await?`
+  becomes `let report = ...; report.revision()`, and the same for a
+  staged chain's `batch.publish()`. This is breaking for callers that
+  read the revision.
+- `Stack::transaction()` returns `StackTransaction<&Branch>`, its
+  `commit()` a `StackCommit`, its staged batch a `StackBatch` and their
+  publishes `StackPublish` and `StackBatchPublish`. They carry the
+  methods of the branch types they wrap (`assert`, `retract`,
+  `dispatch`, `integrate`, `query`, `allow_empty`, `canonicalize`,
+  `amend`, `version`, `revision`, `induced`, `shares`, `claims`,
+  `select`); a signature that named `Transaction<&Branch>` for a stack
+  transaction names `StackTransaction<&Branch>`. Their `perform` takes
+  a `StackEnv`, as `Invocation::perform` does.
+- `report.effect().perform(&env)` after a stack transaction runs the
+  providers over its commands, as after an invocation; before, a
+  command asserted through a stack transaction landed on `control:`
+  but no report named it, so no provider answered it.
+- `dialog-stack` re-exports the five new types.
+
+Why: tonk's evaluate route and its "absent branch" transact path build
+the transaction themselves, resolved against a head they chose, and
+published it with `.commit().publish()`, which answered a `Revision`
+and nothing more, so a command asserted that way was never answered by
+a provider. Only its route through `Stack::assert(..).perform(&env)`
+got a report. A stack transaction's publish now reports what it landed
+the same way, so every route runs the providers.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: the publish writes what it wrote
+  before, and the report is computed in memory from the staged chain.
+  Nothing is rewritten on upgrade, and an older release reads what this
+  one writes.
+
 ### A stack shares one evaluation of a query among its readers, and delivers to them after a dispatch
 
 [#819](https://github.com/dialog-db/dialog-db/pull/819).

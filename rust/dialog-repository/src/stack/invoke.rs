@@ -22,7 +22,7 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_corpus::{Changes, Fact, Statement};
 use parking_lot::Mutex;
 
-use super::effect::{Effect, is_lifecycle};
+use super::effect::Effect;
 use crate::placement::take_dispatched;
 use crate::{Channel, CommitError, PublishError, QueryLayer, Revision, Stack, StackEnv};
 
@@ -351,6 +351,22 @@ impl InvocationReport {
         }
     }
 
+    /// A report of a dispatch that published: the primary left at
+    /// `revision`, `ticks` run and `commands` landed.
+    pub(crate) fn published(
+        stack: Stack,
+        revision: Revision,
+        ticks: u32,
+        commands: Vec<Fact>,
+    ) -> Self {
+        Self {
+            stack,
+            revision,
+            ticks,
+            commands,
+        }
+    }
+
     /// The head the dispatch left the primary at: the revision it
     /// published, or the unchanged head when nothing durable was written.
     pub fn revision(&self) -> &Revision {
@@ -442,24 +458,7 @@ async fn publish<Env: StackEnv>(
         transients.merge(take_dispatched(&mut changes));
         let transaction = transaction.assert(changes).dispatch(transients);
         let outcome = match Box::pin(transaction.commit().perform(env)).await {
-            Ok(batch) => {
-                let ticks = batch.ticks();
-                let commands: Vec<Fact> = batch
-                    .looped()
-                    .into_iter()
-                    .filter(|fact| !is_lifecycle(&fact.the))
-                    .collect();
-                batch
-                    .publish()
-                    .perform(env)
-                    .await
-                    .map(|revision| InvocationReport {
-                        stack: stack.clone(),
-                        revision,
-                        ticks,
-                        commands,
-                    })
-            }
+            Ok(batch) => InvocationReport::publish(stack.clone(), batch, env).await,
             Err(error) => Err(error),
         };
         match outcome {

@@ -45,7 +45,12 @@
 //! first (see [`invoke`]), and reports what it did
 //! ([`InvocationReport`](crate::InvocationReport)).
 //! [`Stack::transaction`] is the same commit without the re-run, for a
-//! caller that handles a lost head itself.
+//! caller that handles a lost head itself ([`StackTransaction`]), and
+//! its publish reports as an invocation does: the
+//! [`InvocationReport`](crate::InvocationReport) of a one-step
+//! `.commit().publish()` or of a staged chain's publish names the
+//! commands it landed, and its effect runs the stack's providers over
+//! them (see [`transaction`](crate::stack::transaction)).
 //!
 //! A **channel** ([`Channel`]) is a layer whose rows live one tick, with
 //! two ends: what its outside end sends is read by the next dispatch's
@@ -166,11 +171,13 @@ pub mod effect;
 pub mod invoke;
 pub mod subscribe;
 pub mod sync;
+pub mod transaction;
 
 pub use arrivals::Arrivals;
 pub use backup::{Backup, LayerBackup};
 pub use subscribe::{QueryHash, Subscriber};
 pub use sync::{SyncEnv, SyncError, SyncStack};
+pub use transaction::{StackBatch, StackBatchPublish, StackCommit, StackPublish, StackTransaction};
 
 use std::iter::once;
 use std::sync::Arc;
@@ -800,23 +807,6 @@ impl Stack {
         layer
     }
 
-    /// Start a transaction through the stack. Its reads see every
-    /// layer; its commit routes each write to the layer its descriptor
-    /// names (`in:`), the primary with none named, and the memory layers
-    /// take their shares once the primary's commit publishes. Once its
-    /// publish has won, the commands it dispatched (with
-    /// [`dispatch`](Transaction::dispatch), or written
-    /// `.at(control_layer())`) and the ones its rules dispatched land in
-    /// the stack's [`CONTROL`](crate::CONTROL) for one tick, as
-    /// [`Invocation::perform`](invoke::Invocation::perform) lands them,
-    /// and wake every [`Arrivals`] waiting. Unlike an invocation it is
-    /// not re-run when the head moved under it: its publish fails with
-    /// [`PublishError::VersionMismatch`](crate::PublishError::VersionMismatch)
-    /// and lands nothing, and the caller runs it again.
-    pub fn transaction(&self) -> Transaction<&Branch> {
-        self.receiving(Changes::new())
-    }
-
     /// A transaction through the stack, as [`transaction`](Self::transaction)
     /// starts one, whose first tick also reads `received`: the rows the
     /// outside ends of the stack's channels other than the loopback sent,
@@ -1070,7 +1060,7 @@ mod tests {
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
 
         let doc: Entity = "doc:1".parse()?;
-        let revision = stack
+        let report = stack
             .transaction()
             .assert(
                 dialog_query::the!("doc/title")
@@ -1090,7 +1080,7 @@ mod tests {
         branch.refresh(&operator).await?;
         assert_eq!(
             branch.revision(),
-            Some(revision),
+            Some(report.revision().clone()),
             "the primary's share published"
         );
 
@@ -5860,6 +5850,283 @@ mod tests {
         let performed = effect.perform(&operator).await?;
         assert!(!performed.remaining());
         assert_eq!(performed.invocation().ticks(), 0);
+        assert_eq!(performed.invocation().revision(), report.revision());
+        assert_eq!(revision_of(&own, &control)?, row, "control: did not move");
+        assert_eq!(own.revision(), at, "session: did not move");
+        assert_eq!(branch.revision(), head);
+        Ok(())
+    }
+
+    /// A provider of fetch commands answering each in `state`, as
+    /// `node/fetched` of the node naming the command, and counting its
+    /// runs in `runs`.
+    fn fetch_provider(state: &Entity, runs: &Arc<AtomicU32>) -> crate::Provider {
+        let (at, ran) = (state.clone(), runs.clone());
+        crate::Provider::new(&fetch_concept(), move |command| {
+            let (at, ran) = (at.clone(), ran.clone());
+            async move {
+                ran.fetch_add(1, SeqCst);
+                let node = node_of(&command)?;
+                let mut answer = Changes::new();
+                dialog_query::the!("node/fetched")
+                    .of(node)
+                    .is(command.entity().clone())
+                    .at(at)
+                    .assert(&mut answer);
+                Ok(answer)
+            }
+        })
+    }
+
+    /// A transaction the stack hands out, published in one step through
+    /// `.commit().publish()`, reports like an invocation: its revision is
+    /// the new head, its commands are exactly the one it wrote into
+    /// `control:`, its ticks are the ones an invocation of the same
+    /// writes runs, and its effect runs the registered provider, which
+    /// answers the command. Publishing ran no provider.
+    #[dialog_common::test]
+    async fn it_reports_a_stack_transaction_published_in_one_step() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        declare_lifecycle(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        let runs = Arc::new(AtomicU32::new(0));
+        stack.provide(fetch_provider(&state, &runs))?;
+        let control = crate::control_layer();
+        let node: Entity = "node:1".parse()?;
+        let doc: Entity = "doc:1".parse()?;
+        let command: Entity = "cmd:1".parse()?;
+
+        let report = stack
+            .transaction()
+            .assert(title(&doc, "kept"))
+            .assert(fetch("cmd:1", &node).at(control.clone()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            branch.revision().as_ref(),
+            Some(report.revision()),
+            "the report names the new head"
+        );
+        assert_eq!(
+            committed::<String>(&branch, &operator, "doc/title", &doc).await?,
+            vec!["String(\"kept\")".to_string()]
+        );
+        assert_eq!(cells_of(report.commands()), vec!["cmd:1 cmd.fetch/node"]);
+        assert_eq!(runs.load(SeqCst), 0, "publishing ran no provider");
+        assert!(held(&memory, "node/fetched", &node)?.is_empty());
+
+        let effect = report.effect().perform(&operator).await?;
+        assert_eq!(runs.load(SeqCst), 1);
+        assert_eq!(effect.answered(), from_ref(&command));
+        assert!(effect.failed().is_empty() && effect.unhandled().is_empty());
+        assert_eq!(
+            held(&memory, "node/fetched", &node)?,
+            vec!["Entity(cmd:1)".to_string()],
+            "the provider's answer landed"
+        );
+
+        let invoked = stack
+            .assert(title(&"doc:2".parse()?, "kept"))
+            .assert(fetch("cmd:2", &"node:2".parse()?).at(control.clone()))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            report.ticks(),
+            invoked.ticks(),
+            "the ticks the commit ran, as an invocation of the same writes counts them"
+        );
+        assert!(report.ticks() > 0);
+        Ok(())
+    }
+
+    /// A staged chain of two links through the stack, each with a
+    /// command, publishes through `batch.publish()` with one report: the
+    /// chain tip as its revision, both commands, every link's ticks,
+    /// and an effect answering both.
+    #[dialog_common::test]
+    async fn it_reports_a_staged_stack_chain_with_every_link_s_commands() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        declare_lifecycle(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        let runs = Arc::new(AtomicU32::new(0));
+        stack.provide(fetch_provider(&state, &runs))?;
+        let (first, second): (Entity, Entity) = ("node:1".parse()?, "node:2".parse()?);
+
+        let batch = stack
+            .transaction()
+            .assert(title(&"doc:1".parse()?, "one"))
+            .dispatch(fetch("cmd:1", &first))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let batch = batch
+            .assert(title(&"doc:2".parse()?, "two"))
+            .dispatch(fetch("cmd:2", &second))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let (tip, ticks) = (batch.revision(), batch.ticks());
+        let report = batch.publish().perform(&operator).await?;
+        assert_eq!(report.revision(), &tip, "the chain tip");
+        branch.refresh(&operator).await?;
+        assert_eq!(branch.revision(), Some(tip));
+        assert_eq!(
+            cells_of(report.commands()),
+            vec!["cmd:1 cmd.fetch/node", "cmd:2 cmd.fetch/node"],
+            "the commands of both links"
+        );
+        assert_eq!(report.ticks(), ticks, "every link's ticks");
+        assert_eq!(runs.load(SeqCst), 0, "publishing ran no provider");
+
+        let effect = report.effect().perform(&operator).await?;
+        assert_eq!(runs.load(SeqCst), 2);
+        let mut answered = effect.answered().to_vec();
+        answered.sort();
+        assert_eq!(
+            answered,
+            vec!["cmd:1".parse::<Entity>()?, "cmd:2".parse::<Entity>()?],
+            "both commands answered"
+        );
+        assert_eq!(
+            held(&memory, "node/fetched", &first)?,
+            vec!["Entity(cmd:1)".to_string()]
+        );
+        assert_eq!(
+            held(&memory, "node/fetched", &second)?,
+            vec!["Entity(cmd:2)".to_string()]
+        );
+        Ok(())
+    }
+
+    /// Move the head of `other`'s branch with a commit of `label`.
+    async fn move_head(other: &Branch, env: &Operator, label: &str) -> Result<()> {
+        other
+            .transaction()
+            .assert(title(&"doc:2".parse()?, label))
+            .commit()
+            .publish()
+            .perform(env)
+            .await?;
+        Ok(())
+    }
+
+    /// A stack transaction whose head moved under it, published in one
+    /// step or staged and then published, fails with `VersionMismatch`
+    /// and reports nothing: no command lands in `control:`, nothing is
+    /// written to the tree, and no provider runs, then or at the next
+    /// dispatch's effect.
+    #[dialog_common::test]
+    async fn it_reports_nothing_of_a_stack_transaction_that_lost_its_head() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let runs = Arc::new(AtomicU32::new(0));
+        stack.provide(fetch_provider(&state, &runs))?;
+        let control = crate::control_layer();
+        let mut fetches = stack
+            .arrivals(&control, fetch_query())
+            .expect("every stack has control:");
+        let other = repo.branch("main").open().perform(&operator).await?;
+        let node: Entity = "node:1".parse()?;
+        let doc: Entity = "doc:1".parse()?;
+
+        let transaction = stack
+            .transaction()
+            .assert(title(&doc, "lost"))
+            .assert(fetch("cmd:1", &node).at(control.clone()));
+        move_head(&other, &operator, "moved once").await?;
+        let refused = transaction.commit().publish().perform(&operator).await;
+        assert!(
+            matches!(
+                refused,
+                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
+            ),
+            "{refused:?}"
+        );
+
+        stack.refresh(&operator).await?;
+        let batch = stack
+            .transaction()
+            .assert(title(&doc, "lost"))
+            .dispatch(fetch("cmd:2", &node))
+            .commit()
+            .perform(&operator)
+            .await?;
+        move_head(&other, &operator, "moved twice").await?;
+        let refused = batch.publish().perform(&operator).await;
+        assert!(
+            matches!(
+                refused,
+                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
+            ),
+            "{refused:?}"
+        );
+
+        assert!(fetches.poll(&operator).await?.is_empty(), "nothing landed");
+        assert!(!waiting(&stack, &control), "nothing waits in control:");
+        branch.refresh(&operator).await?;
+        assert!(
+            committed::<String>(&branch, &operator, "doc/title", &doc)
+                .await?
+                .is_empty(),
+            "nothing was written"
+        );
+        let next = stack
+            .assert(title(&"doc:3".parse()?, "next"))
+            .perform(&operator)
+            .await?;
+        assert!(next.commands().is_empty(), "no lost command lingers");
+        next.effect().perform(&operator).await?;
+        assert_eq!(runs.load(SeqCst), 0, "no provider ran");
+        Ok(())
+    }
+
+    /// A stack transaction that dispatched no command reports none: its
+    /// effect is empty, and performing it runs no dispatch, so
+    /// `control:`'s revision row and `session:`'s revision are unchanged.
+    #[dialog_common::test]
+    async fn it_reports_no_command_of_a_stack_transaction_that_dispatched_none() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let control = crate::control_layer();
+        let own = ephemeral(&stack, &session_layer())
+            .expect("session:")
+            .clone();
+
+        let report = stack
+            .transaction()
+            .assert(title(&"doc:1".parse()?, "x"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert!(report.commands().is_empty());
+        let effect = report.effect();
+        assert!(effect.is_empty());
+        let (row, at, head) = (
+            revision_of(&own, &control)?,
+            own.revision(),
+            branch.revision(),
+        );
+
+        let performed = effect.perform(&operator).await?;
+        assert!(!performed.remaining());
+        assert_eq!(performed.invocation().ticks(), 0, "no dispatch ran");
         assert_eq!(performed.invocation().revision(), report.revision());
         assert_eq!(revision_of(&own, &control)?, row, "control: did not move");
         assert_eq!(own.revision(), at, "session: did not move");
