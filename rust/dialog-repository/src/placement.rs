@@ -398,13 +398,14 @@ pub(crate) fn durable_branch(layer: &Entity) -> Result<String, CommitError> {
 
 /// Read a layer declaration's value as a store, or fail the commit.
 fn store_value(layer: &Entity, value: &Value) -> Result<Store, CommitError> {
-    match value {
-        Value::String(text) if let Some(store) = Store::parse(text) => Ok(store),
-        other => Err(CommitError::InvalidPlacement {
-            attribute: format!("dialog.layer/store of {layer}"),
-            value: format!("{other:?}"),
-        }),
-    }
+    let store = match value {
+        Value::String(text) => Store::parse(text),
+        _ => None,
+    };
+    store.ok_or_else(|| CommitError::InvalidPlacement {
+        attribute: format!("dialog.layer/store of {layer}"),
+        value: format!("{value:?}"),
+    })
 }
 
 /// The layers declared for a session: the primary's committed
