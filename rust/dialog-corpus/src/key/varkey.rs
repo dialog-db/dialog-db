@@ -190,12 +190,12 @@ impl KeyParts {
             // to escape.
             let mut payload = Vec::with_capacity(if upper { MAX_FILLER + 1 } else { 1 });
             if upper {
-                // The maximum type is the number band, and its largest
-                // number, positive infinity, is a one-byte payload that
-                // parses and sorts with or above every real value in it.
-                // (`set_value_*` replaces it with a real payload; this is
-                // only the unset bound.)
-                dialog_number::encode_f64(f64::INFINITY, &mut payload);
+                // The maximum type is the composite, keyed as a terminated
+                // string, and the filler sorts above every composite's
+                // escaped bytes, as it does above every entity and
+                // attribute. (`set_value_*` replaces it with a real payload;
+                // this is only the unset bound.)
+                encode_bytes(&filler(), &mut payload);
                 (ValueDataType::max(), ValuePayload::Inline(payload))
             } else {
                 // The minimum value type is a terminated-string type, whose
@@ -424,7 +424,9 @@ fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
     // An unknown discriminant is corruption: reject the key rather than
     // guessing a width (`ValueDataType::from` would silently default to
     // Bytes and misparse the tail).
-    if type_byte > u8::from(ValueDataType::Number) {
+    if type_byte > u8::from(ValueDataType::Number)
+        && type_byte != u8::from(ValueDataType::Composite)
+    {
         return None;
     }
     match ValueDataType::from(type_byte) {
@@ -443,9 +445,10 @@ fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
         | ValueDataType::Bytes
         | ValueDataType::Record
         | ValueDataType::Entity
-        | ValueDataType::Symbol => terminated_len(bytes, at),
-        // `number:` and the sized number types type slots, not keys: their
-        // bytes are rejected above.
+        | ValueDataType::Symbol
+        | ValueDataType::Composite => terminated_len(bytes, at),
+        // The sized number types type slots, not keys: their bytes are
+        // rejected above.
         _ => None,
     }
 }

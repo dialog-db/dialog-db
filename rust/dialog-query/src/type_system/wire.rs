@@ -46,7 +46,7 @@ use super::{ConceptRef, NameShape, Primitive, Refinement, Type};
 /// denotes. `option` has no `ValueType`: it is the synthetic absence
 /// atom, and a set containing it alongside others marks the variable
 /// optional.
-const VARIANTS: [(&str, Option<ValueType>); 10] = [
+const VARIANTS: [(&str, Option<ValueType>); 11] = [
     ("bytes", Some(ValueType::Bytes)),
     ("entity", Some(ValueType::Entity)),
     ("boolean", Some(ValueType::Boolean)),
@@ -55,6 +55,7 @@ const VARIANTS: [(&str, Option<ValueType>); 10] = [
     ("int", Some(ValueType::SignedInt)),
     ("float", Some(ValueType::Float)),
     ("record", Some(ValueType::Record)),
+    ("composite", Some(ValueType::Composite)),
     ("symbol", Some(ValueType::Symbol)),
     ("option", None),
 ];

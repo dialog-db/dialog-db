@@ -445,6 +445,15 @@ fn render_value(value: &Value) -> String {
         Value::Float(number) => format!("{number:?}"),
         Value::Bytes(bytes) => hex(bytes),
         Value::Record(bytes) => format!("record:{}", hex(bytes)),
+        Value::Composite(composite) => format!(
+            "{{{}}}",
+            composite
+                .fields()
+                .iter()
+                .map(|(attribute, value)| format!("{attribute} {}", render_value(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

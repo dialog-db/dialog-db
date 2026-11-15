@@ -1947,6 +1947,98 @@ mod spill_cache_tests {
         Ok(())
     }
 
+    /// Composite values go into a tree and come out whole, by attribute,
+    /// by entity and by value, a composite past the inline threshold
+    /// through its spilled block, and a composite nesting another as it
+    /// was written.
+    #[dialog_common::test]
+    async fn it_stores_and_finds_composite_values() -> anyhow::Result<()> {
+        use crate::{Composite, Selector};
+        use futures_util::TryStreamExt as _;
+
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        let at = |lat: f64| -> anyhow::Result<Value> {
+            Ok(Value::Composite(Composite::new([
+                ("geo/lat".parse()?, Value::Float(lat)),
+                ("geo/lon".parse()?, Value::Float(-122.42)),
+            ])?))
+        };
+        let big = Value::Composite(Composite::new([
+            ("doc/body".parse()?, Value::String("x".repeat(inline_n + 1))),
+            ("doc/tag".parse()?, Value::String("a".into())),
+            ("doc/tag".parse()?, Value::String("b".into())),
+        ])?);
+        let nested = Value::Composite(Composite::new([
+            ("place/name".parse()?, Value::String("home".into())),
+            ("place/at".parse()?, at(37.77)?),
+        ])?);
+        let facts: Vec<Fact> = [at(1.0)?, at(2.5)?, big.clone(), nested.clone()]
+            .into_iter()
+            .enumerate()
+            .map(|(index, is)| Fact {
+                the: "x/where".parse().unwrap(),
+                of: format!("x:{index}").parse().unwrap(),
+                is,
+                cause: None,
+            })
+            .collect();
+        let store = CountingBlocks::new();
+        let mut delta = ArchiveDelta::zero();
+        let mut tree = Corpus::empty_in(test_catalog());
+        tree.apply(
+            &store,
+            &mut delta,
+            stream::iter(
+                facts
+                    .iter()
+                    .cloned()
+                    .map(|fact| Instruction::Assert(fact, crate::Pick::All)),
+            ),
+        )
+        .await?;
+        store.flush(&mut delta);
+
+        let read = |selector: Selector<crate::selector::Constrained>| {
+            let tree = Corpus::at(test_catalog(), tree.root().clone());
+            let store = store.clone();
+            async move {
+                let mut values: Vec<Value> = tree
+                    .scan_owned(store, spill_cache(), selector)
+                    .map_ok(|fact| fact.is)
+                    .try_collect()
+                    .await?;
+                values.sort_by_key(|value| value.to_bytes());
+                anyhow::Ok(values)
+            }
+        };
+        let mut expected: Vec<Value> = facts.iter().map(|fact| fact.is.clone()).collect();
+        expected.sort_by_key(|value| value.to_bytes());
+
+        assert_eq!(
+            read(Selector::new().the("x/where".parse()?)).await?,
+            expected,
+            "every composite, by attribute"
+        );
+        for fact in &facts {
+            assert_eq!(
+                read(Selector::new().of(fact.of.clone())).await?,
+                vec![fact.is.clone()],
+                "a composite by its entity"
+            );
+            assert_eq!(
+                read(Selector::new().is(fact.is.clone())).await?,
+                vec![fact.is.clone()],
+                "a composite by its value"
+            );
+        }
+        let Value::Composite(read_back) = &read(Selector::new().of("x:3".parse()?)).await?[0]
+        else {
+            panic!("a composite reads back as one");
+        };
+        assert_eq!(read_back.get(&"place/at".parse()?), vec![at(37.77)?]);
+        Ok(())
+    }
+
     /// The spill cache is bounded by TOTAL BYTES: inserting past the budget
     /// evicts the oldest blocks, and a block larger than the whole budget is
     /// served uncached rather than pinning it.

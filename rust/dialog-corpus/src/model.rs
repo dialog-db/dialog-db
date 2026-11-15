@@ -38,6 +38,9 @@ pub use symbol::*;
 mod value;
 pub use value::*;
 
+mod composite;
+pub use composite::*;
+
 mod ordkey;
 pub use ordkey::*;
 
