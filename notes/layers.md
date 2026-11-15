@@ -283,6 +283,111 @@ page subscribes to); the two vocabularies selected by origin
 space's and the profile's holds the profile's). What stays: the
 `Provider<C>` impls, which are the effects.
 
+## Decisions of 2026-11-15, after tonk moved onto the stack
+
+Made by the maintainer on reading what the stack built (#795 to #810) and
+what tonk's move onto it (tonk-labs/tonk#1318) found. They supersede the
+Order's descriptions where they differ.
+
+1. **The thing is a `Stack`**, not a `Session`: `branch.stack()`, a stack
+   of layers. `schema::Session` (`db:session`) already names something
+   else. A separate crate later, once the model below is built; the
+   rename now.
+2. **Every stack has three implied layers**, `memory:` (the primary),
+   `session:` (its own, process-local) and `control:` (the channel it
+   invokes through); `layers()` lists all three. A plain branch has no
+   others. A layer's revision row exists from the moment the stack opens.
+3. **Layer facts.** `dialog.layer/store` goes. A layer is described by
+   `dialog.layer/type` with a bare-scheme entity as the value, and a
+   branch layer names its branch entity, the same entity the meta
+   branch derives from `(replica, name)`:
+
+   ```
+   ; implied, written into session: when the stack opens
+   control:   dialog.layer/type    channel:
+   session:   dialog.layer/type    session:
+   memory:    dialog.layer/type    branch:
+   memory:    dialog.layer/branch  <branch entity of the primary>
+
+   ; declared, stored in the primary's tree
+   session:tab    dialog.layer/type    session:
+   memory:notes   dialog.layer/type    branch:
+   memory:notes   dialog.layer/branch  <branch entity of notes>
+   ```
+
+   Everything about a branch is the branch entity's own meta facts,
+   reused verbatim: `dialog.branch/revision` (the revision entity,
+   `Revision::entity()`), `dialog.branch/tree`, `dialog.branch/pull`
+   and `dialog.branch/push` (branch entities, cardinality-many, whose
+   replica's `dialog.replica/peer` and `dialog.peer/address` say where).
+   That is what `sync` reads to know where each layer pulls from and
+   pushes to. Revisions are the existing revision entity, never base58
+   text and never a new `revision:` scheme; a tree is the `node:` entity
+   when that lands (tonk-tree component independence branch). A memory
+   layer's revision row keeps the chain hash as text until an entity
+   form is chosen.
+4. **A durable layer has no head of its own.** `memory:notes` is at the
+   tree the primary's `dialog.branch/revision` fact for its branch
+   entity names, full stop. A dispatch writes the layer's new tree
+   through the snapshot API and names it in the same primary commit; a
+   failed primary commit leaves an orphan tree block and moves nothing.
+   A pull of the primary downloads the pointed trees' intersecting
+   ranges before advancing the primary's head (the offline guarantee,
+   applied to the pointed trees). The stack's `session:` carries no
+   revision row for a durable layer: the primary's fact is the record.
+   `sync` takes one `Download` and covers the primary and its pointed
+   trees. **Gap to close:** when the local layer and a pulled primary
+   name different trees, `last` would pick one arbitrarily; the pull
+   must replay our changes (the diff from the tree we started at to
+   ours) onto their tree, write the merged tree, and point at it, as a
+   branch pull rebases commits.
+5. **A channel is a layer**: an ephemeral layer whose rows live one tick,
+   so a simpler `Ephemeral`. `control:` is the built-in one; the stack
+   creates others (`stack.channel("mail:box")`, asserting
+   `mail:box dialog.layer/type channel:` into `session:`). What one end
+   asserts lands on the other end's layer for one tick, commands and
+   facts alike; not a Rust channel, a layer with a transport.
+6. **Writes re-run on a moved head**: `stack.transact(|tx| ..)` takes a
+   closure, re-run from the new head when the compare-and-swap is lost,
+   so an embedder's reads inside it are repeated; `stack.invoke(command)`
+   the same. The word is *invoke*; nothing is "dispatched" in the API.
+7. **Effects are explicit steps.** `invoke(..).perform(&env)` returns an
+   `InvocationReport`: the revision published, the ticks run, the
+   commands that landed in `control:`. `report.effect().perform(&env)`
+   runs the stack's registered providers (`stack.provide(p)`, a function
+   from landed rows to answer statements, the shape tonk's
+   `run_commands` consumes) over those commands and returns the answers'
+   report; the report says whether commands remain, so the embedder
+   drives the chain (tonk under `waitUntil`). Lifecycle events
+   (`invoked`, `answered`, `failed`, `unhandled`, a provider's progress)
+   land in `control:` as rows of the command's entity for one tick;
+   rules copy what they want into `session:`. A failed provider answers
+   with a failure command of the same entity. Registering a provider
+   writes `session: dialog.provider/command <concept>` per command it
+   serves: local discovery.
+8. **`stack.backup()`** returns the embedder's rows of every `session:`
+   layer (the implied one and the declared `session:*`) with the
+   revision they were taken at; `branch.stack().restore(backup)`
+   replays them and the stack recomputes its own rows. Dialog's
+   bookkeeping lives apart from `Branch::overlay()` (a second store read
+   as `session:`), so an embedder's export, clear or retain never meets
+   it. `stack.layer("session:")` hands out the session layer; layers are
+   created like channels; `Layer` has variants (ephemeral, durable,
+   channel).
+9. **Toolchain.** Tonk pins a February 2026 stable; dialog's CI runs a
+   newer one. Dialog declares no `rust-version`, so a construct stable
+   only in the newer compiler reached tonk unchecked (an `if let` guard,
+   fixed in rc.4). Decide: `rust-version` at tonk's toolchain, or move
+   tonk's overlay forward.
+
+Order of the rework, each a PR stacked on #810 and pinned by tests:
+(a) the `Stack` rename, `dialog.layer/type`, branch entities, revision
+entities, `control:` in `layers()`, rows at open; (b) durable layers as
+pointed trees, with the merge on pull; (c) channels as a layer type and
+`stack.channel`; (d) `transact(|tx|)`, `InvocationReport`, `provide`,
+`effect`, lifecycle events, discovery facts; (e) `backup`/`restore` and
+the bookkeeping split.
+
 ## Open
 
 - Channels as layers, named by address. The maintainer's proposal,
