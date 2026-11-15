@@ -23,6 +23,7 @@ use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::session::{Composite, shared_metadata};
 use crate::repository::source::{Live, Source, View};
 use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
+use crate::session::Loopback;
 use crate::{Branch, CommitError, Ephemeral, PublishError, RemoteSite, Revision, Snapshot, Staged};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -97,13 +98,17 @@ pub struct Transaction<L: Line> {
 
 /// What a transaction through a [`Session`](crate::Session) carries: the
 /// composite its reads and its induction see, the memory layers that
-/// take their shares once the commit publishes, and the durable layers
-/// that commit theirs on their branches.
+/// take their shares once the commit publishes, the durable layers
+/// that commit theirs on their branches, and the loopback the publish
+/// lands the transaction's commands in.
 #[derive(Clone)]
 pub(crate) struct SessionContext {
     pub(crate) composite: Composite,
     pub(crate) memories: Vec<(Entity, Ephemeral)>,
     pub(crate) durables: Vec<DurableLayer>,
+    /// The session's loopback, where the publish lands the commands the
+    /// transaction dispatched.
+    pub(crate) loopback: Loopback,
 }
 
 /// A durable layer of a session as one dispatch reads and writes it: the

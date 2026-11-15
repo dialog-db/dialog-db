@@ -118,7 +118,7 @@ use std::sync::Arc;
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::tree::CorpusNode;
-use dialog_corpus::{Changes, Entity, Statement};
+use dialog_corpus::{Change, Changes, Entity, Statement, Update as _};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -139,20 +139,20 @@ use crate::repository::branch::transaction::{DurableLayer, SessionContext};
 use crate::repository::source::Source;
 use crate::{Branch, CommitError, Ephemeral, QueryLayer, RemoteSite, Transaction};
 
-/// What a session needs of its environment: a read of the primary, to
-/// resolve the layers its schema declares when it opens, and what a
-/// transaction's commit needs, to publish through it.
-pub trait SessionEnv:
+/// What opening a session and reading through it need of the
+/// environment: a read of the primary, to resolve the layers its schema
+/// declares, the open of each durable layer's branch, and what a query
+/// through the session reads with. Nothing in it commits or publishes:
+/// an environment that can open branches and query them opens a session
+/// beside them ([`OpenSession::perform`]), and reads what arrives in its
+/// layers ([`Arrivals`]). Dispatching through the session needs
+/// [`SessionEnv`].
+pub trait OpenSessionEnv:
     Provider<BlobRead>
     + Provider<Get>
     + Provider<Put>
     + Provider<Resolve>
     + Provider<Identify>
-    + Provider<Attest>
-    + Provider<Publish>
-    + Provider<Import>
-    + Provider<BlobImport>
-    + Provider<BlobSize>
     + Provider<ArchiveLoad>
     + Provider<nodes::Read<CorpusNode>>
     + Provider<nodes::Preload<CorpusNode>>
@@ -167,17 +167,12 @@ pub trait SessionEnv:
 {
 }
 
-impl<T> SessionEnv for T where
+impl<T> OpenSessionEnv for T where
     T: Provider<BlobRead>
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Identify>
-        + Provider<Attest>
-        + Provider<Publish>
-        + Provider<Import>
-        + Provider<BlobImport>
-        + Provider<BlobSize>
         + Provider<ArchiveLoad>
         + Provider<nodes::Read<CorpusNode>>
         + Provider<nodes::Preload<CorpusNode>>
@@ -189,6 +184,29 @@ impl<T> SessionEnv for T where
         + Holds
         + ConditionalSync
         + 'static
+{
+}
+
+/// What a session needs of its environment to dispatch through it: what
+/// opening it and reading through it need ([`OpenSessionEnv`]), and what
+/// a transaction's commit needs, to publish through it.
+pub trait SessionEnv:
+    OpenSessionEnv
+    + Provider<Attest>
+    + Provider<Publish>
+    + Provider<Import>
+    + Provider<BlobImport>
+    + Provider<BlobSize>
+{
+}
+
+impl<T> SessionEnv for T where
+    T: OpenSessionEnv
+        + Provider<Attest>
+        + Provider<Publish>
+        + Provider<Import>
+        + Provider<BlobImport>
+        + Provider<BlobSize>
 {
 }
 
@@ -209,8 +227,10 @@ impl OpenSession {
     }
 
     /// Read the primary's schema at its head and build every layer it
-    /// declares.
-    pub async fn perform<Env: SessionEnv>(self, env: &Env) -> Result<Session, CommitError> {
+    /// declares. Opening reads and opens branches, and commits nothing,
+    /// so it needs no more of `env` than a read does
+    /// ([`OpenSessionEnv`]).
+    pub async fn perform<Env: OpenSessionEnv>(self, env: &Env) -> Result<Session, CommitError> {
         let primary = Source::from(self.primary.clone());
         let layers = Layers::resolve(&primary, &self.declared, env).await?;
         // The primary, the session's own layer and the loopback are
@@ -246,8 +266,7 @@ impl OpenSession {
                 layers: memories,
                 durables,
                 declared: RwLock::new(self.declared),
-                control: Ephemeral::new(),
-                landed: Notify::new(),
+                loopback: Loopback::default(),
             }),
         })
     }
@@ -267,14 +286,46 @@ struct Inner {
     durables: Vec<(Entity, Branch)>,
     declared: RwLock<Changes>,
     /// The loopback, [`CONTROL`](crate::CONTROL), as the session holds
-    /// it between dispatches: empty, but for the one instant each
-    /// published dispatch's commands stand in it, so its instants are
-    /// every command, in order, once. A dispatch's own ticks read their
-    /// commands as rows of `control:` without it.
+    /// it between dispatches, and what wakes a reader of it.
+    loopback: Loopback,
+}
+
+/// The session's loopback, [`CONTROL`](crate::CONTROL), as it holds it
+/// between dispatches: empty, but for the one instant each published
+/// dispatch's commands stand in it, so its instants are every command,
+/// in order, once. A dispatch's own ticks read their commands as rows of
+/// `control:` without it. Every transaction through the session carries
+/// it, so the publish that lands the dispatch lands its commands here,
+/// whichever way the transaction was driven. Cheap to clone: clones
+/// share the layer and the waiters.
+#[derive(Clone, Default)]
+pub(crate) struct Loopback {
     control: Ephemeral,
     /// Woken once each dispatch through the session has published and
     /// landed its commands: what [`Arrivals::next`] waits on.
-    landed: Notify,
+    landed: Arc<Notify>,
+}
+
+impl Loopback {
+    /// Land a published dispatch's `commands` for one tick: asserted as
+    /// one instant, gone in the next, so a reader of the layer's
+    /// instants sees each once and nothing of them stays. A retraction
+    /// among them dispatched nothing to read and lands nothing. Wakes
+    /// every [`Arrivals`] waiting for the next dispatch.
+    pub(crate) fn land(&self, commands: &Changes) -> Result<(), CommitError> {
+        let mut asserted = Changes::new();
+        for (of, the, change) in commands.iter() {
+            if let Change::Assert(is, pick) = change {
+                asserted.associate(the.clone(), of.clone(), is.clone(), pick.clone());
+            }
+        }
+        if !asserted.is_empty() {
+            self.control.apply(asserted)?;
+            self.control.clear();
+        }
+        self.landed.notify_waiters();
+        Ok(())
+    }
 }
 
 /// The primary branch and the layers its schema declares, read and
@@ -315,7 +366,7 @@ impl Session {
             return Some(self.inner.primary.overlay());
         }
         if *name == control_layer() {
-            return Some(&self.inner.control);
+            return Some(&self.inner.loopback.control);
         }
         self.inner
             .layers
@@ -445,7 +496,16 @@ impl Session {
     /// Start a transaction through the session. Its reads see every
     /// layer; its commit routes each write to the layer its descriptor
     /// names (`in:`), the primary with none named, and the memory layers
-    /// take their shares once the primary's commit publishes.
+    /// take their shares once the primary's commit publishes. Once its
+    /// publish has won, the commands it dispatched (with
+    /// [`dispatch`](Transaction::dispatch), or written
+    /// `.at(control_layer())`) and the ones its rules dispatched land in
+    /// the session's [`CONTROL`](crate::CONTROL) for one tick, as
+    /// [`Invocation::perform`](invoke::Invocation::perform) lands them,
+    /// and wake every [`Arrivals`] waiting. Unlike an invocation it is
+    /// not re-run when the head moved under it: its publish fails with
+    /// [`PublishError::VersionMismatch`](crate::PublishError::VersionMismatch)
+    /// and lands nothing, and the caller runs it again.
     pub fn transaction(&self) -> Transaction<&Branch> {
         let transaction = self.inner.primary.transaction();
         let primary = transaction.view().to_source();
@@ -459,6 +519,7 @@ impl Session {
             composite: self.composite(primary, &durables),
             memories: self.inner.layers.clone(),
             durables,
+            loopback: self.inner.loopback.clone(),
         })
     }
 }
@@ -3354,6 +3415,352 @@ mod tests {
                 "String(\"primary\") in memory:".to_string(),
             ]
         );
+        Ok(())
+    }
+
+    /// `cmd.fetch/priority` of the fetch `command`: a second attribute of
+    /// the command's entity, so a command reads as more than one concept.
+    fn priority(command: &str, level: u32) -> impl Statement + use<> {
+        dialog_query::the!("cmd.fetch/priority")
+            .of(command.parse::<Entity>().expect("entity"))
+            .is(level)
+    }
+
+    /// `doc/title` of `doc` as `text`, in the primary.
+    fn title(doc: &Entity, text: &str) -> impl Statement + use<> {
+        dialog_query::the!("doc/title")
+            .of(doc.clone())
+            .is(text.to_string())
+    }
+
+    /// Every row of `layer`, with every term a variable but `in`.
+    fn whole(layer: &Entity) -> AttributeQuery {
+        AttributeQuery::new(
+            Term::var("the"),
+            Term::var("of"),
+            Term::var("is"),
+            Term::blank(),
+            None,
+        )
+        .with_layer(Term::from(layer.clone()))
+    }
+
+    /// The rows of `claims` as `of the`, sorted.
+    fn cells(claims: &[dialog_query::Claim]) -> Vec<String> {
+        let mut cells: Vec<String> = claims
+            .iter()
+            .map(|claim| format!("{} {}", claim.of, claim.the))
+            .collect();
+        cells.sort();
+        cells
+    }
+
+    /// A transaction the session hands out, committed and published
+    /// through the transaction API rather than invoked, lands the
+    /// commands it dispatched in `control:` once its publish has won: a
+    /// write `.at(control_layer())` published in one step, and a
+    /// `dispatch` of a staged chain published after. Each is read once,
+    /// as a row of `control:`, nothing stays there, and the durable
+    /// write beside the first is in the tree.
+    #[dialog_common::test]
+    async fn it_lands_the_commands_of_a_transaction_published_through_the_session() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let control = crate::control_layer();
+        let mut fetches = session
+            .arrivals(&control, fetch_query())
+            .expect("every session has control:");
+        let node: Entity = "node:1".parse()?;
+        let doc: Entity = "doc:1".parse()?;
+
+        session
+            .transaction()
+            .assert(fetch("cmd:1", &node).at(control.clone()))
+            .assert(title(&doc, "kept"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let commands = fetches.poll(&operator).await?;
+        assert_eq!(subjects(&commands), vec!["cmd:1".to_string()]);
+        assert_eq!(commands[0].layer(), Some(&control), "a row of control:");
+        assert!(fetches.poll(&operator).await?.is_empty(), "read once");
+        assert!(
+            session.layer(&control).expect("control:").is_empty(),
+            "nothing stays in control:"
+        );
+        assert_eq!(
+            committed::<String>(&branch, &operator, "doc/title", &doc).await?,
+            vec!["String(\"kept\")".to_string()],
+            "the durable write is in the tree"
+        );
+
+        let batch = session
+            .transaction()
+            .dispatch(fetch("cmd:2", &node))
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert!(
+            fetches.poll(&operator).await?.is_empty(),
+            "a staged chain lands nothing before it publishes"
+        );
+        batch.publish().perform(&operator).await?;
+        assert_eq!(
+            subjects(&fetches.poll(&operator).await?),
+            vec!["cmd:2".to_string()]
+        );
+        assert!(fetches.poll(&operator).await?.is_empty(), "read once");
+        Ok(())
+    }
+
+    /// A transaction through the session whose head moved under it is
+    /// refused at commit with `VersionMismatch`, and lands nothing: no
+    /// command in `control:`, and no durable write in the tree.
+    #[dialog_common::test]
+    async fn it_lands_nothing_of_a_session_transaction_that_lost_its_head() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let control = crate::control_layer();
+        let mut fetches = session
+            .arrivals(&control, fetch_query())
+            .expect("every session has control:");
+        let node: Entity = "node:1".parse()?;
+        let doc: Entity = "doc:1".parse()?;
+
+        let transaction = session
+            .transaction()
+            .assert(fetch("cmd:1", &node).at(control.clone()))
+            .assert(title(&doc, "lost"));
+        branch
+            .transaction()
+            .assert(title(&"doc:2".parse()?, "moved"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let refused = transaction.commit().publish().perform(&operator).await;
+        assert!(
+            matches!(
+                refused,
+                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
+            ),
+            "{refused:?}"
+        );
+        assert!(fetches.poll(&operator).await?.is_empty(), "nothing landed");
+        assert!(session.layer(&control).expect("control:").is_empty());
+        assert!(
+            committed::<String>(&branch, &operator, "doc/title", &doc)
+                .await?
+                .is_empty(),
+            "nothing was written"
+        );
+        Ok(())
+    }
+
+    /// A scan with `in: control:` constant and every other term a
+    /// variable reads the tick's commands and nothing else: within the
+    /// transaction, every row of each command dispatched, and none of the
+    /// durable write or the write into a memory layer beside them; once
+    /// it has published, the same rows as they arrive in `control:`.
+    #[dialog_common::test]
+    async fn it_scans_the_whole_of_control() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let control = crate::control_layer();
+        let mut arrivals = session
+            .arrivals(&control, whole(&control))
+            .expect("every session has control:");
+        let node: Entity = "node:1".parse()?;
+        let doc: Entity = "doc:1".parse()?;
+        let expected = vec![
+            "cmd:1 cmd.fetch/node".to_string(),
+            "cmd:1 cmd.fetch/priority".to_string(),
+        ];
+
+        let transaction = session
+            .transaction()
+            .dispatch(fetch("cmd:1", &node))
+            .assert(priority("cmd:1", 2).at(control.clone()))
+            .assert(title(&doc, "kept"))
+            .assert(flag(&doc, true, &state));
+        let during: Vec<dialog_query::Claim> = transaction
+            .query()
+            .select(whole(&control))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(cells(&during), expected, "the tick's commands alone");
+        assert!(during.iter().all(|claim| claim.layer() == Some(&control)));
+        transaction.commit().publish().perform(&operator).await?;
+
+        let arrived = arrivals.poll(&operator).await?;
+        assert_eq!(cells(&arrived), expected, "what arrived in control:");
+        assert!(arrivals.poll(&operator).await?.is_empty(), "read once");
+        Ok(())
+    }
+
+    /// A reader of the rows arriving in `control:`, with no query, yields
+    /// every fact each published dispatch's commands assert, each once,
+    /// oldest first: a command of one attribute, then one of two, then
+    /// nothing.
+    #[dialog_common::test]
+    async fn it_reads_the_rows_arriving_in_control() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let control = crate::control_layer();
+        let mut rows = session
+            .arrivals_rows(&control)
+            .expect("every session has control:");
+        let node: Entity = "node:1".parse()?;
+        let text = |facts: Vec<dialog_corpus::Fact>| -> Vec<String> {
+            facts
+                .into_iter()
+                .map(|fact| format!("{} {} {:?}", fact.of, fact.the, fact.is))
+                .collect()
+        };
+        assert!(rows.rows().is_empty(), "nothing dispatched yet");
+
+        session
+            .invoke(fetch("cmd:1", &node))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            text(rows.rows()),
+            vec!["cmd:1 cmd.fetch/node Entity(node:1)".to_string()]
+        );
+
+        session
+            .invoke(fetch("cmd:2", &node))
+            .dispatch(priority("cmd:2", 3))
+            .perform(&operator)
+            .await?;
+        let mut second = text(rows.rows());
+        second.sort();
+        assert_eq!(
+            second,
+            vec![
+                "cmd:2 cmd.fetch/node Entity(node:1)".to_string(),
+                "cmd:2 cmd.fetch/priority UnsignedInt(3)".to_string(),
+            ]
+        );
+        assert!(rows.rows().is_empty(), "each row once");
+        Ok(())
+    }
+
+    /// An environment that provides what opening a session and reading
+    /// through it need, and nothing that commits: no `Publish`, `Attest`,
+    /// `Import`, `BlobImport` or `BlobSize`. Each command it provides is
+    /// performed on the peer it wraps.
+    struct ReadOnly(Operator);
+
+    macro_rules! reads {
+        ($($command:ty),* $(,)?) => {
+            $(
+                impl Provider<$command> for ReadOnly {
+                    fn execute(
+                        &self,
+                        input: <$command as dialog_capability::Command>::Input,
+                    ) -> dialog_capability::Resume<'_, <$command as dialog_capability::Command>::Output>
+                    {
+                        <Operator as Provider<$command>>::execute(&self.0, input)
+                    }
+                }
+            )*
+        };
+    }
+
+    reads!(
+        BlobRead,
+        Get,
+        Put,
+        Resolve,
+        Identify,
+        ArchiveLoad,
+        nodes::Read<CorpusNode>,
+        nodes::Preload<CorpusNode>,
+        nodes::Write<CorpusNode>,
+        BlobLoad,
+        dialog_corpus::Preload,
+        dialog_corpus::Speculation,
+        Fork<RemoteSite, Resolve>,
+    );
+
+    impl Holds for ReadOnly {
+        fn held(&self, key: &str) -> Option<dialog_common::Held> {
+            self.0.held(key)
+        }
+
+        fn hold(&self, key: String, handle: dialog_common::Held) {
+            self.0.hold(key, handle)
+        }
+
+        fn held_or(
+            &self,
+            key: &str,
+            make: &dyn Fn() -> dialog_common::Held,
+        ) -> dialog_common::Held {
+            self.0.held_or(key, make)
+        }
+    }
+
+    /// A session opens through an environment that can only read: one
+    /// that opens branches and queries them, and provides nothing a
+    /// commit needs. It builds the memory layer and opens the durable
+    /// layer the primary declares, and reads the primary and what
+    /// arrives in `control:` through the same environment.
+    #[dialog_common::test]
+    async fn it_opens_a_session_through_an_environment_that_only_reads() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        let notes = declare_notes(&branch, &operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .assert(title(&doc, "kept"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let reader = ReadOnly(operator.clone());
+
+        let session = branch.session().perform(&reader).await?;
+        assert_eq!(
+            session.layers(),
+            vec![session_layer(), state, notes.clone()]
+        );
+        assert!(
+            session.durable(&notes).is_some(),
+            "the durable layer opened"
+        );
+        let titles: Vec<dialog_query::Claim> = session
+            .query()
+            .select(AttributeQuery::from(
+                Term::<QueryRelation>::from(QueryRelation::from(
+                    "doc/title".parse::<dialog_corpus::Relation>()?,
+                ))
+                .of(Term::<Entity>::from(doc.clone()))
+                .is(Term::<String>::var("v")),
+            ))
+            .perform(&reader)
+            .try_vec()
+            .await?;
+        assert_eq!(subjects(&titles), vec!["doc:1".to_string()]);
+        let mut fetches = session
+            .arrivals(&crate::control_layer(), fetch_query())
+            .expect("every session has control:");
+        assert!(fetches.poll(&reader).await?.is_empty());
         Ok(())
     }
 }

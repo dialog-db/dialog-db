@@ -680,18 +680,23 @@ impl TryFrom<&AttributeQueryAll> for Selector<Constrained> {
             }
         }
 
-        let selector = selector.ok_or_else(|| EvaluationError::EmptySelector {
-            message: "At least one field must be constrained".to_string(),
-        })?;
-        Ok(match &from.layer {
-            Term::Constant(layer) => {
+        // A constant layer constrains the scan too: with every other term
+        // a variable, the scan reads the whole layer.
+        match (&from.layer, selector) {
+            (Term::Constant(layer), selector) => {
                 let layer = Entity::try_from(layer.clone()).map_err(|_| {
                     EvaluationError::Store("Could not convert value to Entity".to_string())
                 })?;
-                selector.in_layer(layer)
+                Ok(match selector {
+                    Some(selector) => selector.in_layer(layer),
+                    None => Selector::new().only_in(layer),
+                })
             }
-            Term::Variable { .. } => selector,
-        })
+            (Term::Variable { .. }, Some(selector)) => Ok(selector),
+            (Term::Variable { .. }, None) => Err(EvaluationError::EmptySelector {
+                message: "At least one field, or the layer, must be constrained".to_string(),
+            }),
+        }
     }
 }
 
@@ -1520,6 +1525,80 @@ mod tests {
         assert_eq!(results[0].of(), &alice);
         assert_eq!(results[0].is(), &Value::String("Alice".to_string()));
 
+        Ok(())
+    }
+
+    /// A constant layer constrains a scan whose every other term is a
+    /// variable: it converts to a selector reading that layer alone,
+    /// where without it there is nothing to scan by.
+    #[dialog_common::test]
+    fn it_constrains_a_scan_by_a_constant_layer_alone() -> anyhow::Result<()> {
+        let control: Entity = "control:".parse()?;
+        let everything = AttributeQueryAll::new(
+            Term::var("the"),
+            Term::var("of"),
+            Term::var("is"),
+            Term::var("cause"),
+        );
+        assert!(matches!(
+            Selector::<Constrained>::try_from(&everything),
+            Err(EvaluationError::EmptySelector { .. })
+        ));
+        let layer = everything.with_layer(Term::from(control.clone()));
+        let selector = Selector::<Constrained>::try_from(&layer)?;
+        assert_eq!(selector.layer(), Some(&control));
+        assert_eq!(selector.entity(), None);
+        assert_eq!(selector.attribute(), None);
+        assert_eq!(selector.value(), None);
+        Ok(())
+    }
+
+    /// A scan with every term a variable but a constant layer reads every
+    /// row of that layer and nothing of any other: of the primary, every
+    /// fact the tree holds; of a layer the store does not hold, nothing.
+    #[dialog_common::test]
+    async fn it_scans_a_whole_layer() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/age").of(alice.clone()).is(42u32))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let scan = |layer: &str| -> anyhow::Result<AttributeQueryAll> {
+            Ok(AttributeQueryAll::new(
+                Term::var("the"),
+                Term::var("of"),
+                Term::var("is"),
+                Term::blank(),
+            )
+            .with_layer(Term::from(layer.parse::<Entity>()?)))
+        };
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let rows = scan("memory:")?.perform(&source).try_vec().await?;
+        let mut read: Vec<String> = rows
+            .iter()
+            .filter(|row| row.of() == &alice)
+            .map(|row| row.the().to_string())
+            .collect();
+        read.sort();
+        assert_eq!(
+            read,
+            vec!["person/age".to_string(), "person/name".to_string()]
+        );
+
+        let rows = scan("control:")?.perform(&source).try_vec().await?;
+        assert!(rows.is_empty(), "the primary holds no row of control:");
         Ok(())
     }
 

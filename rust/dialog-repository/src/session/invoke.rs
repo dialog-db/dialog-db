@@ -4,7 +4,7 @@
 //! one tick, where the session's providers read them (see
 //! [`Arrivals`](super::Arrivals)).
 
-use dialog_corpus::{Change, Changes, Statement, Update as _};
+use dialog_corpus::{Changes, Statement};
 
 use crate::placement::take_dispatched;
 use crate::{CommitError, PublishError, Revision, Session, SessionEnv};
@@ -64,14 +64,6 @@ impl Session {
         .assert(facts)
     }
 
-    /// Land a published dispatch's `commands` in the session's
-    /// `control:` layer for one tick: asserted as one instant, gone in
-    /// the next, so a reader of the layer's instants sees each once and
-    /// nothing of them stays. A retraction among them dispatched nothing
-    /// to read and lands nothing. Wakes every [`Arrivals`] waiting for
-    /// the next dispatch.
-    ///
-    /// [`Arrivals`]: super::Arrivals
     /// Read again the head of the primary and of every durable layer:
     /// what a dispatch re-run after a lost compare-and-swap builds on.
     pub(crate) async fn refresh<Env: SessionEnv>(&self, env: &Env) -> Result<(), CommitError> {
@@ -79,22 +71,6 @@ impl Session {
         for (_, branch) in self.durables() {
             branch.refresh(env).await?;
         }
-        Ok(())
-    }
-
-    fn land(&self, commands: &Changes) -> Result<(), CommitError> {
-        let mut asserted = Changes::new();
-        for (of, the, change) in commands.iter() {
-            if let Change::Assert(is, pick) = change {
-                asserted.associate(the.clone(), of.clone(), is.clone(), pick.clone());
-            }
-        }
-        if !asserted.is_empty() {
-            let control = &self.inner.control;
-            control.apply(asserted)?;
-            control.clear();
-        }
-        self.inner.landed.notify_waiters();
         Ok(())
     }
 }
@@ -131,23 +107,22 @@ impl Invocation {
             mut transients,
         } = self;
         transients.merge(take_dispatched(&mut changes));
-        let (revision, commands) = dispatch(&session, &changes, &transients, env).await?;
-        session.land(&commands)?;
-        Ok(revision)
+        dispatch(&session, &changes, &transients, env).await
     }
 }
 
 /// One dispatch of `changes` and `transients` through `session`: commit
 /// and publish, re-run from the new heads when the publish loses its
-/// compare-and-swap, on the primary or on any durable layer. Answers the head it left the primary at and every
-/// command of the dispatch: the ones dispatched and the ones its rules
-/// dispatched in any tick.
+/// compare-and-swap, on the primary or on any durable layer. Answers the
+/// head it left the primary at. The publish that wins lands the
+/// dispatch's commands in the session's `control:`, as every publish of
+/// a transaction through the session does.
 async fn dispatch<Env: SessionEnv>(
     session: &Session,
     changes: &Changes,
     transients: &Changes,
     env: &Env,
-) -> Result<(Revision, Changes), CommitError> {
+) -> Result<Revision, CommitError> {
     let mut reruns = 0;
     loop {
         let transaction = session
@@ -166,10 +141,8 @@ async fn dispatch<Env: SessionEnv>(
             }
             Err(error) => return Err(error),
         };
-        let mut commands = transients.clone();
-        batch.induced().clone().assert(&mut commands);
         match batch.publish().perform(env).await {
-            Ok(revision) => return Ok((revision, commands)),
+            Ok(revision) => return Ok(revision),
             Err(CommitError::Publish(lost @ PublishError::VersionMismatch { .. })) => {
                 if reruns == MAX_RERUNS {
                     return Err(lost.into());
