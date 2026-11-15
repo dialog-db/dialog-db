@@ -14,6 +14,68 @@ says how to cut a release.
 
 ## Unreleased
 
+### A session's transaction lands its commands when it publishes, a session opens through a read-only environment, and a whole layer is a legal scan
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD).
+
+Three gaps an embedder met moving onto sessions. A transaction a
+session hands out (`Session::transaction`), committed and published
+through the transaction API, never landed what it dispatched in
+`control:`: only `Invocation::perform` did. Now its publish lands them,
+as an invocation's does. Opening a session asked for an environment
+that can commit, though opening only reads the primary and opens
+branches; it now asks for what a read needs. And a scan whose every
+term is a variable but a constant `in` was refused as an empty
+selector; a constant layer now constrains a scan, so it reads every row
+of that layer, and `Arrivals` can yield the arrived facts themselves,
+without a query.
+
+What this changes for you:
+
+- A transaction from `Session::transaction`, published with
+  `.commit().publish().perform(env)` or staged and then
+  `TransactionBatch::publish`, lands the commands it dispatched (with
+  `Transaction::dispatch`, or written `.at(control_layer())`) and the
+  ones its rules dispatched in the session's `control:` once the publish
+  wins, as one instant gone in the next, and wakes every `Arrivals`
+  waiting. A publish that loses its compare-and-swap lands nothing. It
+  is still not re-run on a moved head; `Session::invoke` is.
+- `OpenSessionEnv` is new: the providers opening a session and reading
+  through it need, with nothing that commits. `OpenSession::perform`,
+  `Arrivals::poll` and `Arrivals::next` are bounded on it rather than on
+  `SessionEnv`, which now extends it with what a commit needs (`Attest`,
+  `Publish`, `Import`, blob import and size). Every environment that
+  met the old bounds meets the new ones.
+- A scan with a constant `in` and every other term a variable, an
+  `AttributeQuery` with `.with_layer(Term::from(layer))`, reads every
+  row of that layer: of a memory layer, `control:` or a channel, its
+  rows alone; of the primary or a durable layer, the whole tree, which
+  is legal and costs what reading the whole tree costs. Before, it
+  failed with `EvaluationError::EmptySelector`. A scan with nothing
+  constant at all, the layer included, still does.
+- `Selector::only_in(layer)` is new: a selector the layer alone
+  constrains. A tree reads it as its whole entity index.
+- `Arrivals::rows` and `Arrivals::next_rows` are new: every fact the
+  layer's assertions since the last read assert, each once, oldest
+  first, with no query; `Session::arrivals_rows(layer)` builds a reader
+  for them. Rows and `poll` read the same arrivals, so a row one yields
+  the other does not. `Arrivals` takes its query type as a default
+  parameter, `Arrivals<Q = ()>`.
+
+Why: an embedder resolves its commands with its own transactions, so
+the commands a session's transaction dispatched must reach the
+session's providers whichever way it was published; it opens branches
+with an environment that only reads, and the session beside them needs
+no more; and its providers tell a command apart by the attributes its
+entity carries, so they need every row of the arrived instant, not one
+concept's.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten:
+  `control:` is process-local, and a scan of a whole layer reads what
+  is already stored.
+
 ### A durable layer is a branch the primary points at, and `Session::sync` pulls and pushes it with the primary
 
 [#808](https://github.com/dialog-db/dialog-db/pull/808), argued in
