@@ -1079,6 +1079,16 @@ In the same conversation he settled how a pattern is written in a stored rule (`
 
 In order. One is asked, answered and written down before the next.
 
+
+**Raised 2026-11-14 by the maintainer, not yet a topic:** "Can we expose diagnostics also through query engine?" What is known, before anything is proposed:
+
+- A kept tree is a value the engine matches by pattern, so a dialog rule can already conclude something about a form (`it_finds_a_kept_form_by_a_pattern_over_its_tree`).
+- The diagnostics of today are not found that way. A `(warning "…")` rule is matched by the analyzer's own matcher, in memory, and a refusal is an error of a phase. So there are two matchers.
+- The notebook keeps no form by itself, and a refused document keeps nothing, so the forms most worth a diagnostic are not in the database.
+- A diagnostic is about a place in a text. A kept tree is a value and has no place; the place is in `Written`, which is not kept.
+
+Asked back: what it is for, an editor reading diagnostics as a query, lints written as rules, or a tool asking a space what is wrong. They need different things of the list above. The agent's hypothesis to test: a lint written as a dialog rule over `syntax.form` gives, on the todo example, the warnings the analyzer's `(warning …)` rule gives.
+
 1. Decided 2026-11-14: the more specific rule wins. Built 2026-11-13: the reader that gives `...` no meaning, the quoted list, the record's refusals, a read that says every field or `...`, a struct's last key.
 1. Decided 2026-11-13: the new format always, the old read for one cycle. Built 2026-11-14 as #799, on #778, a draft: every rule body is written in format 4, a rule that holds a pattern is kept, and the bytes format 3 wrote are pinned as reading back. Not yet here: this branch still refuses a struct in a rule that writes, until #799 is merged in and the notebook stops holding such rules aside.
 2. Decided 2026-11-14, by the maintainer, shown #791's cases: it is a bug. Filed as #801 and fixed apart from everything here in #802, on main: the tests alone are its first commit and four of five fail there; with the fix the crate's 711 pass. #802 is the first of #791's two changes. The second, a written attribute that a deductive rule also derives from itself, is not in it and is filed as #804: main misses the derived fact with the subject named, and #802 makes the unnamed spelling miss it too, where main found it by the bug. Not checked by anyone: whether a tonk rule relies on the old firing.
