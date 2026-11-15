@@ -942,6 +942,23 @@ The list misreading is gone and the to-do holds. The note slipped to name matchi
 
 **Decision.** The spec's `in:` paragraph carries the write sentence.
 
+## 2026-11-15 — R45: `cardinality:` in place of `pick:`
+
+**Question.** The one [planned](results/r45-plan.md). The maintainer retires `pick:` for `cardinality: :one | :many`, and a ranking moves into a rule's conclusion as a fold, `([:suspended :active :registered] ?state)`, the first listed winning. Do readers still expect the election between stored and concluded values, and do they read the ranking?
+
+**Method.** Clean runner, 20 readers each: R42's note and to-do with `cardinality: :one`, and an account whose status ranks its `:many` states, with and without a sentence on the ranking.
+
+**Results.** [r45](results/r45.md).
+
+| document | reads right |
+|---|---|
+| note | 20 of 20 |
+| to-do, the renamed title shows | 20 of 20 |
+| account, a re-asserted `:active` leaves `:suspended`, no sentence | 0 of 20 |
+| the same, with the ranking sentence | 20 of 20 |
+
+**Decision.** The spec takes `cardinality:`. A ranking in a conclusion needs its sentence, and its spelling is open.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
