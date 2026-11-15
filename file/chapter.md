@@ -14,7 +14,7 @@ The chapter follows one fact into the file and back out, then walks through what
 cargo run -p dialog-chronicle --example guide_bytes
 ```
 
-Hashes, keys and the offsets that follow them differ from run to run, since each run's session has a key of its own. The layout does not.
+Hashes, keys and the offsets that follow them differ from run to run, since each run's session has a key of its own, and a revision's size moves by a few bytes with the hashes it holds. The layout does not.
 
 </div>
 
@@ -55,7 +55,7 @@ When Alice's peer created the repository, its file looked like this:
 
 {{opened}}
 
-Every file starts with sixteen bytes of **magic**: `DIALOG`, the byte `b6`, a byte for the format's version, now 1, and eight zeros, reserved. The `b6` is a pilcrow in Latin-1 and is not valid UTF-8 on its own, so a tool that reads the file as text fails at once. A file that starts with anything else is not opened.
+Every file starts with sixteen bytes of **magic**: `DIALOG`, the byte `b6`, a byte for the format's version, now 1, and eight zeros, reserved. The `b6` is a pilcrow in Latin-1 and is not valid UTF-8 on its own, so a tool that reads the file as text fails at once. A file that starts with anything else is refused. The one exception is a file no longer than its head whose first bytes are all zeros, or the start of the magic with no durable slot: an open that was making it was cut short, so nothing was ever appended, and it is made again.
 
 {{magic}}
 
@@ -134,7 +134,7 @@ Every record has the same nine-byte header:
 | 4 | tokens: a count, then each token's pad byte, padding, length and bytes | the whole body |
 | 5 | frame: a pad byte, padding, then the frame's data | the whole body |
 | 7 | pages: pages of the file's index | until a page is reused; each page has its own |
-| 8 | extent: space claimed by one writer | its header only; each frame inside has its own |
+| 8 | extent: space claimed by one writer | nothing: it is written to after it is claimed; each frame inside has its own |
 | 9 | cell: one value of a memory cell | the whole body |
 
 The commit's append is the tokens record and the frame record. The new head follows as two cell records, `revision` and `induction` (see [step 5](#step-5-the-head-moves)), each its own append:
@@ -153,7 +153,7 @@ The turn itself is not a lock on the file. It is a lock on one byte, far past th
 
 {{locks}}
 
-Readers take no lock at all. The writer holding the turn waits on no other lock, so no cycle of waiting runs through it.
+A read takes no lock: a process holds `present` while it has the file open and `recovery` while it opens it, and nothing to read. The writer holding the turn waits on no other lock, but for the last close, which makes its sync point in the turn and waits for `sync` there. A sync point made outside the turn only tries the turn, never waits for it, so no cycle of waiting forms.
 
 <div class="aside">
 
@@ -163,7 +163,7 @@ Readers take no lock at all. The writer holding the turn waits on no other lock,
 
 ### Step 5: the head moves
 
-The branch's head is a cell (see [Commits and History](./history.md)), and the file keeps cells the way SQLite keeps commits in its write-ahead log. An update appends a cell record holding the cell's name and its new value, and the cells' own index, rooted in the slot, files the name at its newest record. Nothing is written over.
+The branch's head is a cell (see [Commits and History](./history.md)), and the file keeps cells as a log. An update appends a cell record holding the cell's name and its new value, and the cells' own index, rooted in the slot, files the name at its newest record. Nothing is written over.
 
 {{cell_record}}
 
@@ -203,7 +203,7 @@ The node is then read **in place**: the archive decodes the frame's rows once, a
 
 <div class="aside">
 
-**Implementations.** The file's index is [`dialog-chronicle/src/archive/tree.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/tree.rs), and what it maps is [`archive/index.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/index.rs). A node read in place is [`archive/served.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/served.rs), through `NodeSource` and the node views in [`dialog-search-tree/src/node/view.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-search-tree/src/node/view.rs).
+**Implementations.** The file's index is [`dialog-chronicle/src/archive/tree.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/tree.rs), and what it maps is [`archive/index.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/index.rs). A node read in place is [`archive/served.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/served.rs), which answers the tree's node commands (`nodes::Read`, `Preload`, `Write`) with the node views in [`dialog-search-tree/src/node/view.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-search-tree/src/node/view.rs).
 
 </div>
 
@@ -298,8 +298,8 @@ Whether this works is tested, not argued. The tests record every write the archi
 <div class="aside caveat">
 
 - **Native only.** The crate compiles to nothing on the web. Its tests run on Linux, macOS and Windows. Whether the same file can live in a browser's file system, served by one worker a tab hosts, is being measured in [`research/single-file-format/browser`](https://github.com/dialog-db/dialog-db/tree/main/research/single-file-format/browser), not built.
-- **Opt-in.** Nothing switches a replica to it. A replica the file system store wrote can be moved in with the `chronicle` migration of the `dialog-migration` crate.
-- **Nothing is collected.** A node no head reaches any more, such as a losing try's, stays in the file.
+- **Opt-in.** Nothing switches a replica to it. The `chronicle` migration of the `dialog-migration` crate (`IntoChronicle`, or the `dialog-migrate` binary) moves the blocks of a replica the file system store wrote into each space's file. It moves no cells: a migrated space keeps its memory, branch heads among them, where it was, and names `Chronicle` as its archive only.
+- **Nothing is collected.** A node no head reaches any more, such as a losing try's, stays in the file. A later version may even be written against it: the winning retry's root is a frame on top of the lost try's.
 - **The format is still changing.** A file written now may not open in a later release.
 
 </div>
@@ -314,7 +314,7 @@ All integers are little-endian. *Varint* is LEB128, *zigzag* maps signed to unsi
 | rolling slots | 16 and 65,552 | 64 KiB each: length u32, crc32 u32, body |
 | durable slot | 131,088 and 196,624 | two copies, the same layout, written only at a sync point; the last 8 bytes of each 64 KiB hold the sequence of the copy last synced there |
 | records | from 262,160 | kind u8, length u32, crc32 u32, body |
-| lock bytes | from 2⁶²−3 | sync, recovery, present, turn, then an owner byte per extent |
+| lock bytes | from 2⁶²−3 | sync, recovery, present, turn, an owner byte per extent, and from 2⁶²+2⁶¹ a byte per extent left for another process |
 
 | record | body |
 |---|---|
@@ -352,6 +352,6 @@ All integers are little-endian. *Varint* is LEB128, *zigzag* maps signed to unsi
 | setting | value |
 |---|---|
 | extent size | 1 MiB (`Options::extent`) |
-| sync point | every 64 appends, 2 seconds, or 2,048 freed index pages; after 2 seconds a thread in each process makes one even if no append follows |
+| sync point | every 64 appends, 2 seconds, or 2,048 freed index pages, and at the last close; a thread in each process makes one within 3 seconds even if no append follows |
 | blocks in one append | at most 32,768 (`COMMIT_BLOCKS`); a larger commit is appended in parts |
 | longest chain of frames | 32 (`CHAIN`) |

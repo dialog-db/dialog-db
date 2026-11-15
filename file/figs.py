@@ -394,7 +394,7 @@ def rolling():
 
 @fig
 def locks():
-    f = Fig(760, 190, "The lock bytes sit at 2^62, far past any data, so locking them never blocks a read or a write", "lk")
+    f = Fig(760, 208, "The lock bytes sit at 2^62, far past any data, so locking them never blocks a read or a write", "lk")
     f.line(126, 60, 396, 60, "dashed")
     f.rect(16, 48, 110, 24, "value")
     f.text(71, 64, "the data, 3.6 MB", "small", "middle")
@@ -409,7 +409,8 @@ def locks():
         x += w + 4
     f.text(16, 124, "turn: held by the writer laying out and writing an append.   present: held shared by every process with the file open.", "label small muted")
     f.text(16, 142, "recovery: held while a process opens the file.   sync: held while a sync point is made.   owner(x): held by extent x's writer.", "label small muted")
-    f.text(16, 166, "POSIX record locks on Unix, LockFileEx on Windows: a process that dies lets go of every byte it held.", "label small muted")
+    f.text(16, 160, "left(x), at 2⁶²+2⁶¹+x: held shared by the process that left extent x free for another to take.", "label small muted")
+    f.text(16, 184, "POSIX record locks on Unix, LockFileEx on Windows: a process that dies lets go of every byte it held.", "label small muted")
     return f
 
 @fig
@@ -466,7 +467,7 @@ def order():
         y += 22
     f.text(16, 168, "The disk can reorder unsynced writes, so a record is kept only if everything before it in the slot is whole:", "label small muted")
     f.text(16, 186, "opening walks every record since the durable slot by its checksum. What a power loss can lose is a suffix.", "label small muted")
-    f.text(16, 212, "Like SQLite's synchronous=NORMAL: an update is durable at the next sync point, not at its own.", "label small muted")
+    f.text(16, 212, "An update is durable at the next sync point, not at its own.", "label small muted")
     return f
 
 
@@ -487,8 +488,8 @@ def sync_point():
         f.text(56, y + 12, a, "label small")
         f.text(56, y + 28, b, "small muted")
         y += 44
-    f.text(16, 252, "One follows every 64 appends, 2 seconds, or 2,048 freed index pages, and Chronicle::sync. It is made after the turn", "label small muted")
-    f.text(16, 270, "is let go. After 2 seconds a thread in each process makes one even if no append follows.", "label small muted")
+    f.text(16, 252, "One follows every 64 appends, 2 seconds, or 2,048 freed index pages, once the turn is let go, and Chronicle::sync and", "label small muted")
+    f.text(16, 270, "the last close make one. A thread in each process makes one within 3 seconds even if no append follows.", "label small muted")
     return f
 
 
@@ -574,7 +575,7 @@ def chain():
     f.text(16, 28, "base ←", "label small muted")
     f.text(16, 136, "Reading frame 213,645 decodes six frames: the whole one, then each frame's copies and new rows on top. A writer looks up the", "label small muted")
     f.text(16, 154, "node's lineage (its catalog, its kind and its first key) to find the frame to write against.", "label small muted")
-    f.text(16, 180, "At depth 32 (CHAIN) the next version is written whole again, so no read decodes more than 32 frames.", "label small muted")
+    f.text(16, 180, "Once a chain is 32 frames long (CHAIN), the next version is written whole again, so no read decodes more than 32 frames.", "label small muted")
     f.text(16, 206, "Commit 5's root is frame 147,934, also written against 147,739: two versions can share a base.", "label small muted")
     return f
 
@@ -654,7 +655,7 @@ def extent_bytes():
     f.brace(x3 + 8, x4, y + 28, "its inverse: a torn count is none", "small muted")
     f.brace(x4 + 8, x5, y + 28, "epoch 4: claimed by append 4", "small muted")
     f.rect(16, 180, 620, 28, "value")
-    f.text(24, 198, "frame record, 8,050 bytes: hash 66b11878…, kind ff (whole), then the 7,996-byte block", "small")
+    f.text(24, 198, "frame record, 8,059 bytes: hash 66b11878…, kind ff (whole), then the 7,996-byte block", "small")
     f.text(16, 238, "Only the count is written over, after the frames it counts. The epoch tells a new claim of the same space from an old one.", "label small muted")
     return f
 
@@ -692,7 +693,7 @@ def reader():
     f.line(436, 40, 436, 100, "critical")
     f.text(436, 116, "the reader's snapshot ends here", "small critical", "middle")
     f.text(16, 36, "the file, while commit 3 is written", "label small muted")
-    f.text(16, 152, "Everything a slot names stays as it was, except index pages, which are reused. So a reader reads its snapshot without", "label small muted")
+    f.text(16, 152, "Nothing a slot names is written over but index pages, which are reused, and extents' counts. So a reader reads its snapshot without", "label small muted")
     f.text(16, 170, "a lock, and the writer never waits for it. A lookup that misses looks for a newer slot, once the file has grown.", "label small muted")
     f.text(16, 196, "An index page reused since is caught: each page records the append that wrote it and a checksum, and its parent names", "label small muted")
     f.text(16, 214, "both (page 876, append 29). A mismatch is stale: the reader takes the newest slot and looks again.", "label small muted")
@@ -764,7 +765,7 @@ def recovery():
     f.line(380, 96, 380, 114, "", True)
     f.text(388, 110, "no", "small muted")
     f.rect(200, 116, 360, 30, "")
-    f.text(380, 136, "another process present, or same boot?", "small", "middle")
+    f.text(380, 136, "another process present, or same boot (Linux)?", "small", "middle")
     f.line(560, 131, 600, 131, "", True)
     f.text(580, 126, "yes", "small muted", "middle")
     f.rect(602, 116, 142, 30, "value")
@@ -801,9 +802,9 @@ def torn():
             for s in range(4):
                 f.rect(x + s * w / 4, 34, w / 4, 30, "value" if s % 2 == 0 else "ghost")
         f.text(x + w / 2, 82, k, "small muted", "middle")
-    f.text(16, 116, "The archive's tests replay their own writes onto such images, at every point and in 30 ways at each,", "label small muted")
-    f.text(16, 134, "and open each as after a reboot. Each must open, keep every block synced before the loss, read no block as", "label small muted")
-    f.text(16, 152, "other bytes, and hold heads whose every block is there.", "label small muted")
+    f.text(16, 116, "The archive's tests replay their own writes onto such images at every point, losing each write or each sector alone,", "label small muted")
+    f.text(16, 134, "then 30 random sets, and open each as after a reboot. Each must open, keep every block synced before the loss,", "label small muted")
+    f.text(16, 152, "read no block as other bytes, and hold heads whose every block is there.", "label small muted")
     return f
 
 
