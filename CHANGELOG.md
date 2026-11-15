@@ -145,14 +145,12 @@ transaction again computes them over the head that won.
 `Chronicle` provides the memory effects (`Resolve`, `Publish`,
 `Retract`, `List`), so a `Space` can name it as its memory as well as its
 archive: `Space<Chronicle, Chronicle, ...>` keeps a space's blocks and
-its cells, branch heads among them, in one file. A cell is kept as SQLite
-keeps a commit in its write-ahead log: each update appends a record with
-the cell's value, in the writer's turn, and the cells' own index files the
-cell at its newest record. The record names the writer's extents that
+its cells, branch heads among them, in one file. A cell is kept as a
+log: each update appends a record with the cell's value, in the writer's
+turn, and the cells' own index files the cell at its newest record. The record names the writer's extents that
 still hold blocks, and recovery takes it as whole only with those
 extents' frames, so a power loss can undo the last updates (synced at the
-next sync point, as SQLite's `synchronous=NORMAL`), never leave a head
-naming what is gone.
+next sync point), never leave a head naming what is gone.
 
 What this changes for you:
 
@@ -163,9 +161,8 @@ What this changes for you:
   cell already holds succeeds whatever edition the writer expected, as on
   every memory store.
 - A cell's update takes the writer's turn for the append of one small
-  record, as a SQLite commit takes its write lock: an update waits while
-  another process holds the turn, for its own appends' laying out and
-  writing. Splitting and encoding an append, folding extents in and
+  record: an update waits while another process holds the turn, for its
+  own appends' laying out and writing. Splitting and encoding an append, folding extents in and
   syncing are done before or after the turn, not in it.
   A `Resolve` takes no lock, and reads the newest update another process
   made.
@@ -339,8 +336,11 @@ What this changes for you:
   (opening a `Chronicle` creates one). With `remove_source` it deletes
   the `fs` archive after, unless a block's bytes did not match its name
   or a file in it was not a block (`chronicle::strays`): then it fails and
-  keeps the `fs` archive. It is a conversion an
-  application opts into, not an upgrade every replica needs. Every block
+  keeps the `fs` archive. It moves blocks only: a space's cells, branch
+  heads among them, stay in its `memory` directory, so a migrated space
+  names `Chronicle` as its archive and not as its memory. It is a
+  conversion an application opts into, not an upgrade every replica
+  needs. Every block
   reads back as the bytes it was; nodes in an older layout are kept whole.
   `dialog-migrate [--dry-run] [--step <id>] [--remove-source] <replica>`
   runs the steps; `--source`, `--target` and `--catalog` move one store.
