@@ -1,7 +1,7 @@
 //! The layers a primary declares beside itself, and the names of the
-//! layers every session has.
+//! layers every stack has.
 //!
-//! A session reads several layers as one (see [`Session`](crate::Session)):
+//! A stack reads several layers as one (see [`Stack`](crate::Stack)):
 //! the **primary**, a branch whose schema defines the others, and the
 //! layers that schema declares beside it. A layer is declared on the
 //! primary and replicated with it:
@@ -16,11 +16,11 @@
 //! a write with no layer named lands in the primary, a read with none
 //! reads every layer. A layer's name says its store, and the bare name
 //! is that store's default: [`MEMORY`] is the primary, [`SESSION`] the
-//! in-memory layer every session has, [`CONTROL`] the loopback a command
+//! in-memory layer every stack has, [`CONTROL`] the loopback a command
 //! lands in.
 //!
 //! A **durable** layer, `memory:<name>` ([`Store::Durable`]), is the
-//! repository's branch `<name>`: a session reads it as a line beside the
+//! repository's branch `<name>`: a stack reads it as a line beside the
 //! primary and commits what a dispatch writes into it on that branch.
 //! The primary records the revision each durable layer stands at as a
 //! pointer fact of its own (`memory:<name> dialog.layer/revision
@@ -43,8 +43,8 @@
 //!
 //! The declarations in force are resolved from three places, each
 //! outranking the one before: the primary's tree, the primary's session
-//! store, and what the session itself holds
-//! ([`Session::declare`](crate::Session::declare)).
+//! store, and what the stack itself holds
+//! ([`Stack::declare`](crate::Stack::declare)).
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -63,17 +63,17 @@ use crate::{CommitError, Ephemeral, Revision};
 use crate::{Erased, select_from_source};
 use base58::ToBase58 as _;
 
-// The declaration attribute is parsed once: every session open asks for it.
+// The declaration attribute is parsed once: every stack open asks for it.
 static STORE_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.layer/store").into());
 // The revision and selection attributes are read on every dispatch
-// through a session.
+// through a stack.
 static REVISION_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.layer/revision").into());
 static SELECTION_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.session/layer").into());
 
 pub use dialog_corpus::{MEMORY, memory_layer};
 
-/// The name of the layer every session mints: in memory, the session's
-/// own, gone when the session is.
+/// The name of the layer every stack mints: in memory, the stack's
+/// own, gone when the stack is.
 pub const SESSION: &str = "session:";
 /// The name of the loopback: where a command lands, for one tick.
 pub const CONTROL: &str = "control:";
@@ -85,7 +85,7 @@ static SESSION_LAYER: LazyLock<Entity> =
 static CONTROL_LAYER: LazyLock<Entity> =
     LazyLock::new(|| CONTROL.parse().expect("a bare scheme is an entity"));
 
-/// The entity of the session's own layer, [`SESSION`].
+/// The entity of the stack's own layer, [`SESSION`].
 pub fn session_layer() -> Entity {
     SESSION_LAYER.clone()
 }
@@ -102,7 +102,7 @@ pub(crate) fn store_attr() -> Relation {
 }
 
 /// The `dialog.layer/revision` attribute: of a layer's entity, the
-/// revision the layer stands at, as text. A session holds one row of it
+/// revision the layer stands at, as text. A stack holds one row of it
 /// per layer in [`SESSION`], rewritten by the dispatch, or the sync,
 /// after which the layer stands somewhere else.
 pub fn revision_attr() -> Relation {
@@ -111,12 +111,12 @@ pub fn revision_attr() -> Relation {
 
 /// The `dialog.session/layer` attribute: of [`SESSION`], the layer a
 /// write with no layer named lands in while it is set (see
-/// [`Session::select`](crate::Session::select)).
+/// [`Stack::select`](crate::Stack::select)).
 pub fn selection_attr() -> Relation {
     SELECTION_ATTR.clone()
 }
 
-/// Whether a write of `the` with no layer named follows the session's
+/// Whether a write of `the` with no layer named follows the stack's
 /// selected layer: every attribute does but the machinery under
 /// `dialog.` (rules, layer declarations, revisions, the selection
 /// itself), which lands in the primary or where it names.
@@ -124,7 +124,7 @@ pub(crate) fn follows_selection(the: &Relation) -> bool {
     !the.as_str().starts_with("dialog.")
 }
 
-/// The layer `own`, a session's own layer, holds as selected, if any:
+/// The layer `own`, a stack's own layer, holds as selected, if any:
 /// its `dialog.session/layer` row of [`SESSION`].
 pub(crate) fn selected(own: &Ephemeral) -> Option<Entity> {
     own.scan(&Selector::new().the(selection_attr()).of(session_layer()))
@@ -135,9 +135,9 @@ pub(crate) fn selected(own: &Ephemeral) -> Option<Entity> {
         })
 }
 
-/// [`Statement`] selecting `layer` in a session's own layer: its
+/// [`Statement`] selecting `layer` in a stack's own layer: its
 /// `dialog.session/layer` row of [`SESSION`], under `last`, written into
-/// [`SESSION`]. See [`Session::select`](crate::Session::select).
+/// [`SESSION`]. See [`Stack::select`](crate::Stack::select).
 pub(crate) struct Selection(pub(crate) Entity);
 
 impl Statement for Selection {
@@ -169,14 +169,14 @@ pub(crate) fn tree_revision(revision: &Revision) -> Value {
     Value::String(tree.to_base58())
 }
 
-/// The revision every layer of a session stands at, as text: of
+/// The revision every layer of a stack stands at, as text: of
 /// [`MEMORY`] the tree of `primary`'s revision (none for a primary with
 /// no revision); of each of `durables` the tree of its branch's (none
 /// for one with no revision); of each of `memories` the hash of its
 /// instant chain; and of [`SESSION`], `own`, the hash of its chain as
 /// it stood before the records that followed its last change
 /// ([`Ephemeral::settled`]), so that recording the revisions is not
-/// itself a move of the session's own layer. Each is base58, as
+/// itself a move of the stack's own layer. Each is base58, as
 /// `dialog.branch/tree` renders a tree.
 fn revisions(
     primary: Option<&Revision>,
@@ -204,7 +204,7 @@ fn revisions(
     rows
 }
 
-/// The layers whose revision moved since `own`, a session's own layer,
+/// The layers whose revision moved since `own`, a stack's own layer,
 /// last recorded it: each layer (see [`revisions`]) whose revision as it
 /// stands now is not the one `own`'s `dialog.layer/revision` row of it
 /// holds, with that revision and the rows `own` holds of it. A layer
@@ -232,7 +232,7 @@ fn moved_revisions(
 
 /// The `dialog.layer/revision` rows of the layers whose revision moved
 /// since `own` last recorded it (see [`moved_revisions`]), each under
-/// `last`, bound for no layer: what a session records in its own layer
+/// `last`, bound for no layer: what a stack records in its own layer
 /// once a dispatch has published. Empty when no layer moved, so the
 /// recording mints no instant.
 pub(crate) fn revision_rows(
@@ -251,7 +251,7 @@ pub(crate) fn revision_rows(
 /// The change in the `dialog.layer/revision` rows since `own` last
 /// recorded them (see [`moved_revisions`]): for each layer that moved,
 /// the retraction of the row `own` holds and the row as it stands now.
-/// What a dispatch through a session takes as stimulus, so a rule
+/// What a dispatch through a stack takes as stimulus, so a rule
 /// premised on a layer's revision fires when the layer moved, and on
 /// the first dispatch, which finds nothing recorded. The retraction
 /// matters: the recorded row stands in `session:` above the dispatch's
@@ -291,28 +291,28 @@ pub(crate) fn take_dispatched(changes: &mut Changes) -> Changes {
     dispatched
 }
 
-/// What backs a layer a session builds from the primary's schema.
+/// What backs a layer a stack builds from the primary's schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Store {
-    /// A table in memory: the session mints it when it opens, and it is
-    /// gone when the session is.
+    /// A table in memory: the stack mints it when it opens, and it is
+    /// gone when the stack is.
     Memory,
-    /// A channel, `control:<name>`: a table in memory the session mints
+    /// A channel, `control:<name>`: a table in memory the stack mints
     /// when it opens, for a consumer outside the dispatch (the embedder,
     /// another process). What lands in it stays until the consumer
     /// retracts it, so a consumer that was not reading loses nothing:
     /// it reads the layer's instants ([`Ephemeral::since`]) or
-    /// [`Session::arrivals`](crate::Session::arrivals), and retracts
+    /// [`Stack::arrivals`](crate::Stack::arrivals), and retracts
     /// what it consumed. Bare [`CONTROL`], the loopback, is every
-    /// session's, and declaring it builds nothing.
+    /// stack's, and declaring it builds nothing.
     Control,
     /// A branch, `memory:<name>`: the repository's branch `<name>`,
-    /// which the session opens beside the primary, reads as a line
+    /// which the stack opens beside the primary, reads as a line
     /// stamped with the layer's name, and commits what a dispatch writes
     /// into the layer on. No memory cell holds its rows. The primary
     /// records the revision the layer stands at as a pointer fact
     /// (`memory:<name> dialog.layer/revision`), and
-    /// [`Session::sync`](crate::Session::sync) pulls and pushes it with
+    /// [`Stack::sync`](crate::Stack::sync) pulls and pushes it with
     /// the primary when its branch has upstreams.
     Durable,
 }
@@ -341,7 +341,7 @@ impl Store {
 
 /// [`Statement`] declaring a layer beside the primary: `layer` is the
 /// entity a descriptor's `in:` names, and `store` what backs it. A
-/// session opened on the primary builds the layer from this.
+/// stack opened on the primary builds the layer from this.
 ///
 /// ```no_run
 /// # use dialog_repository::{Branch, LayerDeclaration, Store};
@@ -393,7 +393,7 @@ impl Statement for LayerDeclaration {
 /// stands at: its `dialog.layer/revision` pointer fact, under `last`,
 /// bound for no layer, so it lands in the primary and never follows a
 /// selection. A dispatch that moves a durable layer writes it; so does
-/// [`Session::sync`](crate::Session::sync) when a pull moved the layer.
+/// [`Stack::sync`](crate::Stack::sync) when a pull moved the layer.
 pub(crate) struct Pointer {
     pub(crate) layer: Entity,
     pub(crate) revision: Value,
@@ -436,8 +436,8 @@ fn store_value(layer: &Entity, value: &Value) -> Result<Store, CommitError> {
     })
 }
 
-/// The layers declared for a session: the primary's committed
-/// declarations, with the ones its session store and the session hold
+/// The layers declared for a stack: the primary's committed
+/// declarations, with the ones its session store and the stack hold
 /// laid over, in that order.
 #[derive(Debug, Default)]
 pub(crate) struct Layers {
@@ -449,7 +449,7 @@ pub(crate) struct Layers {
 impl Layers {
     /// Resolve the layers declared over `primary`, pinned: its committed
     /// declarations, then those its session store holds, then `held`
-    /// (what the session declares), a later one for the same layer
+    /// (what the stack declares), a later one for the same layer
     /// outranking an earlier.
     pub(crate) async fn resolve(
         primary: &Source,
@@ -465,7 +465,7 @@ impl Layers {
         }
         // A declaration held in the primary's session store is this
         // process's own: it never reaches the tree or a peer, outranks
-        // the committed one, and yields to what the session holds.
+        // the committed one, and yields to what the stack holds.
         for claim in primary.overlay().scan(&store_selector()) {
             let store = store_value(&claim.of, &claim.is)?;
             layers.declared.insert(claim.of, store);
@@ -593,7 +593,7 @@ mod tests {
 
     /// The bare names parse as entities and render unchanged.
     #[dialog_common::test]
-    fn it_names_the_layers_every_session_has() {
+    fn it_names_the_layers_every_stack_has() {
         assert_eq!(memory_layer().to_string(), MEMORY);
         assert_eq!(session_layer().to_string(), SESSION);
         assert_eq!(control_layer().to_string(), CONTROL);

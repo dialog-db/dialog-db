@@ -23,7 +23,7 @@ use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::session::{Composite, shared_metadata};
 use crate::repository::source::{Live, Source, View};
 use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
-use crate::session::Loopback;
+use crate::stack::Loopback;
 use crate::{Branch, CommitError, Ephemeral, PublishError, RemoteSite, Revision, Snapshot, Staged};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -90,28 +90,28 @@ pub struct Transaction<L: Line> {
     /// [`Staged`]); exported to a [`Changes`] batch once, at commit.
     changes: Staged,
     transients: Staged,
-    /// The session this transaction commits through, if one: its layers,
+    /// The stack this transaction commits through, if one: its layers,
     /// which its reads and its induction see, and which take the writes
     /// named for them.
-    session: Option<SessionContext>,
+    stack: Option<StackContext>,
 }
 
-/// What a transaction through a [`Session`](crate::Session) carries: the
+/// What a transaction through a [`Stack`](crate::Stack) carries: the
 /// composite its reads and its induction see, the memory layers that
 /// take their shares once the commit publishes, the durable layers
 /// that commit theirs on their branches, and the loopback the publish
 /// lands the transaction's commands in.
 #[derive(Clone)]
-pub(crate) struct SessionContext {
+pub(crate) struct StackContext {
     pub(crate) composite: Composite,
     pub(crate) memories: Vec<(Entity, Ephemeral)>,
     pub(crate) durables: Vec<DurableLayer>,
-    /// The session's loopback, where the publish lands the commands the
+    /// The stack's loopback, where the publish lands the commands the
     /// transaction dispatched.
     pub(crate) loopback: Loopback,
 }
 
-/// A durable layer of a session as one dispatch reads and writes it: the
+/// A durable layer of a stack as one dispatch reads and writes it: the
 /// layer's name, its branch, and the head the dispatch pinned when it
 /// began, which its reads see and its commit on the branch builds on and
 /// compares and swaps against.
@@ -155,7 +155,7 @@ impl DurableLayer {
             pinned: self.pinned.clone(),
             changes: Staged::default(),
             transients: Staged::default(),
-            session: None,
+            stack: None,
         }
     }
 }
@@ -217,15 +217,15 @@ impl<L: Line> Transaction<L> {
             pinned,
             changes: Staged::default(),
             transients: Staged::default(),
-            session: None,
+            stack: None,
         }
     }
 
-    /// Commit through `session`: induction reads its layers, and the
+    /// Commit through `stack`: induction reads its layers, and the
     /// writes placed outside the primary are handed back as the shares of
     /// its memory layers instead of landing in the tree.
-    pub(crate) fn with_session(mut self, session: SessionContext) -> Self {
-        self.session = Some(session);
+    pub(crate) fn with_stack(mut self, stack: StackContext) -> Self {
+        self.stack = Some(stack);
         self
     }
 
@@ -283,7 +283,7 @@ impl<L: Line> Transaction<L> {
             allow_empty: false,
             canonicalize: false,
             amend: false,
-            session: self.session.clone(),
+            stack: self.stack.clone(),
         }
     }
 }
@@ -319,8 +319,8 @@ impl Transaction<&Branch> {
     /// view too. The transaction itself stays open and committable.
     pub fn query(&self) -> TransactionQuery<'_> {
         let query = TransactionQuery::new(self.view(), self.layers());
-        match &self.session {
-            Some(session) => query.over(session.composite.clone()),
+        match &self.stack {
+            Some(stack) => query.over(stack.composite.clone()),
             None => query,
         }
     }
@@ -391,7 +391,7 @@ pub struct TransactionCommit<L: Line> {
     pub(super) allow_empty: bool,
     pub(super) canonicalize: bool,
     pub(super) amend: bool,
-    pub(super) session: Option<SessionContext>,
+    pub(super) stack: Option<StackContext>,
 }
 
 impl<L: Line> TransactionCommit<L> {

@@ -104,7 +104,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _};
 use super::session::{Composite, QueryEnv, QueryLayer};
 use crate::repository::archive::erased;
 use crate::repository::source::Source;
-use crate::{Branch, Ephemeral, Index, RemoteSite, Revision, Session};
+use crate::{Branch, Ephemeral, Index, RemoteSite, Revision, Stack};
 
 /// How many touched entities a maintained poll re-derives at once.
 /// Measured on the catch-up soak's hundred-entity poll (#646): a
@@ -397,17 +397,17 @@ pub struct Subscription<Q: Application> {
     /// minted since this sequence are the delta instead
     /// ([`Ephemeral::since`](crate::Ephemeral::since)).
     overlay_sequence: u64,
-    /// The session the subscription reads through, if any: its memory
+    /// The stack the subscription reads through, if any: its memory
     /// layers are read beside the branch, each attribute from the layer
     /// it is placed on, and each layer is observed as the branch's
-    /// session overlay is (see [`Session::subscribe`]).
-    session: Option<Session>,
-    /// The sequence each of the session's memory layers stood at when
-    /// the retained results were evaluated, parallel to the session's
+    /// session overlay is (see [`Stack::subscribe`]).
+    stack: Option<Stack>,
+    /// The sequence each of the stack's memory layers stood at when
+    /// the retained results were evaluated, parallel to the stack's
     /// layers: what a maintained poll rewinds each layer to.
     memory_sequences: Vec<u64>,
-    /// The head each of the session's durable layers stood at when the
-    /// retained results were evaluated, parallel to the session's
+    /// The head each of the stack's durable layers stood at when the
+    /// retained results were evaluated, parallel to the stack's
     /// durable layers. A durable layer that moved re-evaluates the
     /// query: its tree is not diffed against the demand cover.
     durable_heads: Vec<Option<Revision>>,
@@ -445,8 +445,8 @@ impl Branch {
     }
 }
 
-impl Session {
-    /// Register a standing query over this session: the primary and
+impl Stack {
+    /// Register a standing query over this stack: the primary and
     /// every layer it holds, each attribute read from the layer it is
     /// placed on. The subscription evaluates on its first
     /// [`poll`](Subscription::poll) and is incrementally gated
@@ -462,18 +462,16 @@ impl Session {
 }
 
 impl<Q: Application> Subscription<Q> {
-    /// A standing query over `branch`, read through `session` when there
+    /// A standing query over `branch`, read through `stack` when there
     /// is one.
-    fn over(branch: Branch, session: Option<Session>, query: Q) -> Self {
-        let layers = session
-            .as_ref()
-            .map_or(0, |session| session.memories().len());
+    fn over(branch: Branch, stack: Option<Stack>, query: Q) -> Self {
+        let layers = stack.as_ref().map_or(0, |stack| stack.memories().len());
         Subscription {
             branch,
             query,
             revision: None,
             overlay_sequence: 0,
-            session,
+            stack,
             memory_sequences: vec![0; layers],
             durable_heads: Vec::new(),
             demand: Demand::new(),
@@ -869,13 +867,10 @@ where
         Ok(Some(delta))
     }
 
-    /// The memory layers the subscription reads through its session, by
-    /// name, in the session's order; none without a session.
+    /// The memory layers the subscription reads through its stack, by
+    /// name, in the stack's order; none without a stack.
     fn memories(&self) -> Vec<(Entity, Ephemeral)> {
-        self.session
-            .as_ref()
-            .map(Session::memories)
-            .unwrap_or_default()
+        self.stack.as_ref().map(Stack::memories).unwrap_or_default()
     }
 
     /// The sequence each memory layer stands at now, parallel to
@@ -887,29 +882,29 @@ where
             .collect()
     }
 
-    /// The head each of the session's durable layers stands at now, in
-    /// the session's order; none without a session.
+    /// The head each of the stack's durable layers stands at now, in
+    /// the stack's order; none without a stack.
     fn durable_heads_now(&self) -> Vec<Option<Revision>> {
-        self.session
+        self.stack
             .iter()
-            .flat_map(|session| session.durables().iter())
+            .flat_map(|stack| stack.durables().iter())
             .map(|(_, branch)| branch.revision())
             .collect()
     }
 
-    /// `primary` followed by the session's durable layers, each as its
+    /// `primary` followed by the stack's durable layers, each as its
     /// branch stands now, with the names their rows bind `in` to.
     fn lines(&self, primary: Source) -> (Vec<Source>, Vec<Option<Entity>>) {
         let mut sources = vec![primary];
         let mut names = vec![None];
-        for (layer, branch) in self.session.iter().flat_map(|session| session.durables()) {
+        for (layer, branch) in self.stack.iter().flat_map(|stack| stack.durables()) {
             sources.push(Source::from(branch.clone()));
             names.push(Some(layer.clone()));
         }
         (sources, names)
     }
 
-    /// What the subscription reads: the branch, and through a session
+    /// What the subscription reads: the branch, and through a stack
     /// its durable layers and its memory layers.
     fn composite(&self) -> Composite {
         let (sources, names) = self.lines(Source::from(self.branch.clone()));
@@ -945,7 +940,7 @@ where
         })
     }
 
-    /// Classify what the session's memory layers changed since their
+    /// Classify what the stack's memory layers changed since their
     /// pinned sequences, within the demand cover, as
     /// [`touched_overlay`](Self::touched_overlay) does for the branch's
     /// session overlay. A pin a layer's ring no longer reaches is

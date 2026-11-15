@@ -1,13 +1,13 @@
-//! Driving a session: a dispatch is one unit of publication, re-run from
+//! Driving a stack: a dispatch is one unit of publication, re-run from
 //! the new head when it loses its compare-and-swap. Once it has
 //! published, its commands land in [`control:`](crate::CONTROL) for
-//! one tick, where the session's providers read them (see
+//! one tick, where the stack's providers read them (see
 //! [`Arrivals`](super::Arrivals)).
 
 use dialog_corpus::{Changes, Statement};
 
 use crate::placement::take_dispatched;
-use crate::{CommitError, PublishError, Revision, Session, SessionEnv};
+use crate::{CommitError, PublishError, Revision, Stack, StackEnv};
 
 /// How many times a dispatch is re-run from a moved head before the
 /// mismatch is reported. A run is a function of the head and the
@@ -15,12 +15,12 @@ use crate::{CommitError, PublishError, Revision, Session, SessionEnv};
 /// against a head that moves faster than this writer can follow.
 pub const MAX_RERUNS: u32 = 8;
 
-/// Command driving one dispatch through a [`Session`]. Built by
-/// [`Session::invoke`] or [`Session::transact`]; run with
+/// Command driving one dispatch through a [`Stack`]. Built by
+/// [`Stack::invoke`] or [`Stack::transact`]; run with
 /// [`perform`](Self::perform).
 ///
 /// A dispatch is one unit of publication. The command and the writes
-/// beside it are the stimulus of a transaction through the session: its
+/// beside it are the stimulus of a transaction through the stack: its
 /// commit runs induction to a fixed point over the primary and every
 /// layer, routes each write to the layer its attribute is placed on,
 /// and publishes the primary's share with one compare-and-swap against
@@ -34,30 +34,30 @@ pub const MAX_RERUNS: u32 = 8;
 /// and one a rule's head lands there in any tick. Each is the stimulus
 /// of the tick after the one that wrote it and lands nowhere. Once the
 /// dispatch has published, and only then, its commands land in the
-/// session's `control:` layer as one instant and are gone in the next:
-/// what the session's providers read (see
-/// [`Session::arrivals`](crate::Session::arrivals)), so a lost
+/// stack's `control:` layer as one instant and are gone in the next:
+/// what the stack's providers read (see
+/// [`Stack::arrivals`](crate::Stack::arrivals)), so a lost
 /// compare-and-swap re-runs no effect. A provider answers by invoking,
 /// and its answer is a dispatch of its own, with its own
 /// compare-and-swap.
 #[derive(Clone)]
 pub struct Invocation {
-    session: Session,
+    stack: Stack,
     changes: Changes,
     transients: Changes,
 }
 
-impl Session {
-    /// Dispatch `command` through the session. See [`Invocation`].
+impl Stack {
+    /// Dispatch `command` through the stack. See [`Invocation`].
     pub fn invoke<C: Statement>(&self, command: C) -> Invocation {
         self.transact(Changes::new()).dispatch(command)
     }
 
-    /// Write `facts` through the session with no command: an import, a
+    /// Write `facts` through the stack with no command: an import, a
     /// seed, a test fixture. See [`Invocation`].
     pub fn transact<S: Statement>(&self, facts: S) -> Invocation {
         Invocation {
-            session: self.clone(),
+            stack: self.clone(),
             changes: Changes::new(),
             transients: Changes::new(),
         }
@@ -66,7 +66,7 @@ impl Session {
 
     /// Read again the head of the primary and of every durable layer:
     /// what a dispatch re-run after a lost compare-and-swap builds on.
-    pub(crate) async fn refresh<Env: SessionEnv>(&self, env: &Env) -> Result<(), CommitError> {
+    pub(crate) async fn refresh<Env: StackEnv>(&self, env: &Env) -> Result<(), CommitError> {
         self.primary().refresh(env).await?;
         for (_, branch) in self.durables() {
             branch.refresh(env).await?;
@@ -100,32 +100,32 @@ impl Invocation {
     /// commands in `control:` for one tick. Returns the head the dispatch
     /// left the primary at: the revision it published, or the unchanged
     /// head when nothing durable was written.
-    pub async fn perform<Env: SessionEnv>(self, env: &Env) -> Result<Revision, CommitError> {
+    pub async fn perform<Env: StackEnv>(self, env: &Env) -> Result<Revision, CommitError> {
         let Invocation {
-            session,
+            stack,
             mut changes,
             mut transients,
         } = self;
         transients.merge(take_dispatched(&mut changes));
-        dispatch(&session, &changes, &transients, env).await
+        dispatch(&stack, &changes, &transients, env).await
     }
 }
 
-/// One dispatch of `changes` and `transients` through `session`: commit
+/// One dispatch of `changes` and `transients` through `stack`: commit
 /// and publish, re-run from the new heads when the publish loses its
 /// compare-and-swap, on the primary or on any durable layer. Answers the
 /// head it left the primary at. The publish that wins lands the
-/// dispatch's commands in the session's `control:`, as every publish of
-/// a transaction through the session does.
-async fn dispatch<Env: SessionEnv>(
-    session: &Session,
+/// dispatch's commands in the stack's `control:`, as every publish of
+/// a transaction through the stack does.
+async fn dispatch<Env: StackEnv>(
+    stack: &Stack,
     changes: &Changes,
     transients: &Changes,
     env: &Env,
 ) -> Result<Revision, CommitError> {
     let mut reruns = 0;
     loop {
-        let transaction = session
+        let transaction = stack
             .transaction()
             .assert(changes.clone())
             .dispatch(transients.clone());
@@ -136,7 +136,7 @@ async fn dispatch<Env: SessionEnv>(
                     return Err(lost.into());
                 }
                 reruns += 1;
-                session.refresh(env).await?;
+                stack.refresh(env).await?;
                 continue;
             }
             Err(error) => return Err(error),
@@ -148,7 +148,7 @@ async fn dispatch<Env: SessionEnv>(
                     return Err(lost.into());
                 }
                 reruns += 1;
-                session.refresh(env).await?;
+                stack.refresh(env).await?;
             }
             Err(error) => return Err(error),
         }

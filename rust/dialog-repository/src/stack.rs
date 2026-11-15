@@ -1,24 +1,24 @@
-//! A session: the primary branch read and written as one with the
+//! A stack: the primary branch read and written as one with the
 //! layers its schema declares beside it.
 //!
 //! The primary's schema says which layers exist ([`LayerDeclaration`]).
-//! Opening a session on the primary builds every layer the schema
+//! Opening a stack on the primary builds every layer the schema
 //! declares in memory and reads them with the primary as one composite.
 //! Where a row lies is a dimension of the row, `in`: a read with `in`
 //! unbound reads every layer and binds each row's, one with `in` bound
 //! reads that layer alone, and a write lands in the layer its
 //! descriptor names (`in:`, or [`Statement::at`]), the primary with none
-//! named. A transaction through the session routes each write so: the
+//! named. A transaction through the stack routes each write so: the
 //! primary's share is committed and published as any branch commit is,
 //! and each memory layer's share lands in it once the publish does, so
-//! no layer shows a commit that was refused. The layers every session
-//! has are named [`MEMORY`], the primary, [`SESSION`], the session's own,
+//! no layer shows a commit that was refused. The layers every stack
+//! has are named [`MEMORY`], the primary, [`SESSION`], the stack's own,
 //! and [`CONTROL`], the loopback a command lands in.
 //!
 //! ```no_run
 //! # use dialog_repository::{Branch, LayerDeclaration, Store};
 //! # use dialog_corpus::Statement as _;
-//! # async fn example(branch: Branch, env: impl dialog_repository::SessionEnv) -> anyhow::Result<()> {
+//! # async fn example(branch: Branch, env: impl dialog_repository::StackEnv) -> anyhow::Result<()> {
 //! let state: dialog_corpus::Entity = "session:state".parse()?;
 //! branch
 //!     .transaction()
@@ -27,8 +27,8 @@
 //!     .publish()
 //!     .perform(&env)
 //!     .await?;
-//! let session = branch.session().perform(&env).await?;
-//! session
+//! let stack = branch.stack().perform(&env).await?;
+//! stack
 //!     .transact(dialog_query::the!("ui/selected").of("doc:1".parse()?).is(true).at(state))
 //!     .perform(&env)
 //!     .await?;
@@ -36,10 +36,10 @@
 //! # }
 //! ```
 //!
-//! A session is driven by dispatch ([`Session::invoke`], and
-//! [`Session::transact`] for writes with no command): each dispatch is
+//! A stack is driven by dispatch ([`Stack::invoke`], and
+//! [`Stack::transact`] for writes with no command): each dispatch is
 //! one unit of publication, re-run from the new head when the primary's
-//! head moved under it (see [`invoke`]). [`Session::transaction`] is the
+//! head moved under it (see [`invoke`]). [`Stack::transaction`] is the
 //! same commit without the re-run, for a caller that handles a lost head
 //! itself.
 //!
@@ -50,64 +50,64 @@
 //! `dialog.concept/transient` marker). It is the stimulus of the next
 //! tick, read as a row of `control:` by a rule premised on it, and gone
 //! after that tick. Once a dispatch has published, its commands land in
-//! the session's `control:` layer as one instant and leave it in the
+//! the stack's `control:` layer as one instant and leave it in the
 //! next: a **provider**, something that performs an effect, reads them
-//! there with [`Session::arrivals`], each once, and answers by invoking
-//! ([`Session::invoke`]), naming the command it answers by its entity.
+//! there with [`Stack::arrivals`], each once, and answers by invoking
+//! ([`Stack::invoke`]), naming the command it answers by its entity.
 //! A provider outside the invoke loop, or outside the process, reads a
 //! **channel** instead, `control:<name>`, a layer declared with
 //! [`Store::Control`] whose rows stay until the consumer retracts them.
 //!
 //! A layer declared with [`Store::Durable`], `memory:<name>`, is a
-//! branch: the repository's branch `<name>`, opened with the session and
+//! branch: the repository's branch `<name>`, opened with the stack and
 //! read as a line beside the primary, its rows binding `in` to
-//! `memory:<name>` ([`Session::durable`] hands the branch out). A write
+//! `memory:<name>` ([`Stack::durable`] hands the branch out). A write
 //! into it is committed on that branch as part of the dispatch's
 //! publication, and the primary records the revision it lands at as a
 //! pointer fact, `memory:<name> dialog.layer/revision <tree>`, in the
 //! same dispatch: the layers publish bottom to top, the primary last,
 //! and a lost compare-and-swap on any of them re-runs the dispatch from
-//! the new heads. [`Session::sync`] pulls and pushes the primary and
+//! the new heads. [`Stack::sync`] pulls and pushes the primary and
 //! every durable layer with upstreams.
 //!
-//! Every session has its own layer, [`SESSION`], whether or not the
-//! schema declares it: a table in memory, the session's alone, gone
-//! when the process is. It is how a session addresses the process-local
-//! store a branch has always had: [`Session::layer`] hands it out for
+//! Every stack has its own layer, [`SESSION`], whether or not the
+//! schema declares it: a table in memory, the stack's alone, gone
+//! when the process is. It is how a stack addresses the process-local
+//! store a branch has always had: [`Stack::layer`] hands it out for
 //! [`session_layer`](crate::session_layer), a write `.at(session_layer())`
 //! lands in it once the dispatch publishes, and a read binds its rows'
 //! `in` to it. [`Branch::overlay`] stays, as the same store under its
 //! older name: what is written through one is read through the other.
 //!
-//! The session records in its own layer the revision every layer
+//! The stack records in its own layer the revision every layer
 //! stands at, one `dialog.layer/revision` row per layer, under `last`:
 //! of [`MEMORY`] the primary's tree, of each durable layer its branch's
 //! tree, of each memory layer its instant chain, and of [`SESSION`] its
 //! own chain as it stood before the recordings that followed its last
 //! change. A row is written only when its layer **moved**, when the
-//! revision it stands at is not the one the session holds for it: after
+//! revision it stands at is not the one the stack holds for it: after
 //! a dispatch publishes, for the layers its commit and its writes moved,
-//! and after [`Session::sync`] pulls and pushes, for the layers the
-//! pulls moved. Writing the rows is not itself a move of the session's
+//! and after [`Stack::sync`] pulls and pushes, for the layers the
+//! pulls moved. Writing the rows is not itself a move of the stack's
 //! own layer: its row moves only when something else was written into
 //! `session:`, a dispatch's writes into it among them, and then names
 //! the revision those writes left it at. So a dispatch that writes
 //! nothing into `session:` and moves no other layer writes no row and
 //! mints no instant in `session:`. Of the same rows, as the layers stood
-//! when a dispatch began, those the session has not recorded are its
+//! when a dispatch began, those the stack has not recorded are its
 //! stimulus, so a rule premised on a layer's revision fires when the
 //! layer moved outside a dispatch (a pull moved the primary or a durable
 //! layer, something wrote into a memory layer directly) and on the
-//! session's first dispatch, which finds nothing recorded.
+//! stack's first dispatch, which finds nothing recorded.
 //!
-//! The session's own layer also holds which layer is **selected**
-//! ([`Session::select`]): while one is, a write with no layer named
+//! The stack's own layer also holds which layer is **selected**
+//! ([`Stack::select`]): while one is, a write with no layer named
 //! lands in it rather than the primary, as a stroke lands on the layer
 //! an image editor has selected. The machinery under `dialog.` (rules,
 //! layer declarations, the revision rows) never follows the selection.
 //!
-//! What the session holds of its own are its **declarations**
-//! ([`Session::declare`]): layers this process declares for itself,
+//! What the stack holds of its own are its **declarations**
+//! ([`Stack::declare`]): layers this process declares for itself,
 //! which outrank what the primary's tree and session store declare, and
 //! reach no layer and no peer.
 //!
@@ -120,7 +120,7 @@ pub mod invoke;
 pub mod sync;
 
 pub use arrivals::Arrivals;
-pub use sync::{SyncEnv, SyncError, SyncSession};
+pub use sync::{SyncEnv, SyncError, SyncStack};
 
 use std::iter::once;
 use std::sync::Arc;
@@ -146,19 +146,19 @@ use crate::placement::{
     session_layer,
 };
 use crate::repository::branch::session::Composite;
-use crate::repository::branch::transaction::{DurableLayer, SessionContext};
+use crate::repository::branch::transaction::{DurableLayer, StackContext};
 use crate::repository::source::Source;
 use crate::{Branch, CommitError, Ephemeral, QueryLayer, RemoteSite, Revision, Transaction};
 
-/// What opening a session and reading through it need of the
+/// What opening a stack and reading through it need of the
 /// environment: a read of the primary, to resolve the layers its schema
 /// declares, the open of each durable layer's branch, and what a query
-/// through the session reads with. Nothing in it commits or publishes:
-/// an environment that can open branches and query them opens a session
-/// beside them ([`OpenSession::perform`]), and reads what arrives in its
-/// layers ([`Arrivals`]). Dispatching through the session needs
-/// [`SessionEnv`].
-pub trait OpenSessionEnv:
+/// through the stack reads with. Nothing in it commits or publishes:
+/// an environment that can open branches and query them opens a stack
+/// beside them ([`OpenStack::perform`]), and reads what arrives in its
+/// layers ([`Arrivals`]). Dispatching through the stack needs
+/// [`StackEnv`].
+pub trait OpenStackEnv:
     Provider<BlobRead>
     + Provider<Get>
     + Provider<Put>
@@ -178,7 +178,7 @@ pub trait OpenSessionEnv:
 {
 }
 
-impl<T> OpenSessionEnv for T where
+impl<T> OpenStackEnv for T where
     T: Provider<BlobRead>
         + Provider<Get>
         + Provider<Put>
@@ -198,11 +198,11 @@ impl<T> OpenSessionEnv for T where
 {
 }
 
-/// What a session needs of its environment to dispatch through it: what
-/// opening it and reading through it need ([`OpenSessionEnv`]), and what
+/// What a stack needs of its environment to dispatch through it: what
+/// opening it and reading through it need ([`OpenStackEnv`]), and what
 /// a transaction's commit needs, to publish through it.
-pub trait SessionEnv:
-    OpenSessionEnv
+pub trait StackEnv:
+    OpenStackEnv
     + Provider<Attest>
     + Provider<Publish>
     + Provider<Import>
@@ -211,8 +211,8 @@ pub trait SessionEnv:
 {
 }
 
-impl<T> SessionEnv for T where
-    T: OpenSessionEnv
+impl<T> StackEnv for T where
+    T: OpenStackEnv
         + Provider<Attest>
         + Provider<Publish>
         + Provider<Import>
@@ -221,16 +221,16 @@ impl<T> SessionEnv for T where
 {
 }
 
-/// Command opening a [`Session`] on a branch. Built by
-/// [`Branch::session`]; run with [`perform`](Self::perform).
-pub struct OpenSession {
+/// Command opening a [`Stack`] on a branch. Built by
+/// [`Branch::stack`]; run with [`perform`](Self::perform).
+pub struct OpenStack {
     primary: Branch,
     declared: Changes,
 }
 
-impl OpenSession {
-    /// Hold `declaration` in the session once it is open, as
-    /// [`Session::declare`] would: a layer it declares is built with the
+impl OpenStack {
+    /// Hold `declaration` in the stack once it is open, as
+    /// [`Stack::declare`] would: a layer it declares is built with the
     /// rest.
     pub fn declare<S: Statement>(mut self, declaration: S) -> Self {
         declaration.assert(&mut self.declared);
@@ -240,12 +240,12 @@ impl OpenSession {
     /// Read the primary's schema at its head and build every layer it
     /// declares. Opening reads and opens branches, and commits nothing,
     /// so it needs no more of `env` than a read does
-    /// ([`OpenSessionEnv`]).
-    pub async fn perform<Env: OpenSessionEnv>(self, env: &Env) -> Result<Session, CommitError> {
+    /// ([`OpenStackEnv`]).
+    pub async fn perform<Env: OpenStackEnv>(self, env: &Env) -> Result<Stack, CommitError> {
         let primary = Source::from(self.primary.clone());
         let layers = Layers::resolve(&primary, &self.declared, env).await?;
-        // The primary, the session's own layer and the loopback are
-        // every session's, whatever the schema says of them: a
+        // The primary, the stack's own layer and the loopback are
+        // every stack's, whatever the schema says of them: a
         // declaration naming one builds nothing apart.
         let (memory, own, control) = (memory_layer(), session_layer(), control_layer());
         let mut memories = Vec::new();
@@ -271,7 +271,7 @@ impl OpenSession {
                 }
             }
         }
-        Ok(Session {
+        Ok(Stack {
             inner: Arc::new(Inner {
                 primary: self.primary,
                 layers: memories,
@@ -286,7 +286,7 @@ impl OpenSession {
 struct Inner {
     primary: Branch,
     /// The layers the schema declares, each with the entity that names
-    /// it, in the order the schema lists them. The session's own layer,
+    /// it, in the order the schema lists them. The stack's own layer,
     /// [`SESSION`](crate::SESSION), is not among them: it is the
     /// primary's process-local store ([`Branch::overlay`]), read with the
     /// primary.
@@ -296,23 +296,23 @@ struct Inner {
     /// order the schema lists them.
     durables: Vec<(Entity, Branch)>,
     declared: RwLock<Changes>,
-    /// The loopback, [`CONTROL`](crate::CONTROL), as the session holds
+    /// The loopback, [`CONTROL`](crate::CONTROL), as the stack holds
     /// it between dispatches, and what wakes a reader of it.
     loopback: Loopback,
 }
 
-/// The session's loopback, [`CONTROL`](crate::CONTROL), as it holds it
+/// The stack's loopback, [`CONTROL`](crate::CONTROL), as it holds it
 /// between dispatches: empty, but for the one instant each published
 /// dispatch's commands stand in it, so its instants are every command,
 /// in order, once. A dispatch's own ticks read their commands as rows of
-/// `control:` without it. Every transaction through the session carries
+/// `control:` without it. Every transaction through the stack carries
 /// it, so the publish that lands the dispatch lands its commands here,
 /// whichever way the transaction was driven. Cheap to clone: clones
 /// share the layer and the waiters.
 #[derive(Clone, Default)]
 pub(crate) struct Loopback {
     control: Ephemeral,
-    /// Woken once each dispatch through the session has published and
+    /// Woken once each dispatch through the stack has published and
     /// landed its commands: what [`Arrivals::next`] waits on.
     landed: Arc<Notify>,
 }
@@ -343,32 +343,32 @@ impl Loopback {
 /// written as one. Cheap to clone: clones share the layers and the
 /// declarations.
 #[derive(Clone)]
-pub struct Session {
+pub struct Stack {
     inner: Arc<Inner>,
 }
 
 impl Branch {
-    /// Open a session on this branch: it becomes the primary, and every
+    /// Open a stack on this branch: it becomes the primary, and every
     /// layer its schema declares is built beside it.
-    pub fn session(&self) -> OpenSession {
-        OpenSession {
+    pub fn stack(&self) -> OpenStack {
+        OpenStack {
             primary: self.clone(),
             declared: Changes::new(),
         }
     }
 }
 
-impl Session {
-    /// The branch this session reads and writes as its primary.
+impl Stack {
+    /// The branch this stack reads and writes as its primary.
     pub fn primary(&self) -> &Branch {
         &self.inner.primary
     }
 
-    /// The layer named `name`, if the session holds one: the session's
-    /// own, [`SESSION`](crate::SESSION), which every session has, the
-    /// loopback, [`CONTROL`](crate::CONTROL), which every session has
+    /// The layer named `name`, if the stack holds one: the stack's
+    /// own, [`SESSION`](crate::SESSION), which every stack has, the
+    /// loopback, [`CONTROL`](crate::CONTROL), which every stack has
     /// too, or one the schema declares (a memory layer or a channel).
-    /// The session's own is the primary's process-local store, the one
+    /// The stack's own is the primary's process-local store, the one
     /// [`Branch::overlay`] hands out: a clone of either shares its state.
     /// The loopback holds nothing between dispatches; its instants are
     /// the commands of each published dispatch (see [`invoke`]).
@@ -386,7 +386,7 @@ impl Session {
             .map(|(_, memory)| memory)
     }
 
-    /// The layers this session holds beside the primary, by name: its
+    /// The layers this stack holds beside the primary, by name: its
     /// own, [`SESSION`](crate::SESSION), first, then the memory layers
     /// the schema declares, in the schema's order, then its durable
     /// layers, in the schema's order. The loopback,
@@ -399,7 +399,7 @@ impl Session {
             .collect()
     }
 
-    /// The branch the durable layer `name` is, if the session holds one
+    /// The branch the durable layer `name` is, if the stack holds one
     /// by that name: the repository's branch `<name>` of
     /// `memory:<name>`, declared with [`Store::Durable`]. A durable layer
     /// holds no [`Ephemeral`]: [`layer`](Self::layer) answers `None` for
@@ -412,21 +412,21 @@ impl Session {
             .map(|(_, branch)| branch)
     }
 
-    /// The durable layers this session holds, by name, with the branch
+    /// The durable layers this stack holds, by name, with the branch
     /// each is, in the schema's order.
     pub fn durables(&self) -> &[(Entity, Branch)] {
         &self.inner.durables
     }
 
     /// Select `layer`, or clear the selection with `None`: a dispatch
-    /// writing the session's own layer's `dialog.session/layer` row of
+    /// writing the stack's own layer's `dialog.session/layer` row of
     /// [`SESSION`](crate::SESSION), under `last`. While a layer is
     /// selected, a write with no layer named, and a rule head whose
     /// descriptor names none, lands in it rather than the primary,
     /// except a write under `dialog.` (rules, layer declarations,
     /// revisions), which never follows the selection. Selecting
     /// [`MEMORY`](crate::MEMORY) is selecting the primary. A selected
-    /// layer the session does not hold refuses the commit that would
+    /// layer the stack does not hold refuses the commit that would
     /// land a write in it with [`CommitError::UnboundLayer`].
     ///
     /// The selection takes effect from the dispatch after the one that
@@ -439,32 +439,32 @@ impl Session {
         }
     }
 
-    /// The layer selected in the session's own layer, if any (see
+    /// The layer selected in the stack's own layer, if any (see
     /// [`select`](Self::select)).
     pub fn selected(&self) -> Option<Entity> {
         selected(self.inner.primary.overlay())
     }
 
-    /// Hold `declaration` in this session: a
+    /// Hold `declaration` in this stack: a
     /// [`LayerDeclaration`](crate::LayerDeclaration), or a [`Changes`] of
     /// them, whose retractions undo what an earlier call declared or what
     /// the primary declares. It is this process's own: it outranks a
     /// declaration the primary's session store or tree holds and reaches
-    /// no layer and no peer. A layer declared here after the session
-    /// opened is not built: declare it on [`Branch::session`] instead.
+    /// no layer and no peer. A layer declared here after the stack
+    /// opened is not built: declare it on [`Branch::stack`] instead.
     /// Chainable.
     pub fn declare<S: Statement>(&self, declaration: S) -> &Self {
         declaration.assert(&mut *self.inner.declared.write());
         self
     }
 
-    /// The declarations this session holds, as [`declare`](Self::declare)
+    /// The declarations this stack holds, as [`declare`](Self::declare)
     /// accumulated them.
     pub fn declared(&self) -> Changes {
         self.inner.declared.read().clone()
     }
 
-    /// Whether a layer of the session stands somewhere other than the
+    /// Whether a layer of the stack stands somewhere other than the
     /// `dialog.layer/revision` row its own layer holds of it: what the
     /// next dispatch would record (see the [module docs](self)).
     pub(crate) fn unrecorded(&self) -> bool {
@@ -484,13 +484,13 @@ impl Session {
     }
 
     /// The memory layers the schema declares, by name, in the schema's
-    /// order. The session's own layer is not among them: a commit and a
+    /// order. The stack's own layer is not among them: a commit and a
     /// read take it from the primary, as its session overlay.
     pub(crate) fn memories(&self) -> Vec<(Entity, Ephemeral)> {
         self.inner.layers.clone()
     }
 
-    /// The layers a transaction through this session reads and induces
+    /// The layers a transaction through this stack reads and induces
     /// over: the primary pinned as `primary`, each durable layer as
     /// `durables` pins it, and the memory layers.
     fn composite(&self, primary: Source, durables: &[DurableLayer]) -> Composite {
@@ -507,12 +507,12 @@ impl Session {
         }
     }
 
-    /// A query over the session: the primary and every layer. A read
+    /// A query over the stack: the primary and every layer. A read
     /// with `in` unbound reads them all and binds each row's layer; one
     /// with `in` bound reads that layer alone.
     pub fn query(&self) -> QueryLayer<'_> {
         // The primary's line reads its session overlay as `session:`, so
-        // the session's own layer is read once, with the primary.
+        // the stack's own layer is read once, with the primary.
         let mut layer = QueryLayer::from(&self.inner.primary);
         for (name, memory) in &self.inner.layers {
             layer = layer.with_memory(name.clone(), memory);
@@ -523,14 +523,14 @@ impl Session {
         layer
     }
 
-    /// Start a transaction through the session. Its reads see every
+    /// Start a transaction through the stack. Its reads see every
     /// layer; its commit routes each write to the layer its descriptor
     /// names (`in:`), the primary with none named, and the memory layers
     /// take their shares once the primary's commit publishes. Once its
     /// publish has won, the commands it dispatched (with
     /// [`dispatch`](Transaction::dispatch), or written
     /// `.at(control_layer())`) and the ones its rules dispatched land in
-    /// the session's [`CONTROL`](crate::CONTROL) for one tick, as
+    /// the stack's [`CONTROL`](crate::CONTROL) for one tick, as
     /// [`Invocation::perform`](invoke::Invocation::perform) lands them,
     /// and wake every [`Arrivals`] waiting. Unlike an invocation it is
     /// not re-run when the head moved under it: its publish fails with
@@ -545,7 +545,7 @@ impl Session {
             .iter()
             .map(|(layer, branch)| DurableLayer::pin(layer.clone(), branch.clone()))
             .collect();
-        transaction.with_session(SessionContext {
+        transaction.with_stack(StackContext {
             composite: self.composite(primary, &durables),
             memories: self.inner.layers.clone(),
             durables,
@@ -715,7 +715,7 @@ mod tests {
         Ok(state)
     }
 
-    /// A session builds the layers the primary's schema declares and
+    /// A stack builds the layers the primary's schema declares and
     /// routes each write to the layer it names: the tree never holds a
     /// fact written into the memory layer, and the layer never holds one
     /// written with no layer named.
@@ -725,16 +725,16 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         assert_eq!(
-            session.layers(),
+            stack.layers(),
             vec![crate::session_layer(), state.clone()],
-            "the session's own layer comes first, then the schema's"
+            "the stack's own layer comes first, then the schema's"
         );
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let memory = stack.layer(&state).expect("the state layer").clone();
 
         let doc: Entity = "doc:1".parse()?;
-        let revision = session
+        let revision = stack
             .transaction()
             .assert(
                 dialog_query::the!("doc/title")
@@ -777,17 +777,17 @@ mod tests {
         assert!(held(&memory, "doc/title", &doc)?.is_empty());
 
         assert_eq!(
-            read::<bool>(session.query(), &operator, "ui/selected", &doc).await?,
+            read::<bool>(stack.query(), &operator, "ui/selected", &doc).await?,
             vec!["Boolean(true)".to_string()]
         );
         assert_eq!(
-            read::<String>(session.query(), &operator, "doc/title", &doc).await?,
+            read::<String>(stack.query(), &operator, "doc/title", &doc).await?,
             vec!["String(\"Notes\")".to_string()]
         );
         Ok(())
     }
 
-    /// Every session has its own layer, declared or not: it is the
+    /// Every stack has its own layer, declared or not: it is the
     /// primary's process-local store, so what is written through one name
     /// is read through the other, and a read binds its rows once, to
     /// `session:`. A schema that declares `session:` builds nothing apart.
@@ -797,15 +797,11 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let own = crate::session_layer();
-        let session = branch.session().perform(&operator).await?;
-        assert_eq!(
-            session.layers(),
-            vec![own.clone()],
-            "undeclared, still held"
-        );
+        let stack = branch.stack().perform(&operator).await?;
+        assert_eq!(stack.layers(), vec![own.clone()], "undeclared, still held");
 
         let doc: Entity = "doc:1".parse()?;
-        session
+        stack
             .transact(flag(&doc, true, &own))
             .perform(&operator)
             .await?;
@@ -817,14 +813,14 @@ mod tests {
         branch
             .overlay()
             .assert(primary_flag(&"doc:2".parse()?, true))?;
-        let layer = session.layer(&own).expect("the session's own layer");
+        let layer = stack.layer(&own).expect("the stack's own layer");
         assert_eq!(
             held(layer, "ui/selected", &"doc:2".parse()?)?,
             vec!["Boolean(true)".to_string()],
             "a write into the overlay is read through `session:`"
         );
 
-        let claims: Vec<dialog_query::Claim> = session
+        let claims: Vec<dialog_query::Claim> = stack
             .query()
             .select(selected_query().with_layer(Term::var("where")))
             .perform(&operator)
@@ -858,7 +854,7 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        let declared = branch.session().perform(&operator).await?;
+        let declared = branch.stack().perform(&operator).await?;
         assert_eq!(declared.layers(), vec![own.clone()]);
         assert!(
             !held(
@@ -882,10 +878,10 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
-        session
+        stack
             .transaction()
             .assert(count(&counter, 1, &state))
             .commit()
@@ -894,7 +890,7 @@ mod tests {
             .await?;
         let before = branch.revision();
         for expected in ["UnsignedInt(2)", "UnsignedInt(3)"] {
-            session
+            stack
                 .transaction()
                 .dispatch(
                     dialog_query::the!("cmd.increment/counter")
@@ -914,7 +910,7 @@ mod tests {
         branch.refresh(&operator).await?;
         assert_eq!(branch.revision(), before, "nothing was written to the tree");
         assert_eq!(
-            read::<u64>(session.query(), &operator, "counter/count", &counter).await?,
+            read::<u64>(stack.query(), &operator, "counter/count", &counter).await?,
             vec!["UnsignedInt(3)".to_string()]
         );
         Ok(())
@@ -930,14 +926,14 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
-        session
+        stack
             .transact(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
-        // Another handle moves the head; this session's handle is stale.
+        // Another handle moves the head; this stack's handle is stale.
         let other = repo.branch("main").open().perform(&operator).await?;
         let moved = other
             .transaction()
@@ -951,7 +947,7 @@ mod tests {
             .perform(&operator)
             .await?;
         let doc: Entity = "doc:1".parse()?;
-        let published = session
+        let published = stack
             .invoke(
                 dialog_query::the!("cmd.increment/counter")
                     .of("cmd:1".parse::<Entity>()?)
@@ -994,14 +990,14 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
-        let before = session
+        let before = stack
             .transact(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
-        let after = session
+        let after = stack
             .invoke(
                 dialog_query::the!("cmd.increment/counter")
                     .of("cmd:1".parse::<Entity>()?)
@@ -1018,20 +1014,20 @@ mod tests {
         Ok(())
     }
 
-    /// A write named for a layer the session does not hold is refused
+    /// A write named for a layer the stack does not hold is refused
     /// before anything changes: the primary's head and every layer stay as
     /// they were.
     #[dialog_common::test]
-    async fn it_refuses_a_write_named_for_a_layer_the_session_does_not_hold() -> Result<()> {
+    async fn it_refuses_a_write_named_for_a_layer_the_stack_does_not_hold() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
         let before = branch.revision();
         let doc: Entity = "doc:1".parse()?;
-        let refused = session
+        let refused = stack
             .transaction()
             .assert(
                 dialog_query::the!("ui/selected")
@@ -1058,7 +1054,7 @@ mod tests {
                 assert_eq!(named, layer("nowhere").to_string());
             }
             other => {
-                panic!("a write named for a layer the session does not hold is refused: {other:?}")
+                panic!("a write named for a layer the stack does not hold is refused: {other:?}")
             }
         }
         branch.refresh(&operator).await?;
@@ -1078,10 +1074,10 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
         let doc: Entity = "doc:1".parse()?;
-        let transaction = session
+        let transaction = stack
             .transaction()
             .assert(
                 dialog_query::the!("ui/selected")
@@ -1124,13 +1120,13 @@ mod tests {
         // tick that wrote the layer, and lands none of them when its
         // publish loses the compare-and-swap.
         let counter: Entity = "ctr:1".parse()?;
-        session.primary().refresh(&operator).await?;
-        session
+        stack.primary().refresh(&operator).await?;
+        stack
             .transact(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
         let start = memory.revision();
-        let batch = session
+        let batch = stack
             .transaction()
             .assert(flag(&doc, true, &state))
             .dispatch(
@@ -1198,7 +1194,7 @@ mod tests {
         )
     }
 
-    /// After each dispatch publishes, the session's own layer holds one
+    /// After each dispatch publishes, the stack's own layer holds one
     /// `dialog.layer/revision` row per layer, under `last`: a second
     /// dispatch replaces the rows the first wrote, and the primary's row
     /// follows the primary's head.
@@ -1208,15 +1204,15 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let own_name = crate::session_layer();
-        let own = session.layer(&own_name).expect("its own layer").clone();
+        let own = stack.layer(&own_name).expect("its own layer").clone();
         let memory = crate::memory_layer();
         let doc: Entity = "doc:1".parse()?;
 
         let mut primary_rows = Vec::new();
         for title in ["First", "Second"] {
-            let revision = session
+            let revision = stack
                 .transact(
                     dialog_query::the!("doc/title")
                         .of(doc.clone())
@@ -1242,12 +1238,12 @@ mod tests {
     }
 
     /// A rule premised on `dialog.layer/revision` fires for a layer that
-    /// moved since the session last recorded it, with the revision it
+    /// moved since the stack last recorded it, with the revision it
     /// stood at as the dispatch began: on the first dispatch, which finds
     /// nothing recorded, for every layer. The second dispatch finds the
-    /// primary and the session's own layer where the first recorded
+    /// primary and the stack's own layer where the first recorded
     /// them, so the rule fires for neither. (It used to fire for the
-    /// session's own layer on every dispatch after the first, since the
+    /// stack's own layer on every dispatch after the first, since the
     /// recording itself moved that layer; recording is no longer a move
     /// of it, so its row moves only when something wrote into it.)
     #[dialog_common::test]
@@ -1285,10 +1281,10 @@ mod tests {
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let memory_name = crate::memory_layer();
-        let memory = session.layer(&state).expect("the state layer").clone();
-        let own = session
+        let memory = stack.layer(&state).expect("the state layer").clone();
+        let own = stack
             .layer(&crate::session_layer())
             .expect("its own layer")
             .clone();
@@ -1297,7 +1293,7 @@ mod tests {
         let start = branch.revision().expect("a revision");
         let own_name = crate::session_layer();
         let own_start = chain_text(&own);
-        session
+        stack
             .transact(
                 dialog_query::the!("doc/title")
                     .of(doc.clone())
@@ -1313,15 +1309,15 @@ mod tests {
         assert_eq!(
             held(&memory, "seen/revision", &own_name)?,
             vec![own_start.clone()],
-            "nothing was recorded, so the rule fired for the session's own layer"
+            "nothing was recorded, so the rule fired for the stack's own layer"
         );
 
         // The next dispatch finds the primary where the last dispatch
         // recorded it, so its revision is no stimulus and the rule does
         // not fire for it again. Nothing but the recording wrote into
-        // the session's own layer, and a recording is no move of it, so
+        // the stack's own layer, and a recording is no move of it, so
         // the rule does not fire for it either.
-        session
+        stack
             .transact(flag(&doc, true, &state))
             .perform(&operator)
             .await?;
@@ -1333,7 +1329,7 @@ mod tests {
         assert_eq!(
             held(&memory, "seen/revision", &own_name)?,
             vec![own_start],
-            "the session's own layer did not move, so the rule did not fire for it"
+            "the stack's own layer did not move, so the rule did not fire for it"
         );
         Ok(())
     }
@@ -1353,7 +1349,7 @@ mod tests {
     /// A dispatch after which no layer stands anywhere new writes no
     /// revision row and mints no instant in `session:`: one that writes
     /// nothing, and one that only dispatches a command no rule answers
-    /// (a write into `control:`, which lands in no layer the session
+    /// (a write into `control:`, which lands in no layer the stack
     /// records).
     #[dialog_common::test]
     async fn it_records_no_revision_when_nothing_moved() -> Result<()> {
@@ -1361,9 +1357,9 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
-        session
+        stack
             .transact(flag(&doc, true, &state))
             .perform(&operator)
             .await?;
@@ -1371,7 +1367,7 @@ mod tests {
         let rows = revision_rows_of(branch.overlay());
         assert_eq!(rows.len(), 3, "the first dispatch recorded every layer");
 
-        session.transact(Changes::new()).perform(&operator).await?;
+        stack.transact(Changes::new()).perform(&operator).await?;
         assert_eq!(
             branch.overlay().revision().sequence,
             sequence,
@@ -1379,7 +1375,7 @@ mod tests {
         );
         assert_eq!(revision_rows_of(branch.overlay()), rows);
 
-        session
+        stack
             .transact(flag(&doc, false, &crate::control_layer()))
             .perform(&operator)
             .await?;
@@ -1394,7 +1390,7 @@ mod tests {
 
     /// A dispatch that moves the primary alone rewrites the primary's
     /// row alone, to the tree it published, as one instant of
-    /// `session:`: the memory layer's row and the session's own stay as
+    /// `session:`: the memory layer's row and the stack's own stay as
     /// the dispatch before recorded them.
     #[dialog_common::test]
     async fn it_records_only_the_layer_that_moved() -> Result<()> {
@@ -1402,11 +1398,11 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let own = branch.overlay().clone();
         let (memory, own_name) = (crate::memory_layer(), crate::session_layer());
         let doc: Entity = "doc:1".parse()?;
-        session
+        stack
             .transact(flag(&doc, true, &state))
             .perform(&operator)
             .await?;
@@ -1415,7 +1411,7 @@ mod tests {
         let own_before = revision_of(&own, &own_name)?;
         let sequence = own.revision().sequence;
 
-        let published = session
+        let published = stack
             .transact(
                 dialog_query::the!("doc/title")
                     .of(doc.clone())
@@ -1454,8 +1450,8 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
         let doc: Entity = "doc:1".parse()?;
         let title = |text: &str| {
             dialog_query::the!("doc/title")
@@ -1463,15 +1459,12 @@ mod tests {
                 .is(text.to_string())
         };
 
-        assert_eq!(session.selected(), None);
-        session
-            .select(Some(state.clone()))
-            .perform(&operator)
-            .await?;
-        assert_eq!(session.selected(), Some(state.clone()));
+        assert_eq!(stack.selected(), None);
+        stack.select(Some(state.clone())).perform(&operator).await?;
+        assert_eq!(stack.selected(), Some(state.clone()));
 
         let before = branch.revision();
-        session.transact(title("Notes")).perform(&operator).await?;
+        stack.transact(title("Notes")).perform(&operator).await?;
         branch.refresh(&operator).await?;
         assert_eq!(
             held(&memory, "doc/title", &doc)?,
@@ -1487,7 +1480,7 @@ mod tests {
         assert_eq!(branch.revision(), before, "the primary's head stays");
 
         let other = layer("other");
-        session
+        stack
             .transact(LayerDeclaration::new(other.clone(), Store::Memory))
             .perform(&operator)
             .await?;
@@ -1500,9 +1493,9 @@ mod tests {
         );
         assert!(held(&memory, "dialog.layer/store", &other)?.is_empty());
 
-        session.select(None).perform(&operator).await?;
-        assert_eq!(session.selected(), None, "the selection is cleared");
-        session.transact(title("Other")).perform(&operator).await?;
+        stack.select(None).perform(&operator).await?;
+        assert_eq!(stack.selected(), None, "the selection is cleared");
+        stack.transact(title("Other")).perform(&operator).await?;
         assert_eq!(
             committed::<String>(&branch, &operator, "doc/title", &doc).await?,
             vec!["String(\"Other\")".to_string()],
@@ -1550,12 +1543,9 @@ mod tests {
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
-        session
-            .select(Some(state.clone()))
-            .perform(&operator)
-            .await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
+        stack.select(Some(state.clone())).perform(&operator).await?;
 
         let doc: Entity = "doc:1".parse()?;
         let command: Entity = "cmd:1".parse()?;
@@ -1569,7 +1559,7 @@ mod tests {
             .is("hi".to_string())
             .assert(&mut marked);
         let before = branch.revision();
-        session.invoke(marked).perform(&operator).await?;
+        stack.invoke(marked).perform(&operator).await?;
         branch.refresh(&operator).await?;
         assert_eq!(
             held(&memory, "doc/note", &doc)?,
@@ -1585,26 +1575,26 @@ mod tests {
         Ok(())
     }
 
-    /// A selected layer the session does not hold refuses the commit
+    /// A selected layer the stack does not hold refuses the commit
     /// that would land a write in it, and nothing is written: not the
     /// tree, not a layer.
     #[dialog_common::test]
-    async fn it_refuses_a_write_into_a_selected_layer_the_session_does_not_hold() -> Result<()> {
+    async fn it_refuses_a_write_into_a_selected_layer_the_stack_does_not_hold() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
         let nowhere = layer("nowhere");
-        session
+        stack
             .select(Some(nowhere.clone()))
             .perform(&operator)
             .await?;
 
         let doc: Entity = "doc:1".parse()?;
         let before = branch.revision();
-        let refused = session
+        let refused = stack
             .transact(
                 dialog_query::the!("doc/title")
                     .of(doc.clone())
@@ -1658,14 +1648,10 @@ mod tests {
         )
     }
 
-    /// What a fresh evaluation of `query` through the session reads.
-    async fn fresh(
-        session: &Session,
-        env: &Operator,
-        query: AttributeQuery,
-    ) -> Result<Vec<String>> {
+    /// What a fresh evaluation of `query` through the stack reads.
+    async fn fresh(stack: &Stack, env: &Operator, query: AttributeQuery) -> Result<Vec<String>> {
         let claims: Vec<dialog_query::Claim> =
-            session.query().select(query).perform(env).try_vec().await?;
+            stack.query().select(query).perform(env).try_vec().await?;
         Ok(selected(&claims))
     }
 
@@ -1683,23 +1669,23 @@ mod tests {
         dialog_query::the!("ui/selected").of(doc.clone()).is(value)
     }
 
-    /// A subscription through a session reads every layer, and a share a
+    /// A subscription through a stack reads every layer, and a share a
     /// dispatch lands in a memory layer propagates as a delta on the
     /// next poll, maintained from the layer's instants. A commit to the
     /// primary outside the cover advances the pins for free.
     #[dialog_common::test]
-    async fn it_subscribes_through_a_session() -> Result<()> {
+    async fn it_subscribes_through_a_stack() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
-        let mut subscription = session.subscribe(selected_query());
+        let mut subscription = stack.subscribe(selected_query());
         let initial = subscription.poll(&operator).await?.expect("initial");
         assert!(initial.asserted.is_empty());
 
-        session
+        stack
             .transact(flag(&doc, true, &state))
             .perform(&operator)
             .await?;
@@ -1719,7 +1705,7 @@ mod tests {
         );
         assert_eq!(subscription.recomputes(), 1);
 
-        session
+        stack
             .transact(
                 dialog_query::the!("doc/title")
                     .of(doc.clone())
@@ -1732,7 +1718,7 @@ mod tests {
             "a commit outside the cover changes nothing"
         );
 
-        session
+        stack
             .transact(Changes::new())
             .retract(flag(&doc, true, &state))
             .perform(&operator)
@@ -1756,19 +1742,19 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
-        session
+        stack
             .transact(flag(&doc, true, &state))
             .assert(primary_flag(&doc, false))
             .perform(&operator)
             .await?;
 
         let rows = |query: AttributeQuery| {
-            let session = session.clone();
+            let stack = stack.clone();
             let operator = &operator;
             async move {
-                let claims: Vec<dialog_query::Claim> = session
+                let claims: Vec<dialog_query::Claim> = stack
                     .query()
                     .select(query)
                     .perform(operator)
@@ -1923,18 +1909,18 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
         declare_steps(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
-        session
+        stack
             .transact(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
-        let mut subscription = session.subscribe(count_query());
+        let mut subscription = stack.subscribe(count_query());
         subscription.poll(&operator).await?;
 
         let start = memory.revision().sequence;
-        session
+        stack
             .invoke(
                 dialog_query::the!("cmd.increment/counter")
                     .of("cmd:1".parse::<Entity>()?)
@@ -1965,7 +1951,7 @@ mod tests {
         subscription.poll(&operator).await?;
         let mut retained = selected(subscription.results());
         retained.sort();
-        assert_eq!(retained, fresh(&session, &operator, count_query()).await?);
+        assert_eq!(retained, fresh(&stack, &operator, count_query()).await?);
         assert_eq!(retained, vec![format!("{counter} UnsignedInt(4)")]);
         assert_eq!(
             subscription.recomputes(),
@@ -1986,12 +1972,12 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
         declare_steps(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
 
         let start = memory.revision().sequence;
-        session
+        stack
             .transact(count(&counter, 2, &state))
             .perform(&operator)
             .await?;
@@ -2018,23 +2004,23 @@ mod tests {
         Ok(())
     }
 
-    /// A head under `last` landing in the session's own layer succeeds
+    /// A head under `last` landing in the stack's own layer succeeds
     /// the row that layer already holds, within the dispatch: the rounds
     /// after read the head, not the older row, so a chain over
     /// `session:` runs as one over a declared layer does.
     #[dialog_common::test]
-    async fn it_succeeds_the_sessions_own_row_within_a_dispatch() -> Result<()> {
+    async fn it_succeeds_the_stacks_own_row_within_a_dispatch() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         declare_steps_in(&branch, &operator, crate::SESSION).await?;
         branch.refresh(&operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let own = crate::session_layer();
         let counter: Entity = "ctr:1".parse()?;
 
         // A row the layer holds before the dispatch, which no step follows.
-        session
+        stack
             .transact(count(&counter, 1, &own))
             .perform(&operator)
             .await?;
@@ -2043,7 +2029,7 @@ mod tests {
             vec!["UnsignedInt(1)".to_string()]
         );
         // The dispatch writes 2 above it; the steps follow to 4.
-        session
+        stack
             .transact(count(&counter, 2, &own))
             .perform(&operator)
             .await?;
@@ -2065,11 +2051,11 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
         let doc: Entity = "doc:1".parse()?;
-        session
+        stack
             .transact(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
@@ -2080,7 +2066,7 @@ mod tests {
         };
 
         let start = memory.revision().sequence;
-        session
+        stack
             .invoke(increment())
             .assert(
                 dialog_query::the!("doc/title")
@@ -2096,7 +2082,7 @@ mod tests {
         );
 
         let start = memory.revision().sequence;
-        session
+        stack
             .invoke(increment())
             .assert(flag(&doc, true, &state))
             .perform(&operator)
@@ -2108,7 +2094,7 @@ mod tests {
         );
 
         let start = memory.revision().sequence;
-        session
+        stack
             .transact(
                 dialog_query::the!("doc/title")
                     .of(doc.clone())
@@ -2198,13 +2184,13 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
         declare_spread(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
-        let mut subscription = session.subscribe(selected_query());
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
+        let mut subscription = stack.subscribe(selected_query());
         subscription.poll(&operator).await?;
 
         let start = memory.revision().sequence;
-        session
+        stack
             .invoke(
                 dialog_query::the!("cmd.spread/doc")
                     .of("cmd:1".parse::<Entity>()?)
@@ -2239,10 +2225,7 @@ mod tests {
         subscription.poll(&operator).await?;
         let mut retained = selected(subscription.results());
         retained.sort();
-        assert_eq!(
-            retained,
-            fresh(&session, &operator, selected_query()).await?
-        );
+        assert_eq!(retained, fresh(&stack, &operator, selected_query()).await?);
         assert_eq!(retained.len(), 4);
         assert_eq!(subscription.recomputes(), 1);
         Ok(())
@@ -2273,22 +2256,22 @@ mod tests {
     /// evaluation after every step, and nothing after the first poll
     /// evaluates afresh.
     #[dialog_common::test]
-    async fn it_agrees_with_a_fresh_evaluation_through_session_churn() -> Result<()> {
+    async fn it_agrees_with_a_fresh_evaluation_through_stack_churn() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
         declare_spread(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let docs: Vec<Entity> = (1..=4)
             .map(|index| format!("doc:{index}").parse())
             .collect::<Result<_, _>>()?;
         let counter: Entity = "ctr:1".parse()?;
-        session
+        stack
             .transact(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
-        let mut subscription = session.subscribe(selected_query());
+        let mut subscription = stack.subscribe(selected_query());
         subscription.poll(&operator).await?;
 
         for seed in [7u64, 99, 2024] {
@@ -2297,21 +2280,21 @@ mod tests {
                 let doc = docs[rng.below(docs.len() as u64) as usize].clone();
                 let label = match rng.below(7) {
                     0 => {
-                        session
+                        stack
                             .transact(flag(&doc, true, &state))
                             .perform(&operator)
                             .await?;
                         "select"
                     }
                     1 => {
-                        session
+                        stack
                             .transact(flag(&doc, false, &state))
                             .perform(&operator)
                             .await?;
                         "deselect"
                     }
                     2 => {
-                        session
+                        stack
                             .transact(Changes::new())
                             .retract(flag(&doc, true, &state))
                             .perform(&operator)
@@ -2319,7 +2302,7 @@ mod tests {
                         "retract"
                     }
                     3 => {
-                        session
+                        stack
                             .invoke(
                                 dialog_query::the!("cmd.increment/counter")
                                     .of("cmd:1".parse::<Entity>()?)
@@ -2335,14 +2318,14 @@ mod tests {
                         "increment and title"
                     }
                     4 => {
-                        session
+                        stack
                             .transact(primary_flag(&doc, step % 2 == 0))
                             .perform(&operator)
                             .await?;
                         "select in the primary"
                     }
                     5 => {
-                        session
+                        stack
                             .invoke(
                                 dialog_query::the!("cmd.spread/doc")
                                     .of("cmd:2".parse::<Entity>()?)
@@ -2359,7 +2342,7 @@ mod tests {
                 retained.sort();
                 assert_eq!(
                     retained,
-                    fresh(&session, &operator, selected_query()).await?,
+                    fresh(&stack, &operator, selected_query()).await?,
                     "seed {seed} step {step} ({label}): the maintained result drifted"
                 );
             }
@@ -2449,7 +2432,7 @@ mod tests {
     /// A provider reads each command a published dispatch leaves in
     /// `control:`, once, as a row of `control:`, and answers by invoking:
     /// the answer is the next tick's stimulus, where a rule captures it on
-    /// the state layer. A subscription through the session sees the
+    /// the state layer. A subscription through the stack sees the
     /// capture, nothing durable is written, the expiry of the command is
     /// no arrival, and nothing stays in `control:`.
     #[dialog_common::test]
@@ -2458,18 +2441,18 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_fetch(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
         let control = crate::control_layer();
-        let mut fetches = session
+        let mut fetches = stack
             .arrivals(&control, fetch_query())
-            .expect("every session has control:");
+            .expect("every stack has control:");
         assert!(
             fetches.poll(&operator).await?.is_empty(),
             "nothing dispatched yet"
         );
         let node: Entity = "node:1".parse()?;
-        let mut subscription = session.subscribe(AttributeQuery::from(
+        let mut subscription = stack.subscribe(AttributeQuery::from(
             Term::<QueryRelation>::from(QueryRelation::from(
                 "node/fetched".parse::<dialog_corpus::Relation>()?,
             ))
@@ -2486,7 +2469,7 @@ mod tests {
         );
         let before = branch.revision();
 
-        session
+        stack
             .invoke(fetch("cmd:1", &node))
             .perform(&operator)
             .await?;
@@ -2502,7 +2485,7 @@ mod tests {
             "read as a row of control:"
         );
         for command in &commands {
-            session.invoke(fetched(command)?).perform(&operator).await?;
+            stack.invoke(fetched(command)?).perform(&operator).await?;
         }
 
         assert_eq!(branch.revision(), before, "nothing durable was written");
@@ -2519,7 +2502,7 @@ mod tests {
             "read once: the answer is no fetch, and the expiry is no arrival"
         );
         assert!(
-            session.layer(&control).expect("control:").is_empty(),
+            stack.layer(&control).expect("control:").is_empty(),
             "nothing stays in control:"
         );
         Ok(())
@@ -2533,16 +2516,13 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         declare_fetch(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let mut fetches = session
+        let stack = branch.stack().perform(&operator).await?;
+        let mut fetches = stack
             .arrivals(&crate::control_layer(), fetch_query())
-            .expect("every session has control:");
+            .expect("every stack has control:");
         let node: Entity = "node:1".parse()?;
         let (commands, invoked) = join(fetches.next(&operator), async {
-            session
-                .invoke(fetch("cmd:1", &node))
-                .perform(&operator)
-                .await
+            stack.invoke(fetch("cmd:1", &node)).perform(&operator).await
         })
         .await;
         invoked?;
@@ -2577,16 +2557,16 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let (state, host) = declare_host(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        assert!(session.layers().contains(&host), "the channel is held");
-        let memory = session.layer(&state).expect("the state layer").clone();
-        let channel = session.layer(&host).expect("the channel").clone();
-        let mut fetches = session.arrivals(&host, fetch_query()).expect("the channel");
+        let stack = branch.stack().perform(&operator).await?;
+        assert!(stack.layers().contains(&host), "the channel is held");
+        let memory = stack.layer(&state).expect("the state layer").clone();
+        let channel = stack.layer(&host).expect("the channel").clone();
+        let mut fetches = stack.arrivals(&host, fetch_query()).expect("the channel");
         assert!(fetches.poll(&operator).await?.is_empty());
         let before = branch.revision();
         let node: Entity = "node:1".parse()?;
         for command in ["cmd:1", "cmd:2"] {
-            session
+            stack
                 .transact(fetch(command, &node).at(host.clone()))
                 .perform(&operator)
                 .await?;
@@ -2608,7 +2588,7 @@ mod tests {
                 .iter()
                 .all(|command| command.layer() == Some(&host))
         );
-        let mut answer = session.transact(Changes::new());
+        let mut answer = stack.transact(Changes::new());
         for command in &commands {
             answer = answer
                 .dispatch(fetched(command)?)
@@ -2641,21 +2621,21 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let (_, host) = declare_host(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let mut behind = session.arrivals(&host, fetch_query()).expect("the channel");
+        let stack = branch.stack().perform(&operator).await?;
+        let mut behind = stack.arrivals(&host, fetch_query()).expect("the channel");
         let node: Entity = "node:1".parse()?;
         for index in 0..PAST_THE_INSTANTS {
-            session
+            stack
                 .transact(fetch(&format!("cmd:{index}"), &node).at(host.clone()))
                 .perform(&operator)
                 .await?;
         }
         assert_eq!(
-            session.layer(&host).expect("the channel").len(),
+            stack.layer(&host).expect("the channel").len(),
             PAST_THE_INSTANTS,
             "every row is still there"
         );
-        let mut late = session.arrivals(&host, fetch_query()).expect("the channel");
+        let mut late = stack.arrivals(&host, fetch_query()).expect("the channel");
         assert_eq!(late.poll(&operator).await?.len(), PAST_THE_INSTANTS);
         assert!(late.poll(&operator).await?.is_empty());
         assert_eq!(
@@ -2746,15 +2726,15 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state_on_control(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
-        session
+        stack
             .transact(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
 
-        session
+        stack
             .invoke(increment("cmd:1", &counter))
             .perform(&operator)
             .await?;
@@ -2764,7 +2744,7 @@ mod tests {
             "one step, in the tick the command was stimulus of"
         );
 
-        session
+        stack
             .transact(increment("cmd:2", &counter))
             .perform(&operator)
             .await?;
@@ -2785,7 +2765,7 @@ mod tests {
             "a row of the primary is no command"
         );
 
-        session
+        stack
             .transact(increment("cmd:3", &counter).at(crate::control_layer()))
             .perform(&operator)
             .await?;
@@ -2904,12 +2884,12 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_ping(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
         let control = crate::control_layer();
         let target: Entity = "doc:1".parse()?;
 
-        let transaction = session.transaction().dispatch(ping("cmd:1", &target));
+        let transaction = stack.transaction().dispatch(ping("cmd:1", &target));
         let claims: Vec<dialog_query::Claim> = transaction
             .query()
             .select(anywhere("cmd.ping/target"))
@@ -2920,10 +2900,10 @@ mod tests {
         assert_eq!(claims[0].layer(), Some(&control), "a transaction reads it");
 
         let before = branch.revision();
-        let mut pongs = session
+        let mut pongs = stack
             .arrivals(&control, anywhere("cmd.pong/target"))
-            .expect("every session has control:");
-        session
+            .expect("every stack has control:");
+        stack
             .invoke(ping("cmd:1", &target))
             .perform(&operator)
             .await?;
@@ -2943,7 +2923,7 @@ mod tests {
             "the pong is a command of the dispatch"
         );
         for the in ["cmd.ping/target", "cmd.pong/target"] {
-            let rows: Vec<dialog_query::Claim> = session
+            let rows: Vec<dialog_query::Claim> = stack
                 .query()
                 .select(anywhere(the))
                 .perform(&operator)
@@ -2964,14 +2944,14 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let control = crate::control_layer();
-        let mut arrivals = session
+        let mut arrivals = stack
             .arrivals(&control, selected_query())
-            .expect("every session has control:");
+            .expect("every stack has control:");
         let before = branch.revision();
         let doc: Entity = "doc:1".parse()?;
-        session
+        stack
             .transact(flag(&doc, true, &control))
             .perform(&operator)
             .await?;
@@ -2987,11 +2967,11 @@ mod tests {
                 .is_empty()
         );
         assert!(held(branch.overlay(), "ui/selected", &doc)?.is_empty());
-        assert!(held(session.layer(&state).expect("state"), "ui/selected", &doc)?.is_empty());
-        assert!(session.layer(&control).expect("control:").is_empty());
+        assert!(held(stack.layer(&state).expect("state"), "ui/selected", &doc)?.is_empty());
+        assert!(stack.layer(&control).expect("control:").is_empty());
         assert!(
             fresh(
-                &session,
+                &stack,
                 &operator,
                 selected_query().with_layer(Term::var("where"))
             )
@@ -3060,16 +3040,16 @@ mod tests {
         Ok(format!("{:?}", tree_revision(&revision)))
     }
 
-    /// The `doc/note` values `query` reads through `session`, each with
+    /// The `doc/note` values `query` reads through `stack`, each with
     /// the layer its `in` binds, sorted. A row with no layer stamped is
     /// the primary's.
     async fn notes_read(
-        session: &Session,
+        stack: &Stack,
         env: &Operator,
         query: AttributeQuery,
     ) -> Result<Vec<String>> {
         let claims: Vec<dialog_query::Claim> =
-            session.query().select(query).perform(env).try_vec().await?;
+            stack.query().select(query).perform(env).try_vec().await?;
         let mut rows: Vec<String> = claims
             .iter()
             .map(|claim| {
@@ -3098,7 +3078,7 @@ mod tests {
         )
     }
 
-    /// A schema declaring `memory:notes` durable opens a session holding
+    /// A schema declaring `memory:notes` durable opens a stack holding
     /// it as the repository's `notes` branch, with no memory cell of its
     /// own. A write `in: memory:notes` is committed on that branch and
     /// lands nowhere in the primary's tree, and the primary gains the
@@ -3110,15 +3090,15 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let notes = declare_notes(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        assert_eq!(session.layers(), vec![session_layer(), notes.clone()]);
-        let layer = session.durable(&notes).expect("the notes layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        assert_eq!(stack.layers(), vec![session_layer(), notes.clone()]);
+        let layer = stack.durable(&notes).expect("the notes layer").clone();
         assert_eq!(layer.name(), "notes");
-        assert!(session.layer(&notes).is_none(), "no memory cell holds it");
+        assert!(stack.layer(&notes).is_none(), "no memory cell holds it");
         assert_eq!(layer.revision(), None, "the branch starts empty");
 
         let doc: Entity = "doc:1".parse()?;
-        session
+        stack
             .transact(note(&doc, "first", &notes))
             .perform(&operator)
             .await?;
@@ -3141,7 +3121,7 @@ mod tests {
             "the primary points at the layer's new revision"
         );
 
-        session
+        stack
             .transact(note(&doc, "second", &notes))
             .perform(&operator)
             .await?;
@@ -3170,16 +3150,16 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let notes = declare_notes(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
-        session
+        stack
             .transact(note(&doc, "kept", &notes))
             .assert(note(&doc, "primary", &crate::memory_layer()))
             .perform(&operator)
             .await?;
         assert_eq!(
             notes_read(
-                &session,
+                &stack,
                 &operator,
                 note_query().with_layer(Term::var("where"))
             )
@@ -3192,7 +3172,7 @@ mod tests {
         );
         assert_eq!(
             notes_read(
-                &session,
+                &stack,
                 &operator,
                 note_query()
                     .with_layer(Term::Constant(dialog_corpus::Value::Entity(notes.clone())))
@@ -3203,7 +3183,7 @@ mod tests {
         );
         assert_eq!(
             notes_read(
-                &session,
+                &stack,
                 &operator,
                 note_query().with_layer(Term::Constant(dialog_corpus::Value::Entity(
                     crate::memory_layer()
@@ -3227,15 +3207,15 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let notes = declare_notes(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
-        session
+        stack
             .transact(note(&doc, "first", &notes))
             .perform(&operator)
             .await?;
         let primary_before = branch.revision().expect("a head");
 
-        // Another handle of the layer's branch moves it; the session's
+        // Another handle of the layer's branch moves it; the stack's
         // handle is stale, so its publish of the layer loses the CAS.
         let other = repo.branch("notes").open().perform(&operator).await?;
         let moved = other
@@ -3250,16 +3230,16 @@ mod tests {
             .perform(&operator)
             .await?;
         assert_ne!(
-            session.durable(&notes).expect("notes").revision().as_ref(),
+            stack.durable(&notes).expect("notes").revision().as_ref(),
             Some(&moved),
-            "the session's handle has not seen the move"
+            "the stack's handle has not seen the move"
         );
 
-        let published = session
+        let published = stack
             .transact(note(&doc, "second", &notes))
             .perform(&operator)
             .await?;
-        let layer = session.durable(&notes).expect("notes");
+        let layer = stack.durable(&notes).expect("notes");
         let tip = layer.revision().expect("the layer has a head");
         assert_eq!(
             tip.version().edition,
@@ -3301,17 +3281,17 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let notes = declare_notes(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
-        session
+        stack
             .transact(note(&doc, "kept", &notes))
             .perform(&operator)
             .await?;
         let primary = branch.revision();
-        let layer = session.durable(&notes).expect("notes").revision();
+        let layer = stack.durable(&notes).expect("notes").revision();
         let missing: Entity = "memory:missing".parse()?;
 
-        let refused = session
+        let refused = stack
             .transact(note(&doc, "lost", &notes))
             .assert(note(&doc, "lost", &missing))
             .perform(&operator)
@@ -3335,7 +3315,7 @@ mod tests {
         Ok(())
     }
 
-    /// `session.sync()` pulls a durable layer whose branch pulls from an
+    /// `stack.sync()` pulls a durable layer whose branch pulls from an
     /// upstream before the primary, and records where the pull left it as
     /// the primary's pointer fact; the pulled rows read with `in` bound to
     /// the layer. It pushes the layer to the upstream it pushes to. A
@@ -3346,7 +3326,7 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let notes = declare_notes(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let upstream = repo
             .branch("notes-upstream")
             .open()
@@ -3364,10 +3344,10 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        let layer = session.durable(&notes).expect("notes");
+        let layer = stack.durable(&notes).expect("notes");
         layer.set_upstream(&upstream).perform(&operator).await?;
 
-        session
+        stack
             .sync(crate::Download::MinimalRanges)
             .perform(&operator)
             .await?;
@@ -3383,7 +3363,7 @@ mod tests {
         );
         assert_eq!(
             notes_read(
-                &session,
+                &stack,
                 &operator,
                 note_query()
                     .with_layer(Term::Constant(dialog_corpus::Value::Entity(notes.clone())))
@@ -3392,12 +3372,12 @@ mod tests {
             vec!["String(\"upstream\") in memory:notes".to_string()]
         );
 
-        session
+        stack
             .transact(note(&doc, "local", &notes))
             .perform(&operator)
             .await?;
         let pointed = branch.revision();
-        session
+        stack
             .sync(crate::Download::MinimalRanges)
             .perform(&operator)
             .await?;
@@ -3421,7 +3401,7 @@ mod tests {
     /// revision. A second sync, which pulls nothing, records nothing:
     /// `session:` mints no instant, and the rule does not fire again.
     /// Replica A is a second branch of the repository tracking the same
-    /// upstream as the session's primary.
+    /// upstream as the stack's primary.
     #[dialog_common::test]
     async fn it_records_the_revisions_a_pull_moved() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
@@ -3470,11 +3450,11 @@ mod tests {
             .perform(&operator)
             .await?;
         branch.set_upstream(&upstream).perform(&operator).await?;
-        let session = branch.session().perform(&operator).await?;
-        let memory = session.layer(&state).expect("the state layer").clone();
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = stack.layer(&state).expect("the state layer").clone();
         let own = branch.overlay().clone();
         let memory_name = crate::memory_layer();
-        session
+        stack
             .sync(crate::Download::MinimalRanges)
             .perform(&operator)
             .await?;
@@ -3501,7 +3481,7 @@ mod tests {
         replica.push().perform(&operator).await?;
 
         let fired = memory.revision().sequence;
-        session
+        stack
             .sync(crate::Download::MinimalRanges)
             .perform(&operator)
             .await?;
@@ -3528,7 +3508,7 @@ mod tests {
         );
 
         let (own_sequence, memory_sequence) = (own.revision().sequence, memory.revision().sequence);
-        session
+        stack
             .sync(crate::Download::MinimalRanges)
             .perform(&operator)
             .await?;
@@ -3546,24 +3526,24 @@ mod tests {
         Ok(())
     }
 
-    /// A subscription through a session reads its durable layers too: a
+    /// A subscription through a stack reads its durable layers too: a
     /// write into one is a delta on the next poll, read afresh since the
     /// layer's tree moved, and the subscription then agrees with a fresh
     /// read.
     #[dialog_common::test]
-    async fn it_subscribes_to_a_durable_layer_through_a_session() -> Result<()> {
+    async fn it_subscribes_to_a_durable_layer_through_a_stack() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let notes = declare_notes(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let every = || note_query().with_layer(Term::var("where"));
-        let mut subscription = session.subscribe(every());
+        let mut subscription = stack.subscribe(every());
         let initial = subscription.poll(&operator).await?.expect("initial");
         assert!(initial.asserted.is_empty());
 
         let doc: Entity = "doc:1".parse()?;
-        session
+        stack
             .transact(note(&doc, "kept", &notes))
             .perform(&operator)
             .await?;
@@ -3589,13 +3569,13 @@ mod tests {
         assert!(delta.retracted.is_empty());
         assert!(subscription.poll(&operator).await?.is_none());
         assert_eq!(
-            notes_read(&session, &operator, every()).await?,
+            notes_read(&stack, &operator, every()).await?,
             vec!["String(\"kept\") in memory:notes".to_string()]
         );
         Ok(())
     }
 
-    /// Two replicas of a space sync a session through one S3 upstream:
+    /// Two replicas of a space sync a stack through one S3 upstream:
     /// the first writes into its primary and its durable layer and syncs;
     /// the second, whose primary and layer track the same remote
     /// branches, syncs and reads the same rows with the same `in`.
@@ -3629,23 +3609,23 @@ mod tests {
         let origin = connect("origin", site.clone(), first.did(), &operator).await?;
         let main = first.branch("main").open().perform(&operator).await?;
         let notes = declare_notes(&main, &operator).await?;
-        let session = main.session().perform(&operator).await?;
+        let stack = main.stack().perform(&operator).await?;
         main.set_upstream(origin.branch("main").open().perform(&operator).await?)
             .perform(&operator)
             .await?;
-        session
+        stack
             .durable(&notes)
             .expect("notes")
             .set_upstream(origin.branch("notes").open().perform(&operator).await?)
             .perform(&operator)
             .await?;
         let doc: Entity = "doc:1".parse()?;
-        session
+        stack
             .transact(note(&doc, "kept", &notes))
             .assert(note(&doc, "primary", &crate::memory_layer()))
             .perform(&operator)
             .await?;
-        session
+        stack
             .sync(crate::Download::MinimalRanges)
             .perform(&operator)
             .await?;
@@ -3665,7 +3645,7 @@ mod tests {
             .pull(crate::Download::MinimalRanges)
             .perform(&operator)
             .await?;
-        let mirrored = replica.session().perform(&operator).await?;
+        let mirrored = replica.stack().perform(&operator).await?;
         mirrored
             .durable(&notes)
             .expect("the declaration replicated with the primary")
@@ -3680,7 +3660,7 @@ mod tests {
         let every = note_query().with_layer(Term::var("where"));
         assert_eq!(
             notes_read(&mirrored, &operator, every.clone()).await?,
-            notes_read(&session, &operator, every).await?,
+            notes_read(&stack, &operator, every).await?,
             "the second replica reads the same rows with the same `in`"
         );
         assert_eq!(
@@ -3735,7 +3715,7 @@ mod tests {
         cells
     }
 
-    /// A transaction the session hands out, committed and published
+    /// A transaction the stack hands out, committed and published
     /// through the transaction API rather than invoked, lands the
     /// commands it dispatched in `control:` once its publish has won: a
     /// write `.at(control_layer())` published in one step, and a
@@ -3743,19 +3723,19 @@ mod tests {
     /// as a row of `control:`, nothing stays there, and the durable
     /// write beside the first is in the tree.
     #[dialog_common::test]
-    async fn it_lands_the_commands_of_a_transaction_published_through_the_session() -> Result<()> {
+    async fn it_lands_the_commands_of_a_transaction_published_through_the_stack() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let control = crate::control_layer();
-        let mut fetches = session
+        let mut fetches = stack
             .arrivals(&control, fetch_query())
-            .expect("every session has control:");
+            .expect("every stack has control:");
         let node: Entity = "node:1".parse()?;
         let doc: Entity = "doc:1".parse()?;
 
-        session
+        stack
             .transaction()
             .assert(fetch("cmd:1", &node).at(control.clone()))
             .assert(title(&doc, "kept"))
@@ -3768,7 +3748,7 @@ mod tests {
         assert_eq!(commands[0].layer(), Some(&control), "a row of control:");
         assert!(fetches.poll(&operator).await?.is_empty(), "read once");
         assert!(
-            session.layer(&control).expect("control:").is_empty(),
+            stack.layer(&control).expect("control:").is_empty(),
             "nothing stays in control:"
         );
         assert_eq!(
@@ -3777,7 +3757,7 @@ mod tests {
             "the durable write is in the tree"
         );
 
-        let batch = session
+        let batch = stack
             .transaction()
             .dispatch(fetch("cmd:2", &node))
             .commit()
@@ -3796,23 +3776,23 @@ mod tests {
         Ok(())
     }
 
-    /// A transaction through the session whose head moved under it is
+    /// A transaction through the stack whose head moved under it is
     /// refused at commit with `VersionMismatch`, and lands nothing: no
     /// command in `control:`, and no durable write in the tree.
     #[dialog_common::test]
-    async fn it_lands_nothing_of_a_session_transaction_that_lost_its_head() -> Result<()> {
+    async fn it_lands_nothing_of_a_stack_transaction_that_lost_its_head() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let control = crate::control_layer();
-        let mut fetches = session
+        let mut fetches = stack
             .arrivals(&control, fetch_query())
-            .expect("every session has control:");
+            .expect("every stack has control:");
         let node: Entity = "node:1".parse()?;
         let doc: Entity = "doc:1".parse()?;
 
-        let transaction = session
+        let transaction = stack
             .transaction()
             .assert(fetch("cmd:1", &node).at(control.clone()))
             .assert(title(&doc, "lost"));
@@ -3832,7 +3812,7 @@ mod tests {
             "{refused:?}"
         );
         assert!(fetches.poll(&operator).await?.is_empty(), "nothing landed");
-        assert!(session.layer(&control).expect("control:").is_empty());
+        assert!(stack.layer(&control).expect("control:").is_empty());
         assert!(
             committed::<String>(&branch, &operator, "doc/title", &doc)
                 .await?
@@ -3853,11 +3833,11 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_fetch(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let control = crate::control_layer();
-        let mut arrivals = session
+        let mut arrivals = stack
             .arrivals(&control, whole(&control))
-            .expect("every session has control:");
+            .expect("every stack has control:");
         let node: Entity = "node:1".parse()?;
         let doc: Entity = "doc:1".parse()?;
         let expected = vec![
@@ -3865,7 +3845,7 @@ mod tests {
             "cmd:1 cmd.fetch/priority".to_string(),
         ];
 
-        let transaction = session
+        let transaction = stack
             .transaction()
             .dispatch(fetch("cmd:1", &node))
             .assert(priority("cmd:1", 2).at(control.clone()))
@@ -3896,11 +3876,11 @@ mod tests {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let control = crate::control_layer();
-        let mut rows = session
+        let mut rows = stack
             .arrivals_rows(&control)
-            .expect("every session has control:");
+            .expect("every stack has control:");
         let node: Entity = "node:1".parse()?;
         let text = |facts: Vec<dialog_corpus::Fact>| -> Vec<String> {
             facts
@@ -3910,7 +3890,7 @@ mod tests {
         };
         assert!(rows.rows().is_empty(), "nothing dispatched yet");
 
-        session
+        stack
             .invoke(fetch("cmd:1", &node))
             .perform(&operator)
             .await?;
@@ -3919,7 +3899,7 @@ mod tests {
             vec!["cmd:1 cmd.fetch/node Entity(node:1)".to_string()]
         );
 
-        session
+        stack
             .invoke(fetch("cmd:2", &node))
             .dispatch(priority("cmd:2", 3))
             .perform(&operator)
@@ -3937,7 +3917,7 @@ mod tests {
         Ok(())
     }
 
-    /// An environment that provides what opening a session and reading
+    /// An environment that provides what opening a stack and reading
     /// through it need, and nothing that commits: no `Publish`, `Attest`,
     /// `Import`, `BlobImport` or `BlobSize`. Each command it provides is
     /// performed on the peer it wraps.
@@ -3993,13 +3973,13 @@ mod tests {
         }
     }
 
-    /// A session opens through an environment that can only read: one
+    /// A stack opens through an environment that can only read: one
     /// that opens branches and queries them, and provides nothing a
     /// commit needs. It builds the memory layer and opens the durable
     /// layer the primary declares, and reads the primary and what
     /// arrives in `control:` through the same environment.
     #[dialog_common::test]
-    async fn it_opens_a_session_through_an_environment_that_only_reads() -> Result<()> {
+    async fn it_opens_a_stack_through_an_environment_that_only_reads() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -4015,16 +3995,10 @@ mod tests {
             .await?;
         let reader = ReadOnly(operator.clone());
 
-        let session = branch.session().perform(&reader).await?;
-        assert_eq!(
-            session.layers(),
-            vec![session_layer(), state, notes.clone()]
-        );
-        assert!(
-            session.durable(&notes).is_some(),
-            "the durable layer opened"
-        );
-        let titles: Vec<dialog_query::Claim> = session
+        let stack = branch.stack().perform(&reader).await?;
+        assert_eq!(stack.layers(), vec![session_layer(), state, notes.clone()]);
+        assert!(stack.durable(&notes).is_some(), "the durable layer opened");
+        let titles: Vec<dialog_query::Claim> = stack
             .query()
             .select(AttributeQuery::from(
                 Term::<QueryRelation>::from(QueryRelation::from(
@@ -4037,9 +4011,9 @@ mod tests {
             .try_vec()
             .await?;
         assert_eq!(subjects(&titles), vec!["doc:1".to_string()]);
-        let mut fetches = session
+        let mut fetches = stack
             .arrivals(&crate::control_layer(), fetch_query())
-            .expect("every session has control:");
+            .expect("every stack has control:");
         assert!(fetches.poll(&reader).await?.is_empty());
         Ok(())
     }

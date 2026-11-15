@@ -43,11 +43,11 @@ pub use placement::{
     selection_attr, session_layer,
 };
 
-/// A session: the primary branch and the layers its schema declares.
-pub mod session;
-pub use session::invoke::{Invocation, MAX_RERUNS};
-pub use session::{
-    Arrivals, OpenSession, OpenSessionEnv, Session, SessionEnv, SyncEnv, SyncError, SyncSession,
+/// A stack: the primary branch and the layers its schema declares.
+pub mod stack;
+pub use stack::invoke::{Invocation, MAX_RERUNS};
+pub use stack::{
+    Arrivals, OpenStack, OpenStackEnv, Stack, StackEnv, SyncEnv, SyncError, SyncStack,
 };
 
 /// Streaming-merge and tombstone helpers used by the query-session

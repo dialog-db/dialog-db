@@ -1,4 +1,4 @@
-//! Syncing a session: the primary and every durable layer that has
+//! Syncing a stack: the primary and every durable layer that has
 //! upstreams, pulled and pushed in the order that keeps the primary's
 //! pointer facts naming revisions of the layers it holds.
 
@@ -13,13 +13,13 @@ use crate::repository::branch::resolve::resolve;
 use crate::repository::source::Source;
 use crate::{
     Branch, CommitError, Download, PullEnv, PullError, PushError, RemoteSite,
-    ResolveUpstreamsError, Session, SessionEnv,
+    ResolveUpstreamsError, Stack, StackEnv,
 };
 
-/// What [`Session::sync`] needs of its environment: what a session's
+/// What [`Stack::sync`] needs of its environment: what a stack's
 /// dispatch needs, and what a pull and a push need.
 pub trait SyncEnv:
-    SessionEnv
+    StackEnv
     + PullEnv
     + Provider<Fork<RemoteSite, Get>>
     + Provider<Fork<RemoteSite, Put>>
@@ -30,7 +30,7 @@ pub trait SyncEnv:
 }
 
 impl<T> SyncEnv for T where
-    T: SessionEnv
+    T: StackEnv
         + PullEnv
         + Provider<Fork<RemoteSite, Get>>
         + Provider<Fork<RemoteSite, Put>>
@@ -40,7 +40,7 @@ impl<T> SyncEnv for T where
 {
 }
 
-/// Why a [`Session::sync`] stopped.
+/// Why a [`Stack::sync`] stopped.
 #[derive(Error, Debug)]
 pub enum SyncError {
     /// The upstreams of the primary or of a durable layer could not be
@@ -61,14 +61,14 @@ pub enum SyncError {
     Push(#[from] PushError),
 }
 
-/// Command syncing a [`Session`]. Built by [`Session::sync`]; run with
+/// Command syncing a [`Stack`]. Built by [`Stack::sync`]; run with
 /// [`perform`](Self::perform).
-pub struct SyncSession<'a> {
-    session: &'a Session,
+pub struct SyncStack<'a> {
+    stack: &'a Stack,
     download: Download,
 }
 
-impl Session {
+impl Stack {
     /// Pull and push the primary and every durable layer that has
     /// upstreams (the ones its branch pulls from and pushes to), bringing
     /// local what `download` names of each head a pull adopts (see
@@ -79,10 +79,10 @@ impl Session {
     /// a pointer the primary pulls names a layer revision already
     /// pulled; a layer the pulls left at a revision the primary does not
     /// point at gets its pointer fact written, as a dispatch through the
-    /// session; and the primary is pushed after the layers, so a replica
+    /// stack; and the primary is pushed after the layers, so a replica
     /// that pulls a pointer finds the layer revision it names upstream.
     ///
-    /// After the pulls, and again after the pushes, the session records
+    /// After the pulls, and again after the pushes, the stack records
     /// the `dialog.layer/revision` row of every layer that stands
     /// somewhere other than its row says, as a dispatch does once it
     /// publishes, and only those: the dispatch that writes the pointer
@@ -92,28 +92,24 @@ impl Session {
     /// `memory:` fires when a pull moved the primary, as it fires when a
     /// commit did. A sync after which no layer stands anywhere new
     /// dispatches nothing and writes nothing into `session:`.
-    pub fn sync(&self, download: Download) -> SyncSession<'_> {
-        SyncSession {
-            session: self,
+    pub fn sync(&self, download: Download) -> SyncStack<'_> {
+        SyncStack {
+            stack: self,
             download,
         }
     }
 }
 
-impl SyncSession<'_> {
+impl SyncStack<'_> {
     /// Pull every durable layer with upstreams, then the primary; record
     /// the layers' revisions in the primary where they moved, and in the
-    /// session's own layer those that moved; push every durable layer
-    /// with upstreams, then the primary; and record in the session's own
+    /// stack's own layer those that moved; push every durable layer
+    /// with upstreams, then the primary; and record in the stack's own
     /// layer the revisions the pushes moved.
     pub async fn perform<Env: SyncEnv>(self, env: &Env) -> Result<(), SyncError> {
-        let session = self.session;
-        let primary = session.primary();
-        let layers: Vec<&Branch> = session
-            .durables()
-            .iter()
-            .map(|(_, branch)| branch)
-            .collect();
+        let stack = self.stack;
+        let primary = stack.primary();
+        let layers: Vec<&Branch> = stack.durables().iter().map(|(_, branch)| branch).collect();
         for branch in layers.iter().copied().chain([primary]) {
             resolve(branch, env).await?;
         }
@@ -124,7 +120,7 @@ impl SyncSession<'_> {
         }
         let pointed = pointers(&Source::from(primary.clone()), env).await?;
         let mut moved = dialog_corpus::Changes::new();
-        for (layer, branch) in session.durables() {
+        for (layer, branch) in stack.durables() {
             let Some(revision) = branch.revision() else {
                 continue;
             };
@@ -145,16 +141,16 @@ impl SyncSession<'_> {
         // One dispatch writes the pointers the pulls moved and records,
         // in `session:`, the revisions they moved; with no pointer to
         // write, it runs only when a revision moved, to record it.
-        if !moved.is_empty() || session.unrecorded() {
-            Box::pin(session.transact(moved).perform(env)).await?;
+        if !moved.is_empty() || stack.unrecorded() {
+            Box::pin(stack.transact(moved).perform(env)).await?;
         }
         for branch in layers.into_iter().chain([primary]) {
             if !branch.pushes().is_empty() {
                 Box::pin(branch.push().perform(env)).await?;
             }
         }
-        if session.unrecorded() {
-            Box::pin(session.transact(dialog_corpus::Changes::new()).perform(env)).await?;
+        if stack.unrecorded() {
+            Box::pin(stack.transact(dialog_corpus::Changes::new()).perform(env)).await?;
         }
         Ok(())
     }

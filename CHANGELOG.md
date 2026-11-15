@@ -14,11 +14,11 @@ says how to cut a release.
 
 ## Unreleased
 
-### A session writes a layer's revision row only when the layer moved, and `Session::sync` writes the rows its pulls moved
+### A stack writes a layer's revision row only when the layer moved, and `Stack::sync` writes the rows its pulls moved
 
 [#810](https://github.com/dialog-db/dialog-db/pull/810).
 
-A session's own layer, `session:`, holds a `dialog.layer/revision` row
+A stack's own layer, `session:`, holds a `dialog.layer/revision` row
 for each of its layers. Every dispatch used to rewrite all of them
 after it published, so `session:` minted an instant on every dispatch
 even when no layer had moved, and its own row moved every time, since
@@ -27,7 +27,7 @@ the layers whose revision is not the one `session:` holds, and writes
 nothing when none moved. Writing the rows is no longer a move of
 `session:`: its own row names the revision it stood at before the
 recordings that followed its last change, and moves only when
-something was written into it. `Session::sync` did not write the rows
+something was written into it. `Stack::sync` did not write the rows
 at all; it now writes those its pulls moved, and after its pushes
 those the pushes moved, through a dispatch that takes them as
 stimulus.
@@ -39,10 +39,10 @@ What this changes for you:
   revision row and mints no instant in `session:`. One that moves the
   primary alone rewrites the `memory:` row alone.
 - A rule premised on the `dialog.layer/revision` of `session:` fires on
-  a session's first dispatch and when something wrote into `session:`
+  a stack's first dispatch and when something wrote into `session:`
   outside a dispatch, no longer on every dispatch after the first.
 - A rule premised on the `dialog.layer/revision` of `memory:` or of a
-  durable layer fires when a `Session::sync` pull moved it, as it does
+  durable layer fires when a `Stack::sync` pull moved it, as it does
   when a commit did. A sync that moves nothing dispatches nothing.
 
 Why: a revision row says where a layer stands, so it changes when the
@@ -56,15 +56,15 @@ then sees one change per move.
   live in `session:`, which is process-local. `session:` mints fewer
   instants.
 
-### A session's transaction lands its commands when it publishes, a session opens through a read-only environment, and a whole layer is a legal scan
+### A stack's transaction lands its commands when it publishes, a stack opens through a read-only environment, and a whole layer is a legal scan
 
 [#809](https://github.com/dialog-db/dialog-db/pull/809).
 
-Three gaps an embedder met moving onto sessions. A transaction a
-session hands out (`Session::transaction`), committed and published
+Three gaps an embedder met moving onto stacks. A transaction a
+stack hands out (`Stack::transaction`), committed and published
 through the transaction API, never landed what it dispatched in
 `control:`: only `Invocation::perform` did. Now its publish lands them,
-as an invocation's does. Opening a session asked for an environment
+as an invocation's does. Opening a stack asked for an environment
 that can commit, though opening only reads the primary and opens
 branches; it now asks for what a read needs. And a scan whose every
 term is a variable but a constant `in` was refused as an empty
@@ -74,18 +74,18 @@ without a query.
 
 What this changes for you:
 
-- A transaction from `Session::transaction`, published with
+- A transaction from `Stack::transaction`, published with
   `.commit().publish().perform(env)` or staged and then
   `TransactionBatch::publish`, lands the commands it dispatched (with
   `Transaction::dispatch`, or written `.at(control_layer())`) and the
-  ones its rules dispatched in the session's `control:` once the publish
+  ones its rules dispatched in the stack's `control:` once the publish
   wins, as one instant gone in the next, and wakes every `Arrivals`
   waiting. A publish that loses its compare-and-swap lands nothing. It
-  is still not re-run on a moved head; `Session::invoke` is.
-- `OpenSessionEnv` is new: the providers opening a session and reading
-  through it need, with nothing that commits. `OpenSession::perform`,
+  is still not re-run on a moved head; `Stack::invoke` is.
+- `OpenStackEnv` is new: the providers opening a stack and reading
+  through it need, with nothing that commits. `OpenStack::perform`,
   `Arrivals::poll` and `Arrivals::next` are bounded on it rather than on
-  `SessionEnv`, which now extends it with what a commit needs (`Attest`,
+  `StackEnv`, which now extends it with what a commit needs (`Attest`,
   `Publish`, `Import`, blob import and size). Every environment that
   met the old bounds meets the new ones.
 - A scan with a constant `in` and every other term a variable, an
@@ -99,15 +99,15 @@ What this changes for you:
   constrains. A tree reads it as its whole entity index.
 - `Arrivals::rows` and `Arrivals::next_rows` are new: every fact the
   layer's assertions since the last read assert, each once, oldest
-  first, with no query; `Session::arrivals_rows(layer)` builds a reader
+  first, with no query; `Stack::arrivals_rows(layer)` builds a reader
   for them. Rows and `poll` read the same arrivals, so a row one yields
   the other does not. `Arrivals` takes its query type as a default
   parameter, `Arrivals<Q = ()>`.
 
 Why: an embedder resolves its commands with its own transactions, so
-the commands a session's transaction dispatched must reach the
-session's providers whichever way it was published; it opens branches
-with an environment that only reads, and the session beside them needs
+the commands a stack's transaction dispatched must reach the
+stack's providers whichever way it was published; it opens branches
+with an environment that only reads, and the stack beside them needs
 no more; and its providers tell a command apart by the attributes its
 entity carries, so they need every row of the arrived instant, not one
 concept's.
@@ -118,16 +118,16 @@ concept's.
   `control:` is process-local, and a scan of a whole layer reads what
   is already stored.
 
-### A durable layer is a branch the primary points at, and `Session::sync` pulls and pushes it with the primary
+### A durable layer is a branch the primary points at, and `Stack::sync` pulls and pushes it with the primary
 
 [#808](https://github.com/dialog-db/dialog-db/pull/808), argued in
 [notes/layers.md](./notes/layers.md) (points 1, 11 and 13, and
 "Durable layers" under "Open").
 
-A session's layers were all in memory. A layer can now be durable: a
+A stack's layers were all in memory. A layer can now be durable: a
 branch of the repository, declared in the primary as
 `memory:<name> dialog.layer/store "durable"` (`Store::Durable`). A
-session opens the branch `<name>` beside the primary and reads it as a
+stack opens the branch `<name>` beside the primary and reads it as a
 line whose rows bind `in` to `memory:<name>`. A write `in:
 memory:<name>`, a rule head whose descriptor names it, and a write
 while it is selected are committed on that branch as part of the
@@ -138,7 +138,7 @@ revision each durable layer stands at as a pointer fact of its own,
 history says which revision of each layer goes with each of its own.
 The layers publish bottom to top, the primary last since it carries the
 pointers, and a lost compare-and-swap on any of them re-runs the whole
-dispatch from the new heads. `Session::sync` pulls every durable layer
+dispatch from the new heads. `Stack::sync` pulls every durable layer
 with upstreams, then the primary, writes the pointer of a layer the
 pulls moved, and pushes the layers, then the primary.
 
@@ -147,23 +147,23 @@ What this changes for you:
 - `Store::Durable` is new; `LayerDeclaration::new("memory:notes".parse()?,
   Store::Durable)` declares one. A durable layer named under another
   store (`session:notes`) or with no branch name (`memory:`) fails the
-  session's open with `CommitError::InvalidPlacement`.
-- `Session::layers` lists the durable layers after the memory layers.
-  `Session::durable(name)` and `Session::durables()` hand out their
-  branches, for setting their upstreams; `Session::layer` answers
+  stack's open with `CommitError::InvalidPlacement`.
+- `Stack::layers` lists the durable layers after the memory layers.
+  `Stack::durable(name)` and `Stack::durables()` hand out their
+  branches, for setting their upstreams; `Stack::layer` answers
   `None` for a durable layer, which holds no memory cell.
 - A dispatch that writes a durable layer commits on its branch and on
   the primary, with the pointer fact, so it publishes on the primary
-  even when it wrote nothing else there. The session's own
+  even when it wrote nothing else there. The stack's own
   `dialog.layer/revision` rows of `session:` include each durable
   layer's tree, so a rule premised on a durable layer's revision fires
   when it moved.
 - `CommitError::UnboundLayer` refuses a write into `memory:<name>` the
   primary does not declare, before any branch moves.
-- `Session::sync(download)` and `SyncSession`, `SyncEnv` and
+- `Stack::sync(download)` and `SyncStack`, `SyncEnv` and
   `SyncError` are new. A sync names its `Download`, as every pull does.
-- A query through a session, `Session::query`, a transaction through
-  it, and `Session::subscribe` read the durable layers too. A
+- A query through a stack, `Stack::query`, a transaction through
+  it, and `Stack::subscribe` read the durable layers too. A
   subscription re-evaluates when a durable layer moved.
 
 Why: a device-local or replicated table beside the primary is a layer,
@@ -180,11 +180,11 @@ composite.
   synced as any branch is. 0.4.0 and earlier know no layer declarations
   and read both as ordinary facts, and read the primary without the
   layer's rows. A build of this release line from before this change
-  opens no session on a primary that declares a durable layer: it
+  opens no stack on a primary that declares a durable layer: it
   refuses the declaration with `CommitError::InvalidPlacement`. Nothing
   already stored is rewritten, and nothing has to be run.
 - What a durable layer syncs to is its branch's own upstreams, set on
-  the branch (`Session::durable(name)` then `Branch::set_upstream`), on
+  the branch (`Stack::durable(name)` then `Branch::set_upstream`), on
   each replica. The declaration carries no upstream.
 
 ### `control:` is the layer a command lives in for one tick, a channel is a layer its consumer empties, and a provider reads what arrives in either
@@ -193,19 +193,19 @@ composite.
 [notes/layers.md](./notes/layers.md) (points 7 to 18, and "Open").
 
 A command used to be a fact apart: dispatched into a transaction, read
-by the rules of one tick, then kept by the session in a command feed
+by the rules of one tick, then kept by the stack in a command feed
 that handlers and readers drained. It is now a row of a layer.
-`control:`, the loopback every session has, holds what a dispatch
+`control:`, the loopback every stack has, holds what a dispatch
 writes into it for one tick: a command dispatched, a write
 `.at(control_layer())`, and a rule head landing there. Each is the
 next tick's stimulus, read as a row of `control:`, and is gone after
 that tick. Once a dispatch has published, its commands stand in the
-session's `control:` layer for one instant and leave it in the next, so
+stack's `control:` layer for one instant and leave it in the next, so
 the layer's instants are every command, in order, once, and nothing of
 them stays. A channel, `control:<name>`, is a layer for a consumer
 outside the invoke loop or the process: what lands in it stays until
 the consumer retracts it. A provider reads either through
-`Session::arrivals`, which yields each newly asserted row of its query
+`Stack::arrivals`, which yields each newly asserted row of its query
 once and drops retractions, and answers by invoking.
 
 What this changes for you:
@@ -224,26 +224,26 @@ What this changes for you:
   say, in that layer, where before the layer it named was ignored.
 - `Store::Control` is new: `LayerDeclaration::new(entity,
   Store::Control)` declares a channel, stored as `dialog.layer/store
-  "control"`. A session builds it in memory, as it builds a
+  "control"`. A stack builds it in memory, as it builds a
   `Store::Memory` layer, and writes into it are routed and land tick by
-  tick as into any layer the session holds. Declaring bare `control:`
+  tick as into any layer the stack holds. Declaring bare `control:`
   builds nothing apart.
-- `Session::arrivals(layer, query)` and `Arrivals` are new: a reader
+- `Stack::arrivals(layer, query)` and `Arrivals` are new: a reader
   of what arrives in `control:` or a channel. `poll` yields the rows of
   the query the layer's assertions since the last read make, evaluated
-  over those rows alone; `next` waits for the session's next dispatch
-  while there are none. `Session::layer(&control_layer())` hands out
+  over those rows alone; `next` waits for the stack's next dispatch
+  while there are none. `Stack::layer(&control_layer())` hands out
   the loopback, which holds nothing between dispatches.
-- `Session::commands()`, `Commands`, `Dispatched`, `Lost` and
+- `Stack::commands()`, `Commands`, `Dispatched`, `Lost` and
   `FEED_CAPACITY` are gone: read `control:` with
-  `Session::arrivals(&control_layer(), query)` instead, or a channel's
+  `Stack::arrivals(&control_layer(), query)` instead, or a channel's
   instants with `Ephemeral::since`. A reader that falls further behind
   than a layer's instants reach reads what the layer holds now: on a
   channel nothing is lost; the commands that stood in `control:`
   meanwhile are.
-- `Handler`, `HandlerError`, `Answering`, `Session::handle` and
+- `Handler`, `HandlerError`, `Answering`, `Stack::handle` and
   `MAX_ANSWERS` are gone: a provider reads its commands with
-  `Session::arrivals` and answers with `Session::invoke`, a dispatch
+  `Stack::arrivals` and answers with `Stack::invoke`, a dispatch
   with its own compare-and-swap. `Invocation::perform` publishes once
   and no longer chains answers.
 - `CommitError::AnswerDivergence` and `CommitError::Handler` are gone:
@@ -265,7 +265,7 @@ own.
   channel's entity, is a new stored value, replicated with the
   primary like every layer declaration. 0.4.0 and earlier know no
   layer declarations and read it as an ordinary fact. A build of this
-  release line from before this change opens no session on a primary
+  release line from before this change opens no stack on a primary
   that declares a channel: it refuses the declaration with
   `CommitError::InvalidPlacement`. Nothing already stored is
   rewritten, and nothing has to be run.
@@ -277,7 +277,7 @@ own.
 [#805](https://github.com/dialog-db/dialog-db/pull/805), argued in
 [notes/layers.md](./notes/layers.md) (point 12).
 
-A dispatch through a session runs in ticks: the transaction's own
+A dispatch through a stack runs in ticks: the transaction's own
 writes are the first, and each induction round after it is one more.
 A memory layer used to take a dispatch's writes as one instant holding
 the merged result, so a reader of its instants could not see the states
@@ -310,7 +310,7 @@ What this changes for you:
   dispatch, so a chain of rules over `session:` runs as one over a
   declared layer does. Before, the held row stood above the write and
   the next round read it instead.
-- A maintained subscription over a session reads the several instants
+- A maintained subscription over a stack reads the several instants
   in order and still equals a fresh evaluation.
 
 Why: a subscriber, or a rule premised on a layer's revision, should see
@@ -320,23 +320,23 @@ evaluation after any sequence of ticks.
 #### Compatibility and migration
 
 - Nothing stored or synced changes, and nothing is rewritten: memory
-  layers are process-local. A session's memory layers mint more
+  layers are process-local. A stack's memory layers mint more
   instants per dispatch, which a reader pinned to an older sequence
   sees as more instants, not a different state.
 
-### Every session has its own layer, `session:`, which records the layers' revisions and which layer is selected
+### Every stack has its own layer, `session:`, which records the layers' revisions and which layer is selected
 
 [#803](https://github.com/dialog-db/dialog-db/pull/803), argued in
 [notes/layers.md](./notes/layers.md) ("The `session:` layer").
 
-A session now holds its own layer, `session:`, whether or not the
+A stack now holds its own layer, `session:`, whether or not the
 primary's schema declares it: it is the branch's process-local store,
 the one `Branch::overlay` has always handed out, now addressed as a
-layer. After each dispatch publishes, the session writes into it one
+layer. After each dispatch publishes, the stack writes into it one
 `dialog.layer/revision` row per layer under `last`: of `memory:` the
 primary's tree hash, of each declared layer and of `session:` itself
 the hash of its instant chain. Of the same rows, as the layers stood when
-the dispatch began, those the session has not recorded are the
+the dispatch began, those the stack has not recorded are the
 dispatch's stimulus, so a rule premised on a layer's revision fires
 when the layer moved (and on the first dispatch, which finds nothing
 recorded). A row
@@ -348,21 +348,21 @@ the selection.
 
 What this changes for you:
 
-- `Session::layers()` lists `session:` first, and `Session::layer` of
+- `Stack::layers()` lists `session:` first, and `Stack::layer` of
   `session_layer()` returns the branch's overlay. A declaration of
   `session:` in the schema no longer builds a second store.
-- `Session::select(Option<Entity>)` and `Session::selected()` are new.
+- `Stack::select(Option<Entity>)` and `Stack::selected()` are new.
   A selection takes effect from the next dispatch; selecting a layer the
-  session does not hold makes a commit that would land a write in it
+  stack does not hold makes a commit that would land a write in it
   fail with `CommitError::UnboundLayer`, and nothing is written.
 - `revision_attr()` (`dialog.layer/revision`) and `selection_attr()`
   (`dialog.session/layer`) are new.
-- Every dispatch through a session now mints one instant in `session:`
+- Every dispatch through a stack now mints one instant in `session:`
   and runs induction even when it writes nothing else. A commit on a
-  branch outside a session writes no revision rows and ignores the
+  branch outside a stack writes no revision rows and ignores the
   selection.
 
-Why: the session's own layer replaces `Branch::overlay` as a mechanism
+Why: the stack's own layer replaces `Branch::overlay` as a mechanism
 apart, so a layer's revision becomes a row a rule or a subscription
 reads like any other, and the layer a write lands in becomes data a
 rule or the embedder sets, the way an image editor's stroke lands on
@@ -374,53 +374,53 @@ the selected layer.
   overlay, which is never committed or synced. Nothing stored or synced
   changes, and nothing is rewritten.
 
-### A session's handlers answer a dispatch's commands
+### A stack's handlers answer a dispatch's commands
 
 [#797](https://github.com/dialog-db/dialog-db/pull/797), argued in
 [notes/layers.md](./notes/layers.md) ("Handlers").
 
 A command is scratch: it lives one tick and lands on no layer, so
-nothing could react to it with an effect. Now a session holds
-handlers (`Session::handle`), built into dialog or registered by the
+nothing could react to it with an effect. Now a stack holds
+handlers (`Stack::handle`), built into dialog or registered by the
 embedder through the same `Handler` trait. Once a dispatch has
 published, every command of it, the one invoked and the ones its rules
 dispatched in any tick, is offered to each handler; what they answer is
 dispatched as the next tick's stimulus, where a rule captures what it
 wants of the answer on the layer its attribute is placed on, and a
-subscription through the session sees the capture. The chain ends when
+subscription through the stack sees the capture. The chain ends when
 no handler answers.
 
 What this changes for you:
 
 - `Handler`, `HandlerError`, `Answering` (a handler over a function) and
-  `Session::handle` are new. A handler sees commands as `Changes` and
+  `Stack::handle` are new. A handler sees commands as `Changes` and
   answers with `Changes`; an answer names the command it answers by that
   command's entity.
 - `Invocation::perform` now runs the handlers after each publish and
   chains their answers, so one `invoke` can publish several times. It
   still returns the head the last dispatch left the primary at.
-- `Session::commands()` is new: a reader of the session's command feed,
+- `Stack::commands()` is new: a reader of the stack's command feed,
   the control channel. Each `poll` yields every dispatch since the last,
   in order and once, as `Dispatched { sequence, revision, commands }`.
-  A consumer outside the session's process, or one that answers in its
-  own time, reads it and answers by invoking through the session; the
+  A consumer outside the stack's process, or one that answers in its
+  own time, reads it and answers by invoking through the stack; the
   feed holds `FEED_CAPACITY` dispatches, and a reader it moved past is
   told with `Lost` and starts over with `catch_up`.
 - `CommitError::AnswerDivergence` is new: handlers that keep answering
   are stopped after `MAX_ANSWERS` dispatches. `CommitError::Handler` is
   new: a handler's failure fails the invocation. Both come after the
   dispatch they follow has published; what it wrote stands.
-- A session with no handler behaves as before.
+- A stack with no handler behaves as before.
 
 Why: an embedder's command handlers (tonk's command providers) and
 dialog's own effects, such as fetching a tree node a page asked for,
 need one way to observe a command and answer it, and the answer has to
-enter the session as a fact on a pinned layer rather than as something
+enter the stack as a fact on a pinned layer rather than as something
 a query could observe outside any revision. Running handlers after the
 publish keeps a dispatch a function of head and stimulus, so a lost
 compare-and-swap re-runs no effect.
 
-### A row has a layer, `in`, and a session reads and writes its layers as one
+### A row has a layer, `in`, and a stack reads and writes its layers as one
 
 [#795](https://github.com/dialog-db/dialog-db/pull/795) and
 [#800](https://github.com/dialog-db/dialog-db/pull/800), argued in
@@ -433,16 +433,16 @@ name it for every fact it writes (`Statement::at`). A read with `in`
 unbound reads every layer and binds each row's; one with `in` bound
 reads that layer alone; a write lands in the layer named, the primary
 with none. `LayerDeclaration` (`dialog.layer/store`) declares a layer
-beside the primary, backed for now by memory. `Branch::session()` opens
-a `Session` over the primary: it mints a memory layer for every declared
+beside the primary, backed for now by memory. `Branch::stack()` opens
+a `Stack` over the primary: it mints a memory layer for every declared
 layer, reads the composite, and commits a transaction by routing each
-write to its layer. `Session::invoke` drives it: one dispatch is one
+write to its layer. `Stack::invoke` drives it: one dispatch is one
 publication, re-run from the new head when the head moved under it.
 The primary's share is minted and published as before; a layer's share
 is applied only after the publish wins its compare-and-swap, so a lost
 head leaves no layer changed. A rule head whose descriptor names a
 layer lands there, keeping its pick, and succeeds no claim of the
-primary. The layers every session has are named: `memory:` is the
+primary. The layers every stack has are named: `memory:` is the
 primary, `session:` the branch's process-local store (what
 `Branch::overlay` holds), `control:` the loopback a command lands in.
 
@@ -457,26 +457,26 @@ What this changes for you:
   `dissociate_in`, `take_shares`, `iter_in`, `into_layer`), serialized
   under an `in` key beside `facts` and `assets`. `into_instructions`
   yields the writes bound for the primary alone.
-- `Branch::session()`, `OpenSession::declare`, `Session::{query,
+- `Branch::stack()`, `OpenStack::declare`, `Stack::{query,
   transaction, layer, layers, declare, declared}` are new. A branch
-  read or committed directly, with no session, behaves as before, and
+  read or committed directly, with no stack, behaves as before, and
   a write `.at(session:)` through it lands in the branch's overlay.
-- `Session::invoke(command)` and `Session::transact(facts)` drive a
+- `Stack::invoke(command)` and `Stack::transact(facts)` drive a
   session: each returns an `Invocation` whose `perform` commits and
   publishes as one unit, and re-runs the whole dispatch from the new
   head when the publish loses its compare-and-swap, up to `MAX_RERUNS`
   times before reporting `PublishError::VersionMismatch`. A dispatch
   that writes only to memory layers publishes nothing and returns the
   unchanged head.
-- `Session::subscribe(query)` is new: a standing query over the primary
-  and every layer the session holds. A commit to the primary, a share a
+- `Stack::subscribe(query)` is new: a standing query over the primary
+  and every layer the stack holds. A commit to the primary, a share a
   dispatch lands in a memory layer, and a write to the primary's session
   overlay each propagate as a result delta on the next poll, maintained
   incrementally from the layer's instants as an overlay change is. A
-  maintained subscription through a session equals a fresh evaluation
+  maintained subscription through a stack equals a fresh evaluation
   after any sequence of dispatches (pinned by a seeded churn test).
 - `CommitError::UnboundLayer` is new: a write named for a layer the
-  session does not hold is refused before anything is settled or
+  stack does not hold is refused before anything is settled or
   minted. `CommitError::InvalidPlacement` is new: a layer declaration
   whose value names no store is refused.
 - The corpus write gate admits `dialog.layer/*` from an application
@@ -486,7 +486,7 @@ Why: local state that moves at frame rate, replicated state and
 ephemeral state peers learn of are different layers, not different
 kinds of fact. A row's layer being a term lets one set of rules act
 across layers and choose where a write lands from data, the way a
-stroke lands on the layer an editor's tool is on, and lets a session
+stroke lands on the layer an editor's tool is on, and lets a stack
 recreate every layer from the primary's declarations when it opens.
 
 #### Compatibility and migration

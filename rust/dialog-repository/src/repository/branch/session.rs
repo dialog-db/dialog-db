@@ -119,7 +119,7 @@ pub struct QueryLayer<'a> {
 
 /// The lines a query env reads, owned: every tree line, pinned, plus
 /// every memory layer, live. What a [`QueryLayer`] resolves to when a
-/// query is performed, and what a [`Session`](crate::Session) hands its
+/// query is performed, and what a [`Stack`](crate::Stack) hands its
 /// induction.
 #[derive(Default, Clone)]
 pub(crate) struct Composite {
