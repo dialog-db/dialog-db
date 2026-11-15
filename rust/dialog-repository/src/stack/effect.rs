@@ -342,7 +342,7 @@ impl Stack {
             Value::Entity(provider.concept.clone()),
             Pick::All,
         );
-        self.primary().overlay().apply(row)?;
+        self.own().apply(row)?;
         providers.push(provider);
         Ok(self)
     }

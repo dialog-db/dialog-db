@@ -55,7 +55,8 @@ pub use stack::effect::{
 };
 pub use stack::invoke::{Attempt, Invocation, InvocationReport, MAX_RERUNS};
 pub use stack::{
-    Arrivals, Durable, Layer, OpenStack, OpenStackEnv, Stack, StackEnv, SyncEnv, SyncError,
+    Arrivals, Backup, Durable, Layer, LayerBackup, OpenStack, OpenStackEnv, Stack, StackEnv,
+    SyncEnv, SyncError,
     SyncStack,
 };
 

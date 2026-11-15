@@ -27,7 +27,8 @@ use super::{
 use crate::Channel;
 use crate::Ephemeral;
 use crate::placement::{
-    Pointer, Recorded, control_layer, follows_selection, memory_layer, selected, session_layer,
+    Observed, Pointer, Recorded, control_layer, follows_selection, memory_layer, selected,
+    session_layer,
     take_dispatched,
 };
 use crate::repository::branch::asset::store_assets;
@@ -132,10 +133,12 @@ pub struct TransactionBatch {
     /// lands, so what a transaction read is what its publish leaves.
     overlay: Ephemeral,
     overlay_retractions: Vec<Fact>,
-    /// The primary's branch entity when the chain was committed through
-    /// a stack: its publish then records, in the stack's own layer, the
-    /// revision of every layer that moved (see [`record_revisions`]).
-    revisions: Option<Entity>,
+    /// What the stack the chain was committed through records where its
+    /// layers stand with: its publish then records, in the stack's own
+    /// layer, the revision of every layer that moved (see
+    /// [`record_revisions`]). `None` for a chain committed on the branch
+    /// alone.
+    revisions: Option<Recording>,
     /// The trees this chain minted for the stack's durable layers, by
     /// layer: the revision each layer's writes left it at, which the
     /// chain's primary commit points at. Nothing publishes them: the
@@ -391,8 +394,8 @@ impl BatchPublish {
                     let mut written = dispatched;
                     written.merge(induced);
                     land_in(&channels, written);
-                    if let Some(branch) = &revisions {
-                        record_revisions(branch, &memories, &channels, &overlay, &tip)?;
+                    if let Some(recording) = &revisions {
+                        record_revisions(recording, &memories, &channels, &tip)?;
                     }
                     Ok(())
                 }
@@ -744,15 +747,13 @@ impl TransactionCommit<&Branch> {
         let retractions = overlay_retractions(&self.changes, &overlay);
 
         // The layers a write named for them lands in once the commit
-        // publishes: the stack's, and the branch's own session overlay
-        // as `session:`.
-        let revisions = self.stack.as_ref().map(|stack| stack.branch.clone());
-        let mut memories = self
-            .stack
-            .as_ref()
-            .map(|stack| stack.memories.clone())
-            .unwrap_or_default();
-        memories.push((session_layer(), overlay.clone()));
+        // publishes: the stack's, its own `session:` among them, and on
+        // a branch alone, the branch's session overlay as `session:`.
+        let revisions = self.stack.as_ref().map(Recording::of);
+        let memories = match self.stack.as_ref() {
+            Some(stack) => stack.memories.clone(),
+            None => vec![(session_layer(), overlay.clone())],
+        };
         let channels = self.stack.as_ref().map(|stack| stack.channels.clone());
         let pinned = self
             .stack
@@ -894,7 +895,7 @@ impl TransactionCommit<TransactionBatch> {
         let amending = amend.is_some();
         let retractions = overlay_retractions(&self.changes, &batch.overlay);
         if batch.revisions.is_none() {
-            batch.revisions = self.stack.as_ref().map(|stack| stack.branch.clone());
+            batch.revisions = self.stack.as_ref().map(Recording::of);
         }
         if batch.channels.is_none() {
             batch.channels = self.stack.as_ref().map(|stack| stack.channels.clone());
@@ -988,16 +989,39 @@ fn apply_shares(
     Ok(())
 }
 
-/// Record in the stack's own layer, `overlay`, the revision of every
-/// layer of the stack that moved, once `tip` has published and the
-/// dispatch's writes have landed on `channels`: one row under `last`
-/// for each layer whose revision is not the one `overlay` holds,
+/// What a stack records where its layers stand with, carried by a chain
+/// committed through it to its publish: the primary's branch entity, the
+/// stack's own layer and its mark of where it last recorded the primary.
+#[derive(Clone)]
+pub(crate) struct Recording {
+    branch: Entity,
+    own: Ephemeral,
+    observed: Observed,
+}
+
+impl Recording {
+    fn of(stack: &StackContext) -> Self {
+        Self {
+            branch: stack.branch.clone(),
+            own: stack.own.clone(),
+            observed: stack.observed.clone(),
+        }
+    }
+}
+
+/// Record in the stack's own layer the revision of every layer of the
+/// stack that moved, once `tip` has published and the dispatch's writes
+/// have landed on `channels`: one row under `last` for each memory layer
+/// and channel whose revision is not the one the own layer holds,
 /// replacing the row it held, as one instant; a publish after which no
-/// layer stands anywhere new writes nothing and mints no instant. The
-/// primary's row is `branch`'s `dialog.branch/revision`; every memory
-/// layer's and every channel's, its `dialog.layer/revision`.
+/// layer stands anywhere new writes nothing and mints no instant. Every
+/// memory layer's and every channel's row is its
+/// `dialog.layer/revision`. The primary has no row of the stack's: the
+/// branch metadata read as `session:` carries its
+/// `dialog.branch/revision`, and the stack moves its mark of where it
+/// last recorded the primary to `tip`.
 ///
-/// The stack's own row names the revision `overlay` stood at before
+/// The stack's own row names the revision its own layer stood at before
 /// the records that followed its last change: once this dispatch's
 /// writes into it have landed, the revision they left it at, and for a
 /// dispatch that wrote nothing into it, the one it already stood at.
@@ -1006,20 +1030,20 @@ fn apply_shares(
 /// the stack's own layer, and a dispatch that wrote nothing into
 /// `session:` and moved no other layer records nothing.
 fn record_revisions(
-    branch: &Entity,
+    recording: &Recording,
     memories: &[(Entity, Ephemeral)],
     channels: &[Channel],
-    overlay: &Ephemeral,
     tip: &Revision,
 ) -> Result<(), CommitError> {
     let recorded = Recorded {
-        branch,
+        branch: &recording.branch,
         primary: Some(tip),
+        observed: &recording.observed,
         memories,
         channels,
-        own: overlay,
+        own: &recording.own,
     };
-    overlay.record(recorded.rows())?;
+    recorded.record()?;
     Ok(())
 }
 
@@ -1129,7 +1153,8 @@ where
         None => Composite::of(view.to_source()),
     };
     // The layers a write named for them (`in:`) can land in: the
-    // stack's, and the line's own session overlay as `session:`. A
+    // stack's, its own `session:` among them, and on a line alone, the
+    // line's session overlay as `session:`. A
     // write named for any other is refused before anything is settled
     // or minted; one named for `memory:` is the primary's.
     let held: Vec<Entity> = stack
@@ -1153,7 +1178,7 @@ where
     // one, so one the stack does not hold refuses the commit.
     let selection = stack
         .as_ref()
-        .and_then(|_| selected(view.to_source().overlay()))
+        .and_then(|stack| selected(&stack.own))
         .filter(|layer| *layer != memory_layer());
     if let Some(layer) = &selection {
         let moved = changes.take_cells(follows_selection);
@@ -1201,13 +1226,13 @@ where
     // layer moved. A recording does not move the stack's own layer, so
     // its row is stimulus only when something else wrote into it since.
     if let Some(stack) = &stack {
-        let source = view.to_source();
         let recorded = Recorded {
             branch: &stack.branch,
             primary: view.revision(),
+            observed: &stack.observed,
             memories: &stack.memories,
             channels: &stack.channels,
-            own: source.overlay(),
+            own: &stack.own,
         };
         transients.merge(recorded.stimulus().into_layer(session_layer()));
         transients.merge(stack.received.clone());
@@ -1223,7 +1248,11 @@ where
     // read each layer as that tick leaves it, and they are stimulus of
     // the first round, as the link's writes into the primary are.
     for (layer, share) in &shares {
-        if *layer == session_layer() {
+        // A line's session overlay is read live, and its row of a cell
+        // stands above a write staged for it; a stack's own layer is a
+        // memory layer of the composite, which the rounds read with the
+        // ticks applied, and needs none of this.
+        if *layer == session_layer() && stack.is_none() {
             let source = view.to_source();
             changes.merge(succession_in_own(source.overlay(), share).into_layer(layer.clone()));
         }

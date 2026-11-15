@@ -64,7 +64,7 @@
 //! schema holding only those declares no layer.
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
@@ -74,6 +74,7 @@ use dialog_corpus::{
 use dialog_effects::branch::invalid_name;
 use dialog_query::the;
 use futures_util::TryStreamExt as _;
+use parking_lot::RwLock;
 
 use crate::repository::source::Source;
 use crate::{Channel, CommitError, Ephemeral, Revision};
@@ -284,14 +285,46 @@ fn revisions(
     rows
 }
 
+/// The revision a stack last recorded its primary at, as the entity
+/// its `dialog.branch/revision` row names: what `session:` read for the
+/// primary's cell then. The stack writes no row of that cell into its
+/// own store: the branch metadata it reads as `session:` carries one, of
+/// the revision the read's head stands at, and two rows of one cell
+/// would read two values between a head move and the dispatch after it.
+/// What the stack keeps instead is this mark, which a dispatch diffs the
+/// head against to find whether the primary moved. Shared by every clone
+/// of a stack.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Observed(Arc<RwLock<Option<Entity>>>);
+
+impl Observed {
+    /// A mark at `at`, the entity of a revision, or at none.
+    pub(crate) fn new(at: Option<Entity>) -> Self {
+        Self(Arc::new(RwLock::new(at)))
+    }
+
+    /// The revision entity the mark stands at.
+    pub(crate) fn get(&self) -> Option<Entity> {
+        self.0.read().clone()
+    }
+
+    /// Move the mark to `at`.
+    pub(crate) fn set(&self, at: Option<Entity>) {
+        *self.0.write() = at;
+    }
+}
+
 /// What a stack records of its layers' revisions, and where: the
-/// primary's branch entity, the primary's revision, the memory layers,
-/// the channels and the stack's own layer (see [`revisions`]).
+/// primary's branch entity, the primary's revision and the mark of where
+/// the stack last saw it, the memory layers, the channels and the
+/// stack's own layer (see [`revisions`]).
 pub(crate) struct Recorded<'a> {
     /// The primary's branch entity.
     pub(crate) branch: &'a Entity,
     /// The revision the primary stands at, if any.
     pub(crate) primary: Option<&'a Revision>,
+    /// Where the stack last recorded the primary (see [`Observed`]).
+    pub(crate) observed: &'a Observed,
     /// The memory layers the schema declares, by name.
     pub(crate) memories: &'a [(Entity, Ephemeral)],
     /// The channels, the loopback, [`CONTROL`], among them.
@@ -301,14 +334,24 @@ pub(crate) struct Recorded<'a> {
 }
 
 impl Recorded<'_> {
-    /// The rows whose revision moved since the stack's own layer last
-    /// recorded them: each row (see [`revisions`]) whose value as it
-    /// stands now is not the one the own layer holds of its cell, with
-    /// the facts the own layer holds of it. A row the own layer holds
-    /// nothing of has moved: nothing recorded it yet. What both the
-    /// recording ([`rows`](Self::rows)) and the stimulus
+    /// Whether the row of `of` under `the` is the primary's
+    /// `dialog.branch/revision`, which the stack keeps as its
+    /// [`Observed`] mark rather than as a row of its own.
+    fn is_primary(&self, of: &Entity, the: &Relation) -> bool {
+        of == self.branch && *the == branch_revision_attr()
+    }
+
+    /// The rows whose revision moved since the stack last recorded
+    /// them: each row (see [`revisions`]) whose value as it stands now is
+    /// not the one recorded of its cell, with the values recorded of it.
+    /// A memory layer's and a channel's row is recorded in the own layer;
+    /// the primary's is the [`Observed`] mark, the value `session:` read
+    /// of its cell from the branch metadata when the stack last recorded
+    /// it. A row nothing recorded yet has moved. What both the recording
+    /// ([`rows`](Self::rows)) and the stimulus
     /// ([`stimulus`](Self::stimulus)) of a dispatch are made of.
-    fn moved(&self) -> Vec<(Row, Vec<Fact>)> {
+    fn moved(&self) -> Vec<(Row, Vec<Value>)> {
+        let observed = self.observed.get();
         revisions(
             self.branch,
             self.primary,
@@ -318,10 +361,16 @@ impl Recorded<'_> {
         )
         .into_iter()
         .filter_map(|(of, the, is)| {
-            let recorded = self
-                .own
-                .scan(&Selector::new().the(the.clone()).of(of.clone()));
-            if recorded.iter().any(|fact| fact.is == is) {
+            let recorded: Vec<Value> = if self.is_primary(&of, &the) {
+                observed.clone().map(Value::Entity).into_iter().collect()
+            } else {
+                self.own
+                    .scan(&Selector::new().the(the.clone()).of(of.clone()))
+                    .into_iter()
+                    .map(|fact| fact.is)
+                    .collect()
+            };
+            if recorded.contains(&is) {
                 None
             } else {
                 Some(((of, the, is), recorded))
@@ -330,32 +379,58 @@ impl Recorded<'_> {
         .collect()
     }
 
-    /// The revision rows that moved since the stack's own layer last
+    /// Whether any layer stands somewhere other than the stack last
+    /// recorded it, the primary among them.
+    pub(crate) fn any_moved(&self) -> bool {
+        !self.moved().is_empty()
+    }
+
+    /// The revision rows of the own layer that moved since it last
     /// recorded them (see [`moved`](Self::moved)), each under `last`,
     /// bound for no layer: what a stack records in its own layer once a
-    /// dispatch has published, and when it opens. Empty when no layer
+    /// dispatch has published, and when it opens. The primary's row is
+    /// not among them: the metadata carries it. Empty when no such layer
     /// moved, so the recording mints no instant.
     pub(crate) fn rows(&self) -> Changes {
+        self.rows_of(|_| true)
+    }
+
+    /// [`rows`](Self::rows), of the layers `keep` holds alone.
+    pub(crate) fn rows_of(&self, keep: impl Fn(&Entity) -> bool) -> Changes {
         let mut rows = Changes::new();
         for ((of, the, is), _) in self.moved() {
-            rows.associate(the, of, is, Pick::Last);
+            if !self.is_primary(&of, &the) && keep(&of) {
+                rows.associate(the, of, is, Pick::Last);
+            }
         }
         rows
     }
 
-    /// The change in the revision rows since the stack's own layer last
-    /// recorded them (see [`moved`](Self::moved)): for each that moved,
-    /// the retraction of the row the own layer holds and the row as it
-    /// stands now. What a dispatch through a stack takes as stimulus, so
-    /// a rule premised on a layer's revision fires when the layer moved
-    /// outside a dispatch. The retraction matters: the recorded row
-    /// stands in `session:` above the dispatch's own rows, and would be
-    /// elected over the new one.
+    /// Record where every layer stands: write [`rows`](Self::rows) into
+    /// the own layer as a record ([`Ephemeral::record`]), and move the
+    /// [`Observed`] mark to the primary's revision.
+    pub(crate) fn record(&self) -> Result<(), DialogCorpusError> {
+        self.own.record(self.rows())?;
+        self.observed.set(self.primary.map(Revision::entity));
+        Ok(())
+    }
+
+    /// The change in the revision rows since the stack last recorded
+    /// them (see [`moved`](Self::moved)): for each that moved, the
+    /// retraction of the value recorded of it and the row as it stands
+    /// now. What a dispatch through a stack takes as stimulus, so a rule
+    /// premised on a layer's revision fires when the layer moved outside
+    /// a dispatch. The retraction matters: the recorded row stands in
+    /// `session:` above the dispatch's own rows, and would be elected
+    /// over the new one. The primary's row moves so too, from the
+    /// revision the stack last recorded it at to the one the dispatch
+    /// began at, which is what the metadata reads of the cell during the
+    /// dispatch.
     pub(crate) fn stimulus(&self) -> Changes {
         let mut rows = Changes::new();
         for ((of, the, is), recorded) in self.moved() {
-            for fact in recorded {
-                rows.dissociate(the.clone(), of.clone(), fact.is);
+            for value in recorded {
+                rows.dissociate(the.clone(), of.clone(), value);
             }
             rows.associate(the, of, is, Pick::Last);
         }

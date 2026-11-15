@@ -141,12 +141,14 @@
 //! [`CONTROL`]: crate::CONTROL
 
 pub mod arrivals;
+pub mod backup;
 pub(crate) mod durable;
 pub mod effect;
 pub mod invoke;
 pub mod sync;
 
 pub use arrivals::Arrivals;
+pub use backup::{Backup, LayerBackup};
 pub use sync::{SyncEnv, SyncError, SyncStack};
 
 use std::iter::once;
@@ -167,8 +169,8 @@ use dialog_search_tree::nodes;
 use parking_lot::RwLock;
 
 use crate::placement::{
-    LayerDeclaration, LayerType, Layers, Recorded, Selection, channel_name, control_layer,
-    durable_name, memory_layer, selected, session_layer,
+    LayerDeclaration, LayerType, Layers, Observed, Recorded, Selection, channel_name,
+    control_layer, durable_name, memory_layer, selected, session_layer,
 };
 use crate::repository::branch::session::Composite;
 use crate::repository::branch::transaction::{DurableLayer, StackContext};
@@ -254,6 +256,7 @@ impl<T> StackEnv for T where
 pub struct OpenStack {
     primary: Branch,
     declared: Changes,
+    backup: Option<Backup>,
 }
 
 impl OpenStack {
@@ -267,22 +270,30 @@ impl OpenStack {
 
     /// Read the primary's schema at its head and build every layer it
     /// declares, each durable layer at the tree the primary points it
-    /// at. Opening reads and commits nothing, so it needs no more of
-    /// `env` than a read does ([`OpenStackEnv`]).
+    /// at, and mint the stack's own layer, [`SESSION`](crate::SESSION),
+    /// empty but for the rows the stack records in it, or holding what a
+    /// [`restore`](Self::restore) gave it. Opening reads and commits
+    /// nothing, so it needs no more of `env` than a read does
+    /// ([`OpenStackEnv`]).
     pub async fn perform<Env: OpenStackEnv>(self, env: &Env) -> Result<Stack, CommitError> {
-        let primary = Source::from(self.primary.clone());
-        let resolved = Layers::resolve(&primary, &self.declared, env).await?;
-        let layers = resolved.layers();
         // The primary is named by the entity the meta branch derives
         // from `(replica, name)`, the replica being the primary's: this
         // profile's view of the repository.
         let operator = Identify.perform(env).await?;
         let replica = Replica::new(operator.profile().clone(), self.primary.of().clone());
         let branch = replica.branch(self.primary.name()).this;
+        // A backup of another branch is refused before any layer is
+        // read or built.
+        if let Some(backup) = &self.backup {
+            backup.check(&branch)?;
+        }
+        let primary = Source::from(self.primary.clone());
+        let resolved = Layers::resolve(&primary, &self.declared, env).await?;
+        let layers = resolved.layers();
         // The primary, the stack's own layer and the loopback are
         // every stack's, whatever the schema says of them: a
         // declaration naming one builds nothing apart.
-        let (memory, own, control) = (memory_layer(), session_layer(), control_layer());
+        let (memory, own_name, control) = (memory_layer(), session_layer(), control_layer());
         let mut memories = Vec::new();
         let mut channels = Vec::new();
         let mut order = Vec::new();
@@ -290,7 +301,7 @@ impl OpenStack {
         // Every declared layer's name is checked before anything is read
         // or written, so a refused declaration writes nothing.
         for (entity, kind) in layers {
-            if entity == memory || entity == own || entity == control {
+            if entity == memory || entity == own_name || entity == control {
                 continue;
             }
             match kind {
@@ -314,28 +325,49 @@ impl OpenStack {
         let durables = Arc::new(Durables::new(&self.primary, durables, operator.profile()));
         durables.refresh(primary.revision(), env).await?;
         let control = Channel::new(control);
-        // The revision rows of every layer exist from the moment the
-        // stack opens, with the facts of the three layers every stack
-        // has, written as one record into its own layer: what it already
-        // holds is left out, so a second stack on the branch writes
-        // nothing.
-        let overlay = self.primary.overlay();
+        // The stack's own layer is its own store, never the primary's
+        // session overlay ([`Branch::overlay`]), which is the
+        // embedder's: what the stack records lands here alone.
+        let own = Ephemeral::new();
         let head = self.primary.revision();
         let every: Vec<Channel> = once(control.clone()).chain(channels.clone()).collect();
+        // A restored stack starts from the rows the backup holds, and
+        // from where the backup saw the primary; a fresh one from
+        // nothing, and from the primary's head.
+        let (observed, restored) = match &self.backup {
+            Some(backup) => (
+                Observed::new(backup.primary().cloned()),
+                Some(backup.replay(&own, &memories)?),
+            ),
+            None => (Observed::new(head.as_ref().map(crate::Revision::entity)), None),
+        };
+        // The revision rows of every layer exist from the moment the
+        // stack opens, with the facts of the three layers every stack
+        // has, written as one record into its own layer. A restored
+        // stack records again the layers that stood where the backup's
+        // rows said, since replaying their rows moved them, and leaves
+        // the ones that had moved unrecorded when the backup was taken,
+        // and the primary, to the first dispatch's stimulus.
         let recorded = Recorded {
             branch: &branch,
             primary: head.as_ref(),
+            observed: &observed,
             memories: &memories,
             channels: &every,
-            own: overlay,
+            own: &own,
         };
         let mut opening = recorded.implied();
-        opening.merge(recorded.rows());
-        overlay.record(opening)?;
+        match &restored {
+            Some(stale) => opening.merge(recorded.rows_of(|layer| !stale.contains(layer))),
+            None => opening.merge(recorded.rows()),
+        }
+        own.record(opening)?;
         Ok(Stack {
             inner: Arc::new(Inner {
                 primary: self.primary,
                 branch,
+                own,
+                observed,
                 layers: memories,
                 order,
                 durables,
@@ -352,13 +384,17 @@ struct Inner {
     primary: Branch,
     /// The primary's branch entity, the meta branch's for the
     /// primary's `(replica, name)`: what its `dialog.branch/revision`
-    /// row in [`SESSION`](crate::SESSION) is of.
+    /// cell in [`SESSION`](crate::SESSION) is of.
     branch: Entity,
+    /// The stack's own layer, [`SESSION`](crate::SESSION): a store of
+    /// its own, minted when it opened, apart from the primary's session
+    /// overlay ([`Branch::overlay`]).
+    own: Ephemeral,
+    /// Where the stack last recorded the primary (see [`Observed`]).
+    observed: Observed,
     /// The session layers the schema declares, each with the entity that
     /// names it, in the order the schema lists them. The stack's own
-    /// layer, [`SESSION`](crate::SESSION), is not among them: it is the
-    /// primary's process-local store ([`Branch::overlay`]), read with the
-    /// primary.
+    /// layer, [`SESSION`](crate::SESSION), is not among them.
     layers: Vec<(Entity, Ephemeral)>,
     /// The session layers and channels the schema declares, by name, in
     /// the order the schema lists them.
@@ -434,6 +470,7 @@ impl Branch {
         OpenStack {
             primary: self.clone(),
             declared: Changes::new(),
+            backup: None,
         }
     }
 }
@@ -451,11 +488,12 @@ impl Stack {
     /// a durable layer the schema declares; [`Layer::Channel`] for the
     /// loopback, [`CONTROL`](crate::CONTROL), which every stack has too,
     /// and every other channel the stack holds. The stack's own layer is
-    /// the primary's process-local store, the one [`Branch::overlay`]
-    /// hands out: a clone of either shares its state.
+    /// its own store, apart from the primary's session overlay
+    /// ([`Branch::overlay`]): a clone of it shares its state with the
+    /// stack and every clone of the stack.
     pub fn layer(&self, name: &Entity) -> Option<Layer<'_>> {
         if *name == session_layer() {
-            return Some(Layer::Ephemeral(self.inner.primary.overlay()));
+            return Some(Layer::Ephemeral(&self.inner.own));
         }
         if *name == memory_layer() {
             return Some(Layer::Durable(Durable::new(
@@ -499,7 +537,7 @@ impl Stack {
         }
         let mut changes = Changes::new();
         LayerDeclaration::new(name.clone(), LayerType::Channel).assert(&mut changes);
-        self.inner.primary.overlay().apply(changes)?;
+        self.inner.own.apply(changes)?;
         let channel = Channel::new(name.clone());
         channels.push(channel.clone());
         Ok(channel)
@@ -615,7 +653,7 @@ impl Stack {
     /// The layer selected in the stack's own layer, if any (see
     /// [`select`](Self::select)).
     pub fn selected(&self) -> Option<Entity> {
-        selected(self.inner.primary.overlay())
+        selected(&self.inner.own)
     }
 
     /// Hold `declaration` in this stack: a
@@ -643,10 +681,7 @@ impl Stack {
     pub(crate) fn unrecorded(&self) -> bool {
         let revision = self.inner.primary.revision();
         let channels = self.channels();
-        !self
-            .recorded(revision.as_ref(), &channels)
-            .rows()
-            .is_empty()
+        self.recorded(revision.as_ref(), &channels).any_moved()
     }
 
     /// What the stack records of its layers' revisions, with the
@@ -659,17 +694,25 @@ impl Stack {
         Recorded {
             branch: &self.inner.branch,
             primary,
+            observed: &self.inner.observed,
             memories: &self.inner.layers,
             channels,
-            own: self.inner.primary.overlay(),
+            own: &self.inner.own,
         }
     }
 
-    /// The memory layers the schema declares, by name, in the schema's
-    /// order. The stack's own layer is not among them: a commit and a
-    /// read take it from the primary, as its session overlay.
+    /// The memory layers of the stack, by name: its own,
+    /// [`SESSION`](crate::SESSION), first, then those the schema
+    /// declares, in the schema's order.
     pub(crate) fn memories(&self) -> Vec<(Entity, Ephemeral)> {
-        self.inner.layers.clone()
+        once((session_layer(), self.inner.own.clone()))
+            .chain(self.inner.layers.iter().cloned())
+            .collect()
+    }
+
+    /// The stack's own layer, [`SESSION`](crate::SESSION).
+    pub(crate) fn own(&self) -> &Ephemeral {
+        &self.inner.own
     }
 
     /// The layers a transaction through this stack reads and induces
@@ -705,9 +748,10 @@ impl Stack {
     /// primary: when it opened, after each dispatch through it and each
     /// sync, and before each dispatch that finds the primary moved.
     pub fn query(&self) -> QueryLayer<'_> {
-        // The primary's line reads its session overlay as `session:`, so
-        // the stack's own layer is read once, with the primary.
-        let mut layer = QueryLayer::from(&self.inner.primary);
+        // The stack's own layer is read as `session:` beside the branch
+        // metadata; the primary's session overlay, read with it, is then
+        // a part of the primary, `memory:`.
+        let mut layer = QueryLayer::from(&self.inner.primary).with_memory(session_layer(), &self.inner.own);
         for (name, memory) in &self.inner.layers {
             layer = layer.with_memory(name.clone(), memory);
         }
@@ -748,8 +792,10 @@ impl Stack {
         let channels = self.channels();
         transaction.with_stack(StackContext {
             branch: self.inner.branch.clone(),
+            own: self.inner.own.clone(),
+            observed: self.inner.observed.clone(),
             composite: self.composite(primary, &durables, &channels),
-            memories: self.inner.layers.clone(),
+            memories: self.memories(),
             durables,
             pinned,
             state: self.inner.durables.clone(),

@@ -19,7 +19,7 @@ pub(crate) use succession::{settle, stored_claims};
 
 use crate::Channel;
 use crate::Commit;
-use crate::placement::control_layer;
+use crate::placement::{Observed, control_layer};
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::session::{Composite, shared_metadata};
 use crate::repository::source::{Live, View};
@@ -106,10 +106,16 @@ pub struct Transaction<L: Line> {
 /// channels the publish lands what the transaction wrote into them in.
 #[derive(Clone)]
 pub(crate) struct StackContext {
-    /// The primary's branch entity, whose `dialog.branch/revision` row
-    /// the stack records in its own layer.
+    /// The primary's branch entity, whose `dialog.branch/revision` cell
+    /// the stack reads in `session:` from the branch metadata.
     pub(crate) branch: Entity,
+    /// The stack's own layer, `session:`, where it records the revisions
+    /// of its layers and holds its selection.
+    pub(crate) own: Ephemeral,
+    /// Where the stack last recorded the primary.
+    pub(crate) observed: Observed,
     pub(crate) composite: Composite,
+    /// The stack's memory layers, its own first.
     pub(crate) memories: Vec<(Entity, Ephemeral)>,
     /// The durable layers, each at the revision the primary pointed it
     /// at when the transaction opened.

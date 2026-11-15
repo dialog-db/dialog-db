@@ -644,6 +644,17 @@ pub enum CommitError {
         layer: String,
     },
 
+    /// A [`Backup`](crate::Backup) restored on a branch other than the
+    /// one whose stack took it ([`OpenStack::restore`](crate::OpenStack::restore)).
+    /// Refused before any layer is built: nothing is read or written.
+    #[error("A backup of branch {backup} cannot be restored on branch {branch}")]
+    ForeignBackup {
+        /// The branch entity the backup was taken of.
+        backup: String,
+        /// The branch entity of the stack it was restored on.
+        branch: String,
+    },
+
     /// A read the body of a [`Stack::transact`](crate::Stack::transact)
     /// made through the stack failed: the transaction writes nothing.
     #[error("A read in the transaction's body failed: {0}")]

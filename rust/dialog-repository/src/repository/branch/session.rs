@@ -743,9 +743,24 @@ impl<'a> QueryEnv<'a> {
         *layer == crate::control_layer() || self.channels.contains(layer)
     }
 
-    /// The primary's session store, read as [`session:`](crate::SESSION):
-    /// the first line's overlay. `None` for a read over no line.
+    /// Whether a stack's own layer is read here, as a memory layer named
+    /// [`session:`](crate::SESSION): then that is what `session:` is, and
+    /// the primary's session overlay is read as a part of the primary.
+    fn holds_own_layer(&self) -> bool {
+        self.memories
+            .iter()
+            .any(|(layer, _)| *layer == session_layer())
+    }
+
+    /// The primary's session store when it is read as
+    /// [`session:`](crate::SESSION), live: the first line's overlay.
+    /// `None` for a read over no line, and for one through a stack, whose
+    /// own layer is `session:`, a memory layer read with the ticks
+    /// applied.
     pub(crate) fn session_store(&self) -> Option<&Ephemeral> {
+        if self.holds_own_layer() {
+            return None;
+        }
         self.sources.first().map(Source::overlay)
     }
 
@@ -764,11 +779,15 @@ impl<'a> QueryEnv<'a> {
     }
 
     /// The name a row of the line at `index`'s session overlay binds its
-    /// `in` to: the primary's is [`session:`](crate::SESSION); another
-    /// line's is read as the line's own.
+    /// `in` to: the primary's is [`session:`](crate::SESSION), but
+    /// through a stack, whose own layer is `session:`, it is a part of
+    /// the primary, [`memory:`](crate::MEMORY); another line's is read as
+    /// the line's own.
     fn overlay_layer(&self, index: usize) -> Entity {
-        if index == 0 {
+        if index == 0 && !self.holds_own_layer() {
             session_layer()
+        } else if index == 0 {
+            memory_layer()
         } else {
             self.line_layer(index)
         }
