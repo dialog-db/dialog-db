@@ -130,15 +130,7 @@ impl DeductiveRule {
                 .reduce()
                 .iter()
                 .filter(|entry| entry.field == name)
-                .map(|entry| {
-                    (
-                        value.clone(),
-                        ReduceSpec {
-                            apply: entry.aggregator,
-                            of: entry.input.clone(),
-                        },
-                    )
-                })
+                .map(|entry| (value.clone(), ReduceSpec::from(entry)))
                 .collect();
 
             let rule = if reduce.is_empty() {

@@ -1450,3 +1450,281 @@ async fn a_stored_claim_is_read_over_a_folded_value() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// "A field written under cardinality many keeps every claim, and its
+/// pick chooses on read." A status ranked `suspended` over `active`:
+/// writing `active` and then `suspended` leaves both claims, the read
+/// returns `suspended`, and retracting it falls back to `active`.
+/// Written as its pick reads, the second write would have succeeded the
+/// first, and the retraction would leave nothing.
+#[dialog_common::test]
+async fn a_field_written_under_cardinality_many_keeps_every_claim() -> anyhow::Result<()> {
+    use crate::attribute::AttributeDescriptor;
+    use dialog_corpus::{Changes, Fact, Instruction};
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let account: Entity = "id:account".parse()?;
+    let spelling = serde_json::json!({
+        "the": "account/state",
+        "as": ["suspended", "active"],
+        "cardinality": "many"
+    });
+    let status: AttributeDescriptor = serde_json::from_value(spelling.clone())?;
+    let fact = |state: &str| -> anyhow::Result<Fact> {
+        Ok(Fact {
+            the: "account/state".parse()?,
+            of: account.clone(),
+            is: Value::String(state.into()),
+            cause: None,
+        })
+    };
+    for state in ["active", "suspended"] {
+        let changes: Changes = [Instruction::Assert(fact(state)?, status.writes())]
+            .into_iter()
+            .collect();
+        branch
+            .transaction()
+            .integrate(changes)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+    }
+    let read = |pick: Option<&str>| {
+        let mut field = spelling.clone();
+        if let Some(pick) = pick {
+            field["pick"] = pick.into();
+            field["as"] = "text:".into();
+        }
+        let branch = &branch;
+        let operator = &operator;
+        async move {
+            let source = TestEnv::new(branch, operator, RuleRegistry::new());
+            let predicate: ConceptDescriptor =
+                serde_json::from_value(serde_json::json!({ "with": { "value": field } }))?;
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("who"));
+            terms.insert("value".into(), Term::var("value"));
+            let rows = ConceptQuery { terms, predicate }
+                .evaluate(Match::new().seed(), &source)
+                .try_vec()
+                .await?;
+            let mut values: Vec<Value> = rows
+                .iter()
+                .map(|row| Ok(row.lookup(&Term::<Any>::var("value"))?.content()?))
+                .collect::<anyhow::Result<_>>()?;
+            values.sort_by_key(|value| format!("{value:?}"));
+            anyhow::Ok(values)
+        }
+    };
+    assert_eq!(
+        read(Some("all:")).await?,
+        vec![
+            Value::String("active".into()),
+            Value::String("suspended".into())
+        ],
+        "both states are kept"
+    );
+    assert_eq!(
+        read(None).await?,
+        vec![Value::String("suspended".into())],
+        "the read ranks them"
+    );
+    let changes: Changes = [Instruction::Retract(fact("suspended")?)]
+        .into_iter()
+        .collect();
+    branch
+        .transaction()
+        .integrate(changes)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        read(None).await?,
+        vec![Value::String("active".into())],
+        "the state beneath is still there"
+    );
+    Ok(())
+}
+
+/// `account/status(a) := top(s) among [suspended, active] :-
+/// account/state(a) = s`, the states read as a set.
+fn ranked_status() -> anyhow::Result<DeductiveRule> {
+    compile(serde_json::json!({
+        "deduce": { "with": { "status": { "the": "account/status", "as": "text:" } } },
+        "when": [{
+            "assert": { "with": {
+                "state": { "the": "account/state", "as": "text:", "pick": "all:" }
+            }},
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "state": { "?": { "name": "state" } }
+            }
+        }],
+        "reduce": {
+            "status": {
+                "apply": "top",
+                "of": { "?": { "name": "state" } },
+                "among": ["suspended", "active"]
+            }
+        }
+    }))
+}
+
+/// Write `value` to `the` of `of`, added beside the cell's claims or
+/// succeeding the newest, in a commit of its own.
+async fn write(
+    operator: &dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
+    branch: &dialog_repository::Branch,
+    the: &str,
+    of: &Entity,
+    value: &str,
+    pick: dialog_corpus::Pick,
+) -> anyhow::Result<()> {
+    use dialog_corpus::{Changes, Fact, Instruction};
+    let fact = Fact {
+        the: the.parse()?,
+        of: of.clone(),
+        is: Value::String(value.into()),
+        cause: None,
+    };
+    let changes: Changes = [Instruction::Assert(fact, pick)].into_iter().collect();
+    branch
+        .transaction()
+        .integrate(changes)
+        .commit()
+        .publish()
+        .perform(operator)
+        .await?;
+    Ok(())
+}
+
+/// "`top` is an aggregator: every state is kept, and a rule derives
+/// the status by rank." With `active` and then `suspended` added to an
+/// account's states, the status is `suspended`, the better ranked; a
+/// stored status written before either state loses to it, since the
+/// chosen value stands as the fact it was chosen from; and a status
+/// written after wins, as a later write does.
+#[dialog_common::test]
+async fn a_rule_derives_a_status_by_rank_over_the_states_kept() -> anyhow::Result<()> {
+    use dialog_corpus::Pick;
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let account: Entity = "id:account".parse()?;
+    let status = |value: &str| {
+        vec![(
+            Value::Entity(account.clone()),
+            Value::String(value.to_string()),
+        )]
+    };
+    let read = || async {
+        let mut registry = RuleRegistry::new();
+        registry.register(ranked_status()?)?;
+        let source = TestEnv::new(&branch, &operator, registry);
+        relation_under(&source, "account/status", "last").await
+    };
+
+    write(
+        &operator,
+        &branch,
+        "account/status",
+        &account,
+        "frozen",
+        Pick::Last,
+    )
+    .await?;
+    write(
+        &operator,
+        &branch,
+        "account/state",
+        &account,
+        "active",
+        Pick::All,
+    )
+    .await?;
+    assert_eq!(
+        read().await?,
+        status("active"),
+        "newer than the stored status"
+    );
+    write(
+        &operator,
+        &branch,
+        "account/state",
+        &account,
+        "suspended",
+        Pick::All,
+    )
+    .await?;
+    assert_eq!(
+        read().await?,
+        status("suspended"),
+        "the better ranked state"
+    );
+    write(
+        &operator,
+        &branch,
+        "account/status",
+        &account,
+        "closed",
+        Pick::Last,
+    )
+    .await?;
+    assert_eq!(read().await?, status("closed"), "a later write wins");
+    Ok(())
+}
+
+/// "`last` is an aggregator over any group." A department's newest
+/// hire is the newest `org.employee/dept` claim naming it, whichever
+/// employee it is of: a group no cell holds.
+#[dialog_common::test]
+async fn a_rule_takes_the_last_of_a_group() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let dept_a: Entity = "id:dept-a".parse()?;
+    for who in ["id:alice", "id:carol", "id:bob"] {
+        let who: Entity = who.parse()?;
+        branch
+            .transaction()
+            .assert(the!("org.employee/dept").of(who.clone()).is(dept_a.clone()))
+            .assert(
+                the!("org.employee/name")
+                    .of(who.clone())
+                    .is(who.to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+    }
+    let newest = compile(serde_json::json!({
+        "deduce": { "with": { "newest": { "the": "org.dept/newest", "as": "text:" } } },
+        "when": [{
+            "assert": { "with": {
+                "dept": { "the": "org.employee/dept", "as": "entity:" },
+                "name": { "the": "org.employee/name", "as": "text:" }
+            }},
+            "where": {
+                "this": { "?": { "name": "employee" } },
+                "dept": { "?": { "name": "this" } },
+                "name": { "?": { "name": "name" } }
+            }
+        }],
+        "reduce": {
+            "newest": { "apply": "last", "of": { "?": { "name": "name" } } }
+        }
+    }))?;
+    let mut registry = RuleRegistry::new();
+    registry.register(newest)?;
+    let source = TestEnv::new(&branch, &operator, registry);
+    assert_eq!(
+        relation_under(&source, "org.dept/newest", "last").await?,
+        vec![(Value::Entity(dept_a), Value::String("id:bob".into()))],
+        "bob was hired in the newest commit"
+    );
+    Ok(())
+}

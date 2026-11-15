@@ -59,6 +59,10 @@ pub(crate) mod field {
     /// `among`: the values an attribute lists.
     pub(crate) const AMONG: Reference =
         Reference::from_hex("d1e96125c25fead1a441f04f681c25cb095b08748fbabaf12b044ae4c0f65099");
+    /// `cardinality`: how a write through an attribute updates its
+    /// cell, named where it says more than the pick.
+    pub(crate) const CARDINALITY: Reference =
+        Reference::from_hex("53fe9dc362646cad45a9bbbb2833ee4836f2ff436a48d7ee953d3a53788894ea");
     /// `optional`: a concept field that may be absent.
     pub(crate) const OPTIONAL: Reference =
         Reference::from_hex("01eef36ab3d2ace67169e6676162fcfe9e313b226dcb4b7b892ff75fe99b5524");
@@ -106,6 +110,7 @@ mod tests {
             ("as", field::AS),
             ("pick", field::PICK),
             ("among", field::AMONG),
+            ("cardinality", field::CARDINALITY),
             ("optional", field::OPTIONAL),
             ("conforms", field::CONFORMS),
         ] {

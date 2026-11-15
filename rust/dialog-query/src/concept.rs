@@ -174,7 +174,7 @@ where
             ),
             cause: None,
             cardinality: Some(descriptor.cardinality()),
-            pick: Some(descriptor.pick().clone()),
+            pick: Some(descriptor.writes()),
         };
         buf.push(expr);
     }
@@ -252,7 +252,7 @@ where
                 ),
                 cause: None,
                 cardinality: Some(descriptor.cardinality()),
-                pick: Some(descriptor.pick().clone()),
+                pick: Some(descriptor.writes()),
             };
             buf.push(expr);
         }

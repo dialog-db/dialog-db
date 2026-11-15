@@ -632,7 +632,7 @@ impl ConceptQuery {
             // folded rows are computed once, over the full relation, and the
             // caller's bindings join against the output (the fixpoint-table
             // shape). The plain rules plan as usual.
-            let mut reduced: Vec<fixpoint::Row> = Vec::new();
+            let mut reduced: Vec<fixpoint::Answer> = Vec::new();
             for rule in rules.reducing() {
                 reduced.extend(reduce_rows(rule, env).await?);
             }
@@ -687,7 +687,7 @@ impl ConceptQuery {
                     let input = each?;
                     let mut matched = false;
                     for row in reduced.iter() {
-                        if let Some(merged) = fixpoint::join(&input, &app.terms, row)? {
+                        if let Some(merged) = fixpoint::join(&input, &app.terms, &row.row)? {
                             matched = true;
                             yield merged;
                         }
@@ -708,7 +708,7 @@ impl ConceptQuery {
                 let joined = joining.map_ok(move |input| {
                     let rows: Vec<Result<Match, EvaluationError>> = reduced
                         .iter()
-                        .filter_map(|row| fixpoint::join(&input, &terms, row).transpose())
+                        .filter_map(|row| fixpoint::join(&input, &terms, &row.row).transpose())
                         .collect();
                     stream::iter(rows)
                 })
@@ -889,7 +889,7 @@ impl ConceptQuery {
     fn relation<'a, Env, M: Selection + 'a>(
         self,
         rules: ConceptRules,
-        reduced: Vec<fixpoint::Row>,
+        reduced: Vec<fixpoint::Answer>,
         rows: M,
         env: &'a Env,
     ) -> impl Selection + 'a
@@ -1032,7 +1032,8 @@ impl ConceptQuery {
                         candidates.retain(|candidate| kind.reads(&candidate.value));
                     }
                 }
-                for row in &reduced {
+                for folded in &reduced {
+                    let row = &folded.row;
                     let (Some(this), Some(value)) = (row.get("this"), row.get(ConceptDescriptor::VALUE)) else {
                         continue;
                     };
@@ -1047,7 +1048,11 @@ impl ConceptQuery {
                         value: value.clone(),
                         key: row.get(&key_operand).cloned(),
                         rank: 0,
-                        standing: None,
+                        // A fold that chose one of its inputs stands
+                        // as the fact it chose; one that computed a
+                        // value cites none, and stands below every
+                        // claim.
+                        standing: folded.standing.clone(),
                         source: Source::Folded,
                     });
                 }
@@ -1549,7 +1554,7 @@ fn entity_key(value: &Value) -> Result<Vec<u8>, EvaluationError> {
 async fn reduce_rows<'a, Env>(
     rule: &DeductiveRule,
     env: &'a Env,
-) -> Result<Vec<fixpoint::Row>, EvaluationError>
+) -> Result<Vec<fixpoint::Answer>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
@@ -1560,9 +1565,20 @@ where
         .plan(&Environment::new())
         .evaluate(Match::new().seed(), env);
     let folded = reducer.fold(body).await?;
+    // A folded row cites a standing only for a field a choosing fold
+    // bound, from the fact it chose.
+    let chosen = |matched: &Match| {
+        rule.reduce()
+            .iter()
+            .filter_map(|entry| matched.standing_of(&entry.field))
+            .max()
+    };
     Ok(folded
         .iter()
-        .filter_map(|matched| fixpoint::project_complete(rule.conclusion(), matched))
+        .filter_map(|matched| {
+            let row = fixpoint::project_complete(rule.conclusion(), matched)?;
+            Some(fixpoint::Answer::new(row, chosen(matched)))
+        })
         .collect())
 }
 

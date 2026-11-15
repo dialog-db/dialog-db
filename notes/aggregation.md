@@ -91,6 +91,27 @@ authored confusion, so it is a **hard error**, sibling of
 - **Grouping keys** are compared by dag-cbor bytes of the group values (the
   fixpoint `AnswerTable` precedent; `Value` has no `Ord`).
 
+## Folds that choose
+
+`min`, `max`, `last` and `top` return one of their inputs; `count`,
+`count-distinct`, `sum` and `avg` compute a value none of them is. The
+choosing four order their inputs as a read under the pick of the same
+name elects a cell's claims: `last` by the standing of the fact each
+input was bound from, `top` by the entry's `among` list, best first,
+then by standing, `min` and `max` by value, then by standing. A cell is
+one group among many: `last` in a head is a cardinality-one read over
+any group a body can name.
+
+A chosen value stands as the fact it was chosen from, so under `last`
+it competes with a stored claim of the head's relation as any derived
+value does. A computed value cites no fact and stands below every
+stored claim.
+
+A fold reads its rule's whole body: a caller's bindings join against
+the folded rows and never restrict the body, so a read naming one
+entity costs what a read of every entity does. Restricting the body by
+a bound grouping field would be sound, and is not done.
+
 ## Stratification
 
 A reducing rule's folds read complete relations, so every positive concept

@@ -285,12 +285,21 @@ pub struct AttributeDescriptor {
     /// carries [`among`](Self::among). The cardinality is the pick's
     /// arity.
     pick: Pick,
+    /// Whether a write through the attribute adds a claim beside the
+    /// cell's others where its pick alone would have it succeed the one
+    /// a read returns: cardinality many declared beside a choosing
+    /// pick, which keeps every claim written and leaves the choice to
+    /// the read. Never set under `all`, whose writes add anyway.
+    adds: bool,
 }
 
 /// The wire form of an [`AttributeDescriptor`]: `the` is one relation
 /// or a ranked list, `as` a type or a ranked value list, `pick` the
 /// pick where it says more than the lists imply, and `cardinality`
-/// the older spelling of `last` and `all`, read but never written.
+/// how a write updates the cell. Alone, `cardinality` is the older
+/// spelling of `last` (one) and `all` (many). Beside a choosing pick or
+/// a list, `many` has a write add its claim and leave the choice to the
+/// read, and is written only then.
 #[derive(Serialize, Deserialize)]
 struct Wire {
     the: OneOrMany<The>,
@@ -402,13 +411,16 @@ impl TryFrom<Wire> for AttributeDescriptor {
             }
         };
         // A listed domain or relation chain is a ranked choice, `top`
-        // unless the pick says otherwise; `cardinality` is the older
-        // spelling of `last` and `all`.
+        // unless the pick says otherwise; `cardinality` alone is the
+        // older spelling of `last` and `all`.
         let pick = match wire.pick.or(wire.select) {
             Some(name) => name.with(among.clone()),
             None if !then.is_empty() || !among.is_empty() => Pick::Top(among.clone()),
             None => wire.cardinality.unwrap_or_default().pick(),
         };
+        // Beside a choosing pick, cardinality many is how the cell is
+        // written: every claim is kept, and the pick chooses on read.
+        let adds = wire.cardinality == Some(Cardinality::Many) && pick.elects();
         let descriptor = AttributeDescriptor {
             the,
             then,
@@ -416,6 +428,7 @@ impl TryFrom<Wire> for AttributeDescriptor {
             content_type,
             among,
             pick,
+            adds,
         };
         match descriptor.pick_error() {
             Some(reason) => Err(reason),
@@ -449,7 +462,7 @@ impl From<AttributeDescriptor> for Wire {
         Wire {
             the,
             description: descriptor.description,
-            cardinality: None,
+            cardinality: descriptor.adds.then_some(Cardinality::Many),
             content,
             pick: Some(name).filter(|name| *name != implied),
             select: None,
@@ -483,6 +496,34 @@ impl AttributeDescriptor {
             content_type,
             among: Vec::new(),
             pick: cardinality.pick(),
+            adds: false,
+        }
+    }
+
+    /// This descriptor written under cardinality many: a write adds
+    /// its claim beside the cell's others and succeeds none, so every
+    /// claim written is kept and the pick chooses among them on read.
+    /// Under `all` a write adds already, and this changes nothing.
+    pub fn adding(mut self) -> Self {
+        self.adds = self.pick.elects();
+        self
+    }
+
+    /// Whether a write through this attribute adds a claim where its
+    /// pick alone would succeed one (see [`adding`](Self::adding)).
+    pub fn adds(&self) -> bool {
+        self.adds
+    }
+
+    /// The pick a write through this attribute carries, which says
+    /// what the write succeeds: `all`, succeeding nothing, when the
+    /// attribute is written under cardinality many, and otherwise the
+    /// pick it is read under, succeeding the claim a read returns.
+    pub fn writes(&self) -> Pick {
+        if self.adds {
+            Pick::All
+        } else {
+            self.pick.clone()
         }
     }
 
@@ -533,13 +574,15 @@ impl AttributeDescriptor {
             }
             pick => pick,
         };
+        self.adds = self.adds && self.pick.elects();
         self
     }
 
     /// Which of its relation's candidates this attribute picks. A write
-    /// through the attribute carries it: any pick but `all` succeeds
-    /// the claim a read returns, retracted beside the written value;
-    /// `all` appends.
+    /// through the attribute carries [`writes`](Self::writes), which is
+    /// this pick unless the attribute is written under cardinality
+    /// many: any pick but `all` succeeds the claim a read returns,
+    /// retracted beside the written value; `all` appends.
     pub fn pick(&self) -> &Pick {
         &self.pick
     }
@@ -560,6 +603,7 @@ impl AttributeDescriptor {
         self.pick = Cardinality::of(&self.pick).pick();
         self.among = Vec::new();
         self.then = Vec::new();
+        self.adds = false;
         self
     }
 
@@ -682,7 +726,7 @@ impl AttributeDescriptor {
             Ok(Attribution {
                 the,
                 is: value.clone(),
-                pick: self.pick.clone(),
+                pick: self.writes(),
             })
         } else {
             Err(FieldTypeError::TypeMismatch {
@@ -787,6 +831,11 @@ impl AttributeDescriptor {
                 field::AMONG,
                 ReferenceType::LIST.list(self.among.iter().map(Value::reference)),
             ));
+        }
+        // Named only where it says more than the pick does, so every
+        // attribute written as its pick reads keeps its identity.
+        if self.adds {
+            entries.push((field::CARDINALITY, SYMBOL.reference_of(b"many")));
         }
         ATTRIBUTE.map(entries)
     }
@@ -993,6 +1042,55 @@ mod tests {
                 .expect("serializes")
                 .get("pick")
                 .is_none()
+        );
+    }
+
+    /// Beside a choosing pick, `cardinality: many` is how the cell is
+    /// written: a write adds its claim and succeeds none, and the pick
+    /// chooses on read. It is written back only there, and it tells
+    /// the attribute apart from the one written as its pick reads,
+    /// whose identity does not move.
+    #[dialog_common::test]
+    fn it_writes_under_cardinality_many_beside_a_choosing_pick() {
+        let status = serde_json::json!({
+            "the": "job/status",
+            "as": ["case:suspended", "case:active"]
+        });
+        let succeeding: AttributeDescriptor =
+            serde_json::from_value(status.clone()).expect("descriptor parses");
+        assert!(matches!(succeeding.writes(), Pick::Top(_)));
+        assert!(!succeeding.adds());
+
+        let mut spelled = status.clone();
+        spelled["cardinality"] = "many".into();
+        let adding: AttributeDescriptor =
+            serde_json::from_value(spelled.clone()).expect("descriptor parses");
+        assert!(matches!(adding.pick(), Pick::Top(_)), "read as before");
+        assert_eq!(adding.cardinality(), Cardinality::One, "one value read");
+        assert_eq!(adding.writes(), Pick::All, "every claim written is kept");
+        assert_eq!(serde_json::to_value(&adding).expect("serializes"), spelled);
+        assert_eq!(adding, succeeding.clone().adding());
+        assert_ne!(adding.to_uri(), succeeding.to_uri());
+
+        let one: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": "job/status",
+            "as": ["case:suspended", "case:active"],
+            "cardinality": "one"
+        }))
+        .expect("descriptor parses");
+        assert_eq!(one, succeeding, "cardinality one is what a pick writes as");
+
+        let all: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": "job/tag",
+            "as": "text:",
+            "pick": "all:",
+            "cardinality": "many"
+        }))
+        .expect("descriptor parses");
+        assert!(!all.adds(), "`all` adds already");
+        assert_eq!(
+            serde_json::to_value(&all).expect("serializes"),
+            serde_json::json!({ "the": "job/tag", "as": "text:", "pick": "all:" })
         );
     }
 

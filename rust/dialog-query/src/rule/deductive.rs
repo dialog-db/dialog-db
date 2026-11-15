@@ -1661,10 +1661,7 @@ mod tests {
         ];
         let reduce = BTreeMap::from([(
             "total".to_string(),
-            ReduceSpec {
-                apply: Aggregator::Sum,
-                of: Term::var("salary"),
-            },
+            ReduceSpec::new(Aggregator::Sum, Term::var("salary")),
         )]);
         let result = DeductiveRule::with_reduce(conclusion, premises, reduce);
         assert!(

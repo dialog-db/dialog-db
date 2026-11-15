@@ -14,6 +14,92 @@ says how to cut a release.
 
 ## Unreleased
 
+### `last` and `top` are aggregators, and a chosen value stands as the fact it was chosen from
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
+[`notes/aggregation.md`](./notes/aggregation.md).
+
+A `reduce` clause takes `last` and `top` beside `min` and `max`: the
+four folds that return one of their inputs. `last` returns the newest
+input, the one bound from the fact standing greatest, which is what a
+cardinality-one read does within a cell and is now available over any
+group. `top` returns the input listed first in the entry's `among`,
+best first, an unlisted value last and the newest among equals:
+
+```json
+"reduce": { "status": {
+  "apply": "top",
+  "of": { "?": { "name": "state" } },
+  "among": ["suspended", "active"]
+} }
+```
+
+All four choose in the order a read under the pick of the same name
+elects a cell's claims.
+
+What this changes for you:
+
+- `Aggregator::Last` and `Aggregator::Top` are new. `ReduceSpec` and
+  `ReduceEntry` carry `among`, the values a `top` ranks, written only
+  when it lists any; `ReduceSpec::new` and `ranking` build one, and code
+  building either by its fields names the new one.
+- A value `min`, `max`, `last` or `top` chose stands as the fact it was
+  bound from, so under `last` it competes with a stored claim of its
+  relation as any derived value does: the newer wins. A value `sum`,
+  `count` or `avg` computed still stands below every stored claim.
+  `ReduceEntry::selects` tells the two kinds apart.
+- `min` and `max` over values that compare equal return the one bound
+  from the newest fact, where they returned the one of the smaller
+  encoding; values that also stand equal still fall to the encoding.
+- A read through a folding rule evaluates the rule's whole body, even
+  when the query names one entity: a ranked read written as a rule
+  costs time in proportion to the relation, where a ranked pick on the
+  attribute reads one cell. Picks stay for that reason.
+
+Why: a status derived by rank over every state an account has been
+given is a rule, not a property of how the relation is stored. With the
+choosing folds in the head, the relation keeps every claim and the rule
+says how to read it.
+
+### An attribute may be written under cardinality many beside a choosing pick
+
+Refs [#759](https://github.com/dialog-db/dialog-db/issues/759)
+
+An attribute's pick says how it is read. How it is written was the
+pick's too: any pick but `all` succeeded the claim a read returned.
+`cardinality: many` beside a choosing pick, or beside a list, now has a
+write add its claim and succeed none, so the cell keeps every claim
+written and the pick chooses among them on read:
+
+```json
+{ "the": "account/state", "as": ["suspended", "active"], "cardinality": "many" }
+```
+
+Writing `active` and then `suspended` leaves both claims and reads
+`suspended`; retracting `suspended` reads `active`. Without the
+cardinality the second write succeeds the first, and the retraction
+leaves nothing.
+
+What this changes for you:
+
+- `AttributeDescriptor::writes` is the pick a write through the
+  attribute carries: `all` when it is written under cardinality many,
+  else the pick it is read under. Code that passed
+  `descriptor.pick()` to `Update::associate` passes `writes()`.
+  `AttributeDescriptor::adding` declares it, and `adds` reads it.
+- `cardinality` alone is still the older spelling of `last` (one) and
+  `all` (many), and `cardinality: one` beside a pick says what the pick
+  already does. It is written back only where it says more than the
+  pick: `many` beside a choosing pick.
+- An attribute written under cardinality many is another attribute than
+  the one written as its pick reads, with its own identity. Every
+  attribute that does not declare it keeps the identity it had.
+
+Why: a pick that also decides what a write retires makes the relation's
+contents depend on how each writer reads it. A status that should keep
+every state and derive the current one by rank could not be declared:
+its ranked read forced a succeeding write.
+
 ### A deductive rule may fold, and one closing a cycle through a fold is set aside
 
 Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
@@ -119,6 +205,11 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A descriptor spelling `cardinality: many` beside a choosing pick, and
+  a rule folding with `last` or `top`, are new spellings. An older
+  release reads the first as the attribute written as its pick reads,
+  under another identity, and refuses the second, leaving the rule
+  inert.
 - A rule descriptor's `reduce` block is the one this release has always
   encoded, so nothing stored is rewritten. An older release reads a
   rule with a `reduce` installed by this one and leaves it inert, as it

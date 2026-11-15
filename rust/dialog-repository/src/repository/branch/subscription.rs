@@ -3032,10 +3032,7 @@ mod tests {
         for (field, apply, input) in reduce {
             clause.insert(
                 (*field).to_string(),
-                dialog_query::ReduceSpec {
-                    apply: *apply,
-                    of: Term::<Any>::var(*input),
-                },
+                dialog_query::ReduceSpec::new(*apply, Term::<Any>::var(*input)),
             );
         }
         dialog_query::DeductiveRule::with_reduce(conclusion.clone(), premises, clause)

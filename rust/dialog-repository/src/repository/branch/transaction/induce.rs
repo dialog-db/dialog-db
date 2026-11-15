@@ -1401,7 +1401,7 @@ fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenH
                     })?
                 }
             };
-            cells.push((attribute, value, field.descriptor().pick().clone()));
+            cells.push((attribute, value, field.descriptor().writes()));
         }
         heads.push((this, cells));
     }

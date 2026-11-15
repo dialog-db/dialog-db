@@ -79,7 +79,7 @@ Which of the claims a relation holds for an entity an attribute reads, spelled `
 
 Like a type, each pick is named by an entity, `last:`, `all:`, `top:`, `max:` and `min:`, which is how a descriptor spells it and what an attribute's identity hashes.
 
-A pick governs writes too: writing through an attribute under any pick but `all` succeeds the claim a read under that pick returns, and `all` adds a claim beside the others. In Rust a pick is `dialog_corpus::Pick`.
+A pick governs writes too, unless the attribute says otherwise: writing through an attribute under any pick but `all` succeeds the claim a read under that pick returns, and `all` adds a claim beside the others. An attribute declared `cardinality: many` beside a choosing pick is written as `all` is and read as its pick says, so the cell keeps every claim written. In Rust a pick is `dialog_corpus::Pick`.
 
 ### Concept
 

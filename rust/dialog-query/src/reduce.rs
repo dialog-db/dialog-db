@@ -102,6 +102,8 @@ use crate::term::Term;
 use crate::try_stream;
 use crate::type_system::{Primitive, Type};
 use crate::types::Any;
+use crate::{Pick, Standing};
+use std::sync::Arc;
 
 /// The fold applied to a reduced field's inputs, one group at a time.
 ///
@@ -125,6 +127,14 @@ pub enum Aggregator {
     Max,
     /// `f64` mean of the present numeric values.
     Avg,
+    /// The newest present value: the one bound from the fact standing
+    /// greatest, as a cardinality-one read elects among a cell's
+    /// claims.
+    Last,
+    /// The present value listed first among the entry's ranked values
+    /// ([`ReduceEntry::among`]), best first; an unlisted value ranks
+    /// last, and the newest wins among equals.
+    Top,
 }
 
 impl Display for Aggregator {
@@ -136,6 +146,8 @@ impl Display for Aggregator {
             Aggregator::Min => "min",
             Aggregator::Max => "max",
             Aggregator::Avg => "avg",
+            Aggregator::Last => "last",
+            Aggregator::Top => "top",
         };
         write!(f, "{name}")
     }
@@ -152,7 +164,9 @@ impl Aggregator {
     /// this requirement is non-empty.
     pub fn input_requirement(self) -> Type {
         let primitive = match self {
-            Aggregator::Count | Aggregator::CountDistinct => Primitive::ALL,
+            Aggregator::Count | Aggregator::CountDistinct | Aggregator::Last | Aggregator::Top => {
+                Primitive::ALL
+            }
             Aggregator::Sum | Aggregator::Avg => Primitive::NUMERIC,
             Aggregator::Min | Aggregator::Max => Primitive::COMPARABLE,
         };
@@ -208,7 +222,7 @@ impl Aggregator {
                 }
                 Type::from(band)
             }
-            Aggregator::Min | Aggregator::Max => {
+            Aggregator::Min | Aggregator::Max | Aggregator::Last | Aggregator::Top => {
                 if optional {
                     consumed.optional()
                 } else {
@@ -238,6 +252,27 @@ pub struct ReduceSpec {
     pub apply: Aggregator,
     /// The term supplying the fold's input, one lookup per body row.
     pub of: Term<Any>,
+    /// The values a `top` ranks, best first; empty for every other
+    /// fold.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub among: Vec<Value>,
+}
+
+impl ReduceSpec {
+    /// `apply` folded over `of`.
+    pub fn new(apply: Aggregator, of: Term<Any>) -> Self {
+        ReduceSpec {
+            apply,
+            of,
+            among: Vec::new(),
+        }
+    }
+
+    /// This spec ranking `among`, best first: what a `top` chooses by.
+    pub fn ranking(mut self, among: Vec<Value>) -> Self {
+        self.among = among;
+        self
+    }
 }
 
 impl From<&ReduceEntry> for ReduceSpec {
@@ -245,6 +280,7 @@ impl From<&ReduceEntry> for ReduceSpec {
         ReduceSpec {
             apply: entry.aggregator,
             of: entry.input.clone(),
+            among: entry.among.clone(),
         }
     }
 }
@@ -261,6 +297,10 @@ pub struct ReduceEntry {
     /// `Absent` binding is skipped; an unbound variable is an
     /// evaluation error.
     pub input: Term<Any>,
+    /// The values a `top` ranks, best first; empty for every other
+    /// fold.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub among: Vec<Value>,
 }
 
 impl ReduceEntry {
@@ -276,7 +316,24 @@ impl ReduceEntry {
             field: field.into(),
             aggregator,
             input,
+            among: Vec::new(),
         }
+    }
+
+    /// This entry ranking `among`, best first: what a `top` chooses by.
+    pub fn ranking(mut self, among: Vec<Value>) -> Self {
+        self.among = among;
+        self
+    }
+
+    /// Whether the fold returns one of its inputs (`min`, `max`, `last`,
+    /// `top`) rather than computing a value none of them is. A chosen
+    /// value stands as the fact it was bound from does.
+    pub fn selects(&self) -> bool {
+        matches!(
+            self.aggregator,
+            Aggregator::Min | Aggregator::Max | Aggregator::Last | Aggregator::Top
+        )
     }
 
     /// Checked construction against the declared or inferred type of
@@ -307,6 +364,7 @@ impl ReduceEntry {
             field,
             aggregator,
             input,
+            among: Vec::new(),
         })
     }
 
@@ -339,11 +397,15 @@ pub struct Reduce {
     pub entries: Vec<ReduceEntry>,
 }
 
+/// A present input of a fold: the value, and the standing of the fact
+/// it was bound from, when a fact did.
+type Input = (Value, Option<Standing>);
+
 /// Buffered per-group state: the decoded key tuple and one column of
-/// present input values per reduce entry.
+/// present inputs per reduce entry.
 struct Group {
     key: Vec<Option<Value>>,
-    columns: Vec<Vec<Value>>,
+    columns: Vec<Vec<Input>>,
 }
 
 impl Reduce {
@@ -385,7 +447,13 @@ impl Reduce {
             });
             for (column, entry) in group.columns.iter_mut().zip(&entries) {
                 match row.lookup(&entry.input)? {
-                    Binding::Present(value) => column.push(value),
+                    Binding::Present(value) => {
+                        let standing = entry
+                            .input
+                            .name()
+                            .and_then(|variable| row.standing_of(variable));
+                        column.push((value, standing));
+                    }
                     Binding::Absent => {}
                 }
             }
@@ -403,7 +471,14 @@ impl Reduce {
             for (entry, column) in entries.iter().zip(group.columns) {
                 let out: Term<Any> = Term::var(entry.field.as_str());
                 match fold_column(entry, column)? {
-                    Some(value) => row.bind(&out, value)?,
+                    Some((value, standing)) => {
+                        row.bind(&out, value)?;
+                        // A chosen value stands as the fact it was
+                        // bound from; a computed one cites none.
+                        if let Some(standing) = standing {
+                            row.cite_variable_standing(&Arc::from(entry.field.as_str()), standing);
+                        }
+                    }
                     None => row.bind_absent(&out)?,
                 }
             }
@@ -441,9 +516,71 @@ fn fault(entry: &ReduceEntry, reason: impl Into<String>) -> EvaluationError {
     }
 }
 
-/// Fold one group's column of present values. `None` means the
+/// Fold one group's column of present inputs. `None` means the
 /// output field binds Absent (identity-less fold, no present input).
-fn fold_column(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>, EvaluationError> {
+/// A fold that chooses one of its inputs returns it with its standing;
+/// one that computes a value returns it with none.
+fn fold_column(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>, EvaluationError> {
+    if entry.selects() {
+        return choose(entry, inputs);
+    }
+    let values: Vec<Value> = inputs.into_iter().map(|(value, _)| value).collect();
+    let folded = fold_values(entry, values)?;
+    Ok(folded.map(|value| (value, None)))
+}
+
+/// The input a choosing fold returns: the least or the greatest value
+/// (`min`, `max`), the newest (`last`), or the best ranked among the
+/// entry's listed values (`top`), in the order a read under the pick of
+/// the same name elects a cell's claims ([`Pick::prefers`]). Among
+/// equal values the one standing greatest is returned, so the choice
+/// carries the newest fact that holds it.
+fn choose(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>, EvaluationError> {
+    let pick = match entry.aggregator {
+        Aggregator::Min => Pick::Min,
+        Aggregator::Max => Pick::Max,
+        Aggregator::Top => Pick::Top(entry.among.clone()),
+        _ => Pick::Last,
+    };
+    if matches!(pick, Pick::Min | Pick::Max) {
+        for pair in inputs.windows(2) {
+            if order(&pair[0].0, &pair[1].0).is_none() {
+                return Err(fault(
+                    entry,
+                    format!("cannot order {:?} against {:?}", pair[0].0, pair[1].0),
+                ));
+            }
+        }
+    }
+    let mut best: Option<Input> = None;
+    for candidate in inputs {
+        best = Some(match best {
+            None => candidate,
+            Some(incumbent) => {
+                let ahead = pick.prefers(
+                    (&candidate.0, candidate.1.as_ref()),
+                    (&incumbent.0, incumbent.1.as_ref()),
+                );
+                let behind = pick.prefers(
+                    (&incumbent.0, incumbent.1.as_ref()),
+                    (&candidate.0, candidate.1.as_ref()),
+                );
+                // Neither is preferred: values that compare equal and
+                // stand equal (`-0.0` and `0.0`). The smaller encoding
+                // is kept, so the choice is independent of row order.
+                if ahead || (!behind && encode(&candidate.0)? < encode(&incumbent.0)?) {
+                    candidate
+                } else {
+                    incumbent
+                }
+            }
+        });
+    }
+    Ok(best)
+}
+
+/// Fold one group's column of present values into a computed one.
+fn fold_values(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>, EvaluationError> {
     match entry.aggregator {
         Aggregator::Count => Ok(Some(Value::UnsignedInt(values.len() as u128))),
         Aggregator::CountDistinct => {
@@ -454,9 +591,10 @@ fn fold_column(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>,
             Ok(Some(Value::UnsignedInt(distinct.len() as u128)))
         }
         Aggregator::Sum => fold_sum(entry, values).map(Some),
-        Aggregator::Min => fold_extremum(entry, values, Ordering::Less),
-        Aggregator::Max => fold_extremum(entry, values, Ordering::Greater),
         Aggregator::Avg => fold_avg(entry, values),
+        Aggregator::Min | Aggregator::Max | Aggregator::Last | Aggregator::Top => {
+            unreachable!("a choosing fold is folded by `choose`")
+        }
     }
 }
 
@@ -545,40 +683,6 @@ fn order(a: &Value, b: &Value) -> Option<Ordering> {
             a.compare(b)
         }
     }
-}
-
-/// `min` (`target = Less`) / `max` (`target = Greater`): keep the
-/// value that stands in `target` relation to the current best. An
-/// incomparable pair errors. Compare-equal but byte-distinct values
-/// (`-0.0` vs `0.0`) resolve to the smaller dag-cbor encoding so the
-/// pick is independent of row order.
-fn fold_extremum(
-    entry: &ReduceEntry,
-    values: Vec<Value>,
-    target: Ordering,
-) -> Result<Option<Value>, EvaluationError> {
-    let mut values = values.into_iter();
-    let Some(mut best) = values.next() else {
-        return Ok(None);
-    };
-    for candidate in values {
-        match order(&candidate, &best) {
-            Some(Ordering::Equal) => {
-                if encode(&candidate)? < encode(&best)? {
-                    best = candidate;
-                }
-            }
-            Some(ordering) if ordering == target => best = candidate,
-            Some(_) => {}
-            None => {
-                return Err(fault(
-                    entry,
-                    format!("cannot order {candidate:?} against {best:?}"),
-                ));
-            }
-        }
-    }
-    Ok(Some(best))
 }
 
 #[cfg(test)]
