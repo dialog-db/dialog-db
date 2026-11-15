@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A value can be a composite: attribute and value pairs, held as one value
 
-[#PR](https://github.com/dialog-db/dialog-db/pull/PR), from the record
+[#812](https://github.com/dialog-db/dialog-db/pull/812), from the record
 values research ([#748](https://github.com/dialog-db/dialog-db/pull/748))
 
 A value that is compound but atomic (a location's latitude and longitude, a
