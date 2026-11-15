@@ -31,28 +31,75 @@ for one with `Get`.
 On disk, 4,096 Stack Exchange commits take 1,169 MiB as a file per block
 and 13.4 MiB in the file. tonk's team space takes 568.5 MiB and 25.4 MiB.
 
-## Using it
+## Opening a repository over the file
 
-A space's storage is a `Space` of five providers, the archive first and
-the memory second. Name `Chronicle` in either place:
+A space's storage is a `Space` of five providers: the archive, the memory,
+then credentials, certificates and blobs. Name `Chronicle` as the archive,
+and as the memory too if the space's cells should be in the file:
 
 ```rs
 use dialog_chronicle::Chronicle;
-use dialog_storage::provider::{FileSystem, Space, Storage};
+use dialog_storage::provider::{FileSystem, Space};
 
-// Blocks and cells, branch heads among them, in archive.dialog: for a
-// replica made this way from the start.
+/// Blocks and cells, branch heads among them, in archive.dialog: for a
+/// replica that starts in the file.
 type FileSpace = Space<Chronicle, Chronicle, FileSystem, FileSystem, FileSystem>;
 
-// Blocks only; cells stay a file each. What a migrated replica uses.
+/// Blocks in archive.dialog, cells a file each: for a replica moved in
+/// from the `fs` provider (see below).
 type BlockSpace = Space<Chronicle, FileSystem, FileSystem, FileSystem, FileSystem>;
-
-let storage = Storage::<FileSpace>::new();
 ```
 
-Opened through a `Space`, each space's file is `archive.dialog` in the
-directory the `fs` provider would keep that space in (`file_at` names it).
-It is created on first open.
+A peer and its repositories then open over that storage as they do over
+any other (see `dialog-peer`'s README); only the storage's type changes:
+
+```rs
+use dialog_capability::Subject;
+use dialog_credentials::{Ed25519Signer, SignerCredential};
+use dialog_effects::storage::{Directory, Location};
+use dialog_identity::OpenCredential;
+use dialog_peer::{Allowance, Peer};
+use dialog_repository::{Repository, RepositoryExt as _};
+use dialog_storage::provider::Storage;
+use dialog_storage::provider::storage::{CredentialStore, NativeSpace};
+use dialog_varsig::Principal as _;
+
+// Every space the peer opens is a directory under `base`.
+let base = Directory::At("/path/to/profiles".into());
+
+// The storage belongs to a system: opening spaces in it takes the
+// system's grant.
+let system = SignerCredential::from(Ed25519Signer::generate().await?);
+let storage = Storage::<FileSpace>::new().owned_by(system.did());
+
+let credential = OpenCredential::open("alice")
+    .at(base.clone())
+    .perform(&CredentialStore::<NativeSpace>::default())
+    .await?;
+
+let alice = Peer::new(credential.clone())
+    .at(Location::new(base.clone(), "alice"))
+    .with(storage)
+    .space(Repository::from(credential.did()).branch("main"))
+    .grant(Allowance::storage(&system))
+    .base(base)
+    .build()
+    .await?;
+
+let session = alice
+    .session(b"my-app")
+    .space(alice.state())
+    .allow(Subject::any())
+    .await?;
+
+// Commits, queries and sync go through the file from here on.
+let notes = alice.space("notes").open().perform(&session).await?;
+let main = notes.branch("main").open().perform(&session).await?;
+```
+
+Each space's file is `archive.dialog` in the directory the `fs` provider
+would keep that space in (`file_at` names it), created on first open.
+From there, commit and query as `dialog-repository`'s README shows.
 
 A file can also be opened on its own, which is what migrations and tools
 do:
@@ -60,10 +107,10 @@ do:
 ```rs
 use dialog_chronicle::{Chronicle, Options};
 
-let archive = Chronicle::open("replica/archive.dialog")?;
+let archive = Chronicle::open("profiles/alice/archive.dialog")?;
 archive.append("index", &blocks)?;
 let bytes = archive.get("index", &hash)?;
-archive.sync()?; // a sync point now, instead of within two seconds
+archive.sync()?; // a sync point now, not within the next two seconds
 
 // Every block whole, no frames: for comparing against the fs provider.
 let plain = Chronicle::open_with(path, Options { frames: false, ..Options::default() })?;
@@ -75,39 +122,76 @@ in a process.
 `dialog-chronicle` is not on crates.io. Depend on it from git, pinned to a
 release tag (see [RELEASING.md](../../RELEASING.md)).
 
-## Moving an existing replica
+## Migrating a replica from the `fs` provider
 
-`dialog-migration`, behind its `chronicle` feature, moves the blocks of
-every space of a replica the `fs` provider wrote into its
-`archive.dialog`. It moves blocks only: a space's cells, branch heads
-among them, stay in its `memory` directory. Open a migrated replica with
-`Chronicle` as the archive and the file system as the memory (`BlockSpace`
-above), not as `FileSpace`, which would find no branch heads. An
-application runs the migration before it opens the replica:
+A replica the `fs` provider wrote keeps a file per block under each
+space's `archive/` directory. The `chronicle` migration of
+`dialog-migration` moves those blocks into each space's `archive.dialog`.
+
+It moves **blocks only**. A space's cells, branch heads among them, stay
+in its `memory/` directory, so a migrated replica opens as `BlockSpace`
+(`Chronicle` archive, file system memory). Opened as `FileSpace` it would
+find no branch heads.
+
+### From an application
+
+Add the migration to the application's dependencies, behind its feature:
+
+```toml
+[dependencies]
+dialog-migration = { git = "https://github.com/dialog-db/dialog-db.git", tag = "v<version>", version = "<version>", features = ["chronicle"] }
+```
+
+Run it on start, before the peer opens, on the directory the peer's
+spaces are under (`base` above). It finds every space under that
+directory by itself, and does nothing for a space it has moved already, so
+running it on every start is safe:
 
 ```rs
 use dialog_migration::Migrations;
 use dialog_migration::chronicle::IntoChronicle;
 
+let profiles = std::path::Path::new("/path/to/profiles");
 let migrations = Migrations::new().with(IntoChronicle::default());
-migrations.run(profile_directory)?;
+
+// What it would do: a line per space not moved yet.
+for pending in migrations.plan(profiles)? {
+    println!("{}: {}", pending.step, pending.detail);
+}
+
+// Do it. An interrupted run picks up where it stopped.
+migrations.run(profiles)?;
+
+// Then open the peer over Storage::<BlockSpace>, as above.
 ```
+
+`plan` and `run` block on the file system; from an async application,
+run them before its runtime starts or on a blocking thread.
+
+### From the command line
 
 The same step is the `dialog-migrate` binary:
 
 ```sh
-cargo install --path rust/dialog-migration --features chronicle
-dialog-migrate --dry-run <profile directory>
-dialog-migrate <profile directory>
+cargo install --git https://github.com/dialog-db/dialog-db.git --tag v<version> dialog-migration --features chronicle
+dialog-migrate --dry-run /path/to/profiles   # what it would do
+dialog-migrate /path/to/profiles
+dialog-migrate --remove-source /path/to/profiles   # and delete the moved blocks
 ```
 
-- It writes into an existing `archive.dialog` through `Chronicle`, never
-  over one.
+### What it does
+
+- A space with no `archive.dialog` gets one written under another name
+  and renamed into place once whole.
+- A space that has one already (a process opened it as `BlockSpace` before
+  migrating) gets the blocks written into it through `Chronicle`, never
+  over it.
 - A space is marked migrated with `archive.dialog.migrated`, so running it
   again does nothing, and an interrupted run picks up where it stopped.
 - `--remove-source` (or `IntoChronicle { remove_source: true }`) deletes
-  each space's block directory once its file is in place. It deletes
-  nothing when a block was left out.
+  each space's `archive/` directory once its file is in place. If a
+  block's bytes did not match its name, or a file there was not a block,
+  it fails instead and keeps the directory.
 
 There is no migration back to a file per block yet. The blocks are the
 same bytes in both, so copying them out with `Import` is one; cells kept
