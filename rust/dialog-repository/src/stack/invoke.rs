@@ -14,6 +14,7 @@
 
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::future::Future;
+use std::mem::take;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -151,7 +152,7 @@ impl Stack {
     /// # use dialog_query::attribute::Relation;
     /// # use dialog_query::query::Output as _;
     /// # use dialog_corpus::{Entity, Value};
-    /// # async fn example<Env: StackEnv + Clone>(stack: Stack, env: Env) -> anyhow::Result<()> {
+    /// # async fn example<Env: StackEnv + Clone + dialog_common::ConditionalSend>(stack: Stack, env: Env) -> anyhow::Result<()> {
     /// let counter: Entity = "counter:1".parse()?;
     /// let reader = env.clone();
     /// let report = stack
@@ -257,10 +258,7 @@ impl Attempt {
     /// What the attempt staged: its writes and the commands it sent.
     fn take(&self) -> (Changes, Changes) {
         let mut staged = self.staged.lock();
-        (
-            std::mem::take(&mut staged.changes),
-            std::mem::take(&mut staged.sent),
-        )
+        (take(&mut staged.changes), take(&mut staged.sent))
     }
 }
 

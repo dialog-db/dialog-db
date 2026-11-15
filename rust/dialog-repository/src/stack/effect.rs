@@ -43,6 +43,7 @@
 //! for them.
 
 use std::collections::BTreeSet;
+use std::error::Error;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::future::Future;
 use std::pin::Pin;
@@ -269,7 +270,7 @@ impl Display for Failure {
     }
 }
 
-impl<E: std::error::Error> From<E> for Failure {
+impl<E: Error> From<E> for Failure {
     fn from(error: E) -> Self {
         Self::new(error.to_string())
     }

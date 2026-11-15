@@ -1,22 +1,24 @@
 //! What arrives on a channel's outside end: the rows each published
 //! dispatch wrote into it, each once, read through a query. How a
-//! provider observes the commands it performs.
+//! consumer that reads the log itself observes the commands it
+//! performs; a provider registered with [`Stack::provide`] is handed
+//! them by an effect instead ([`effect`](super::effect)).
 //!
-//! A provider subscribes to the command concept it performs, on the
+//! A consumer subscribes to the command concept it performs, on the
 //! channel the commands land in: the loopback, [`control:`](crate::CONTROL),
 //! where every published dispatch's commands land, or another
 //! [`Channel`] the stack holds. A channel's outside end
 //! is a log of ticks, one per published dispatch that wrote into it, and
 //! [`Arrivals`] reads it from its own position, yielding the rows of its
 //! query those ticks assert, each once, oldest first. A row lives one
-//! tick: its expiry is no news to the provider, and nothing is retracted.
+//! tick: its expiry is no news to the consumer, and nothing is retracted.
 //!
-//! A provider answers by invoking ([`Stack::invoke`]): a command naming
+//! A consumer answers by invoking ([`Stack::invoke`]): a command naming
 //! the one it answers by that command's entity, which a rule captures on
 //! the layer it wants. The answer is a dispatch of its own, with its own
-//! compare-and-swap. A command reaches the outside end of `control:` only once its dispatch
-//! has published, so a dispatch re-run from a moved head re-runs no
-//! effect.
+//! compare-and-swap. A command reaches the outside end of `control:`
+//! only once its dispatch has published, so a dispatch re-run from a
+//! moved head re-runs no effect.
 //!
 //! ```no_run
 //! # use dialog_repository::{Stack, StackEnv, control_layer};
@@ -54,7 +56,7 @@ use dialog_query::query::{Application, Output as _};
 use crate::{Channel, Ephemeral, OpenStackEnv, QueryLayer, Stack};
 
 /// The rows of a query that the ticks landing on one channel of a stack
-/// make, each once, oldest first: what a provider reads its commands
+/// make, each once, oldest first: what a consumer reads its commands
 /// from. Built by [`Stack::arrivals`]; read with [`poll`](Self::poll), or
 /// [`next`](Self::next) to wait for them.
 ///
@@ -66,7 +68,7 @@ use crate::{Channel, Ephemeral, OpenStackEnv, QueryLayer, Stack};
 /// concept's commands, bound as its terms.
 ///
 /// The query is evaluated over the arrived rows alone, read as rows of
-/// the channel, and a provider reads the stack ([`Stack::query`]) for
+/// the channel, and a consumer reads the stack ([`Stack::query`]) for
 /// anything else it needs.
 ///
 /// The reader holds a position in the channel's log, and the log keeps
@@ -120,7 +122,7 @@ impl<Q> Arrivals<Q> {
     }
 
     /// Every fact the ticks landed since the last read assert, oldest
-    /// first, with no query: what a provider reads when it decodes a
+    /// first, with no query: what a consumer reads when it decodes a
     /// command by the set of attributes its entity carries, rather than
     /// by one concept. Empty when nothing arrived. The reader then stands
     /// at the channel's latest tick, as after [`poll`](Self::poll): the

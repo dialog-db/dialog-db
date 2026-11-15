@@ -263,7 +263,7 @@ impl TransactionBatch {
     /// The rows the publish lands on the outside end of the loopback,
     /// [`control:`](crate::CONTROL), as it lands them: the facts the
     /// chain's transactions dispatched and its rules dispatched, bound
-    /// for no layer, oldest tick's first within each entity.
+    /// for no layer, grouped by entity.
     pub(crate) fn looped(&self) -> Vec<Fact> {
         let mut written = self.dispatched.clone();
         written.merge(self.induced.clone());

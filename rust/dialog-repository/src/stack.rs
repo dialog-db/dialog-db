@@ -37,12 +37,15 @@
 //! # }
 //! ```
 //!
-//! A stack is driven by dispatch ([`Stack::invoke`], and
-//! [`Stack::transact`] for writes with no command): each dispatch is
-//! one unit of publication, re-run from the new head when the primary's
-//! head moved under it (see [`invoke`]). [`Stack::transaction`] is the
-//! same commit without the re-run, for a caller that handles a lost head
-//! itself.
+//! A stack is driven by invoking ([`Stack::invoke`] for a command,
+//! [`Stack::transact`] for a body that reads the stack and writes what
+//! it decides on, [`Stack::assert`] for writes alone). Each invocation
+//! runs one **dispatch**, the unit of publication, re-run from the new
+//! head when the primary's head moved under it, the `transact` body
+//! first (see [`invoke`]), and reports what it did
+//! ([`InvocationReport`](crate::InvocationReport)).
+//! [`Stack::transaction`] is the same commit without the re-run, for a
+//! caller that handles a lost head itself.
 //!
 //! A **channel** ([`Channel`]) is a layer whose rows live one tick, with
 //! two ends: what its outside end sends is read by the next dispatch's
@@ -55,13 +58,16 @@
 //! `dialog.concept/transient` marker). It is the stimulus of the next
 //! tick, read as a row of `control:` by a rule premised on it, and gone
 //! after that tick. Once a dispatch has published, its commands land on
-//! the loopback's outside end as one tick: a **provider**, something that
-//! performs an effect, reads them there with [`Stack::arrivals`], each
-//! once, and answers by invoking, naming the command it answers by its
-//! entity. A provider outside the invoke loop, or outside the process,
-//! reads another channel instead: one the schema declares with
-//! [`LayerType::Channel`], or one [`Stack::channel`] creates, named by
-//! any entity outside [`MEMORY`] and [`SESSION`].
+//! the loopback's outside end as one tick, and the invocation's report
+//! names them. Its effect ([`InvocationReport::effect`](crate::InvocationReport::effect)),
+//! a separate step the embedder performs when it chooses, runs the
+//! stack's **providers** ([`Stack::provide`]) over them and writes their
+//! answers in one more dispatch, with each command's lifecycle rows (see
+//! [`effect`]). A consumer outside the process, or one that reads the
+//! log itself, reads them with [`Stack::arrivals`], or reads another
+//! channel: one the schema declares with [`LayerType::Channel`], or one
+//! [`Stack::channel`] creates, named by any entity outside [`MEMORY`]
+//! and [`SESSION`].
 //!
 //! A layer declared with [`LayerType::Branch`], `memory:<name>`, is
 //! durable: a tree the primary points at, with no head of its own. The
@@ -220,7 +226,7 @@ impl<T> OpenStackEnv for T where
 {
 }
 
-/// What a stack needs of its environment to dispatch through it: what
+/// What a stack needs of its environment to invoke through it: what
 /// opening it and reading through it need ([`OpenStackEnv`]), and what
 /// a transaction's commit needs, to publish through it.
 pub trait StackEnv:
@@ -778,7 +784,11 @@ mod tests {
     use dialog_remote_s3::helpers::S3Address;
     use dialog_storage::provider::storage::VolatileSpace;
     use futures_util::future::join;
+    use parking_lot::Mutex;
     use std::fmt::Debug;
+    use std::slice::from_ref;
+    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::Ordering::SeqCst;
 
     type Operator = Peer<VolatileSpace, dialog_peer::Session>;
 
@@ -5120,16 +5130,21 @@ mod tests {
             .perform(&operator)
             .await?;
         let other = repo.branch("main").open().perform(&operator).await?;
-        let runs = Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let read = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let runs = Arc::new(AtomicU32::new(0));
+        let read = Arc::new(Mutex::new(Vec::new()));
 
-        let (env, ctr, ran, seen) = (operator.clone(), counter.clone(), runs.clone(), read.clone());
+        let (env, ctr, ran, seen) = (
+            operator.clone(),
+            counter.clone(),
+            runs.clone(),
+            read.clone(),
+        );
         let report = stack
             .transact(move |tx| {
                 let (env, ctr, other) = (env.clone(), ctr.clone(), other.clone());
                 let (ran, seen) = (ran.clone(), seen.clone());
                 async move {
-                    ran.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    ran.fetch_add(1, SeqCst);
                     let n = counter_read(tx.query(), &env, &ctr).await?;
                     seen.lock().push(n);
                     if tx.number() == 1 {
@@ -5151,7 +5166,7 @@ mod tests {
             .await?;
 
         assert_eq!(
-            runs.load(std::sync::atomic::Ordering::SeqCst),
+            runs.load(SeqCst),
             2,
             "the body ran again from the moved head"
         );
@@ -5245,8 +5260,14 @@ mod tests {
         // that record is the third's, where nothing fires.
         assert_eq!(report.ticks(), 3);
 
-        let quiet = stack.assert(title(&target, "again")).perform(&operator).await?;
-        assert!(quiet.commands().is_empty(), "a write alone lands no command");
+        let quiet = stack
+            .assert(title(&target, "again"))
+            .perform(&operator)
+            .await?;
+        assert!(
+            quiet.commands().is_empty(),
+            "a write alone lands no command"
+        );
         Ok(())
     }
 
@@ -5324,7 +5345,10 @@ mod tests {
             "the ping marked in the first tick, the pong in the second"
         );
         assert!(
-            report.commands().iter().all(|fact| fact.the.as_str() != "dialog.command/invoked"),
+            report
+                .commands()
+                .iter()
+                .all(|fact| fact.the.as_str() != "dialog.command/invoked"),
             "the mark is no command"
         );
         let rows: Vec<dialog_query::Claim> = stack
@@ -5384,7 +5408,9 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         declare_fetch(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let own = ephemeral(&stack, &session_layer()).expect("session:").clone();
+        let own = ephemeral(&stack, &session_layer())
+            .expect("session:")
+            .clone();
         assert!(provided(&stack)?.is_empty());
 
         stack.provide(crate::Provider::new(&fetch_concept(), |_| async {
@@ -5459,7 +5485,7 @@ mod tests {
         );
 
         let effect = report.effect().perform(&operator).await?;
-        assert_eq!(effect.answered(), std::slice::from_ref(&command));
+        assert_eq!(effect.answered(), from_ref(&command));
         assert!(effect.failed().is_empty() && effect.unhandled().is_empty());
         assert!(!effect.remaining(), "the answer is no command");
         assert_eq!(
@@ -5487,16 +5513,19 @@ mod tests {
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let node: Entity = "node:1".parse()?;
         let command: Entity = "cmd:1".parse()?;
-        stack.provide(crate::Provider::new(&fetch_concept(), |command| async move {
-            let node = node_of(&command)?;
-            let mut answer = Changes::new();
-            dialog_query::the!("cmd.fetched/node")
-                .of(command.entity().clone())
-                .is(node)
-                .at(crate::control_layer())
-                .assert(&mut answer);
-            Ok(answer)
-        }))?;
+        stack.provide(crate::Provider::new(
+            &fetch_concept(),
+            |command| async move {
+                let node = node_of(&command)?;
+                let mut answer = Changes::new();
+                dialog_query::the!("cmd.fetched/node")
+                    .of(command.entity().clone())
+                    .is(node)
+                    .at(crate::control_layer())
+                    .assert(&mut answer);
+                Ok(answer)
+            },
+        ))?;
         let at = state.clone();
         stack.provide(crate::Provider::new(&fetched_concept(), move |command| {
             let at = at.clone();
@@ -5529,7 +5558,7 @@ mod tests {
         assert!(held(&memory, "log/acked", &command)?.is_empty());
 
         let second = first.effect().perform(&operator).await?;
-        assert_eq!(second.answered(), std::slice::from_ref(&command));
+        assert_eq!(second.answered(), from_ref(&command));
         assert!(!second.remaining());
         assert_eq!(
             held(&memory, "log/acked", &command)?,
@@ -5630,7 +5659,7 @@ mod tests {
             .perform(&operator)
             .await?;
         let effect = report.effect().perform(&operator).await?;
-        assert_eq!(effect.unhandled(), std::slice::from_ref(&command));
+        assert_eq!(effect.unhandled(), from_ref(&command));
         assert!(effect.answered().is_empty() && effect.failed().is_empty());
         assert!(!effect.remaining());
         assert_eq!(
@@ -5654,12 +5683,12 @@ mod tests {
         let stack = branch.stack().perform(&operator).await?;
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let other = repo.branch("main").open().perform(&operator).await?;
-        let runs = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let runs = Arc::new(AtomicU32::new(0));
         let (env, ran) = (operator.clone(), runs.clone());
         stack.provide(crate::Provider::new(&fetch_concept(), move |command| {
             let (env, ran, other) = (env.clone(), ran.clone(), other.clone());
             async move {
-                ran.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ran.fetch_add(1, SeqCst);
                 // Another handle moves the head while the provider runs,
                 // before the answer dispatch begins.
                 other
@@ -5681,7 +5710,7 @@ mod tests {
             .await?;
 
         let effect = report.effect().perform(&operator).await?;
-        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(runs.load(SeqCst), 1);
         assert_eq!(
             effect.invocation().revision().version().edition,
             report.revision().version().edition.successor().successor(),
@@ -5714,14 +5743,20 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let stack = branch.stack().perform(&operator).await?;
         let control = crate::control_layer();
-        let own = ephemeral(&stack, &session_layer()).expect("session:").clone();
+        let own = ephemeral(&stack, &session_layer())
+            .expect("session:")
+            .clone();
         let report = stack
             .assert(title(&"doc:1".parse()?, "x"))
             .perform(&operator)
             .await?;
         let effect = report.effect();
         assert!(effect.is_empty());
-        let (row, at, head) = (revision_of(&own, &control)?, own.revision(), branch.revision());
+        let (row, at, head) = (
+            revision_of(&own, &control)?,
+            own.revision(),
+            branch.revision(),
+        );
 
         let performed = effect.perform(&operator).await?;
         assert!(!performed.remaining());

@@ -14,6 +14,90 @@ says how to cut a release.
 
 ## Unreleased
 
+### A stack transacts through a closure re-run on a moved head, an invocation reports what it landed, and providers run as a separate effect
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+points 6 and 7).
+
+`Stack::transact` took the facts to write, so a write computed from a
+read was published against whatever head the dispatch re-ran on. It now
+takes a closure, run once per attempt against an `Attempt` that reads
+the stack at the head the attempt begins at and stages writes and
+commands; a lost compare-and-swap runs the closure again from the new
+head and drops what the lost attempt staged. The public verb is
+*invoke*: nothing in the API is "dispatched" any more (a dispatch is
+the unit of publication an invocation runs). `Invocation::perform`
+returns an `InvocationReport` instead of the bare revision: the head it
+left the primary at, the ticks it ran and the commands it landed on
+`control:`'s outside end. Its `effect()` is the next step, performed
+when the embedder chooses (a worker's `waitUntil`): it runs the
+providers registered with `Stack::provide` over those commands, writes
+their answers in one more dispatch with each command's lifecycle rows,
+and says whether that dispatch landed commands of its own. Every change
+in a command's life is a row of the command's entity in `control:` for
+one tick, which a rule copies into a layer that keeps it, and a
+registered provider is recorded in `session:`.
+
+What this changes for you:
+
+- `Stack::transact(|tx| async move { .. })` replaces
+  `Stack::transact(facts)`: the closure returns `Result<(),
+  CommitError>`, is `ConditionalSend + ConditionalSync + 'static`, and
+  its future `ConditionalSend`. `Attempt` (`query`, `assert`,
+  `retract`, `invoke`, `number`, `stack`) is new; `.at(layer)` on a
+  statement places it as before. `Stack::assert(facts)` is the
+  one-statement shorthand, for writes with no read.
+- `Invocation::dispatch` is renamed `Invocation::invoke`.
+- `Invocation::perform` returns `InvocationReport` (`revision()`,
+  `ticks()`, `commands()`, `effect()`) instead of `Revision`: take
+  `report.revision()` where the revision was used. `commands()` leaves
+  out lifecycle rows.
+- `CommitError::Read` (a read in a transact body failed, converted from
+  `EvaluationError`) and `CommitError::Aborted(reason)` (the body gave
+  up) are new; either fails the invocation with nothing written.
+- `Stack::provide(Provider)`, `Provider::new(&concept, handler)`,
+  `Command` (`entity`, `rows`, `progress`), `Failure`, `Effect`
+  (`perform`, `commands`, `is_empty`) and `EffectReport` (`invocation`,
+  `answered`, `failed`, `unhandled`, `remaining`, `effect`) are new. A
+  provider claims a command whose rows carry an attribute of its
+  concept; the first registered claiming one runs. Its answer is
+  written as a transact body's writes are, and a statement it places
+  `.at(control_layer())` is a command the next effect runs. A provider
+  that fails answers with the failure and does not stop the others; a
+  command no provider claims is answered `unhandled`, not an error.
+  `Invocation::perform` runs no provider.
+- Lifecycle rows, each of the command's entity in `control:` for one
+  tick: `dialog.command/invoked` (the tick of its dispatch it is
+  stimulus of, from 1, written beside the command's own rows),
+  `dialog.command/answered` (the provider's concept),
+  `dialog.command/failed` (the reason), `dialog.command/unhandled`
+  (`true`), all three by the effect's answer dispatch, and
+  `dialog.command/progress` (`Command::progress`). Their attributes
+  are exported (`invoked_attr` and the rest).
+- `session: dialog.provider/command <concept>`, cardinality-many, is
+  written when a concept is first provided; providing it again
+  replaces the handler and writes nothing (`provided_attr`).
+- The corpus write gate admits `dialog.command/*` and
+  `dialog.provider/*` from application writes, as it admits
+  `dialog.layer/*`.
+
+Why: a write that depends on a read must be computed again when the head
+it read moved, which only a closure can be. An embedder answering
+commands in a request cannot block the response on every provider, so
+running them is a step it performs later, and it needs to know whether
+anything is left; a command's life written as rows lets rules keep what
+an embedder wants to show, and the discovery rows say what this
+process can perform.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: the lifecycle rows live one tick on
+  `control:`, which is process-local, and the discovery rows are in
+  `session:`, which is too. A tree written by this release holds them
+  only if an application asserts them durably, which an older release
+  refuses with `ReservedRelation`.
+
 ### A channel is a layer of its own type, with two ends, whose rows live one tick
 
 [#815](https://github.com/dialog-db/dialog-db/pull/815), argued in
@@ -69,7 +153,8 @@ What this changes for you:
 - `Arrivals` keeps its API (`poll`, `next`, `rows`, `next_rows`,
   `layer`); it reads the channel's log from its position, and
   `Stack::arrivals` returns `None` for a layer that is no channel.
-- `Stack::invoke` and `Invocation::dispatch` send into `control:`,
+- `Stack::invoke` and `Invocation::invoke` (`Invocation::dispatch`
+  before #TBD) send into `control:`,
   and every dispatch takes what each channel's outside end was sent;
   what a caller observes of `invoke` is unchanged. A dispatch that
   fails puts back what the channels were sent, not its own commands.
@@ -352,7 +437,8 @@ What this changes for you:
   ones its rules dispatched in the stack's `control:` once the publish
   wins, as one instant gone in the next, and wakes every `Arrivals`
   waiting. A publish that loses its compare-and-swap lands nothing. It
-  is still not re-run on a moved head; `Stack::invoke` is.
+  is still not re-run on a moved head; `Stack::invoke` and
+  `Stack::transact` are.
 - `OpenStackEnv` is new: the providers opening a stack and reading
   through it need, with nothing that commits. `OpenStack::perform`,
   `Arrivals::poll` and `Arrivals::next` are bounded on it rather than on
@@ -508,7 +594,10 @@ What this changes for you:
   `MAX_ANSWERS` are gone: a provider reads its commands with
   `Stack::arrivals` and answers with `Stack::invoke`, a dispatch
   with its own compare-and-swap. `Invocation::perform` publishes once
-  and no longer chains answers.
+  and no longer chains answers. Since #TBD a provider is registered
+  with `Stack::provide` and run by a report's effect, a step apart
+  from the invocation; `Stack::arrivals` stays for a consumer that
+  reads the log itself.
 - `CommitError::AnswerDivergence` and `CommitError::Handler` are gone:
   nothing runs an answer inside an invocation, so neither can happen.
   A provider's own failure is the provider's to report.
@@ -725,8 +814,9 @@ What this changes for you:
   read or committed directly, with no stack, behaves as before, and
   a write `.at(session:)` through it lands in the branch's overlay.
 - `Stack::invoke(command)` and `Stack::transact(facts)` drive a
-  session: each returns an `Invocation` whose `perform` commits and
-  publishes as one unit, and re-runs the whole dispatch from the new
+  session (since #TBD, `Stack::transact` takes a closure and
+  `Stack::assert(facts)` takes the facts): each returns an
+  `Invocation` whose `perform` commits and publishes as one unit, and re-runs the whole dispatch from the new
   head when the publish loses its compare-and-swap, up to `MAX_RERUNS`
   times before reporting `PublishError::VersionMismatch`. A dispatch
   that writes only to memory layers publishes nothing and returns the

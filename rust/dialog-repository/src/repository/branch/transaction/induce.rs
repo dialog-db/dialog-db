@@ -63,10 +63,10 @@ use crate::placement::{
 use crate::repository::archive::erased;
 use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
-use crate::stack::effect::invoked;
 use crate::rules::{
     TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
 };
+use crate::stack::effect::invoked;
 use crate::{CommitError, RemoteSite, Revision, Staged};
 use std::slice::from_ref;
 

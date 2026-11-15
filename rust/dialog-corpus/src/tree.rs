@@ -1539,6 +1539,12 @@ where
         // `dialog.branch/tree`: the pointer a primary holds to the
         // revision, and its tree, a durable layer of its schema stands
         // at, which names a tree the writer could have minted anyway.
+        // So are `dialog.command/*`, the rows a stack writes of a
+        // command's life (invoked, answered, failed, unhandled,
+        // progress), and `dialog.provider/*`, the commands a stack's
+        // providers serve: they record what this process did and can
+        // do, and a rule copies them where they should stay, so they
+        // claim nothing the writer could not have claimed anyway.
         if scope == WriteScope::Application {
             let (Instruction::Assert(fact, _) | Instruction::Retract(fact)) = &instruction;
             let the = fact.the.as_str();
@@ -1546,6 +1552,8 @@ where
                 && !the.starts_with("dialog.rule/")
                 && !the.starts_with("dialog.concept/")
                 && !the.starts_with("dialog.layer/")
+                && !the.starts_with("dialog.command/")
+                && !the.starts_with("dialog.provider/")
                 && the != "dialog.branch/revision"
                 && the != "dialog.branch/tree"
             {
