@@ -375,7 +375,7 @@ mod tests {
                     is: Value::String(name.into()),
                     cause: None,
                 },
-                crate::Pick::All,
+                crate::Cardinality::Many,
             )]),
         )
         .await?;

@@ -270,20 +270,20 @@ impl Statement for &DeductiveRule {
             conclusion_attr(),
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
         update.associate(
             source_attr(),
             rule_entity.clone(),
             Value::Bytes(self.encode()),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
         for reads in reads_entities(self) {
             update.associate(
                 reads_attr(),
                 rule_entity.clone(),
                 Value::Entity(reads),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             );
         }
         for derives in derives_entities(self) {
@@ -291,7 +291,7 @@ impl Statement for &DeductiveRule {
                 derives_attr(),
                 rule_entity.clone(),
                 Value::Entity(derives),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             );
         }
     }
@@ -339,20 +339,20 @@ impl Statement for &InductiveRule {
             source_attr(),
             rule_entity.clone(),
             Value::Bytes(self.encode()),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
         update.associate(
             induces_attr(),
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
         for on in on_entities(self) {
             update.associate(
                 on_attr(),
                 rule_entity.clone(),
                 Value::Entity(on),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             );
         }
     }

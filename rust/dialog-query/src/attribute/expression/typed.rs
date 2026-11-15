@@ -200,8 +200,7 @@ where
             of,
             is: attr.value().clone().into(),
             cause,
-            cardinality: Some(desc.cardinality()),
-            pick: Some(desc.writes()),
+            cardinality: Some(desc.writes()),
         })
     }
 }
@@ -265,8 +264,7 @@ where
             of,
             is: attr.value().clone().into(),
             cause,
-            cardinality: Some(desc.cardinality()),
-            pick: Some(desc.writes()),
+            cardinality: Some(desc.writes()),
         }
     }
 }

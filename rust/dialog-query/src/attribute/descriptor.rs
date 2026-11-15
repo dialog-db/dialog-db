@@ -1,14 +1,15 @@
 use crate::Parameters;
+use crate::Pick;
 use crate::attribute::Relation;
 use crate::attribute::query::AttributeQuery;
 use crate::corpus::{CorpusRelation, Entity, Value};
 use crate::error::{FieldTypeError, TypeError};
-use crate::schema::Cardinality;
+use crate::schema::{Cardinality, estimate_cost};
 use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::types::Type;
-use dialog_corpus::{NameShape, Pick, Symbol};
+use dialog_corpus::{NameShape, Symbol};
 
 use crate::identity::{self, ATTRIBUTE, field};
 use base58::ToBase58;
@@ -19,7 +20,8 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::iter;
 use std::str::FromStr;
 
-/// A validated attribute–value pair with the pick it is written under,
+/// A validated attribute–value pair with the cardinality it is written
+/// under,
 /// produced by [`AttributeDescriptor::resolve`]. Used inside
 /// [`ConceptStatement`](crate::concept::descriptor::ConceptStatement) to
 /// represent the set of facts that make up a concept instance.
@@ -29,10 +31,10 @@ pub struct Attribution {
     pub the: CorpusRelation,
     /// The resolved value for this attribute.
     pub is: Value,
-    /// The pick the attribute reads under, which its write elects under:
-    /// a `last` field's write succeeds the claim the cell holds, an
-    /// `all` field's lands beside the others.
-    pub pick: Pick,
+    /// The cardinality the attribute is written under: a cardinality
+    /// one field's write succeeds the newest claim the cell holds, a
+    /// cardinality many field's lands beside the others.
+    pub cardinality: Cardinality,
 }
 
 /// What an attribute's `the` holds: one relation, or every entry of a
@@ -416,7 +418,7 @@ impl TryFrom<Wire> for AttributeDescriptor {
         let pick = match wire.pick.or(wire.select) {
             Some(name) => name.with(among.clone()),
             None if !then.is_empty() || !among.is_empty() => Pick::Top(among.clone()),
-            None => wire.cardinality.unwrap_or_default().pick(),
+            None => Pick::of(wire.cardinality.unwrap_or_default()),
         };
         // Beside a choosing pick, cardinality many is how the cell is
         // written: every claim is kept, and the pick chooses on read.
@@ -495,7 +497,7 @@ impl AttributeDescriptor {
             description: description.into(),
             content_type,
             among: Vec::new(),
-            pick: cardinality.pick(),
+            pick: Pick::of(cardinality),
             adds: false,
         }
     }
@@ -515,15 +517,15 @@ impl AttributeDescriptor {
         self.adds
     }
 
-    /// The pick a write through this attribute carries, which says
-    /// what the write succeeds: `all`, succeeding nothing, when the
-    /// attribute is written under cardinality many, and otherwise the
-    /// pick it is read under, succeeding the claim a read returns.
-    pub fn writes(&self) -> Pick {
+    /// The cardinality a write through this attribute carries, which
+    /// says what the write succeeds: many, succeeding nothing, under
+    /// `all` or when the attribute is written under cardinality many,
+    /// and otherwise one, succeeding the newest claim.
+    pub fn writes(&self) -> Cardinality {
         if self.adds {
-            Pick::All
+            Cardinality::Many
         } else {
-            self.pick.clone()
+            self.pick.cardinality()
         }
     }
 
@@ -600,7 +602,7 @@ impl AttributeDescriptor {
     /// arity alone: the relation itself, which is what rules derive
     /// into.
     pub fn without_pick(mut self) -> Self {
-        self.pick = Cardinality::of(&self.pick).pick();
+        self.pick = Pick::of(self.pick.cardinality());
         self.among = Vec::new();
         self.then = Vec::new();
         self.adds = false;
@@ -666,7 +668,7 @@ impl AttributeDescriptor {
     /// and every other pick one. `cardinality` is the older spelling
     /// of `last` and `all`, so the two never disagree.
     pub fn cardinality(&self) -> Cardinality {
-        Cardinality::of(&self.pick)
+        self.pick.cardinality()
     }
 
     /// The arity the stored scan of this attribute reads under. A
@@ -726,7 +728,7 @@ impl AttributeDescriptor {
             Ok(Attribution {
                 the,
                 is: value.clone(),
-                pick: self.writes(),
+                cardinality: self.writes(),
             })
         } else {
             Err(FieldTypeError::TypeMismatch {
@@ -743,8 +745,7 @@ impl AttributeDescriptor {
     /// - `of`: Is the entity known?
     /// - `is`: Is the value known?
     pub fn estimate(&self, of: bool, is: bool) -> usize {
-        self.cardinality()
-            .estimate(true, of, is)
+        estimate_cost(self.cardinality(), true, of, is)
             .expect("Should succeed if we know attribute")
     }
 
@@ -1058,7 +1059,7 @@ mod tests {
         });
         let succeeding: AttributeDescriptor =
             serde_json::from_value(status.clone()).expect("descriptor parses");
-        assert!(matches!(succeeding.writes(), Pick::Top(_)));
+        assert_eq!(succeeding.writes(), Cardinality::One);
         assert!(!succeeding.adds());
 
         let mut spelled = status.clone();
@@ -1067,7 +1068,11 @@ mod tests {
             serde_json::from_value(spelled.clone()).expect("descriptor parses");
         assert!(matches!(adding.pick(), Pick::Top(_)), "read as before");
         assert_eq!(adding.cardinality(), Cardinality::One, "one value read");
-        assert_eq!(adding.writes(), Pick::All, "every claim written is kept");
+        assert_eq!(
+            adding.writes(),
+            Cardinality::Many,
+            "every claim written is kept"
+        );
         assert_eq!(serde_json::to_value(&adding).expect("serializes"), spelled);
         assert_eq!(adding, succeeding.clone().adding());
         assert_ne!(adding.to_uri(), succeeding.to_uri());

@@ -577,16 +577,16 @@ impl ConceptStatement {
 
 impl Statement for ConceptStatement {
     fn assert(self, update: &mut impl Update) {
-        // Each field is written under its own pick, as an attribute
-        // statement spelling that pick is: a `last` field's write
-        // succeeds the claim its cell holds, and is a no-op when the
-        // cell already reads as the written value.
+        // Each field is written under its own cardinality, as an
+        // attribute statement is: a cardinality one field's write
+        // succeeds the newest claim its cell holds, and is a no-op when
+        // the cell already reads as the written value.
         for attribution in self.with {
             update.associate(
                 attribution.the,
                 self.this.clone(),
                 attribution.is,
-                attribution.pick,
+                attribution.cardinality,
             );
         }
     }

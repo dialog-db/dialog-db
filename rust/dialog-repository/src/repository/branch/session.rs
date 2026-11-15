@@ -3431,7 +3431,7 @@ mod rule_tests {
             "account/active".parse()?,
             account.clone(),
             Value::String("yes".into()),
-            dialog_corpus::Pick::Last,
+            dialog_corpus::Cardinality::One,
         );
         branch
             .transaction()
@@ -3607,7 +3607,7 @@ mod rule_tests {
         let other = Value::Bytes(rule_with_person_attr("org/person-alias").encode());
         let mut forged = Changes::new();
         for (of, the, change) in genuine.iter() {
-            let dialog_corpus::Change::Assert(value, pick) = change else {
+            let dialog_corpus::Change::Assert(value, cardinality) = change else {
                 continue;
             };
             let value = if *the == source_attr() {
@@ -3615,7 +3615,7 @@ mod rule_tests {
             } else {
                 value.clone()
             };
-            forged.associate(the.clone(), of.clone(), value, pick.clone());
+            forged.associate(the.clone(), of.clone(), value, *cardinality);
         }
 
         let employees = |overlay: Changes| {
@@ -4966,7 +4966,6 @@ mod ordered_relation_tests {
             is: Value::Entity(member.clone()),
             cause: None,
             cardinality: None,
-            pick: None,
         }
     }
 
@@ -5016,7 +5015,6 @@ mod ordered_relation_tests {
                 is: Value::String("Groceries".into()),
                 cause: None,
                 cardinality: None,
-                pick: None,
             })
             .commit()
             .publish()

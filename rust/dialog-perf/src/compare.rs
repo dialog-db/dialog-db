@@ -898,7 +898,7 @@ mod tests {
 mod counted {
     use crate::counters::{Counters, since};
     use crate::env::{Env, assert_all, attribute, entity, fact, text};
-    use dialog_corpus::Pick;
+    use dialog_corpus::Cardinality;
     use std::sync::OnceLock;
 
     /// The counting subscriber, installed once for the test process.
@@ -919,7 +919,7 @@ mod counted {
         let before = counters.snapshot(&env);
         env.commit(assert_all(
             [fact(&entity("thing", 0), "stuff/name", text("a"))],
-            Pick::All,
+            Cardinality::Many,
         ))
         .await?;
         let moved = since(&before, &counters.snapshot(&env));
@@ -951,7 +951,7 @@ mod counted {
                         text(format!("name {index}")),
                     )
                 });
-                env.commit(assert_all(facts, Pick::Last)).await?;
+                env.commit(assert_all(facts, Cardinality::One)).await?;
             }
             heads.push(env.head());
         }

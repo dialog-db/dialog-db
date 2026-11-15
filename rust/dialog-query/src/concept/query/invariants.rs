@@ -1581,7 +1581,7 @@ async fn write(
     the: &str,
     of: &Entity,
     value: &str,
-    pick: dialog_corpus::Pick,
+    cardinality: crate::Cardinality,
 ) -> anyhow::Result<()> {
     use dialog_corpus::{Changes, Fact, Instruction};
     let fact = Fact {
@@ -1590,7 +1590,9 @@ async fn write(
         is: Value::String(value.into()),
         cause: None,
     };
-    let changes: Changes = [Instruction::Assert(fact, pick)].into_iter().collect();
+    let changes: Changes = [Instruction::Assert(fact, cardinality)]
+        .into_iter()
+        .collect();
     branch
         .transaction()
         .integrate(changes)
@@ -1609,7 +1611,7 @@ async fn write(
 /// written after wins, as a later write does.
 #[dialog_common::test]
 async fn a_rule_derives_a_status_by_rank_over_the_states_kept() -> anyhow::Result<()> {
-    use dialog_corpus::Pick;
+    use crate::Cardinality;
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1633,7 +1635,7 @@ async fn a_rule_derives_a_status_by_rank_over_the_states_kept() -> anyhow::Resul
         "account/status",
         &account,
         "frozen",
-        Pick::Last,
+        Cardinality::One,
     )
     .await?;
     write(
@@ -1642,7 +1644,7 @@ async fn a_rule_derives_a_status_by_rank_over_the_states_kept() -> anyhow::Resul
         "account/state",
         &account,
         "active",
-        Pick::All,
+        Cardinality::Many,
     )
     .await?;
     assert_eq!(
@@ -1656,7 +1658,7 @@ async fn a_rule_derives_a_status_by_rank_over_the_states_kept() -> anyhow::Resul
         "account/state",
         &account,
         "suspended",
-        Pick::All,
+        Cardinality::Many,
     )
     .await?;
     assert_eq!(
@@ -1670,7 +1672,7 @@ async fn a_rule_derives_a_status_by_rank_over_the_states_kept() -> anyhow::Resul
         "account/status",
         &account,
         "closed",
-        Pick::Last,
+        Cardinality::One,
     )
     .await?;
     assert_eq!(read().await?, status("closed"), "a later write wins");

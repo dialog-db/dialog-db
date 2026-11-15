@@ -53,7 +53,7 @@ where
         .await?;
     let branch = repository.branch("main").open().perform(&session).await?;
     let changes = facts
-        .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
+        .map(|fact| Instruction::Assert(fact, dialog_corpus::Cardinality::Many))
         .collect::<Vec<_>>()
         .await
         .into_iter()

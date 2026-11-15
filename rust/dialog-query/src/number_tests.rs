@@ -78,7 +78,6 @@ async fn store(
             is: value.clone(),
             cause: None,
             cardinality: None,
-            pick: None,
         });
     }
     transaction.commit().publish().perform(operator).await?;

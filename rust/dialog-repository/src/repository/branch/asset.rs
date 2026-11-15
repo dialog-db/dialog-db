@@ -185,7 +185,7 @@ where
                 // so re-asserting a recorded asset mints nothing.
                 instructions.push(Instruction::Assert(
                     asset.fact()?,
-                    dialog_corpus::Pick::Last,
+                    dialog_corpus::Cardinality::One,
                 ));
             }
             AssetChange::Discard(asset) => {
@@ -357,7 +357,7 @@ mod tests {
             avatar(),
             alice(),
             Value::Entity(content),
-            dialog_corpus::Pick::Last,
+            dialog_corpus::Cardinality::One,
         );
         facts
     }
@@ -932,7 +932,7 @@ mod tests {
             fact.the,
             fact.of,
             Value::UnsignedInt(1_000_000),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
         let refused = branch
             .transaction()

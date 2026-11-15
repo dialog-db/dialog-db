@@ -43,7 +43,7 @@ use crate::{Branch, CommitError, RemoteSite, Revision, Transient};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::tree::CorpusNode;
-use dialog_corpus::{Entity, Pick, Relation as CorpusRelation, Selector, Value};
+use dialog_corpus::{Entity, Relation as CorpusRelation, Selector, Value};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -275,8 +275,8 @@ impl UpgradeRules<'_> {
     }
 }
 
-/// A rule fact as a statement, under `all`, the pick rule facts are
-/// written under.
+/// A rule fact as a statement, under cardinality many, the cardinality
+/// rule facts are written under.
 fn statement(the: CorpusRelation, of: Entity, is: Value) -> AttributeStatement {
     AttributeStatement {
         the: Relation::from(the),
@@ -284,6 +284,5 @@ fn statement(the: CorpusRelation, of: Entity, is: Value) -> AttributeStatement {
         is,
         cause: None,
         cardinality: Some(Cardinality::Many),
-        pick: Some(Pick::All),
     }
 }

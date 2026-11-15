@@ -23,7 +23,7 @@ use std::env;
 use anyhow::Result;
 use dialog_capability::Subject;
 use dialog_corpus::history::{Edition, Origin, Version, context_of};
-use dialog_corpus::{Fact, Instruction, Pick, Selector, Value};
+use dialog_corpus::{Cardinality, Fact, Instruction, Selector, Value};
 use dialog_effects::authority::{Identify, OperatorExt as _};
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use futures_util::{StreamExt as _, stream};
@@ -52,7 +52,7 @@ fn assert_one(of: &str) -> Instruction {
             is: Value::String("body".to_string()),
             cause: None,
         },
-        dialog_corpus::Pick::All,
+        dialog_corpus::Cardinality::Many,
     )
 }
 
@@ -923,8 +923,8 @@ async fn it_does_not_push_a_head_a_reset_left_behind_the_base() -> Result<()> {
 /// has retired. A claim is an attribute, an entity and a value, written by
 /// one write: a value asserted again after it was retracted is a new claim,
 /// which nothing that retired the first one retires. Facts are of two
-/// attributes: `post/title`, written under `Pick::All`, whose writes
-/// append, and `post/state`, written under `Pick::Last` to one of three
+/// attributes: `post/title`, written under `Cardinality::Many`, whose writes
+/// append, and `post/state`, written under `Cardinality::One` to one of three
 /// entities, so writers race on them. A write under `Last` retires the claim
 /// its pick returns, and concurrent writes leave several live claims for
 /// the next write to choose among; which one it retires is read from the
@@ -1348,9 +1348,9 @@ impl Claim {
     /// The assertion of this claim under its attribute's pick.
     fn assert(&self) -> Instruction {
         let pick = if self.the == "post/state" {
-            Pick::Last
+            Cardinality::One
         } else {
-            Pick::All
+            Cardinality::Many
         };
         Instruction::Assert(self.fact(), pick)
     }

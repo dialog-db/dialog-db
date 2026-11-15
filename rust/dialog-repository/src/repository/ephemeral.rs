@@ -47,8 +47,9 @@ use dialog_common::Blake3Hash;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::selector_range;
 use dialog_corpus::{
-    Cause, Changes, DialogCorpusError, Entity, EntityKey, Fact, Instruction, Key, KeyViewConstruct,
-    Pick, Relation, Selector, SortKey, Standing, Statement, Update, fact_index_keys, sort_key,
+    Cardinality, Cause, Changes, DialogCorpusError, Entity, EntityKey, Fact, Instruction, Key,
+    KeyViewConstruct, Relation, Selector, SortKey, Standing, Statement, Update, fact_index_keys,
+    sort_key,
 };
 use dialog_search_tree::Manifest;
 use parking_lot::RwLock;
@@ -490,7 +491,7 @@ impl State {
 
     fn apply(&mut self, instruction: Instruction, delta: &mut Delta) {
         match instruction {
-            Instruction::Assert(fact, Pick::All) => self.insert(fact, delta),
+            Instruction::Assert(fact, Cardinality::Many) => self.insert(fact, delta),
             // A write under a choosing pick among transients: the claim
             // the pick elects of the cell gives way to the value.
             // Transients carry no version, so the election orders them by
@@ -723,7 +724,7 @@ impl Ephemeral {
                 fact.the.clone(),
                 fact.of.clone(),
                 fact.is.clone(),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             );
         }
         changes
@@ -894,7 +895,12 @@ mod tests {
 
     impl Statement for Claim {
         fn assert(self, update: &mut impl dialog_corpus::Update) {
-            update.associate(self.0.the, self.0.of, self.0.is, dialog_corpus::Pick::All);
+            update.associate(
+                self.0.the,
+                self.0.of,
+                self.0.is,
+                dialog_corpus::Cardinality::Many,
+            );
         }
 
         fn retract(self, update: &mut impl dialog_corpus::Update) {
@@ -952,7 +958,7 @@ mod tests {
             "person/name".parse().unwrap(),
             "id:a".parse().unwrap(),
             Value::String("C".into()),
-            dialog_corpus::Pick::Last,
+            dialog_corpus::Cardinality::One,
         );
         let succeeded = line.apply(changes).unwrap().expect("the write mints");
         assert_eq!(succeeded.retracted.len(), 1);
@@ -988,7 +994,7 @@ mod tests {
             "person/name".parse().unwrap(),
             "id:a".parse().unwrap(),
             Value::String("B".into()),
-            dialog_corpus::Pick::Last,
+            dialog_corpus::Cardinality::One,
         );
         line.apply(replace).unwrap();
         assert_eq!(

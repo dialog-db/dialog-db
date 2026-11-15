@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_corpus::{Pick, Value};
+use dialog_corpus::{Cardinality, Value};
 use dialog_query::attribute::query::all::AttributeQueryAll;
 use dialog_query::query::Output as _;
 use dialog_query::type_system::{Primitive, Type as Kind};
@@ -77,7 +77,7 @@ async fn seed_items(env: &Env, size: usize) -> Result<()> {
             fact(&this, "item/size", magnitude(index)),
         ]
     });
-    env.commit(assert_all(facts, Pick::Last)).await
+    env.commit(assert_all(facts, Cardinality::One)).await
 }
 
 /// Every claim of `the` whose value lies in `from..=to` (or from `from` on).

@@ -4,7 +4,7 @@
 
 use crate::ArchiveDelta;
 use crate::tree::{Corpus, CorpusExt as _, SpillCache};
-use crate::{Changes, Entity, Fact, Instruction, Pick, Relation, Update as _, Value};
+use crate::{Cardinality, Changes, Entity, Fact, Instruction, Relation, Update as _, Value};
 use anyhow::Result;
 use dialog_search_tree::helpers::Blocks;
 use dialog_search_tree::helpers::test_catalog;
@@ -77,7 +77,7 @@ async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Resul
         &mut tree,
         &store,
         version(0),
-        vec![Instruction::Assert(salary(100), Pick::All)],
+        vec![Instruction::Assert(salary(100), Cardinality::Many)],
     )
     .await?;
 
@@ -89,9 +89,9 @@ async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Resul
         &store,
         version(1),
         vec![
-            Instruction::Assert(salary(200), Pick::Last),
-            Instruction::Assert(salary(300), Pick::All),
-            Instruction::Assert(salary(400), Pick::Last),
+            Instruction::Assert(salary(200), Cardinality::One),
+            Instruction::Assert(salary(300), Cardinality::Many),
+            Instruction::Assert(salary(400), Cardinality::One),
         ],
     )
     .await?;
@@ -108,19 +108,19 @@ async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Resul
         the.clone(),
         entity.clone(),
         Value::UnsignedInt(200),
-        Pick::Last,
+        Cardinality::One,
     );
     changes.associate(
         the.clone(),
         entity.clone(),
         Value::UnsignedInt(300),
-        Pick::All,
+        Cardinality::Many,
     );
     changes.associate(
         the.clone(),
         entity.clone(),
         Value::UnsignedInt(400),
-        Pick::Last,
+        Cardinality::One,
     );
     let mut by_batch = tree.clone();
     let mut delta = ArchiveDelta::zero();
@@ -159,7 +159,7 @@ async fn a_claim_succeeded_within_its_own_batch_leaves_no_standing_record() -> R
         &mut tree,
         &store,
         version(0),
-        vec![Instruction::Assert(salary(100), Pick::All)],
+        vec![Instruction::Assert(salary(100), Cardinality::Many)],
     )
     .await?;
     apply(
@@ -167,8 +167,8 @@ async fn a_claim_succeeded_within_its_own_batch_leaves_no_standing_record() -> R
         &store,
         version(1),
         vec![
-            Instruction::Assert(salary(150), Pick::Max),
-            Instruction::Assert(salary(120), Pick::Max),
+            Instruction::Assert(salary(150), Cardinality::One),
+            Instruction::Assert(salary(120), Cardinality::One),
         ],
     )
     .await?;
@@ -225,7 +225,7 @@ async fn copies_of_a_head_land_the_same_tree() -> Result<()> {
         is: Value::UnsignedInt(value.into()),
         cause: None,
     };
-    let assert_all = |value: u32| Instruction::Assert(fact(value), Pick::All);
+    let assert_all = |value: u32| Instruction::Assert(fact(value), Cardinality::Many);
     let retract = |value: u32| Instruction::Retract(fact(value));
     async fn records(tree: &Corpus, store: &Blocks) -> Result<usize> {
         let history = TreeHistory::new(tree.clone(), store.clone());

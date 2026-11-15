@@ -7,7 +7,7 @@ use crate::corpus::{Constrained, CorpusRelation, Selector};
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
-use crate::schema::Cardinality;
+use crate::schema::{Cardinality, estimate_cost};
 use crate::selection::{Match, Selection};
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
@@ -193,7 +193,7 @@ impl AttributeQueryOnly {
         let of = self.of().is_bound(env);
         let is = self.is().is_bound(env);
 
-        Cardinality::One.estimate(the, of, is)
+        estimate_cost(Cardinality::One, the, of, is)
     }
 
     /// Returns the parameters for this query.

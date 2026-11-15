@@ -48,11 +48,11 @@ use std::sync::{Arc, Mutex};
 use crate::history::{Cause as HistoryCause, Claim, Record, RecordEntries, Version};
 use crate::key::value_payload as build_value_payload;
 use crate::{
-    ATTRIBUTE_KEY_TAG, ArchiveDelta, AttributeKey, AttributeKeyPart, Cause, CorpusWriter, Datum,
-    DeltaOverlay, DialogCorpusError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart, Fact, FactView,
-    Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, Pick, Selector, SelectorMatch,
-    Standing, State, VALUE_KEY_TAG, Value, ValueDataType, ValueKey, decode_value_parts,
-    encode_bytes, encode_value_owned,
+    ATTRIBUTE_KEY_TAG, ArchiveDelta, AttributeKey, AttributeKeyPart, Cardinality, Cause,
+    CorpusWriter, Datum, DeltaOverlay, DialogCorpusError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart,
+    Fact, FactView, Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, Selector,
+    SelectorMatch, Standing, State, VALUE_KEY_TAG, Value, ValueDataType, ValueKey,
+    decode_value_parts, encode_bytes, encode_value_owned,
     key::varkey::{self, KeyLayout, KeyRef, ValuePayload, ValueRef, parse_key_layout},
     key::{EncodedValue, fact_index_keys, fact_index_keys_with, reproject_index_keys},
     make_reference, match_selector_and_key_ref,
@@ -586,7 +586,7 @@ pub trait CorpusExt {
     /// same key writes that a branch commit would.
     ///
     /// Each instruction touches all three EAV/AEV/VAE indexes; an
-    /// assertion under a choosing pick additionally scans the
+    /// assertion under cardinality one additionally scans the
     /// `(entity, attribute)` range to elect the prior it succeeds (and
     /// skips inserting when a same-valued prior is already in place,
     /// the no-op of writing a standing value).
@@ -1458,7 +1458,7 @@ fn fold_record(earlier: &[Version], later: Record) -> Record {
 /// [`CorpusWriter::read`], which see the batch's own pending writes on both
 /// targets. On the buffered target that means the node buffers are merged into
 /// the scan: an election blind to a buffered prior would leave it live where
-/// the pick would have retired it, and a `Retract` blind to one would cite
+/// the write would have retired it, and a `Retract` blind to one would cite
 /// nothing and so cover nothing at merge time.
 ///
 /// `storage` loads the tree's nodes and spilled values; a value above the
@@ -1542,7 +1542,7 @@ where
             }
         }
         match instruction {
-            Instruction::Assert(fact, Pick::All) => {
+            Instruction::Assert(fact, Cardinality::Many) => {
                 changed = true;
                 // ONE value encode per instruction: the payload feeds all
                 // three index keys, and a spilling value's block bytes and
@@ -1605,7 +1605,7 @@ where
                     )
                     .await?;
             }
-            Instruction::Assert(fact, policy) => {
+            Instruction::Assert(fact, Cardinality::One) => {
                 let entity_key = EntityKey::from_fact(&fact, manifest);
 
                 // Scan the cell's claims against the in-flight write target,
@@ -1668,10 +1668,10 @@ where
                     }
                 }
 
-                // The elected claim is the one a read under the pick
+                // The elected claim is the one a read
                 // returns over these priors, the written value's own claim
                 // among them when the cell holds it.
-                let elected = policy.elect(
+                let elected = Cardinality::One.elect(
                     priors
                         .iter()
                         .map(|(_, _, value, standing)| (value, Some(standing))),
@@ -1904,7 +1904,7 @@ mod spill_cache_tests {
                 facts
                     .iter()
                     .cloned()
-                    .map(|fact| Instruction::Assert(fact, crate::Pick::All)),
+                    .map(|fact| Instruction::Assert(fact, crate::Cardinality::Many)),
             ),
         )
         .await?;
@@ -1990,7 +1990,10 @@ mod spill_cache_tests {
         tree.apply(
             &store,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(fact.clone(), crate::Pick::All)]),
+            stream::iter(vec![Instruction::Assert(
+                fact.clone(),
+                crate::Cardinality::Many,
+            )]),
         )
         .await
         .unwrap();
@@ -2051,7 +2054,10 @@ mod spill_cache_tests {
         tree.apply(
             &store,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(fact.clone(), crate::Pick::All)]),
+            stream::iter(vec![Instruction::Assert(
+                fact.clone(),
+                crate::Cardinality::Many,
+            )]),
         )
         .await?;
         let key = EntityKey::from_fact(&fact, &dialog_search_tree::Manifest::default()).into_key();
@@ -2321,7 +2327,7 @@ mod corrupt_row_tests {
                         is: Value::String(of.to_string()),
                         cause: None,
                     },
-                    crate::Pick::All,
+                    crate::Cardinality::Many,
                 )
             })
             .collect();

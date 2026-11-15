@@ -126,7 +126,7 @@ impl Statement for Transient {
             transient_attr(),
             self.0,
             Value::Boolean(true),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
     }
 

@@ -32,8 +32,8 @@ use std::sync::{Arc, OnceLock};
 use dialog_common::Blake3Hash;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
-    AssetChange, Change, Changes, Entity, Fact, Instruction, Pick, Relation, Selector, SortKey,
-    Statement, Update, Value, sort_key,
+    AssetChange, Cardinality, Change, Changes, Entity, Fact, Instruction, Relation, Selector,
+    SortKey, Statement, Update, Value, sort_key,
 };
 use dialog_search_tree::Manifest;
 
@@ -178,11 +178,11 @@ impl State {
             cause: None,
         };
         match change {
-            Change::Assert(value, policy) => {
-                if policy.elects() {
+            Change::Assert(value, cardinality) => {
+                if cardinality.elects() {
                     self.electing.insert(the, of);
                 }
-                self.apply(Instruction::Assert(fact(value), policy.clone()));
+                self.apply(Instruction::Assert(fact(value), *cardinality));
             }
             Change::Retract(value) => {
                 self.apply(Instruction::Retract(fact(value)));
@@ -424,9 +424,10 @@ pub(crate) fn squash(cell: Vec<Change>, held: &dyn Fn(&Value) -> bool) -> Vec<Ch
             .iter()
             .rposition(|prior| prior.value() == change.value());
         match (&change, last.map(|at| &out[at])) {
-            (Change::Assert(_, policy), Some(Change::Assert(_, prior))) if policy == prior => {}
+            (Change::Assert(_, cardinality), Some(Change::Assert(_, prior)))
+                if cardinality == prior => {}
             (Change::Retract(_), Some(Change::Retract(_))) => {}
-            (Change::Retract(value), Some(Change::Assert(_, Pick::All))) => {
+            (Change::Retract(value), Some(Change::Assert(_, Cardinality::Many))) => {
                 out.remove(last.expect("a prior write"));
                 let before = out
                     .iter()
@@ -457,7 +458,7 @@ mod tests {
 
     use super::*;
     use dialog_corpus::history::Edition;
-    use dialog_corpus::{Asset, Change, Pick, Value};
+    use dialog_corpus::{Asset, Cardinality, Change, Value};
 
     fn fact(of: &str, the: &str, is: &str) -> Fact {
         Fact {
@@ -471,7 +472,9 @@ mod tests {
     fn apply(staged: &mut Staged, instruction: Instruction) {
         let mut changes = Changes::new();
         match instruction {
-            Instruction::Assert(f, policy) => changes.associate(f.the, f.of, f.is, policy),
+            Instruction::Assert(f, cardinality) => {
+                changes.associate(f.the, f.of, f.is, cardinality)
+            }
             Instruction::Retract(f) => changes.dissociate(f.the, f.of, f.is),
         }
         staged.apply(changes);
@@ -508,18 +511,18 @@ mod tests {
         staged.apply_change(
             &the,
             &a,
-            &Change::Assert(Value::String("A".into()), Pick::Last),
+            &Change::Assert(Value::String("A".into()), Cardinality::One),
         );
         staged.apply_change(
             &the,
             &b,
-            &Change::Assert(Value::String("B".into()), Pick::Last),
+            &Change::Assert(Value::String("B".into()), Cardinality::One),
         );
         staged.apply_change(&the, &b, &Change::Retract(Value::String("B".into())));
         staged.apply_change(
             &the,
             &a,
-            &Change::Assert(Value::String("C".into()), Pick::All),
+            &Change::Assert(Value::String("C".into()), Cardinality::Many),
         );
 
         let mut cells = staged.electing_cells_within(&Selector::new().the(the.clone()));
@@ -536,7 +539,7 @@ mod tests {
         assert_eq!(
             staged.writes_of(&the, &b),
             vec![
-                Change::Assert(Value::String("B".into()), Pick::Last),
+                Change::Assert(Value::String("B".into()), Cardinality::One),
                 Change::Retract(Value::String("B".into()))
             ]
         );
@@ -556,7 +559,12 @@ mod tests {
                 overlay.revision(),
                 super::super::ephemeral::Ephemeral::holding({
                     let mut changes = Changes::new();
-                    changes.associate(the.clone(), a.clone(), Value::String("x".into()), Pick::All);
+                    changes.associate(
+                        the.clone(),
+                        a.clone(),
+                        Value::String("x".into()),
+                        Cardinality::Many,
+                    );
                     changes
                 })
                 .revision(),
@@ -571,7 +579,7 @@ mod tests {
         shared.apply_change(
             &the,
             &a,
-            &Change::Assert(Value::String("D".into()), Pick::Last),
+            &Change::Assert(Value::String("D".into()), Cardinality::One),
         );
         assert!(shared.take_settlement(&observed).is_some());
         assert!(
@@ -588,7 +596,7 @@ mod tests {
         let mut staged = Staged::default();
         let the: Relation = "person/name".parse().expect("attribute");
         let a: Entity = "id:a".parse().expect("entity");
-        let write = Change::Assert(Value::String("A".into()), Pick::Last);
+        let write = Change::Assert(Value::String("A".into()), Cardinality::One);
         staged.apply_change(&the, &a, &write);
         staged.apply_change(&the, &a, &write);
         assert_eq!(staged.writes_of(&the, &a), vec![write.clone()]);
@@ -598,7 +606,7 @@ mod tests {
             vec![("id:a person/name".into(), write.clone())]
         );
 
-        let other = Change::Assert(Value::String("A".into()), Pick::All);
+        let other = Change::Assert(Value::String("A".into()), Cardinality::Many);
         staged.apply_change(&the, &a, &other);
         assert_eq!(
             staged.writes_of(&the, &a),
@@ -622,20 +630,26 @@ mod tests {
         let mut staged = Staged::default();
         apply(
             &mut staged,
-            Instruction::Assert(fact("id:a", "person/name", "A"), Pick::All),
+            Instruction::Assert(fact("id:a", "person/name", "A"), Cardinality::Many),
         );
         assert_eq!(staged.rules(), None, "plain facts name no rule set");
         let rule = fact("id:rule", "dialog.rule/conclusion", "id:concept");
-        apply(&mut staged, Instruction::Assert(rule.clone(), Pick::All));
+        apply(
+            &mut staged,
+            Instruction::Assert(rule.clone(), Cardinality::Many),
+        );
         let named = staged.rules();
         assert!(named.is_some());
         apply(
             &mut staged,
-            Instruction::Assert(fact("id:b", "person/name", "B"), Pick::All),
+            Instruction::Assert(fact("id:b", "person/name", "B"), Cardinality::Many),
         );
         assert_eq!(staged.rules(), named, "a plain write leaves it");
         let mut other = Staged::default();
-        apply(&mut other, Instruction::Assert(rule.clone(), Pick::All));
+        apply(
+            &mut other,
+            Instruction::Assert(rule.clone(), Cardinality::Many),
+        );
         assert_eq!(other.rules(), named, "same rule facts, same name");
         apply(&mut staged, Instruction::Retract(rule));
         assert_ne!(staged.rules(), named, "a rule write moves it");
@@ -648,7 +662,7 @@ mod tests {
         let x = fact("id:a", "person/name", "A");
         apply(
             &mut staged,
-            Instruction::Assert(x.clone(), dialog_corpus::Pick::All),
+            Instruction::Assert(x.clone(), dialog_corpus::Cardinality::Many),
         );
         apply(&mut staged, Instruction::Retract(x.clone()));
         assert!(held(&staged, "id:a", "person/name").is_empty());
@@ -677,7 +691,7 @@ mod tests {
         assert_eq!(
             squash(
                 vec![
-                    Change::Assert(a(), dialog_corpus::Pick::All),
+                    Change::Assert(a(), dialog_corpus::Cardinality::Many),
                     Change::Retract(a())
                 ],
                 &unknown
@@ -687,7 +701,7 @@ mod tests {
         assert_eq!(
             squash(
                 vec![
-                    Change::Assert(a(), dialog_corpus::Pick::All),
+                    Change::Assert(a(), dialog_corpus::Cardinality::Many),
                     Change::Retract(a())
                 ],
                 &|_| false
@@ -698,12 +712,12 @@ mod tests {
         assert_eq!(
             squash(
                 vec![
-                    Change::Assert(a(), dialog_corpus::Pick::All),
-                    Change::Assert(a(), dialog_corpus::Pick::All)
+                    Change::Assert(a(), dialog_corpus::Cardinality::Many),
+                    Change::Assert(a(), dialog_corpus::Cardinality::Many)
                 ],
                 &unknown
             ),
-            vec![Change::Assert(a(), dialog_corpus::Pick::All)]
+            vec![Change::Assert(a(), dialog_corpus::Cardinality::Many)]
         );
         // Retract then assert keeps both: the commit retracts the
         // line's claim and asserts afresh.
@@ -711,13 +725,13 @@ mod tests {
             squash(
                 vec![
                     Change::Retract(a()),
-                    Change::Assert(a(), dialog_corpus::Pick::All)
+                    Change::Assert(a(), dialog_corpus::Cardinality::Many)
                 ],
                 &unknown
             ),
             vec![
                 Change::Retract(a()),
-                Change::Assert(a(), dialog_corpus::Pick::All)
+                Change::Assert(a(), dialog_corpus::Cardinality::Many)
             ]
         );
         // Retract, assert, retract: the second retraction cancels the
@@ -726,7 +740,7 @@ mod tests {
             squash(
                 vec![
                     Change::Retract(a()),
-                    Change::Assert(a(), dialog_corpus::Pick::All),
+                    Change::Assert(a(), dialog_corpus::Cardinality::Many),
                     Change::Retract(a())
                 ],
                 &unknown
@@ -737,16 +751,16 @@ mod tests {
         assert_eq!(
             squash(
                 vec![
-                    Change::Assert(a(), dialog_corpus::Pick::All),
-                    Change::Assert(b(), dialog_corpus::Pick::All),
-                    Change::Assert(a(), dialog_corpus::Pick::All),
+                    Change::Assert(a(), dialog_corpus::Cardinality::Many),
+                    Change::Assert(b(), dialog_corpus::Cardinality::Many),
+                    Change::Assert(a(), dialog_corpus::Cardinality::Many),
                     Change::Retract(b()),
                     Change::Retract(b())
                 ],
                 &unknown
             ),
             vec![
-                Change::Assert(a(), dialog_corpus::Pick::All),
+                Change::Assert(a(), dialog_corpus::Cardinality::Many),
                 Change::Retract(b())
             ]
         );
@@ -755,25 +769,25 @@ mod tests {
         assert_eq!(
             squash(
                 vec![
-                    Change::Assert(a(), dialog_corpus::Pick::All),
-                    Change::Assert(b(), dialog_corpus::Pick::Last),
+                    Change::Assert(a(), dialog_corpus::Cardinality::Many),
+                    Change::Assert(b(), dialog_corpus::Cardinality::One),
                     Change::Retract(b())
                 ],
                 &unknown
             ),
             vec![
-                Change::Assert(a(), dialog_corpus::Pick::All),
-                Change::Assert(b(), dialog_corpus::Pick::Last),
+                Change::Assert(a(), dialog_corpus::Cardinality::Many),
+                Change::Assert(b(), dialog_corpus::Cardinality::One),
                 Change::Retract(b())
             ]
         );
         // A choosing write is kept for the transactor, retraction or not.
         assert_eq!(
             squash(
-                vec![Change::Assert(a(), Pick::Last), Change::Retract(a())],
+                vec![Change::Assert(a(), Cardinality::One), Change::Retract(a())],
                 &unknown
             ),
-            vec![Change::Assert(a(), Pick::Last), Change::Retract(a())]
+            vec![Change::Assert(a(), Cardinality::One), Change::Retract(a())]
         );
         // A cell with a choosing write is kept as written: the choosing
         // write may succeed what an earlier write asserted, so a repeat
@@ -781,18 +795,18 @@ mod tests {
         // cancel what it succeeded.
         for cell in [
             vec![
-                Change::Assert(a(), Pick::All),
-                Change::Assert(b(), Pick::Last),
-                Change::Assert(a(), Pick::All),
+                Change::Assert(a(), Cardinality::Many),
+                Change::Assert(b(), Cardinality::One),
+                Change::Assert(a(), Cardinality::Many),
             ],
             vec![
-                Change::Assert(a(), Pick::Last),
-                Change::Assert(b(), Pick::All),
-                Change::Assert(a(), Pick::Last),
+                Change::Assert(a(), Cardinality::One),
+                Change::Assert(b(), Cardinality::Many),
+                Change::Assert(a(), Cardinality::One),
             ],
             vec![
-                Change::Assert(a(), Pick::All),
-                Change::Assert(b(), Pick::Last),
+                Change::Assert(a(), Cardinality::Many),
+                Change::Assert(b(), Cardinality::One),
                 Change::Retract(a()),
             ],
         ] {
@@ -803,13 +817,13 @@ mod tests {
         assert_eq!(
             squash(
                 vec![
-                    Change::Assert(a(), Pick::All),
+                    Change::Assert(a(), Cardinality::Many),
                     Change::Retract(b()),
-                    Change::Assert(a(), Pick::All)
+                    Change::Assert(a(), Cardinality::Many)
                 ],
                 &unknown
             ),
-            vec![Change::Assert(a(), Pick::All), Change::Retract(b())]
+            vec![Change::Assert(a(), Cardinality::Many), Change::Retract(b())]
         );
     }
 
@@ -820,7 +834,7 @@ mod tests {
         apply(&mut staged, Instruction::Retract(x.clone()));
         apply(
             &mut staged,
-            Instruction::Assert(x.clone(), dialog_corpus::Pick::All),
+            Instruction::Assert(x.clone(), dialog_corpus::Cardinality::Many),
         );
         assert_eq!(
             held(&staged, "id:a", "person/name"),
@@ -836,7 +850,7 @@ mod tests {
             changes,
             vec![
                 Change::Retract(Value::String("A".into())),
-                Change::Assert(Value::String("A".into()), dialog_corpus::Pick::All)
+                Change::Assert(Value::String("A".into()), dialog_corpus::Cardinality::Many)
             ]
         );
     }
@@ -851,7 +865,7 @@ mod tests {
         let mut staged = Staged::default();
         apply(
             &mut staged,
-            Instruction::Assert(fact("id:a", "person/name", "A"), Pick::All),
+            Instruction::Assert(fact("id:a", "person/name", "A"), Cardinality::Many),
         );
         apply(
             &mut staged,
@@ -859,7 +873,7 @@ mod tests {
         );
         apply(
             &mut staged,
-            Instruction::Assert(fact("id:a", "person/name", "B"), Pick::Last),
+            Instruction::Assert(fact("id:a", "person/name", "B"), Cardinality::One),
         );
         assert_eq!(
             held(&staged, "id:a", "person/name"),
@@ -875,11 +889,11 @@ mod tests {
             vec![
                 (
                     "id:a person/name".into(),
-                    Change::Assert(Value::String("A".into()), Pick::All)
+                    Change::Assert(Value::String("A".into()), Cardinality::Many)
                 ),
                 (
                     "id:a person/name".into(),
-                    Change::Assert(Value::String("B".into()), Pick::Last)
+                    Change::Assert(Value::String("B".into()), Cardinality::One)
                 ),
                 (
                     "id:a person/name".into(),
@@ -894,7 +908,10 @@ mod tests {
         let mut staged = Staged::default();
         apply(
             &mut staged,
-            Instruction::Assert(fact("id:a", "person/name", "B"), dialog_corpus::Pick::Last),
+            Instruction::Assert(
+                fact("id:a", "person/name", "B"),
+                dialog_corpus::Cardinality::One,
+            ),
         );
         apply(
             &mut staged,
@@ -902,7 +919,10 @@ mod tests {
         );
         apply(
             &mut staged,
-            Instruction::Assert(fact("id:a", "person/name", "C"), dialog_corpus::Pick::All),
+            Instruction::Assert(
+                fact("id:a", "person/name", "C"),
+                dialog_corpus::Cardinality::Many,
+            ),
         );
         assert_eq!(
             held(&staged, "id:a", "person/name"),
@@ -917,9 +937,9 @@ mod tests {
         assert_eq!(
             changes,
             vec![
-                Change::Assert(Value::String("B".into()), dialog_corpus::Pick::Last),
+                Change::Assert(Value::String("B".into()), dialog_corpus::Cardinality::One),
                 Change::Retract(Value::String("B".into())),
-                Change::Assert(Value::String("C".into()), dialog_corpus::Pick::All)
+                Change::Assert(Value::String("C".into()), dialog_corpus::Cardinality::Many)
             ]
         );
     }
@@ -929,12 +949,18 @@ mod tests {
         let mut staged = Staged::default();
         apply(
             &mut staged,
-            Instruction::Assert(fact("id:a", "person/name", "A"), dialog_corpus::Pick::All),
+            Instruction::Assert(
+                fact("id:a", "person/name", "A"),
+                dialog_corpus::Cardinality::Many,
+            ),
         );
         let view = staged.clone();
         apply(
             &mut staged,
-            Instruction::Assert(fact("id:b", "person/name", "B"), dialog_corpus::Pick::All),
+            Instruction::Assert(
+                fact("id:b", "person/name", "B"),
+                dialog_corpus::Cardinality::Many,
+            ),
         );
         assert!(held(&view, "id:b", "person/name").is_empty());
         assert_eq!(

@@ -786,7 +786,7 @@ where
 
         let instructions: Vec<Instruction> = data
             .into_iter()
-            .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
+            .map(|fact| Instruction::Assert(fact, dialog_corpus::Cardinality::Many))
             .collect();
         branch
             .transaction()
@@ -1245,7 +1245,7 @@ where
                     is,
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ));
         }
 

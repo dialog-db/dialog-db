@@ -629,7 +629,7 @@ mod tests {
     use dialog_capability::{Command, Fork, Provider};
     use dialog_common::Blake3Hash as NodeHash;
     use dialog_common::{ConditionalSync, Held, Holds};
-    use dialog_corpus::{Fact, Instruction, Pick, Value};
+    use dialog_corpus::{Cardinality, Fact, Instruction, Value};
     use dialog_credentials::Credential;
     use dialog_effects::archive::{ArchiveError, Get, Import, Put};
     use dialog_effects::authority::{Attest, Identify};
@@ -739,7 +739,7 @@ mod tests {
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            Pick::All,
+            Cardinality::Many,
         )]))
         .perform(operator)
         .await?;
@@ -858,7 +858,7 @@ mod tests {
                     is: Value::String("Bob".into()),
                     cause: None,
                 },
-                Pick::All,
+                Cardinality::Many,
             )]))
             .perform(&refusing)
             .await;
@@ -899,7 +899,7 @@ mod tests {
                     is: Value::String("Alice".into()),
                     cause: None,
                 },
-                Pick::All,
+                Cardinality::Many,
             )]))
             .perform(env)
             .await?;

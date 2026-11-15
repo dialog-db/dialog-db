@@ -41,8 +41,8 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
-    Change, Changes, DialogCorpusError, Entity, Fact, Instruction, Pick, Relation, Select,
-    Selector, Statement, Value,
+    Change, Changes, DialogCorpusError, Entity, Fact, Instruction, Relation, Select, Selector,
+    Statement, Value,
 };
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -894,7 +894,7 @@ where
             continue;
         }
         lag.push(if arriving {
-            Instruction::Assert(fact, dialog_corpus::Pick::All)
+            Instruction::Assert(fact, dialog_corpus::Cardinality::Many)
         } else {
             Instruction::Retract(fact)
         });
@@ -1179,7 +1179,7 @@ fn seed_groups(query: &dialog_query::ConceptQuery, rows: &[Fact]) -> Vec<Vec<usi
             continue;
         };
         let combinable = field.descriptor().the().attribute().is_some()
-            && matches!(field.descriptor().pick(), Pick::Last);
+            && matches!(field.descriptor().pick(), dialog_query::Pick::Last);
         if !combinable {
             groups.push(vec![at]);
             continue;
@@ -1284,8 +1284,8 @@ fn bind_seed(
 }
 
 /// What a head writes, as `emit_matches` tells two heads apart: its
-/// subject, then each field's attribute, value and pick.
-type WrittenHead = (Entity, Vec<(Relation, Value, Pick)>);
+/// subject, then each field's attribute, value and cardinality.
+type WrittenHead = (Entity, Vec<(Relation, Value, dialog_corpus::Cardinality)>);
 
 /// Emit a rule's head for every produced match: transient heads into
 /// `transients`, durable heads (novelty-checked against the frozen
@@ -1319,23 +1319,23 @@ async fn emit_matches<'a>(
             continue;
         }
         let mut head = Changes::new();
-        for (attribute, value, pick) in cells {
+        for (attribute, value, cardinality) in cells {
             match rule.polarity() {
                 // A retracting head dissociates the exact bound
                 // triple, cardinality-independent.
                 Polarity::Retract => {
                     dialog_corpus::Update::dissociate(&mut head, attribute, this.clone(), value);
                 }
-                // An asserting head writes as the field's pick says: a
-                // set appends, and a choosing pick succeeds the claim
-                // it elects, resolved against the view at commit.
+                // An asserting head writes as the field's cardinality
+                // says: many appends, and one succeeds the newest
+                // claim, resolved against the view at commit.
                 Polarity::Assert => {
                     dialog_corpus::Update::associate(
                         &mut head,
                         attribute,
                         this.clone(),
                         value,
-                        pick,
+                        cardinality,
                     );
                 }
             }
@@ -1901,7 +1901,7 @@ mod tests {
                     is: Value::SignedInt(1),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3154,7 +3154,7 @@ mod tests {
                     is: Value::String(audience.into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ))
         };
 
@@ -3182,7 +3182,7 @@ mod tests {
                     is: Value::String("hello".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3262,7 +3262,7 @@ mod tests {
                     is: Value::String("hello".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3348,7 +3348,7 @@ mod tests {
                     is: Value::String("p".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3407,7 +3407,7 @@ mod tests {
                     is: Value::String("old".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3435,7 +3435,7 @@ mod tests {
                     is: Value::String("new".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -4233,7 +4233,7 @@ mod tests {
                     is: Value::Entity(issue.clone()),
                     cause: None,
                 },
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             )]))
             .perform(&operator)
             .await?;

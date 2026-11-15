@@ -1386,7 +1386,7 @@ mod tests {
                 the.clone(),
                 of.clone(),
                 Value::String(value.into()),
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             );
             changes
         };

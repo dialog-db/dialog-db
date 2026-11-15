@@ -37,7 +37,7 @@
 //! shape; the bulk batch is the seed's own entity facts, 2 000 of them.
 
 use anyhow::{Context as _, Result};
-use dialog_corpus::{Fact, Instruction, Pick, Value};
+use dialog_corpus::{Cardinality, Fact, Instruction, Value};
 
 use crate::join::entity_facts;
 use crate::report::PhaseReport;
@@ -55,7 +55,7 @@ fn title(index: usize) -> Result<Instruction> {
             is: Value::String(format!("Bug #{index}: filed from the writer")),
             cause: None,
         },
-        Pick::All,
+        Cardinality::Many,
     ))
 }
 

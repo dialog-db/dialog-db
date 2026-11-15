@@ -16,6 +16,7 @@ pub use rules::{ConceptRules, Exact, Installed};
 
 use std::fmt;
 
+use crate::Pick;
 use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::corpus::{CorpusRelation, Type, Value};
@@ -32,7 +33,7 @@ use crate::{
     Term, try_stream,
 };
 use dialog_capability::Provider;
-use dialog_corpus::{Pick, encode_value_owned};
+use dialog_corpus::encode_value_owned;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};

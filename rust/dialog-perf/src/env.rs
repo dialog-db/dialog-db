@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use dialog_capability::Subject;
-use dialog_corpus::{Changes, Entity, Fact, Instruction, Pick, Relation, Value};
+use dialog_corpus::{Cardinality, Changes, Entity, Fact, Instruction, Relation, Value};
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Location;
 use dialog_peer::helpers::{Meter, Metered, Tally, open_peer_as, test_storage};
@@ -311,10 +311,10 @@ pub fn fact(of: &Entity, the: &str, is: Value) -> Fact {
 }
 
 /// `facts` asserted under `policy`, as one batch.
-pub fn assert_all(facts: impl IntoIterator<Item = Fact>, policy: Pick) -> Changes {
+pub fn assert_all(facts: impl IntoIterator<Item = Fact>, policy: Cardinality) -> Changes {
     facts
         .into_iter()
-        .map(|fact| Instruction::Assert(fact, policy.clone()))
+        .map(|fact| Instruction::Assert(fact, policy))
         .collect()
 }
 

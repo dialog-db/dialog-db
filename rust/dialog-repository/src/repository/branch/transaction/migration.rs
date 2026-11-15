@@ -19,7 +19,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::helpers::test_repo;
 use crate::{Branch, Transient};
 use anyhow::Result;
-use dialog_corpus::{Entity, Pick, Relation as CorpusRelation, Selector, Value};
+use dialog_corpus::{Entity, Relation as CorpusRelation, Selector, Value};
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::Relation;
 use dialog_query::query::Output as _;
@@ -64,7 +64,6 @@ fn statement(the: &str, of: &Entity, is: Value) -> AttributeStatement {
         is,
         cause: None,
         cardinality: Some(Cardinality::Many),
-        pick: Some(Pick::All),
     }
 }
 
@@ -166,15 +165,16 @@ async fn stored(
     Ok(values)
 }
 
-/// `org/salary` of `of` read under `select`, stored and derived, sorted.
+/// `org/salary` of `of` read under `cardinality`, stored and derived,
+/// sorted.
 async fn salary(
     branch: &Branch,
     operator: &Operator,
     of: &Entity,
-    select: &str,
+    cardinality: &str,
 ) -> Result<Vec<u64>> {
     let predicate: ConceptDescriptor = serde_json::from_value(json!({ "with": {
-        "salary": { "the": "org/salary", "as": "natural:", "pick": select }
+        "salary": { "the": "org/salary", "as": "natural:", "cardinality": cardinality }
     }}))?;
     let mut terms = Parameters::new();
     terms.insert("this".to_string(), Term::<Any>::constant(of.clone()));
@@ -192,14 +192,9 @@ async fn salary(
     Ok(read)
 }
 
-fn unsigned(the: &str, of: &Entity, value: u32, policy: Pick) -> AttributeStatement {
+fn unsigned(the: &str, of: &Entity, value: u32, policy: Cardinality) -> AttributeStatement {
     AttributeStatement {
-        cardinality: Some(if policy == Pick::All {
-            Cardinality::Many
-        } else {
-            Cardinality::One
-        }),
-        pick: Some(policy),
+        cardinality: Some(policy),
         ..statement(the, of, Value::UnsignedInt(value.into()))
     }
 }
@@ -218,11 +213,11 @@ async fn a_rule_the_previous_release_installed_derives_once_upgraded() -> Result
     commit(
         &branch,
         &operator,
-        unsigned("org/bonus", &alice, 500, Pick::All),
+        unsigned("org/bonus", &alice, 500, Cardinality::Many),
     )
     .await?;
     assert_eq!(
-        salary(&branch, &operator, &alice, "all").await?,
+        salary(&branch, &operator, &alice, "many").await?,
         Vec::<u64>::new(),
         "inert before the upgrade"
     );
@@ -232,7 +227,7 @@ async fn a_rule_the_previous_release_installed_derives_once_upgraded() -> Result
         upgraded.reinstalled[0].0,
         stored_by_main("salary_from_bonus")
     );
-    assert_eq!(salary(&branch, &operator, &alice, "all").await?, vec![500]);
+    assert_eq!(salary(&branch, &operator, &alice, "many").await?, vec![500]);
     Ok(())
 }
 
@@ -265,7 +260,12 @@ async fn concurrent_upgrades_converge() -> Result<()> {
     let alice: Entity = "id:alice".parse()?;
     let a = repo.branch("a").open().perform(&operator).await?;
     install(&a, &operator, installed_by_main("salary_from_bonus")).await?;
-    commit(&a, &operator, unsigned("org/bonus", &alice, 500, Pick::All)).await?;
+    commit(
+        &a,
+        &operator,
+        unsigned("org/bonus", &alice, 500, Cardinality::Many),
+    )
+    .await?;
     let b = repo.branch("b").open().perform(&operator).await?;
     b.pull(crate::Download::MinimalRanges)
         .from(&a)
@@ -328,11 +328,11 @@ async fn a_rule_reintroduced_by_the_previous_release_is_inert_until_the_next_upg
     commit(
         &branch,
         &operator,
-        unsigned("org/bonus", &alice, 500, Pick::All),
+        unsigned("org/bonus", &alice, 500, Cardinality::Many),
     )
     .await?;
     assert_eq!(
-        salary(&branch, &operator, &alice, "all").await?,
+        salary(&branch, &operator, &alice, "many").await?,
         vec![500],
         "the upgraded rule derives; the reintroduced copy is inert"
     );
@@ -348,7 +348,7 @@ async fn a_rule_reintroduced_by_the_previous_release_is_inert_until_the_next_upg
         .await?
         .is_empty()
     );
-    assert_eq!(salary(&branch, &operator, &alice, "all").await?, vec![500]);
+    assert_eq!(salary(&branch, &operator, &alice, "many").await?, vec![500]);
     Ok(())
 }
 
@@ -413,7 +413,7 @@ async fn a_rule_the_previous_release_installed_feeds_induction_once_upgraded() -
     commit(
         &branch,
         &operator,
-        unsigned("org/bonus", &alice, 500, Pick::All),
+        unsigned("org/bonus", &alice, 500, Cardinality::Many),
     )
     .await?;
     assert_eq!(
@@ -427,8 +427,9 @@ async fn a_rule_the_previous_release_installed_feeds_induction_once_upgraded() -
 /// "If the read elects a candidate a rule derives, nothing is
 /// retracted." Alice's stored salary is 100, her bonus 500, and
 /// `main`'s rule, upgraded, derives her salary from her bonus, so a
-/// `max` read elects the derived 500 and a `max` write of 200 lands
-/// beside the stored 100 without retracting it.
+/// read elects the derived 500, which stands past the bonus it reads,
+/// and a cardinality one write of 200 lands beside the stored 100
+/// without retracting it, and is what a read returns after.
 #[dialog_common::test]
 async fn a_choosing_write_beside_an_upgraded_rule() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -440,20 +441,20 @@ async fn a_choosing_write_beside_an_upgraded_rule() -> Result<()> {
     commit(
         &branch,
         &operator,
-        unsigned("org/salary", &alice, 100, Pick::All),
+        unsigned("org/salary", &alice, 100, Cardinality::Many),
     )
     .await?;
     commit(
         &branch,
         &operator,
-        unsigned("org/bonus", &alice, 500, Pick::All),
+        unsigned("org/bonus", &alice, 500, Cardinality::Many),
     )
     .await?;
-    assert_eq!(salary(&branch, &operator, &alice, "max").await?, vec![500]);
+    assert_eq!(salary(&branch, &operator, &alice, "one").await?, vec![500]);
     commit(
         &branch,
         &operator,
-        unsigned("org/salary", &alice, 200, Pick::Max),
+        unsigned("org/salary", &alice, 200, Cardinality::One),
     )
     .await?;
     assert_eq!(
@@ -461,7 +462,7 @@ async fn a_choosing_write_beside_an_upgraded_rule() -> Result<()> {
         vec![Value::UnsignedInt(100), Value::UnsignedInt(200)],
         "the read elected the derived 500, so no stored claim is succeeded"
     );
-    assert_eq!(salary(&branch, &operator, &alice, "max").await?, vec![500]);
+    assert_eq!(salary(&branch, &operator, &alice, "one").await?, vec![200]);
     Ok(())
 }
 
@@ -480,10 +481,10 @@ async fn retracting_an_upgraded_rule_uninstalls_it() -> Result<()> {
     commit(
         &branch,
         &operator,
-        unsigned("org/bonus", &alice, 500, Pick::All),
+        unsigned("org/bonus", &alice, 500, Cardinality::Many),
     )
     .await?;
-    assert_eq!(salary(&branch, &operator, &alice, "all").await?, vec![500]);
+    assert_eq!(salary(&branch, &operator, &alice, "many").await?, vec![500]);
 
     let rule = DeductiveRule::decode(&source_from_main("salary_from_bonus"))
         .map_err(anyhow::Error::msg)?;
@@ -496,7 +497,7 @@ async fn retracting_an_upgraded_rule_uninstalls_it() -> Result<()> {
         .await?;
     branch.refresh(&operator).await?;
     assert_eq!(
-        salary(&branch, &operator, &alice, "all").await?,
+        salary(&branch, &operator, &alice, "many").await?,
         Vec::<u64>::new(),
         "the retracted rule derives nothing"
     );
@@ -649,11 +650,11 @@ async fn rule_facts_under_an_entity_that_is_not_their_address_derive_nothing() -
     commit(
         &branch,
         &operator,
-        unsigned("org/bonus", &alice, 500, Pick::All),
+        unsigned("org/bonus", &alice, 500, Cardinality::Many),
     )
     .await?;
     assert_eq!(
-        salary(&branch, &operator, &alice, "all").await?,
+        salary(&branch, &operator, &alice, "many").await?,
         Vec::<u64>::new(),
         "a rule under an entity its body does not hash to derives nothing"
     );
@@ -746,10 +747,10 @@ async fn a_body_in_an_earlier_format_is_rewritten() -> Result<()> {
     commit(
         &branch,
         &operator,
-        unsigned("org/bonus", &alice, 500, Pick::All),
+        unsigned("org/bonus", &alice, 500, Cardinality::Many),
     )
     .await?;
-    assert_eq!(salary(&branch, &operator, &alice, "all").await?, vec![500]);
+    assert_eq!(salary(&branch, &operator, &alice, "many").await?, vec![500]);
     assert_eq!(
         upgrade(&branch, &operator).await?,
         crate::RulesUpgraded::default()

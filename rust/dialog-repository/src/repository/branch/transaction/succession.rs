@@ -1,17 +1,17 @@
-//! Succession of a claim under a choosing pick, settled at commit and
+//! Succession of a claim under cardinality one, settled at commit and
 //! in a transaction's own reads.
 //!
-//! A write through an attribute read under `last`, `max`, `min` or
-//! `top` succeeds the claim the attribute stands for: the candidate a
-//! read under the pick would return, over what the write observed.
-//! That is a transactional guarantee: a write observes the line and
-//! the writes before it in its own transaction, in order, and succeeds
-//! whatever a reader at that point would have observed. A write under
-//! `all` asserts and succeeds nothing. An inductive rule's head
-//! observes the round view it fired on.
+//! A write through an attribute of cardinality one succeeds the claim
+//! the attribute stands for: the newest candidate, the one a read
+//! returns, over what the write observed. That is a transactional
+//! guarantee: a write observes the line and the writes before it in its
+//! own transaction, in order, and succeeds whatever a reader at that
+//! point would have observed. A write under cardinality many asserts
+//! and succeeds nothing. An inductive rule's head observes the round
+//! view it fired on.
 //!
 //! What a read returns depends on the line and on the rules deriving
-//! the relation, so the statement records a [`Pick`] and the
+//! the relation, so the statement records a [`Cardinality`] and the
 //! settlement runs here, over the transaction's ordered log: each write
 //! is replayed in order over the claims the line holds for its cell;
 //! a succession elects among the live claims and the candidates rules
@@ -21,16 +21,15 @@
 //! as one more candidate. Writing a value the cell already holds writes
 //! nothing. At commit, a cell no rule derives is left to the tree,
 //! which elects among the cell's stored claims in the descent that
-//! writes the value ([`dialog_corpus::Instruction::Assert`] under a
-//! choosing [`Pick`]); the
-//! settlement here is for the cells rules derive, whose candidates the
-//! tree cannot see, and for a transaction's own reads. What a cell's
-//! writes settle to is squashed as one commit's
-//! writes are: an assertion a later retraction cancels leaves only the
-//! retraction, so a claim that lived only inside the transaction leaves
-//! no tombstone. The same settlement runs for a transaction's own
-//! reads, so a read over the transaction sees what the commit will
-//! leave.
+//! writes the value ([`dialog_corpus::Instruction::Assert`] under
+//! [`Cardinality::One`]); the settlement here is for the cells rules
+//! derive, whose candidates the tree cannot see, and for a
+//! transaction's own reads. What a cell's writes settle to is squashed
+//! as one commit's writes are: an assertion a later retraction cancels
+//! leaves only the retraction, so a claim that lived only inside the
+//! transaction leaves no tombstone. The same settlement runs for a
+//! transaction's own reads, so a read over the transaction sees what
+//! the commit will leave.
 
 use crate::repository::CellSettlement;
 use crate::repository::branch::session::{Erased, QueryEnv};
@@ -41,11 +40,10 @@ use crate::{CommitError, Ephemeral, Staged};
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
 use dialog_corpus::{
-    Cause, Change, Changes, Entity, Fact, Pick, Relation as CorpusRelation, Select, Selector, Value,
+    Cause, Change, Changes, Entity, Fact, Relation as CorpusRelation, Select, Selector, Value,
 };
 use dialog_query::Application as _;
 use dialog_query::attribute::{AttributeDescriptor, Relation, The};
-use dialog_query::concept::query::Election;
 use dialog_query::query::Output as _;
 use dialog_query::rule::statement::Reach;
 use dialog_query::source::SelectRules;
@@ -59,8 +57,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 
 /// Settle a transaction's writes for its commit against `sources`,
-/// read with `overlay`. A write under a choosing pick succeeds the
-/// claim the pick elects. Where no rule is involved and the session
+/// read with `overlay`. A write under cardinality one succeeds the
+/// newest claim. Where no rule is involved and the session
 /// overlay holds none of the cells, the tree sees every candidate: the
 /// batch passes through as written, and the tree elects in the descent
 /// that lands each write, in the order every election shares. Otherwise
@@ -135,10 +133,10 @@ pub(crate) async fn settle(
 
 /// A transaction's writes settled in the order it made them, as far as
 /// [`upto`](Self::upto): what the commit applies, and what a read of
-/// the transaction sees. Each write under a choosing pick elects
+/// the transaction sees. Each write under cardinality one elects
 /// among the cell's claims as the line and the writes before it leave
 /// them, and among the candidates rules derive through the line and
-/// the writes before it, already settled. A write under `all` and a
+/// the writes before it, already settled. A write under many and a
 /// retraction settle to themselves. One engine for the commit and for
 /// reads, so a transaction reads what its commit leaves; advanced only
 /// over writes it has not settled, so each write is settled once.
@@ -148,7 +146,7 @@ pub(crate) struct ReadSettlement {
     edition: Edition,
     /// How many of the log's writes are settled.
     upto: usize,
-    /// Each cell some write under a choosing pick wrote, with its
+    /// Each cell some write under cardinality one wrote, with its
     /// claims and what its writes settled to.
     cells: HashMap<(CorpusRelation, Entity), Cell>,
     /// The settled writes, as the view later writes read the derived
@@ -189,7 +187,7 @@ impl ReadSettlement {
             let key = (the.clone(), of.clone());
             if !self.cells.contains_key(&key) {
                 if !change.elects() {
-                    // A cell no choosing write has written yet: the
+                    // A cell no cardinality one write has written yet: the
                     // write settles to itself.
                     self.derives.gained(the, change);
                     self.prefix.apply_change(the, of, change);
@@ -208,8 +206,8 @@ impl ReadSettlement {
                 self.cells.insert(key.clone(), cell);
             }
             let derived = match change {
-                Change::Assert(_, policy)
-                    if policy.elects() && self.derives.at(&line, the).await? =>
+                Change::Assert(_, cardinality)
+                    if cardinality.elects() && self.derives.at(&line, the).await? =>
                 {
                     let view = QueryEnv::new(sources.to_vec(), overlay.clone(), env)
                         .with_layers(vec![self.prefix.clone()]);
@@ -546,10 +544,10 @@ impl Cell {
         squash(self.settled, &|value| line.contains(value))
     }
 
-    /// Replay one write: an assertion under `all` adds a claim, standing
+    /// Replay one write: an assertion under many adds a claim, standing
     /// at the commit's edition, as every write of the transaction does;
-    /// a retraction removes one; an assertion under a choosing pick
-    /// elects among the live claims and the derived candidates that are
+    /// a retraction removes one; an assertion under one elects the
+    /// newest among the live claims and the derived candidates that are
     /// not claims, retracts the elected claim when it is one and adds
     /// its value, or adds nothing when the cell holds the value already.
     /// Returns what the write settles to.
@@ -569,7 +567,7 @@ impl Cell {
             claim: true,
         };
         Ok(match change {
-            Change::Assert(value, Pick::All) => {
+            Change::Assert(value, Cardinality::Many) => {
                 self.live.retain(|claim| claim.value != *value);
                 self.live.push(staged(value));
                 vec![change.clone()]
@@ -578,27 +576,23 @@ impl Cell {
                 self.live.retain(|claim| claim.value != *value);
                 vec![change.clone()]
             }
-            Change::Assert(value, policy) => {
-                // The claim a read under the pick returns, among the
-                // live claims (the written value's own claim included,
-                // when the cell holds it) and the derived candidates.
-                let pool: Vec<(Value, Option<Standing>, (Value, bool))> = self
+            Change::Assert(value, Cardinality::One) => {
+                // The claim a read returns, the newest, among the live
+                // claims (the written value's own claim included, when
+                // the cell holds it) and the derived candidates.
+                let pool: Vec<&Candidate> = self
                     .live
                     .iter()
                     .chain(derived.iter().filter(|candidate| {
                         !self.live.iter().any(|claim| claim.value == candidate.value)
                     }))
-                    .map(|candidate| {
-                        (
-                            candidate.value.clone(),
-                            candidate.standing.clone(),
-                            (candidate.value.clone(), candidate.claim),
-                        )
-                    })
                     .collect();
-                let elected = Election::from(policy)
-                    .elect_claims(pool)
-                    .map_err(|error| CommitError::Succession(error.to_string()))?;
+                let elected = Cardinality::One
+                    .elect(
+                        pool.iter()
+                            .map(|candidate| (&candidate.value, candidate.standing.as_ref())),
+                    )
+                    .map(|index| (pool[index].value.clone(), pool[index].claim));
                 // The read returns a claim the written value already reads
                 // as, through the lens of its type (see `Value::reads_as`):
                 // the write changes nothing, as writing the integer 4 over
@@ -619,7 +613,7 @@ impl Cell {
                 self.live
                     .retain(|claim| !(claim.claim && claim.value == *value));
                 self.live.push(staged(value));
-                settled.push(Change::Assert(value.clone(), Pick::All));
+                settled.push(Change::Assert(value.clone(), Cardinality::Many));
                 settled
             }
         })
@@ -635,7 +629,7 @@ mod tests {
     use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_corpus::history::Edition;
-    use dialog_corpus::{Change, Entity, Pick, Relation as CorpusRelation, Selector, Value};
+    use dialog_corpus::{Change, Entity, Relation as CorpusRelation, Selector, Value};
     use dialog_credentials::Credential;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::Relation;
@@ -658,30 +652,30 @@ mod tests {
         let edition = Edition::from(7u64);
         let mut cell = super::Cell::over(Vec::new());
         for value in [200u32, 300] {
-            let change = Change::Assert(Value::UnsignedInt(value.into()), Pick::Last);
+            let change = Change::Assert(Value::UnsignedInt(value.into()), Cardinality::One);
             let written = cell.write(&change, &[], edition)?;
             cell.settled.extend(written);
         }
         assert_eq!(
             cell.settled,
             vec![
-                Change::Assert(Value::UnsignedInt(200), dialog_corpus::Pick::All),
+                Change::Assert(Value::UnsignedInt(200), dialog_corpus::Cardinality::Many),
                 Change::Retract(Value::UnsignedInt(200)),
-                Change::Assert(Value::UnsignedInt(300), dialog_corpus::Pick::All),
+                Change::Assert(Value::UnsignedInt(300), dialog_corpus::Cardinality::Many),
             ]
         );
         assert_eq!(
             cell.squashed(),
             vec![Change::Assert(
                 Value::UnsignedInt(300),
-                dialog_corpus::Pick::All
+                dialog_corpus::Cardinality::Many
             )]
         );
         Ok(())
     }
 
-    /// A write of `org/salary` under `max`: the statement a field
-    /// reading the relation under that pick writes.
+    /// A write of `org/salary` under cardinality one: the statement a
+    /// field of that cardinality writes.
     fn salary(of: &Entity, value: u32) -> AttributeStatement {
         AttributeStatement {
             the: Relation::from(
@@ -693,7 +687,6 @@ mod tests {
             is: Value::UnsignedInt(value.into()),
             cause: None,
             cardinality: Some(Cardinality::One),
-            pick: Some(Pick::Max),
         }
     }
 
@@ -721,14 +714,14 @@ mod tests {
         Ok(values)
     }
 
-    /// `org/salary` read under `max` for `of`.
-    async fn read_max(
+    /// `org/salary` read for `of`.
+    async fn read_last(
         branch: &Branch,
         operator: &dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
         of: &Entity,
     ) -> Result<Vec<u64>> {
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": "max:" }
+            "salary": { "the": "org/salary", "as": "natural:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(of.clone()));
@@ -743,12 +736,12 @@ mod tests {
             .collect()
     }
 
-    /// A write under `max` succeeds the claim a `max` read returns: the
-    /// greatest live claim is retracted beside the written value,
+    /// A write under cardinality one succeeds the claim a read returns:
+    /// the newest live claim is retracted beside the written value,
     /// whether the write is greater or smaller than it, so the cell
     /// holds one claim after each write and a read returns the latest.
     #[dialog_common::test]
-    async fn it_succeeds_the_claim_a_max_read_returns() -> Result<()> {
+    async fn it_succeeds_the_claim_a_read_returns() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -768,7 +761,7 @@ mod tests {
                 "writing {write} succeeds the elected claim"
             );
             assert_eq!(
-                read_max(&branch, &operator, &alice).await?,
+                read_last(&branch, &operator, &alice).await?,
                 vec![expected as u64]
             );
         }
@@ -787,7 +780,7 @@ mod tests {
 
     /// Two writers succeed the same claim concurrently: each retracts
     /// the claim it observed and asserts its own, and the merge keeps
-    /// both of theirs, where the read under `max` elects. No write is
+    /// both of theirs, among which every replica's read elects the same. No write is
     /// lost and no merge is refused.
     #[dialog_common::test]
     async fn it_keeps_both_claims_of_concurrent_successions() -> Result<()> {
@@ -847,14 +840,18 @@ mod tests {
             vec![200, 300],
             "both successions stand; the claim both observed is gone"
         );
-        assert_eq!(read_max(&a, &operator, &alice).await?, vec![300]);
-        assert_eq!(read_max(&b, &operator, &alice).await?, vec![300]);
+        // The two successions are concurrent: which is newest is
+        // decided by their versions, the same way on every replica.
+        let read = read_last(&a, &operator, &alice).await?;
+        assert!(read == vec![200] || read == vec![300], "{read:?}");
+        assert_eq!(read_last(&b, &operator, &alice).await?, read);
         Ok(())
     }
 
-    /// A candidate a rule derives is not a claim: a write under `max`
-    /// succeeds the greatest stored claim and leaves the derived
-    /// candidate, which the read still elects while it is greater.
+    /// A candidate a rule derives is not a claim: a write the read
+    /// resolves to the derived candidate succeeds no stored claim and
+    /// stands beside it, and once the candidate is gone a write
+    /// succeeds the newest stored claim.
     #[dialog_common::test]
     async fn it_succeeds_stored_claims_only_beside_a_derived_candidate() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -887,7 +884,7 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        assert_eq!(read_max(&branch, &operator, &alice).await?, vec![500]);
+        assert_eq!(read_last(&branch, &operator, &alice).await?, vec![500]);
 
         branch
             .transaction()
@@ -902,13 +899,13 @@ mod tests {
             "the read elected the derived candidate, so no stored claim is succeeded"
         );
         assert_eq!(
-            read_max(&branch, &operator, &alice).await?,
-            vec![500],
-            "the derived candidate stands and still wins the read"
+            read_last(&branch, &operator, &alice).await?,
+            vec![200],
+            "the derived candidate stands, and the write is newer"
         );
 
-        // Once the derived candidate is gone, the greatest stored
-        // claim is what a read returns, and a write succeeds it.
+        // Once the derived candidate is gone, the newest stored claim
+        // is what a read returns, and a write succeeds it.
         branch
             .transaction()
             .retract(dialog_query::the!("org/bonus").of(alice.clone()).is(500u32))
@@ -925,15 +922,15 @@ mod tests {
         Ok(())
     }
 
-    /// `org/salary` read for `of` under `select`, every row.
+    /// `org/salary` read for `of` under `cardinality`, every row.
     async fn read_under(
         branch: &Branch,
         operator: &dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
         of: &Entity,
-        select: &str,
+        cardinality: &str,
     ) -> Result<Vec<u64>> {
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": select }
+            "salary": { "the": "org/salary", "as": "natural:", "cardinality": cardinality }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(of.clone()));
@@ -954,10 +951,7 @@ mod tests {
     /// An `org/salary` fact for `of`, as a session asserts it into the
     /// overlay.
     fn session_salary(of: &Entity, value: u32) -> AttributeStatement {
-        AttributeStatement {
-            pick: None,
-            ..salary(of, value)
-        }
+        salary(of, value)
     }
 
     /// The session overlay is the newest facts: an overlay row wins a
@@ -973,7 +967,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            pick: Some(Pick::Last),
+            cardinality: Some(Cardinality::One),
             ..salary(&alice, value)
         };
         branch
@@ -985,7 +979,7 @@ mod tests {
             .await?;
         branch.overlay().assert(session_salary(&alice, 500))?;
         assert_eq!(
-            read_under(&branch, &operator, &alice, "last").await?,
+            read_under(&branch, &operator, &alice, "one").await?,
             vec![500],
             "the overlay row is the newest fact of the cell"
         );
@@ -1003,74 +997,22 @@ mod tests {
             "the read elected the overlay row, so no stored claim is succeeded"
         );
         assert_eq!(
-            read_under(&branch, &operator, &alice, "last").await?,
+            read_under(&branch, &operator, &alice, "one").await?,
             vec![500],
             "the overlay row still stands above the written claim"
         );
         assert_eq!(
-            read_under(&branch, &operator, &alice, "all").await?,
+            read_under(&branch, &operator, &alice, "many").await?,
             vec![300, 400, 500]
         );
 
         branch.overlay().clear();
         assert_eq!(
-            read_under(&branch, &operator, &alice, "last").await?,
+            read_under(&branch, &operator, &alice, "one").await?,
             vec![400],
             "with the session row gone the written claim is the newest"
         );
         assert_eq!(stored(&branch, &operator, &alice).await?, vec![300, 400]);
-        Ok(())
-    }
-
-    /// Under `max` the overlay row ranks by value like any claim: a
-    /// write succeeds the stored claim the read elects beneath a
-    /// smaller overlay row, and retires nothing when the overlay row is
-    /// the greatest.
-    #[dialog_common::test]
-    async fn it_succeeds_the_stored_claim_a_max_read_elects_beside_the_overlay() -> Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-        let alice = Entity::new()?;
-        branch
-            .transaction()
-            .assert(salary(&alice, 300))
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-
-        branch.overlay().assert(session_salary(&alice, 100))?;
-        assert_eq!(read_max(&branch, &operator, &alice).await?, vec![300]);
-        branch
-            .transaction()
-            .assert(salary(&alice, 400))
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        assert_eq!(
-            stored(&branch, &operator, &alice).await?,
-            vec![400],
-            "the stored claim the read elected is succeeded; the overlay row is not a claim"
-        );
-        assert_eq!(read_max(&branch, &operator, &alice).await?, vec![400]);
-
-        branch.overlay().assert(session_salary(&alice, 500))?;
-        assert_eq!(read_max(&branch, &operator, &alice).await?, vec![500]);
-        branch
-            .transaction()
-            .assert(salary(&alice, 450))
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        assert_eq!(
-            stored(&branch, &operator, &alice).await?,
-            vec![400, 450],
-            "the read elected the overlay row, so no stored claim is succeeded"
-        );
-        assert_eq!(read_max(&branch, &operator, &alice).await?, vec![500]);
         Ok(())
     }
 
@@ -1088,7 +1030,7 @@ mod tests {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
         let last = |of: &Entity, value: u32| AttributeStatement {
-            pick: Some(Pick::Last),
+            cardinality: Some(Cardinality::One),
             ..salary(of, value)
         };
         let carol: Entity = "id:carol".parse()?;
@@ -1102,7 +1044,7 @@ mod tests {
             .assert(last(&carol, 30));
 
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": "last:" }
+            "salary": { "the": "org/salary", "as": "natural:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));
@@ -1160,7 +1102,7 @@ mod tests {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
         let last = |of: &Entity, value: u32| AttributeStatement {
-            pick: Some(Pick::Last),
+            cardinality: Some(Cardinality::One),
             ..salary(of, value)
         };
         branch
@@ -1180,7 +1122,7 @@ mod tests {
             .retract(last(&bob, 20))
             .assert(last(&bob, 25));
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": "all:" }
+            "salary": { "the": "org/salary", "as": "natural:", "cardinality": "many" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::var("this"));
@@ -1224,7 +1166,7 @@ mod tests {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
         let last = |of: &Entity, value: u32| AttributeStatement {
-            pick: Some(Pick::Last),
+            cardinality: Some(Cardinality::One),
             ..salary(of, value)
         };
         let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
@@ -1287,7 +1229,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice: Entity = "id:alice".parse()?;
         let last = |of: &Entity, value: u32| AttributeStatement {
-            pick: Some(Pick::Last),
+            cardinality: Some(Cardinality::One),
             ..salary(of, value)
         };
         branch
@@ -1302,7 +1244,7 @@ mod tests {
         let read = |value: u32| {
             let predicate: ConceptDescriptor =
                 serde_json::from_value(serde_json::json!({ "with": {
-                    "salary": { "the": "org/salary", "as": "natural:", "pick": "all:" }
+                    "salary": { "the": "org/salary", "as": "natural:", "cardinality": "many" }
                 }}))
                 .expect("a descriptor");
             let mut terms = Parameters::new();
@@ -1343,7 +1285,7 @@ mod tests {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
         let last = |of: &Entity, value: u32| AttributeStatement {
-            pick: Some(Pick::Last),
+            cardinality: Some(Cardinality::One),
             ..salary(of, value)
         };
         branch
@@ -1363,7 +1305,7 @@ mod tests {
         let read = |of: &Entity| {
             let predicate: ConceptDescriptor =
                 serde_json::from_value(serde_json::json!({ "with": {
-                    "salary": { "the": "org/salary", "as": "natural:", "pick": "all:" }
+                    "salary": { "the": "org/salary", "as": "natural:", "cardinality": "many" }
                 }}))
                 .expect("a descriptor");
             let mut terms = Parameters::new();
@@ -1412,7 +1354,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            pick: Some(Pick::Last),
+            cardinality: Some(Cardinality::One),
             ..salary(&alice, value)
         };
         branch
@@ -1445,7 +1387,7 @@ mod tests {
 
         transaction.commit().publish().perform(&operator).await?;
         assert_eq!(
-            read_under(&branch, &operator, &alice, "last").await?,
+            read_under(&branch, &operator, &alice, "one").await?,
             vec![500]
         );
         Ok(())
@@ -1461,7 +1403,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            pick: Some(Pick::Last),
+            cardinality: Some(Cardinality::One),
             ..salary(&alice, value)
         };
         branch
@@ -1482,7 +1424,7 @@ mod tests {
         assert_eq!(stored(&branch, &operator, &alice).await?, vec![300, 400]);
         branch.overlay().clear();
         assert_eq!(
-            read_under(&branch, &operator, &alice, "last").await?,
+            read_under(&branch, &operator, &alice, "one").await?,
             vec![400]
         );
         Ok(())
@@ -1535,7 +1477,7 @@ mod tests {
             vec![100, 150],
             "the derived candidate the transaction brings wins, so nothing is retired"
         );
-        assert_eq!(read_max(&branch, &operator, &alice).await?, vec![500]);
+        assert_eq!(read_last(&branch, &operator, &alice).await?, vec![500]);
         Ok(())
     }
 
@@ -1551,7 +1493,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            pick: Some(Pick::Last),
+            cardinality: Some(Cardinality::One),
             ..salary(&alice, value)
         };
         branch
@@ -1752,13 +1694,12 @@ mod tests {
         transaction: &[Write],
     ) -> Result<(Vec<u128>, Vec<u128>)> {
         let statement = |write: Write| {
-            let (value, pick) = match write {
-                Write::All(value) | Write::Retract(value) => (value, None),
-                Write::Last(value) => (value, Some(Pick::Last)),
+            let (value, cardinality) = match write {
+                Write::All(value) | Write::Retract(value) => (value, Cardinality::Many),
+                Write::Last(value) => (value, Cardinality::One),
             };
             AttributeStatement {
-                cardinality: pick.is_none().then_some(Cardinality::Many),
-                pick,
+                cardinality: Some(cardinality),
                 ..salary(of, value)
             }
         };
@@ -1816,9 +1757,9 @@ mod tests {
     }
 
     /// A write observes the writes before it in its transaction and
-    /// none after: `all` written after `last` stands beside it, and
-    /// `max` written after `all` succeeds the staged claim it elects,
-    /// leaving the committed one the read never returned.
+    /// none after: a many write after a one write stands beside it, and
+    /// a one write after a many write succeeds the staged claim, the
+    /// newest, leaving the committed ones the read never returned.
     #[dialog_common::test]
     async fn it_settles_a_cell_in_the_order_the_transaction_wrote_it() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -1826,11 +1767,10 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            pick: Some(Pick::Last),
+            cardinality: Some(Cardinality::One),
             ..salary(&alice, value)
         };
         let all = |value: u32| AttributeStatement {
-            pick: None,
             cardinality: Some(Cardinality::Many),
             ..salary(&alice, value)
         };
@@ -1844,7 +1784,7 @@ mod tests {
             .await?;
 
         // `last(200)` observes {50} and succeeds it; `all(300)` comes
-        // after and appends.
+        // after and adds.
         branch
             .transaction()
             .assert(last(200))
@@ -1855,8 +1795,8 @@ mod tests {
             .await?;
         assert_eq!(stored(&branch, &operator, &alice).await?, vec![200, 300]);
 
-        // `max(150)` observes {200, 300, 400}: 400 was written before it
-        // in this transaction and is the greatest, so it is what the
+        // `salary(150)` observes {200, 300, 400}: 400 was written before
+        // it in this transaction and is the newest, so it is what the
         // write succeeds; 200 and 300 stay.
         branch
             .transaction()
@@ -1869,13 +1809,13 @@ mod tests {
         assert_eq!(
             stored(&branch, &operator, &alice).await?,
             vec![150, 200, 300],
-            "the staged claim the pick elected is gone, the others stand"
+            "the staged claim the read elected is gone, the others stand"
         );
         Ok(())
     }
 
-    /// A transaction reads what its commit will leave: a `max` write
-    /// below the committed claim succeeds it, and a read over the
+    /// A transaction reads what its commit will leave: a write below
+    /// the committed claim succeeds it, and a read over the
     /// transaction already returns the write alone.
     #[dialog_common::test]
     async fn it_reads_a_write_as_the_commit_will_settle_it() -> Result<()> {
@@ -1893,7 +1833,7 @@ mod tests {
 
         let transaction = branch.transaction().assert(salary(&alice, 150));
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": "all:" }
+            "salary": { "the": "org/salary", "as": "natural:", "cardinality": "many" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));
@@ -1945,7 +1885,7 @@ mod tests {
         assert_eq!(stored(&branch, &operator, &alice).await?, vec![100, 200]);
 
         let last = AttributeStatement {
-            pick: Some(Pick::Last),
+            cardinality: Some(Cardinality::One),
             ..salary(&alice, 150)
         };
         branch

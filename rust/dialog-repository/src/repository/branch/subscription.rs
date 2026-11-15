@@ -4986,7 +4986,7 @@ mod tests {
                 "person/name".parse().expect("attribute"),
                 here.clone(),
                 Value::String(value.into()),
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             );
             changes
         };
@@ -5244,7 +5244,7 @@ mod tests {
                 "sync/status".parse()?,
                 here.clone(),
                 Value::String(status.into()),
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             );
             branch.overlay().assert(changes)?;
             let site = Entity::new()?;
@@ -5324,7 +5324,7 @@ mod tests {
                 "person/name".parse().expect("attribute"),
                 of.clone(),
                 Value::String(is.into()),
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             );
             changes
         };

@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         futures_util::stream::iter(
             data.into_iter()
-                .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All)),
+                .map(|fact| Instruction::Assert(fact, dialog_corpus::Cardinality::Many)),
         ),
         false,
     )

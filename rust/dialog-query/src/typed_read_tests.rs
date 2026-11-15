@@ -60,7 +60,6 @@ async fn store_mixed(branch: &Branch, operator: &Operator) -> anyhow::Result<Vec
             is: value,
             cause: None,
             cardinality: None,
-            pick: None,
         });
     }
     transaction.commit().publish().perform(operator).await?;
@@ -292,7 +291,6 @@ async fn it_elects_among_the_values_of_its_type_in_a_derived_field() -> anyhow::
             is,
             cause: None,
             cardinality: None,
-            pick: None,
         });
     }
     transaction.commit().publish().perform(&operator).await?;
@@ -371,7 +369,6 @@ async fn it_passes_over_a_row_one_variable_cannot_hold_twice() -> anyhow::Result
             is: Value::Entity(own.clone()),
             cause: None,
             cardinality: None,
-            pick: None,
         })
         .commit()
         .publish()

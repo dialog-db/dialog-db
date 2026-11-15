@@ -24,7 +24,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use anyhow::{Context as _, Result};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSend;
-use dialog_corpus::{Entity, Pick, Relation as ArtifactsRelation, Selector, Value};
+use dialog_corpus::{Entity, Relation as ArtifactsRelation, Selector, Value};
 use dialog_effects::authority::Identify;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_peer::{Peer, Session};
@@ -356,7 +356,6 @@ fn succeed_age(of: &Entity, value: u64) -> AttributeStatement {
         is: Value::UnsignedInt(value.into()),
         cause: None,
         cardinality: Some(Cardinality::One),
-        pick: Some(Pick::Last),
     }
 }
 
