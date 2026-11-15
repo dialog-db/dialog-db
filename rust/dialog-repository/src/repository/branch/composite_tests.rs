@@ -40,14 +40,14 @@ async fn it_round_trips_a_composite_as_a_claims_value() -> Result<()> {
     let branch = repo.branch("main").open().perform(&operator).await?;
 
     let small = Composite::map([
-        (text("title"), text("Buy milk")),
-        (text("done"), Value::Boolean(false)),
+        ("title", text("Buy milk")),
+        ("done", Value::Boolean(false)),
         (
-            text("tags"),
+            "tags",
             Composite::list([text("home"), text("errand")]).into(),
         ),
         (
-            text("at"),
+            "at",
             Composite::list([Value::Float(45.5), Value::Float(-122.6)]).into(),
         ),
     ])?;
@@ -124,7 +124,7 @@ fn heading_rule() -> Result<DeductiveRule> {
     terms.set(
         "payload".into(),
         Pattern::Map(
-            MapPattern::new([(text("title"), Pattern::Term(Term::var("heading")))])?
+            MapPattern::new([("title", Pattern::Term(Term::var("heading")))])?
                 .with_rest(Term::<Any>::blank()),
         ),
     );
@@ -150,11 +150,8 @@ async fn it_runs_a_rule_that_holds_a_pattern_laid_over_a_branch() -> Result<()> 
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
 
-    let titled = Composite::map([
-        (text("title"), text("Buy milk")),
-        (text("done"), Value::Boolean(false)),
-    ])?;
-    let untitled = Composite::map([(text("done"), Value::Boolean(true))])?;
+    let titled = Composite::map([("title", text("Buy milk")), ("done", Value::Boolean(false))])?;
+    let untitled = Composite::map([("done", Value::Boolean(true))])?;
     let milk: Entity = "id:milk".parse()?;
     let chore: Entity = "id:chore".parse()?;
     branch

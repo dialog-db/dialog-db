@@ -36,9 +36,9 @@ fn var(name: &str) -> Pattern {
 
 fn note() -> Value {
     Composite::map([
-        (text("title"), text("Buy milk")),
-        (text("done"), Value::Boolean(false)),
-        (text("priority"), Value::UnsignedInt(2)),
+        ("title", text("Buy milk")),
+        ("done", Value::Boolean(false)),
+        ("priority", Value::UnsignedInt(2)),
     ])
     .expect("a map")
     .into()
@@ -91,8 +91,8 @@ fn it_binds_the_entries_a_map_pattern_did_not_name() {
         rest.composite(),
         Ok(Some(
             Composite::map([
-                (text("done"), Value::Boolean(false)),
-                (text("priority"), Value::UnsignedInt(2)),
+                ("done", Value::Boolean(false)),
+                ("priority", Value::UnsignedInt(2)),
             ])
             .expect("a map")
         ))
@@ -174,13 +174,13 @@ fn it_takes_a_list_apart_and_binds_a_run() {
 #[dialog_common::test]
 fn it_takes_nested_shapes_apart() {
     let place: Value = Composite::map([
-        (text("name"), text("Home")),
+        ("name", text("Home")),
         (
-            text("at"),
+            "at",
             Composite::list([Value::Float(45.5), Value::Float(-122.5)]).into(),
         ),
         (
-            text("tags"),
+            "tags",
             Composite::list([text("quiet"), text("green")]).into(),
         ),
     ])
@@ -245,12 +245,9 @@ fn it_is_the_value_once_its_variables_are_bound() {
     assert_eq!(
         exact.build(&row),
         Some(
-            Composite::map([
-                (text("title"), text("Buy milk")),
-                (text("done"), Value::Boolean(false)),
-            ])
-            .expect("a map")
-            .into()
+            Composite::map([("title", text("Buy milk")), ("done", Value::Boolean(false)),])
+                .expect("a map")
+                .into()
         )
     );
 
@@ -289,7 +286,7 @@ fn it_is_no_value_where_its_parts_make_none() {
     clash
         .bind(
             &Term::var("rest"),
-            Composite::map([(text("title"), text("Other"))])
+            Composite::map([("title", text("Other"))])
                 .expect("a map")
                 .into(),
         )
@@ -312,7 +309,7 @@ fn it_is_a_constant_with_no_variable() {
     assert_eq!(
         constant.as_value(),
         Some(
-            Composite::map([(text("text"), text("hi"))])
+            Composite::map([("text", text("hi"))])
                 .expect("a map")
                 .into()
         )
@@ -386,7 +383,7 @@ fn it_is_written_one_way() {
         .expect("a pattern");
     assert_eq!(forward, backward);
     assert_eq!(forward.to_string(), backward.to_string());
-    assert_eq!(forward.to_string(), r#"{String("a"): ?x, String("b"): ?y}"#);
+    assert_eq!(forward.to_string(), r#"{"a": ?x, "b": ?y}"#);
 
     assert!(matches!(
         Pattern::map([("a".to_string(), var("x")), ("a".to_string(), var("y"))]),
@@ -416,23 +413,15 @@ fn entity(uri: &str) -> Entity {
 }
 
 fn map(entries: &[(&str, Value)]) -> Value {
-    Composite::map(
-        entries
-            .iter()
-            .map(|(key, value)| (text(key), value.clone())),
-    )
-    .expect("a map")
-    .into()
+    Composite::map(entries.iter().map(|(key, value)| (*key, value.clone())))
+        .expect("a map")
+        .into()
 }
 
 /// A map pattern over text keys.
 fn shape(entries: &[(&str, Pattern)]) -> MapPattern {
-    MapPattern::new(
-        entries
-            .iter()
-            .map(|(key, pattern)| (text(key), pattern.clone())),
-    )
-    .expect("a pattern")
+    MapPattern::new(entries.iter().map(|(key, pattern)| (*key, pattern.clone())))
+        .expect("a pattern")
 }
 
 /// A concept of one field over `the`, declared `as`.

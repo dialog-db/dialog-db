@@ -1,22 +1,29 @@
 //! A value made of values: a map or a list.
 //!
 //! A composite is kept whole as a [`Value::Record`]: one version byte,
-//! then the dag-cbor of its parts.
+//! then one dag-cbor item, a map or a list.
 //!
 //! ```text
 //! record    = version item
 //! version   = 0x01
-//! item      = { "map:":   [[part, part], ...] }     entries by their keys as written
-//!           | { "list:":  [part, ...] }
-//! part      = [type, bytes]                          a value, as a claim writes one
+//! item      = { text: part, ... }          a map, its keys text
+//!           | [ part, ... ]                a list
+//! part      = text | bytes | true | false
+//!           | an integer                   a whole number dag-cbor holds
+//!           | a float                      a number that is not whole
+//!           | item                         a composite, nested
+//!           | a link                       any other value, inline
 //! ```
 //!
-//! A part is a [`Value`] of any type, written as the history index
-//! writes a claim's value: the byte of its type and the bytes
-//! [`Value::to_bytes`] gives. A part that is itself a composite is a
-//! record like any other, under its own version byte, so composites
-//! nest as deep as they are written and a reader looks one level in at
-//! a time.
+//! What follows the version byte is plain dag-cbor, so anything that
+//! reads dag-cbor reads a composite. A value dag-cbor has a kind for is
+//! written as that kind. A value it has none for is written as a link
+//! that holds the value itself: a CID whose hash is the identity, over
+//! the bytes [`Value::to_bytes`] gives, and whose codec says the
+//! value's type ([`VALUE_CODEC`]). An entity and a symbol are
+//! written so, and so is a whole number past the 64 bits a dag-cbor
+//! integer holds, a float that is not finite, and a record that is no
+//! composite.
 //!
 //! A number is kept as the number band keeps one: under the narrowest
 //! type that holds it, a whole number as a natural when it is not
@@ -34,11 +41,12 @@
 //!
 //! A composite is named by the merkle reference of its parts
 //! ([`Composite::reference`]), which no layout of its bytes moves. A map
-//! holds no key twice and writes its entries in the order of their keys
-//! as written, so one map has one byte string whatever order its
-//! entries were given in.
+//! holds no key twice and writes its entries in the order dag-cbor
+//! gives keys, the shorter first and then by their bytes, so one map
+//! has one byte string whatever order its entries were given in.
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::mem;
 use std::ops::Deref;
 
@@ -57,6 +65,15 @@ pub const COMPOSITE_VERSION: u8 = 1;
 /// The greatest byte that is a version: a CBOR unsigned integer of one
 /// byte. A record whose first byte is above it is a record of before.
 const GREATEST_VERSION: u8 = 0x17;
+
+/// The first of the codecs of the link a value is written as when
+/// dag-cbor has no kind for it, in the range multicodec keeps for
+/// private use. The codec of a value's link is this and the byte of the
+/// value's type, and what the link holds is the bytes
+/// [`Value::to_bytes`] gives. The type is in the codec and not in what
+/// is held so that the longest symbol, of 64 bytes, is a link of the 64
+/// bytes the links of the libraries hold.
+pub const VALUE_CODEC: u32 = 0x30_d1a0;
 
 /// How deep [`Composite::reference`] follows composites nested in
 /// composites. A part nested deeper is named as the record it is, by
@@ -86,12 +103,14 @@ pub enum CompositeError {
     #[error("the record is not a composite: {0}")]
     Malformed(String),
     /// The bytes hold a composite, but not as this release writes it:
-    /// a map's entries out of order, or a number under a wider type.
+    /// a map's entries out of order, a length in more bytes than it
+    /// needs, a number under a wider type, or a value written as a link
+    /// that dag-cbor has a kind for.
     #[error("the record holds a composite in bytes other than the ones it is written in")]
     NotCanonical,
     /// A map was given one key twice.
     #[error("a map holds no key twice, and {0:?} was given twice")]
-    DuplicateKey(Value),
+    DuplicateKey(String),
 }
 
 impl From<CompositeError> for DialogCorpusError {
@@ -117,7 +136,7 @@ fn kept(value: Value) -> Value {
 /// A value made of values. See the [module](self) for how one is kept.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Composite {
-    /// A map from a value to a value, holding no key twice.
+    /// A map from a text to a value, holding no key twice.
     Map(CompositeMap),
     /// Values in order, of any number.
     List(CompositeItems),
@@ -129,12 +148,12 @@ pub enum Composite {
 pub struct CompositeItems(Vec<Value>);
 
 impl CompositeItems {
-    /// `items`, in order, each as a part is kept.
+    /// The items `items` are, each as a part is kept.
     pub fn new(items: impl IntoIterator<Item = Value>) -> Self {
         Self(items.into_iter().map(kept).collect())
     }
 
-    /// The items, as the values they are.
+    /// The values, in order.
     pub fn into_values(self) -> Vec<Value> {
         self.0
     }
@@ -154,74 +173,56 @@ impl FromIterator<Value> for CompositeItems {
     }
 }
 
-/// The entries of a map, in the order of their keys as written.
+/// The entries of a map, in the order they are written in: by key, the
+/// shorter first and then by their bytes, each value as a part is kept.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct CompositeMap {
-    entries: Vec<Entry>,
+    entries: Vec<(String, Value)>,
 }
 
-/// One entry, with what orders it: its key as it is written.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct Entry {
-    order: Vec<u8>,
-    key: Value,
-    value: Value,
-}
-
-/// What orders a key among a map's entries and tells two keys apart:
-/// the byte of its type, then its bytes. Two keys kept as parts are one
-/// value exactly when these are equal.
-fn order_of(key: &Value) -> Vec<u8> {
-    let bytes = key.to_bytes();
-    let mut order = Vec::with_capacity(bytes.len() + 1);
-    order.push(u8::from(key.data_type()));
-    order.extend_from_slice(&bytes);
-    order
+/// The order dag-cbor writes a map's keys in: the shorter first, and
+/// two of one length by their bytes.
+fn order(left: &str, right: &str) -> Ordering {
+    left.len()
+        .cmp(&right.len())
+        .then_with(|| left.as_bytes().cmp(right.as_bytes()))
 }
 
 impl CompositeMap {
-    /// The map of `entries`, in whatever order they come, each key and
-    /// value as a part is kept. Refuses a key given twice: the natural
-    /// `3` and the float `3.0` are one key.
-    pub fn new(entries: impl IntoIterator<Item = (Value, Value)>) -> Result<Self, CompositeError> {
-        let mut entries: Vec<Entry> = entries
+    /// The map of `entries`, in whatever order they come, each value as
+    /// a part is kept. Refuses a key given twice.
+    pub fn new<K: Into<String>>(
+        entries: impl IntoIterator<Item = (K, Value)>,
+    ) -> Result<Self, CompositeError> {
+        let mut entries: Vec<(String, Value)> = entries
             .into_iter()
-            .map(|(key, value)| {
-                let key = kept(key);
-                Entry {
-                    order: order_of(&key),
-                    key,
-                    value: kept(value),
-                }
-            })
+            .map(|(key, value)| (key.into(), kept(value)))
             .collect();
-        entries.sort_by(|a, b| a.order.cmp(&b.order));
-        if let Some(pair) = entries
-            .windows(2)
-            .find(|pair| pair[0].order == pair[1].order)
-        {
-            return Err(CompositeError::DuplicateKey(pair[1].key.clone()));
+        entries.sort_by(|(left, _), (right, _)| order(left, right));
+        if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+            return Err(CompositeError::DuplicateKey(pair[1].0.clone()));
         }
         Ok(Self { entries })
     }
 
     /// The value under `key`, if the map holds it.
-    pub fn get(&self, key: &Value) -> Option<&Value> {
-        let order = order_of(&kept(key.clone()));
+    pub fn get(&self, key: &str) -> Option<&Value> {
         self.entries
-            .binary_search_by(|entry| entry.order.cmp(&order))
+            .binary_search_by(|(held, _)| order(held, key))
             .ok()
-            .map(|index| &self.entries[index].value)
+            .map(|index| &self.entries[index].1)
     }
 
     /// Whether the map holds `key`.
-    pub fn contains(&self, key: &Value) -> bool {
+    pub fn contains(&self, key: &str) -> bool {
         self.get(key).is_some()
     }
 
     /// The entries, in the order they are written in.
-    pub fn iter(&self) -> impl Iterator<Item = (&Value, &Value)> {
-        self.entries.iter().map(|entry| (&entry.key, &entry.value))
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.entries
+            .iter()
+            .map(|(key, value)| (key.as_str(), value))
     }
 
     /// How many entries the map holds.
@@ -235,16 +236,13 @@ impl CompositeMap {
     }
 
     /// This map without the entries under `keys`.
-    pub fn without<'a>(&self, keys: impl IntoIterator<Item = &'a Value>) -> Self {
-        let dropped: Vec<Vec<u8>> = keys
-            .into_iter()
-            .map(|key| order_of(&kept(key.clone())))
-            .collect();
+    pub fn without<'a>(&self, keys: impl IntoIterator<Item = &'a str>) -> Self {
+        let dropped: Vec<&str> = keys.into_iter().collect();
         Self {
             entries: self
                 .entries
                 .iter()
-                .filter(|entry| !dropped.contains(&entry.order))
+                .filter(|(key, _)| !dropped.contains(&key.as_str()))
                 .cloned()
                 .collect(),
         }
@@ -252,14 +250,15 @@ impl CompositeMap {
 
     /// This map with `entries` added. Refuses a key the map already
     /// holds, or one given twice.
-    pub fn with(
+    pub fn with<K: Into<String>>(
         &self,
-        entries: impl IntoIterator<Item = (Value, Value)>,
+        entries: impl IntoIterator<Item = (K, Value)>,
     ) -> Result<Self, CompositeError> {
         Self::new(
-            self.iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .chain(entries),
+            self.entries
+                .iter()
+                .cloned()
+                .chain(entries.into_iter().map(|(key, value)| (key.into(), value))),
         )
     }
 }
@@ -267,11 +266,13 @@ impl CompositeMap {
 impl Composite {
     /// A map of `entries`, in whatever order they come. Refuses a key
     /// given twice.
-    pub fn map(entries: impl IntoIterator<Item = (Value, Value)>) -> Result<Self, CompositeError> {
+    pub fn map<K: Into<String>>(
+        entries: impl IntoIterator<Item = (K, Value)>,
+    ) -> Result<Self, CompositeError> {
         CompositeMap::new(entries).map(Composite::Map)
     }
 
-    /// A list of `items`.
+    /// A list of `items`, in order.
     pub fn list(items: impl IntoIterator<Item = Value>) -> Self {
         Composite::List(CompositeItems::new(items))
     }
@@ -280,23 +281,17 @@ impl Composite {
     /// dag-cbor of its parts. One composite has one byte string.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = vec![COMPOSITE_VERSION];
-        let (shape, parts) = match self {
-            Composite::Map(map) => (MAP, map.len()),
-            Composite::List(items) => (LIST, items.len()),
-        };
-        write::head(write::MAP, 1, &mut bytes);
-        write::head(write::TEXT, shape.len() as u64, &mut bytes);
-        bytes.extend_from_slice(shape.as_bytes());
-        write::head(write::ARRAY, parts as u64, &mut bytes);
         match self {
             Composite::Map(map) => {
-                for entry in &map.entries {
-                    write::head(write::ARRAY, 2, &mut bytes);
-                    write::part(&entry.key, &mut bytes);
-                    write::part(&entry.value, &mut bytes);
+                write::head(write::MAP, map.len() as u64, &mut bytes);
+                for (key, value) in &map.entries {
+                    write::head(write::TEXT, key.len() as u64, &mut bytes);
+                    bytes.extend_from_slice(key.as_bytes());
+                    write::part(value, &mut bytes);
                 }
             }
             Composite::List(items) => {
+                write::head(write::ARRAY, items.len() as u64, &mut bytes);
                 for item in items.iter() {
                     write::part(item, &mut bytes);
                 }
@@ -310,26 +305,18 @@ impl Composite {
     /// ones the composite they hold is written in.
     pub fn try_from_bytes(bytes: &[u8]) -> Result<Self, CompositeError> {
         match version_of(bytes) {
-            Some(COMPOSITE_VERSION) => {}
-            Some(version) => return Err(CompositeError::UnknownVersion { version }),
-            None => {
-                return Err(CompositeError::Malformed(
-                    "it does not start with a version byte".into(),
-                ));
-            }
+            Some(COMPOSITE_VERSION) => read::composite(&bytes[1..]),
+            Some(version) => Err(CompositeError::UnknownVersion { version }),
+            None => Err(CompositeError::Malformed(
+                "it does not start with a version byte".into(),
+            )),
         }
-        let Read(composite) = serde_ipld_dagcbor::from_slice(&bytes[1..])
-            .map_err(|error| CompositeError::Malformed(error.to_string()))?;
-        if composite.to_bytes() != bytes {
-            return Err(CompositeError::NotCanonical);
-        }
-        Ok(composite)
     }
 
     /// The composite's name: the merkle reference of its parts. A map
     /// is named under [`Type::MAP`] and a list under [`Type::LIST`],
-    /// each part by its own [`Value::reference`]. The bytes the composite is kept as are not
-    /// part of it.
+    /// each part by its own [`Value::reference`] and a key as the text
+    /// it is. The bytes the composite is kept as are not part of it.
     pub fn reference(&self) -> Reference {
         self.reference_within(NAMED_DEPTH)
     }
@@ -352,7 +339,8 @@ impl Composite {
             let below = naming.depth.saturating_sub(1);
             let step = match naming.next() {
                 None => Step::Named,
-                Some(part) => match (below > 0).then(|| part.composite()) {
+                Some(Part::Key(key)) => Step::Part(Value::String(key.into()).scalar_reference()),
+                Some(Part::Value(part)) => match (below > 0).then(|| part.composite()) {
                     Some(Ok(Some(nested))) => Step::Into(nested),
                     _ => Step::Part(part.scalar_reference()),
                 },
@@ -388,6 +376,14 @@ struct Naming<'a> {
     names: Vec<Reference>,
 }
 
+/// What is named next in a composite.
+enum Part<'a> {
+    /// A map's key, which is text.
+    Key(&'a str),
+    /// A value: a list's item, or what a map holds under a key.
+    Value(&'a Value),
+}
+
 /// What naming a composite does next.
 enum Step {
     /// A part is named, by its bytes.
@@ -408,18 +404,18 @@ impl<'a> Naming<'a> {
     }
 
     /// The part to name next, if any is left.
-    fn next(&self) -> Option<&Value> {
+    fn next(&self) -> Option<Part<'_>> {
         let at = self.names.len();
         match self.composite.as_ref() {
             Composite::Map(map) => {
-                let entry = map.entries.get(at / 2)?;
+                let (key, value) = map.entries.get(at / 2)?;
                 Some(if at.is_multiple_of(2) {
-                    &entry.key
+                    Part::Key(key)
                 } else {
-                    &entry.value
+                    Part::Value(value)
                 })
             }
-            Composite::List(items) => items.get(at),
+            Composite::List(items) => items.get(at).map(Part::Value),
         }
     }
 
@@ -501,10 +497,10 @@ impl TryFrom<&Value> for Composite {
 
 /// A value as a `(type, bytes)` pair: the byte of its type and the
 /// bytes [`Value::to_bytes`] gives. It is how the history index writes
-/// a claim's value and how a composite writes a part. serde's untagged
-/// spelling of a value cannot round-trip every variant (an unsigned
-/// integer resurfaces as a float), and dag-cbor holds no integer past
-/// 64 bits, where this holds every value.
+/// a claim's value. serde's untagged spelling of a value cannot
+/// round-trip every variant (an unsigned integer resurfaces as a
+/// float), and dag-cbor holds no integer past 64 bits, where this holds
+/// every value.
 pub(crate) mod type_and_bytes {
     use super::*;
 
@@ -521,22 +517,57 @@ pub(crate) mod type_and_bytes {
     }
 }
 
-/// The name a map's parts are written under.
-const MAP: &str = "map:";
-/// The name a list's parts are written under.
-const LIST: &str = "list:";
+/// The bytes a link to a value of `data_type` starts with: the byte
+/// dag-cbor puts in front of every link, then a CID of version 1 under
+/// the codec of that type, hashed by the identity. The length of what
+/// it holds follows, and then what it holds.
+fn link_of(data_type: u8) -> [u8; 7] {
+    let code = VALUE_CODEC + u32::from(data_type);
+    [
+        0x00,
+        0x01,
+        (code & 0x7f) as u8 | 0x80,
+        ((code >> 7) & 0x7f) as u8 | 0x80,
+        ((code >> 14) & 0x7f) as u8 | 0x80,
+        (code >> 21) as u8,
+        0x00,
+    ]
+}
+
+/// Whether `value` is written as a link, there being no dag-cbor kind
+/// that holds it. A record that is a composite is neither: it is nested
+/// as the item it is.
+fn linked(value: &Value) -> bool {
+    match value {
+        Value::Bytes(_) | Value::Boolean(_) | Value::String(_) => false,
+        Value::UnsignedInt(natural) => u64::try_from(*natural).is_err(),
+        Value::SignedInt(integer) => !(-(1i128 << 64)..0).contains(integer),
+        Value::Float(float) => !float.is_finite(),
+        Value::Entity(_) | Value::Symbol(_) | Value::Record(_) => true,
+    }
+}
 
 /// The dag-cbor a composite is written as. Written by hand, since
-/// nothing here can fail: a composite is text, arrays and `(type,
-/// bytes)` pairs, whatever its values are.
+/// nothing here can fail and a link may hold more than the 64 bytes the
+/// link of the libraries does.
 mod write {
+    use super::{COMPOSITE_VERSION, link_of, read, version_of};
     use crate::Value;
 
     pub const UNSIGNED: u8 = 0;
+    pub const NEGATIVE: u8 = 1;
     pub const BYTES: u8 = 2;
     pub const TEXT: u8 = 3;
     pub const ARRAY: u8 = 4;
     pub const MAP: u8 = 5;
+    pub const TAG: u8 = 6;
+    pub const SIMPLE: u8 = 7;
+
+    /// The tag dag-cbor writes a link under.
+    pub const LINK_TAG: u64 = 42;
+    pub const FALSE: u8 = 20;
+    pub const TRUE: u8 = 21;
+    pub const FLOAT: u8 = 27;
 
     /// The head of an item of `major` type: its argument in the fewest
     /// bytes that hold it, as dag-cbor requires.
@@ -559,59 +590,318 @@ mod write {
         }
     }
 
-    /// A part: the pair of its type's byte and its bytes.
-    pub fn part(value: &Value, out: &mut Vec<u8>) {
-        let bytes = value.to_bytes();
-        head(ARRAY, 2, out);
-        head(UNSIGNED, u64::from(u8::from(value.data_type())), out);
-        head(BYTES, bytes.len() as u64, out);
-        out.extend_from_slice(&bytes);
-    }
-}
-
-/// A part as it is read. The type byte is one a stored value has: the
-/// lossy fallback [`ValueDataType::from`] gives an unknown byte would
-/// read a later release's type as bytes.
-struct Owned(Value);
-
-impl<'de> Deserialize<'de> for Owned {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (data_type, bytes): (u8, serde_bytes::ByteBuf) =
-            Deserialize::deserialize(deserializer)?;
-        if data_type > ValueDataType::Symbol as u8 {
-            return Err(D::Error::custom(format!(
-                "{data_type} is not the type of a stored value"
-            )));
+    /// A length as a CID writes one: seven bits a byte, the least
+    /// first, every byte but the last marked.
+    pub fn varint(mut length: u64, out: &mut Vec<u8>) {
+        while length >= 0x80 {
+            out.push(length as u8 | 0x80);
+            length >>= 7;
         }
-        Value::try_from((ValueDataType::from(data_type), bytes.into_vec()))
-            .map(Owned)
-            .map_err(D::Error::custom)
+        out.push(length as u8);
+    }
+
+    /// A part: the dag-cbor kind that holds the value, the item a
+    /// composite is, or a link that holds any other value.
+    pub fn part(value: &Value, out: &mut Vec<u8>) {
+        match value {
+            Value::Boolean(false) => out.push(SIMPLE << 5 | FALSE),
+            Value::Boolean(true) => out.push(SIMPLE << 5 | TRUE),
+            Value::String(text) => {
+                head(TEXT, text.len() as u64, out);
+                out.extend_from_slice(text.as_bytes());
+            }
+            Value::Bytes(bytes) => {
+                head(BYTES, bytes.len() as u64, out);
+                out.extend_from_slice(bytes);
+            }
+            Value::UnsignedInt(natural) if !super::linked(value) => {
+                head(UNSIGNED, *natural as u64, out);
+            }
+            Value::SignedInt(integer) if !super::linked(value) => {
+                head(NEGATIVE, (-1 - *integer) as u64, out);
+            }
+            Value::Float(float) if !super::linked(value) => {
+                out.push(SIMPLE << 5 | FLOAT);
+                out.extend_from_slice(&float.to_be_bytes());
+            }
+            // A composite is nested as the item it is, which is what
+            // follows its version byte.
+            Value::Record(bytes)
+                if version_of(bytes) == Some(COMPOSITE_VERSION)
+                    && read::composite(&bytes[1..]).is_ok() =>
+            {
+                out.extend_from_slice(&bytes[1..]);
+            }
+            _ => {
+                let held = value.to_bytes();
+                let link = link_of(u8::from(value.data_type()));
+                let mut length = Vec::new();
+                varint(held.len() as u64, &mut length);
+                head(TAG, LINK_TAG, out);
+                head(BYTES, (link.len() + length.len() + held.len()) as u64, out);
+                out.extend_from_slice(&link);
+                out.extend_from_slice(&length);
+                out.extend_from_slice(&held);
+            }
+        }
     }
 }
 
-/// A composite as it is read from under the version byte.
-struct Read(Composite);
+/// The dag-cbor a composite is read from. Read by hand, a level at a
+/// time and without a call for each level, so a record nested deep is
+/// read on any stack; and strictly, so the bytes read are the bytes the
+/// composite is written in.
+mod read {
+    use std::cmp::Ordering;
 
-#[derive(Deserialize)]
-enum Stored {
-    #[serde(rename = "map:")]
-    Map(Vec<(Owned, Owned)>),
-    #[serde(rename = "list:")]
-    List(Vec<Owned>),
-}
+    use super::write::{
+        ARRAY, BYTES, FALSE, FLOAT, LINK_TAG, MAP, NEGATIVE, SIMPLE, TAG, TEXT, TRUE, UNSIGNED,
+    };
+    use super::{
+        COMPOSITE_VERSION, Composite, CompositeError, CompositeItems, CompositeMap, kept, link_of,
+        linked, order,
+    };
+    use crate::{Value, ValueDataType};
 
-impl<'de> Deserialize<'de> for Read {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let values = |parts: Vec<Owned>| parts.into_iter().map(|Owned(value)| value);
-        Ok(Read(match Stored::deserialize(deserializer)? {
-            Stored::Map(entries) => Composite::map(
-                entries
-                    .into_iter()
-                    .map(|(Owned(key), Owned(value))| (key, value)),
-            )
-            .map_err(D::Error::custom)?,
-            Stored::List(items) => Composite::list(values(items)),
-        }))
+    fn malformed(why: &str) -> CompositeError {
+        CompositeError::Malformed(why.into())
+    }
+
+    /// One item, as far as its head says: a value, or how many parts
+    /// the list or the map it opens holds.
+    enum Item {
+        Value(Value),
+        List(u64),
+        Map(u64),
+    }
+
+    /// A list or a map being read past: how many of its parts are left,
+    /// and for a map the key last read.
+    struct Open<'a> {
+        left: u64,
+        key: Option<Option<&'a str>>,
+    }
+
+    struct Cursor<'a> {
+        bytes: &'a [u8],
+        at: usize,
+    }
+
+    impl<'a> Cursor<'a> {
+        fn take(&mut self, length: u64) -> Result<&'a [u8], CompositeError> {
+            let end = usize::try_from(length)
+                .ok()
+                .and_then(|length| self.at.checked_add(length))
+                .filter(|end| *end <= self.bytes.len())
+                .ok_or_else(|| malformed("it ends before an item does"))?;
+            let taken = &self.bytes[self.at..end];
+            self.at = end;
+            Ok(taken)
+        }
+
+        fn byte(&mut self) -> Result<u8, CompositeError> {
+            Ok(self.take(1)?[0])
+        }
+
+        /// The head of the next item: its major type, and its argument
+        /// read from the fewest bytes that hold it.
+        fn head(&mut self) -> Result<(u8, u64), CompositeError> {
+            let first = self.byte()?;
+            let (major, short) = (first >> 5, first & 0x1f);
+            if major == SIMPLE {
+                return Ok((major, u64::from(short)));
+            }
+            let (argument, least) = match short {
+                0..24 => (u64::from(short), 0),
+                24 => (u64::from(self.byte()?), 24),
+                25 => {
+                    let bytes = self.take(2)?;
+                    (u64::from(u16::from_be_bytes([bytes[0], bytes[1]])), 1 << 8)
+                }
+                26 => {
+                    let bytes: [u8; 4] = self.take(4)?.try_into().expect("four bytes");
+                    (u64::from(u32::from_be_bytes(bytes)), 1 << 16)
+                }
+                27 => {
+                    let bytes: [u8; 8] = self.take(8)?.try_into().expect("eight bytes");
+                    (u64::from_be_bytes(bytes), 1 << 32)
+                }
+                _ => return Err(malformed("a length of no fixed size")),
+            };
+            if argument < least {
+                return Err(CompositeError::NotCanonical);
+            }
+            Ok((major, argument))
+        }
+
+        fn text(&mut self, length: u64) -> Result<&'a str, CompositeError> {
+            str::from_utf8(self.take(length)?).map_err(|_| malformed("a text is not UTF-8"))
+        }
+
+        /// A map's next key, which follows `last` in the order keys are
+        /// written in.
+        fn key(&mut self, last: Option<&str>) -> Result<&'a str, CompositeError> {
+            let (TEXT, length) = self.head()? else {
+                return Err(malformed("a map's key is not text"));
+            };
+            let key = self.text(length)?;
+            match last {
+                Some(last) if order(last, key) != Ordering::Less => {
+                    Err(CompositeError::NotCanonical)
+                }
+                _ => Ok(key),
+            }
+        }
+
+        /// The value a link holds, which is one dag-cbor has no kind
+        /// for.
+        fn link(&mut self) -> Result<Value, CompositeError> {
+            let (BYTES, length) = self.head()? else {
+                return Err(malformed("a link is not bytes"));
+            };
+            let mut link = Cursor {
+                bytes: self.take(length)?,
+                at: 0,
+            };
+            // The codec says the type: every type's link starts as the
+            // first type's does but for the byte the type is in.
+            let first = link_of(0);
+            let start = link.take(first.len() as u64)?;
+            let data_type = start[2].wrapping_sub(first[2]);
+            if data_type > ValueDataType::Symbol as u8 || start != link_of(data_type) {
+                return Err(malformed("a link is not one that holds a value"));
+            }
+            let mut held: u64 = 0;
+            let mut shift = 0;
+            loop {
+                let byte = link.byte()?;
+                if shift > 56 || (byte == 0 && shift > 0) {
+                    return Err(CompositeError::NotCanonical);
+                }
+                held |= u64::from(byte & 0x7f) << shift;
+                shift += 7;
+                if byte & 0x80 == 0 {
+                    break;
+                }
+            }
+            let held = link.take(held)?;
+            if link.at != link.bytes.len() {
+                return Err(malformed("a link holds more than its length says"));
+            }
+            let value = Value::try_from((ValueDataType::from(data_type), held.to_vec()))
+                .map_err(|error| CompositeError::Malformed(error.to_string()))?;
+            // What dag-cbor has a kind for is written as that kind, a
+            // number under its narrowest type, and a composite as the
+            // item it is.
+            let nested = matches!(value.composite(), Ok(Some(_)));
+            if !linked(&value) || nested || kept(value.clone()) != value {
+                return Err(CompositeError::NotCanonical);
+            }
+            Ok(value)
+        }
+
+        fn item(&mut self) -> Result<Item, CompositeError> {
+            let (major, argument) = self.head()?;
+            let value = match major {
+                UNSIGNED => Value::UnsignedInt(u128::from(argument)),
+                NEGATIVE => Value::SignedInt(-1 - i128::from(argument)),
+                BYTES => Value::Bytes(self.take(argument)?.to_vec()),
+                TEXT => Value::String(self.text(argument)?.into()),
+                ARRAY => return Ok(Item::List(argument)),
+                MAP => return Ok(Item::Map(argument)),
+                TAG if argument == LINK_TAG => return self.link().map(Item::Value),
+                TAG => return Err(malformed("a tag other than a link's")),
+                _ => match argument as u8 {
+                    FALSE => Value::Boolean(false),
+                    TRUE => Value::Boolean(true),
+                    FLOAT => {
+                        let bytes: [u8; 8] = self.take(8)?.try_into().expect("eight bytes");
+                        let float = Value::Float(f64::from_be_bytes(bytes));
+                        if linked(&float) || kept(float.clone()) != float {
+                            return Err(CompositeError::NotCanonical);
+                        }
+                        float
+                    }
+                    _ => return Err(malformed("a value of no kind a composite holds")),
+                },
+            };
+            Ok(Item::Value(value))
+        }
+
+        /// Reads past the list or the map just opened, all of it and
+        /// everything nested in it, checking each part as it goes. What
+        /// is open waits in a list, innermost last.
+        fn past(&mut self, opened: Open<'a>) -> Result<(), CompositeError> {
+            let mut open = vec![opened];
+            while let Some(innermost) = open.last_mut() {
+                if innermost.left == 0 {
+                    open.pop();
+                    continue;
+                }
+                innermost.left -= 1;
+                if let Some(last) = innermost.key {
+                    innermost.key = Some(Some(self.key(last)?));
+                }
+                match self.item()? {
+                    Item::Value(_) => {}
+                    Item::List(left) => open.push(Open { left, key: None }),
+                    Item::Map(left) => open.push(Open {
+                        left,
+                        key: Some(None),
+                    }),
+                }
+            }
+            Ok(())
+        }
+
+        /// The next part: a value, or the composite a nested item is,
+        /// as the record it is kept as.
+        fn part(&mut self) -> Result<Value, CompositeError> {
+            let start = self.at;
+            let opened = match self.item()? {
+                Item::Value(value) => return Ok(value),
+                Item::List(left) => Open { left, key: None },
+                Item::Map(left) => Open {
+                    left,
+                    key: Some(None),
+                },
+            };
+            self.past(opened)?;
+            let mut record = vec![COMPOSITE_VERSION];
+            record.extend_from_slice(&self.bytes[start..self.at]);
+            Ok(Value::Record(record))
+        }
+    }
+
+    /// The composite `bytes`, which follow a version byte, hold: its
+    /// own parts, each nested composite checked and left as the record
+    /// it is.
+    pub fn composite(bytes: &[u8]) -> Result<Composite, CompositeError> {
+        let mut cursor = Cursor { bytes, at: 0 };
+        let composite = match cursor.item()? {
+            Item::Value(_) => return Err(malformed("it is neither a map nor a list")),
+            Item::List(length) => {
+                let mut items = Vec::new();
+                for _ in 0..length {
+                    items.push(cursor.part()?);
+                }
+                Composite::List(CompositeItems(items))
+            }
+            Item::Map(length) => {
+                let mut entries: Vec<(String, Value)> = Vec::new();
+                let mut last = None;
+                for _ in 0..length {
+                    let key = cursor.key(last)?;
+                    last = Some(key);
+                    entries.push((key.into(), cursor.part()?));
+                }
+                Composite::Map(CompositeMap { entries })
+            }
+        };
+        if cursor.at != bytes.len() {
+            return Err(malformed("something follows the composite"));
+        }
+        Ok(composite)
     }
 }
 
@@ -623,6 +913,8 @@ mod tests {
     use crate::history::{Edition, Origin, REVISION_RECORD_FORMAT, RevisionRecord, Version};
     use crate::identity::RECORD;
     use crate::{Entity, Relation, encode_value_owned};
+    use ipld_core::cid::Cid;
+    use ipld_core::ipld::Ipld;
     use serde::de::IgnoredAny;
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -632,44 +924,107 @@ mod tests {
         Value::String(text.into())
     }
 
-    /// A part as serde writes it, for bytes written another way than
-    /// [`Composite::to_bytes`] writes them.
-    struct Part<'a>(&'a Value);
-
-    impl Serialize for Part<'_> {
-        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            type_and_bytes::serialize(self.0, serializer)
-        }
+    /// The link `value` is written as.
+    fn link(value: &Value) -> Vec<u8> {
+        let mut written = Vec::new();
+        write::part(value, &mut written);
+        written
     }
 
-    #[derive(Serialize)]
-    enum Written<'a> {
-        #[serde(rename = "map:")]
-        Map(Vec<(Part<'a>, Part<'a>)>),
-        #[serde(rename = "list:")]
-        List(Vec<Part<'a>>),
+    /// The bytes of a composite whose one item is `part`, as written.
+    fn list_of(part: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![COMPOSITE_VERSION, 0x81];
+        bytes.extend_from_slice(part);
+        bytes
     }
 
-    /// The bytes written by hand are the dag-cbor serde writes for the
-    /// same shape, so a dag-cbor reader reads them.
+    /// What follows the version byte is dag-cbor a reader of dag-cbor
+    /// reads: text, numbers, a truth value and bytes as its own kinds, a
+    /// nested composite as a map or a list, and a value it has no kind
+    /// for as a link that holds the value. The bytes are written out, so
+    /// a change to how a composite is kept shows here.
     #[dialog_common::test]
-    fn it_writes_the_dag_cbor_serde_writes() {
-        let long = Value::Bytes(vec![7; 70_000]);
-        let values = every_value();
-        let list = Composite::list(values.iter().chain([&long]).cloned());
-        let written = Written::List(values.iter().chain([&long]).map(Part).collect());
-        let mut expected = vec![COMPOSITE_VERSION];
-        serde_ipld_dagcbor::to_writer(&mut expected, &written).expect("encodes");
-        assert_eq!(list.to_bytes(), expected);
+    fn it_writes_dag_cbor_a_reader_of_dag_cbor_reads() {
+        let alice = Value::Entity("id:alice".parse::<Entity>().expect("an entity"));
+        let note = Composite::map([
+            ("title", text("Buy milk")),
+            ("done", Value::Boolean(false)),
+            ("count", Value::UnsignedInt(3)),
+            ("ratio", Value::Float(-0.5)),
+            ("by", alice.clone()),
+            (
+                "tags",
+                Composite::list([text("a"), Value::SignedInt(-2)]).into(),
+            ),
+            ("raw", Value::Bytes(vec![0, 255])),
+        ])
+        .expect("a map");
+        let bytes = note.to_bytes();
+        assert_eq!(
+            hex(&bytes),
+            concat!(
+                "01a7",
+                "626279d82a500001a1a3c301000869643a616c696365",
+                "637261774200ff",
+                "64646f6e65f4",
+                "6474616773826161",
+                "21",
+                "65636f756e7403",
+                "65726174696ffbbfe0000000000000",
+                "657469746c6568427579206d696c6b",
+            )
+        );
 
-        let map = Composite::map([(text("a"), long.clone())]).expect("a map");
-        let mut expected = vec![COMPOSITE_VERSION];
-        serde_ipld_dagcbor::to_writer(
-            &mut expected,
-            &Written::Map(vec![(Part(&text("a")), Part(&long))]),
-        )
-        .expect("encodes");
-        assert_eq!(map.to_bytes(), expected);
+        let read: Ipld = serde_ipld_dagcbor::from_slice(&bytes[1..]).expect("dag-cbor");
+        let Ipld::Map(entries) = read else {
+            panic!("a map");
+        };
+        assert_eq!(entries["title"], Ipld::String("Buy milk".into()));
+        assert_eq!(entries["done"], Ipld::Bool(false));
+        assert_eq!(entries["count"], Ipld::Integer(3));
+        assert_eq!(entries["ratio"], Ipld::Float(-0.5));
+        assert_eq!(entries["raw"], Ipld::Bytes(vec![0, 255]));
+        assert_eq!(
+            entries["tags"],
+            Ipld::List(vec![Ipld::String("a".into()), Ipld::Integer(-2)])
+        );
+        let Ipld::Link(link) = &entries["by"] else {
+            panic!("a link");
+        };
+        assert_eq!(
+            link.codec(),
+            u64::from(VALUE_CODEC) + u64::from(u8::from(ValueDataType::Entity))
+        );
+        assert_eq!(link.hash().code(), 0, "the identity");
+        assert_eq!(link.hash().digest(), b"id:alice");
+        assert_eq!(Value::from(&note).composite(), Ok(Some(note)));
+    }
+
+    /// A link holds a value of any length. The link of the libraries
+    /// holds 64 bytes at most (`cid`'s `Cid` is `CidGeneric<64>`), so a
+    /// value longer than that is read here and is not read by a reader
+    /// built on them. This test says so for as long as it is so.
+    #[dialog_common::test]
+    fn it_links_a_value_longer_than_the_link_of_the_libraries_holds() {
+        let long = format!("did:web:{}", "a".repeat(57));
+        assert_eq!(long.len(), 65);
+        let entity = Value::Entity(long.parse::<Entity>().expect("an entity"));
+        let list = Composite::list([entity]);
+        assert_eq!(Value::from(&list).composite(), Ok(Some(list.clone())));
+        assert!(
+            serde_ipld_dagcbor::from_slice::<Ipld>(&list.to_bytes()[1..]).is_err(),
+            "the libraries read a link this long now: say so in the module"
+        );
+
+        let longest = format!("ns/{}", "a".repeat(61));
+        assert_eq!(longest.len(), 64);
+        assert!(format!("{longest}a").parse::<Relation>().is_err());
+        let short = Composite::list([Value::Symbol(longest.parse().expect("a symbol"))]);
+        let Ok(Ipld::List(items)) = serde_ipld_dagcbor::from_slice::<Ipld>(&short.to_bytes()[1..])
+        else {
+            panic!("the longest symbol is a link the libraries read");
+        };
+        assert!(matches!(items[0], Ipld::Link(Cid { .. })));
     }
 
     /// A value of every type, the ones dag-cbor's own kinds do not hold
@@ -749,9 +1104,11 @@ mod tests {
         let map = Composite::map(
             every_value()
                 .into_iter()
-                .zip(every_value().into_iter().rev()),
+                .enumerate()
+                .map(|(at, value)| (format!("key{at}"), value)),
         )
         .expect("no key twice");
+
         for composite in [list, map] {
             let value = Value::from(&composite);
             assert!(matches!(value, Value::Record(_)));
@@ -763,7 +1120,7 @@ mod tests {
     /// is read a level at a time.
     #[dialog_common::test]
     fn it_nests_as_deep_as_written() {
-        let inner = Composite::map([(text("x"), Value::UnsignedInt(1))]).expect("a map");
+        let inner = Composite::map([("x", Value::UnsignedInt(1))]).expect("a map");
         let middle = Composite::list([Value::from(&inner), text("beside")]);
         let outer = Composite::list([Value::from(&middle), Value::Boolean(false)]);
 
@@ -782,18 +1139,23 @@ mod tests {
     #[dialog_common::test]
     fn it_keeps_a_map_in_one_order_whatever_order_it_was_given_in() {
         let entries = vec![
-            (text("title"), text("Buy milk")),
-            (text("done"), Value::Boolean(false)),
-            (Value::UnsignedInt(7), text("seven")),
-            (
-                Value::Symbol("note/text".parse().expect("a relation")),
-                Composite::list([text("a"), text("b")]).into(),
-            ),
+            ("title", text("Buy milk")),
+            ("done", Value::Boolean(false)),
+            ("b", text("seven")),
+            ("aa", Composite::list([text("a"), text("b")]).into()),
         ];
         let forward = Composite::map(entries.clone()).expect("a map");
         let backward = Composite::map(entries.into_iter().rev()).expect("a map");
 
         assert_eq!(forward, backward);
+        let Composite::Map(kept) = &forward else {
+            panic!("a map");
+        };
+        assert_eq!(
+            kept.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+            vec!["b", "aa", "done", "title"],
+            "the shorter key first, and two of one length by their bytes"
+        );
         assert_eq!(forward.reference(), backward.reference());
         assert_eq!(forward.to_bytes(), backward.to_bytes());
         assert_eq!(Value::from(&forward), Value::from(&backward));
@@ -803,21 +1165,11 @@ mod tests {
         );
     }
 
-    /// A map refuses a key given twice, and two spellings of one number
-    /// are one key.
+    /// A map refuses a key given twice.
     #[dialog_common::test]
     fn it_refuses_a_key_given_twice() {
-        let twice = Composite::map([(text("a"), text("x")), (text("a"), text("y"))]);
-        assert_eq!(twice, Err(CompositeError::DuplicateKey(text("a"))));
-
-        let one_number = Composite::map([
-            (Value::UnsignedInt(3), text("x")),
-            (Value::Float(3.0), text("y")),
-        ]);
-        assert_eq!(
-            one_number,
-            Err(CompositeError::DuplicateKey(Value::UnsignedInt(3)))
-        );
+        let twice = Composite::map([("a", text("x")), ("a", text("y"))]);
+        assert_eq!(twice, Err(CompositeError::DuplicateKey("a".into())));
     }
 
     /// A number is kept under the narrowest type that holds it, as the
@@ -855,21 +1207,36 @@ mod tests {
             ]
         );
 
-        let map = Composite::map([(Value::Float(3.0), Value::SignedInt(4))]).expect("a map");
+        let map = Composite::map([("n", Value::SignedInt(4))]).expect("a map");
         let Composite::Map(entries) = &map else {
             panic!("a map");
         };
-        assert_eq!(
-            entries.get(&Value::SignedInt(3)),
-            Some(&Value::UnsignedInt(4))
-        );
+        assert_eq!(entries.get("n"), Some(&Value::UnsignedInt(4)));
 
-        let wide = Value::Float(3.0);
-        let mut bytes = vec![COMPOSITE_VERSION];
-        serde_ipld_dagcbor::to_writer(&mut bytes, &Written::List(vec![Part(&wide)]))
-            .expect("encodes");
+        // A whole number is an integer, a number past 64 bits a link,
+        // and one that is not whole a float.
+        assert_eq!(three.to_bytes(), vec![COMPOSITE_VERSION, 0x81, 0x03]);
         assert_eq!(
-            Composite::try_from_bytes(&bytes),
+            Composite::list([Value::SignedInt(-2)]).to_bytes(),
+            vec![COMPOSITE_VERSION, 0x81, 0x21]
+        );
+        let most = Value::UnsignedInt(u128::from(u64::MAX));
+        assert_eq!(
+            Composite::list([most]).to_bytes(),
+            [&[COMPOSITE_VERSION, 0x81, 0x1b][..], &[0xff; 8]].concat()
+        );
+        let past = Value::UnsignedInt(u128::from(u64::MAX) + 1);
+        assert_eq!(
+            Composite::list([past.clone()]).to_bytes(),
+            list_of(&link(&past))
+        );
+        assert_eq!(link(&past)[..2], [0xd8, 0x2a], "a link");
+
+        // Bytes that hold a whole number as a float are not the ones
+        // the composite is written in.
+        let wide = [&[0xfb][..], &3.0f64.to_be_bytes()].concat();
+        assert_eq!(
+            Composite::try_from_bytes(&list_of(&wide)),
             Err(CompositeError::NotCanonical)
         );
     }
@@ -877,24 +1244,18 @@ mod tests {
     /// A map finds a value by its key, and gives and takes entries.
     #[dialog_common::test]
     fn it_reads_a_map_by_key() {
-        let map = CompositeMap::new([(text("a"), Value::UnsignedInt(1)), (text("b"), text("two"))])
-            .expect("a map");
-        assert_eq!(map.get(&text("a")), Some(&Value::UnsignedInt(1)));
-        assert_eq!(map.get(&text("c")), None);
+        let map =
+            CompositeMap::new([("a", Value::UnsignedInt(1)), ("b", text("two"))]).expect("a map");
+        assert_eq!(map.get("a"), Some(&Value::UnsignedInt(1)));
+        assert_eq!(map.get("c"), None);
         assert_eq!(map.len(), 2);
 
-        let rest = map.without([&text("a")]);
+        let rest = map.without(["a"]);
+        assert_eq!(rest.iter().collect::<Vec<_>>(), vec![("b", &text("two"))]);
+        assert_eq!(rest.with([("a", Value::UnsignedInt(1))]), Ok(map.clone()));
         assert_eq!(
-            rest.iter().collect::<Vec<_>>(),
-            vec![(&text("b"), &text("two"))]
-        );
-        assert_eq!(
-            rest.with([(text("a"), Value::UnsignedInt(1))]),
-            Ok(map.clone())
-        );
-        assert_eq!(
-            map.with([(text("a"), Value::UnsignedInt(9))]),
-            Err(CompositeError::DuplicateKey(text("a")))
+            map.with([("a", Value::UnsignedInt(9))]),
+            Err(CompositeError::DuplicateKey("a".into()))
         );
     }
 
@@ -910,7 +1271,7 @@ mod tests {
         assert_eq!(Value::from(&list).reference(), list.reference());
         assert_ne!(list.reference(), RECORD.reference_of(&list.to_bytes()));
 
-        let map = Composite::map([(parts[0].clone(), parts[1].clone())]).expect("a map");
+        let map = Composite::map([("a", parts[1].clone())]).expect("a map");
         assert_eq!(
             map.reference(),
             Type::MAP.map([(parts[0].reference(), parts[1].reference())])
@@ -1035,28 +1396,29 @@ mod tests {
         assert_eq!(opaque.reference(), RECORD.reference_of(&[1, 2, 3]));
     }
 
-    /// One composite has one byte string: a map whose entries are
-    /// written out of order, and a map with a key twice, are refused.
+    /// One composite has one byte string. Bytes that hold a composite
+    /// another way are refused: a map's entries out of order or a key
+    /// twice, a length in more bytes than it needs, a value written as a
+    /// link that dag-cbor has a kind for, and a composite written as a
+    /// link where it nests.
     #[dialog_common::test]
     fn it_refuses_bytes_a_composite_is_not_written_in() {
-        let map = Composite::map([(text("a"), text("x")), (text("b"), text("y"))]).expect("a map");
-        let Composite::Map(entries) = &map else {
-            panic!("a map");
-        };
-        let mut swapped = vec![COMPOSITE_VERSION];
-        serde_ipld_dagcbor::to_writer(
-            &mut swapped,
-            &Written::Map(
-                entries
-                    .entries
-                    .iter()
-                    .rev()
-                    .map(|entry| (Part(&entry.key), Part(&entry.value)))
-                    .collect(),
-            ),
-        )
-        .expect("encodes");
-        assert_ne!(swapped, map.to_bytes());
+        let map = Composite::map([("a", text("x")), ("b", text("y"))]).expect("a map");
+        let written = [0xa2, 0x61, b'a', 0x61, b'x', 0x61, b'b', 0x61, b'y'];
+        assert_eq!(map.to_bytes()[1..], written);
+
+        let swapped = vec![
+            COMPOSITE_VERSION,
+            0xa2,
+            0x61,
+            b'b',
+            0x61,
+            b'y',
+            0x61,
+            b'a',
+            0x61,
+            b'x',
+        ];
         assert_eq!(
             Composite::try_from_bytes(&swapped),
             Err(CompositeError::NotCanonical)
@@ -1066,37 +1428,103 @@ mod tests {
             RECORD.reference_of(&swapped)
         );
 
-        let mut twice = vec![COMPOSITE_VERSION];
-        let (key, value) = (text("a"), text("x"));
-        serde_ipld_dagcbor::to_writer(
-            &mut twice,
-            &Written::Map(vec![(Part(&key), Part(&value)), (Part(&key), Part(&value))]),
-        )
-        .expect("encodes");
-        assert!(matches!(
+        let twice = [
+            &[COMPOSITE_VERSION, 0xa2][..],
+            &written[1..5],
+            &written[1..5],
+        ]
+        .concat();
+        assert_eq!(
             Composite::try_from_bytes(&twice),
-            Err(CompositeError::Malformed(_))
-        ));
+            Err(CompositeError::NotCanonical)
+        );
+
+        // The same inside a nested map, which is read past and checked.
+        let nested = [0xa2, 0x61, b'b', 0xf4, 0x61, b'a', 0xf4];
+        assert_eq!(
+            Composite::try_from_bytes(&list_of(&nested)),
+            Err(CompositeError::NotCanonical)
+        );
+
+        // A text of one byte, its length in a byte of its own.
+        assert_eq!(
+            Composite::try_from_bytes(&list_of(&[0x78, 0x01, b'a'])),
+            Err(CompositeError::NotCanonical)
+        );
+
+        // A text, a small number and a composite, each held in a link.
+        for held in [
+            text("a"),
+            Value::UnsignedInt(3),
+            Value::from(Composite::list([text("a")])),
+        ] {
+            let payload = held.to_bytes();
+            let link = link_of(u8::from(held.data_type()));
+            let mut linked = vec![0xd8, 0x2a];
+            let length = link.len() + 1 + payload.len();
+            write::head(write::BYTES, length as u64, &mut linked);
+            linked.extend_from_slice(&link);
+            linked.push(payload.len() as u8);
+            linked.extend_from_slice(&payload);
+            assert_eq!(
+                Composite::try_from_bytes(&list_of(&linked)),
+                Err(CompositeError::NotCanonical),
+                "{held:?}"
+            );
+        }
     }
 
-    /// A part's type is one a stored value has.
+    /// What a composite holds is of a kind it is written in: no null,
+    /// no float of fewer than 64 bits, no tag but a link's, no link but
+    /// one that holds a value, and no value of a type that is not
+    /// stored. Nor is a composite anything but a map or a list, with
+    /// nothing after it and no key that is not text.
     #[dialog_common::test]
-    fn it_refuses_a_part_of_no_stored_type() {
-        let mut bytes = vec![COMPOSITE_VERSION];
-        #[derive(Serialize)]
-        enum Foreign {
-            #[serde(rename = "list:")]
-            List(Vec<(u8, serde_bytes::ByteBuf)>),
+    fn it_refuses_a_part_of_no_kind_a_composite_holds() {
+        let unknown_type = {
+            // A codec past the last stored type's.
+            let start = link_of(ValueDataType::Symbol as u8 + 1);
+            let mut link = vec![0xd8, 0x2a];
+            write::head(write::BYTES, (start.len() + 2) as u64, &mut link);
+            link.extend_from_slice(&start);
+            link.extend_from_slice(&[1, 1]);
+            link
+        };
+        let foreign_link = {
+            // A CID of version 1 under dag-cbor, hashed by sha2-256.
+            let mut link = vec![0xd8, 0x2a, 0x58, 37, 0x00, 0x01, 0x71, 0x12, 0x20];
+            link.extend_from_slice(&[7; 32]);
+            link
+        };
+        for part in [
+            vec![0xf6],
+            vec![0xf9, 0x3e, 0x00],
+            vec![0xc1, 0x01],
+            unknown_type,
+            foreign_link,
+        ] {
+            assert!(
+                matches!(
+                    Composite::try_from_bytes(&list_of(&part)),
+                    Err(CompositeError::Malformed(_))
+                ),
+                "{part:?}"
+            );
         }
-        serde_ipld_dagcbor::to_writer(
-            &mut bytes,
-            &Foreign::List(vec![(200, serde_bytes::ByteBuf::from(vec![1]))]),
-        )
-        .expect("encodes");
-        assert!(matches!(
-            Composite::try_from_bytes(&bytes),
-            Err(CompositeError::Malformed(_))
-        ));
+        for bytes in [
+            vec![COMPOSITE_VERSION, 0x61, b'a'],
+            vec![COMPOSITE_VERSION, 0x80, 0x80],
+            vec![COMPOSITE_VERSION, 0x82, 0xf4],
+            vec![COMPOSITE_VERSION, 0xa1, 0x01, 0xf4],
+        ] {
+            assert!(
+                matches!(
+                    Composite::try_from_bytes(&bytes),
+                    Err(CompositeError::Malformed(_))
+                ),
+                "{bytes:?}"
+            );
+        }
     }
 
     /// A list of one item nested `nesting` deep around a text.
@@ -1145,8 +1573,10 @@ mod tests {
 
     /// A record nested in records is named by its parts down to the
     /// depth a name follows, and what is nested deeper goes in by its
-    /// bytes. The names are the ones a call a level gave (43d49a5), so
-    /// naming without one moved no name.
+    /// bytes. Down to the depth the names are the ones a call a level
+    /// gave (43d49a5), so naming without one moved no name, and so are
+    /// they whatever bytes a composite is kept as. Past the depth a
+    /// name is of bytes, and is the name of the bytes written today.
     #[dialog_common::test]
     fn it_names_a_nested_record_by_its_parts_down_to_a_depth() {
         let named = |nesting: usize| {
@@ -1183,11 +1613,11 @@ mod tests {
             ),
             (
                 NAMED_DEPTH + 1,
-                "3ac3da0bfc3557f3a12a5c67e3f8a9e23f9b14ce32d946cdb0e5cc79bb2d831d",
+                "b8ddfad12d38308119e15bc908209410e95ea6a30c2070dddbdf176b8ccc7636",
             ),
             (
                 NAMED_DEPTH * 4,
-                "bfa65cda9f6779faddaeaea2d89389b1a3d894803ceab8a05af9b596f04fcf9e",
+                "aa62510da9e7a9a14a77f6e4719b1a94a27416ac96428a03dabeb635528a8a12",
             ),
         ] {
             let value = nested(nesting);
@@ -1220,11 +1650,8 @@ mod tests {
     #[dialog_common::test]
     fn it_names_composites_nested_in_composites_by_their_parts() {
         let pair = Composite::list([text("t"), Value::Boolean(false)]);
-        let map = Composite::map([
-            (text("k"), Value::UnsignedInt(1)),
-            (text("j"), Value::from(&pair)),
-        ])
-        .expect("a map");
+        let map = Composite::map([("k", Value::UnsignedInt(1)), ("j", Value::from(&pair))])
+            .expect("a map");
         let list = Composite::list([Value::from(&map), text("z"), Value::from(&map)]);
         let outer = Composite::list([Value::from(&list), Value::Boolean(true)]);
 
