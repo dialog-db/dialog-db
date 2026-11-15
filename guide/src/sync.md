@@ -136,11 +136,11 @@ Alice renamed the milk to `"Oat milk, 1 L"`. Bob, without seeing that, renamed i
 </svg>
 </figure>
 
-A name is meant to have one value, so a reader that asks for it under the pick `last` sees an election between the two. The fact whose commit had seen more wins: the deeper edition. If the editions are equal, as they are here, the hash of the version decides. Every fact a commit wrote carries the same version, so a whole commit wins or loses together: a reader never sees half of Alice's edit and half of Bob's.
+A name is meant to have one value, so a reader that asks for it under cardinality one sees an election between the two. The fact whose commit had seen more wins: the deeper edition. If the editions are equal, as they are here, the hash of the version decides. Every fact a commit wrote carries the same version, so a whole commit wins or loses together: a reader never sees half of Alice's edit and half of Bob's.
 
 The election is a function of the stored facts alone, so every replica elects the same name without talking to anyone. The losing value is not deleted. It stays in the store, and an app that wants to show "edited on two devices" can ask for every value by reading the name under `all`. It stays even after someone asserts a new name, because an assertion supersedes only the fact a read returned, which is the winner. The loser goes when someone retracts it.
 
-The other picks choose in their own ways, `max` by the greatest value and `top` by a ranked list, but always from the stored facts alone, and so the same way on every replica.
+A rule folding the facts with `max` or `top` chooses in its own way, by the greatest value or by a ranked list, but always from the stored facts alone, and so the same way on every replica.
 
 ## After the merge
 

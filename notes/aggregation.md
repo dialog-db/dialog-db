@@ -95,10 +95,12 @@ authored confusion, so it is a **hard error**, sibling of
 
 `min`, `max`, `last` and `top` return one of their inputs; `count`,
 `count-distinct`, `sum` and `avg` compute a value none of them is. The
-choosing four order their inputs as a read under the pick of the same
-name elects a cell's claims: `last` by the standing of the fact each
-input was bound from, `top` by the entry's `among` list, best first,
-then by standing, `min` and `max` by value, then by standing. A cell is
+choosing four share the order a cardinality-one read elects a cell's
+claims by (`Cardinality::newer`): `last` by the standing of the fact
+each input was bound from, `top` by the entry's `among` list, best
+first, then by standing, `min` and `max` by value, then by standing.
+They are how a ranked read is written: an attribute has no ranked read
+of its own. A cell is
 one group among many: `last` in a head is a cardinality-one read over
 any group a body can name.
 

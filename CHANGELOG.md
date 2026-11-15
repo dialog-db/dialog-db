@@ -14,6 +14,91 @@ says how to cut a release.
 
 ## Unreleased
 
+### An attribute is a relation, a type and a cardinality, and a ranked read is a rule
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793) and
+[#759](https://github.com/dialog-db/dialog-db/issues/759), detail in
+[`notes/glossary.md`](./notes/glossary.md) and
+[`notes/notation.md`](./notes/notation.md).
+
+An attribute no longer has a pick. It is a relation, a value type and a
+cardinality, `one` (the default) or `many`. Under one a read returns the
+cell's newest claim, built in, recursion included, and a write succeeds
+that claim: what `last` did. Under many a read returns every claim and
+a write adds one: what `all` did.
+
+```json
+{ "the": "person/email", "as": "text:", "cardinality": "many" }
+```
+
+No attribute reads under `max`, `min` or `top` any more, and `the` names
+one relation: a list of relations, ranked, is gone. A read that ranks a
+cell's claims is a deductive rule folding them with `top`, `max` or
+`min` in its `reduce` (see the next entry). A listed `as: [a, b]` stays,
+as an enumerated type: the values the attribute holds, with no ranking
+meaning.
+
+An attribute or a rule body spelled with a `pick` (or `select`), or
+listing relations under `the`, is refused by name, so a definition in
+the format 0.3 and 0.4 wrote is never read with another meaning. A rule
+those releases stored is inert until `Branch::upgrade_rules` rewrites
+it (see Compatibility and migration).
+
+What this changes for you:
+
+- `dialog_corpus::Pick` and `dialog_query::Pick` are gone.
+  `dialog_corpus::Cardinality`, re-exported as `dialog_query::Cardinality`,
+  takes their place on the write path: `Change::Assert(Value,
+  Cardinality)`, `Instruction::Assert(Fact, Cardinality)` and
+  `Update::associate(.., Cardinality)`. `Cardinality::One` succeeds the
+  newest claim and `Cardinality::Many` adds. `Pick::newer` is
+  `Cardinality::newer`, the one order the tree, a transaction's
+  settlement, a cardinality-one read and the choosing folds share, and
+  `Cardinality::elect` is what `Pick::Last.elect` was. A batch spells
+  the cardinality `one` or `many`, and reads the picks 0.3 and 0.4 wrote
+  there (`last` and `max`, `min`, `top` as one, `all` as many).
+- `Cardinality::estimate` is `dialog_query::estimate_cost(cardinality,
+  ..)`.
+- `AttributeDescriptor` loses `pick`, `with_pick`, `pick_error`,
+  `with_then`, `relations`, `is_chain`, `reads_elected`,
+  `scan_cardinality`, `writes`, `adding` and `adds`. `cardinality` is
+  what both a read and a write go by, `with_cardinality` sets it, and
+  `without_pick` is `plain`. `Attribution::pick` is `cardinality`, and
+  `AttributeStatement` (`DynamicAttributeExpression`) has no `pick`
+  field: its `cardinality` says how it writes, many when it is `None`.
+  `TypeError::UnfitPick` is gone.
+- `#[derive(Attribute)]` reads `#[cardinality(one)]` (the default) or
+  `#[cardinality(many)]`. `#[pick(..)]` no longer compiles: `#[pick(last)]`
+  and `#[pick(all)]` say which cardinality replaces them, and a ranking
+  pick says to write a rule.
+- A query over `{ "the": .., "pick": "max:" }` fails to parse. Write a
+  rule concluding the ranked value, `"reduce": { "top": { "apply":
+  "max", "of": .. } }`, and query its relation.
+- `Election` elects by cardinality alone; `Election::elect_claims`,
+  `ConceptRules::chain_scans` and `ConceptRules::ranks` are gone.
+- An attribute's identity hashes its relation, its cardinality, its type
+  and its listed values, where it hashed the list of relations it read
+  and its pick. Every attribute's identity moved, and every concept's
+  and every rule's with it. `dialog_query::migration` reproduces the
+  identities of 0.3 and 0.4 (`attribute_reference_v1`,
+  `attribute_uri_v1`, `concept_reference_v1`, `concept_identity_v1`).
+- A rule body is stored in format 4, which spells cardinalities.
+- `RulesUpgraded::unmapped` lists the rules the upgrade left inert, with
+  why (`dialog_query::migration::Unmapped`), and
+  `dialog_query::migration::rewrite_body` is the rewrite it runs.
+  `dialog_query::rule::body::format_of` reads the format a stored body
+  names.
+- A stored rule body this release does not decode, a body spelling
+  picks or one in a later format, is inert on a read as it already was
+  at commit: a query that finds it no longer fails with `rule hydrate`.
+
+Why: a pick made one attribute decide both how a relation is read and
+what a write to it retires, so the relation's contents depended on how
+each writer read it, and a ranked read forced a succeeding write. A
+cardinality says only how many claims a cell holds. How to rank them is
+a rule, which reads the relation as it is and can be changed without
+rewriting it.
+
 ### `last` and `top` are aggregators, and a chosen value stands as the fact it was chosen from
 
 Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
@@ -34,8 +119,10 @@ best first, an unlisted value last and the newest among equals:
 } }
 ```
 
-All four choose in the order a read under the pick of the same name
-elects a cell's claims.
+All four fall back on the order a cardinality-one read elects a cell's
+claims by: `last` is that order, and the others take the newest among
+the values they hold equal. They are how a ranked read is written now
+that attributes have none.
 
 What this changes for you:
 
@@ -44,10 +131,10 @@ What this changes for you:
   when it lists any; `ReduceSpec::new` and `ranking` build one, and code
   building either by its fields names the new one.
 - A value `min`, `max`, `last` or `top` chose stands as the fact it was
-  bound from, so under `last` it competes with a stored claim of its
-  relation as any derived value does: the newer wins. A value `sum`,
-  `count` or `avg` computed still stands below every stored claim.
-  `ReduceEntry::selects` tells the two kinds apart.
+  bound from, so it competes with a stored claim of its relation under
+  cardinality one as any derived value does: the newer wins. A value
+  `sum`, `count` or `avg` computed still stands below every stored
+  claim. `ReduceEntry::selects` tells the two kinds apart.
 - `min` and `max` over values that compare equal return the one bound
   from the newest fact, where they returned the one of the smaller
   encoding; values that also stand equal still fall to the encoding.
@@ -61,45 +148,6 @@ given is a rule, not a property of how the relation is stored. With the
 choosing folds in the head, the relation keeps every claim and the rule
 says how to read it.
 
-### An attribute may be written under cardinality many beside a choosing pick
-
-Refs [#759](https://github.com/dialog-db/dialog-db/issues/759)
-
-An attribute's pick says how it is read. How it is written was the
-pick's too: any pick but `all` succeeded the claim a read returned.
-`cardinality: many` beside a choosing pick, or beside a list, now has a
-write add its claim and succeed none, so the cell keeps every claim
-written and the pick chooses among them on read:
-
-```json
-{ "the": "account/state", "as": ["suspended", "active"], "cardinality": "many" }
-```
-
-Writing `active` and then `suspended` leaves both claims and reads
-`suspended`; retracting `suspended` reads `active`. Without the
-cardinality the second write succeeds the first, and the retraction
-leaves nothing.
-
-What this changes for you:
-
-- `AttributeDescriptor::writes` is the pick a write through the
-  attribute carries: `all` when it is written under cardinality many,
-  else the pick it is read under. Code that passed
-  `descriptor.pick()` to `Update::associate` passes `writes()`.
-  `AttributeDescriptor::adding` declares it, and `adds` reads it.
-- `cardinality` alone is still the older spelling of `last` (one) and
-  `all` (many), and `cardinality: one` beside a pick says what the pick
-  already does. It is written back only where it says more than the
-  pick: `many` beside a choosing pick.
-- An attribute written under cardinality many is another attribute than
-  the one written as its pick reads, with its own identity. Every
-  attribute that does not declare it keeps the identity it had.
-
-Why: a pick that also decides what a write retires makes the relation's
-contents depend on how each writer reads it. A status that should keep
-every state and derive the current one by rank could not be declared:
-its ranked read forced a succeeding write.
-
 ### A deductive rule may fold, and one closing a cycle through a fold is set aside
 
 Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
@@ -107,10 +155,10 @@ Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
 [`notes/attribute-heads.md`](./notes/attribute-heads.md).
 
 A deductive rule takes a `reduce` clause again: `sum`, `count`,
-`count-distinct`, `min`, `max` and `avg` over the rows of its body,
-grouped by the head fields it does not reduce. The head is an ordinary
-concept, so any rule, query or subscription reads a folded relation as
-it reads any other. Since
+`count-distinct`, `min`, `max`, `avg`, `last` and `top` over the rows
+of its body, grouped by the head fields it does not reduce. The head is
+an ordinary concept, so any rule, query or subscription reads a folded
+relation as it reads any other. Since
 [#580](https://github.com/dialog-db/dialog-db/pull/580) every authored
 rule with a `reduce` was refused (`ReduceInOpenRule`), and nothing an
 author could write folded.
@@ -131,8 +179,9 @@ What this changes for you:
   `Absence::Folded`. `ProgramAnalysis::violations` and
   `EvaluationError::AggregationThroughRecursion` remain for a cycle
   with no rule to set aside.
-- A folded value stands below every stored claim of its relation under
-  `last`: a value written to the relation is read over the fold.
+- A computed value stands below every stored claim of its relation
+  under cardinality one: a value written to the relation is read over
+  the fold.
 - A subscription over a folding rule, or over a rule reading one, is
   recomputed on each poll that touches what it reads, not maintained
   row by row.
@@ -144,36 +193,35 @@ home but a query whose result has to be written back as a fact, where
 two replicas can disagree about it. A derived relation is never
 stored, so it cannot diverge.
 
-### A rule deciding on a `last` value inside its own cycle is set aside
+### A rule deciding on a cardinality-one value inside its own cycle is set aside
 
 Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
 [`notes/attribute-heads.md`](./notes/attribute-heads.md).
 
-Inside a recursive component a read under `last` sees every candidate
-the fixpoint derives, and readers elect the newest once the component
-is derived in full. That is exact for a rule that passes the value
-along: each candidate it derives stands by the one it carried, so the
-election at the exit picks what a stratified read would have. It is not
-for a rule that decides on the value. Such a rule fires for a candidate
-no reader elects, and nothing at the exit takes its conclusion back:
-with `b` reading `own` over a losing `end`, a rule concluding a label
-for `a` from `x/label(next) = "end"` concluded it, though every read of
-`b` returned `own`. The same body under another head, outside the
-cycle, concluded nothing.
+Inside a recursive component a cardinality-one read sees every
+candidate the fixpoint derives, and readers elect the newest once the
+component is derived in full. That is exact for a rule that passes the
+value along: each candidate it derives stands by the one it carried, so
+the election at the exit picks what a stratified read would have. It is
+not for a rule that decides on the value. Such a rule fires for a
+candidate no reader elects, and nothing at the exit takes its
+conclusion back: with `b` reading `own` over a losing `end`, a rule
+concluding a label for `a` from `x/label(next) = "end"` concluded it,
+though every read of `b` returned `own`. The same body under another
+head, outside the cycle, concluded nothing.
 
-A read under `last` whose value the rule decides on is now an absence
-test, as a read under `top`, `max` or `min` already was, so a rule
-closing a cycle through one is quarantined. A rule decides on a value
-when the read is pinned to a constant, or when the value, or anything
-a formula or an equality computes from it, is compared, joined on by
-another read, negated over, or checked against a constant. A rule
-passes a value along when it reaches the head and nothing else,
-directly or through formulas.
+A cardinality-one read whose value the rule decides on is now an
+absence test, so a rule closing a cycle through one is quarantined. A
+rule decides on a value when the read is pinned to a constant, or when
+the value, or anything a formula or an equality computes from it, is
+compared, joined on by another read, negated over, or checked against a
+constant. A rule passes a value along when it reaches the head and
+nothing else, directly or through formulas.
 
 What this changes for you:
 
-- A rule that reads its own relation under `last`, of another entity,
-  and decides on the value read is set aside, and listed by
+- A rule that reads its own relation under cardinality one, of another
+  entity, and decides on the value read is set aside, and listed by
   `ProgramAnalysis::quarantined` and `dialog.rule/quarantined`. A query
   over the relation returns what the remaining rules derive. Before, it
   returned that rule's conclusions too, the ones drawn from losing
@@ -193,10 +241,10 @@ What this changes for you:
 - A quarantine says what it was made over. `Quarantine::tested` names
   the cycle's plainest absence test: the rule making it (`by`), the
   relation tested (`target`) and how (`absence`). `Tested` is new, and
-  `Absence::Decided` is a `last` read the rule decides on, apart from
-  `Absence::Elected`, a ranked read. Code building a `Quarantine` by its
-  fields names the new one.
-- `Polarity::Electing` carries `decides` beside `ranked`.
+  `Absence::Decided` is a cardinality-one read the rule decides on.
+  `Absence::Elected`, a ranked read, is gone with ranked reads. Code
+  building a `Quarantine` by its fields names the new one.
+- `Polarity::Electing` carries `decides`, and no longer `ranked`.
 
 Why: a rule set has to mean one thing whatever else is installed. The
 same body gave a different answer when an unrelated rule closed a cycle
@@ -205,19 +253,42 @@ and names the rule.
 
 ### Compatibility and migration
 
-- A descriptor spelling `cardinality: many` beside a choosing pick, and
-  a rule folding with `last` or `top`, are new spellings. An older
-  release reads the first as the attribute written as its pick reads,
-  under another identity, and refuses the second, leaving the rule
-  inert.
-- A rule descriptor's `reduce` block is the one this release has always
-  encoded, so nothing stored is rewritten. An older release reads a
-  rule with a `reduce` installed by this one and leaves it inert, as it
-  left its own.
-- Nothing stored or synced changes. A rule the analysis now sets aside
-  stays installed and is evaluated again once the cycle it closed is
-  gone. Replicas on releases either side of this one can answer a query
-  over such a cycle differently.
+- A rule an older release stored spells its attributes under picks (0.3
+  and 0.4) or under the older `cardinality` (0.2), and sits under an
+  identity that hashed them. This release refuses an attribute spelled
+  with a pick, and reads a rule only under the identity it gives it now,
+  so every such rule is inert: it derives nothing, fires at no commit,
+  and no read fails over it. Nothing is rewritten on upgrade.
+  `Branch::upgrade_rules` (or `Branch::migrate`) is what an embedder
+  runs: it rewrites each rule whose attributes read under `last` or
+  `all` (spelled, or implied by a plain attribute) into cardinality one
+  or many, asserts it in format 4 under its identity now, and retracts
+  every rule fact the older release wrote for it. A rule reading an
+  attribute under `max`, `min` or `top` (including a listed `as` without
+  a pick, which read as `top`), or over a chain of relations, has no
+  rewriting with the same meaning: it is left as it is, inert, and
+  listed in `RulesUpgraded::unmapped` with why. Its author replaces it
+  with a rule folding with that aggregator. When to run the upgrade,
+  once after a full replication or on every pull, is the embedder's
+  decision, as before.
+- The upgrade also moves a `dialog.concept/transient` marker keyed by a
+  concept's 0.3 or 0.4 identity, as it moves one keyed by its 0.2
+  identity. An application that keyed its own facts by an attribute or
+  concept identity moves them with `dialog_query::migration`.
+- An older release cannot read what this one writes: a rule body in
+  format 4 is refused by name, and a rule stored under its new identity
+  is inert there, as an older release's rules are here. A batch this
+  release encodes spells `one` and `many`, which an older release does
+  not read; this release reads the batches an older one encoded.
+- What the tree stores is unchanged: a cell's claims, and how a
+  cardinality-one write elects the claim it succeeds, are as `last`
+  left them. A write a 0.3 or 0.4 replica made under `max`, `min` or
+  `top` succeeded the claim that pick elected; those claims stay as
+  written, and a read now returns the cell's newest.
+- A rule the analysis sets aside for deciding on a cardinality-one value
+  in its own cycle stays installed and is evaluated again once the cycle
+  it closed is gone. Replicas on releases either side of this one can
+  answer a query over such a cycle differently.
 
 ## 0.4.0 (2026-11-14)
 

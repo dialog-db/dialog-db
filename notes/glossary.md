@@ -58,28 +58,26 @@ Causal references ground claims in time and establish partial order between them
 
 ### Attribute
 
-A relation qualified by a value type and a pick: how a relation is read. `person/name` read as `text:` under `last` is an attribute. Two attributes over one relation, read as different types or under different picks, are two attributes, each with its own identity.
+A relation, a value type and a cardinality: how a relation is read and written. `person/name` read as `text:` under cardinality one is an attribute. Two attributes over one relation, read as different types or under different cardinalities, are two attributes, each with its own identity.
 
 ```json
 { "the": "person/name", "as": "text:" }
-{ "the": "person/email", "as": "text:", "pick": "all:" }
+{ "the": "person/email", "as": "text:", "cardinality": "many" }
 { "the": "job/status", "as": ["case:suspended", "case:active"] }
 ```
 
-An attribute's identity is a hash of the relations it reads, its type, its pick and the values its pick ranks.
+A listed `as` is an enumerated type: the values the attribute holds, in no ranking order. An attribute's identity is a hash of its relation, its cardinality, its type and the values it lists.
 
-#### Pick
+#### Cardinality
 
-Which of the claims a relation holds for an entity an attribute reads, spelled `pick`:
+How many claims a cell of an attribute holds, spelled `cardinality`:
 
-- `last` (the default): the newest claim;
-- `all`: every claim, as a set;
-- `top`: the best ranked of listed values (`as: [..]`) or relations (`the: [..]`), and a list implies `top`;
-- `max`, `min`: the greatest or least value of an ordered type.
+- `one` (the default): a read returns the cell's newest claim, and a write succeeds that claim, so the cell holds one live claim;
+- `many`: a read returns every claim, as a set, and a write adds a claim beside the others.
 
-Like a type, each pick is named by an entity, `last:`, `all:`, `top:`, `max:` and `min:`, which is how a descriptor spells it and what an attribute's identity hashes.
+A read that ranks claims, the greatest, the least or the best of a list, is not a property of an attribute but a rule whose `reduce` folds the claims with `max`, `min` or `top` (see [aggregation](./aggregation.md)). In Rust a cardinality is `dialog_corpus::Cardinality`, re-exported as `dialog_query::Cardinality`.
 
-A pick governs writes too, unless the attribute says otherwise: writing through an attribute under any pick but `all` succeeds the claim a read under that pick returns, and `all` adds a claim beside the others. An attribute declared `cardinality: many` beside a choosing pick is written as `all` is and read as its pick says, so the cell keeps every claim written. In Rust a pick is `dialog_corpus::Pick`.
+The releases 0.3 and 0.4 spelled a `pick` in its place (`last`, `all`, `top`, `max`, `min`) and could list relations under `the`. This release refuses both by name; `Branch::upgrade_rules` rewrites a stored rule reading under `last` or `all` and reports one it cannot rewrite.
 
 ### Concept
 

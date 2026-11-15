@@ -13,6 +13,19 @@
 > `dialog_corpus::Pick`, replaced the `Policy` and `Select` the
 > note mentions. Types are named by entities (`text:`, `integer:`,
 > `natural:`, ...). See [`glossary.md`](./glossary.md).
+>
+> Since then, picks are gone too
+> ([#793](https://github.com/dialog-db/dialog-db/issues/793)). An
+> attribute is a relation, a type and a **cardinality**: under one a
+> read returns the cell's newest claim (what `last` read) and a write
+> succeeds it, under many a read returns every claim (what `all` read)
+> and a write adds one. A read under `top`, `max` or `min`, and a chain
+> of relations, is now a rule whose `reduce` folds with that aggregator
+> (see [`aggregation.md`](./aggregation.md)). Where this note speaks of
+> a choosing pick, read cardinality one; of `all`, cardinality many. Its
+> ranked elections, relation chains and the `ranked` half of
+> `Polarity::Electing` are gone; a cardinality-one read whose value a
+> rule decides on inside its own cycle is still an absence test.
 
 ## The claim
 
