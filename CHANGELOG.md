@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A durable layer is the tree the primary points at, with no head of its own, and a pull merges a layer two replicas moved
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[#814](https://github.com/dialog-db/dialog-db/pull/814), argued in
 [notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
 point 4).
 
