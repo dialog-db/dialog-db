@@ -59,7 +59,7 @@ memory:notes    dialog.branch/tree       "<its tree, base58>"
 `branch.stack()` builds an [`OpenStack`], and `perform(&env)` opens it.
 Opening reads the primary's schema at its head, builds every layer it
 declares (a session layer empty, a durable layer at the tree the primary
-points it at) and mints `session:`. Opening reads and commits nothing,
+points it at) and mints `session:`. Opening commits nothing,
 so the environment only needs what a read needs: [`OpenStackEnv`] is
 storage reads, archive and tree node loads, memory `Resolve`, `Identify`
 (the stack derives the primary's branch entity from the operator's
