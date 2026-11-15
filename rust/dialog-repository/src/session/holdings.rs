@@ -7,10 +7,17 @@
 //! function of the handle it is given, and it leaves one thing a query
 //! cannot say: whether asking for a node would fetch it.
 //!
-//! That is asked by command, before the query is issued. [`Holdings`] is
-//! the provider dialog has for it: it reads the node commands a
-//! session's dispatches leave in [`control:`](crate::CONTROL)
-//! ([`Session::arrivals`]) and answers each by invoking.
+//! That is asked by command, before the query is issued. This module
+//! answers such commands, in two forms:
+//!
+//! - [`answers`] takes the commands a dispatch left in
+//!   [`control:`](crate::CONTROL) and returns their answers, for an
+//!   embedder that reads `control:` itself and runs its providers at a
+//!   moment of its choosing. It invokes what comes back.
+//! - [`Holdings`] reads `control:` for one session
+//!   ([`Session::arrivals_rows`]) and answers by invoking:
+//!   [`poll`](Holdings::poll) after a dispatch, or
+//!   [`next`](Holdings::next) in a loop of its own.
 //!
 //! | command | answered with |
 //! |---|---|
@@ -21,7 +28,7 @@
 //! stood when asked, with nothing fetched; for a fetch, after trying, so
 //! `false` means no place the replica knows of had the node.
 //!
-//! The provider asserts nothing. Its answer is a command, dispatched as
+//! Nothing here asserts a fact. An answer is a command, dispatched as
 //! the next tick's stimulus, and a rule of the space decides whether to
 //! keep it and where. A space that wants to show what it holds places an
 //! attribute on a memory layer and captures the answer there: the fact
@@ -46,15 +53,14 @@
 //! # }
 //! ```
 
-use dialog_common::Blake3Hash;
+use dialog_capability::Provider;
+use dialog_common::{Blake3Hash, ConditionalSync};
 use dialog_corpus::tree::CorpusNode;
-use dialog_corpus::{Changes, Entity, Pick, Update as _, Value};
+use dialog_corpus::{Change, Changes, Entity, Fact, Pick, Relation, Update as _, Value};
 use dialog_effects::archive::prelude::CatalogScope;
-use dialog_query::attribute::Relation;
-use dialog_query::{AttributeQuery, EvaluationError, Term};
 use dialog_search_tree::nodes;
 
-use crate::{Arrivals, CommitError, Session, SessionEnv, control_layer};
+use crate::{Arrivals, Branch, CommitError, Session, SessionEnv, control_layer};
 
 /// The command asking whether a node is held: its value is the node.
 pub const PROBE: &str = "dialog.node.probe/node";
@@ -71,12 +77,9 @@ pub const FETCHED: &str = "dialog.node.fetched/node";
 /// tried.
 pub const FETCHED_LOCAL: &str = "dialog.node.fetched/local";
 
-/// The provider could not answer.
+/// The node commands could not be answered.
 #[derive(Debug, thiserror::Error)]
 pub enum HoldingsError {
-    /// Reading the commands that arrived failed.
-    #[error("reading the node commands: {0}")]
-    Arrivals(#[from] EvaluationError),
     /// Reading a node failed, as distinct from the node not being there.
     #[error("reading a node: {0}")]
     Read(String),
@@ -85,91 +88,141 @@ pub enum HoldingsError {
     Answer(#[from] CommitError),
 }
 
-/// The provider of the node commands for one session: see the
-/// [module docs](self).
+/// One node command: the command's entity, the node it names, and
+/// whether it asks for the node to be fetched.
+type Asked = (Entity, Entity, [u8; 32], bool);
+
+/// The node command `the` of `command` with value `is` is, if it is
+/// one. A command of another attribute, or whose value is not a `node:`
+/// entity, is not.
+fn asked(command: &Entity, the: &Relation, is: &Value) -> Option<Asked> {
+    let fetching = match the.to_string().as_str() {
+        PROBE => false,
+        FETCH => true,
+        _ => return None,
+    };
+    let Value::Entity(node) = is else {
+        return None;
+    };
+    Some((command.clone(), node.clone(), node.node_hash()?, fetching))
+}
+
+/// The answers to `asked`, read through `env`: the two facts of each
+/// command's answer, on the command's own entity.
+async fn answer_all<Env>(
+    catalog: &CatalogScope,
+    asked: &[Asked],
+    env: &Env,
+) -> Result<Changes, HoldingsError>
+where
+    Env: Provider<nodes::Read<CorpusNode>> + ConditionalSync,
+{
+    let mut answers = Changes::new();
+    for (command, node, hash, fetching) in asked {
+        let read = nodes::Read::<CorpusNode>::new(catalog.clone(), Blake3Hash::from(*hash));
+        let read = if *fetching { read } else { read.locally() };
+        let local = read
+            .perform(env)
+            .await
+            .map_err(|error| HoldingsError::Read(error.to_string()))?
+            .is_some();
+        let (about, held) = if *fetching {
+            (FETCHED, FETCHED_LOCAL)
+        } else {
+            (PROBED, PROBED_LOCAL)
+        };
+        answer(&mut answers, command, about, Value::Entity(node.clone()));
+        answer(&mut answers, command, held, Value::Boolean(local));
+    }
+    Ok(answers)
+}
+
+/// The answers to the node commands among `commands`, for the tree of
+/// `branch`, read through `env`. Empty when none of `commands` is a node
+/// command.
+///
+/// For an embedder that reads what a dispatch left in `control:` itself
+/// and runs its providers then: it invokes what this returns
+/// (`session.invoke(answers)`), as it would any provider's answer.
 ///
 /// What "held" and "fetched" mean is the environment's: a node read
 /// asked for [locally](nodes::Read::locally) answers from what the
 /// replica holds, and one not so asked hydrates from wherever the
 /// subject's blocks live and keeps what arrives.
+pub async fn answers<Env>(
+    branch: &Branch,
+    commands: &Changes,
+    env: &Env,
+) -> Result<Changes, HoldingsError>
+where
+    Env: Provider<nodes::Read<CorpusNode>> + ConditionalSync,
+{
+    let asked: Vec<Asked> = commands
+        .iter()
+        .filter_map(|(command, the, change)| match change {
+            Change::Assert(is, _) => asked(command, the, is),
+            Change::Retract(_) => None,
+        })
+        .collect();
+    answer_all(&branch.archive().index(), &asked, env).await
+}
+
+/// The provider of the node commands for one session: see the
+/// [module docs](self).
 pub struct Holdings {
     session: Session,
     catalog: CatalogScope,
-    probes: Arrivals<AttributeQuery>,
-    fetches: Arrivals<AttributeQuery>,
-}
-
-/// The query for the commands of one attribute: every command and the
-/// node it names.
-fn commands(the: &str) -> AttributeQuery {
-    let the: dialog_corpus::Relation = the.parse().expect("a node command's attribute");
-    AttributeQuery::from(
-        Term::<Relation>::from(Relation::from(the))
-            .of(Term::<Entity>::var("command"))
-            .is(Term::<Entity>::var("node")),
-    )
+    commands: Arrivals,
 }
 
 impl Holdings {
     /// Provide the node commands for `session`, from here on: a command
     /// dispatched before this is not answered.
     pub fn serve(session: &Session) -> Self {
-        let control = control_layer();
-        let arrivals = |the| {
-            session
-                .arrivals(&control, commands(the))
-                .expect("every session has control:")
-        };
         Self {
             session: session.clone(),
             catalog: session.primary().archive().index(),
-            probes: arrivals(PROBE),
-            fetches: arrivals(FETCH),
+            commands: session
+                .arrivals_rows(&control_layer())
+                .expect("every session has control:"),
         }
     }
 
     /// Answer the node commands that arrived since the last call, in one
-    /// dispatch: every probe, then every fetch. Returns how many it
-    /// answered. A command whose value is not a `node:` entity is not
-    /// this provider's and is not answered.
-    ///
-    /// Call it after a dispatch that may have asked, or in a loop of
-    /// one's own; nothing here waits.
+    /// dispatch. Returns how many it answered. Nothing here waits: call
+    /// it after a dispatch that may have asked.
     pub async fn poll<Env: SessionEnv>(&mut self, env: &Env) -> Result<usize, HoldingsError> {
-        let mut asked = Vec::new();
-        for (arrivals, fetching) in [(&mut self.probes, false), (&mut self.fetches, true)] {
-            for command in arrivals.poll(env).await? {
-                let Value::Entity(node) = command.is else {
-                    continue;
-                };
-                let Some(hash) = node.node_hash() else {
-                    continue;
-                };
-                asked.push((command.of, node, hash, fetching));
+        let arrived = self.commands.rows();
+        self.answer(arrived, env).await
+    }
+
+    /// Wait for the session's next dispatch to leave a node command, and
+    /// answer what arrived. Returns how many it answered, at least one.
+    /// A provider that runs on its own calls this in a loop.
+    pub async fn next<Env: SessionEnv>(&mut self, env: &Env) -> Result<usize, HoldingsError> {
+        loop {
+            let arrived = self.commands.next_rows().await;
+            let answered = self.answer(arrived, env).await?;
+            if answered > 0 {
+                return Ok(answered);
             }
         }
+    }
+
+    /// Answer the node commands among `arrived` in one dispatch.
+    async fn answer<Env: SessionEnv>(
+        &self,
+        arrived: Vec<Fact>,
+        env: &Env,
+    ) -> Result<usize, HoldingsError> {
+        let asked: Vec<Asked> = arrived
+            .iter()
+            .filter_map(|fact| asked(&fact.of, &fact.the, &fact.is))
+            .collect();
         if asked.is_empty() {
             return Ok(0);
         }
-
-        let mut answers = Changes::new();
-        for (command, node, hash, fetching) in &asked {
-            let read =
-                nodes::Read::<CorpusNode>::new(self.catalog.clone(), Blake3Hash::from(*hash));
-            let read = if *fetching { read } else { read.locally() };
-            let local = read
-                .perform(env)
-                .await
-                .map_err(|error| HoldingsError::Read(error.to_string()))?
-                .is_some();
-            let (about, held) = if *fetching {
-                (FETCHED, FETCHED_LOCAL)
-            } else {
-                (PROBED, PROBED_LOCAL)
-            };
-            answer(&mut answers, command, about, Value::Entity(node.clone()));
-            answer(&mut answers, command, held, Value::Boolean(local));
-        }
+        let answers = answer_all(&self.catalog, &asked, env).await?;
         self.session.invoke(answers).perform(env).await?;
         Ok(asked.len())
     }

@@ -111,6 +111,9 @@ pub struct QueryLayer<'a> {
     /// Memory layers read beside the lines, live, each by the name a
     /// row's `in` binds to.
     memories: Vec<(Entity, &'a Ephemeral)>,
+    /// Lines read after `lines`, each a layer of a session read by the
+    /// name a row's `in` binds to: its durable layers.
+    named: Vec<(Entity, Live<'a>)>,
     changes: Changes,
 }
 
@@ -123,6 +126,10 @@ pub(crate) struct Composite {
     pub(crate) sources: Vec<Source>,
     /// The memory layers, each by the name a row's `in` binds to.
     pub(crate) memories: Vec<(Entity, Ephemeral)>,
+    /// The name a row of each of `sources` binds its `in` to, by index:
+    /// a durable layer's. A line with none named here is named as
+    /// [`QueryEnv::line_layer`] says.
+    pub(crate) names: Vec<Option<Entity>>,
 }
 
 impl Composite {
@@ -130,7 +137,7 @@ impl Composite {
     pub(crate) fn of(source: Source) -> Self {
         Self {
             sources: vec![source],
-            memories: Vec::new(),
+            ..Self::default()
         }
     }
 }
@@ -163,6 +170,7 @@ impl<'a> QueryLayer<'a> {
         let other = other.into();
         self.lines.extend(other.lines);
         self.memories.extend(other.memories);
+        self.named.extend(other.named);
         other.changes.assert(&mut self.changes);
         self
     }
@@ -174,9 +182,22 @@ impl<'a> QueryLayer<'a> {
         self
     }
 
-    /// The lines pinned as `views`, with the memory layers, owned: what
-    /// one query reads.
+    /// Read `branch` after the lines, live, as the durable layer named
+    /// `layer`: a layer of a session that is a branch.
+    pub(crate) fn with_line(mut self, layer: Entity, branch: &'a Branch) -> Self {
+        self.named.push((layer, Live::from(branch)));
+        self
+    }
+
+    /// The lines pinned as `views` (see [`pin`](Self::pin)), with the
+    /// memory layers, owned: what one query reads.
     pub(crate) fn composite(&self, views: Vec<View<'a>>) -> Composite {
+        let names = self
+            .lines
+            .iter()
+            .map(|_| None)
+            .chain(self.named.iter().map(|(layer, _)| Some(layer.clone())))
+            .collect();
         Composite {
             sources: views.into_iter().map(View::into_source).collect(),
             memories: self
@@ -184,12 +205,18 @@ impl<'a> QueryLayer<'a> {
                 .iter()
                 .map(|(layer, memory)| (layer.clone(), (*memory).clone()))
                 .collect(),
+            names,
         }
     }
 
-    /// The branches this layer reads from, in join order.
+    /// The branches this layer reads from, in join order, then the
+    /// durable layers'.
     pub fn branches(&self) -> Vec<&'a Branch> {
-        self.lines.iter().filter_map(|line| line.branch()).collect()
+        self.lines
+            .iter()
+            .chain(self.named.iter().map(|(_, line)| line))
+            .filter_map(|line| line.branch())
+            .collect()
     }
 
     /// The snapshots this layer reads from, in join order.
@@ -223,7 +250,11 @@ impl<'a> QueryLayer<'a> {
     /// Pin every line of this layer at the head it stands at now: what
     /// one query of the layer reads throughout.
     pub(crate) fn pin(&self) -> Vec<View<'a>> {
-        self.lines.iter().map(|line| line.pin()).collect()
+        self.lines
+            .iter()
+            .chain(self.named.iter().map(|(_, line)| line))
+            .map(|line| line.pin())
+            .collect()
     }
 
     /// The full per-query overlay: this layer's own
@@ -549,6 +580,9 @@ pub(crate) struct QueryEnv<'a> {
     /// Their rows stand where a line's session overlay's do, and their
     /// tombstones hide facts in every line.
     memories: Vec<(Entity, Ephemeral)>,
+    /// The name a row of each line binds its `in` to, by index, where the
+    /// composite named one: a durable layer's (see [`Composite::names`]).
+    names: Vec<Option<Entity>>,
     /// The query's own overlay: caller-asserted facts and the
     /// auto-injected metadata, held as a line (see
     /// [`QueryLayer::overlay`]) and read under the lines' format.
@@ -668,6 +702,7 @@ impl<'a> QueryEnv<'a> {
         Self {
             sources,
             memories: Vec::new(),
+            names: Vec::new(),
             overlay,
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
@@ -683,9 +718,14 @@ impl<'a> QueryEnv<'a> {
     /// A runtime env over `composite`: its lines and its memory layers
     /// (see [`new`](Self::new)).
     pub(crate) fn over(composite: Composite, overlay: Ephemeral, env: &'a Erased) -> Self {
-        let Composite { sources, memories } = composite;
+        let Composite {
+            sources,
+            memories,
+            names,
+        } = composite;
         let mut env = Self::new(sources, overlay, env);
         env.memories = memories;
+        env.names = names;
         env
     }
 
@@ -696,13 +736,16 @@ impl<'a> QueryEnv<'a> {
     }
 
     /// The name a row of the line at `index` binds its `in` to: the
-    /// primary is [`memory:`](crate::MEMORY); another line is named by
-    /// its subject.
+    /// primary is [`memory:`](crate::MEMORY); a durable layer of a
+    /// session is named as it is declared, `memory:<name>`; another line
+    /// is named by its subject.
     fn line_layer(&self, index: usize) -> Entity {
         if index == 0 {
-            memory_layer()
-        } else {
-            self.sources[index].as_view().subject().did().this()
+            return memory_layer();
+        }
+        match self.names.get(index) {
+            Some(Some(layer)) => layer.clone(),
+            _ => self.sources[index].as_view().subject().did().this(),
         }
     }
 
@@ -781,6 +824,7 @@ impl<'a> QueryEnv<'a> {
             let composite = Composite {
                 sources: self.sources.clone(),
                 memories: self.memories.clone(),
+                names: self.names.clone(),
             };
             Box::pin(settlement.advance(&composite, &self.overlay, layer, self.env))
                 .await
@@ -924,6 +968,7 @@ impl Clone for QueryEnv<'_> {
         Self {
             sources: self.sources.clone(),
             memories: self.memories.clone(),
+            names: self.names.clone(),
             overlay: self.overlay.clone(),
             layers: self.layers.clone(),
             format: self.format.clone(),

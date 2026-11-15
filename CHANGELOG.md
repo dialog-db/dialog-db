@@ -104,9 +104,12 @@ consumer no way to know, before it asked, whether asking for a node
 would fetch it.
 
 `Holdings` is the provider dialog has for that
-(`Holdings::serve(&session)`, then `poll` after a dispatch). It reads two
-commands as they arrive in `control:` and answers each by invoking a
-command of the same entity:
+(`Holdings::serve(&session)`, then `poll` after a dispatch, or `next` in
+a loop to wait for one). It reads two commands as they arrive in
+`control:` and answers each by invoking a command of the same entity.
+An embedder that reads `control:` itself calls
+`session::holdings::answers(&branch, &commands, &env)` with what a
+dispatch left there and invokes what comes back:
 
 - `dialog.node.probe/node`, the node to ask about, is answered with
   `dialog.node.probed/node` and `dialog.node.probed/local`: whether the
@@ -130,6 +133,137 @@ Why: whether a block is held changes with no commit, so a query step
 that reported it would answer the same query differently from one
 moment to the next. As a command's answer captured by a rule, it enters
 a query as a fact of a layer the query has pinned.
+### A session's transaction lands its commands when it publishes, a session opens through a read-only environment, and a whole layer is a legal scan
+
+[#809](https://github.com/dialog-db/dialog-db/pull/809).
+
+Three gaps an embedder met moving onto sessions. A transaction a
+session hands out (`Session::transaction`), committed and published
+through the transaction API, never landed what it dispatched in
+`control:`: only `Invocation::perform` did. Now its publish lands them,
+as an invocation's does. Opening a session asked for an environment
+that can commit, though opening only reads the primary and opens
+branches; it now asks for what a read needs. And a scan whose every
+term is a variable but a constant `in` was refused as an empty
+selector; a constant layer now constrains a scan, so it reads every row
+of that layer, and `Arrivals` can yield the arrived facts themselves,
+without a query.
+
+What this changes for you:
+
+- A transaction from `Session::transaction`, published with
+  `.commit().publish().perform(env)` or staged and then
+  `TransactionBatch::publish`, lands the commands it dispatched (with
+  `Transaction::dispatch`, or written `.at(control_layer())`) and the
+  ones its rules dispatched in the session's `control:` once the publish
+  wins, as one instant gone in the next, and wakes every `Arrivals`
+  waiting. A publish that loses its compare-and-swap lands nothing. It
+  is still not re-run on a moved head; `Session::invoke` is.
+- `OpenSessionEnv` is new: the providers opening a session and reading
+  through it need, with nothing that commits. `OpenSession::perform`,
+  `Arrivals::poll` and `Arrivals::next` are bounded on it rather than on
+  `SessionEnv`, which now extends it with what a commit needs (`Attest`,
+  `Publish`, `Import`, blob import and size). Every environment that
+  met the old bounds meets the new ones.
+- A scan with a constant `in` and every other term a variable, an
+  `AttributeQuery` with `.with_layer(Term::from(layer))`, reads every
+  row of that layer: of a memory layer, `control:` or a channel, its
+  rows alone; of the primary or a durable layer, the whole tree, which
+  is legal and costs what reading the whole tree costs. Before, it
+  failed with `EvaluationError::EmptySelector`. A scan with nothing
+  constant at all, the layer included, still does.
+- `Selector::only_in(layer)` is new: a selector the layer alone
+  constrains. A tree reads it as its whole entity index.
+- `Arrivals::rows` and `Arrivals::next_rows` are new: every fact the
+  layer's assertions since the last read assert, each once, oldest
+  first, with no query; `Session::arrivals_rows(layer)` builds a reader
+  for them. Rows and `poll` read the same arrivals, so a row one yields
+  the other does not. `Arrivals` takes its query type as a default
+  parameter, `Arrivals<Q = ()>`.
+
+Why: an embedder resolves its commands with its own transactions, so
+the commands a session's transaction dispatched must reach the
+session's providers whichever way it was published; it opens branches
+with an environment that only reads, and the session beside them needs
+no more; and its providers tell a command apart by the attributes its
+entity carries, so they need every row of the arrived instant, not one
+concept's.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten:
+  `control:` is process-local, and a scan of a whole layer reads what
+  is already stored.
+
+### A durable layer is a branch the primary points at, and `Session::sync` pulls and pushes it with the primary
+
+[#808](https://github.com/dialog-db/dialog-db/pull/808), argued in
+[notes/layers.md](./notes/layers.md) (points 1, 11 and 13, and
+"Durable layers" under "Open").
+
+A session's layers were all in memory. A layer can now be durable: a
+branch of the repository, declared in the primary as
+`memory:<name> dialog.layer/store "durable"` (`Store::Durable`). A
+session opens the branch `<name>` beside the primary and reads it as a
+line whose rows bind `in` to `memory:<name>`. A write `in:
+memory:<name>`, a rule head whose descriptor names it, and a write
+while it is selected are committed on that branch as part of the
+dispatch, and nothing of them lives in memory. The primary records the
+revision each durable layer stands at as a pointer fact of its own,
+`memory:<name> dialog.layer/revision <the layer's tree, base58>`, under
+`last`, written by the dispatch that moved the layer, so the primary's
+history says which revision of each layer goes with each of its own.
+The layers publish bottom to top, the primary last since it carries the
+pointers, and a lost compare-and-swap on any of them re-runs the whole
+dispatch from the new heads. `Session::sync` pulls every durable layer
+with upstreams, then the primary, writes the pointer of a layer the
+pulls moved, and pushes the layers, then the primary.
+
+What this changes for you:
+
+- `Store::Durable` is new; `LayerDeclaration::new("memory:notes".parse()?,
+  Store::Durable)` declares one. A durable layer named under another
+  store (`session:notes`) or with no branch name (`memory:`) fails the
+  session's open with `CommitError::InvalidPlacement`.
+- `Session::layers` lists the durable layers after the memory layers.
+  `Session::durable(name)` and `Session::durables()` hand out their
+  branches, for setting their upstreams; `Session::layer` answers
+  `None` for a durable layer, which holds no memory cell.
+- A dispatch that writes a durable layer commits on its branch and on
+  the primary, with the pointer fact, so it publishes on the primary
+  even when it wrote nothing else there. The session's own
+  `dialog.layer/revision` rows of `session:` include each durable
+  layer's tree, so a rule premised on a durable layer's revision fires
+  when it moved.
+- `CommitError::UnboundLayer` refuses a write into `memory:<name>` the
+  primary does not declare, before any branch moves.
+- `Session::sync(download)` and `SyncSession`, `SyncEnv` and
+  `SyncError` are new. A sync names its `Download`, as every pull does.
+- A query through a session, `Session::query`, a transaction through
+  it, and `Session::subscribe` read the durable layers too. A
+  subscription re-evaluates when a durable layer moved.
+
+Why: a device-local or replicated table beside the primary is a layer,
+not a separate mechanism, and its history has to be tied to the
+primary's, the way a submodule pointer ties a submodule to its
+superproject, so one revision of the primary names the whole
+composite.
+
+#### Compatibility and migration
+
+- `dialog.layer/store "durable"` and the pointer fact
+  `memory:<name> dialog.layer/revision` are new stored facts in the
+  primary, replicated with it; the layer's rows are in its own branch,
+  synced as any branch is. 0.4.0 and earlier know no layer declarations
+  and read both as ordinary facts, and read the primary without the
+  layer's rows. A build of this release line from before this change
+  opens no session on a primary that declares a durable layer: it
+  refuses the declaration with `CommitError::InvalidPlacement`. Nothing
+  already stored is rewritten, and nothing has to be run.
+- What a durable layer syncs to is its branch's own upstreams, set on
+  the branch (`Session::durable(name)` then `Branch::set_upstream`), on
+  each replica. The declaration carries no upstream.
+
 ### `control:` is the layer a command lives in for one tick, a channel is a layer its consumer empties, and a provider reads what arrives in either
 
 [#807](https://github.com/dialog-db/dialog-db/pull/807), argued in

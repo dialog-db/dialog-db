@@ -90,6 +90,9 @@ impl ValueBound {
 /// be very slow and is often not what you want). To avoid this, always be sure
 /// to specify at least one field of the [`Selector`] before submitting
 /// a query!
+///
+/// A layer constrains a selector too ([`Selector::only_in`]): one naming
+/// a layer and nothing else reads every [`Fact`] of that layer.
 #[derive(Debug, Clone)]
 pub struct Selector<State>
 where
@@ -343,6 +346,31 @@ where
     pub fn in_layer(mut self, layer: Entity) -> Selector<State> {
         self.layer = Some(layer);
         self
+    }
+
+    /// Read every [`Fact`] of `layer`, and nothing of any other: like
+    /// [`in_layer`](Self::in_layer), but the layer alone constrains the
+    /// selector, so a selector naming nothing else is a scan of the whole
+    /// layer. A read over several layers takes that layer's rows alone,
+    /// which for a layer held in memory is cheap. A store holding one
+    /// layer reads all it holds, which for a tree is a scan of the whole
+    /// entity index: naming the primary, or a layer kept as a tree, so is
+    /// legal but costs what reading the whole tree costs.
+    pub fn only_in(self, layer: Entity) -> Selector<Constrained> {
+        Selector::<Constrained> {
+            entity: self.entity,
+            attribute: self.attribute,
+            value: self.value,
+            entity_prefix: self.entity_prefix,
+            attribute_prefix: self.attribute_prefix,
+            attribute_name: self.attribute_name,
+            name_shape: self.name_shape,
+            value_prefix: self.value_prefix,
+            value_lower: self.value_lower,
+            value_upper: self.value_upper,
+            layer: Some(layer),
+            state_type: PhantomData,
+        }
     }
 
     /// Set the [`Relation`] field (the predicate) of the [`Selector`]

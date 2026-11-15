@@ -4,7 +4,7 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* The problem and the approach (top story). Three of the four things to build in dialog are built and tested on the draft branch: the readings over a decoded node, the five resolvers, the entities. That an index node's buffered ops are readable by no resolver. | *Where are we at?* Building. All four things are built on the draft branch, which now sits on top of the session stack (`claude/layers-6`) instead of beside it. |
+| **Status** | *What do we know?* The problem and the approach (top story). Three of the four things to build in dialog are built and tested on the draft branch: the readings over a decoded node, the five resolvers, the entities. That an index node's buffered ops are readable by no resolver. | *Where are we at?* Building. All four things are built on the draft branch, which now sits on top of the session stack (`claude/layers-8`, 0.5.0-rc.4) instead of beside it. |
 | **Agenda** | *What do we need to know?* The maintainer's word on what building settled without them: a span's and an entry's entity being its place, `fanout-bits`, `of` taking an entity only. Whether buffered ops are to be exposed, and as what. How a row's details are reached by its own entity. | *Where are we going?* Tonk: pin, a query step that is not a concept, the component, and the removal of its reader. In dialog: the points still open in what is built. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
@@ -815,4 +815,42 @@ it, and said so.
 
 **Decided.** By the maintainer: `fanout-exponent`. Renamed in the
 resolver, its tests and the changelog.
+
+## 2026-11-15, Building: on `layers-8`; what an embedder calls
+
+**Asked.** The maintainer: is something missing in the stack's work for
+a good integration story; then, raise those points with the stack
+session; and tonk-labs/tonk#1318 moves tonk onto the stack and
+dissolves its own machinery.
+
+**Learned.** The stack had moved two steps since the last merge:
+durable layers and `Session::sync` (#808), and what tonk's integration
+found missing (#809): a session's transaction lands its commands, a
+session opens through a read-only environment, and
+`Session::arrivals_rows` reads everything that arrives in a layer.
+
+tonk#1318 says how an embedder drives providers: it reads what a
+dispatch left in `control:` under its own lock, inside the request, and
+runs its registry then. It does not run a standing loop, because a loop
+outlives the request and cannot tell which client asked. So what an
+embedder needs of a provider dialog ships is a function from the
+commands that landed to their answers, which `Holdings` had on
+2026-11-14 and lost when it was re-wired.
+
+It is back, as `holdings::answers(&branch, &commands, &env)`.
+`Holdings` now reads `control:` through one `arrivals_rows` reader
+instead of one reader per command, which also gives it a waiting form,
+`next`.
+
+Raised with the stack session, at the maintainer's word: nothing runs a
+provider, so one dialog ships is not built in; an asker cannot wait for
+its answer; there is no convention for a provider that fails; and a
+tree's root is text in `dialog.layer/revision` and an entity in
+`dialog.branch/tree`. Not raised, since #809 answered it: a provider
+waiting on more than one command.
+
+1,807 tests in the three crates, the workspace clippy gate and a wasm
+check pass on the merge.
+
+**Decided.** Nothing.
 

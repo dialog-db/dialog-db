@@ -1332,23 +1332,16 @@ pub fn selector_range(
         );
         Key::from(varkey::build_key(&parts))
     };
-    if selector.entity().is_some()
+    let by_entity = selector.entity().is_some()
         || (selector.entity_prefix().is_some()
             && selector.value().is_none()
             && selector.attribute().is_none()
-            && selector.attribute_prefix().is_none())
-    {
-        let (start, end) = apply_prefix_bounds(
-            EntityKey(exact_bound(ENTITY_KEY_TAG, false)),
-            EntityKey(exact_bound(ENTITY_KEY_TAG, true)),
-            selector,
-            manifest,
-        );
-        start.into_key()..=end.into_key()
-    } else if selector.value().is_some()
-        || selector.value_prefix().is_some()
-        || selector.value_lower().is_some()
-        || selector.value_upper().is_some()
+            && selector.attribute_prefix().is_none());
+    if !by_entity
+        && (selector.value().is_some()
+            || selector.value_prefix().is_some()
+            || selector.value_lower().is_some()
+            || selector.value_upper().is_some())
     {
         let (start, end) = apply_prefix_bounds(
             ValueKey(exact_bound(VALUE_KEY_TAG, false)),
@@ -1357,7 +1350,9 @@ pub fn selector_range(
             manifest,
         );
         start.into_key()..=end.into_key()
-    } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
+    } else if !by_entity
+        && (selector.attribute().is_some() || selector.attribute_prefix().is_some())
+    {
         let (start, end) = apply_prefix_bounds(
             AttributeKey(exact_bound(ATTRIBUTE_KEY_TAG, false)),
             AttributeKey(exact_bound(ATTRIBUTE_KEY_TAG, true)),
@@ -1366,8 +1361,15 @@ pub fn selector_range(
         );
         start.into_key()..=end.into_key()
     } else {
-        // `Constrained` guarantees at least one field is set.
-        unreachable!("Selector will always have at least one field specified")
+        // By entity, or by nothing but a layer (`Selector::only_in`):
+        // then every fact, the whole entity index.
+        let (start, end) = apply_prefix_bounds(
+            EntityKey(exact_bound(ENTITY_KEY_TAG, false)),
+            EntityKey(exact_bound(ENTITY_KEY_TAG, true)),
+            selector,
+            manifest,
+        );
+        start.into_key()..=end.into_key()
     }
 }
 
@@ -2283,6 +2285,19 @@ mod selector_range_tests {
                 );
             }
         }
+    }
+
+    /// A selector constrained by its layer alone reads every fact: the
+    /// whole entity index, edge to edge.
+    #[dialog_common::test]
+    async fn it_reads_the_whole_entity_index_for_a_selector_naming_only_a_layer() {
+        let manifest = dialog_search_tree::Manifest::default();
+        let layer = Entity::from_str("control:").expect("valid entity");
+        let range = selector_range(&Selector::new().only_in(layer), &manifest);
+        let start = <EntityKey<Key> as KeyViewConstruct>::min().into_key();
+        let end = <EntityKey<Key> as KeyViewConstruct>::max().into_key();
+        assert_eq!(range.start().as_ref(), start.as_ref());
+        assert_eq!(range.end().as_ref(), end.as_ref());
     }
 }
 

@@ -19,6 +19,20 @@
 //! in-memory layer every session has, [`CONTROL`] the loopback a command
 //! lands in.
 //!
+//! A **durable** layer, `memory:<name>` ([`Store::Durable`]), is the
+//! repository's branch `<name>`: a session reads it as a line beside the
+//! primary and commits what a dispatch writes into it on that branch.
+//! The primary records the revision each durable layer stands at as a
+//! pointer fact of its own (`memory:<name> dialog.layer/revision
+//! <tree>`), written by the dispatch that moved the layer, so the
+//! primary's history says which revision of each durable layer goes with
+//! each of its own:
+//!
+//! ```text
+//! memory:notes   dialog.layer/store      "durable"
+//! memory:notes   dialog.layer/revision   "<the notes branch's tree, base58>"
+//! ```
+//!
 //! [`CONTROL`] holds a row for one tick: what a dispatch writes into it
 //! (`.at(control_layer())`, a rule head whose descriptor names
 //! `in: control:`, or a command, whose concept carries the
@@ -40,6 +54,7 @@ use dialog_corpus::{
     Change, Changes, DialogCorpusError, Entity, Fact, FactView, Pick, Relation, Selector,
     Statement, Update, Value,
 };
+use dialog_effects::branch::invalid_name;
 use dialog_query::the;
 use futures_util::TryStreamExt as _;
 
@@ -145,22 +160,36 @@ impl Statement for Selection {
     }
 }
 
+/// The revision a branch stands at, as a layer's revision row and a
+/// durable layer's pointer fact carry it: its tree, base58, as
+/// `dialog.branch/tree` renders a tree.
+pub(crate) fn tree_revision(revision: &Revision) -> Value {
+    let tree: &[u8] = revision.tree.hash();
+    Value::String(tree.to_base58())
+}
+
 /// The revision every layer of a session stands at, as text: of
 /// [`MEMORY`] the tree of `primary`'s revision (none for a primary with
-/// no revision); of each of `memories` and of [`SESSION`], `own`, the
-/// hash of its instant chain. Each is base58, as `dialog.branch/tree`
-/// renders a tree.
+/// no revision); of each of `durables` the tree of its branch's (none
+/// for one with no revision); of each of `memories` and of [`SESSION`],
+/// `own`, the hash of its instant chain. Each is base58, as
+/// `dialog.branch/tree` renders a tree.
 fn revisions(
     primary: Option<&Revision>,
+    durables: &[(Entity, Option<Revision>)],
     memories: &[(Entity, Ephemeral)],
     own: &Ephemeral,
 ) -> Vec<(Entity, Value)> {
     let chain = |memory: &Ephemeral| Value::String(memory.revision().hash.as_bytes().to_base58());
     let session = session_layer();
-    let mut rows = Vec::with_capacity(memories.len() + 2);
+    let mut rows = Vec::with_capacity(memories.len() + durables.len() + 2);
     if let Some(revision) = primary {
-        let tree: &[u8] = revision.tree.hash();
-        rows.push((memory_layer(), Value::String(tree.to_base58())));
+        rows.push((memory_layer(), tree_revision(revision)));
+    }
+    for (layer, revision) in durables {
+        if let Some(revision) = revision {
+            rows.push((layer.clone(), tree_revision(revision)));
+        }
     }
     for (layer, memory) in memories {
         if *layer != session {
@@ -176,11 +205,12 @@ fn revisions(
 /// session records in its own layer once a dispatch has published.
 pub(crate) fn revision_rows(
     primary: Option<&Revision>,
+    durables: &[(Entity, Option<Revision>)],
     memories: &[(Entity, Ephemeral)],
     own: &Ephemeral,
 ) -> Changes {
     let mut rows = Changes::new();
-    for (layer, revision) in revisions(primary, memories, own) {
+    for (layer, revision) in revisions(primary, durables, memories, own) {
         rows.associate(revision_attr(), layer, revision, Pick::Last);
     }
     rows
@@ -196,11 +226,12 @@ pub(crate) fn revision_rows(
 /// own rows, and would be elected over the new one.
 pub(crate) fn revision_stimulus(
     primary: Option<&Revision>,
+    durables: &[(Entity, Option<Revision>)],
     memories: &[(Entity, Ephemeral)],
     own: &Ephemeral,
 ) -> Changes {
     let mut rows = Changes::new();
-    for (layer, revision) in revisions(primary, memories, own) {
+    for (layer, revision) in revisions(primary, durables, memories, own) {
         let recorded = own.scan(&Selector::new().the(revision_attr()).of(layer.clone()));
         if recorded.iter().any(|fact| fact.is == revision) {
             continue;
@@ -247,6 +278,15 @@ pub enum Store {
     /// what it consumed. Bare [`CONTROL`], the loopback, is every
     /// session's, and declaring it builds nothing.
     Control,
+    /// A branch, `memory:<name>`: the repository's branch `<name>`,
+    /// which the session opens beside the primary, reads as a line
+    /// stamped with the layer's name, and commits what a dispatch writes
+    /// into the layer on. No memory cell holds its rows. The primary
+    /// records the revision the layer stands at as a pointer fact
+    /// (`memory:<name> dialog.layer/revision`), and
+    /// [`Session::sync`](crate::Session::sync) pulls and pushes it with
+    /// the primary when its branch has upstreams.
+    Durable,
 }
 
 impl Store {
@@ -255,6 +295,7 @@ impl Store {
         match self {
             Store::Memory => "memory",
             Store::Control => "control",
+            Store::Durable => "durable",
         }
     }
 
@@ -264,6 +305,7 @@ impl Store {
         match text {
             "memory" => Some(Store::Memory),
             "control" => Some(Store::Control),
+            "durable" => Some(Store::Durable),
             _ => None,
         }
     }
@@ -319,15 +361,51 @@ impl Statement for LayerDeclaration {
     }
 }
 
+/// [`Statement`] recording, in the primary, the revision a durable layer
+/// stands at: its `dialog.layer/revision` pointer fact, under `last`,
+/// bound for no layer, so it lands in the primary and never follows a
+/// selection. A dispatch that moves a durable layer writes it; so does
+/// [`Session::sync`](crate::Session::sync) when a pull moved the layer.
+pub(crate) struct Pointer {
+    pub(crate) layer: Entity,
+    pub(crate) revision: Value,
+}
+
+impl Statement for Pointer {
+    fn assert(self, update: &mut impl Update) {
+        update.associate(revision_attr(), self.layer, self.revision, Pick::Last);
+    }
+
+    fn retract(self, update: &mut impl Update) {
+        update.dissociate(revision_attr(), self.layer, self.revision);
+    }
+}
+
+/// The branch a durable layer is: `<name>` of `memory:<name>`. A layer
+/// declared durable under any other name, or with a name that is not a
+/// branch name, fails the open.
+pub(crate) fn durable_branch(layer: &Entity) -> Result<String, CommitError> {
+    let text = layer.to_string();
+    let name = text.strip_prefix(MEMORY).unwrap_or_default();
+    if name.is_empty() || invalid_name(name).is_some() {
+        return Err(CommitError::InvalidPlacement {
+            attribute: format!("dialog.layer/store of {layer}"),
+            value: "\"durable\" names a layer memory:<branch>".into(),
+        });
+    }
+    Ok(name.to_string())
+}
+
 /// Read a layer declaration's value as a store, or fail the commit.
 fn store_value(layer: &Entity, value: &Value) -> Result<Store, CommitError> {
-    match value {
-        Value::String(text) if let Some(store) = Store::parse(text) => Ok(store),
-        other => Err(CommitError::InvalidPlacement {
-            attribute: format!("dialog.layer/store of {layer}"),
-            value: format!("{other:?}"),
-        }),
-    }
+    let store = match value {
+        Value::String(text) => Store::parse(text),
+        _ => None,
+    };
+    store.ok_or_else(|| CommitError::InvalidPlacement {
+        attribute: format!("dialog.layer/store of {layer}"),
+        value: format!("{value:?}"),
+    })
 }
 
 /// The layers declared for a session: the primary's committed
@@ -411,6 +489,24 @@ impl Layers {
     }
 }
 
+/// The pointer facts `primary`'s tree holds, by layer: the revision it
+/// records each durable layer at, as the cell's elected claim.
+pub(crate) async fn pointers(
+    primary: &Source,
+    env: &Erased,
+) -> Result<Vec<(Entity, Value)>, CommitError> {
+    if primary.revision().is_none() {
+        return Ok(Vec::new());
+    }
+    Ok(
+        committed(primary, Selector::new().the(revision_attr()), env)
+            .await?
+            .into_iter()
+            .map(|fact| (fact.of, fact.is))
+            .collect(),
+    )
+}
+
 /// Selector for every committed `dialog.layer/store` declaration.
 fn store_selector() -> Selector<Constrained> {
     Selector::new().the(store_attr())
@@ -479,10 +575,29 @@ mod tests {
     /// names it back.
     #[dialog_common::test]
     fn it_reads_back_every_store_it_names() {
-        for store in [Store::Memory, Store::Control] {
+        for store in [Store::Memory, Store::Control, Store::Durable] {
             assert_eq!(Store::parse(store.as_str()), Some(store));
         }
-        assert_eq!(Store::parse("durable"), None);
+        assert_eq!(Store::parse("disk"), None);
+    }
+
+    /// A durable layer is the branch its name gives after `memory:`; a
+    /// durable layer named under another store, or with no branch name,
+    /// is refused with `InvalidPlacement`.
+    #[dialog_common::test]
+    fn it_names_the_branch_a_durable_layer_is() -> anyhow::Result<()> {
+        assert_eq!(durable_branch(&"memory:notes".parse()?)?, "notes");
+        for refused in ["session:notes", "memory:", "control:notes"] {
+            let refused: Entity = refused.parse()?;
+            assert!(
+                matches!(
+                    durable_branch(&refused),
+                    Err(CommitError::InvalidPlacement { .. })
+                ),
+                "{refused}"
+            );
+        }
+        Ok(())
     }
 
     /// Taking the writes into `control:` out of a batch leaves the

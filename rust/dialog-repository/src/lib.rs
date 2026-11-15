@@ -47,7 +47,9 @@ pub use placement::{
 pub mod session;
 pub use session::holdings::Holdings;
 pub use session::invoke::{Invocation, MAX_RERUNS};
-pub use session::{Arrivals, OpenSession, Session, SessionEnv};
+pub use session::{
+    Arrivals, OpenSession, OpenSessionEnv, Session, SessionEnv, SyncEnv, SyncError, SyncSession,
+};
 
 /// Streaming-merge and tombstone helpers used by the query-session
 /// composition layer.

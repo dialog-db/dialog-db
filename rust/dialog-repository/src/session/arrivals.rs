@@ -53,12 +53,19 @@ use dialog_corpus::{Change, Changes, Entity, Fact, Pick, Relation, Update as _};
 use dialog_query::EvaluationError;
 use dialog_query::query::{Application, Output as _};
 
-use crate::{Ephemeral, QueryLayer, Session, SessionEnv};
+use crate::{Ephemeral, OpenSessionEnv, QueryLayer, Session};
 
 /// The rows of a query that the assertions arriving in one layer of a
 /// session make, each once, oldest first: what a provider reads its
 /// commands from. Built by [`Session::arrivals`]; read with
 /// [`poll`](Self::poll), or [`next`](Self::next) to wait for them.
+///
+/// A reader can also take the arrived facts themselves, with no query:
+/// [`rows`](Self::rows), or [`next_rows`](Self::next_rows) to wait for
+/// them, on a reader built by [`Session::arrivals_rows`] (or any other).
+/// Read rows when a command is told apart by the attributes its entity
+/// carries rather than by one concept; read through a query to take one
+/// concept's commands, bound as its terms.
 ///
 /// The query is evaluated over the arrived rows alone, read as rows of
 /// the layer, so a row the layer held before it arrived is never yielded
@@ -74,7 +81,7 @@ use crate::{Ephemeral, QueryLayer, Session, SessionEnv};
 /// yield a row again that the reader had not retracted; the commands
 /// that stood in `control:` meanwhile are gone. Polling after every
 /// dispatch, as a provider in the invoke loop does, never falls behind.
-pub struct Arrivals<Q: Application> {
+pub struct Arrivals<Q = ()> {
     session: Session,
     layer: Entity,
     memory: Ephemeral,
@@ -92,6 +99,18 @@ impl Session {
     /// published dispatch leaves, or a channel the session holds. `None`
     /// for a layer the session does not hold. See [`Arrivals`].
     pub fn arrivals<Q: Application>(&self, layer: &Entity, query: Q) -> Option<Arrivals<Q>> {
+        self.reader(layer, query)
+    }
+
+    /// Read what arrives in `layer` row by row, with no query: a reader
+    /// whose [`rows`](Arrivals::rows) and [`next_rows`](Arrivals::next_rows)
+    /// yield every fact newly asserted there. `None` for a layer the
+    /// session does not hold. See [`Arrivals`].
+    pub fn arrivals_rows(&self, layer: &Entity) -> Option<Arrivals> {
+        self.reader(layer, ())
+    }
+
+    fn reader<Q>(&self, layer: &Entity, query: Q) -> Option<Arrivals<Q>> {
         let memory = self.layer(layer)?.clone();
         let sequence = memory.revision().sequence;
         let held = memory.export().iter().filter_map(asserted).collect();
@@ -119,19 +138,26 @@ fn asserted((of, the, change): (&Entity, &Relation, &Change)) -> Option<Fact> {
     }
 }
 
-impl<Q: Application> Arrivals<Q> {
+impl<Q> Arrivals<Q> {
     /// The layer this reader reads.
     pub fn layer(&self) -> &Entity {
         &self.layer
     }
 
-    /// The rows of the query the layer's assertions since the last read
-    /// make, oldest first; empty when nothing the query reads arrived.
-    /// The reader then stands at the layer's newest instant.
-    pub async fn poll<'a, Env: SessionEnv>(
-        &'a mut self,
-        env: &'a Env,
-    ) -> Result<Vec<Q::Conclusion>, EvaluationError> {
+    /// Every fact the layer's assertions since the last read assert,
+    /// each once, oldest first, with no query: what a provider reads when
+    /// it decodes a command by the set of attributes its entity carries,
+    /// rather than by one concept. Empty when nothing arrived. The reader
+    /// then stands at the layer's newest instant, as after
+    /// [`poll`](Self::poll): the two read the same arrivals, so a row one
+    /// yields the other does not.
+    ///
+    /// Read rows to take everything that arrived, a whole command of
+    /// whatever shape; read through a query ([`Session::arrivals`] and
+    /// [`poll`](Self::poll)) to take only the commands of one concept,
+    /// bound as its terms. A query whose every term is a variable but a
+    /// constant `in` naming the layer reads the same rows as claims.
+    pub fn rows(&mut self) -> Vec<Fact> {
         let mut arrived = take(&mut self.held);
         match self.memory.since(self.sequence) {
             Some(instants) => {
@@ -147,6 +173,39 @@ impl<Q: Application> Arrivals<Q> {
                 arrived.extend(self.memory.export().iter().filter_map(asserted));
             }
         }
+        arrived
+    }
+
+    /// The next facts to arrive: what [`rows`](Self::rows) yields,
+    /// waiting for the session's next dispatch to publish while it yields
+    /// nothing. Only a dispatch through the session wakes it, as with
+    /// [`next`](Self::next).
+    pub async fn next_rows(&mut self) -> Vec<Fact> {
+        let session = self.session.clone();
+        loop {
+            // Listening before reading, so a dispatch landing between the
+            // read and the wait is not slept through.
+            let landed = session.inner.loopback.landed.notified();
+            let mut landed = pin!(landed);
+            landed.as_mut().enable();
+            let rows = self.rows();
+            if !rows.is_empty() {
+                return rows;
+            }
+            landed.await;
+        }
+    }
+}
+
+impl<Q: Application> Arrivals<Q> {
+    /// The rows of the query the layer's assertions since the last read
+    /// make, oldest first; empty when nothing the query reads arrived.
+    /// The reader then stands at the layer's newest instant.
+    pub async fn poll<'a, Env: OpenSessionEnv>(
+        &'a mut self,
+        env: &'a Env,
+    ) -> Result<Vec<Q::Conclusion>, EvaluationError> {
+        let arrived = self.rows();
         if arrived.is_empty() {
             return Ok(Vec::new());
         }
@@ -169,7 +228,7 @@ impl<Q: Application> Arrivals<Q> {
     /// for the session's next dispatch to publish while it yields
     /// nothing. Only a dispatch through the session wakes it; a write
     /// into the layer's [`Ephemeral`] directly is read on the next poll.
-    pub async fn next<Env: SessionEnv>(
+    pub async fn next<Env: OpenSessionEnv>(
         &mut self,
         env: &Env,
     ) -> Result<Vec<Q::Conclusion>, EvaluationError> {
@@ -177,7 +236,7 @@ impl<Q: Application> Arrivals<Q> {
         loop {
             // Listening before reading, so a dispatch landing between the
             // read and the wait is not slept through.
-            let landed = session.inner.landed.notified();
+            let landed = session.inner.loopback.landed.notified();
             let mut landed = pin!(landed);
             landed.as_mut().enable();
             let rows = self.poll(env).await?;
