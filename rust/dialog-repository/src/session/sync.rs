@@ -81,6 +81,17 @@ impl Session {
     /// point at gets its pointer fact written, as a dispatch through the
     /// session; and the primary is pushed after the layers, so a replica
     /// that pulls a pointer finds the layer revision it names upstream.
+    ///
+    /// After the pulls, and again after the pushes, the session records
+    /// the `dialog.layer/revision` row of every layer that stands
+    /// somewhere other than its row says, as a dispatch does once it
+    /// publishes, and only those: the dispatch that writes the pointer
+    /// facts records them, and with no pointer to write but a layer the
+    /// pulls moved, an empty dispatch does. Each such dispatch takes the
+    /// moved rows as its stimulus, so a rule premised on the revision of
+    /// `memory:` fires when a pull moved the primary, as it fires when a
+    /// commit did. A sync after which no layer stands anywhere new
+    /// dispatches nothing and writes nothing into `session:`.
     pub fn sync(&self, download: Download) -> SyncSession<'_> {
         SyncSession {
             session: self,
@@ -91,8 +102,10 @@ impl Session {
 
 impl SyncSession<'_> {
     /// Pull every durable layer with upstreams, then the primary; record
-    /// the layers' revisions in the primary where they moved; push every
-    /// durable layer with upstreams, then the primary.
+    /// the layers' revisions in the primary where they moved, and in the
+    /// session's own layer those that moved; push every durable layer
+    /// with upstreams, then the primary; and record in the session's own
+    /// layer the revisions the pushes moved.
     pub async fn perform<Env: SyncEnv>(self, env: &Env) -> Result<(), SyncError> {
         let session = self.session;
         let primary = session.primary();
@@ -129,13 +142,19 @@ impl SyncSession<'_> {
                 );
             }
         }
-        if !moved.is_empty() {
+        // One dispatch writes the pointers the pulls moved and records,
+        // in `session:`, the revisions they moved; with no pointer to
+        // write, it runs only when a revision moved, to record it.
+        if !moved.is_empty() || session.unrecorded() {
             Box::pin(session.transact(moved).perform(env)).await?;
         }
         for branch in layers.into_iter().chain([primary]) {
             if !branch.pushes().is_empty() {
                 Box::pin(branch.push().perform(env)).await?;
             }
+        }
+        if session.unrecorded() {
+            Box::pin(session.transact(dialog_corpus::Changes::new()).perform(env)).await?;
         }
         Ok(())
     }

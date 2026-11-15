@@ -14,6 +14,48 @@ says how to cut a release.
 
 ## Unreleased
 
+### A session writes a layer's revision row only when the layer moved, and `Session::sync` writes the rows its pulls moved
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD).
+
+A session's own layer, `session:`, holds a `dialog.layer/revision` row
+for each of its layers. Every dispatch used to rewrite all of them
+after it published, so `session:` minted an instant on every dispatch
+even when no layer had moved, and its own row moved every time, since
+the recording itself moved it. Now a dispatch writes only the rows of
+the layers whose revision is not the one `session:` holds, and writes
+nothing when none moved. Writing the rows is no longer a move of
+`session:`: its own row names the revision it stood at before the
+recordings that followed its last change, and moves only when
+something was written into it. `Session::sync` did not write the rows
+at all; it now writes those its pulls moved, and after its pushes
+those the pushes moved, through a dispatch that takes them as
+stimulus.
+
+What this changes for you:
+
+- A dispatch that writes nothing into `session:` and moves no other
+  layer (an empty transaction, a command no rule answers) writes no
+  revision row and mints no instant in `session:`. One that moves the
+  primary alone rewrites the `memory:` row alone.
+- A rule premised on the `dialog.layer/revision` of `session:` fires on
+  a session's first dispatch and when something wrote into `session:`
+  outside a dispatch, no longer on every dispatch after the first.
+- A rule premised on the `dialog.layer/revision` of `memory:` or of a
+  durable layer fires when a `Session::sync` pull moved it, as it does
+  when a commit did. A sync that moves nothing dispatches nothing.
+
+Why: a revision row says where a layer stands, so it changes when the
+layer moves, by a commit, a pull or a push, and not on every dispatch.
+A reader of `session:`'s instants, and a rule premised on a revision,
+then sees one change per move.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten: the rows
+  live in `session:`, which is process-local. `session:` mints fewer
+  instants.
+
 ### A session's transaction lands its commands when it publishes, a session opens through a read-only environment, and a whole layer is a legal scan
 
 [#809](https://github.com/dialog-db/dialog-db/pull/809).

@@ -142,12 +142,13 @@ use tokio::sync::Notify;
 
 use crate::RepositoryMemoryExt as _;
 use crate::placement::{
-    Layers, Selection, Store, control_layer, durable_branch, memory_layer, selected, session_layer,
+    Layers, Selection, Store, control_layer, durable_branch, memory_layer, revision_rows, selected,
+    session_layer,
 };
 use crate::repository::branch::session::Composite;
 use crate::repository::branch::transaction::{DurableLayer, SessionContext};
 use crate::repository::source::Source;
-use crate::{Branch, CommitError, Ephemeral, QueryLayer, RemoteSite, Transaction};
+use crate::{Branch, CommitError, Ephemeral, QueryLayer, RemoteSite, Revision, Transaction};
 
 /// What opening a session and reading through it need of the
 /// environment: a read of the primary, to resolve the layers its schema
@@ -461,6 +462,25 @@ impl Session {
     /// accumulated them.
     pub fn declared(&self) -> Changes {
         self.inner.declared.read().clone()
+    }
+
+    /// Whether a layer of the session stands somewhere other than the
+    /// `dialog.layer/revision` row its own layer holds of it: what the
+    /// next dispatch would record (see the [module docs](self)).
+    pub(crate) fn unrecorded(&self) -> bool {
+        let durables: Vec<(Entity, Option<Revision>)> = self
+            .inner
+            .durables
+            .iter()
+            .map(|(layer, branch)| (layer.clone(), branch.revision()))
+            .collect();
+        !revision_rows(
+            self.inner.primary.revision().as_ref(),
+            &durables,
+            &self.inner.layers,
+            self.inner.primary.overlay(),
+        )
+        .is_empty()
     }
 
     /// The memory layers the schema declares, by name, in the schema's
@@ -3391,6 +3411,137 @@ mod tests {
             branch.revision(),
             pointed,
             "a pointer that already names the layer is not written again"
+        );
+        Ok(())
+    }
+
+    /// A sync whose pull moved the primary records the primary's new
+    /// revision in `session:`, as a commit would, and a rule premised on
+    /// `dialog.layer/revision` of `memory:` fires on it once, with that
+    /// revision. A second sync, which pulls nothing, records nothing:
+    /// `session:` mints no instant, and the rule does not fire again.
+    /// Replica A is a second branch of the repository tracking the same
+    /// upstream as the session's primary.
+    #[dialog_common::test]
+    async fn it_records_the_revisions_a_pull_moved() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let watch: InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": {
+                    "revision": {
+                        "the": "seen/revision", "as": "Text", "pick": "last",
+                        "in": "session:state"
+                    }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": { "revision": { "the": "dialog.layer/revision", "as": "Text" } }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "revision": { "?": { "name": "revision" } }
+                    }
+                }
+            ]
+        }))?;
+        branch
+            .transaction()
+            .assert(watch)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        let upstream = repo.branch("upstream").open().perform(&operator).await?;
+        upstream
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of("doc:0".parse::<Entity>()?)
+                    .is("Upstream".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.set_upstream(&upstream).perform(&operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let memory = session.layer(&state).expect("the state layer").clone();
+        let own = branch.overlay().clone();
+        let memory_name = crate::memory_layer();
+        session
+            .sync(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
+        upstream.refresh(&operator).await?;
+        assert_eq!(upstream.revision(), branch.revision(), "B pushed");
+
+        let replica = repo.branch("replica-a").open().perform(&operator).await?;
+        replica.set_upstream(&upstream).perform(&operator).await?;
+        replica
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
+        replica
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of("doc:1".parse::<Entity>()?)
+                    .is("From A".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        replica.push().perform(&operator).await?;
+
+        let fired = memory.revision().sequence;
+        session
+            .sync(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
+        let head = branch.revision().expect("B has a head");
+        assert_eq!(
+            Some(&head),
+            replica.revision().as_ref(),
+            "B pulled A's commit"
+        );
+        assert_eq!(
+            revision_of(&own, &memory_name)?,
+            vec![tree_text(&head)],
+            "session: holds the primary's revision as the pull left it"
+        );
+        assert_eq!(
+            held(&memory, "seen/revision", &memory_name)?,
+            vec![tree_text(&head)],
+            "the rule fired on the pulled revision"
+        );
+        assert_eq!(
+            memory.revision().sequence,
+            fired + 1,
+            "the rule fired once: one instant in its layer"
+        );
+
+        let (own_sequence, memory_sequence) = (own.revision().sequence, memory.revision().sequence);
+        session
+            .sync(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
+        assert_eq!(branch.revision(), Some(head), "nothing was pulled");
+        assert_eq!(
+            own.revision().sequence,
+            own_sequence,
+            "a sync that moved nothing recorded nothing"
+        );
+        assert_eq!(
+            memory.revision().sequence,
+            memory_sequence,
+            "and the rule did not fire again"
         );
         Ok(())
     }
