@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A stack transacts through a closure re-run on a moved head, an invocation reports what it landed, and providers run as a separate effect
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[#816](https://github.com/dialog-db/dialog-db/pull/816), argued in
 [notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
 points 6 and 7).
 
@@ -154,7 +154,7 @@ What this changes for you:
   `layer`); it reads the channel's log from its position, and
   `Stack::arrivals` returns `None` for a layer that is no channel.
 - `Stack::invoke` and `Invocation::invoke` (`Invocation::dispatch`
-  before #TBD) send into `control:`,
+  before #816) send into `control:`,
   and every dispatch takes what each channel's outside end was sent;
   what a caller observes of `invoke` is unchanged. A dispatch that
   fails puts back what the channels were sent, not its own commands.
@@ -594,7 +594,7 @@ What this changes for you:
   `MAX_ANSWERS` are gone: a provider reads its commands with
   `Stack::arrivals` and answers with `Stack::invoke`, a dispatch
   with its own compare-and-swap. `Invocation::perform` publishes once
-  and no longer chains answers. Since #TBD a provider is registered
+  and no longer chains answers. Since #816 a provider is registered
   with `Stack::provide` and run by a report's effect, a step apart
   from the invocation; `Stack::arrivals` stays for a consumer that
   reads the log itself.
@@ -814,7 +814,7 @@ What this changes for you:
   read or committed directly, with no stack, behaves as before, and
   a write `.at(session:)` through it lands in the branch's overlay.
 - `Stack::invoke(command)` and `Stack::transact(facts)` drive a
-  session (since #TBD, `Stack::transact` takes a closure and
+  session (since #816, `Stack::transact` takes a closure and
   `Stack::assert(facts)` takes the facts): each returns an
   `Invocation` whose `perform` commits and publishes as one unit, and re-runs the whole dispatch from the new
   head when the publish loses its compare-and-swap, up to `MAX_RERUNS`
