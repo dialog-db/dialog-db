@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 460" font-family="system-ui, sans-serif" font-size="12">
+<rect width="960" height="460" fill="#ffffff"/>
+<text x="70" y="24" font-size="16" font-weight="600">Time against main/fs, lower is better</text>
+<text x="70" y="44" fill="#4b5563">dataset 3ea7f49117155b92; median of 3 runs, whiskers from the lowest to the highest run</text>
+<line x1="70" x2="940" y1="350.0" y2="350.0" stroke="#e5e7eb"/>
+<text x="64" y="354.0" text-anchor="end" fill="#4b5563">0.00</text>
+<line x1="70" x2="940" y1="294.0" y2="294.0" stroke="#e5e7eb"/>
+<text x="64" y="298.0" text-anchor="end" fill="#4b5563">0.30</text>
+<line x1="70" x2="940" y1="238.0" y2="238.0" stroke="#e5e7eb"/>
+<text x="64" y="242.0" text-anchor="end" fill="#4b5563">0.60</text>
+<line x1="70" x2="940" y1="182.0" y2="182.0" stroke="#e5e7eb"/>
+<text x="64" y="186.0" text-anchor="end" fill="#4b5563">0.89</text>
+<line x1="70" x2="940" y1="126.0" y2="126.0" stroke="#e5e7eb"/>
+<text x="64" y="130.0" text-anchor="end" fill="#4b5563">1.19</text>
+<line x1="70" x2="940" y1="70.0" y2="70.0" stroke="#e5e7eb"/>
+<text x="64" y="74.0" text-anchor="end" fill="#4b5563">1.49</text>
+<text x="16" y="210.0" transform="rotate(-90 16 210.0)" text-anchor="middle" fill="#4b5563">× main/fs</text>
+<line x1="70" x2="940" y1="162.1" y2="162.1" stroke="#111827" stroke-dasharray="4 3"/>
+<rect x="79.7" y="162.1" width="23.8" height="187.9" fill="#6b7280"/>
+<line x1="91.6" x2="91.6" y1="169.8" y2="160.3" stroke="#111827"/>
+<rect x="105.4" y="155.0" width="23.8" height="195.0" fill="#2563eb"/>
+<line x1="117.3" x2="117.3" y1="160.0" y2="147.1" stroke="#111827"/>
+<rect x="131.2" y="148.7" width="23.8" height="201.3" fill="#d97706"/>
+<line x1="143.1" x2="143.1" y1="153.9" y2="131.3" stroke="#111827"/>
+<text x="118.3" y="366" text-anchor="end" transform="rotate(-30 118.3 366)">v2/issue cold</text>
+<rect x="176.3" y="162.1" width="23.8" height="187.9" fill="#6b7280"/>
+<line x1="188.2" x2="188.2" y1="165.0" y2="146.1" stroke="#111827"/>
+<rect x="202.1" y="161.9" width="23.8" height="188.1" fill="#2563eb"/>
+<line x1="214.0" x2="214.0" y1="163.2" y2="149.3" stroke="#111827"/>
+<rect x="227.9" y="158.9" width="23.8" height="191.1" fill="#d97706"/>
+<line x1="239.8" x2="239.8" y1="159.0" y2="154.6" stroke="#111827"/>
+<text x="215.0" y="366" text-anchor="end" transform="rotate(-30 215.0 366)">v2/issue warm</text>
+<rect x="273.0" y="162.1" width="23.8" height="187.9" fill="#6b7280"/>
+<line x1="284.9" x2="284.9" y1="176.8" y2="118.3" stroke="#111827"/>
+<rect x="298.8" y="179.4" width="23.8" height="170.6" fill="#2563eb"/>
+<line x1="310.7" x2="310.7" y1="190.3" y2="145.1" stroke="#111827"/>
+<rect x="324.6" y="178.2" width="23.8" height="171.8" fill="#d97706"/>
+<line x1="336.4" x2="336.4" y1="188.3" y2="173.6" stroke="#111827"/>
+<text x="311.7" y="366" text-anchor="end" transform="rotate(-30 311.7 366)">memo/full cold</text>
+<rect x="369.7" y="162.1" width="23.8" height="187.9" fill="#6b7280"/>
+<line x1="381.6" x2="381.6" y1="167.9" y2="95.5" stroke="#111827"/>
+<rect x="395.4" y="160.8" width="23.8" height="189.2" fill="#2563eb"/>
+<line x1="407.3" x2="407.3" y1="174.7" y2="114.2" stroke="#111827"/>
+<rect x="421.2" y="165.1" width="23.8" height="184.9" fill="#d97706"/>
+<line x1="433.1" x2="433.1" y1="170.8" y2="160.0" stroke="#111827"/>
+<text x="408.3" y="366" text-anchor="end" transform="rotate(-30 408.3 366)">issue detail cold</text>
+<rect x="466.3" y="162.1" width="23.8" height="187.9" fill="#6b7280"/>
+<line x1="478.2" x2="478.2" y1="183.8" y2="161.2" stroke="#111827"/>
+<rect x="492.1" y="151.2" width="23.8" height="198.8" fill="#2563eb"/>
+<line x1="504.0" x2="504.0" y1="160.5" y2="149.0" stroke="#111827"/>
+<rect x="517.9" y="156.1" width="23.8" height="193.9" fill="#d97706"/>
+<line x1="529.8" x2="529.8" y1="160.7" y2="154.0" stroke="#111827"/>
+<text x="505.0" y="366" text-anchor="end" transform="rotate(-30 505.0 366)">command</text>
+<rect x="563.0" y="162.1" width="23.8" height="187.9" fill="#6b7280"/>
+<line x1="574.9" x2="574.9" y1="175.2" y2="159.4" stroke="#111827"/>
+<rect x="588.8" y="159.0" width="23.8" height="191.0" fill="#2563eb"/>
+<line x1="600.7" x2="600.7" y1="162.5" y2="156.0" stroke="#111827"/>
+<rect x="614.6" y="163.7" width="23.8" height="186.3" fill="#d97706"/>
+<line x1="626.4" x2="626.4" y1="169.7" y2="154.8" stroke="#111827"/>
+<text x="601.7" y="366" text-anchor="end" transform="rotate(-30 601.7 366)">command after pull</text>
+<rect x="659.7" y="162.1" width="23.8" height="187.9" fill="#6b7280"/>
+<line x1="671.6" x2="671.6" y1="169.9" y2="147.9" stroke="#111827"/>
+<rect x="685.4" y="106.6" width="23.8" height="243.4" fill="#2563eb"/>
+<line x1="697.3" x2="697.3" y1="116.8" y2="104.1" stroke="#111827"/>
+<rect x="711.2" y="108.0" width="23.8" height="242.0" fill="#d97706"/>
+<line x1="723.1" x2="723.1" y1="112.2" y2="102.8" stroke="#111827"/>
+<text x="698.3" y="366" text-anchor="end" transform="rotate(-30 698.3 366)">pull</text>
+<rect x="756.3" y="162.1" width="23.8" height="187.9" fill="#6b7280"/>
+<line x1="768.2" x2="768.2" y1="162.5" y2="152.7" stroke="#111827"/>
+<rect x="782.1" y="162.2" width="23.8" height="187.8" fill="#2563eb"/>
+<line x1="794.0" x2="794.0" y1="165.5" y2="160.0" stroke="#111827"/>
+<rect x="807.9" y="171.1" width="23.8" height="178.9" fill="#d97706"/>
+<line x1="819.8" x2="819.8" y1="174.1" y2="161.8" stroke="#111827"/>
+<text x="795.0" y="366" text-anchor="end" transform="rotate(-30 795.0 366)">push</text>
+<rect x="853.0" y="162.1" width="23.8" height="187.9" fill="#6b7280"/>
+<line x1="864.9" x2="864.9" y1="174.9" y2="145.6" stroke="#111827"/>
+<rect x="878.8" y="149.7" width="23.8" height="200.3" fill="#2563eb"/>
+<line x1="890.7" x2="890.7" y1="153.3" y2="136.8" stroke="#111827"/>
+<rect x="904.6" y="160.2" width="23.8" height="189.8" fill="#d97706"/>
+<line x1="916.4" x2="916.4" y1="173.3" y2="143.1" stroke="#111827"/>
+<text x="891.7" y="366" text-anchor="end" transform="rotate(-30 891.7 366)">v2/issue poll</text>
+<rect x="674" y="436" width="12" height="12" fill="#6b7280"/>
+<text x="692" y="446">main/fs</text>
+<rect x="765" y="436" width="12" height="12" fill="#2563eb"/>
+<text x="783" y="446">file 9</text>
+<rect x="849" y="436" width="12" height="12" fill="#d97706"/>
+<text x="867" y="446">file 10</text>
+</svg>
