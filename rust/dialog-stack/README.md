@@ -372,7 +372,7 @@ pub struct Fetch {
     pub node: Node,
 }
 
-# async fn example(stack: Stack, env: impl StackEnv) -> anyhow::Result<()> {
+# async fn example(stack: Stack, env: impl StackEnv + Clone + dialog_common::ConditionalSend) -> anyhow::Result<()> {
 let tab: Entity = "session:tab".parse()?;
 let fetch = <Fetch as Descriptor<ConceptDescriptor>>::descriptor();
 stack.provide(Provider::new(fetch, move |command| {
@@ -518,7 +518,7 @@ one goes when its last reader is dropped or closed.
 # use dialog_query::attribute::Relation;
 # use dialog_query::{AttributeQuery, Term};
 # use dialog_stack::{Stack, StackEnv};
-# async fn example(stack: Stack, env: impl StackEnv) -> anyhow::Result<()> {
+# async fn example(stack: Stack, env: impl StackEnv + Clone + dialog_common::ConditionalSend) -> anyhow::Result<()> {
 /// `ui/selected` of every entity.
 fn selected() -> AttributeQuery {
     AttributeQuery::from(

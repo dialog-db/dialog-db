@@ -170,7 +170,7 @@ type Handler = Arc<dyn Fn(Command) -> Answering>;
 /// ```no_run
 /// # use dialog_repository::{Provider, Stack, StackEnv, Failure};
 /// # use dialog_corpus::{Changes, Statement as _, Value};
-/// # async fn example(stack: Stack, env: impl StackEnv, fetch: dialog_query::ConceptDescriptor) -> anyhow::Result<()> {
+/// # async fn example(stack: Stack, env: impl StackEnv + Clone + dialog_common::ConditionalSend, fetch: dialog_query::ConceptDescriptor) -> anyhow::Result<()> {
 /// stack.provide(Provider::new(&fetch, |command| async move {
 ///     let Some(Value::Entity(node)) = command.rows().first().map(|row| row.is.clone()) else {
 ///         return Err(Failure::new("a fetch names its node"));
@@ -406,7 +406,10 @@ impl Effect {
     /// of the effect. Returns the [`EffectReport`]. An effect with no
     /// commands runs no dispatch, reports nothing remaining, and
     /// settles all the same.
-    pub async fn perform<Env: StackEnv>(self, env: &Env) -> Result<EffectReport, CommitError> {
+    pub async fn perform<Env>(self, env: &Env) -> Result<EffectReport, CommitError>
+    where
+        Env: StackEnv + Clone + ConditionalSend,
+    {
         let Effect {
             stack,
             revision,

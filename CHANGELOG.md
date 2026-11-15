@@ -49,6 +49,7 @@ What this changes for you:
   a channel does not.
 - A subscription lives as long as a reader of it: the stack holds it
   weakly, and it goes when its last `Subscriber` is dropped or closed.
+- `Stack::settle` and `Effect::perform` need a `Clone` environment.
 - `Effect::perform` settles the stack, with or without commands to
   perform. A failed poll does not fail the effect: it is reported by
   `EffectReport::unsettled()` and stays scheduled.

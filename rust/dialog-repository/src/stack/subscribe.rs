@@ -49,7 +49,7 @@
 //! # use dialog_query::attribute::Relation;
 //! # use dialog_query::{AttributeQuery, Term};
 //! # use dialog_repository::{Stack, StackEnv};
-//! # async fn example(stack: Stack, env: impl StackEnv) -> anyhow::Result<()> {
+//! # async fn example(stack: Stack, env: impl StackEnv + Clone + dialog_common::ConditionalSend) -> anyhow::Result<()> {
 //! let selected = || {
 //!     AttributeQuery::from(
 //!         Term::<Relation>::from(Relation::from(
@@ -85,8 +85,7 @@ use std::pin::{Pin, pin};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
-use dialog_capability::{Command, Provider, Resume};
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, Held, Holds};
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 use dialog_query::query::Application;
 use dialog_query::{Conclusion, EvaluationError};
 use parking_lot::Mutex;
@@ -105,6 +104,16 @@ type Erased = dyn Any + Send + Sync;
 /// type erased.
 #[cfg(target_arch = "wasm32")]
 type Erased = dyn Any;
+
+/// The environment a [`Stack::settle`] polls with, its type erased so
+/// the registry can poll a subscription of any query type with it: a
+/// shared handle, `Sized` and `'static` as the evaluation asks, that
+/// provides what the environment provides.
+#[cfg(not(target_arch = "wasm32"))]
+type Environment = Arc<dyn OpenStackEnv + Send>;
+/// The environment a [`Stack::settle`] polls with, its type erased.
+#[cfg(target_arch = "wasm32")]
+type Environment = Arc<dyn OpenStackEnv>;
 
 /// The future one subscription's poll returns.
 #[cfg(not(target_arch = "wasm32"))]
@@ -176,7 +185,7 @@ enum Polled {
 /// erased.
 trait Poll: ConditionalSend + ConditionalSync + 'static {
     /// Poll the evaluation and deliver what moved.
-    fn poll<'a>(&'a self, env: &'a Borrowed) -> Polling<'a>;
+    fn poll<'a>(&'a self, env: &'a Environment) -> Polling<'a>;
 }
 
 /// One subscription: the evaluation, and what its readers have yet to
@@ -237,7 +246,7 @@ where
     Q: Application + Clone + ConditionalSync,
     Q::Conclusion: Conclusion + PartialEq + Clone + ConditionalSync,
 {
-    fn poll<'a>(&'a self, env: &'a Borrowed) -> Polling<'a> {
+    fn poll<'a>(&'a self, env: &'a Environment) -> Polling<'a> {
         Box::pin(async move {
             let Some(mut engine) = self.engine.lock().take() else {
                 return Ok(Polled::Busy);
@@ -390,12 +399,20 @@ impl Stack {
     /// every other subscription has been polled. One another `settle` is
     /// polling at the same time is left to it, and scheduled again, so a
     /// write that landed after that poll began is not missed.
-    pub async fn settle<Env: OpenStackEnv>(&self, env: &Env) -> Result<usize, EvaluationError> {
+    ///
+    /// The environment is `Clone`: `settle` clones it once into a shared
+    /// handle whose type it erases, so one poll serves subscriptions of
+    /// every query type. Dialog's environments are cheap handles by
+    /// design, so the clone costs a reference count.
+    pub async fn settle<Env>(&self, env: &Env) -> Result<usize, EvaluationError>
+    where
+        Env: OpenStackEnv + Clone + ConditionalSend + 'static,
+    {
         let subscriptions = self.subscriptions();
         if !subscriptions.scheduled.swap(false, Ordering::AcqRel) {
             return Ok(0);
         }
-        let env = Borrowed::new(env);
+        let env: Environment = Arc::new(env.clone());
         let mut delivered = 0;
         let mut failed = None;
         for subscription in subscriptions.live() {
@@ -501,66 +518,6 @@ impl<Q: Application> Drop for Subscriber<Q> {
             .lock()
             .readers
             .retain(|(held, _)| *held != reader);
-    }
-}
-
-/// The environment a [`Stack::settle`] was handed, its type erased, so
-/// the registry can poll a subscription of any query type with it.
-///
-/// It points at the environment rather than borrowing it, since the
-/// evaluation asks for an environment whose type is `'static`, and a
-/// borrow's type is not. It is sound because a `Borrowed` is built by
-/// `settle` from the environment it borrows, lives on `settle`'s frame
-/// for no longer than that borrow, and is handed on only by reference:
-/// it is neither `Clone` nor moved out, so nothing can keep it, or reach
-/// the environment through it, once `settle` returns.
-struct Borrowed {
-    env: *const dyn OpenStackEnv,
-}
-
-// SAFETY: a `Borrowed` reads the environment by shared reference only,
-// and the environment is `Sync` (`OpenStackEnv: ConditionalSync`), so
-// handing one to another thread is handing it `&Env`, which is `Send`.
-#[cfg(not(target_arch = "wasm32"))]
-unsafe impl Send for Borrowed {}
-// SAFETY: as above: a shared `Borrowed` is a shared `&Env`.
-#[cfg(not(target_arch = "wasm32"))]
-unsafe impl Sync for Borrowed {}
-
-impl Borrowed {
-    fn new<Env: OpenStackEnv>(env: &Env) -> Self {
-        let env: &dyn OpenStackEnv = env;
-        Self { env }
-    }
-
-    fn env(&self) -> &dyn OpenStackEnv {
-        // SAFETY: the pointer was made from a reference that outlives
-        // this `Borrowed` (see the type's docs), so it is valid and
-        // aligned, and the environment is only read through it.
-        unsafe { &*self.env }
-    }
-}
-
-impl<C: Command> Provider<C> for Borrowed
-where
-    dyn OpenStackEnv: Provider<C>,
-{
-    fn execute(&self, input: C::Input) -> Resume<'_, C::Output> {
-        Provider::<C>::execute(self.env(), input)
-    }
-}
-
-impl Holds for Borrowed {
-    fn held(&self, key: &str) -> Option<Held> {
-        self.env().held(key)
-    }
-
-    fn hold(&self, key: String, handle: Held) {
-        self.env().hold(key, handle)
-    }
-
-    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
-        self.env().held_or(key, make)
     }
 }
 
