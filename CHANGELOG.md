@@ -111,15 +111,22 @@ premises, as it does for every other premise.
 [design/patterns/design-composite-bytes.md](./design/patterns/design-composite-bytes.md)
 
 A value was a scalar or a `Record`, bytes dialog did not look into. A
-`Composite` is a value made of values: a map from a value to a value
+`Composite` is a value made of values: a map from a text to a value
 that holds no key twice, or a list, nested as deep as it is written,
 as the IPLD data model has them. There is no tuple: a notation that has
-one writes it as a list. It is kept whole as a `Value::Record`: one version byte,
-`0x01`, then the dag-cbor of its parts. So a composite is a claim's
-value like any other: it is stored, keyed, compared, spilled and synced
-as the bytes it is. Its name is not a hash of those bytes. A composite
-is named by the merkle reference of its parts, a map under `map:` and
-a list under `list:`, each part by its own reference, so a later layout of the bytes moves no name.
+one writes it as a list. It is kept whole as a `Value::Record`: one
+version byte, `0x01`, then plain dag-cbor. A value dag-cbor has a kind
+for is written as that kind, a nested composite as the map or the list
+it is, and a value it has no kind for (an entity, a symbol, a whole
+number past 64 bits) as a link that holds the value: a CID hashed by
+the identity, under a codec that says the value's type. So anything
+that reads dag-cbor reads what follows the version byte, and a
+composite is a claim's value like any other: it is stored, keyed,
+compared, spilled and synced as the bytes it is. Its name is not a hash
+of those bytes. A composite is named by the merkle reference of its
+parts, a map under `map:` and a list under `list:`, each part by its
+own reference and a key as the text it is, so a later layout of the
+bytes moves no name.
 
 What this changes for you:
 
@@ -130,11 +137,16 @@ What this changes for you:
   `Err(CompositeError::UnknownVersion { version })` for a record under a
   version this release does not read.
 - One value has one byte string. A map's entries are written in one
-  order whatever order they were given in, a key given twice is refused
-  (`CompositeError::DuplicateKey`), and a number is kept under the
+  order whatever order they were given in (dag-cbor's: the shorter key
+  first), a key given twice is refused (`CompositeError::DuplicateKey`),
+  bytes that hold a composite any other way are refused
+  (`CompositeError::NotCanonical`), and a number is kept under the
   narrowest type that holds it, as a tree under the number band reads
   one back: the natural `3`, the integer `3` and the float `3.0` are
   one part, and read back as the natural `3`.
+- A link holds a value of any length. A reader built on the `cid`
+  crate's `Cid` reads one of 64 bytes at most, so it reads every symbol
+  and refuses an entity longer than that.
 - `Value::reference` of a record that holds a composite is the
   reference of its parts. Of any other record it is what it was,
   `RECORD.reference_of(bytes)`.

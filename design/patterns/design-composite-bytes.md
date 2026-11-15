@@ -51,7 +51,57 @@
 | no key twice, as the name sees keys | 🟢 the order and the test are the merkle map's own | 🔴 the natural 3 and the float 3.0 are two keys with one reference | 🟢 two kept keys have one reference exactly when they are written alike |
 | cost to write and to read | 🟡 a keyed hash a key, on every read | a comparison of bytes | a comparison of bytes |
 
-## Decided
+## Decided again, 2026-11-15: plain dag-cbor, and a link for what it has no kind for
+
+By the maintainer. B and D above stood from the build until he read what they cost: a part written as `[type, bytes]` is dialog's own encoding inside dag-cbor, and a key of any type needs a map and an order of its own. Of the types dag-cbor has no kind for: "I think I'd encode those as inline CID". Asked whether that is version 1 or a later one: version 1, before a record is released.
+
+```
+ 01                                   version
+ a3                                   a map of three, its keys text, in dag-cbor's order
+    62 "by"    d8 2a 50 00 01 a1 a3 c3 01 00 08 "id:alice"
+                                      a link: tag 42, then a CID under the codec of an
+                                      entity, hashed by the identity, holding the entity
+    64 "tags"  82 61 "a" 21           a composite, nested as the item it is
+    65 "count" 03                     a whole number, as an integer
+```
+
+| a value | is written as |
+|---|---|
+| text, bytes, a truth value | dag-cbor's own kind |
+| a whole number within 64 bits | an integer |
+| a number that is not whole | a float of 64 bits |
+| a composite | the map or the list it is, nested, with no version byte of its own |
+| an entity, a symbol | a link that holds it |
+| a whole number past 64 bits, a float that is not finite, a record that is no composite | a link that holds it |
+
+A map's key is text. The maintainer's form for a pattern in a stored rule has text keys and he named the data model IPLD's; the agent asked three times before reading it there.
+
+Three things he left to the agent, and what was taken:
+
+| Decision: what says the type of the value a link holds |
+|---|---|---|
+| criterion \ approach | L: one codec, and the type's byte in front of what is held | M: a codec a type |
+| the longest symbol, 64 bytes, in the 64 bytes the links of the libraries hold | 🔴 65 bytes: a reader built on `cid` refuses it | 🟢 64 |
+| codes to choose | one | 🟡 nine, one a stored type, in a row |
+
+M. `VALUE_CODEC` is `0x30d1a0`, in the range multicodec keeps for private use, and a type's codec is that and the type's byte. The agent first built L and said a symbol always fits; the test of the longest one said otherwise.
+
+- **Length.** A link here holds a value of any length: the bytes of a CID are written and read by hand. `cid` 0.11 has `pub type Cid = CidGeneric<64>`, so a reader built on it refuses an entity longer than 64 bytes (`it_links_a_value_longer_than_the_link_of_the_libraries_holds`), and [IPIP-0512](https://specs.ipfs.tech/ipips/ipip-0512/) bounds an identity CID at 128 bytes where UnixFS is read.
+- **The version byte stays.** A record of before is itself one dag-cbor map, so nothing else tells a composite from one. What follows the byte is plain dag-cbor.
+
+What it cost, against the agent's hypothesis that the code would fall by more than a third:
+
+| | B and D | this |
+|---|---|---|
+| code in `composite.rs`, without tests and comments | 409 lines | 633 |
+| the record `{title, done, count, ratio, by, tags, raw}` of the test | 161 bytes | 83 |
+| who reads it | this crate | anything that reads dag-cbor, but for a link longer than 64 bytes |
+
+Refuted. The map type did get smaller, and the writer is about what it was. The reader is new and by hand, about 250 lines, for three reasons the libraries do not meet together: a link longer than 64 bytes, a record nested deeper than a stack of calls allows on wasm, and bytes read strictly so that one composite has one byte string. The bytes halved, which nobody had asked for.
+
+D's two cells against E are answered so: a record of before as a part is a link, not a marker; and reading the top reads past what is nested, checking it, without building it.
+
+## Decided first, and superseded above in its first two letters
 
 B, D, J and H. A composite under version 1 is `{"map:": [[part, part], …]}`, `{"list:": [part, …]}` or `{"tuple:": [part, …]}`, a part is `[type, bytes]`, a nested composite is a record, a number is kept under the narrowest type that holds it, and a map's entries are in the order of their keys as written and hold no key twice.
 
