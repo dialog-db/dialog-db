@@ -358,6 +358,8 @@ where
     /// a given key schema: the same [`StreamingLeaf`] machinery segments use,
     /// on a smaller per-link buffer.
     pub fn keys<Key: self::Key>(&self) -> Result<StreamingLeaf<'_>, DialogSearchTreeError> {
+        #[cfg(any(test, feature = "helpers"))]
+        buffer_decodes::COUNT.with(|count| count.set(count.get() + 1));
         let count = self.checked_count()?;
         let schema = if self.layout == crate::MIXED_LAYOUT {
             crate::Schema::opaque()
@@ -1193,7 +1195,7 @@ mod tests {
         let segment = segment_node(&[key("a")])?;
         assert_eq!(segment.layout_version(), TAGGED_LAYOUT);
         assert_eq!(
-            &segment.buffer().as_ref()[..16],
+            &segment.buffer()?.as_ref()[..16],
             &[
                 2,
                 0,
@@ -1217,7 +1219,7 @@ mod tests {
         let index = index_node(&[b"", b"m"])?;
         assert_eq!(index.layout_version(), TAGGED_LAYOUT);
         assert_eq!(
-            &index.buffer().as_ref()[..6],
+            &index.buffer()?.as_ref()[..6],
             &[2, 1, 3, 0x05, 1, NUMBER_BAND as u8]
         );
 
@@ -1229,10 +1231,10 @@ mod tests {
         let body = PersistentNodeBody::segment_from_entries(entries, manifest.clone())?;
         let node = TestNode::try_from(&body)?;
         assert_eq!(
-            &node.buffer().as_ref()[..16],
+            &node.buffer()?.as_ref()[..16],
             &[2, 0, 3, 0x02, 1, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         );
-        let read = TestNode::try_from(node.buffer().clone())?;
+        let read = TestNode::try_from(node.buffer()?.clone())?;
         assert_eq!(read.layout_version(), TAGGED_LAYOUT);
         assert_eq!(read.manifest()?, manifest);
         Ok(())
@@ -1242,7 +1244,7 @@ mod tests {
     /// by one carrying `fields`, which must fit before the 16-byte boundary.
     fn with_fields(fields: &[u8]) -> Result<crate::Buffer> {
         let node = segment_node(&[key("a")])?;
-        let mut bytes = node.buffer().as_ref().to_vec();
+        let mut bytes = node.buffer()?.as_ref().to_vec();
         let mut prelude = vec![2, 0, fields.len() as u8];
         prelude.extend_from_slice(fields);
         assert!(prelude.len() <= 16);
@@ -1267,7 +1269,7 @@ mod tests {
         let rewritten = TestNode::try_from(&PersistentNodeBody::segment_from_entries(
             entries, manifest,
         )?)?;
-        assert_eq!(&rewritten.buffer().as_ref()[..6], &[2, 0, 3, 0x40, 1, 7]);
+        assert_eq!(&rewritten.buffer()?.as_ref()[..6], &[2, 0, 3, 0x40, 1, 7]);
 
         assert!(TestNode::try_from(with_fields(&[0x41, 1, 7])?).is_err());
         Ok(())
@@ -1278,7 +1280,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_refuses_a_malformed_prelude() -> Result<()> {
         let node = segment_node(&[key("a")])?;
-        let mut bytes = node.buffer().as_ref().to_vec();
+        let mut bytes = node.buffer()?.as_ref().to_vec();
         bytes[15] = 1;
         assert!(TestNode::try_from(crate::Buffer::from(bytes)).is_err());
 
@@ -1581,5 +1583,22 @@ mod tests {
         let node = well_formed(vec![buffer(7)])?;
         assert!(node.as_index()?.all_novelty::<[u8; 8]>().is_err());
         Ok(())
+    }
+}
+
+/// How many novelty buffers this thread has decoded, for tests that pin a
+/// walk which must decode none. Per thread, so tests running side by side
+/// on their own threads do not see each other's decodes.
+#[cfg(any(test, feature = "helpers"))]
+pub(crate) mod buffer_decodes {
+    use std::cell::Cell;
+
+    thread_local! {
+        pub(crate) static COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// The decodes so far on this thread.
+    pub(crate) fn count() -> usize {
+        COUNT.with(Cell::get)
     }
 }

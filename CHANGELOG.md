@@ -14,6 +14,729 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule that leaves a premise's subject unnamed fires for the entity a commit wrote
+
+[#802](https://github.com/dialog-db/dialog-db/pull/802), fixes
+[#801](https://github.com/dialog-db/dialog-db/issues/801)
+
+Commit-time induction starts a rule from each row a commit changed. It
+bound the row's value to the premise's field, and the row's entity to
+the variable the premise gives `this`. A premise that gave `this` no
+variable left the entity unbound, so the premise was read at every
+entity holding the value written, and the rule fired for entities the
+commit did not touch. Such a premise is now seeded with its subject
+named, in a variable nothing else in the rule reads, so the seed binds
+the entity the row is about.
+
+What this changes for you:
+
+- **A rule whose premise names no `this` fires for fewer entities.**
+  Writing one field of one entity no longer fires the rule for every
+  entity that holds the same value in that field. A command is no
+  longer issued again for them, and a durable head under `last` no
+  longer writes its value again over what was written since. It fires
+  for what the same rule with its subject named fired for already.
+- A commit that writes one field of an entity and a commit that writes
+  two now fire such a rule for the same entities. Before, the two
+  fields together found the entity written and the one field found
+  every holder of its value.
+- A rule fired in full is not seeded and is unchanged: a rule installed
+  over existing state, one whose premise changed through a deductive
+  rule, and one enabled by a retraction under `unless` fire for every
+  match, as before.
+- Nothing stored changes shape. A rule that relied on being fired for
+  every holder of a value has to be given a premise that says so.
+
+Why: a row is a fact of one entity, and the matches it newly makes are
+those where the premise is read at that entity. Reading by value alone
+found matches the commit did not make and fired for them again.
+
+### A tree write sizes its segments before filling them
+
+When a write regroups a window of entries into segments, each segment
+is now moved out in one step at its final size, and a merged stretch
+is allocated at its final size, where both grew entry by entry. The
+trees written are the same.
+
+What this changes for you:
+
+- A commit that rewrites many entries copies far less: the perf
+  scenario that succeeds a standing claim on 500 entities retires 26%
+  fewer instructions, and its reallocations start from 50 MB in all
+  where they started from 530 MB.
+
+Why: a growing vector is copied each time it outgrows its allocation,
+and a write regroups large windows many times over.
+
+### A tree reads a node from its block or from rows a store keeps it in
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./research/single-file-format/design.md)
+
+A node's body is now read through views, `IndexView` and `SegmentView`, that
+either a block or a store's rows back. A store that keeps nodes as rows
+implements `NodeRows`, and answers the tree's `nodes::Read` with nodes
+over them (see the entry on the tree asking its environment for nodes).
+Such a node is read in place: keys compare part by part, values
+are read as archives where the store keeps them, and no block is built,
+hashed or validated. `Chronicle` is such a source.
+
+What this changes for you:
+
+- `NodeBody::Index` and `NodeBody::Segment` hold `IndexView` and
+  `SegmentView` instead of `&ArchivedIndex` and `&ArchivedSegment`;
+  `PersistentNode::as_index` and `as_segment` return the views. The views
+  have the archived types' methods. `index.novelty` is `index.buffers()`,
+  a buffer's `child` is `child()`, its `count` is `count()`, and its
+  `polarity` is `is_assert(at)`.
+- `PersistentNode::buffer` returns `Result<&Buffer, _>`: a node read from
+  rows builds its block the first time it is asked, and that can fail.
+- A segment's `keys()` returns a `KeyCursor`, which has `next_key` as
+  `StreamingLeaf` does.
+- Nothing changes for a tree read through a store that keeps blocks.
+
+Why: a store that keeps nodes compactly need not rebuild a block for every
+read. Read in place, the single-file archive's cold reads match the `fs`
+archive's, where rebuilding made them about 2× slower, and its cached nodes
+take about a third of the memory of cached blocks.
+
+### A transaction that loses its branch's race runs again over the head that won
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+`Branch::transact(|transaction| async { ... })` takes the code that builds
+a transaction instead of the transaction. Each try hands it a fresh
+transaction on the branch's head as it is then, commits what it returns,
+and publishes that compare-and-swapped against the head it read. When
+another writer moved the head first, the head that won is read and the
+code runs again: its queries read over the winner, so a write computed
+from a read is computed again, as in a software transactional memory. It
+tries as many times as a commit does (64) before returning
+`VersionMismatch`.
+
+What this changes for you:
+
+- New: `Branch::transact(build).perform(&env)`, with `allow_empty()` and
+  `canonicalize()`; `build` returns `Result<Transaction, E>` where
+  `E: From<CommitError>`, and an error from it ends the transaction with
+  nothing written.
+- Deprecated: `branch.transaction()...commit().publish().perform(&env)`.
+  It keeps failing with `CommitError::Publish(PublishError::VersionMismatch)`
+  on a lost race, as it did. Move to `Branch::transact`, which builds the
+  same transaction inside the closure.
+- `Branch::induce` runs its rules again over the head that won.
+- A `TransactionBatch` its caller staged (`.commit().perform(..)`, then
+  `.publish()`) is still refused on a lost race: its caller read what it
+  staged on. The repository's own commits (delegations, migrations) apply
+  their instructions again over the winner, as before.
+- `dialog_corpus::Instruction` is `Clone`.
+
+Why: processes writing one branch concurrently should not each catch and
+retry every commit; and retrying the instructions a transaction computed
+reapplies writes derived from reads of a head that lost, where running the
+transaction again computes them over the head that won.
+
+### A space can keep its memory cells in its file, branch heads included
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+`Chronicle` provides the memory effects (`Resolve`, `Publish`,
+`Retract`, `List`), so a `Space` can name it as its memory as well as its
+archive: `Space<Chronicle, Chronicle, ...>` keeps a space's blocks and
+its cells, branch heads among them, in one file. A cell is kept as SQLite
+keeps a commit in its write-ahead log: each update appends a record with
+the cell's value, in the writer's turn, and the cells' own index files the
+cell at its newest record. The record names the writer's extents that
+still hold blocks, and recovery takes it as whole only with those
+extents' frames, so a power loss can undo the last updates (synced at the
+next sync point, as SQLite's `synchronous=NORMAL`), never leave a head
+naming what is gone.
+
+What this changes for you:
+
+- A `Space` whose memory is a `Chronicle` keeps no `memory` directory:
+  its cells are in `archive.dialog`.
+- A cell's edition is the BLAKE3 hash of its value, as under `fs`, so a
+  `Publish` names the same version either way, and publishing the value a
+  cell already holds succeeds whatever edition the writer expected, as on
+  every memory store.
+- A cell's update takes the writer's turn for the append of one small
+  record, as a SQLite commit takes its write lock: an update waits while
+  another process holds the turn, for its own appends' laying out and
+  writing. Splitting and encoding an append, folding extents in and
+  syncing are done before or after the turn, not in it.
+  A `Resolve` takes no lock, and reads the newest update another process
+  made.
+- A value of any size is kept in its record.
+- `List` walks the cells' own index, not the blocks'.
+
+Why: a space that is one file is one thing to copy, back up and keep
+consistent, and a head kept apart from the blocks it names was a second
+thing to keep in step with them. Written in place, a head could reach the
+disk before the blocks it names, which the power-loss tests showed.
+
+### Writers to one space's file do not wait on one another
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+A writer to a `Chronicle` tries the file's turn without waiting. With
+it, it appends as before. Without it, it writes its blocks whole into an
+extent of its own, space it claimed in an earlier turn, and they read back
+at once, in its process and in others. The next writer to get the turn,
+usually the same one after its commit, turns those blocks into frames and
+tokens, and the extent is freed once a sync point makes that durable. A
+process that holds the turn keeps an extent ready for itself; a process
+that opens the file with the turn free leaves one no process owns, and
+takes one back as it closes, so there is one for each process that has the
+file open. A process with none takes one of those, or one whose writer
+died, so a process that has never held the turn writes without waiting for
+it too. A writer waits for the turn only to claim an extent when there is
+none to take, or for a catalog the file has not numbered.
+
+What this changes for you:
+
+- Processes writing one space (separate branches, or the same one) no
+  longer queue behind each other's appends, as they did not on the `fs`
+  store either.
+- The writer's turn is a lock on one byte of the file rather than on the
+  whole file, on every platform.
+- `Options::extent` sets how many bytes of blocks an extent holds (1 MiB
+  by default). Each process that writes keeps one extent claimed while it
+  has the file open, and each process that has it open leaves one for
+  another; the last process to close the file retires them and cuts free
+  extents that end the file off it. One left before blocks were appended
+  stays free mid-file and is the next one claimed.
+- Claiming an extent writes its header and grows the file, without
+  writing the extent's bytes: an unused extent is a hole on file systems
+  that keep sparse files.
+- `Options::leave_extent` (on by default) is whether opening leaves an
+  extent for another process; a process that only reads can turn it off
+  and leave the file's length alone.
+- Opening the file no longer waits for another process's turn: the slot
+  it opens from was written in this boot, so there is nothing to repair.
+  After a reboot, or for a new file, opening still takes the turn.
+- A file reached by two names in one process (a hard link, a symbolic
+  link) is one handle, as a path reached two ways already was: two would
+  both hold the writer's turn.
+- A file whose making a power loss cut short opens, made again: one no
+  longer than its header, whose first bytes were never written or are the
+  format's with no durable slot. Any other file that is not an archive is
+  still refused.
+- A writer thread taking the turn just as another thread of its process
+  let it go no longer lets another process take it under it: the file's
+  lock is let go before the process's own. Two writers could append at
+  once before.
+- A block another process holds only in its extent is written again into
+  the writer's own, so a head it commits never names a block another
+  process has not yet folded into the file.
+- The file starts with a 16-byte header: `DIALOG`, the byte `0xB6` (not
+  valid UTF-8 on its own, so a file read as text fails at once), the
+  format version, 1, and zeros, reserved. A file written by an earlier
+  build of `dialog-chronicle` does not open.
+
+Why: many processes work on separate branches of one space at once, and on
+main they never wait on one another to write. A file whose every append
+took one turn made them wait, which would rule the file out wherever such
+processes run.
+
+### A space can keep its blocks in one file
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./research/single-file-format/design.md)
+
+The new `dialog-chronicle` crate adds `Chronicle`, an archive
+provider that keeps a space's blocks in one append-only file instead of a
+file per block. It answers `archive::Get`, `Put` and `Import` like the
+`fs` provider, and opens from a space's `Location` (`Resource<Location>`),
+so a `Space` can take it as its archive and keep memory, credentials and
+blobs where they were. A node of the artifact tree is kept as a frame:
+rows of ids into the file's tokens (each distinct entity, attribute, value
+and datum once, and each revision's version once, so a history record
+shares its fact's tokens), written against the node it supersedes. A frame is only
+written once it realizes to the exact block; anything else is kept whole.
+A read realizes the block. Native only.
+
+What this changes for you:
+
+- Nothing, unless you choose it: `Space<Chronicle, FileSystem,
+  FileSystem, FileSystem, FileSystem>` is a space whose blocks live in
+  `archive.dialog` in the space's directory. The tree, queries and sync
+  work through it unchanged.
+- Any number of processes can open one file. Writers take turns on a
+  lock on one byte of it, and a writer that finds the turn taken writes
+  into an extent of its own instead (see the entry on writers above);
+  readers take no lock. A file this process already has open is shared,
+  not opened twice.
+- The file is synced after an append once 64 appends have come since
+  the last sync or 2 seconds have passed, on `Chronicle::sync`, on the
+  last close, and by a sync thread once appends have waited 2 seconds
+  for a sync (`Options::sync_in_background`, on by default), so a commit
+  no other append follows is durable within about three seconds. The
+  thread is one per process, for every file it has open, and wakes once a
+  second. Dropping a handle waits for it only when that handle may be the
+  last. That is weaker than the `fs` provider, which syncs every
+  block it writes; call `Chronicle::sync` where a commit must be durable
+  before anything else happens. A power loss loses at most the appends
+  since the last sync, and never leaves the file damaged: opening goes back to the newest state
+  that is whole. The slot that state is read from is kept twice, and a
+  sync writes over the older copy, so a sync torn by power loss leaves
+  the previous copy whole.
+- Every frame is checked before it is written: one that does not realize
+  to the exact block it stands for (a node another peer wrote in another
+  layout, say) is kept whole, never written as rows that read back
+  different bytes.
+- A file shorter than its durable slot names (cut short by something
+  other than the archive, such as a copy that did not finish) does not
+  open, where it used to be filled back out with zeros and opened as an
+  older state.
+- A cell's update that names blocks still in its writer's extent names
+  their frames by a checksum, so a power loss that keeps the extent's new
+  count but loses a frame no longer leaves the cell naming a block the
+  file does not hold: an extent claimed again can still hold a whole frame
+  from its earlier claim in the same place.
+- What a sync point frees is taken up by a writer only once the durable
+  slot that frees it is on the disk, and a sync point made in the writer's
+  turn waits for one made without it, so two never write the same durable
+  copy.
+- Every write (`Put`, `Import`, the tree's `nodes::Write`, and a cell's
+  `Publish` and `Retract`) runs on tokio's blocking threads when a tokio
+  runtime runs the caller: it can wait for the writer's turn another
+  process holds and make a sync point, and holds up none of the runtime's
+  other tasks while it does. Reads (`Get`, `Resolve`, `List`, the tree's
+  node reads) answer at once from the file's mapping.
+- An append of more than 32 Ki blocks is committed in parts, so the index
+  pages one commit frees fit the slot that lists them.
+- An open of a file that has to be recovered holds up no open or close of
+  another file in the process. Two opens of one file in a process wait
+  for each other, by its path and, once it exists, by the file, so the
+  second shares the first's handle even when the first made the file.
+- An extent a process left behind when it closed or died is written into
+  again by the next writer that needs one, instead of a new one, so a
+  file opened and closed many times does not grow a dead extent each
+  time.
+- Opening reads small slots at the head of the file and nothing else.
+  The file's index is in the file, so a reader holds a few tens of KB,
+  not an index that grows with the file; its pages are written over once
+  nothing reads them. The format is still changing, and a file written
+  now may not open in the release.
+- `Options::frames = false` keeps every block whole.
+- The new `dialog-migration` crate holds migrations an application runs
+  before it opens a replica, each behind a feature of its own, and the
+  `dialog-migrate` binary that runs them. A migration is a `Step` that finds
+  its work by looking at the replica, so it is safe to run on every start:
+  `Migrations::plan` says what the steps would do, `Migrations::run` does
+  it, and an interrupted run picks up where it stopped. The `chronicle`
+  step (`chronicle::IntoChronicle`) moves every space of a replica the
+  `fs` provider wrote into the `archive.dialog` a file-archive space reads,
+  writing it under another name and renaming it once complete, or, for a
+  space that has an `archive.dialog` already, into that file through
+  `Chronicle` (so what it holds stays, and a process with it open goes on
+  using it), and then writing `archive.dialog.migrated`. A space is
+  migrated when that marker is there, not when it has an `archive.dialog`
+  (opening a `Chronicle` creates one). With `remove_source` it deletes
+  the `fs` archive after, unless a block's bytes did not match its name
+  or a file in it was not a block (`chronicle::strays`): then it fails and
+  keeps the `fs` archive. It is a conversion an
+  application opts into, not an upgrade every replica needs. Every block
+  reads back as the bytes it was; nodes in an older layout are kept whole.
+  `dialog-migrate [--dry-run] [--step <id>] [--remove-source] <replica>`
+  runs the steps; `--source`, `--target` and `--catalog` move one store.
+
+Why: a replica's history costs a file per block per version, which is
+most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
+`fs` archive takes about 1.2 GiB and the file 13 MiB.
+
+### Compatibility and migration
+
+- Nothing an existing space holds changes or is read differently for the
+  single-file archive: it is a new provider a space opts into. A space
+  opened with `Chronicle` does not read an `fs` archive's directory of
+  blocks, and the reverse; moving a space between the two means copying
+  its blocks with `Import`. The blocks are the same bytes in both, so an
+  older release reads any block this one stores.
+- A `Chronicle` file is format 1, the first released; one written by an
+  earlier, unreleased build of `dialog-chronicle` does not open, and is
+  moved again from the replica it came from with `dialog-migrate`. Nothing
+  else stored or synced changes: blocks, their hashes and what a replica
+  syncs are the same.
+
+## 0.4.0 (2026-11-14)
+
+### A prefetch hint a query took but did not finish is resumed by the next query
+
+[#770](https://github.com/dialog-db/dialog-db/pull/770), argued in
+[notes/fetch-scheduler.md](./notes/fetch-scheduler.md) ("A hint outlives
+the driver that took it").
+
+Every evaluation (a query, a subscription, a query inside a transaction)
+drives the env's queue of prefetch hints while it is polled, walking each
+hinted range so its blocks are local before a read asks for them. A hint
+it took lived only in that evaluation: when its stream ended or was
+dropped, an unfinished walk was dropped with it and no later evaluation
+saw the hint again. Now an evaluation that ends with walks unfinished
+hands their hints back to the queue, and whichever evaluation runs next
+resumes them. A resumed walk starts again from the root, but what earlier
+attempts fetched is already local, so it gets further each time.
+
+What this changes for you:
+
+- On a replica whose remote is slow relative to its queries, a hinted
+  range is fetched in full across the queries that follow, where before
+  it stayed partly remote and the range's own read fetched the rest.
+- `PreloadQueue::pending()` counts a hint a dropped evaluation handed
+  back; it no longer drops to zero the moment a driver takes a hint whose
+  walk never ends inside that evaluation.
+- A hint handed back goes through the same path as a new one: refused
+  with a zero `FetchBudget`, not enqueued twice while the same selector is
+  pending, and behind fresher hints under the same 1,024-per-rank bound.
+
+Why: speculation should be driven by whichever consumer is running, not
+lost with the one that popped it; on wasm a query regularly ended before
+its walk did, so the hint it existed for was wasted.
+
+### A read's warm walk picks children by the read's own routing, and decodes no buffer
+
+Refs [#762](https://github.com/dialog-db/dialog-db/issues/762).
+
+A query on a branch whose repository tracks a remote warms the ranges it
+is about to read with a scoped walk of the tree
+(`Traversable::traverse_available_within`). At each index node the walk
+decoded the write buffer of every link to see whether a buffered op fell
+in its scope. It now keeps exactly the children a read of the scope
+descends into, found by binary search on the node's separators
+(`ArchivedIndex::route` and `children_within`), with no buffer decoded and
+no separator rebuilt. A write buffers each op on the link that same rule
+picks, so the children kept are the ones that can hold in-scope content,
+buffered or stored.
+
+What this changes for you:
+
+- A view read on a member that tracks a remote and holds every block
+  costs a third fewer instructions (the `query-member` perf scenario:
+  181.8 M to 120.2 M), and no longer grows with how many links hold
+  buffered ops.
+- A scoped walk (a warm walk, or a download `within` a scope) may keep
+  child 0 of a node for a scope below its first separator, one path to the
+  leftmost leaf it did not keep before, because a read of that scope
+  descends there too.
+- `dialog_search_tree::helpers::buffer_decodes()` counts the novelty
+  buffers the calling thread has decoded, for tests.
+
+Why: on a member whose blocks are all local, the walk was most of a view
+read, and its cost rose with every change that left more ops buffered.
+
+### A typed variable reads the values of its type through a concept, as it does through a scan
+
+[#782](https://github.com/dialog-db/dialog-db/pull/782),
+[design/typed-read-of-untyped-field.md](./design/typed-read-of-untyped-field.md).
+
+A variable's type says which values it reads, and an attribute's type is
+part of which attribute it is. A scan of an attribute into a variable
+typed as text passes over a number stored under it, and so does a read of
+a recursive concept. A read of a concept that is not recursive did not: a
+value of another type under a field that declares no type failed the
+whole query with `Variable ?x of kind String cannot bind UnsignedInt(7)`.
+It now takes such a value for a fact of another attribute, so every way
+a concept is read agrees.
+
+What this changes for you:
+
+- A query that reads a concept field into a typed variable no longer
+  fails when the field holds a value of another type for some entity. It
+  yields the rows whose value the variable reads.
+- A variable that reads a type or nothing (`Option<T>`) is bound absent
+  for an entity whose only values are of another type, as it is for an
+  entity with no value. A value of the variable's type that disagrees
+  with what the variable is already bound to is still no row.
+- Where a pick elects one of an entity's values (`max:`, `top:`, a field
+  a rule derives), a typed variable elects among the values of its type.
+  A greater value of another type no longer takes the place of the one
+  the variable reads.
+
+Why: which of a concept's rows a caller's terms match should not depend
+on whether a rule makes the concept recursive, which the caller cannot
+see. `Match::bind` already says a value a type does not read is a
+mismatch that "callers that filter rows treat as a non-match"; the plain
+concept read was the one caller that did not.
+
+### A rule seeded by several rows of one entity is evaluated once when they agree
+
+[#763](https://github.com/dialog-db/dialog-db/pull/763), [#762](https://github.com/dialog-db/dialog-db/issues/762)
+
+Commit-time induction evaluated a seeded rule once per changed row a
+premise names. Rows of one entity that each bind one distinct field of
+the premise, a single attribute read under `last`, are now bound into
+one evaluation first. When it finds any match, it finds every match the
+rows find one by one: a seeded read yields a row's value only when the
+round view elects it, so every field then reads its row's value either
+way. When it finds none (an overlay row, a derived candidate or another
+claim stands above one of the rows, or the rest of the body fails), the
+rows are seeded one by one, as before. Every other row seeds alone.
+
+What this changes for you:
+
+- What induction writes is unchanged. The matches of one firing keep
+  the order seeding the rows one by one finds them in, so when two of
+  them write one transient cell under `last`, the same one wins. In
+  this crate's tests every seeded firing also seeds its rows one by one,
+  writes those matches the same way, and checks that the novelty and
+  transients are the same.
+- A command whose event names several fields of a premise evaluates the
+  rule once. On a tonk-shaped replica, a warm command's median fell from
+  6.9–8.7 ms to 4.7–5.9 ms; 1,861 of 1,900 groups found their match
+  together while building and pulling, 200 of 220 in warm commands.
+
+Why: an event's fields are one binding; evaluating it once per field
+repeated the same joins.
+
+### A rule seeded by several rows of one change writes its head once
+
+[#761](https://github.com/dialog-db/dialog-db/pull/761)
+
+Commit-time induction evaluates a rule once for each changed row a
+premise names, with that row bound. A command whose event carries
+several of a premise's fields seeds the rule once per field, and every
+evaluation finds the same binding. Each wrote the rule's head again: a
+`set assignee` event of eight fields wrote its assignee and its activity
+record eight times over, and each copy seeded the next round's rules
+again. A firing now writes each distinct head once.
+
+What this changes for you:
+
+- What a commit stores is unchanged: the copies were the same claims,
+  and a set holds a claim once.
+- A commit that fires rules writes fewer ops into the tree. On a
+  tonk-shaped replica, a warm command wrote 177–198 ops before and 26–33
+  now, and its median time fell from 12.7–14.1 ms to 7.1–9.2 ms.
+
+Why: the copies were most of what a warm command wrote, so they filled
+the tree's root buffer on nearly every commit, and each overflow
+rewrote the leaves it sheds into.
+
+### A pull says how much it downloads, and can bring along only what the replica holds
+
+[#775](https://github.com/dialog-db/dialog-db/pull/775),
+[design/held-across-pull.md](./design/held-across-pull.md).
+
+A pull that adopts an upstream head by root (a fast-forward, a rival
+merge settled, a reset brought forward) reads none of the head's tree, so
+every leaf the upstream changed is held by reference once the head lands,
+whether the replica held it before or not. A read or a write the replica
+had answered from its own blocks then waits on the peer that holds the
+block, and fails without one: a page rendered from a device's own store
+did not render offline after a sync it had no part in, and an edit that
+had been answered at once took a round trip after every pull. Whether a
+pull did that was decided by a modifier (`pull().download()`) that was
+easy to leave out, and was left out.
+
+How much a pull brings local is now an argument of the pull, with no
+default: `branch.pull(Download::…)`. `Download` is an enum:
+
+- `Download::MinimalRanges`: nothing. The head is adopted by reference,
+  as a bare `pull()` did.
+- `Download::QueriedRanges`: what the replica holds of its head, as the
+  head it would adopt has it. New. `PersistentTree::follow(held, env)`
+  walks the two trees in step and reads a node of the adopted one,
+  fetching what the replica lacks, only where the keys it is routed meet
+  those of a leaf the replica holds.
+- `Download::Operational`: the entity, attribute and value orders and the
+  blob index, as `pull().download().operational()` did.
+- `Download::Ranges(scope)`: the key ranges given, as
+  `pull().download().within(scope)` did.
+- `Download::Everything`: as `pull().download()` did.
+
+Whatever it names is fetched before the head moves, by `perform` and by
+`prepare` alike, and a download that fails leaves the head where it was.
+
+A pull can also be made again when a commit overtakes it.
+`Pull::retry(Limit)` makes a pull that lost its publish merge onto the
+head the commit left and publish that, `Limit::Times(n)` more times or
+`Limit::Unlimited`.
+
+What this changes for you:
+
+- `Branch::pull` takes a `Download`. Write `pull(Download::MinimalRanges)`
+  where you wrote `pull()`, to keep what it did.
+- `Pull::download`, `PullDownload` and its `within` and `operational` are
+  gone: the extent is the pull's argument. `PreparedPull` is already
+  downloaded when `prepare` hands it back, so a caller that ran a
+  download between `prepare` and `commit` drops it.
+- `Branch::download` takes a `Download` too, and its command struct is
+  `DownloadBranch` (it was `Download`, the name the enum now has).
+  `download().operational()` is `download(Download::Operational)`,
+  `download().within(scope)` is `download(Download::Ranges(scope))`, a
+  bare `download()` is `download(Download::Everything)`, and `.of(revision)`
+  is unchanged.
+- `Branch::replicate` takes a `Download`, which every pull it makes uses.
+- `Pull::perform` and `Pull::prepare` are bounded by `PullEnv`, which is
+  `ResolveEnv` and `Provider<Fork<RemoteSite, blob::Read>>`: a download
+  that brings blobs along reads them from the upstream's site. Every
+  environment that could run a pull download satisfies it.
+- With `Download::QueriedRanges`, every key a replica reads or writes
+  from its own blocks before a pull it reads or writes from them after
+  it. A replica that holds every leaf of its head ends holding every leaf
+  of the head it adopts. A range it never read stays by reference however
+  much of it changed, and a replica with no head, or one that holds none
+  of its head's leaves, fetches nothing.
+- `Download::QueriedRanges` brings tree nodes, not what they point at: a
+  spilled value or a blob that a changed leaf newly references is fetched
+  when it is read.
+- A replica's first write to a key it only read still fetches the leaves
+  of the orders it never read that key through. A write reads the leaves
+  it writes to, in the entity and attribute orders and in history.
+- The head stays where it was while a download runs, and reads and
+  commits go on against it. A commit that lands meanwhile makes the pull
+  lose its publish, as before. `Pull::retry` makes it again; without it
+  the pull fails with `PublishError::VersionMismatch`, the head where the
+  commit put it.
+- A `Download::QueriedRanges` that cannot fetch a node fails with
+  `DownloadError::Tree`, a new variant.
+- New: `PersistentTree::follow` in `dialog-search-tree`; `Download`,
+  `DownloadBranch`, `PullEnv`, `Pull::retry`, `Limit` and
+  `DownloadError::Tree` in `dialog-repository`.
+
+Why: a partial replica's promise is that what it read it can read again
+without the network. Adopting by root keeps the cost of a pull independent
+of what the upstream changed, and breaks that promise each time the
+upstream changes something the replica read. Bounding the fetch by what
+the replica holds keeps both. Which of the two a branch wants is not
+something a library can guess, and a modifier that is easy to miss made
+the cheap answer the one a caller got by not deciding: an argument makes
+every pull say. A pull is retried by the pull because a replica that keeps
+writing while it syncs would otherwise have every caller write the same
+loop.
+
+### `wbg-pool` gives every test's tab focus
+
+[#774](https://github.com/dialog-db/dialog-db/pull/774).
+
+`wbg-pool` runs each test in a tab of its own, many at once, and Chrome
+shows only the latest tab of a window. The rest are hidden: their
+`visibilityState` is `hidden`, `hasFocus()` is false, and animation frames
+and `ResizeObserver` deliveries are held back. `wbg-pool` now turns on
+focus emulation for a tab as it opens it, so each page acts as the focused,
+active one.
+
+What this changes for you:
+
+- A wasm test that waits on an animation frame, a `ResizeObserver`, focus
+  or visibility passes beside other tests as it does alone. Run eight at
+  once in headless Chromium and 15 of 24 tabs passed before; all 24 do now.
+- A tab that cannot be given focus is closed and its run fails with
+  `failed to give a test's tab focus`, where the tab would have run without
+  it.
+- A dependent that carries this as a patch against `wbg-pool` (tonk's
+  `wbg-pool-focus-tabs.patch`) drops it when it builds `wbg-pool` from this
+  release.
+
+Why: a test that depended on rendering failed or hung only in a full run,
+with nothing in its output to say its tab was in the background. Chrome's
+flags against backgrounding (`--disable-renderer-backgrounding` and its
+kin) do not change it; focus emulation does.
+
+### A provisioned wasm test is given its address when it runs
+
+[#774](https://github.com/dialog-db/dialog-db/pull/774).
+
+A test that takes a provisioned address (`#[dialog_common::test]` with a
+parameter) runs under `web-integration-tests` as a native test that starts
+the service and a wasm test that uses it. The wasm test read the address
+from `option_env!`, so it was compiled into the test binary. It now reads
+it when it runs: the native test names the variable in `WBG_POOL_PASS_ENV`,
+and `wbg-pool` defines the variables named there on
+`globalThis.__wbg_pool_env` in the page or worker the suite runs in.
+
+What this changes for you:
+
+- A package's wasm test binary is built once for all of its provisioned
+  tests, where every test rebuilt and relinked it. Nothing in a test
+  changes.
+- The wasm side needs the `wbg-pool` of this release as its runner. Under
+  an older `wbg-pool`, or `wasm-bindgen-test-runner`, a provisioned wasm
+  test fails with `Missing PROVISIONED_SERVICE_ADDRESS environment
+  variable`. A dependent that builds `wbg-pool` from this repository takes
+  both together; patches it carries against `wbg-pool`'s `shim.rs`,
+  `daemon/harness.rs`, `daemon/server.rs` or the scripts under `daemon/js`
+  may need rebasing.
+- `dialog_common::helpers::address` reads the passed variable on
+  `wasm32-unknown-unknown` and the process environment elsewhere.
+  `dialog_common::helpers::PASSED_VARIABLES` is the name of the variable
+  that lists what to pass.
+- `wbg-pool` passes any variable named in `WBG_POOL_PASS_ENV`, not only
+  this one (see its README).
+
+Why: cargo tracks a variable read with `option_env!` as a build input, and
+every provisioned test has its own address. Each test of
+`dialog-repository` therefore rebuilt and relinked the crate's wasm test
+binary, 82 seconds a test on a CI runner, and the cross-target job spent
+over an hour of its 79 minutes of tests there. Two tests of one package
+could also build over each other's binary.
+
+### A read reads one revision, and a transaction reads and commits against the one it opened at
+
+[#757](https://github.com/dialog-db/dialog-db/issues/757),
+[#758](https://github.com/dialog-db/dialog-db/pull/758),
+[design/query-isolation.md](./design/query-isolation.md)
+
+A query performs many selects on its environment: a conjunction looks
+its second premise up per row of the first, a resolver re-reads a
+reference per outer row. A transaction performs many queries, and a
+commit's settlement and induction read the line many times over. Each
+of those reads took its tree root from the branch's head cell as it
+stood at that moment, and that cell is shared by every handle of the
+branch, so a commit made through another handle while a read ran moved
+the root under it: the read saw some of the line at one revision and
+the rest at another, and could yield rows no revision held. Every unit
+of isolation now pins its line when it begins (a query, a select, one
+poll of a subscription, a transaction from open to commit), and every
+scan it performs reads that revision. Inside the crate a read source is
+a pinned `View` and the live `&Branch` or `&Snapshot` is reachable only
+by what needs the current head (a commit's CAS, a subscription deciding
+whether to re-evaluate), so a read that follows the head cannot be
+written. A query over a `Snapshot` was already pinned, and is
+unchanged.
+
+What this changes for you:
+
+- A `Branch::query()`, `Branch::select()`, `Branch::claims().select()`,
+  a subscription's poll, and the induction and succession reads a
+  commit makes each see one revision throughout. A commit that lands on
+  the branch while one of them runs is seen by the next read, not by
+  the rest of this one.
+- A `Transaction` reads the revision its line stood at when it was
+  opened, in every query it runs, and its commit builds on that
+  revision. If the head moved meanwhile (a commit through another
+  handle of the branch, a pull, a commit through the same handle of a
+  snapshot), `commit().perform()` and `commit().publish().perform()`
+  are refused with `CommitError::Publish(PublishError::VersionMismatch)`
+  and nothing of the transaction lands: open a new transaction on the
+  fresh head. Before, such a transaction silently built on the moved
+  head, reading one revision and committing against another. The
+  publish still CAS's the head cell against the version the transaction
+  read, so the refusal holds under a race too; the check at commit is
+  only the early word.
+- `Transaction<L>` requires `L: Line`, a new sealed trait implemented
+  for `&Branch`, `&Snapshot` and `TransactionBatch`. Code generic over
+  the line (`fn f<L>(t: Transaction<L>)`) adds the bound. The lifetime of
+  `Transaction::query()`'s `TransactionQuery` is now that of the borrow
+  of the transaction, not of the branch.
+- The heads a read settlement records (`ReadObservation`) are the
+  revisions the transaction pinned, and the edition its writes stand at
+  is that head's successor, whatever the head is by the time it commits.
+- A line's session overlay (`Branch::overlay`) is not pinned: it is
+  read live, as before.
+- `SourceRef`, the crate's internal borrowed line, is gone; `View` and
+  `Live` replace it. It was never public.
+
+Why: a read's answer should be a function of one state of the branch,
+and a transaction's commit should apply what the transaction read.
+Reading each scan against whatever the head happened to be made both
+depend on the timing of unrelated commits, which no caller can reason
+about.
+
 ### The corpus crate is `dialog-corpus`, and it asks its environment for everything it reads
 
 [#768](https://github.com/dialog-db/dialog-db/pull/768), decided in
@@ -21,7 +744,7 @@ says how to cut a release.
 read is argued in
 [design-spilled-values.md](./design/tree-node-reads/design-spilled-values.md).
 
-The crate that held the data model and its indexes, `dialog-artifacts`, is
+The crate that held the data model and its indexes, `dialog-corpus`, is
 `dialog-corpus`: the corpus is the body of claims a branch holds, in the
 search tree. Its storage side is named after it, and the crate
 no longer depends on a store crate. What it reads beside its nodes, a
@@ -33,17 +756,17 @@ cause.
 
 What this changes for you:
 
-- The crate is `dialog-corpus`; paths that began `dialog_artifacts::`
-  begin `dialog_corpus::`. `tree::ArtifactTree` is `tree::Corpus`,
-  `ArtifactTreeExt` is `CorpusExt`, `ArtifactNodeCache` is `CorpusCache`,
-  `BufferedArtifactTree` is `BufferedCorpus`, `ArtifactWriter` is
-  `CorpusWriter` and `DialogArtifactsError` is `DialogCorpusError`.
-- The model side is renamed the same way. `Artifact` is `Fact`,
-  `ArtifactView` is `FactView`, `ArtifactViewStream` is `FactViewStream`,
-  `ArtifactSelector` is `Selector`, `artifact_index_keys` and
-  `artifact_index_keys_with` are `fact_index_keys` and
-  `fact_index_keys_with`, and every `from_artifact`, `to_artifact` and
-  `for_artifact` is `from_fact`, `to_fact` and `for_fact`. The module that
+- The crate is `dialog-corpus`; paths that began `dialog_corpus::`
+  begin `dialog_corpus::`. `tree::Corpus` is `tree::Corpus`,
+  `CorpusExt` is `CorpusExt`, `CorpusCache` is `CorpusCache`,
+  `BufferedCorpus` is `BufferedCorpus`, `CorpusWriter` is
+  `CorpusWriter` and `DialogCorpusError` is `DialogCorpusError`.
+- The model side is renamed the same way. `Fact` is `Fact`,
+  `FactView` is `FactView`, `FactViewStream` is `FactViewStream`,
+  `Selector` is `Selector`, `fact_index_keys` and
+  `fact_index_keys_with` are `fact_index_keys` and
+  `fact_index_keys_with`, and every `from_fact`, `to_fact` and
+  `for_fact` is `from_fact`, `to_fact` and `for_fact`. The module that
   held them, `artifacts`, is `model`. In `dialog-query` the re-export
   module `artifact` is `corpus`, and its aliases `ArtifactsRelation` and
   `ArtifactTypeError` are `CorpusRelation` and `CorpusTypeError`. `Fact`
@@ -113,14 +836,14 @@ What this changes for you:
   with no alias trait in between, instead of `Provider<archive::Load> + Holds + ConditionalSync` (and `+
   Provider<archive::Get>` where a difference was computed). `Holds`, `Load`
   and `Get` are no longer asked of a tree's environment.
-- `dialog_artifacts::tree::CorpusNode` names the node of the corpus, the
+- `dialog_corpus::tree::CorpusNode` names the node of the corpus, the
   tree over claims (`PersistentNode<Key, State<Datum>>`), and an
   environment a corpus is read through is bounded as
   `Provider<nodes::Read<CorpusNode>> + Provider<nodes::Preload<CorpusNode>>`,
   one that is written through as `Provider<nodes::Write<CorpusNode>>`.
   There is no alias trait for either: a signature says which requests it
   performs. "Corpus" is the name the crate's storage side will carry when
-  `dialog-artifacts` is renamed; everything new here uses it.
+  `dialog-corpus` is renamed; everything new here uses it.
 - `TransientTree::persist(delta)`, `HitchhikerTree::persist(delta)`,
   `HitchhikerTree::persist_mut(delta)` and `Node::into_link(delta,
   manifest)` take no environment and no cache, and the delta they fill is
@@ -407,7 +1130,7 @@ module should not be pinned by a library that uses one call of it.
 
 ### A pull or a push that meets another revision under its own head's version is refused
 
-Fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
+[#707](https://github.com/dialog-db/dialog-db/pull/707), fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
 
 Two replicas writing with one key on one branch share an origin, since
 an origin derives from the branch and the issuer. When both build on the
@@ -465,12 +1188,12 @@ What this changes for you:
   write `ConditionalSend + ConditionalSync`.
 - These traits now name both bounds as supertraits, so what implements
   them and what a bound on them implies is unchanged:
-  `dialog_artifacts::{ValueType, History}`, `dialog_did_web::Fetch`,
+  `dialog_corpus::{ValueType, History}`, `dialog_did_web::Fetch`,
   `dialog_remote_ucan::Presented`, `dialog_peer_iroh::{Channel, Connect}`
   and the `dialog_peer` helpers' `Meter`.
 - A store a tree reads through by value asks for `ConditionalSend` as
   well, since it is moved into the read's future: the `S` of the
-  `dialog_artifacts::ArtifactTreeExt` and `BlobIndexExt` methods,
+  `dialog_corpus::CorpusExt` and `BlobIndexExt` methods,
   `TreeHistory`, `blob_changes` and `spilled_refs`, and of the query
   builder's `execute`, `execute_owned` and `estimate` in
   `dialog_repository`. An env passed by reference (`perform(&env)`)
@@ -512,6 +1235,8 @@ before the publish speaks for one that may never land.
 
 ### Distinct members inserted between the same neighbours get distinct positions
 
+[#729](https://github.com/dialog-db/dialog-db/pull/729).
+
 A position's fractional tail comes from a bias derived from the member's
 identity. The bias was the first six base62 digits of the identity bytes,
 and base62 is a big-endian re-encoding, so those digits depend only on the
@@ -523,7 +1248,7 @@ BLAKE3 digest.
 What this changes for you:
 
 - `Bias::derive` returns a different bias for the same identity, so
-  `dialog_artifacts::position::insert` and the `dialog/position` formula
+  `dialog_corpus::position::insert` and the `dialog/position` formula
   derive different positions than before for the same member and
   neighbours. Derivation is still deterministic: every replica on this
   release derives the same position for the same insert.
@@ -699,7 +1424,7 @@ What this changes for you:
 - A store that keeps nothing skips the range scan's sibling read-ahead
   and an integration's open-ahead pass, which would only read each node
   twice.
-- `dialog_artifacts::ArchiveReader` requires `ArtifactNodes`
+- `dialog_corpus::ArchiveReader` requires `ArtifactNodes`
   (`Nodes<Key, State<Datum>>`). `DeltaOverlay` keeps what its
   environment keeps.
 - `TreeHistory::from_root_with_cache` and `TreeHistory::empty_with_cache`
@@ -819,7 +1544,7 @@ What this changes for you:
   version then value, so a merge that closes such a cycle leaves every
   query answerable. Before, the same pair also fell to value order,
   but so did every rewrite.
-- `dialog_artifacts::Standing` carries a `succession`, zero for every
+- `dialog_corpus::Standing` carries a `succession`, zero for every
   claim, and `Standing::new` builds a claim's standing. Code building a
   `Standing` by its fields names the new one. Nothing stored or synced
   changes: a rank is computed when a component is read.
@@ -997,7 +1722,7 @@ the walk read as it went, not because its reads depended on each other.
 
 ### A reset moves a branch forward only
 
-Fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
+[#686](https://github.com/dialog-db/dialog-db/pull/686), fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
 
 `Branch::reset` now refuses a revision that does not hold the branch's
 head, and the head does not move. A reset back to an older head, or onto
@@ -1379,6 +2104,10 @@ has a tree to canonicalize even when the link itself wrote nothing.
   the same bytes, nothing is rewritten on upgrade, and an older release
   reads everything this one writes. Only Rust names and the crate graph
   move.
+- `Download::QueriedRanges` changes nothing stored or synced: the blocks
+  it fetches are blocks the replica would have fetched at its next read
+  of them, nothing is rewritten on upgrade, and releases on either side
+  read what the other writes. Nothing for an embedder to run.
 - Bounding the caches changes nothing stored or synced: caches hold only
   what a replica can read again, nothing is rewritten on upgrade, and
   releases on either side read what the other writes. Nothing for an
@@ -1530,7 +2259,7 @@ What this changes for you:
   pull refuses a head whose region holds no entry for the head's own
   origin, holds it above the head, holds an entry outside the watermark
   bounds, or derives a count other than the one the head signed, as
-  `DialogArtifactsError::InvalidKey`, and keeps its own head.
+  `DialogCorpusError::InvalidKey`, and keeps its own head.
 - A commit no longer remembers the new head's whole context in the
   branch's memo unless it had the parent's there already. The first
   reader that needs the whole map reads the region then.
@@ -1715,14 +2444,14 @@ say. `PreparedPull::upstream` is the head the prepare fetched and verified,
 the one revision the commit adopts. `PreparedPull::novelty` lists the
 revisions the commit brings into the branch, ancestors first, each as a
 `NewRevision` with its record and its claims. `history::novelty` in
-`dialog-artifacts` is the walk underneath it.
+`dialog-corpus` is the walk underneath it.
 
 What this changes for you:
 
 - `PreparedPull::upstream`, `PreparedPull::novelty`, `NewRevision` and
-  `dialog_artifacts::history::novelty` are new.
+  `dialog_corpus::history::novelty` are new.
 - A revision whose record neither the upstream nor the branch holds fails
-  the walk with `DialogArtifactsError::IncompleteHistory`, where
+  the walk with `DialogCorpusError::IncompleteHistory`, where
   `history::log` skips it.
 - A no-op pull names nothing new, and neither does one whose commit keeps the
   branch's head and advances only its sync base.
@@ -1978,10 +2707,10 @@ The facts a query folds in beside its lines, the injected `db:session` metadata 
 What this changes for you:
 
 - `QueryLayer::overlay` returns an `Ephemeral` instead of an `Arc<Changes>`.
-- `Changes::select` and `impl Provider<Select> for Changes` are removed from `dialog-artifacts`. To read facts held in memory beside a tree, hold them in an `Ephemeral` (`Ephemeral::apply` takes the batch) and read it with `Ephemeral::select`.
+- `Changes::select` and `impl Provider<Select> for Changes` are removed from `dialog-corpus`. To read facts held in memory beside a tree, hold them in an `Ephemeral` (`Ephemeral::apply` takes the batch) and read it with `Ephemeral::select`.
 - A query or subscription whose `.with(..)` carries a rule no longer rebuilds the rule set and re-decodes each rule body on every evaluation. Results are unchanged.
 - Asset changes in a `.with(..)` batch are dropped from the query's overlay, as they were before: a query reads facts only.
-- `EntityKey::from_artifact`, `AttributeKey::from_artifact` and `ValueKey::from_artifact` build the key from its parts in one pass instead of parsing and re-encoding it once per field. The bytes are unchanged. `dialog_artifacts::artifact_index_keys`, which builds all three at once, is now public.
+- `EntityKey::from_fact`, `AttributeKey::from_fact` and `ValueKey::from_fact` build the key from its parts in one pass instead of parsing and re-encoding it once per field. The bytes are unchanged. `dialog_corpus::fact_index_keys`, which builds all three at once, is now public.
 
 Why: a query fell off the cache whenever its overlay held a rule. A performance report on Sapling, which hands rules to each query in its overlay, measured rule decoding and assembly at about 60% of instructions on that path. Reading the per-query batch as a separate kind of store is what let that path skip the cache, so the batch now goes through the store and the cache key every other overlay goes through.
 
@@ -2108,7 +2837,7 @@ What this changes for you:
 - `AuthorizationFailure::authorization_failure(&self) ->
   Option<&AuthorizeError>` on `ArchiveError`, `BlobError`, `MemoryError`,
   `BranchError`, `PeerError`, `ForkError`, `DialogStorageError`,
-  `DialogArtifactsError`, `ResolveError`, `PublishError`,
+  `DialogCorpusError`, `ResolveError`, `PublishError`,
   `RetractError`, `S3Error` and `AuthorizeError` itself.
 - The UCAN test service (`dialog-remote-ucan-s3`'s `helpers`) accepts
   `POST /revocations/<cid>` and refuses that certificate from then on.
@@ -2459,14 +3188,14 @@ What this changes for you:
   `Branch::migrate` (or `migrate_storage`) first; `Branch::needs_migration`
   says whether a branch is in that state, and `storage_encoding` which
   layout its head has.
-- A number read back raw (an `ArtifactSelector` select, a `Value` match)
+- A number read back raw (an `Selector` select, a `Value` match)
   comes back as the narrowest type that holds it: a natural when it is
   whole and not negative, an integer when whole and negative, a float
   otherwise. Code matching `Value::UnsignedInt` on counts and timestamps
   still sees them; code matching `Value::Float(5.0)` on a stored `5.0`
   now sees `UnsignedInt(5)`. A typed read (a concept field, a derived
   struct) views the number as the type it declares, unchanged.
-- An `ArtifactSelector` range bound reads each number through the lens
+- An `Selector` range bound reads each number through the lens
   its type names before comparing, as a field declared with that type
   reads it: an integer bound sees `34.5` as `34`, a natural bound does not
   see `-3`, a float bound sees every number as it is, and
@@ -2616,7 +3345,7 @@ What this changes for you:
   bare or tagged (`{"float:": NaN}` in dag-cbor), as does parsing the
   string `float:NaN` into a `Value`. No type `holds` a NaN, so a typed
   write refuses it, and a commit that would write one by a raw assertion
-  fails with `CommitError::Artifact(InvalidValue("NaN is not a value"))`
+  fails with `CommitError::Fact(InvalidValue("NaN is not a value"))`
   before anything lands.
 - `float/parse` of `NaN` is no row.
 - A float formula whose result would be NaN (`0.0 / 0.0`,
@@ -2733,7 +3462,7 @@ What this changes for you:
   The value index still keeps naturals, integers and floats apart, so
   until it moves to one band, two attributes that differ only by
   listing `5` or `5.0` share an identity but read different claims.
-- `dialog_artifacts::identity` and `dialog_query::identity` hold the
+- `dialog_corpus::identity` and `dialog_query::identity` hold the
   types dialog hashes under.
 
 Why: identity should be a function of what a definition means, cheap
@@ -2855,8 +3584,8 @@ written in.
 
 What this changes for you:
 
-- `dialog_artifacts::Attribute` is `dialog_artifacts::Relation`.
-  `DialogArtifactsError::InvalidAttribute` and `ReservedAttribute` are
+- `dialog_corpus::Attribute` is `dialog_corpus::Relation`.
+  `DialogCorpusError::InvalidAttribute` and `ReservedAttribute` are
   `InvalidRelation` and `ReservedRelation`, and `ATTRIBUTE_LENGTH` is
   `RELATION_LENGTH`.
 - In `dialog_query`, the validated relation name the `the!` macro
@@ -2865,8 +3594,8 @@ What this changes for you:
   (`The::Relation(..)`, `The::Collection { .. }`; it was `Relation`,
   with an `Attribute` variant). `dialog_query::ArtifactsAttribute` is
   `ArtifactsRelation`, and `Reach::Attribute` is `Reach::Relation`.
-- One type, `dialog_artifacts::Pick` (`Last`, `All`, `Top(..)`, `Max`,
-  `Min`), replaces both `dialog_artifacts::Policy` and
+- One type, `dialog_corpus::Pick` (`Last`, `All`, `Top(..)`, `Max`,
+  `Min`), replaces both `dialog_corpus::Policy` and
   `dialog_query::Select`. `AttributeDescriptor::select()` and
   `with_select(..)` are `pick()` and `with_pick(..)`;
   `without_select()` and `select_error()` are `without_pick()` and
@@ -2931,9 +3660,9 @@ What this changes for you:
   it. Under `last` the write is the newest fact of the cell, as a
   last-writer-wins write is.
 - Every write carries its pick. `Change::Assert(Value, Pick)` and
-  `Instruction::Assert(Artifact, Pick)` are the one write form, beside
+  `Instruction::Assert(Fact, Pick)` are the one write form, beside
   `Retract`; `Change::Replace`, `Instruction::Replace`, `Change::Succeed`
-  and `Instruction::Succeed` are gone. `dialog_artifacts::Pick` is the
+  and `Instruction::Succeed` are gone. `dialog_corpus::Pick` is the
   pick an attribute is read under (`Last`, `All`, `Top(..)`, `Max`,
   `Min`); `Update::associate` takes it as its fourth argument, and
   `associate_unique` and `succeed` are gone with the variants they

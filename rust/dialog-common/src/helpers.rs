@@ -51,7 +51,9 @@
 //!
 //! - **Native mode** (`--features integration-tests`): Provider starts, test runs, provider stops
 //! - **Wasm mode** (`--features web-integration-tests`): Native outer test starts provider,
-//!   serializes address to env var, spawns wasm inner test which deserializes and runs
+//!   serializes address to env var, spawns wasm inner test which deserializes and runs.
+//!   The wasm test runner passes the variable on when it runs the test, so a
+//!   package's wasm test binary is built once and serves every test in it
 
 pub mod entropy;
 
@@ -62,6 +64,16 @@ use serde::{Serialize, de::DeserializeOwned};
 
 /// Environment variable name used to pass serialized address to inner tests.
 pub const PROVISIONED_SERVICE_ADDRESS: &str = "PROVISIONED_SERVICE_ADDRESS";
+
+/// Environment variable naming the variables the wasm test runner hands to
+/// the test it runs. The outer test names [`PROVISIONED_SERVICE_ADDRESS`]
+/// here, so the address reaches the inner test when it runs and is not
+/// compiled into its binary.
+pub const PASSED_VARIABLES: &str = "WBG_POOL_PASS_ENV";
+
+/// The global object the wasm test runner defines passed variables on.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+const PASSED_VARIABLES_GLOBAL: &str = "__wbg_pool_env";
 
 /// A provider that manages the lifecycle of a service.
 ///
@@ -137,11 +149,14 @@ pub trait Provisionable: Sized + Serialize + DeserializeOwned + Clone {
     async fn start(settings: Self::Settings) -> anyhow::Result<Service<Self, Self::Provider>>;
 }
 
-/// Deserialize an address from the PROVISIONED_SERVICE_ADDRESS env var.
+/// Deserialize the address the outer test provisioned.
 ///
-/// This is called by the inner test to retrieve the address set by the outer test.
+/// The inner test calls this when it runs. A native process reads the
+/// `PROVISIONED_SERVICE_ADDRESS` environment variable. A wasm test in a
+/// browser has no environment, so it reads the variable from where the test
+/// runner defined it (see [`PASSED_VARIABLES`]).
 pub fn address<A: DeserializeOwned>() -> anyhow::Result<A> {
-    let json = std::env::var(PROVISIONED_SERVICE_ADDRESS).map_err(|_| {
+    let json = provisioned_address().ok_or_else(|| {
         anyhow::anyhow!(
             "Missing {} environment variable",
             PROVISIONED_SERVICE_ADDRESS
@@ -149,6 +164,28 @@ pub fn address<A: DeserializeOwned>() -> anyhow::Result<A> {
     })?;
 
     serde_json::from_str(&json).map_err(|e| anyhow::anyhow!("Failed to deserialize address: {}", e))
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn provisioned_address() -> Option<String> {
+    std::env::var(PROVISIONED_SERVICE_ADDRESS).ok()
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn provisioned_address() -> Option<String> {
+    use wasm_bindgen::JsValue;
+
+    let variables = js_sys::Reflect::get(
+        &js_sys::global(),
+        &JsValue::from_str(PASSED_VARIABLES_GLOBAL),
+    )
+    .ok()?;
+    if !variables.is_object() {
+        return None;
+    }
+    js_sys::Reflect::get(&variables, &JsValue::from_str(PROVISIONED_SERVICE_ADDRESS))
+        .ok()?
+        .as_string()
 }
 
 /// A deterministic data generator for benchmarks and tests.

@@ -3,7 +3,7 @@ use super::merge::merge_with_winner;
 use super::transaction::induction_ignores;
 use crate::repository::archive::erased;
 use crate::repository::archive::persist;
-use crate::repository::source::SourceRef;
+use crate::repository::source::{Live, View};
 use crate::{
     Branch, CommitError, Index, PublishError, RemoteSite, RepositoryMemoryExt as _, Revision,
     Snapshot, TreeReference, origin_of,
@@ -30,13 +30,18 @@ use futures_util::{Stream, StreamExt as _, stream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// How many times a commit that lost its branch's race to another writer
+/// applies its instructions again over the head that won, before it gives
+/// up with the publish's `VersionMismatch`.
+pub(crate) const RETRIES: usize = 64;
+
 /// Command that commits a stream of changes (assert/retract) to a branch
 /// or a snapshot.
 ///
 /// Created by [`Branch::commit`]. Execute with
 /// `.perform(&env)`.
 pub struct Commit<'a, Changes> {
-    source: SourceRef<'a>,
+    line: Live<'a>,
     changes: Changes,
     allow_empty: bool,
     canonicalize: bool,
@@ -48,9 +53,9 @@ pub struct Commit<'a, Changes> {
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
-    pub(crate) fn new(source: impl Into<SourceRef<'a>>, changes: Changes) -> Self {
+    pub(crate) fn new(line: impl Into<Live<'a>>, changes: Changes) -> Self {
         Self {
-            source: source.into(),
+            line: line.into(),
             changes,
             allow_empty: false,
             canonicalize: false,
@@ -240,14 +245,21 @@ where
             + ConditionalSync
             + 'static,
     {
-        match self.source {
-            SourceRef::Branch(branch) => self.perform_on_branch(branch, env).await,
-            SourceRef::Snapshot(snapshot) => self.perform_on_snapshot(snapshot, env).await,
+        match self.line {
+            Live::Branch(branch) => self.perform_on_branch(branch, env).await,
+            Live::Snapshot(snapshot) => {
+                let (base, lineage) = snapshot.head();
+                self.perform_on_snapshot_at(snapshot, base, lineage, env)
+                    .await
+            }
         }
     }
 
-    /// The branch path: build on the checkpointed head, publish CAS'd
-    /// against it.
+    /// The branch path: build on the checkpointed head and publish CAS'd
+    /// against it. A plain commit that loses the race to another writer
+    /// applies the same instructions again over the head that won, minted
+    /// afresh against it (the rules it triggers run again there), and tries
+    /// again; a merging commit merges with the winner instead.
     async fn perform_on_branch<Env>(
         self,
         branch: &Branch,
@@ -282,6 +294,78 @@ where
         // under its origin and would otherwise take the same edition.
         let writer = branch.writer();
         let _writing = writer.lock().await;
+        if self.merge || self.rebuild.is_some() {
+            return self.attempt_on_branch(branch, env).await;
+        }
+        let Commit {
+            line,
+            changes,
+            allow_empty,
+            canonicalize,
+            scope,
+            entries,
+            merge,
+            machinery,
+            rebuild,
+        } = self;
+        let instructions: Vec<Instruction> = changes.collect().await;
+        let mut attempts = 0;
+        loop {
+            let attempt = Commit {
+                line,
+                changes: stream::iter(instructions.clone()),
+                allow_empty,
+                canonicalize,
+                scope,
+                entries: entries.clone(),
+                merge,
+                machinery: machinery.clone(),
+                rebuild: rebuild.clone(),
+            };
+            match attempt.attempt_on_branch(branch, env).await {
+                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
+                    if attempts < RETRIES =>
+                {
+                    attempts += 1;
+                    branch.revision.resolve().perform(env).await?;
+                }
+                done => return done,
+            }
+        }
+    }
+
+    /// One attempt of the branch path, in the branch's writer lock: build
+    /// on the checkpointed head, publish CAS'd against it.
+    async fn attempt_on_branch<Env>(
+        self,
+        branch: &Branch,
+        env: &Env,
+    ) -> Result<Revision, CommitError>
+    where
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + dialog_common::Holds
+            + ConditionalSync
+            + 'static,
+    {
+        let writer = branch.writer();
 
         // A merging commit builds on a head its own writer moved since
         // this handle read it, a pull of its own say: that is not a
@@ -307,10 +391,13 @@ where
         // of, so the publish below CAS's against it. A concurrent commit or
         // pull that advances the head while we apply changes then makes this
         // publish fail with `VersionMismatch` rather than silently overwriting
-        // it — the caller refreshes and retries. See `Cell::checkpoint`.
-        let head = branch.revision.checkpoint();
-        let base_revision = branch.revision();
-        let base_version = branch.revision.edition().map(|edition| edition.version);
+        // it — the caller refreshes and retries. See `Cell::checkpoint`. The
+        // revision built on and the version CAS'd against are one read of
+        // the cell, so they name the same head.
+        let pinned = branch.revision.edition();
+        let base_version = pinned.as_ref().map(|edition| edition.version.clone());
+        let head = branch.revision.checkpoint_at(base_version.clone());
+        let base_revision = pinned.map(|edition| edition.content);
         let merging = self.merge.then(|| base_revision.clone());
         let built_on = base_revision.clone();
 
@@ -329,8 +416,7 @@ where
         };
 
         let minted = Mint {
-            source: SourceRef::from(branch),
-            base: base_revision,
+            view: View::at(Live::Branch(branch), base_revision.as_ref()),
             changes,
             entries: self.entries,
             machinery: self.machinery,
@@ -410,18 +496,31 @@ where
             if let (Some(standing), Some(built_on)) = (watermark.content(), built_on)
                 && standing == built_on
             {
-                watermark.publish(revision.clone()).perform(env).await?;
+                // The head is already published, so this commit stands
+                // whatever happens here. A watermark another writer moved
+                // in the meantime is left where it is: the lag is caught up
+                // by the next inducing instant, as above. Its
+                // `VersionMismatch` must not reach the caller, which takes
+                // it for a lost head and applies the commit again.
+                match watermark.publish(revision.clone()).perform(env).await {
+                    Ok(()) | Err(PublishError::VersionMismatch { .. }) => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
 
         Ok(revision)
     }
 
-    /// The snapshot path: build on the head the snapshot holds, mint on
-    /// the snapshot's own lineage, and advance the head in place.
-    async fn perform_on_snapshot<Env>(
+    /// The snapshot path: build on `base`, the head the snapshot holds
+    /// (or held when the transaction committing through here opened),
+    /// mint on the snapshot's lineage `lineage`, and advance the head in
+    /// place, refused when it no longer stands at `base`.
+    pub(crate) async fn perform_on_snapshot_at<Env>(
         self,
         snapshot: &Snapshot,
+        base: Revision,
+        lineage: Option<Entity>,
         env: &Env,
     ) -> Result<Revision, CommitError>
     where
@@ -447,19 +546,16 @@ where
             + ConditionalSync
             + 'static,
     {
-        // The head this commit builds on and the line it mints on, read
-        // together. The lineage is inherited from the snapshot's earlier
-        // commits, or allocated now for its first: random rather than
-        // derived, because two clones of one base must not share it.
-        let (base, lineage) = snapshot.head();
+        // The line this commit mints on is inherited from the snapshot's
+        // earlier commits, or allocated now for its first: random rather
+        // than derived, because two clones of one base must not share it.
         let lineage = match lineage {
             Some(lineage) => lineage,
             None => Entity::new()?,
         };
 
         let minted = Mint {
-            source: SourceRef::from(snapshot),
-            base: Some(base.clone()),
+            view: View::at(Live::Snapshot(snapshot), Some(&base)),
             changes: self.changes,
             entries: self.entries,
             machinery: self.machinery,
@@ -533,12 +629,10 @@ pub(crate) enum Outcome {
 /// its head cell, a snapshot takes it by value — so the caller owns the
 /// step that makes the revision visible.
 pub(crate) struct Mint<'a, Changes> {
-    /// The line the commit builds on: where its store, caches, and
-    /// remote fallback come from.
-    pub(crate) source: SourceRef<'a>,
-    /// The revision the batch applies on top of, captured by the caller
-    /// (a branch checkpoints it for its CAS).
-    pub(crate) base: Option<Revision>,
+    /// The line the commit builds on, at the revision the batch applies
+    /// on top of, captured by the caller (a branch checkpoints it for
+    /// its CAS): where its store, caches, and remote fallback come from.
+    pub(crate) view: View<'a>,
     /// The instruction stream to apply.
     pub(crate) changes: Changes,
     /// Pre-built machinery entries riding the same batch. See
@@ -611,8 +705,8 @@ where
             + ConditionalSync
             + 'static,
     {
-        let source = self.source;
-        let base_revision = self.base;
+        let source = self.view;
+        let base_revision = source.revision().cloned();
         let changes = self.changes;
 
         // If the line tracks a remote upstream, commits must be able
@@ -1053,20 +1147,17 @@ mod tests {
     }
 
     /// A commit made through one handle, while another handle to the same
-    /// branch commits from a stale snapshot, must not be silently lost — the
-    /// stale commit fails loudly, and refreshing then re-committing reconciles.
+    /// branch commits from a stale snapshot, is not lost, and the stale one
+    /// is not refused: it applies its instructions again over the head that
+    /// won and publishes on top of it.
     ///
-    /// `commit` checkpoints the head it builds on, then publishes CAS'd against
-    /// that version. Two independent handles (the shape the service worker hits
-    /// once `/transact` no longer serializes writes under a single lock) both
-    /// snapshot the same head; one commits and advances storage, so the other's
-    /// publish CAS fails with a `VersionMismatch` rather than overwriting the
-    /// first commit with a tree built from the now-stale snapshot. Recovery is
-    /// refresh + re-commit.
+    /// `commit` checkpoints the head it builds on, then publishes CAS'd
+    /// against that version. Two independent handles both snapshot the same
+    /// head; one commits and advances storage, so the other's publish CAS
+    /// fails, and the commit retries over the new head rather than
+    /// overwriting the first commit with a tree built from the stale one.
     #[dialog_common::test]
-    async fn it_fails_a_commit_racing_another_then_reconciles_on_refresh() -> Result<()> {
-        use crate::PublishError;
-
+    async fn it_applies_a_commit_racing_another_over_the_winner() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
 
@@ -1077,7 +1168,7 @@ mod tests {
 
         // A commits first, advancing the head in storage. B's cache is now
         // stale.
-        writer_a
+        let first = writer_a
             .commit(stream::iter(vec![Instruction::Assert(
                 Fact {
                     the: "user/name".parse()?,
@@ -1090,33 +1181,8 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        // B commits from its stale snapshot — must fail loudly, not silently
-        // drop A's commit.
-        let raced = writer_b
-            .commit(stream::iter(vec![Instruction::Assert(
-                Fact {
-                    the: "user/name".parse()?,
-                    of: "user:b".parse()?,
-                    is: Value::String("Bob".to_string()),
-                    cause: None,
-                },
-                dialog_corpus::Pick::All,
-            )]))
-            .perform(&operator)
-            .await;
-        assert!(
-            matches!(
-                raced,
-                Err(crate::CommitError::Publish(
-                    PublishError::VersionMismatch { .. }
-                ))
-            ),
-            "a commit racing another must fail with a version mismatch; got {raced:?}"
-        );
-
-        // Recovery: refresh B's view of the head, then re-commit.
-        writer_b.refresh(&operator).await?;
-        writer_b
+        // B commits from its stale snapshot: it lands on top of A's commit.
+        let second = writer_b
             .commit(stream::iter(vec![Instruction::Assert(
                 Fact {
                     the: "user/name".parse()?,
@@ -1128,6 +1194,11 @@ mod tests {
             )]))
             .perform(&operator)
             .await?;
+        assert_ne!(
+            second.version(),
+            first.version(),
+            "B minted its own revision"
+        );
 
         // Both commits survive.
         let fresh = repo.branch("main").open().perform(&operator).await?;
@@ -1141,13 +1212,147 @@ mod tests {
             .await
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(
-            results.len(),
-            2,
-            "both racing commits must survive recovery"
-        );
+        assert_eq!(results.len(), 2, "both racing commits survive");
 
         Ok(())
+    }
+
+    /// A one-shot `.commit().publish()` that loses its branch's race fails
+    /// as it always did, with nothing of it written; `Branch::transact` is
+    /// what runs again.
+    #[dialog_common::test]
+    async fn it_refuses_a_one_shot_transaction_that_lost_its_race() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let writer_a = repo.branch("main").open().perform(&operator).await?;
+        let writer_b = repo.branch("main").open().perform(&operator).await?;
+        writer_a
+            .transaction()
+            .integrate(named("user:a", "Alice")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        // B's handle still holds the head A built on.
+        let refused = writer_b
+            .transaction()
+            .integrate(named("user:b", "Bob")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(crate::CommitError::Publish(
+                    crate::PublishError::VersionMismatch { .. }
+                ))
+            ),
+            "got {refused:?}"
+        );
+        assert_eq!(names(&repo, &operator).await?, vec!["Alice".to_string()]);
+        Ok(())
+    }
+
+    /// A transaction built by `transact` that loses its branch's race is
+    /// built again over the head that won: what it read, it reads again,
+    /// so a write computed from a read is computed over the winner.
+    #[dialog_common::test]
+    async fn it_builds_a_transaction_again_over_the_head_that_won() -> Result<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let writer_a = repo.branch("main").open().perform(&operator).await?;
+        let writer_b = repo.branch("main").open().perform(&operator).await?;
+        let tries = AtomicUsize::new(0);
+        writer_b
+            .transact(|transaction| {
+                let (tries, writer_a, operator) = (&tries, &writer_a, &operator);
+                async move {
+                    let seen = read_names(&transaction, operator).await?;
+                    if tries.fetch_add(1, Ordering::SeqCst) == 0 {
+                        // Another writer moves the head after this try read.
+                        writer_a
+                            .transact(|transaction| async move {
+                                anyhow::Ok(transaction.integrate(named("user:a", "Alice")?))
+                            })
+                            .perform(operator)
+                            .await?;
+                    }
+                    anyhow::Ok(transaction.integrate(named("user:b", &format!("Bob saw {seen}"))?))
+                }
+            })
+            .perform(&operator)
+            .await?;
+        assert_eq!(tries.load(Ordering::SeqCst), 2, "built twice");
+        assert_eq!(
+            names(&repo, &operator).await?,
+            vec!["Alice".to_string(), "Bob saw 1".to_string()],
+            "the second build read what the winner wrote"
+        );
+        Ok(())
+    }
+
+    use dialog_query::attribute::Relation;
+    use dialog_storage::provider::storage::VolatileSpace;
+
+    type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
+
+    fn named(entity: &str, name: &str) -> Result<dialog_corpus::Changes> {
+        Ok(vec![Instruction::Assert(
+            Fact {
+                the: "user/name".parse()?,
+                of: entity.parse()?,
+                is: Value::String(name.to_string()),
+                cause: None,
+            },
+            dialog_corpus::Pick::All,
+        )]
+        .into_iter()
+        .collect())
+    }
+
+    /// How many names a transaction reads.
+    async fn read_names(
+        transaction: &crate::Transaction<&crate::Branch>,
+        env: &Operator,
+    ) -> Result<usize> {
+        use dialog_query::query::Output as _;
+        use dialog_query::{Term, the};
+        Ok(transaction
+            .query()
+            .select(dialog_query::AttributeQuery::from(
+                Term::<Relation>::from(the!("user/name"))
+                    .of(Term::<dialog_corpus::Entity>::var("e"))
+                    .is(Term::<String>::var("v")),
+            ))
+            .perform(env)
+            .try_vec()
+            .await?
+            .len())
+    }
+
+    /// The names the branch holds, sorted.
+    async fn names(repo: &crate::Repository, env: &Operator) -> Result<Vec<String>> {
+        let fresh = repo.branch("main").open().perform(env).await?;
+        let mut names: Vec<String> = fresh
+            .claims()
+            .select(Selector::new().the("user/name".parse()?))
+            .to_owned()
+            .perform(env)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|fact| match fact.is {
+                Value::String(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        Ok(names)
     }
 }
 

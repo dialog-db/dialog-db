@@ -43,6 +43,7 @@ async-trait = { workspace = true }
 base58 = { workspace = true }
 ed25519-dalek = { workspace = true }
 futures-util = { workspace = true }
+hashbrown = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
 ipld-core = { workspace = true }

@@ -7,6 +7,9 @@
 //! volatile and the process runs one scenario, so nothing collides), and
 //! the signer is the fixed-seed test system. Two runs of one scenario
 //! move the same blocks.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -211,7 +214,11 @@ impl Env {
         let repository = self.profile.space("perf").open().perform(&reader).await?;
         let upstream = repository.branch(upstream).open().perform(&reader).await?;
         let branch = repository.branch(name).open().perform(&reader).await?;
-        branch.pull().from(&upstream).perform(&reader).await?;
+        branch
+            .pull(dialog_repository::Download::MinimalRanges)
+            .from(&upstream)
+            .perform(&reader)
+            .await?;
         self.forget();
         Ok(Adopter {
             reader,

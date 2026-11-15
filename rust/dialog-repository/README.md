@@ -98,5 +98,5 @@ main
     .await?;
 
 main.push().perform(&session).await?;
-main.pull().perform(&session).await?;
+main.pull(dialog_repository::Download::MinimalRanges).perform(&session).await?;
 ```

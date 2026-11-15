@@ -18,8 +18,8 @@ use futures_util::{Stream, StreamExt as _};
 
 use super::resolve::resolve;
 use crate::{
-    Branch, ConnectedBranch, Observation, RemoteSite, ReplicateError, ResolveEnv, Revision, Target,
-    Upstream, WatchRemoteBranchError,
+    Branch, ConnectedBranch, Download, Observation, RemoteSite, ReplicateError, ResolveEnv,
+    Revision, Target, Upstream, WatchRemoteBranchError,
 };
 
 /// What replicating a branch did.
@@ -59,12 +59,15 @@ pub struct Replicate<'a, Ticks = Pending<()>> {
     branch: &'a Branch,
     pull: bool,
     push: bool,
+    download: Download,
     ticks: Ticks,
 }
 
 impl Branch {
     /// Keep this branch in step with its upstreams: pull from them as they
-    /// move and push to them as this one does.
+    /// move and push to them as this one does. Every pull it makes brings
+    /// local what `download` names of the head it would adopt, before the
+    /// head moves there, as [`Branch::pull`] does.
     ///
     /// Chain [`Replicate::pull`] or [`Replicate::push`] to do only one;
     /// a bare replicate does both.
@@ -74,11 +77,12 @@ impl Branch {
     /// an upstream that cannot be watched at all (or a local one) is pulled
     /// from only as the replication begins. The stream answers
     /// [`Replicated::Unwatched`] when a watch ends, so a host can tell.
-    pub fn replicate(&self) -> Replicate<'_> {
+    pub fn replicate(&self, download: Download) -> Replicate<'_> {
         Replicate {
             branch: self,
             pull: false,
             push: false,
+            download,
             ticks: stream::pending(),
         }
     }
@@ -111,6 +115,7 @@ impl<'a, Ticks> Replicate<'a, Ticks> {
             branch: self.branch,
             pull: self.pull,
             push: self.push,
+            download: self.download,
             ticks,
         }
     }
@@ -243,6 +248,7 @@ where
             chosen => chosen,
         };
         let ticks = self.ticks;
+        let download = self.download;
         stream! {
             let mut sources: SelectAll<Source<'a>> = SelectAll::new();
             sources.push(source(ticks.map(|()| Event::Tick)));
@@ -271,7 +277,7 @@ where
             }
 
             // Catch up once, as the stream begins.
-            for item in sync(branch, env, pull, push, true).await {
+            for item in sync(branch, env, pull, push, true, &download).await {
                 yield item;
             }
 
@@ -285,13 +291,13 @@ where
                     // it.
                     Event::Observed(target, Ok(Observation::Advanced(_) | Observation::Stale)) => {
                         rewatch.delivered(&target);
-                        for item in sync(branch, env, pull, push, false).await {
+                        for item in sync(branch, env, pull, push, false, &download).await {
                             yield item;
                         }
                     }
                     Event::Observed(target, Ok(Observation::Diverged)) => {
                         rewatch.delivered(&target);
-                        for item in sync(branch, env, pull, push, true).await {
+                        for item in sync(branch, env, pull, push, true, &download).await {
                             yield item;
                         }
                     }
@@ -300,7 +306,7 @@ where
                     // so no tick asks where it stands: ask now.
                     Event::Observed(_, Err(error)) => {
                         yield Err(error.into());
-                        for item in sync(branch, env, pull, push, true).await {
+                        for item in sync(branch, env, pull, push, true, &download).await {
                             yield item;
                         }
                     }
@@ -328,7 +334,7 @@ where
                             }
                         }
                         let confirm = pull && (local || !unwatched.is_empty());
-                        for item in sync(branch, env, confirm, push, confirm).await {
+                        for item in sync(branch, env, confirm, push, confirm, &download).await {
                             yield item;
                         }
                     }
@@ -424,6 +430,7 @@ async fn sync<Env>(
     pull: bool,
     push: bool,
     confirm: bool,
+    download: &Download,
 ) -> Vec<Result<Replicated, ReplicateError>>
 where
     Env: ResolveEnv
@@ -437,9 +444,13 @@ where
     let mut done = Vec::new();
     if pull {
         let pulled = if confirm {
-            branch.pull().perform(env).await
+            branch.pull(download.clone()).perform(env).await
         } else {
-            branch.pull().assuming_upstream().perform(env).await
+            branch
+                .pull(download.clone())
+                .assuming_upstream()
+                .perform(env)
+                .await
         };
         match pulled {
             Ok(Some(revision)) => done.push(Ok(Replicated::Pulled(revision))),
@@ -590,7 +601,10 @@ mod tests {
         let first = commit(&writer, "first", &operator).await?;
         writer.push().perform(&operator).await?;
 
-        let events = mirror.replicate().pull().perform(&operator);
+        let events = mirror
+            .replicate(crate::Download::MinimalRanges)
+            .pull()
+            .perform(&operator);
         pin_mut!(events);
         let Replicated::Pulled(caught_up) = next(&mut events).await? else {
             bail!("expected the mirror to catch up first");
@@ -621,7 +635,10 @@ mod tests {
         let ticks = stream::unfold(ticks, |mut ticks| async move {
             ticks.recv().await.map(|tick| (tick, ticks))
         });
-        let events = mirror.replicate().every(ticks).perform(&operator);
+        let events = mirror
+            .replicate(crate::Download::MinimalRanges)
+            .every(ticks)
+            .perform(&operator);
         pin_mut!(events);
 
         let pushed = commit(&writer, "elsewhere", &operator).await?;
@@ -661,7 +678,10 @@ mod tests {
         let first = commit(&writer, "first", &operator).await?;
         writer.push().perform(&operator).await?;
 
-        let events = mirror.replicate().pull().perform(&operator);
+        let events = mirror
+            .replicate(crate::Download::MinimalRanges)
+            .pull()
+            .perform(&operator);
         pin_mut!(events);
         let Replicated::Pulled(caught_up) = next(&mut events).await? else {
             bail!("expected the mirror to catch up first");
@@ -703,7 +723,10 @@ mod tests {
 
         let pushed = writer.push().perform(&operator).await?;
         assert_eq!(pushed.map(|pushed| pushed.tree), Some(head.tree.clone()));
-        mirror.pull().perform(&operator).await?;
+        mirror
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         assert_eq!(mirror.revision().map(|pulled| pulled.tree), Some(head.tree));
         Ok(())
     }
@@ -722,7 +745,10 @@ mod tests {
 
         let head = commit(&writer, "skewed", &operator).await?;
         writer.push().perform(&operator).await?;
-        mirror.pull().perform(&operator).await?;
+        mirror
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
         assert_eq!(mirror.revision().map(|pulled| pulled.tree), Some(head.tree));
         Ok(())
     }
@@ -738,7 +764,10 @@ mod tests {
             SiteAddress::Ucan(UcanAddress::new(&service.endpoint).with_socket(&service.socket));
         rig!(operator, profile, site, writer, mirror);
 
-        let events = mirror.replicate().pull().perform(&operator);
+        let events = mirror
+            .replicate(crate::Download::MinimalRanges)
+            .pull()
+            .perform(&operator);
         pin_mut!(events);
         let pushed = commit(&writer, "ahead", &operator).await?;
         writer.push().perform(&operator).await?;
@@ -778,7 +807,10 @@ mod tests {
             .set_upstream(origin.branch("main").open().perform(&operator).await?)
             .perform(&operator)
             .await?;
-        theirs.pull().perform(&operator).await?;
+        theirs
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await?;
 
         let ahead = commit(&writer, "ahead", &operator).await?;
         writer.push().perform(&operator).await?;
@@ -794,7 +826,11 @@ mod tests {
             "the refusal names the remote's head: {refused:?}"
         );
 
-        theirs.pull().assuming_upstream().perform(&operator).await?;
+        theirs
+            .pull(crate::Download::MinimalRanges)
+            .assuming_upstream()
+            .perform(&operator)
+            .await?;
         theirs.push().perform(&operator).await?;
         Ok(())
     }

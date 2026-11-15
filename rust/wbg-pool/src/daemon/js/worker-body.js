@@ -17,6 +17,10 @@ import {
     default as init,
 } from '{MODULE_JS}';
 
+// Variables the runner was asked to pass (WBG_POOL_PASS_ENV), for tests to
+// read, as a wasm test has no process environment.
+{ENV}
+
 const nocapture = {NOCAPTURE};
 
 function setup(port) {

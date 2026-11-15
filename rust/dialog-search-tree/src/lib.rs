@@ -191,6 +191,8 @@ pub use delta::*;
 mod differential;
 pub use differential::*;
 
+mod follow;
+
 mod cache;
 pub use cache::*;
 

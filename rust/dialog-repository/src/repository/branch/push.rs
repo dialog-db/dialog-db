@@ -1438,7 +1438,7 @@ where
                     ))
                     .into());
                 };
-                let bytes = node.buffer().as_ref().to_vec();
+                let bytes = node.buffer()?.as_ref().to_vec();
 
                 // The entries this node carries (stored in a segment,
                 // buffered in an index) may name blob bytes and spilled
@@ -2116,7 +2116,10 @@ mod tests {
             ),
             "the push over the rival head is refused: {refused:?}"
         );
-        let refused = feature.pull().perform(&operator).await;
+        let refused = feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&operator)
+            .await;
         assert!(
             matches!(
                 &refused,

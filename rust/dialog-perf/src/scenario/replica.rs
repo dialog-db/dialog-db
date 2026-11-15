@@ -1,5 +1,8 @@
 //! A replica that faults blocks in on demand: what its first query costs
 //! once it has adopted a head by root and remembers nothing.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use std::future::Future;
 use std::pin::Pin;
@@ -58,7 +61,11 @@ pub async fn first_query(size: usize) -> Result<Box<dyn Prepared>> {
     let mut previous = env.branch.clone();
     for index in 0..size {
         let writer = env.branch(&format!("writer-{index}")).await?;
-        writer.pull().from(&previous).perform(&env.operator).await?;
+        writer
+            .pull(dialog_repository::Download::MinimalRanges)
+            .from(&previous)
+            .perform(&env.operator)
+            .await?;
         let facts = [fact(
             &entity("origin", index),
             "origin/mark",
@@ -74,7 +81,7 @@ pub async fn first_query(size: usize) -> Result<Box<dyn Prepared>> {
         previous = writer;
     }
     env.branch
-        .pull()
+        .pull(dialog_repository::Download::MinimalRanges)
         .from(&previous)
         .perform(&env.operator)
         .await?;

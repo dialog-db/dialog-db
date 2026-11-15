@@ -1,0 +1,34 @@
+{
+  "scenario": "query-member",
+  "size": 2000,
+  "profile": "release",
+  "outcome": {
+    "filtered": 250,
+    "rows": 2000
+  },
+  "counters": {
+    "archive.get": 32,
+    "archive.get.bytes": 1535532,
+    "archive.put": 0,
+    "archive.put.bytes": 0,
+    "span.apply_batch_reusing": 0,
+    "span.buffer_records": 0,
+    "span.commit": 0,
+    "span.resolve_bundle": 1,
+    "span.resolve_rules": 2,
+    "span.seal_batch": 0,
+    "span.settle": 0,
+    "span.warm_node": 1020,
+    "span.warm_walk": 503,
+    "span.write_instructions": 0
+  },
+  "instructions": 121079801,
+  "instructions_outside_allocator": 89737786,
+  "allocations": {
+    "alloc.bytes": 30869192,
+    "alloc.calls": 142371,
+    "free.calls": 141964,
+    "realloc.calls": 8439,
+    "realloc.from.bytes": 1293707
+  }
+}

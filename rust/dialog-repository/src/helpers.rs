@@ -7,8 +7,10 @@ use dialog_search_tree::nodes;
 use std::any::{Any, type_name};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::Poll;
 
 use dialog_capability::{Command, Provider, Resume, Subject};
@@ -618,6 +620,188 @@ impl<P> Counting<P> {
     }
 }
 
+/// A future an [`Interposing`] env runs under a read, before answering it.
+#[cfg(not(target_arch = "wasm32"))]
+pub type Interposed<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+/// A future an [`Interposing`] env runs under a read, before answering it.
+#[cfg(target_arch = "wasm32")]
+pub type Interposed<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type Interposition<P> = Box<dyn for<'a> FnOnce(&'a P) -> Interposed<'a> + Send>;
+#[cfg(target_arch = "wasm32")]
+type Interposition<P> = Box<dyn for<'a> FnOnce(&'a P) -> Interposed<'a>>;
+
+/// What an [`Interposing`] env has armed: the read to act under, which
+/// one, and the action.
+type Armed<P> = Option<(Under, u64, Interposition<P>)>;
+
+/// Which read an [`Interposing`] env acts under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Under {
+    /// A tree node read ([`nodes::Read`] of a [`CorpusNode`]): every
+    /// block a scan, a history walk or a commit's descent touches.
+    NodeRead,
+    /// A spilled value's load ([`blob::Load`](BlobLoad)): a value too
+    /// large for its row, read from the blob store when the row is.
+    BlobLoad,
+}
+
+/// A [`Provider`] wrapper that does something else under one read:
+/// forwards every effect to the env it wraps, and before answering the
+/// k-th tree node read (or the k-th blob load) runs an action the test
+/// armed, against the wrapped env.
+///
+/// This is how a test puts a commit *inside* a read path: arm it with a
+/// commit through another handle of the branch, and the k-th read the
+/// path performs finds the head moved when it resumes. Sweeping k over
+/// the reads a path performs puts the move at every point of the path,
+/// which is what shows whether the path reads one revision throughout
+/// (dialog-db/dialog-db#757). The action runs against the wrapped env,
+/// so the reads it performs itself are not counted and cannot fire it
+/// again.
+///
+/// Clones share the counters and the armed action.
+pub struct Interposing<P> {
+    inner: P,
+    reads: Arc<AtomicU64>,
+    loads: Arc<AtomicU64>,
+    armed: Arc<Mutex<Armed<P>>>,
+    fired: Arc<AtomicBool>,
+}
+
+impl<P: fmt::Debug> fmt::Debug for Interposing<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Interposing")
+            .field("inner", &self.inner)
+            .field("reads", &self.reads)
+            .field("loads", &self.loads)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<P: Clone> Clone for Interposing<P> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            reads: Arc::clone(&self.reads),
+            loads: Arc::clone(&self.loads),
+            armed: Arc::clone(&self.armed),
+            fired: Arc::clone(&self.fired),
+        }
+    }
+}
+
+impl<P> Interposing<P> {
+    /// Wrap `inner`, with nothing armed: every read is answered as the
+    /// wrapped env answers it.
+    pub fn new(inner: P) -> Self {
+        Self {
+            inner,
+            reads: Arc::new(AtomicU64::new(0)),
+            loads: Arc::new(AtomicU64::new(0)),
+            armed: Arc::new(Mutex::new(None)),
+            fired: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// The env this one wraps: where an armed action runs.
+    pub fn inner(&self) -> &P {
+        &self.inner
+    }
+
+    /// Arm `action` to run under the `at`-th read of the kind `under`
+    /// (counted from 1, from now), once. A read the env never reaches
+    /// leaves it unfired, which [`fired`](Self::fired) reports.
+    pub fn under<F>(&self, under: Under, at: u64, action: F)
+    where
+        F: for<'a> FnOnce(&'a P) -> Interposed<'a> + ConditionalSend + 'static,
+    {
+        self.reads.store(0, Ordering::SeqCst);
+        self.loads.store(0, Ordering::SeqCst);
+        self.fired.store(false, Ordering::SeqCst);
+        *self.armed.lock() = Some((under, at, Box::new(action)));
+    }
+
+    /// Drop whatever is armed and has not run.
+    pub fn disarm(&self) {
+        *self.armed.lock() = None;
+    }
+
+    /// Whether the armed action has run since it was armed.
+    pub fn fired(&self) -> bool {
+        self.fired.load(Ordering::SeqCst)
+    }
+
+    /// Tree node reads performed so far.
+    pub fn reads(&self) -> u64 {
+        self.reads.load(Ordering::SeqCst)
+    }
+
+    /// Blob loads performed so far.
+    pub fn loads(&self) -> u64 {
+        self.loads.load(Ordering::SeqCst)
+    }
+
+    /// Count one read of the kind `under`, and take the armed action when
+    /// this read is the one it waits for.
+    fn due(&self, under: Under) -> Option<Interposition<P>> {
+        let counter = match under {
+            Under::NodeRead => &self.reads,
+            Under::BlobLoad => &self.loads,
+        };
+        let count = counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut armed = self.armed.lock();
+        match armed.as_ref() {
+            Some((kind, at, _)) if *kind == under && *at == count => {
+                self.fired.store(true, Ordering::SeqCst);
+                armed.take().map(|(_, _, action)| action)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl<P: dialog_common::Holds> dialog_common::Holds for Interposing<P> {
+    fn held(&self, key: &str) -> Option<dialog_common::Held> {
+        self.inner.held(key)
+    }
+
+    fn hold(&self, key: String, handle: dialog_common::Held) {
+        self.inner.hold(key, handle)
+    }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> dialog_common::Held) -> dialog_common::Held {
+        self.inner.held_or(key, make)
+    }
+}
+
+impl<C, P> Provider<C> for Interposing<P>
+where
+    C: Command + 'static,
+    C::Input: ConditionalSend + 'static,
+    C::Output: ConditionalSend + 'static,
+    P: Provider<C> + ConditionalSync,
+{
+    fn execute(&self, input: C::Input) -> Resume<'_, C::Output> {
+        let input_of = &input as &dyn Any;
+        let under = if input_of.is::<nodes::Read<CorpusNode>>() {
+            Some(Under::NodeRead)
+        } else if input_of.is::<BlobLoad>() {
+            Some(Under::BlobLoad)
+        } else {
+            None
+        };
+        let Some(action) = under.and_then(|under| self.due(under)) else {
+            return self.inner.execute(input);
+        };
+        Resume::later(async move {
+            action(&self.inner).await;
+            self.inner.execute(input).await
+        })
+    }
+}
+
 /// The tree nodes of `subject`'s index that `roots` reach, by digest: each
 /// root, and every node an index node among them links to, down to the
 /// leaves. A root the archive does not hold is counted and not descended.
@@ -814,7 +998,10 @@ mod prune_tests {
         );
         let feature = local.branch("feature").open().perform(&device).await?;
         feature.set_upstream(&cold).perform(&device).await?;
-        feature.pull().perform(&device).await?;
+        feature
+            .pull(crate::Download::MinimalRanges)
+            .perform(&device)
+            .await?;
         assert_eq!(feature.revision(), cold.revision());
         Ok(())
     }
