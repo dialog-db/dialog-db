@@ -3,7 +3,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Dialog has a value made of values, kept as a record under a version byte and named by its parts. A parameter holds a pattern: a term, or a map or a list of terms. A concept premise that holds one is planned as the concept over the whole value and an equality between the whole and the pattern, and the equality runs both ways ([design-parameters.md](design-parameters.md)). A rule that holds one has an identity, runs, is laid over a branch for a query, and cannot be stored ([design-rule-identity.md](design-rule-identity.md)). A pattern is typed by its leaves, and has to stand where a record can ([design-typing.md](design-typing.md)). A premise of terms alone is moved and allocated as it was, and runs 80 to 290 instructions more a read ([design-leaf-cost.md](design-leaf-cost.md)). | **Building.** The six steps of [the plan](plan.md) are built and tested, in pull request #778. A record nested deep is named on any target's stack ([design-naming-depth.md](design-naming-depth.md)). |
-| **Agenda** | For the maintainer: what installing a rule that holds a pattern should do; today it is refused by a panic that says why, since an assertion returns nothing, and a stored form for it is the rule format topic's (#779). Whether the instructions left on a read of terms alone, each a test of whether a pattern is held, are a cost. Whether a pattern with no rest is the map of exactly its entries, as built. Whether a composite keeps a number under the narrowest type that holds it, as built. Whether any embedder has stored a record that starts with `0x01` to `0x17`. Found on the way, not about patterns: a variable a premise types, read from a concept field that declares no type, fails the query on a value of another type, where a scan drops the row; and one binary's instruction count moves by about 1% between two runs on the read scenarios, all of it inside the allocator, so the Perf gate cannot see less. Whether `notes/record-value.md` is amended: it says a record is opaque to the query layer, which "never looks inside", and patterns look inside a versioned one. The amendment would say a versioned record is the one kind the engine reads, and every other record stays opaque. | The maintainer's answers to the agenda. Then what the notation (#773) needs of patterns that it does not have. |
+| **Agenda** | **For the maintainer, 2026-11-15: whether a map pattern with no rest is exactly its entries (as built, and as the notation's `...` needs) or at least its entries (as he said); whether a record is written with inline CIDs before it lands.** Answered 2026-11-15, see the last entry: the number's type, the version byte's exposure, the note. Earlier: what installing a rule that holds a pattern should do; today it is refused by a panic that says why, since an assertion returns nothing, and a stored form for it is the rule format topic's (#779). Whether the instructions left on a read of terms alone, each a test of whether a pattern is held, are a cost. Whether a pattern with no rest is the map of exactly its entries, as built. Whether a composite keeps a number under the narrowest type that holds it, as built. Whether any embedder has stored a record that starts with `0x01` to `0x17`. Found on the way, not about patterns: a variable a premise types, read from a concept field that declares no type, fails the query on a value of another type, where a scan drops the row; and one binary's instruction count moves by about 1% between two runs on the read scenarios, all of it inside the allocator, so the Perf gate cannot see less. Whether `notes/record-value.md` is amended: it says a record is opaque to the query layer, which "never looks inside", and patterns look inside a versioned one. The amendment would say a versioned record is the one kind the engine reads, and every other record stays opaque. | The maintainer's answers to the agenda. Then what the notation (#773) needs of patterns that it does not have. |
 
 ## 2026-11-11, Directing: a pattern in place of a term
 
@@ -225,3 +225,36 @@ For the rule format topic (#779), which decides it. This is what building patter
 ```
 
 **Decided.** By the maintainer: the data model has maps and lists. Taken out: `Composite::Tuple`, `Composite::tuple`, `Pattern::Tuple`, `Pattern::tuple`, `identity::TUPLE`. A list pattern with no run is the list of exactly its items, which is what a tuple pattern said.
+
+## 2026-11-15, Building: the maintainer's answers to the agenda, and what a record is written as
+
+**Asked.** Whether patterns or records are ready to land; why records are so large a change; the agenda's open questions.
+
+**Learned.**
+
+- Answered by the maintainer:
+  - a number is kept under the narrowest type that holds it: "I guess, I'm not sure about tradeoffs maybe you can make judgment call". The agent's call: as built. It makes `3` and `3.0` one number, which is how the index compares numbers.
+  - whether an embedder stored a record starting with `0x01` to `0x17`: "No idea". Read again for what is exposed: such a record is stored, synced and named as before (`reference_within` falls back to the scalar name), and is refused only when a pattern looks into it.
+  - `notes/record-value.md` is not amended: "No, we'll switch format soon actually but I don't want to block on it".
+  - a key in a pattern is text. Not said as an answer: read off the form he settled for a stored pattern, which has text keys, and off the data model being IPLD's ([rule-format](https://github.com/dialog-db/dialog-db/pull/779)). The agent had asked three times what a key is and should have read it there.
+- **A contradiction, not resolved.** Of a map pattern with no rest: "Not map should have at least captured params, rest is mostly to capture remaining entries". As built, and as three of his decisions of 2026-11-13 in the notation need, a map with no rest is exactly its entries: `{foo: ?a ...}` reads as `{foo: ?a ... _}`, `(todo ?t list: ?l ...)` is sugar for `... _`, and a concept read that leaves fields out without `...` is refused. If a map is open, the trailing `...` says nothing. Put to him with both sides; not changed until he says which goes.
+- Why records are large. `composite.rs` is 1,244 lines: about 410 of code, 150 of comments, 630 of tests. The agent had said "1,300 lines" as if code. The 410 come of four choices: a part written as `[type, bytes]`, since dialog has types IPLD has not; a key of any type, which needs a map type, an order and a hand-written canonical writer with a check on read; the version byte; naming by parts in a loop.
+- The maintainer, of the first: "I think I'd encode those as inline CID". Examined, not decided:
+
+```
+ text, boolean, bytes, float       the native kind
+ a number within 64 bits           a native integer
+ a number beyond                   inline CID, 16 bytes
+ symbol                            inline CID, at most 63 bytes
+ entity                            inline CID, a URI of any length
+ a nested record                   a nested map or list
+```
+
+  - Tag 42 is the one extension dag-cbor allows, so this is the way to keep a record plain dag-cbor.
+  - `cid` 0.11 has `pub type Cid = CidGeneric<64>`: an inline CID carries 64 bytes at most. A symbol fits (`RELATION_LENGTH` is 64). An entity is a URI of any length and may not.
+  - Open: what says the type, a code a type or one code and a type byte; whether an entity is a link.
+- Merged with main at b8b8ba3: corpus 267, query 1006 and repository 716 unit tests pass. The lint run here refuses one future as too large, `attempt_on_branch` in `commit.rs` at 19,008 bytes. It is not patterns: measured on main and on this branch with the threshold lowered, every future of the crate is the same size on both, that one included. Main's own lint passes in CI, whose toolchain is pinned later (rust-overlay of 2026-10-14) than the one used here (1.97, 2026-07-07). So the lint is CI's to say for this merge.
+
+**Decided.** The four answers above. Not decided: open or exact; whether a record is written with inline CIDs as version 1, before it lands, or lands as built.
+
+The agent's hypothesis: with text keys and inline CIDs the canonical writer, the check on read and the map type go, since dag-cbor orders keys and has one encoding a value; the 410 lines fall by more than a third. Confirmed by building it on a branch and running the same tests; refuted if the reader has to be written by hand anyway, for the CIDs.
