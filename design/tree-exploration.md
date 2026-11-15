@@ -156,6 +156,6 @@ What has to be built in dialog:
 Still open in what is built
 ([design-accessors](tree-exploration/design-accessors.md), last two
 sections): reaching a span's or an entry's details by its own entity;
-the ops an index node buffers, which no resolver yields; the name
-`fanout-bits`; a fetch that actually brings a node from a remote, which
+the ops an index node buffers, which no resolver yields; a fetch that
+actually brings a node from a remote, which
 no test here does.

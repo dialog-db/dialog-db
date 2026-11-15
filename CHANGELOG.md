@@ -63,7 +63,7 @@ What this changes for you:
   entry that is no blob record, and the claim slots on one that is.
 - Slot names are kebab-case: `max-separator`, `inline-n`,
   `spill-prefix`, `max-segment`, `frame-ceiling-factor`,
-  `anchor-selector`. `fanout_n` is `fanout-bits`. `tree/node` also
+  `anchor-selector`. `fanout_n` is `fanout-exponent`. `tree/node` also
   yields `entry-overhead`, `key-overhead` and `link-overhead`, which no
   resolver did.
 - `RESOLVER_COST` is 50,000, from 200. Where a rule's body has a fact

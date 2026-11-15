@@ -22,7 +22,7 @@ accessor never lists.
 
 | accessor | given | one row per | a row holds |
 |---|---|---|---|
-| `tree/node` | a node | the node | `kind` (`"index"` or `"segment"`), `size` (its block, in bytes), `count` (spans or entries), `scale`, `novelty`; and the format it was written under, every field of it: `version`, `fanout-bits`, `max-separator`, `inline-n`, `spill-prefix`, `max-segment`, `frame-ceiling-factor`, `anchor-selector`, `entry-overhead`, `key-overhead`, `link-overhead` |
+| `tree/node` | a node | the node | `kind` (`"index"` or `"segment"`), `size` (its block, in bytes), `count` (spans or entries), `scale`, `novelty`; and the format it was written under, every field of it: `version`, `fanout-exponent`, `max-separator`, `inline-n`, `spill-prefix`, `max-segment`, `frame-ceiling-factor`, `anchor-selector`, `entry-overhead`, `key-overhead`, `link-overhead` |
 | `tree/span` | an index node | each child | `span` (the row's own entity), `at`, `node` (the child, a `node:` entity), `separator`, `until`, `rank`, `scale`, `novelty` |
 | `tree/entry` | a segment node | each entry | `entry` (the row's own entity), `at`, `key`, `rank`; its state and claim: `state`, `retraction`, `origin`, `edition`, `cause`, `collapsed`, `supersedes`; `spill` (an `asset:` entity); and of a blob record: `blob` (an `asset:` entity), `blob-size`, `blob-version`. A field that does not apply to an entry is absent, not zero or empty |
 | `tree/value` | an `asset:` | the value | `size`, `bytes` |
@@ -124,9 +124,13 @@ to overturn:
   (`it_is_planned_after_the_fact_that_names_its_node`); the repository
   test cannot show it, because every node of a tree a replica wrote is
   already kept by its environment.
-- **The fanout parameter** is `fanout-bits`. The maintainer offered
-  `fanout-factor` and has not chosen; this is the agent's, and a rename
-  is one line.
+- **The fanout parameter** is `fanout-exponent`, chosen by the
+  maintainer, 2026-11-15. The agent had built it as `fanout-bits`
+  against the maintainer's `fanout-factor`, on its own judgement; asked
+  whether `fanout-factor` was wrong, it gave its reasons (a branching
+  factor is the fanout itself, and `frame-ceiling-factor` on the same
+  row is a multiplier) and three names, and the maintainer took the
+  most literal.
 
 Also decided in building:
 

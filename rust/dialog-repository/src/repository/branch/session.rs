@@ -4634,7 +4634,7 @@ mod resolver_tests {
         "scale",
         "novelty",
         "version",
-        "fanout-bits",
+        "fanout-exponent",
         "max-separator",
         "inline-n",
         "spill-prefix",
@@ -4781,7 +4781,7 @@ mod resolver_tests {
         for slot in NODE {
             assert!(row.contains_key(*slot), "`{slot}` is yielded: {row:?}");
         }
-        assert!(unsigned(row, "fanout-bits") > 0, "a tree branches");
+        assert!(unsigned(row, "fanout-exponent") > 0, "a tree branches");
         assert!(unsigned(row, "version") > 0, "a node has a layout");
         Ok(())
     }

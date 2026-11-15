@@ -206,7 +206,7 @@ accessor! {
     scale => "scale": UnsignedInt, "The node's scale code: an advisory log-scale size of its subtree.";
     novelty => "novelty": UnsignedInt, "Buffered ops riding this node (0 for a segment).";
     version => "version": UnsignedInt, "Layout version; pins how the rest of the node is read.";
-    fanout_bits => "fanout-bits": UnsignedInt, "Branching parameter `n`: how many bits of a key's hash decide a boundary; expected fanout is `2^n`.";
+    fanout_exponent => "fanout-exponent": UnsignedInt, "Branching parameter `n`: how many bits of a key's hash decide a boundary; expected fanout is `2^n`.";
     max_separator => "max-separator": UnsignedInt, "Keys longer than this never become boundaries.";
     inline_n => "inline-n": UnsignedInt, "Values longer than this spill to the blob store.";
     spill_prefix => "spill-prefix": UnsignedInt, "Leading raw value bytes a spilled value's key keeps.";
@@ -487,7 +487,7 @@ impl ResolverQuery {
                     (&query.scale, unsigned(summary.scale)),
                     (&query.novelty, unsigned(summary.novelty)),
                     (&query.version, unsigned(manifest.version)),
-                    (&query.fanout_bits, unsigned(manifest.fanout_n)),
+                    (&query.fanout_exponent, unsigned(manifest.fanout_n)),
                     (&query.max_separator, unsigned(manifest.max_separator)),
                     (&query.inline_n, unsigned(manifest.inline_n)),
                     (&query.spill_prefix, unsigned(manifest.spill_prefix)),
@@ -819,14 +819,19 @@ mod tests {
     fn it_reads_slots_by_their_query_names() {
         let query: ResolverQuery = serde_json::from_value(serde_json::json!({
             "assert": "tree/node",
-            "where": { "fanout-bits": { "?": { "name": "bits" } } }
+            "where": { "fanout-exponent": { "?": { "name": "exponent" } } }
         }))
         .expect("deserializes");
         let ResolverQuery::TreeNode(node) = &query else {
             panic!("a tree/node query");
         };
-        assert_eq!(node.fanout_bits.name(), Some("bits"));
-        assert!(query.parameters().get("fanout-bits").is_some());
-        assert!(query.schema().iter().any(|(slot, _)| slot == "fanout-bits"));
+        assert_eq!(node.fanout_exponent.name(), Some("exponent"));
+        assert!(query.parameters().get("fanout-exponent").is_some());
+        assert!(
+            query
+                .schema()
+                .iter()
+                .any(|(slot, _)| slot == "fanout-exponent")
+        );
     }
 }

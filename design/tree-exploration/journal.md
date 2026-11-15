@@ -803,3 +803,16 @@ built.
 gate and a wasm check pass on the merge.
 
 **Decided.** Nothing.
+
+## 2026-11-15, Building: the fanout parameter's name
+
+**Asked.** The maintainer: was `fanout-factor` a wrong name? Then, of
+the three offered: "fanout-exponent sounds good".
+
+**Learned.** Not wrong; open to two readings that are not `n`. The
+agent had put `fanout-bits` in the code without the maintainer choosing
+it, and said so.
+
+**Decided.** By the maintainer: `fanout-exponent`. Renamed in the
+resolver, its tests and the changelog.
+
