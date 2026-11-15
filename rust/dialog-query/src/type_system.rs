@@ -259,7 +259,7 @@ impl Primitive {
     /// Does **not** yield the `Nothing` atom.
     pub fn iter(self) -> impl Iterator<Item = ValueType> {
         let bits = self.bits;
-        (0..9u32).filter_map(move |pos| {
+        (0..11u32).filter_map(move |pos| {
             if (bits & (1 << pos)) != 0 {
                 value_type_for_bit(pos)
             } else {
@@ -280,6 +280,8 @@ fn value_type_for_bit(pos: u32) -> Option<ValueType> {
         6 => ValueType::Entity,
         7 => ValueType::Symbol,
         8 => ValueType::Record,
+        // 9 is the `Nothing` atom, which no value type is.
+        10 => ValueType::Composite,
         _ => return None,
     })
 }

@@ -370,13 +370,13 @@ mod tests {
         decode(&json).unwrap_or_else(|error| panic!("{json} failed to decode: {error}"))
     }
 
-    /// EVERY set of admissible types survives the round trip. The
-    /// bitset has ten members, so this walks all 1024 subsets: a
+    /// EVERY set of admissible types survives the round trip. This
+    /// walks every subset of the wire's variants (2048 of eleven): a
     /// variant whose wire name were missing or duplicated would show
     /// up here rather than the first time someone queried for it.
     #[dialog_common::test]
     async fn it_round_trips_every_type_set() {
-        for bits in 0u16..1024 {
+        for bits in 0u16..(1 << VARIANTS.len()) {
             let mut primitive = Primitive::EMPTY;
             for (index, (_, value_type)) in VARIANTS.iter().enumerate() {
                 if bits & (1 << index) == 0 {
