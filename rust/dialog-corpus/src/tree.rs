@@ -1953,6 +1953,7 @@ mod spill_cache_tests {
     /// was written.
     #[dialog_common::test]
     async fn it_stores_and_finds_composite_values() -> anyhow::Result<()> {
+        use crate::selector::Constrained;
         use crate::{Composite, Selector};
         use futures_util::TryStreamExt as _;
 
@@ -1998,7 +1999,7 @@ mod spill_cache_tests {
         .await?;
         store.flush(&mut delta);
 
-        let read = |selector: Selector<crate::selector::Constrained>| {
+        let read = |selector: Selector<Constrained>| {
             let tree = Corpus::at(test_catalog(), tree.root().clone());
             let store = store.clone();
             async move {

@@ -35,6 +35,7 @@
 //! holds several. A nested composite is its own reference, so nothing of the
 //! bytes' layout enters a composite's identity.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::hash::{Hash, Hasher};
@@ -423,13 +424,13 @@ impl Hash for Composite {
 }
 
 impl PartialOrd for Composite {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for Composite {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.0.cmp(&other.0)
     }
 }
