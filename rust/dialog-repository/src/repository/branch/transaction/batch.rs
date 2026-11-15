@@ -28,8 +28,7 @@ use crate::Channel;
 use crate::Ephemeral;
 use crate::placement::{
     Observed, Pointer, Recorded, control_layer, follows_selection, memory_layer, selected,
-    session_layer,
-    take_dispatched,
+    session_layer, take_dispatched,
 };
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
@@ -166,7 +165,7 @@ pub struct TransactionBatch {
 /// The facts `changes` retracts that `overlay` holds. A transaction's
 /// read hides such a fact, and the commit's retraction of it lands
 /// nothing in the tree, which never held it: the publish retracts it
-/// from the overlay, so the stack's row does not come back.
+/// from the overlay, so the overlay's row does not come back.
 fn overlay_retractions(changes: &Staged, overlay: &Ephemeral) -> Vec<Fact> {
     let mut retracted = Vec::new();
     for (the, of, change) in changes.log() {

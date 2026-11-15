@@ -85,45 +85,57 @@
 //! and pushes the primary, and the pointed trees with it.
 //!
 //! Every stack has its own layer, [`SESSION`], whether or not the
-//! schema declares it: a table in memory, the stack's alone, gone
-//! when the process is. It is how a stack addresses the process-local
-//! store a branch has always had: [`Stack::layer`] hands it out for
-//! [`session_layer`](crate::session_layer), a write `.at(session_layer())`
-//! lands in it once the dispatch publishes, and a read binds its rows'
-//! `in` to it. [`Branch::overlay`] stays, as the same store under its
-//! older name: what is written through one is read through the other.
+//! schema declares it: a store in memory, the stack's alone, minted when
+//! it opens and gone when the process is. [`Stack::layer`] hands it out
+//! for [`session_layer`](crate::session_layer), a write
+//! `.at(session_layer())` lands in it once the dispatch publishes, and a
+//! read binds its rows' `in` to it. `session:` is made of two things:
+//! the stack's own rows (what was written into it, the revision rows
+//! below, the selection, the layer facts, the providers' discovery rows)
+//! and the branch metadata every query of the primary folds in
+//! (`dialog.branch/*`, `dialog.replica/*`, `dialog.peer/*`), read as rows
+//! of `session:` through the stack. The primary's session overlay,
+//! [`Branch::overlay`], is not a part of it: it is the embedder's, the
+//! stack writes nothing into it, and a read through the stack binds its
+//! rows to the primary, [`MEMORY`]. A second stack opened on the branch
+//! mints a `session:` of its own; [`Stack::backup`] and
+//! [`OpenStack::restore`] carry one stack's session layers to another
+//! (see [`backup`]).
 //!
-//! The stack records in its own layer the revision every layer but a
-//! durable one stands at, one row per layer, under `last`: of
-//! [`MEMORY`] the primary's branch entity's `dialog.branch/revision`,
-//! naming its revision's entity; of each memory layer its
-//! `dialog.layer/revision`, the hash of its instant chain as text; of
-//! each channel, [`CONTROL`] among them, the same, the hash of the
-//! sequence of its last tick ([`Channel::revision`]); and of
-//! [`SESSION`] the hash of its own chain as it
-//! stood before the recordings that followed its last change. A durable
-//! layer has no row: the primary's pointer fact of it is the record.
-//! The rows exist from the moment the stack opens, which writes them as
-//! one instant with the facts of the three layers every stack has
-//! (`control: dialog.layer/type channel:`, `session: dialog.layer/type
-//! session:`, `memory: dialog.layer/type branch:` and `memory:
-//! dialog.layer/branch <the primary's branch entity>`). After that a
-//! row is written only when its layer **moved**, when the revision it
-//! stands at is not the one the stack holds for it: after a dispatch
-//! publishes and lands its commands, for the layers its commit, its
-//! writes and its commands moved, and after [`Stack::sync`] pulls and
-//! pushes, for the layers the pulls moved. Writing the rows is not itself a move of the stack's
-//! own layer: its row moves only when something else was written into
-//! `session:`, a dispatch's writes into it among them, and then names
-//! the revision those writes left it at. So a dispatch that writes
-//! nothing into `session:` and moves no other layer writes no row and
-//! mints no instant in `session:`. Of the same rows, as the layers stood
-//! when a dispatch began, those the stack has not recorded are its
-//! stimulus, so a rule premised on a layer's revision fires when the
-//! layer moved outside a dispatch (a pull or another handle moved the
-//! primary, something wrote into a memory layer directly). A rule
-//! premised on a durable layer's revision reads its pointer fact, which
-//! the dispatch or the sync that moves the layer writes.
+//! The stack records in its own layer the revision every memory layer
+//! and channel stands at, one row per layer, under `last`: of each
+//! memory layer its `dialog.layer/revision`, the hash of its instant
+//! chain as text; of each channel, [`CONTROL`] among them, the same, the
+//! hash of the sequence of its last tick ([`Channel::revision`]); and of
+//! [`SESSION`] the hash of its own chain as it stood before the
+//! recordings that followed its last change. The primary's revision is
+//! one row of `session:`, the branch metadata's `dialog.branch/revision`
+//! of the primary's branch entity, naming its revision's entity: the
+//! stack records no second row of that cell, so it reads one value at
+//! every point, and keeps instead where it last recorded the primary, to
+//! diff the head against. A durable layer has no row: the primary's
+//! pointer fact of it is the record. The rows exist from the moment the
+//! stack opens, which writes them as one instant with the facts of the
+//! three layers every stack has (`control: dialog.layer/type channel:`,
+//! `session: dialog.layer/type session:`, `memory: dialog.layer/type
+//! branch:` and `memory: dialog.layer/branch <the primary's branch
+//! entity>`). After that a row is written only when its layer **moved**,
+//! when the revision it stands at is not the one the stack holds for it:
+//! after a dispatch publishes and lands its commands, for the layers its
+//! commit, its writes and its commands moved, and after [`Stack::sync`]
+//! pulls and pushes, for the layers the pulls moved. Writing the rows is
+//! not itself a move of the stack's own layer: its row moves only when
+//! something else was written into `session:`, a dispatch's writes into
+//! it among them, and then names the revision those writes left it at.
+//! So a dispatch that writes nothing into `session:` and moves no other
+//! layer writes no row and mints no instant in `session:`. Of the same
+//! rows, as the layers stood when a dispatch began, those the stack has
+//! not recorded are its stimulus, the primary's among them, so a rule
+//! premised on a layer's revision fires once when the layer moved
+//! outside a dispatch (a pull or another handle moved the primary,
+//! something wrote into a memory layer directly). A rule premised on a
+//! durable layer's revision reads its pointer fact, which the dispatch
+//! or the sync that moves the layer writes.
 //!
 //! The stack's own layer also holds which layer is **selected**
 //! ([`Stack::select`]): while one is, a write with no layer named
@@ -339,7 +351,10 @@ impl OpenStack {
                 Observed::new(backup.primary().cloned()),
                 Some(backup.replay(&own, &memories)?),
             ),
-            None => (Observed::new(head.as_ref().map(crate::Revision::entity)), None),
+            None => (
+                Observed::new(head.as_ref().map(crate::Revision::entity)),
+                None,
+            ),
         };
         // The revision rows of every layer exist from the moment the
         // stack opens, with the facts of the three layers every stack
@@ -751,7 +766,8 @@ impl Stack {
         // The stack's own layer is read as `session:` beside the branch
         // metadata; the primary's session overlay, read with it, is then
         // a part of the primary, `memory:`.
-        let mut layer = QueryLayer::from(&self.inner.primary).with_memory(session_layer(), &self.inner.own);
+        let mut layer =
+            QueryLayer::from(&self.inner.primary).with_memory(session_layer(), &self.inner.own);
         for (name, memory) in &self.inner.layers {
             layer = layer.with_memory(name.clone(), memory);
         }
@@ -2036,9 +2052,7 @@ mod tests {
         let state = declare_state(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
         let own_name = crate::session_layer();
-        let own = ephemeral(&stack, &own_name)
-            .expect("its own layer")
-            .clone();
+        let own = ephemeral(&stack, &own_name).expect("its own layer").clone();
         let doc: Entity = "doc:1".parse()?;
         stack
             .assert(flag(&doc, true, &state))
@@ -5995,7 +6009,11 @@ mod tests {
 
         let sequence = memory.revision().sequence;
         stack.assert(Changes::new()).perform(&operator).await?;
-        assert_eq!(seen()?, vec![entity_text(&moved)], "the rule fired on the move");
+        assert_eq!(
+            seen()?,
+            vec![entity_text(&moved)],
+            "the rule fired on the move"
+        );
         assert_eq!(memory.revision().sequence, sequence + 1, "once");
         assert_eq!(
             primary_revision_of(&stack, &operator).await?,
@@ -6059,7 +6077,11 @@ mod tests {
         branch.overlay().clear();
         assert!(branch.overlay().is_empty());
         assert_eq!(stack.layers(), layers, "the layers are unchanged");
-        assert_eq!(own.export(), rows, "and so are session:'s rows, revisions among them");
+        assert_eq!(
+            own.export(),
+            rows,
+            "and so are session:'s rows, revisions among them"
+        );
         assert_eq!(stack.selected(), selected, "and the selection");
         Ok(())
     }

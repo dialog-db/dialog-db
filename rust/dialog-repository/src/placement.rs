@@ -160,9 +160,10 @@ pub fn revision_attr() -> Relation {
 
 /// The meta branch's `dialog.branch/revision` attribute: of a branch
 /// entity, the entity of the revision it stands at
-/// ([`Revision::entity`]). The primary's row of it lives in
-/// [`SESSION`]; a durable layer's is a pointer fact in the primary, of
-/// the layer's entity.
+/// ([`Revision::entity`]). The primary's row of it is read in
+/// [`SESSION`] from the branch metadata, the only row of that cell (a
+/// stack records none beside it); a durable layer's is a pointer fact in
+/// the primary, of the layer's entity.
 pub(crate) fn branch_revision_attr() -> Relation {
     BRANCH_REVISION_ATTR.clone()
 }
@@ -238,7 +239,9 @@ type Row = (Entity, Relation, Value);
 
 /// The revision every layer of a stack holds a row for stands at: of
 /// the primary, `branch`'s `dialog.branch/revision`, the entity of
-/// `primary`'s revision (none for a primary with no revision); of each
+/// `primary`'s revision (none for a primary with no revision), which the
+/// stack keeps as its [`Observed`] mark and the metadata carries as the
+/// row; of each
 /// of `memories` the `dialog.layer/revision` hash of its instant chain;
 /// of each of `channels`, [`CONTROL`] among them, the
 /// `dialog.layer/revision` hash of the sequence of its last tick; and of
@@ -441,8 +444,9 @@ impl Recorded<'_> {
     /// writes them into its own layer when it opens: of [`CONTROL`] its
     /// type, `channel:`; of [`SESSION`] its type, `session:`; of
     /// [`MEMORY`] its type, `branch:`, and its branch, `branch`. Those
-    /// the own layer already holds are left out, so a second stack
-    /// opened on the same branch writes none of them again.
+    /// the own layer already holds are left out, so a stack restored
+    /// from a backup ([`OpenStack::restore`](crate::OpenStack::restore))
+    /// writes none of them again.
     pub(crate) fn implied(&self) -> Changes {
         let rows: [Row; 4] = [
             (

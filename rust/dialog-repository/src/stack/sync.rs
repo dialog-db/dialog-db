@@ -89,11 +89,12 @@ impl Stack {
     /// head, so a replica that pulls the head finds every tree it points
     /// at upstream.
     ///
-    /// After the pull, and again after the push, the stack records in
-    /// `session:` the revision row of every layer that stands somewhere
-    /// other than its row says (the primary's `dialog.branch/revision`, a
-    /// memory layer's `dialog.layer/revision`), as a dispatch does once
-    /// it publishes, and only those: the dispatch that writes a merged
+    /// After the pull, and again after the push, the stack records
+    /// where every layer stands that stands somewhere other than it last
+    /// recorded (the primary, whose `dialog.branch/revision` the branch
+    /// metadata reads in `session:`, a memory layer's
+    /// `dialog.layer/revision` row there), as a dispatch does once it
+    /// publishes, and only those: the dispatch that writes a merged
     /// pointer records them, and with none to write but a layer the pull
     /// moved, an empty dispatch does. Each such dispatch takes the moved
     /// rows as its stimulus, so a rule premised on the primary's

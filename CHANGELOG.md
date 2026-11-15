@@ -14,6 +14,82 @@ says how to cut a release.
 
 ## Unreleased
 
+### A stack's `session:` is its own store, apart from `Branch::overlay`, and `Stack::backup` and `OpenStack::restore` carry it to another stack
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+point 8).
+
+A stack's own layer, `session:`, was the primary's session overlay,
+`Branch::overlay()`, so everything the stack records (revision rows,
+`dialog.layer/*` facts, the selection, `dialog.provider/command`
+discovery) landed in the store an embedder keeps its own session facts
+in, and an embedder that snapshots, clears or prunes the overlay had to
+filter dialog's rows out by hand. A stack now mints its own store for
+`session:` when it opens. `Branch::overlay()` is the embedder's: the
+stack writes nothing into it, and a read through the stack binds its
+rows to the primary, `memory:`. `session:` is the stack's own rows and
+the branch metadata (`dialog.branch/*`, `dialog.replica/*`,
+`dialog.peer/*`), and holds one row per cell: the primary's
+`dialog.branch/revision` is the metadata's row alone, where the stack
+used to record a second one that read differently between a head move
+and the next dispatch. `Stack::backup()` takes `session:` and every
+declared session layer as a serializable `Backup`, and
+`branch.stack().restore(backup)` opens a stack holding them again.
+
+What this changes for you:
+
+- `Backup` and `LayerBackup` (`Serialize + Deserialize + Clone +
+  Debug`), `Stack::backup()` and `OpenStack::restore(backup)` are new. A
+  backup holds each session layer's rows (tombstones too), the revision
+  it stood at, the primary's branch entity, and the revision the stack
+  last recorded the primary at. It leaves out channels, durable layers
+  and `Branch::overlay()`. Restoring replays the rows, records again the
+  layers that stood where their rows said, and leaves a layer that had
+  moved unrecorded, like a primary committed or pulled through another
+  handle while the backup was away, to be the first dispatch's stimulus,
+  so a rule premised on its revision fires once. Providers' discovery
+  rows and channels created at run time are not restored: register and
+  create them again. A layer the schema no longer declares is dropped
+  and the rest is restored.
+- `CommitError::ForeignBackup` is new: a backup restored on a stack of
+  another branch, refused before any layer is built, with nothing
+  written.
+- `Branch::overlay()` holds none of dialog's rows: `Stack::layer` of
+  `session_layer()` returns the stack's own store, a write
+  `.at(session_layer())` through a stack lands there, and
+  `Stack::channel` and `Stack::provide` write there. A row of the
+  overlay is read through a stack as `in: memory:`, not `session:`. A
+  branch read or committed without a stack is unchanged.
+- A second stack opened on a branch has a `session:` of its own, with
+  its own revision rows, selection and created channels; it no longer
+  sees what the first one wrote there. Restore a backup to carry them.
+- The stack records no `dialog.branch/revision` row of the primary in
+  `session:`: the metadata's row is the one, reading the head the read
+  stands at. A rule premised on it needs no `dialog.layer/branch` join
+  to tell a stack from a plain branch, and fires once per move. Since
+  the metadata row is read on a plain branch too, such a rule fires
+  when installed on one; install it through the stack.
+- Tonk's overlay operations map onto the stack: `export_overlays` /
+  `import_overlays` is `stack.backup()` / `branch.stack().restore(..)`;
+  `retain_overlay_entities` and `clear_overlay` stay
+  `Branch::overlay().retain_entities` and `Branch::overlay().clear()`,
+  which now meet only the embedder's rows and leave `session:` intact.
+
+Why: the embedder's session store and dialog's bookkeeping were one
+cell, so neither could be exported, cleared or pruned without the
+other, and the primary's revision cell held two rows. Tonk needed to
+carry a session across workers, which `backup` and `restore` provide.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten:
+  `session:` and a `Backup` are process-local, held and carried by the
+  embedder. An embedder that filtered `dialog.*` rows out of
+  `Branch::overlay()` can stop; one that read its overlay rows through a
+  stack with `in: session:` reads them with `in: memory:`, or writes
+  them `.at(session_layer())` through the stack instead.
+
 ### A stack transacts through a closure re-run on a moved head, an invocation reports what it landed, and providers run as a separate effect
 
 [#816](https://github.com/dialog-db/dialog-db/pull/816), argued in
@@ -285,7 +361,8 @@ three layers. A layer is declared by its type, a bare-scheme entity,
 `dialog.layer/store "memory"`, `"control"` or `"durable"`. A branch's
 revision is the meta branch's `dialog.branch/revision`, naming the
 revision entity: the primary's row in `session:` is that attribute of
-the primary's branch entity, the one the meta branch derives from
+the primary's branch entity (the branch metadata's row, since the entry
+above that separates `session:` from `Branch::overlay`), the one the meta branch derives from
 `(replica, name)`, where it was `dialog.layer/revision` of `memory:`
 with the tree's hash as text. A durable layer's pointer facts are the
 same attribute of the layer's own entity (see the entry above).
@@ -318,14 +395,14 @@ What this changes for you:
   layer, and the implied layers' facts: `control: dialog.layer/type
   channel:`, `session: dialog.layer/type session:`, `memory:
   dialog.layer/type branch:` and `memory: dialog.layer/branch <the
-  primary's branch entity>`. What `session:` already holds is not
-  written again, so a second stack on the branch writes nothing. A
+  primary's branch entity>`. Each stack writes them into a `session:`
+  of its own, which a second stack on the branch does not share. A
   rule premised on a layer's revision therefore no longer fires on a
   stack's first dispatch; it fires when the layer moved since the row
   was written.
 - The primary's revision row is `<the primary's branch entity>
-  dialog.branch/revision <the revision's entity>` in `session:`, in
-  place of `memory: dialog.layer/revision "<tree, base58>"`, and the
+  dialog.branch/revision <the revision's entity>` in `session:`, the
+  branch metadata's row of that cell, in place of `memory: dialog.layer/revision "<tree, base58>"`, and the
   stimulus a dispatch takes of it changes the same way. A memory
   layer's row (`session:`, `control:`, a declared session layer or
   channel) stays `<layer> dialog.layer/revision "<chain hash,
@@ -681,13 +758,12 @@ evaluation after any sequence of ticks.
 [notes/layers.md](./notes/layers.md) ("The `session:` layer").
 
 A stack now holds its own layer, `session:`, whether or not the
-primary's schema declares it: it is the branch's process-local store,
-the one `Branch::overlay` has always handed out, now addressed as a
-layer. After each dispatch publishes, the stack writes into it one
-revision row per layer under `last`: of the primary its branch
-entity's `dialog.branch/revision`, of each declared memory layer and
-of `session:` itself the `dialog.layer/revision` hash of its instant
-chain. Of the same rows, as the layers stood when
+primary's schema declares it: a process-local store of the stack's
+own, apart from `Branch::overlay`. After each dispatch publishes, the
+stack writes into it, under `last`, the `dialog.layer/revision` hash
+of the instant chain of each declared memory layer and of `session:`
+itself; the primary's revision is read there too, as the branch
+metadata's `dialog.branch/revision` of its branch entity. Of the same rows, as the layers stood when
 the dispatch began, those the stack has not recorded are the
 dispatch's stimulus, so a rule premised on a layer's revision fires
 when the layer moved (and on the first dispatch, which finds nothing
@@ -701,7 +777,7 @@ the selection.
 What this changes for you:
 
 - `Stack::layers()` lists `session:` first, and `Stack::layer` of
-  `session_layer()` returns the branch's overlay. A declaration of
+  `session_layer()` returns the stack's own store. A declaration of
   `session:` in the schema no longer builds a second store.
 - `Stack::select(Option<Entity>)` and `Stack::selected()` are new.
   A selection takes effect from the next dispatch; selecting a layer the
@@ -714,16 +790,16 @@ What this changes for you:
   branch outside a stack writes no revision rows and ignores the
   selection.
 
-Why: the stack's own layer replaces `Branch::overlay` as a mechanism
-apart, so a layer's revision becomes a row a rule or a subscription
+Why: the stack's own layer is addressed like any other layer, so a
+layer's revision becomes a row a rule or a subscription
 reads like any other, and the layer a write lands in becomes data a
 rule or the embedder sets, the way an image editor's stroke lands on
 the selected layer.
 
 #### Compatibility and migration
 
-- The `session:` rows are process-local: they live in the branch's
-  overlay, which is never committed or synced. Nothing stored or synced
+- The `session:` rows are process-local: they live in the stack's own
+  store, which is never committed or synced. Nothing stored or synced
   changes, and nothing is rewritten.
 
 ### A stack's handlers answer a dispatch's commands
@@ -795,8 +871,8 @@ is applied only after the publish wins its compare-and-swap, so a lost
 head leaves no layer changed. A rule head whose descriptor names a
 layer lands there, keeping its pick, and succeeds no claim of the
 primary. The layers every stack has are named: `memory:` is the
-primary, `session:` the branch's process-local store (what
-`Branch::overlay` holds), `control:` the loopback a command lands in.
+primary, `session:` the stack's own process-local store, `control:`
+the loopback a command lands in.
 
 What this changes for you:
 
@@ -812,7 +888,8 @@ What this changes for you:
 - `Branch::stack()`, `OpenStack::declare`, `Stack::{query,
   transaction, layer, layers, declare, declared}` are new. A branch
   read or committed directly, with no stack, behaves as before, and
-  a write `.at(session:)` through it lands in the branch's overlay.
+  a write `.at(session:)` through it lands in the branch's overlay
+  (through a stack, in the stack's own `session:`).
 - `Stack::invoke(command)` and `Stack::transact(facts)` drive a
   session (since #816, `Stack::transact` takes a closure and
   `Stack::assert(facts)` takes the facts): each returns an
