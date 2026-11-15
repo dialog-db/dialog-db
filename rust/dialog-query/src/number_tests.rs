@@ -100,15 +100,22 @@ async fn scan(source: &TestEnv<'_>, the: &Relation, is: Term<Any>) -> anyhow::Re
 }
 
 /// A one-field concept over `the`, declared `as` (none for an untyped
-/// field) and read under `pick` (none for the default).
-fn field_concept(the: &str, declared: Option<&str>, pick: Option<&str>) -> ConceptDescriptor {
+/// field) and read under `cardinality` (none for the default).
+fn field_concept(
+    the: &str,
+    declared: Option<&str>,
+    cardinality: Option<&str>,
+) -> ConceptDescriptor {
     let mut field = serde_json::Map::new();
     field.insert("the".into(), serde_json::Value::String(the.into()));
     if let Some(declared) = declared {
         field.insert("as".into(), serde_json::Value::String(declared.into()));
     }
-    if let Some(pick) = pick {
-        field.insert("pick".into(), serde_json::Value::String(pick.into()));
+    if let Some(cardinality) = cardinality {
+        field.insert(
+            "cardinality".into(),
+            serde_json::Value::String(cardinality.into()),
+        );
     }
     serde_json::from_value(serde_json::json!({ "with": { "value": field } }))
         .expect("a one-field concept is well formed")
@@ -203,9 +210,9 @@ fn copy_rule(
     body_as: &str,
 ) -> anyhow::Result<DeductiveRule> {
     compile(serde_json::json!({
-        "deduce": { "with": { "v": { "the": head, "as": head_as, "pick": "all:" } } },
+        "deduce": { "with": { "v": { "the": head, "as": head_as, "cardinality": "many" } } },
         "when": [{
-            "assert": { "with": { "v": { "the": body, "as": body_as, "pick": "all:" } } },
+            "assert": { "with": { "v": { "the": body, "as": body_as, "cardinality": "many" } } },
             "where": { "this": { "?": { "name": "this" } }, "v": { "?": { "name": "v" } } }
         }]
     }))
@@ -332,7 +339,7 @@ async fn a_constant_matches_through_the_lens_of_its_type_in_a_concept_field() ->
     let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
     for declared in [Some("natural:"), Some("number:"), None] {
-        let concept = field_concept("score/value", declared, Some("all:"));
+        let concept = field_concept("score/value", declared, Some("many"));
         for (constant, found) in lens_cases() {
             let found = if declared == Some("natural:")
                 && constant.clone().viewed_as(Type::UnsignedInt).is_none()
@@ -726,7 +733,7 @@ async fn concept_fields_read_mixed_stored_values_through_their_declared_type() -
         ),
     ];
     for (declared, expected) in cases {
-        let concept = field_concept("score/value", Some(declared), Some("all:"));
+        let concept = field_concept("score/value", Some(declared), Some("many"));
         assert_eq!(
             field_values(&source, &concept).await?,
             sorted(expected),
@@ -996,7 +1003,7 @@ async fn sized_concept_fields_observe_only_their_range_at_their_precision() -> a
     }
     let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
     for (name, declared, _, expected) in cases {
-        let concept = field_concept(&format!("bound/{name}"), Some(declared), Some("all:"));
+        let concept = field_concept(&format!("bound/{name}"), Some(declared), Some("many"));
         assert_eq!(
             field_values(&source, &concept).await?,
             sorted(expected),
@@ -1082,7 +1089,7 @@ async fn a_rule_body_reads_a_typed_field_through_its_lens() -> anyhow::Result<()
     assert_eq!(
         field_values(
             &source,
-            &field_concept("score/whole", Some("natural:"), Some("all:"))
+            &field_concept("score/whole", Some("natural:"), Some("many"))
         )
         .await?,
         sorted(vec![natural(2), natural(300), natural(3)])
@@ -1090,7 +1097,7 @@ async fn a_rule_body_reads_a_typed_field_through_its_lens() -> anyhow::Result<()
     assert_eq!(
         field_values(
             &source,
-            &field_concept("score/real", Some("float:"), Some("all:"))
+            &field_concept("score/real", Some("float:"), Some("many"))
         )
         .await?,
         sorted(vec![float(2.5), float(-3.0), float(300.0), float(3.0)])
@@ -1098,7 +1105,7 @@ async fn a_rule_body_reads_a_typed_field_through_its_lens() -> anyhow::Result<()
     assert_eq!(
         field_values(
             &source,
-            &field_concept("score/small", Some("natural:8"), Some("all:"))
+            &field_concept("score/small", Some("natural:8"), Some("many"))
         )
         .await?,
         sorted(vec![natural(2), natural(3)])
@@ -1320,7 +1327,7 @@ async fn derived_rows_of_one_number_under_two_types_are_one_row() -> anyhow::Res
         let source = TestEnv::new(&branch, &operator, registry.clone());
         let values = field_values(
             &source,
-            &field_concept("x/v", Some("number:"), Some("all:")),
+            &field_concept("x/v", Some("number:"), Some("many")),
         )
         .await?;
         assert_eq!(values.len(), 1, "the union of the two rules: {values:?}");
@@ -1335,7 +1342,7 @@ async fn derived_rows_of_one_number_under_two_types_are_one_row() -> anyhow::Res
     let source = TestEnv::new(&branch, &operator, registry);
     let values = field_values(
         &source,
-        &field_concept("x/v", Some("number:"), Some("all:")),
+        &field_concept("x/v", Some("number:"), Some("many")),
     )
     .await?;
     assert_eq!(values.len(), 1, "the fixpoint keeps one: {values:?}");
@@ -1396,7 +1403,7 @@ async fn a_sum_adds_numbers_of_one_type_only() -> anyhow::Result<()> {
         .expect("a well-formed rule");
         descriptor.compile()
     };
-    let sums = field_concept("x/sum", Some("number:"), Some("all:"));
+    let sums = field_concept("x/sum", Some("number:"), Some("many"));
 
     let mut raw = RuleRegistry::new();
     raw.register(sum_rule(None, None)?)?;

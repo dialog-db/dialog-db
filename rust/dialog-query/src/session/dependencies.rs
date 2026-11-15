@@ -18,17 +18,15 @@
 //! strongly connected components; a concept is *recursive* when its
 //! component is non-trivial.
 //!
-//! Outside a component, negation, optional reads, elections and folds
-//! have stratified semantics: the premise reads a relation derived in
-//! full before the rule runs. A ranked election is a negation too: a
-//! read under `top`, a relation chain, `max` or `min` returns a
-//! candidate *and nothing better*. Inside a component such a premise
-//! would read a set the cycle is still deriving, which has no
-//! stratified meaning. A read under `last` inside its own component is
-//! treated as one only when the rule decides on the value read (see
-//! [`decides`]): a rule passing the value along reads every candidate
-//! the fixpoint derives, and its readers elect the newest at the exit,
-//! so the component stays positive.
+//! Outside a component, negation, optional reads and folds have
+//! stratified semantics: the premise reads a relation derived in full
+//! before the rule runs. Inside a component such a premise would read a
+//! set the cycle is still deriving, which has no stratified meaning. A
+//! cardinality-one read inside its own component is an absence test
+//! only when the rule decides on the value read (see [`decides`]): a
+//! rule passing the value along reads every candidate the fixpoint
+//! derives, and its readers elect the newest at the exit, so the
+//! component stays positive.
 //!
 //! A merge of rule sets each fine on its own can close a cycle through
 //! an absence test, so it is never refused at install: the analysis
@@ -37,8 +35,8 @@
 //! The rule chosen is the one of the cycle installed last
 //! ([`Installed`]): every read was well defined before it arrived.
 //! Among rules installed together it is the one inside the cycle
-//! deriving what the cycle's plainest absence test reads (an `unless`
-//! or an optional read before a ranked election), so the test keeps
+//! deriving what the cycle's plainest absence test reads (an `unless`,
+//! an optional read or a fold before a decided read), so the test keeps
 //! the meaning it had over everything outside the cycle; when the
 //! test's own rule derives what it tests, that rule. Then the greatest
 //! identity. Install order comes from the commits indexing the rules,
@@ -64,10 +62,9 @@
 //!   quarantine could break fails the queries that touch it (and only
 //!   those).
 
+use crate::Cardinality;
 use crate::Entity;
-use crate::Pick;
-use crate::attribute::AttributeDescriptor;
-use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
+use crate::concept::descriptor::ConceptDescriptor;
 use crate::concept::query::{ConceptQuery, ConceptRules, Installed};
 use crate::constraint::Constraint;
 use crate::error::EvaluationError;
@@ -83,9 +80,9 @@ use std::iter;
 
 /// Polarity of a dependency edge: whether the rule body references
 /// the concept positively (an ordinary premise), under `unless`,
-/// set-widened, or from a *reducing* rule whose fold must read the
-/// complete relation, or under a choosing pick. A negative, optional,
-/// aggregating or electing edge inside a dependency cycle is an absence
+/// set-widened, from a *reducing* rule whose fold must read the
+/// complete relation, or under cardinality one. A negative, optional,
+/// aggregating or deciding edge inside a dependency cycle is an absence
 /// test the analysis quarantines a rule over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Polarity {
@@ -102,16 +99,11 @@ pub enum Polarity {
     /// clause: the rule's folds consume the premise's full
     /// relation, so the reference demands a complete lower stratum.
     Aggregating,
-    /// The body reads the relation under a choosing pick: the
-    /// candidate it returns, and nothing better, which negates the
-    /// better candidates. `ranked` for an explicit ranking (`top`, a
-    /// relation chain, `max`, `min`) rather than `last`, the default.
-    /// `decides` when the rule decides on the value read rather than
-    /// passing it along to its head (see [`decides`]).
+    /// The body reads the relation under cardinality one: the newest
+    /// candidate, and nothing newer. `decides` when the rule decides on
+    /// the value read rather than passing it along to its head (see
+    /// [`decides`]).
     Electing {
-        /// Whether the read ranks candidates rather than taking the
-        /// newest.
-        ranked: bool,
         /// Whether the rule decides on the value the read returns.
         decides: bool,
     },
@@ -119,9 +111,9 @@ pub enum Polarity {
 
 impl Polarity {
     /// Whether the edge tests for something's absence inside a cycle: a
-    /// negation, an optional read, a ranked election, or a `last` read
-    /// whose value the rule decides on. A `last` read whose value the
-    /// rule only passes along is not: inside its cycle it reads every
+    /// negation, an optional read, a fold, or a cardinality-one read
+    /// whose value the rule decides on. A cardinality-one read whose
+    /// value the rule only passes along is not: inside its cycle it reads every
     /// candidate, each derivation stands by the candidate it carried,
     /// and its readers elect the newest once the cycle is derived in
     /// full. A rule deciding on the value would act on a candidate no
@@ -132,8 +124,7 @@ impl Polarity {
             Polarity::Negative
                 | Polarity::Optional
                 | Polarity::Aggregating
-                | Polarity::Electing { ranked: true, .. }
-                | Polarity::Electing { decides: true, .. }
+                | Polarity::Electing { decides: true }
         )
     }
 
@@ -142,15 +133,14 @@ impl Polarity {
         match self {
             Polarity::Negative => Some(Absence::Negated),
             Polarity::Optional => Some(Absence::Optional),
-            Polarity::Electing { ranked: true, .. } => Some(Absence::Elected),
-            Polarity::Electing { decides: true, .. } => Some(Absence::Decided),
+            Polarity::Electing { decides: true } => Some(Absence::Decided),
             Polarity::Aggregating => Some(Absence::Folded),
             Polarity::Electing { .. } | Polarity::Positive => None,
         }
     }
 
-    /// How plainly the edge tests for absence: an `unless` or an
-    /// optional read most, an election next.
+    /// How plainly the edge tests for absence: an `unless`, an
+    /// optional read or a fold most, a decided read next.
     fn strength(self) -> u8 {
         match self {
             Polarity::Negative | Polarity::Optional | Polarity::Aggregating => 2,
@@ -168,10 +158,7 @@ pub enum Absence {
     Negated,
     /// A set-widened (optional) read.
     Optional,
-    /// A read under a ranking pick (`top`, a relation chain, `max`,
-    /// `min`).
-    Elected,
-    /// A read under `last` whose value the rule decides on.
+    /// A cardinality-one read whose value the rule decides on.
     Decided,
     /// A read a `reduce` clause folds over.
     Folded,
@@ -257,19 +244,16 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
                 Some((query.predicate.clone(), Polarity::Optional))
             }
             Premise::Assert(Proposition::Concept(query)) => {
-                let select = query
+                let one = query
                     .predicate
                     .attribute_field()
-                    .filter(|(_, field)| !field.descriptor().is_chain())
-                    .map(|(_, field)| field.descriptor().pick());
-                let polarity = match select {
-                    Some(pick) if positive == Polarity::Positive && pick.elects() => {
-                        Polarity::Electing {
-                            ranked: !matches!(pick, Pick::Last),
-                            decides: decides(rule, index, query),
-                        }
+                    .is_some_and(|(_, field)| field.cardinality() == Cardinality::One);
+                let polarity = if one && positive == Polarity::Positive {
+                    Polarity::Electing {
+                        decides: decides(rule, index, query),
                     }
-                    _ => positive,
+                } else {
+                    positive
                 };
                 Some((query.predicate.clone(), polarity))
             }
@@ -282,7 +266,7 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
 }
 
 /// Whether `rule` decides on the value its premise `index`, a read of
-/// an attribute concept under a choosing pick, returns, rather than
+/// an attribute concept under cardinality one, returns, rather than
 /// passing the value along.
 ///
 /// A rule passes a value along when the value reaches its head and
@@ -415,25 +399,7 @@ fn selecting_edges(
     derived: &HashSet<Entity>,
 ) -> Vec<(ConceptDescriptor, Polarity)> {
     let mut edges = structural_edges(descriptor);
-    if let Some((_, field)) = descriptor.attribute_field() {
-        // A ranked chain elects among every relation it lists.
-        if field.descriptor().is_chain() {
-            for relation in field.descriptor().relations() {
-                let single = AttributeDescriptor::over(
-                    relation.clone(),
-                    "",
-                    field.cardinality(),
-                    field.content_type(),
-                );
-                edges.push((
-                    ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(single)),
-                    Polarity::Electing {
-                        ranked: true,
-                        decides: false,
-                    },
-                ));
-            }
-        }
+    if descriptor.attribute_field().is_some() {
         return edges;
     }
     for (_, field) in descriptor.with().iter() {
@@ -441,11 +407,8 @@ fn selecting_edges(
         if derived.contains(&ProgramAnalysis::node(&attribute)) {
             let polarity = if field.is_optional() {
                 Polarity::Optional
-            } else if field.descriptor().pick().elects() {
-                Polarity::Electing {
-                    ranked: !matches!(field.descriptor().pick(), Pick::Last),
-                    decides: false,
-                }
+            } else if field.cardinality() == Cardinality::One {
+                Polarity::Electing { decides: false }
             } else {
                 Polarity::Positive
             };
@@ -933,14 +896,12 @@ impl ProgramAnalysis {
     }
 
     /// The node a concept is analysed as: an attribute concept is its
-    /// relation, `on:<domain>/<name>`, whatever type or pick it reads
-    /// the relation under, since every rule deriving the relation and
-    /// every read of it meet there; any other concept is itself.
+    /// relation, `on:<domain>/<name>`, whatever type or cardinality it
+    /// reads the relation under, since every rule deriving the relation
+    /// and every read of it meet there; any other concept is itself.
     pub fn node(concept: &ConceptDescriptor) -> Entity {
         match concept.attribute_field() {
-            // A ranked chain of relations is a concept of its own with
-            // an edge to each relation (see `selecting_edges`).
-            Some((_, field)) if !field.descriptor().is_chain() => Reach::of(field.the())
+            Some((_, field)) => Reach::of(field.the())
                 .on_entity()
                 .unwrap_or_else(|| concept.this()),
             _ => concept.this(),

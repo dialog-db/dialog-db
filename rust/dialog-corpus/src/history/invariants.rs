@@ -1,4 +1,4 @@
-//! Invariants the pick-write design claims of the tree, pinned as
+//! Invariants the cardinality-one write design claims of the tree, pinned as
 //! tests. A failing test here is a place where a batch does not land
 //! as the design says it does.
 

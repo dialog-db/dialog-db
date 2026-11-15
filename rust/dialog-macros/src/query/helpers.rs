@@ -205,53 +205,51 @@ pub fn parse_dialog_field_attributes(
     Ok(parsed)
 }
 
-/// Parse the `#[pick(last)]`, `#[pick(all)]`, `#[pick(max)]` or
-/// `#[pick(min)]` attribute into the `dialog_query::Pick` the attribute
-/// is read under, defaulting to `Last`. `#[cardinality(..)]`, the
-/// spelling before picks, is refused with the pick that replaces it.
-pub fn parse_pick_attribute(attrs: &[Attribute]) -> Result<TokenStream, syn::Error> {
+/// Parse the `#[cardinality(one)]` (the default) or
+/// `#[cardinality(many)]` attribute into the `dialog_query::Cardinality`
+/// the attribute is read and written under. `#[pick(..)]`, the spelling
+/// of the release before, is refused with the cardinality that replaces
+/// it, and a ranking pick with the rule that does.
+pub fn parse_cardinality_attribute(attrs: &[Attribute]) -> Result<TokenStream, syn::Error> {
     for attr in attrs {
-        if attr.path().is_ident("cardinality") {
-            let mut replacement = "last";
+        if attr.path().is_ident("pick") {
+            let mut message = None;
             attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("many") {
-                    replacement = "all";
-                }
+                message = Some(if meta.path.is_ident("last") {
+                    "`#[pick(last)]` is now `#[cardinality(one)]`, the default".to_string()
+                } else if meta.path.is_ident("all") {
+                    "`#[pick(all)]` is now `#[cardinality(many)]`".to_string()
+                } else {
+                    "an attribute is no longer read under a ranking pick: a rule whose \
+                     `reduce` folds with `max`, `min` or `top` reads it ranked"
+                        .to_string()
+                });
                 Ok(())
             })?;
             return Err(syn::Error::new_spanned(
                 attr,
-                format!("`#[cardinality(..)]` is now `#[pick({replacement})]`"),
+                message.unwrap_or_else(|| "`#[pick(..)]` is now `#[cardinality(..)]`".into()),
             ));
         }
-        if attr.path().is_ident("pick") {
-            let mut pick = None;
+        if attr.path().is_ident("cardinality") {
+            let mut cardinality = None;
             attr.parse_nested_meta(|meta| {
-                let variant = if meta.path.is_ident("last") {
-                    quote! { Last }
-                } else if meta.path.is_ident("all") {
-                    quote! { All }
-                } else if meta.path.is_ident("max") {
-                    quote! { Max }
-                } else if meta.path.is_ident("min") {
-                    quote! { Min }
-                } else if meta.path.is_ident("top") {
-                    return Err(meta.error(
-                        "`top` ranks listed values, which a derived attribute cannot list; \
-                         build the descriptor with `with_pick`",
-                    ));
+                let variant = if meta.path.is_ident("one") {
+                    quote! { One }
+                } else if meta.path.is_ident("many") {
+                    quote! { Many }
                 } else {
-                    return Err(meta.error("pick must be `last`, `all`, `max` or `min`"));
+                    return Err(meta.error("cardinality must be `one` or `many`"));
                 };
-                pick = Some(variant);
+                cardinality = Some(variant);
                 Ok(())
             })?;
-            let variant = pick.ok_or_else(|| {
-                syn::Error::new_spanned(attr, "pick must be `last`, `all`, `max` or `min`")
+            let variant = cardinality.ok_or_else(|| {
+                syn::Error::new_spanned(attr, "cardinality must be `one` or `many`")
             })?;
-            return Ok(quote! { dialog_query::Pick::#variant });
+            return Ok(quote! { dialog_query::Cardinality::#variant });
         }
     }
 
-    Ok(quote! { dialog_query::Pick::Last })
+    Ok(quote! { dialog_query::Cardinality::One })
 }

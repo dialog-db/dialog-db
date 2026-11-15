@@ -296,7 +296,7 @@ async fn concurrent_upgrades_converge() -> Result<()> {
     let old = stored_by_main("salary_from_bonus");
     for branch in [&a, &b] {
         branch.refresh(&operator).await?;
-        assert_eq!(salary(branch, &operator, &alice, "all").await?, vec![500]);
+        assert_eq!(salary(branch, &operator, &alice, "many").await?, vec![500]);
         for the in [
             "dialog.rule/source",
             "dialog.rule/conclusion",

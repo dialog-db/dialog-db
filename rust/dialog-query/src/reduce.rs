@@ -93,8 +93,10 @@ use std::pin::pin;
 
 use futures_util::TryStreamExt;
 
+use crate::Standing;
 use crate::corpus::Type as ValueType;
 use crate::corpus::Value;
+use crate::corpus::encode_value_owned;
 use crate::error::{EvaluationError, TypeError};
 use crate::formula::number::Numeric;
 use crate::selection::{Binding, Match, Selection};
@@ -102,7 +104,7 @@ use crate::term::Term;
 use crate::try_stream;
 use crate::type_system::{Primitive, Type};
 use crate::types::Any;
-use crate::{Pick, Standing};
+use dialog_corpus::{Cardinality, Contender};
 use std::sync::Arc;
 
 /// The fold applied to a reduced field's inputs, one group at a time.
@@ -531,18 +533,14 @@ fn fold_column(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>,
 
 /// The input a choosing fold returns: the least or the greatest value
 /// (`min`, `max`), the newest (`last`), or the best ranked among the
-/// entry's listed values (`top`), in the order a read under the pick of
-/// the same name elects a cell's claims ([`Pick::prefers`]). Among
-/// equal values the one standing greatest is returned, so the choice
-/// carries the newest fact that holds it.
+/// entry's listed values (`top`). Every one falls back on the order a
+/// cardinality-one read elects a cell's claims by
+/// ([`Cardinality::newer`]): `last` is that order alone, and the others
+/// take the newest among the values they hold equal. Among equal
+/// values the one standing greatest is returned, so the choice carries
+/// the newest fact that holds it.
 fn choose(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>, EvaluationError> {
-    let pick = match entry.aggregator {
-        Aggregator::Min => Pick::Min,
-        Aggregator::Max => Pick::Max,
-        Aggregator::Top => Pick::Top(entry.among.clone()),
-        _ => Pick::Last,
-    };
-    if matches!(pick, Pick::Min | Pick::Max) {
+    if matches!(entry.aggregator, Aggregator::Min | Aggregator::Max) {
         for pair in inputs.windows(2) {
             if order(&pair[0].0, &pair[1].0).is_none() {
                 return Err(fault(
@@ -557,11 +555,13 @@ fn choose(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>, Eval
         best = Some(match best {
             None => candidate,
             Some(incumbent) => {
-                let ahead = pick.prefers(
+                let ahead = prefers(
+                    entry,
                     (&candidate.0, candidate.1.as_ref()),
                     (&incumbent.0, incumbent.1.as_ref()),
                 );
-                let behind = pick.prefers(
+                let behind = prefers(
+                    entry,
                     (&incumbent.0, incumbent.1.as_ref()),
                     (&candidate.0, candidate.1.as_ref()),
                 );
@@ -577,6 +577,44 @@ fn choose(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>, Eval
         });
     }
     Ok(best)
+}
+
+/// Whether a choosing fold takes `candidate` over `incumbent`: `top`
+/// the better ranked among the entry's listed values, then the newer;
+/// `max` and `min` the greater or the lesser value, then the greater
+/// standing; `last` the newer.
+fn prefers(entry: &ReduceEntry, candidate: Contender<'_>, incumbent: Contender<'_>) -> bool {
+    match entry.aggregator {
+        Aggregator::Top => {
+            let mine = rank_among(&entry.among, candidate.0);
+            let theirs = rank_among(&entry.among, incumbent.0);
+            mine < theirs || (mine == theirs && Cardinality::newer(candidate, incumbent))
+        }
+        Aggregator::Max | Aggregator::Min => {
+            let ordering = candidate.0.partial_cmp(incumbent.0).unwrap_or_else(|| {
+                encode_value_owned(candidate.0).cmp(&encode_value_owned(incumbent.0))
+            });
+            let wanted = if entry.aggregator == Aggregator::Max {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            };
+            ordering == wanted || (ordering.is_eq() && candidate.1 > incumbent.1)
+        }
+        _ => Cardinality::newer(candidate, incumbent),
+    }
+}
+
+/// Where `value` ranks among `listed`, best first: an unlisted value
+/// ranks last, and every value ranks first when nothing is listed.
+fn rank_among(listed: &[Value], value: &Value) -> usize {
+    if listed.is_empty() {
+        return 0;
+    }
+    listed
+        .iter()
+        .position(|candidate| candidate == value)
+        .unwrap_or(usize::MAX)
 }
 
 /// Fold one group's column of present values into a computed one.

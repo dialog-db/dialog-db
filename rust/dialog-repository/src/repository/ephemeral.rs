@@ -492,8 +492,8 @@ impl State {
     fn apply(&mut self, instruction: Instruction, delta: &mut Delta) {
         match instruction {
             Instruction::Assert(fact, Cardinality::Many) => self.insert(fact, delta),
-            // A write under a choosing pick among transients: the claim
-            // the pick elects of the cell gives way to the value.
+            // A write under cardinality one among transients: the claim
+            // the read elects of the cell gives way to the value.
             // Transients carry no version, so the election orders them by
             // cause, then value.
             Instruction::Assert(fact, policy) => {
@@ -945,7 +945,7 @@ mod tests {
         assert_eq!(line.len(), 1);
 
         // A second value accumulates; a write under `last` succeeds the
-        // one transient the pick elects and leaves the other.
+        // one transient the read elects and leaves the other.
         line.assert(
             the!("person/name")
                 .of("id:a".parse().unwrap())
@@ -971,7 +971,7 @@ mod tests {
 
     /// A read naming an attribute is answered from the count of facts
     /// held per attribute when the store holds none of it, so the count
-    /// must follow every write: a replace under a choosing pick (the
+    /// must follow every write: a replace under cardinality one (the
     /// session write), a retract of the attribute's last fact and its
     /// re-assert, a tombstone over a fact held only beneath, and the
     /// lift of everything by `clear`.

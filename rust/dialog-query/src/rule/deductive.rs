@@ -692,9 +692,9 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
             None => Term::var(name),
         };
 
-        // The scan reads under the pick's scan arity: one claim for
-        // `last`, every claim for a pick that elects among them.
-        let scanned = Some(field.descriptor().scan_cardinality());
+        // The scan reads under the field's cardinality: the newest
+        // claim under one, every claim under many.
+        let scanned = Some(field.descriptor().cardinality());
         let premise: Premise = if field.is_optional() {
             OptionalAttributeQuery::new(
                 field.the().term(name),
@@ -773,9 +773,9 @@ impl DeductiveRule {
 
     /// Whether the body binds at most one row per `this`. Every premise
     /// it asserts reads a concept of an entity already determined (`this`,
-    /// or a value an earlier such read bound) under a choosing pick for
+    /// or a value an earlier such read bound) under cardinality one for
     /// every field, so each read yields one row; a negation adds none.
-    /// Anything else (a formula, an `all` read, a read keyed by another
+    /// Anything else (a formula, a many read, a read keyed by another
     /// variable) may yield several, and the body is not single-valued.
     pub fn single_valued(&self) -> bool {
         let mut determined: BTreeSet<&str> = BTreeSet::from(["this"]);
@@ -801,8 +801,7 @@ impl DeductiveRule {
                 }
                 let single = query.predicate.with().iter().all(|(_, field)| {
                     !field.is_optional()
-                        && field.descriptor().pick().elects()
-                        && !field.descriptor().is_chain()
+                        && field.descriptor().cardinality() == Cardinality::One
                         && !matches!(field.the(), The::Collection { .. })
                 });
                 if !single || query.widens() {
@@ -2141,13 +2140,13 @@ mod tests {
         assert!(!rule.single_valued());
     }
 
-    /// A read under `all` binds a row per value.
+    /// A read under cardinality many binds a row per value.
     #[dialog_common::test]
-    fn a_body_reading_under_all_is_not_single_valued() {
+    fn a_body_reading_under_many_is_not_single_valued() {
         let rule = compiled(serde_json::json!({
             "deduce": { "with": { "tag": { "the": "item/label", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "tag": { "the": "item/tag", "as": "text:", "pick": "all:" } } },
+                "assert": { "with": { "tag": { "the": "item/tag", "as": "text:", "cardinality": "many" } } },
                 "where": { "this": { "?": { "name": "this" } }, "tag": { "?": { "name": "tag" } } }
             }]
         }));

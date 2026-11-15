@@ -65,7 +65,7 @@ struct State {
     /// what the commit applies, so a write that succeeds a claim is
     /// settled against the line and the writes before it, in order.
     log: Vec<(Relation, Entity, Change)>,
-    /// The cells a write under a choosing pick asserted, kept past
+    /// The cells a write under cardinality one asserted, kept past
     /// their retraction: the cells a read of a range must settle,
     /// found by the range's entity and attribute bounds.
     electing: ElectingCells,
@@ -100,8 +100,8 @@ impl fmt::Debug for SettlementMemo {
 /// How a read sees one cell's writes settled: the claims the writes
 /// succeed, hidden from the line and from the store's own rows (a
 /// succeeded claim is the line's, or an earlier write of the cell the
-/// commit squashes away); and the values written under a choosing
-/// pick the line already held as claims, hidden from the store's own
+/// commit squashes away); and the values written under cardinality
+/// one the line already held as claims, hidden from the store's own
 /// rows, since the commit writes nothing for them and the line's row
 /// is the read's.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -137,14 +137,14 @@ impl ReadObservation {
 impl State {
     /// Apply one recorded write: hold or drop its fact for reads, give
     /// it its place among the transaction's writes, and log it. A
-    /// write under a choosing pick holds its value as one more
+    /// write under cardinality one holds its value as one more
     /// candidate until the commit settles which claim it succeeds; a
     /// read over the
     /// transaction settles the same way (see
     /// [`succession`](crate::repository::branch::transaction)).
     fn apply_change(&mut self, the: &Relation, of: &Entity, change: &Change) {
         // A write that repeats the cell's latest write exactly, value and
-        // pick alike, is the same write: the facts already hold the
+        // cardinality alike, is the same write: the facts already hold the
         // value, the tree would fold the two asserts into one claim, and
         // a commit would otherwise settle the cell in the transactor as a
         // cell written twice. tonk seeds a library's schema into a
@@ -198,7 +198,7 @@ impl State {
     fn apply(&mut self, instruction: Instruction) {
         match instruction {
             // A write holds its value here and retires nothing: what a
-            // choosing pick succeeds is settled against the line when
+            // cardinality one succeeds is settled against the line when
             // the store is read or committed.
             Instruction::Assert(fact, _) => {
                 self.facts.insert(fact);
@@ -344,7 +344,7 @@ impl Staged {
         )
     }
 
-    /// The cells written under a choosing pick that `selector`
+    /// The cells written under cardinality one that `selector`
     /// reaches, retracted since or not: what a read of that range
     /// settles. A bound on the value is no bound on the cell, since a
     /// write may succeed a claim of a value it does not share, so the
@@ -407,11 +407,11 @@ impl Staged {
 /// dropped. A retraction followed by an assertion of the same value
 /// keeps both: the commit retracts the line's claim and asserts afresh.
 ///
-/// A cell holding an assertion under a choosing pick is kept as
+/// A cell holding an assertion under cardinality one is kept as
 /// written, every write in order, for the transactor or the tree to
 /// settle. The rules above reason about one value at a time, which is
 /// exact only while the writes of different values commute; a
-/// choosing write succeeds whichever claim its pick elects at its
+/// cardinality-one write succeeds whichever claim is newest at its
 /// place in the order, and that may be a value an earlier write of the
 /// cell asserted, so no write of the cell is dropped by value alone.
 pub(crate) fn squash(cell: Vec<Change>, held: &dyn Fn(&Value) -> bool) -> Vec<Change> {
@@ -611,7 +611,7 @@ mod tests {
         assert_eq!(
             staged.writes_of(&the, &a),
             vec![write.clone(), other.clone()],
-            "the same value under another pick is another write"
+            "the same value under another cardinality is another write"
         );
         staged.apply_change(&the, &a, &write);
         assert_eq!(
@@ -708,7 +708,7 @@ mod tests {
             ),
             Vec::<Change>::new()
         );
-        // A write repeated under one pick is one write.
+        // A write repeated under one cardinality is one write.
         assert_eq!(
             squash(
                 vec![
@@ -855,7 +855,7 @@ mod tests {
         );
     }
 
-    /// A write under a choosing pick holds its value beside the
+    /// A write under cardinality one holds its value beside the
     /// cell's other staged claims and retires nothing here: what it
     /// succeeds is settled against the line when the store is read or
     /// committed. A retraction of a fact the store does not hold still

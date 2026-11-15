@@ -1,5 +1,4 @@
 use crate::Parameters;
-use crate::Pick;
 use crate::attribute::Relation;
 use crate::attribute::query::AttributeQuery;
 use crate::corpus::{CorpusRelation, Entity, Value};
@@ -15,9 +14,9 @@ use crate::identity::{self, ATTRIBUTE, field};
 use base58::ToBase58;
 use dialog_corpus::identity::{ENTITY, SYMBOL};
 use merkle_reference::{Reference, Type as ReferenceType};
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter, Result as FmtResult};
-use std::iter;
 use std::str::FromStr;
 
 /// A validated attribute–value pair with the cardinality it is written
@@ -253,16 +252,19 @@ impl FromStr for The {
     }
 }
 
-/// Static metadata for an attribute: the relation it reads, or several
-/// ranked, its human-readable description, value type or listed value
-/// domain, and the pick it reads under.
+/// Static metadata for an attribute: the relation it reads, its
+/// human-readable description, its value type or listed value domain,
+/// and its cardinality.
 ///
-/// An attribute is a relation read under a type and a pick. A list
-/// is a ranked choice: `the: [a, b]` reads the first listed relation
-/// holding a candidate, `as: [v1, v2]` the first listed value a
-/// candidate holds, and either implies `pick: top`. Rules derive
+/// An attribute is a relation, a type and a cardinality. Under
+/// cardinality one a read returns the cell's newest claim and a write
+/// succeeds it; under cardinality many a read returns every claim and a
+/// write adds one. `as: [v1, v2]` lists the values the attribute holds,
+/// an enumerated type with no ranking meaning. A read that ranks
+/// candidates (the greatest, the least, the best listed) is a rule whose
+/// `reduce` clause folds them with `max`, `min` or `top`. Rules derive
 /// into relations and are found by them, so two attributes over one
-/// relation under different types or picks are two attributes.
+/// relation under different types or cardinalities are two attributes.
 ///
 /// `AttributeDescriptor` is used in two contexts:
 /// 1. Inside a [`ConceptDescriptor`](crate::concept::descriptor::ConceptDescriptor)
@@ -273,86 +275,57 @@ impl FromStr for The {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Wire", into = "Wire")]
 pub struct AttributeDescriptor {
-    /// The relation read first.
+    /// The relation read.
     the: The,
-    /// The relations read after it, in rank order: a candidate from an
-    /// earlier relation outranks one from a later.
-    then: Vec<The>,
     description: String,
     content_type: Option<Type>,
-    /// The values `as` lists, best first: the domain a value is one
-    /// of, which a `top` pick ranks by.
+    /// The values `as` lists: the domain a value is one of.
     among: Vec<Value>,
-    /// Which of the relation's candidates the attribute picks; a `top`
-    /// carries [`among`](Self::among). The cardinality is the pick's
-    /// arity.
-    pick: Pick,
-    /// Whether a write through the attribute adds a claim beside the
-    /// cell's others where its pick alone would have it succeed the one
-    /// a read returns: cardinality many declared beside a choosing
-    /// pick, which keeps every claim written and leaves the choice to
-    /// the read. Never set under `all`, whose writes add anyway.
-    adds: bool,
+    /// How many claims a cell holds: what a read returns and what a
+    /// write does.
+    cardinality: Cardinality,
 }
 
-/// The wire form of an [`AttributeDescriptor`]: `the` is one relation
-/// or a ranked list, `as` a type or a ranked value list, `pick` the
-/// pick where it says more than the lists imply, and `cardinality`
-/// how a write updates the cell. Alone, `cardinality` is the older
-/// spelling of `last` (one) and `all` (many). Beside a choosing pick or
-/// a list, `many` has a write add its claim and leave the choice to the
-/// read, and is written only then.
+/// The wire form of an [`AttributeDescriptor`]: `the` one relation, `as`
+/// a type or a value list, and `cardinality` one (the default, and not
+/// written) or many.
+///
+/// An earlier release spelled a `pick` (or its preview spelling,
+/// `select`) and could list relations under `the`, a ranked chain. Both
+/// are refused by name, so a definition in that format is never read
+/// with another meaning than it was written with; the migration in
+/// `dialog_query::migration` rewrites the ones that can be rewritten.
 #[derive(Serialize, Deserialize)]
 struct Wire {
     the: OneOrMany<The>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    cardinality: Option<Cardinality>,
+    cardinality: Option<CardinalityName>,
     #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
     content: Option<As>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pick: Option<PickName>,
-    /// The preview spelling of `pick`, read and never written.
+    /// The pick an earlier release spelled: refused.
     #[serde(default, skip_serializing)]
-    select: Option<PickName>,
+    pick: Option<IgnoredAny>,
+    /// The preview spelling of `pick`: refused.
+    #[serde(default, skip_serializing)]
+    select: Option<IgnoredAny>,
 }
 
-/// A pick as the wire spells it: its entity alone (`all:`), the values
-/// a `top` ranks being the `as` list. The plain name a 0.2 release
-/// wrote (`all`) is still read.
+/// A cardinality as an attribute's wire form spells it: `one` or
+/// `many`, and nothing else.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-enum PickName {
-    #[serde(rename = "last:", alias = "last")]
-    Last,
-    #[serde(rename = "all:", alias = "all")]
-    All,
-    #[serde(rename = "top:", alias = "top")]
-    Top,
-    #[serde(rename = "max:", alias = "max")]
-    Max,
-    #[serde(rename = "min:", alias = "min")]
-    Min,
+#[serde(rename_all = "lowercase")]
+enum CardinalityName {
+    One,
+    Many,
 }
 
-impl PickName {
-    fn of(pick: &Pick) -> Self {
-        match pick {
-            Pick::Last => PickName::Last,
-            Pick::All => PickName::All,
-            Pick::Top(_) => PickName::Top,
-            Pick::Max => PickName::Max,
-            Pick::Min => PickName::Min,
-        }
-    }
-
-    fn with(self, ranked: Vec<Value>) -> Pick {
-        match self {
-            PickName::Last => Pick::Last,
-            PickName::All => Pick::All,
-            PickName::Top => Pick::Top(ranked),
-            PickName::Max => Pick::Max,
-            PickName::Min => Pick::Min,
+impl From<CardinalityName> for Cardinality {
+    fn from(name: CardinalityName) -> Self {
+        match name {
+            CardinalityName::One => Cardinality::One,
+            CardinalityName::Many => Cardinality::Many,
         }
     }
 }
@@ -371,19 +344,27 @@ enum As {
     Domain(Vec<Value>),
 }
 
+/// Why an attribute an earlier release spelled with a `pick` is not
+/// read.
+pub const PICK_REFUSED: &str = "an attribute no longer has a `pick`: it is written with \
+     `cardinality: one` (what `last` read) or `cardinality: many` (what `all` read), and a \
+     read under `max`, `min` or `top` is a rule whose `reduce` folds with that aggregator";
+
+/// Why an attribute listing relations under `the`, a ranked chain an
+/// earlier release read, is not read.
+pub const CHAIN_REFUSED: &str = "`the` names one relation: a list of relations, ranked, \
+     is no longer read; a rule reading each relation and folding with `top` replaces it";
+
 impl TryFrom<Wire> for AttributeDescriptor {
     type Error = String;
 
     fn try_from(wire: Wire) -> Result<Self, Self::Error> {
-        let (the, then) = match wire.the {
-            OneOrMany::One(the) => (the, Vec::new()),
-            OneOrMany::Many(mut list) => {
-                if list.is_empty() {
-                    return Err("`the` lists no relation".to_string());
-                }
-                let the = list.remove(0);
-                (the, list)
-            }
+        if wire.pick.is_some() || wire.select.is_some() {
+            return Err(PICK_REFUSED.to_string());
+        }
+        let the = match wire.the {
+            OneOrMany::One(the) => the,
+            OneOrMany::Many(_) => return Err(CHAIN_REFUSED.to_string()),
         };
         let (content_type, among) = match wire.content {
             None => (None, Vec::new()),
@@ -412,61 +393,32 @@ impl TryFrom<Wire> for AttributeDescriptor {
                 (Some(kind), values)
             }
         };
-        // A listed domain or relation chain is a ranked choice, `top`
-        // unless the pick says otherwise; `cardinality` alone is the
-        // older spelling of `last` and `all`.
-        let pick = match wire.pick.or(wire.select) {
-            Some(name) => name.with(among.clone()),
-            None if !then.is_empty() || !among.is_empty() => Pick::Top(among.clone()),
-            None => Pick::of(wire.cardinality.unwrap_or_default()),
-        };
-        // Beside a choosing pick, cardinality many is how the cell is
-        // written: every claim is kept, and the pick chooses on read.
-        let adds = wire.cardinality == Some(Cardinality::Many) && pick.elects();
-        let descriptor = AttributeDescriptor {
+        Ok(AttributeDescriptor {
             the,
-            then,
             description: wire.description,
             content_type,
             among,
-            pick,
-            adds,
-        };
-        match descriptor.pick_error() {
-            Some(reason) => Err(reason),
-            None => Ok(descriptor),
-        }
+            cardinality: wire.cardinality.map(Cardinality::from).unwrap_or_default(),
+        })
     }
 }
 
 impl From<AttributeDescriptor> for Wire {
     fn from(descriptor: AttributeDescriptor) -> Self {
-        let the = if descriptor.then.is_empty() {
-            OneOrMany::One(descriptor.the)
-        } else {
-            OneOrMany::Many(iter::once(descriptor.the).chain(descriptor.then).collect())
-        };
-        let name = PickName::of(&descriptor.pick);
         let content = if descriptor.among.is_empty() {
             descriptor.content_type.map(As::Kind)
         } else {
             Some(As::Domain(descriptor.among))
         };
-        // The pick is written where it says more than the lists imply:
-        // a ranked choice is `top` by itself, and a plain attribute is
-        // `last` by itself.
-        let implied = if matches!(the, OneOrMany::Many(_)) || matches!(content, Some(As::Domain(_)))
-        {
-            PickName::Top
-        } else {
-            PickName::Last
-        };
         Wire {
-            the,
+            the: OneOrMany::One(descriptor.the),
             description: descriptor.description,
-            cardinality: descriptor.adds.then_some(Cardinality::Many),
+            cardinality: match descriptor.cardinality {
+                Cardinality::One => None,
+                Cardinality::Many => Some(CardinalityName::Many),
+            },
             content,
-            pick: Some(name).filter(|name| *name != implied),
+            pick: None,
             select: None,
         }
     }
@@ -493,146 +445,37 @@ impl AttributeDescriptor {
     ) -> Self {
         Self {
             the,
-            then: Vec::new(),
             description: description.into(),
             content_type,
             among: Vec::new(),
-            pick: Pick::of(cardinality),
-            adds: false,
+            cardinality,
         }
     }
 
-    /// This descriptor written under cardinality many: a write adds
-    /// its claim beside the cell's others and succeeds none, so every
-    /// claim written is kept and the pick chooses among them on read.
-    /// Under `all` a write adds already, and this changes nothing.
-    pub fn adding(mut self) -> Self {
-        self.adds = self.pick.elects();
+    /// This descriptor over the listed value domain: the values the
+    /// attribute holds. The list carries no ranking.
+    pub fn with_domain(mut self, values: Vec<Value>) -> Self {
+        self.among = values;
         self
     }
 
-    /// Whether a write through this attribute adds a claim where its
-    /// pick alone would succeed one (see [`adding`](Self::adding)).
-    pub fn adds(&self) -> bool {
-        self.adds
-    }
-
-    /// The cardinality a write through this attribute carries, which
-    /// says what the write succeeds: many, succeeding nothing, under
-    /// `all` or when the attribute is written under cardinality many,
-    /// and otherwise one, succeeding the newest claim.
-    pub fn writes(&self) -> Cardinality {
-        if self.adds {
-            Cardinality::Many
-        } else {
-            self.pick.cardinality()
-        }
-    }
-
-    /// This descriptor reading `then` after its relation, in rank
-    /// order: a ranked choice by relation, read as `top`.
-    pub fn with_then(mut self, then: Vec<The>) -> Self {
-        self.then = then;
-        self.pick = Pick::Top(self.among.clone());
+    /// This descriptor under `cardinality`.
+    pub fn with_cardinality(mut self, cardinality: Cardinality) -> Self {
+        self.cardinality = cardinality;
         self
     }
 
-    /// This descriptor over the listed value domain, best first: a
-    /// ranked choice by value, read as `top` unless it is picked
-    /// otherwise.
-    pub fn with_domain(mut self, ranked: Vec<Value>) -> Self {
-        if matches!(self.pick, Pick::Last | Pick::Top(_)) {
-            self.pick = Pick::Top(ranked.clone());
-        }
-        self.among = ranked;
-        self
-    }
-
-    /// The values `as` lists, best first, if it lists any.
+    /// The values `as` lists, if it lists any.
     pub fn among(&self) -> &[Value] {
         &self.among
     }
 
-    /// Every relation this attribute reads, the first ranked highest.
-    pub fn relations(&self) -> impl Iterator<Item = &The> {
-        iter::once(&self.the).chain(self.then.iter())
-    }
-
-    /// Whether this attribute reads several relations, ranked.
-    pub fn is_chain(&self) -> bool {
-        !self.then.is_empty()
-    }
-
-    /// This descriptor under `pick`. The pick is checked against the
-    /// descriptor by [`pick_error`](Self::pick_error) wherever a concept
-    /// is built. A `top` with no values of its own ranks by the listed
-    /// domain; one with values lists them as the domain.
-    pub fn with_pick(mut self, pick: Pick) -> Self {
-        self.pick = match pick {
-            Pick::Top(ranked) if ranked.is_empty() => Pick::Top(self.among.clone()),
-            Pick::Top(ranked) => {
-                self.among = ranked.clone();
-                Pick::Top(ranked)
-            }
-            pick => pick,
-        };
-        self.adds = self.adds && self.pick.elects();
-        self
-    }
-
-    /// Which of its relation's candidates this attribute picks. A write
-    /// through the attribute carries [`writes`](Self::writes), which is
-    /// this pick unless the attribute is written under cardinality
-    /// many: any pick but `all` succeeds the claim a read returns,
-    /// retracted beside the written value; `all` appends.
-    pub fn pick(&self) -> &Pick {
-        &self.pick
-    }
-
-    /// Whether a field over this attribute must read through the
-    /// attribute concept to be read as declared: its pick is not the
-    /// plain stored read (`last` or `all`), or it reads several
-    /// relations, so the candidates have to be gathered and elected
-    /// even where nothing derives them.
-    pub fn reads_elected(&self) -> bool {
-        !matches!(self.pick, Pick::Last | Pick::All) || self.is_chain()
-    }
-
-    /// This descriptor's first relation read plainly, under its pick's
-    /// arity alone: the relation itself, which is what rules derive
-    /// into.
-    pub fn without_pick(mut self) -> Self {
-        self.pick = Pick::of(self.pick.cardinality());
+    /// This descriptor's relation read plainly, under its cardinality
+    /// alone and with no listed domain: the relation itself, which is
+    /// what rules derive into.
+    pub fn plain(mut self) -> Self {
         self.among = Vec::new();
-        self.then = Vec::new();
-        self.adds = false;
         self
-    }
-
-    /// Why the pick does not fit this attribute, if it does not: `top`
-    /// ranks listed values or relations, and `max` and `min` order a
-    /// comparable value type.
-    pub fn pick_error(&self) -> Option<String> {
-        if self.is_chain() && !matches!(self.pick, Pick::Top(_)) {
-            return Some(
-                "a list of relations is a ranked choice: it reads as `top` only".to_string(),
-            );
-        }
-        let content = self.content_type;
-        match &self.pick {
-            Pick::Top(ranked) if ranked.is_empty() && !self.is_chain() => {
-                Some("`top` ranks listed values or relations, and none are listed".to_string())
-            }
-            Pick::Top(_) => None,
-            pick @ (Pick::Max | Pick::Min) => match content {
-                Some(Type::Bytes) | Some(Type::Boolean) => Some(format!(
-                    "`{pick}` orders a comparable value type, not {:?}",
-                    content.expect("checked")
-                )),
-                _ => None,
-            },
-            Pick::Last | Pick::All => None,
-        }
     }
 
     /// Returns a relation identifier comprised of the attribute's domain and name.
@@ -664,23 +507,11 @@ impl AttributeDescriptor {
         &self.description
     }
 
-    /// Returns the cardinality: the pick's arity, `all` being many
-    /// and every other pick one. `cardinality` is the older spelling
-    /// of `last` and `all`, so the two never disagree.
+    /// Returns the cardinality: under one a read returns the cell's
+    /// newest claim and a write succeeds it, under many a read returns
+    /// every claim and a write adds one.
     pub fn cardinality(&self) -> Cardinality {
-        self.pick.cardinality()
-    }
-
-    /// The arity the stored scan of this attribute reads under. A
-    /// `last` read is the stored scan itself: one claim per entity, the
-    /// newest. Every other pick elects among the claims, so the scan
-    /// hands over every claim and the election chooses; a scan that
-    /// kept one would choose by `last` before the pick saw the rest.
-    pub fn scan_cardinality(&self) -> Cardinality {
-        match self.pick {
-            Pick::Last => Cardinality::One,
-            _ => Cardinality::Many,
-        }
+        self.cardinality
     }
 
     /// Returns the expected value type, or `None` if any type is accepted.
@@ -728,7 +559,7 @@ impl AttributeDescriptor {
             Ok(Attribution {
                 the,
                 is: value.clone(),
-                cardinality: self.writes(),
+                cardinality: self.cardinality,
             })
         } else {
             Err(FieldTypeError::TypeMismatch {
@@ -806,20 +637,27 @@ impl AttributeDescriptor {
     /// The attribute's identity: its merkle reference under
     /// [`ATTRIBUTE`](crate::identity::ATTRIBUTE).
     ///
-    /// It maps `the` to the relations the attribute reads, best first, each
-    /// a symbol; `as` to the entity naming its type, when it declares one;
-    /// `pick` to the entity naming its pick; and `among` to the values it
-    /// lists, when it lists any. A collection reads as the symbol its
-    /// relation slot spells, `todo.list/[symbol]`, which no relation can
-    /// spell. The description is not part of it. Two reads of one relation
-    /// under different types or picks are two attributes.
+    /// It maps `the` to the symbol of the relation the attribute reads,
+    /// `cardinality` to the symbol naming its cardinality (`one` or
+    /// `many`), `as` to the entity naming its type, when it declares one,
+    /// and `among` to the values it lists, when it lists any. A
+    /// collection reads as the symbol its relation slot spells,
+    /// `todo.list/[symbol]`, which no relation can spell. The description
+    /// is not part of it. Two attributes over one relation under
+    /// different types or cardinalities are two attributes.
+    ///
+    /// The release before this one hashed a `pick` where this hashes the
+    /// cardinality, and the relation as a list of one.
     pub fn reference(&self) -> Reference {
-        let relations = iter::once(&self.the)
-            .chain(&self.then)
-            .map(|the| SYMBOL.reference_of(the.to_string().as_bytes()));
         let mut entries = vec![
-            (field::THE, ReferenceType::LIST.list(relations)),
-            (field::PICK, ENTITY.reference_of(self.pick.uri().as_bytes())),
+            (
+                field::THE,
+                SYMBOL.reference_of(self.the.to_string().as_bytes()),
+            ),
+            (
+                field::CARDINALITY,
+                SYMBOL.reference_of(self.cardinality.name().as_bytes()),
+            ),
         ];
         if let Some(content_type) = self.content_type {
             entries.push((
@@ -832,11 +670,6 @@ impl AttributeDescriptor {
                 field::AMONG,
                 ReferenceType::LIST.list(self.among.iter().map(Value::reference)),
             ));
-        }
-        // Named only where it says more than the pick does, so every
-        // attribute written as its pick reads keeps its identity.
-        if self.adds {
-            entries.push((field::CARDINALITY, SYMBOL.reference_of(b"many")));
         }
         ATTRIBUTE.map(entries)
     }
@@ -966,145 +799,68 @@ mod tests {
         assert_ne!(natural.to_uri(), integer.to_uri());
     }
 
-    /// A list is a ranked choice: `as: [..]` ranks values, `the: [..]`
-    /// ranks relations, and either reads as `top` without saying so.
-    /// `cardinality` is read as the older spelling of `last` and `all`
-    /// and never written; a pick is written where it says more than
-    /// the lists imply.
+    /// A listed `as` is an enumerated type: the values the attribute
+    /// holds, in no ranking order, read under the cardinality the
+    /// attribute declares. It is written back as listed.
     #[dialog_common::test]
-    fn it_reads_a_list_as_a_ranked_choice() {
-        let ranked: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+    fn it_reads_a_listed_domain_as_an_enumerated_type() {
+        let listed: AttributeDescriptor = serde_json::from_value(serde_json::json!({
             "the": "job/status",
             "as": ["case:suspended", "case:active"]
         }))
         .expect("descriptor parses");
-        assert!(matches!(ranked.pick(), Pick::Top(_)));
+        assert_eq!(listed.cardinality(), Cardinality::One);
         assert_eq!(
-            ranked.content_type(),
+            listed.content_type(),
             Some(Type::Entity),
             "the domain's type"
         );
-        assert_eq!(ranked.among().len(), 2);
-        assert!(ranked.reads_elected());
+        assert_eq!(listed.among().len(), 2);
         assert_eq!(
-            serde_json::to_value(&ranked).expect("serializes"),
+            serde_json::to_value(&listed).expect("serializes"),
             serde_json::json!({ "the": "job/status", "as": ["case:suspended", "case:active"] })
         );
+        let many: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": "job/status",
+            "as": ["case:suspended", "case:active"],
+            "cardinality": "many"
+        }))
+        .expect("descriptor parses");
+        assert_eq!(many.cardinality(), Cardinality::Many);
+        assert_ne!(many.to_uri(), listed.to_uri());
+    }
 
-        let chain: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+    /// An attribute spelled with a `pick`, in its preview spelling
+    /// `select`, or over a list of relations, as the release before this
+    /// one read it, is refused by name, whatever the pick: it is never
+    /// read with another meaning than it was written with.
+    #[dialog_common::test]
+    fn it_refuses_an_attribute_spelled_with_a_pick_or_a_chain() {
+        for pick in ["last:", "all:", "max:", "min:", "top:", "last", "all"] {
+            for key in ["pick", "select"] {
+                let mut spelled = serde_json::json!({ "the": "job/tag", "as": "text:" });
+                spelled[key] = pick.into();
+                let error = serde_json::from_value::<AttributeDescriptor>(spelled)
+                    .expect_err("a pick is refused");
+                assert!(
+                    error.to_string().contains("no longer has a `pick`"),
+                    "{error}"
+                );
+            }
+        }
+        let error = serde_json::from_value::<AttributeDescriptor>(serde_json::json!({
             "the": ["user/email", "user/phone"],
             "as": "text:"
         }))
-        .expect("descriptor parses");
-        assert!(matches!(chain.pick(), Pick::Top(_)));
-        assert!(chain.is_chain());
-        assert_eq!(chain.relations().count(), 2);
-        assert_eq!(
-            serde_json::to_value(&chain).expect("serializes"),
-            serde_json::json!({ "the": ["user/email", "user/phone"], "as": "text:" })
-        );
-        assert!(
-            serde_json::from_value::<AttributeDescriptor>(serde_json::json!({
-                "the": ["user/email", "user/phone"],
-                "as": "text:",
-                "pick": "all:"
-            }))
-            .is_err(),
-            "a relation chain reads as top only"
-        );
-
-        let many: AttributeDescriptor = serde_json::from_value(serde_json::json!({
-            "the": "job/tag",
-            "as": "text:",
-            "cardinality": "many"
-        }))
-        .expect("descriptor parses");
-        assert_eq!(many.pick(), &Pick::All, "the older spelling");
-        assert_eq!(
-            serde_json::to_value(&many).expect("serializes"),
-            serde_json::json!({ "the": "job/tag", "as": "text:", "pick": "all:" })
-        );
-        let named: AttributeDescriptor = serde_json::from_value(serde_json::json!({
-            "the": "job/tag",
-            "as": "text:",
-            "pick": "all"
-        }))
-        .expect("descriptor parses");
-        assert_eq!(named.pick(), &Pick::All, "the spelling 0.2 wrote");
-        assert_eq!(named.to_uri(), many.to_uri());
-        let one: AttributeDescriptor = serde_json::from_value(serde_json::json!({
-            "the": "job/tag",
-            "as": "text:"
-        }))
-        .expect("descriptor parses");
-        assert_eq!(one.pick(), &Pick::Last);
-        assert!(
-            serde_json::to_value(&one)
-                .expect("serializes")
-                .get("pick")
-                .is_none()
-        );
+        .expect_err("a chain is refused");
+        assert!(error.to_string().contains("names one relation"), "{error}");
     }
 
-    /// Beside a choosing pick, `cardinality: many` is how the cell is
-    /// written: a write adds its claim and succeeds none, and the pick
-    /// chooses on read. It is written back only there, and it tells
-    /// the attribute apart from the one written as its pick reads,
-    /// whose identity does not move.
+    /// Cardinality is part of the attribute: two attributes over one
+    /// relation under different cardinalities, or listing different
+    /// values, are two attributes.
     #[dialog_common::test]
-    fn it_writes_under_cardinality_many_beside_a_choosing_pick() {
-        let status = serde_json::json!({
-            "the": "job/status",
-            "as": ["case:suspended", "case:active"]
-        });
-        let succeeding: AttributeDescriptor =
-            serde_json::from_value(status.clone()).expect("descriptor parses");
-        assert_eq!(succeeding.writes(), Cardinality::One);
-        assert!(!succeeding.adds());
-
-        let mut spelled = status.clone();
-        spelled["cardinality"] = "many".into();
-        let adding: AttributeDescriptor =
-            serde_json::from_value(spelled.clone()).expect("descriptor parses");
-        assert!(matches!(adding.pick(), Pick::Top(_)), "read as before");
-        assert_eq!(adding.cardinality(), Cardinality::One, "one value read");
-        assert_eq!(
-            adding.writes(),
-            Cardinality::Many,
-            "every claim written is kept"
-        );
-        assert_eq!(serde_json::to_value(&adding).expect("serializes"), spelled);
-        assert_eq!(adding, succeeding.clone().adding());
-        assert_ne!(adding.to_uri(), succeeding.to_uri());
-
-        let one: AttributeDescriptor = serde_json::from_value(serde_json::json!({
-            "the": "job/status",
-            "as": ["case:suspended", "case:active"],
-            "cardinality": "one"
-        }))
-        .expect("descriptor parses");
-        assert_eq!(one, succeeding, "cardinality one is what a pick writes as");
-
-        let all: AttributeDescriptor = serde_json::from_value(serde_json::json!({
-            "the": "job/tag",
-            "as": "text:",
-            "pick": "all:",
-            "cardinality": "many"
-        }))
-        .expect("descriptor parses");
-        assert!(!all.adds(), "`all` adds already");
-        assert_eq!(
-            serde_json::to_value(&all).expect("serializes"),
-            serde_json::json!({ "the": "job/tag", "as": "text:", "pick": "all:" })
-        );
-    }
-
-    /// A pick is part of the attribute: two reads of one relation
-    /// under different picks are two attributes. `last` and `all`
-    /// are what `cardinality: one` and `many` always said, so they
-    /// are the same attributes, whichever way they are spelled.
-    #[dialog_common::test]
-    fn it_tells_attributes_apart_by_policy() {
+    fn it_tells_attributes_apart_by_cardinality() {
         let one =
             AttributeDescriptor::new(the!("job/status"), "", Cardinality::One, Some(Type::Entity));
         let many = AttributeDescriptor::new(
@@ -1113,59 +869,11 @@ mod tests {
             Cardinality::Many,
             Some(Type::Entity),
         );
-        let ranked = one.clone().with_domain(vec![Value::Boolean(true)]);
-        let chained = one
-            .clone()
-            .with_then(vec!["job/fallback".parse().expect("a relation")]);
-        let newest = many.clone().with_pick(Pick::Last);
-        let every = one.clone().with_pick(Pick::All);
-        assert_ne!(one.to_uri(), ranked.to_uri());
-        assert_ne!(one.to_uri(), chained.to_uri());
+        let listed = one.clone().with_domain(vec![Value::Boolean(true)]);
         assert_ne!(one.to_uri(), many.to_uri());
-        assert_eq!(newest.to_uri(), one.to_uri(), "`last` is cardinality one");
-        assert_eq!(every.to_uri(), many.to_uri(), "`all` is cardinality many");
-        assert_eq!(newest.cardinality(), Cardinality::One);
-        assert_eq!(every.cardinality(), Cardinality::Many);
-        assert_eq!(
-            ranked.cardinality(),
-            Cardinality::One,
-            "a ranked read is one value"
-        );
-        assert!(
-            matches!(ranked.pick(), Pick::Top(_)),
-            "a listed domain reads as top"
-        );
-        assert!(
-            matches!(chained.pick(), Pick::Top(_)),
-            "a relation chain reads as top"
-        );
-    }
-
-    /// A pick that does not fit its attribute is named: `top` without
-    /// listed values or relations, `max` over an unordered carrier.
-    #[dialog_common::test]
-    fn it_names_a_policy_its_attribute_cannot_read_under() {
-        let status = |pick: Pick, among: Vec<Value>, kind: Type| {
-            AttributeDescriptor::new(the!("job/status"), "", Cardinality::One, Some(kind))
-                .with_domain(among)
-                .with_pick(pick)
-                .pick_error()
-        };
-        assert!(status(Pick::Top(Vec::new()), Vec::new(), Type::Entity).is_some());
-        assert!(
-            status(
-                Pick::Top(Vec::new()),
-                vec![Value::Boolean(true)],
-                Type::Entity
-            )
-            .is_none()
-        );
-        assert!(
-            status(Pick::All, vec![Value::Boolean(true)], Type::Entity).is_none(),
-            "a listed domain read as a set is an enum-typed set"
-        );
-        assert!(status(Pick::Max, Vec::new(), Type::Boolean).is_some());
-        assert!(status(Pick::Max, Vec::new(), Type::String).is_none());
+        assert_ne!(one.to_uri(), listed.to_uri());
+        assert_eq!(one.clone().with_cardinality(Cardinality::Many), many);
+        assert_eq!(listed.cardinality(), Cardinality::One);
     }
 
     #[dialog_common::test]
@@ -1181,8 +889,8 @@ mod tests {
         assert_eq!(json["description"], "Name of the person");
         assert_eq!(json["as"], "text:");
         assert!(
-            json.get("cardinality").is_none() && json.get("pick").is_none(),
-            "`last` is the pick a plain attribute implies: {json}"
+            json.get("cardinality").is_none(),
+            "one is the cardinality a plain attribute implies: {json}"
         );
     }
 
@@ -1195,8 +903,8 @@ mod tests {
             Some(Type::String),
         );
         let json: serde_json::Value = serde_json::to_value(&attr).unwrap();
-        assert_eq!(json["pick"], "all:", "many is spelled as its pick");
-        assert!(json.get("cardinality").is_none(), "{json}");
+        assert_eq!(json["cardinality"], "many");
+        assert!(json.get("pick").is_none(), "{json}");
     }
 
     #[dialog_common::test]
@@ -1503,10 +1211,8 @@ mod collection_tests {
         );
     }
 
-    /// Adding the collection variant must not move any existing
-    /// attribute's identity: a plain attribute hashes exactly what it
-    /// hashed before, and the two key kinds are distinct from it and
-    /// from each other.
+    /// A collection's identity is distinct from a plain attribute's, and
+    /// the two key kinds are distinct from each other.
     #[dialog_common::test]
     fn it_keeps_identities_distinct_and_stable() {
         let attribute = AttributeDescriptor::new(
@@ -1531,13 +1237,9 @@ mod collection_tests {
 
         // A collection reads as the symbol its relation slot spells.
         let symbol = |text: &str| SYMBOL.reference_of(text.as_bytes());
-        let pick = ENTITY.reference_of(sequence.pick().uri().as_bytes());
         let mut entries = vec![
-            (
-                field::THE,
-                ReferenceType::LIST.list([symbol("todo.list/[position]")]),
-            ),
-            (field::PICK, pick),
+            (field::THE, symbol("todo.list/[position]")),
+            (field::CARDINALITY, symbol("many")),
         ];
         if let Some(content_type) = sequence.content_type() {
             entries.push((
@@ -1549,8 +1251,8 @@ mod collection_tests {
     }
 
     /// An attribute is referenced as a map from field names under
-    /// `the:`: the relations it reads, its pick, its type, and the values
-    /// it lists. Nothing else, the description included.
+    /// `the:`: the relation it reads, its cardinality, its type, and the
+    /// values it lists. Nothing else, the description included.
     #[dialog_common::test]
     fn it_references_an_attribute_by_its_fields() {
         let attribute = AttributeDescriptor::new(
@@ -1560,11 +1262,8 @@ mod collection_tests {
             Some(Type::String),
         );
         let expected = ATTRIBUTE.map([
-            (
-                field::THE,
-                ReferenceType::LIST.list([SYMBOL.reference_of(b"todo.list/title")]),
-            ),
-            (field::PICK, ENTITY.reference_of(b"last:")),
+            (field::THE, SYMBOL.reference_of(b"todo.list/title")),
+            (field::CARDINALITY, SYMBOL.reference_of(b"one")),
             (field::AS, ENTITY.reference_of(b"text:")),
         ]);
         assert_eq!(attribute.reference(), expected);

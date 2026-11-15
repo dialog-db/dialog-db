@@ -1179,7 +1179,7 @@ fn seed_groups(query: &dialog_query::ConceptQuery, rows: &[Fact]) -> Vec<Vec<usi
             continue;
         };
         let combinable = field.descriptor().the().attribute().is_some()
-            && matches!(field.descriptor().pick(), dialog_query::Pick::Last);
+            && field.cardinality() == dialog_query::Cardinality::One;
         if !combinable {
             groups.push(vec![at]);
             continue;
@@ -1401,7 +1401,7 @@ fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenH
                     })?
                 }
             };
-            cells.push((attribute, value, field.descriptor().writes()));
+            cells.push((attribute, value, field.cardinality()));
         }
         heads.push((this, cells));
     }
@@ -3711,7 +3711,7 @@ mod tests {
             "description": "Record who an assign command names",
             "assert!": {
                 "with": {
-                    "assignee": { "the": "issue/assignee", "as": "text:", "pick": "all:" }
+                    "assignee": { "the": "issue/assignee", "as": "text:", "cardinality": "many" }
                 }
             },
             "when": [
@@ -3797,7 +3797,7 @@ mod tests {
     fn it_groups_rows_that_bind_distinct_last_fields() -> Result<()> {
         let rule: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "seen": { "the": "seen/who", "as": "text:", "pick": "all:" } }
+                "with": { "seen": { "the": "seen/who", "as": "text:", "cardinality": "many" } }
             },
             "when": [
                 {
@@ -3805,7 +3805,7 @@ mod tests {
                         "with": {
                             "issue": { "the": "cmd.assign/issue", "as": "entity:" },
                             "who": { "the": "cmd.assign/who", "as": "text:" },
-                            "tag": { "the": "cmd.assign/tag", "as": "text:", "pick": "all:" }
+                            "tag": { "the": "cmd.assign/tag", "as": "text:", "cardinality": "many" }
                         }
                     },
                     "where": {
@@ -3858,7 +3858,7 @@ mod tests {
             "description": "Record who an assign command names",
             "assert!": {
                 "with": {
-                    "assignee": { "the": "issue/assignee", "as": "text:", "pick": "all:" }
+                    "assignee": { "the": "issue/assignee", "as": "text:", "cardinality": "many" }
                 }
             },
             "when": [
@@ -4282,13 +4282,13 @@ mod tests {
         let rule: InductiveRule = serde_json::from_value(json!({
             "description": "Record each tag a titled document holds",
             "assert!": {
-                "with": { "tag": { "the": "seen/tag", "as": "text:", "pick": "all:" } }
+                "with": { "tag": { "the": "seen/tag", "as": "text:", "cardinality": "many" } }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "tag": { "the": "doc/tag", "as": "text:", "pick": "all:" },
+                            "tag": { "the": "doc/tag", "as": "text:", "cardinality": "many" },
                             "title": { "the": "doc/title", "as": "text:" }
                         }
                     },

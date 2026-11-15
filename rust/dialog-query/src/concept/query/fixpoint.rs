@@ -2177,10 +2177,10 @@ mod tests {
         Ok(())
     }
 
-    /// A ranked read of a recursive relation elects at the component's
-    /// exit, over the completed closure: the ancestor domain ranks the
-    /// root first, so every descendant's top ancestor is the root,
-    /// which only the transitive closure reaches for `d`.
+    /// A rule folding a recursive relation with `top` reads it over the
+    /// completed closure: the ranking puts the root first, so every
+    /// descendant's top ancestor is the root, which only the transitive
+    /// closure reaches for `d`.
     #[dialog_common::test]
     async fn it_elects_over_the_completed_fixpoint() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -2211,13 +2211,29 @@ mod tests {
         }
         assert!(registry.is_recursive(&ancestor.this())?);
 
-        // The closure's relation read as a ranked choice: the root
-        // outranks everyone, then its children.
+        // The closure's relation folded by rank: the root outranks
+        // everyone, then its children.
+        use crate::rule::DeductiveRuleDescriptor;
+        let fold: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": { "top": { "the": "family/top-ancestor", "as": "entity:" } } },
+            "when": [{
+                "assert": { "with": {
+                    "ancestor": { "the": "family/ancestor", "as": "entity:", "cardinality": "many" }
+                }},
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "ancestor": { "?": { "name": "ancestor" } }
+                }
+            }],
+            "reduce": { "top": {
+                "apply": "top",
+                "of": { "?": { "name": "ancestor" } },
+                "among": [a.to_string(), b.to_string(), c.to_string(), d.to_string()]
+            } }
+        }))?;
+        registry.register(fold.compile()?)?;
         let ranked: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "top": {
-                "the": "family/ancestor",
-                "as": [a.to_string(), b.to_string(), c.to_string(), d.to_string()]
-            }
+            "top": { "the": "family/top-ancestor", "as": "entity:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::var("who"));

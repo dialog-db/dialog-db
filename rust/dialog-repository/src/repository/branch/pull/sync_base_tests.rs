@@ -925,8 +925,8 @@ async fn it_does_not_push_a_head_a_reset_left_behind_the_base() -> Result<()> {
 /// which nothing that retired the first one retires. Facts are of two
 /// attributes: `post/title`, written under `Cardinality::Many`, whose writes
 /// append, and `post/state`, written under `Cardinality::One` to one of three
-/// entities, so writers race on them. A write under `Last` retires the claim
-/// its pick returns, and concurrent writes leave several live claims for
+/// entities, so writers race on them. A write under `One` retires the claim
+/// a read returns, and concurrent writes leave several live claims for
 /// the next write to choose among; which one it retires is read from the
 /// writer's head after the write, not modeled. A retraction retires a live
 /// claim of either attribute, and a re-assertion writes again a value its
@@ -1345,14 +1345,14 @@ impl Claim {
         }
     }
 
-    /// The assertion of this claim under its attribute's pick.
+    /// The assertion of this claim under its attribute's cardinality.
     fn assert(&self) -> Instruction {
-        let pick = if self.the == "post/state" {
+        let cardinality = if self.the == "post/state" {
             Cardinality::One
         } else {
             Cardinality::Many
         };
-        Instruction::Assert(self.fact(), pick)
+        Instruction::Assert(self.fact(), cardinality)
     }
 
     fn retract(&self) -> Instruction {

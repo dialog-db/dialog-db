@@ -256,16 +256,6 @@ pub enum TypeError {
         concept: String,
     },
 
-    /// A concept field declares a `pick` its attribute cannot read
-    /// under.
-    #[error("Attribute {the} cannot be read as declared: {reason}")]
-    UnfitPick {
-        /// The attribute's selector.
-        the: String,
-        /// Why the pick does not fit.
-        reason: String,
-    },
-
     /// Type inference over a rule's premises produced a
     /// contradiction (a variable appears in slots with conflicting
     /// kinds). The planner cannot proceed because the rule has no

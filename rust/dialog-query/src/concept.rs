@@ -173,7 +173,7 @@ where
                 <Self as Attribute>::value(self).clone(),
             ),
             cause: None,
-            cardinality: Some(descriptor.writes()),
+            cardinality: Some(descriptor.cardinality()),
         };
         buf.push(expr);
     }
@@ -250,7 +250,7 @@ where
                     <N as Attribute>::value(inner).clone(),
                 ),
                 cause: None,
-                cardinality: Some(descriptor.writes()),
+                cardinality: Some(descriptor.cardinality()),
             };
             buf.push(expr);
         }

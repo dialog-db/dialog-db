@@ -958,7 +958,7 @@ pub(crate) fn assemble(
 
 /// The head of `rule` deriving the relation indexed by `on`, if it has
 /// one: the head concluding that relation's attribute concept, whatever
-/// type or pick the reader declares over it.
+/// type or cardinality the reader declares over it.
 pub(crate) fn head_onto(
     rule: &DeductiveRule,
     on: &Entity,

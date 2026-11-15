@@ -31,34 +31,35 @@ pub use crate::{Predicate, Premise, Term};
 /// For schema metadata, see [`Descriptor<AttributeDescriptor>`](crate::Descriptor).
 /// For the fluent `::of()` expression builder, see [`StaticAttributeExpressionBuilder`].
 ///
-/// The derive reads the pick from `#[pick(last)]` (the default),
-/// `#[pick(all)]`, `#[pick(max)]` or `#[pick(min)]`:
+/// The derive reads the cardinality from `#[cardinality(one)]` (the
+/// default) or `#[cardinality(many)]`:
 ///
 /// ```rust
 /// use dialog_query::Descriptor;
 ///
 /// #[derive(dialog_macros::Attribute, Clone)]
 /// #[domain("note")]
-/// #[pick(all)]
-/// pub struct Tag(pub String);
-///
-/// assert_eq!(Tag::descriptor().pick(), &dialog_query::Pick::All);
-/// ```
-///
-/// The spelling before picks no longer compiles:
-///
-/// ```compile_fail
-/// #[derive(dialog_macros::Attribute, Clone)]
 /// #[cardinality(many)]
 /// pub struct Tag(pub String);
+///
+/// assert_eq!(Tag::descriptor().cardinality(), dialog_query::Cardinality::Many);
 /// ```
 ///
-/// Nor does `top`, which ranks values a derived attribute cannot list:
+/// The pick an earlier release spelled no longer compiles:
 ///
 /// ```compile_fail
 /// #[derive(dialog_macros::Attribute, Clone)]
-/// #[pick(top)]
-/// pub struct Status(pub String);
+/// #[pick(all)]
+/// pub struct Tag(pub String);
+/// ```
+///
+/// Nor does a ranking pick: a ranked read is a rule whose `reduce` folds
+/// with `max`, `min` or `top`.
+///
+/// ```compile_fail
+/// #[derive(dialog_macros::Attribute, Clone)]
+/// #[pick(max)]
+/// pub struct Grade(pub u32);
 /// ```
 pub trait Attribute: Predicate + Sized {
     /// The Rust scalar type of this attribute's values.
@@ -167,13 +168,8 @@ mod tests {
 
         /// Employees managed by this person
         #[derive(Attribute, Clone)]
-        #[pick(all)]
+        #[cardinality(many)]
         pub struct Manages(pub crate::Entity);
-
-        /// The person's highest grade
-        #[derive(Attribute, Clone)]
-        #[pick(max)]
-        pub struct Grade(pub u32);
     }
 
     #[dialog_common::test]
@@ -253,14 +249,9 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_derives_the_pick_it_names() {
-        assert_eq!(person_derive::Grade::descriptor().pick(), &crate::Pick::Max);
-        assert_eq!(person_derive::Grade::cardinality(), Cardinality::One);
-        assert_eq!(person_derive::Name::descriptor().pick(), &crate::Pick::Last);
-        assert_eq!(
-            person_derive::Manages::descriptor().pick(),
-            &crate::Pick::All
-        );
+    fn it_derives_the_cardinality_it_names() {
+        assert_eq!(person_derive::Name::cardinality(), Cardinality::One);
+        assert_eq!(person_derive::Manages::cardinality(), Cardinality::Many);
     }
 
     #[dialog_common::test]

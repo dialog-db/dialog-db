@@ -510,7 +510,7 @@ fn touched_by(demand: &Demand, instants: Vec<crate::Instant>) -> Touched {
 /// single-valued, every claim the cell holds now, read through `env`,
 /// is asserted, and every claim it held before, the same less the
 /// raw assertions plus the raw retractions, is retracted. A claim the
-/// move left in place lands on both sides, since which claim the pick
+/// move left in place lands on both sides, since which claim the read
 /// elects may have changed either way; re-derivation settles it. A
 /// cell of an attribute read as many-valued is left as the moves
 /// report it: every claim is read, so the moves are the change.
@@ -1036,7 +1036,7 @@ where
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
                 // The poll reports the rows that moved. What a rule
                 // reads of a single-valued attribute is the one claim
-                // its pick elects from the cell, so a row moving can
+                // the read elects from the cell, so a row moving can
                 // change what is read of the cell's other claims: a
                 // session value outvoting a committed one, a retracted
                 // winner uncovering the claim beneath it. For every
@@ -2958,11 +2958,11 @@ mod tests {
 
         /// An ancestor edge (`family/ancestor`) — the recursive
         /// conclusion. Every ancestor is one, so the relation is read
-        /// as a set: under the default `last` a reader outside the
-        /// recursion elects one ancestor.
+        /// as a set: under the default cardinality, one, a reader
+        /// outside the recursion elects one ancestor.
         #[derive(Attribute, Clone, PartialEq)]
         #[domain("family")]
-        #[pick(all)]
+        #[cardinality(many)]
         pub struct Ancestor(pub Entity);
 
         /// Direct parenthood.
@@ -3849,11 +3849,11 @@ mod tests {
         Ok(())
     }
 
-    /// A field listing several relations reads them as a ranked
-    /// choice over however many candidates: twenty contacts have a
-    /// phone, seven of them an email as well, and the handle is the
-    /// email where there is one and the phone otherwise. No rule says
-    /// so; the field does, and nothing is negated.
+    /// A choice between relations over however many candidates: twenty
+    /// contacts have a phone, seven of them an email as well, and the
+    /// handle is the email where there is one and the phone otherwise.
+    /// Two rules say so, the second reading the phone `unless` an email
+    /// is there.
     #[dialog_common::test]
     async fn it_ranks_many_candidates_by_relation() -> anyhow::Result<()> {
         use concepts::{Email, Phone};
@@ -3863,6 +3863,9 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let mut transaction = branch.transaction();
+        for rule in handle_rules() {
+            transaction = with_rule(transaction, &rule);
+        }
         let mut expected: Vec<(Entity, String)> = Vec::new();
         for index in 0..20 {
             let contact: Entity = format!("id:contact-{index}").parse()?;
@@ -3893,12 +3896,47 @@ mod tests {
         Ok(())
     }
 
-    /// `contact/handle` as the notation would declare it: the email,
-    /// else the phone.
+    /// `contact/handle(c) := e :- comm/email(c) = e` and
+    /// `contact/handle(c) := p :- comm/phone(c) = p, unless
+    /// comm/email(c)`: the email, else the phone.
+    fn handle_rules() -> Vec<dialog_query::DeductiveRule> {
+        use dialog_query::rule::DeductiveRuleDescriptor;
+        let handle = serde_json::json!({ "with": {
+            "handle": { "the": "contact/handle", "as": "text:" }
+        }});
+        let read = |the: &str, binds: Option<&str>| {
+            let mut field = serde_json::json!({ "this": { "?": { "name": "this" } } });
+            if let Some(name) = binds {
+                field["value"] = serde_json::json!({ "?": { "name": name } });
+            }
+            serde_json::json!({
+                "assert": { "with": { "value": { "the": the, "as": "text:" } } },
+                "where": field
+            })
+        };
+        let rule = |json: serde_json::Value| -> dialog_query::DeductiveRule {
+            let descriptor: DeductiveRuleDescriptor =
+                serde_json::from_value(json).expect("descriptor parses");
+            descriptor.compile().expect("rule compiles")
+        };
+        vec![
+            rule(serde_json::json!({
+                "deduce": handle,
+                "when": [read("comm/email", Some("handle"))]
+            })),
+            rule(serde_json::json!({
+                "deduce": handle,
+                "when": [read("comm/phone", Some("handle"))],
+                "unless": [read("comm/email", None)]
+            })),
+        ]
+    }
+
+    /// `contact/handle`: the email, else the phone.
     fn handle_query() -> ConceptQuery {
         concept_query(
             serde_json::json!({ "with": {
-                "handle": { "the": ["comm/email", "comm/phone"], "as": "text:" }
+                "handle": { "the": "contact/handle", "as": "text:" }
             }}),
             &["handle"],
         )
@@ -3916,13 +3954,13 @@ mod tests {
             .collect()
     }
 
-    /// A ranked choice flips as its better relation fills in: Bob's
-    /// handle is his phone until his email arrives, and then it is
-    /// the email, the phone row retracted and the email row asserted
+    /// A choice between relations flips as its better relation fills
+    /// in: Bob's handle is his phone until his email arrives, and then
+    /// it is the email, the phone row retracted and the email row asserted
     /// in one delta. The flip is maintained for the touched entity,
     /// not recomputed.
     #[dialog_common::test]
-    async fn it_maintains_a_ranked_choice_flip() -> anyhow::Result<()> {
+    async fn it_maintains_a_choice_flip() -> anyhow::Result<()> {
         use concepts::{Email, Phone};
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3930,8 +3968,11 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let bob = Entity::new()?;
-        branch
-            .transaction()
+        let mut transaction = branch.transaction();
+        for rule in handle_rules() {
+            transaction = with_rule(transaction, &rule);
+        }
+        transaction
             .assert(Phone::of(bob.clone()).is("555-0100"))
             .commit()
             .publish()
@@ -4238,16 +4279,17 @@ mod tests {
     /// The relation `dept_salary_rule` derives into, read as the set.
     fn dept_salary() -> ConceptDescriptor {
         serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "payroll/salary", "as": "natural:", "pick": "all:" }
+            "salary": { "the": "payroll/salary", "as": "natural:", "cardinality": "many" }
         }}))
         .expect("descriptor parses")
     }
 
-    /// `payroll/salary` read under `max`: a department's highest salary.
+    /// `payroll/salary` read under cardinality one: a department's
+    /// newest salary.
     fn dept_top() -> ConceptQuery {
         concept_query(
             serde_json::json!({ "with": {
-                "top": { "the": "payroll/salary", "as": "natural:", "pick": "max:" }
+                "top": { "the": "payroll/salary", "as": "natural:" }
             }}),
             &["top"],
         )
@@ -4285,9 +4327,10 @@ mod tests {
     /// wins retracts the group's old elected row and asserts the new
     /// one; a fact for a fresh group asserts a new row. The election is
     /// the subscription's read, not a rule's: the rule derives one
-    /// candidate per member, and `max` chooses among them. It is per
-    /// group, the row's entity, so the group is maintained like any
-    /// other head: its candidates re-derived and the pick taken again.
+    /// candidate per member, and the cardinality-one read takes the
+    /// newest. It is per group, the row's entity, so the group is
+    /// maintained like any other head: its candidates re-derived and the
+    /// election taken again.
     #[dialog_common::test]
     async fn it_updates_an_electing_subscription_on_asserts() -> anyhow::Result<()> {
         use concepts::{Dept, Salary, Staffed};
@@ -4319,7 +4362,7 @@ mod tests {
         assert!(initial.retracted.is_empty());
         assert_eq!(subscription.recomputes(), 1);
 
-        // A second, higher candidate: the old elected row is retracted
+        // A second, newer candidate: the old elected row is retracted
         // and the new one asserted in the same delta.
         branch
             .transaction()
@@ -4401,8 +4444,15 @@ mod tests {
                 dept: Dept(dept_a.clone()),
                 salary: Salary(100),
             })
-            .assert(bob_row.clone())
             .assert(carol_row.clone())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        // Bob joins later, so his is the newest candidate of dept-a.
+        branch
+            .transaction()
+            .assert(bob_row.clone())
             .commit()
             .publish()
             .perform(&operator)
@@ -4523,13 +4573,14 @@ mod tests {
         Ok(())
     }
 
-    /// Optional elections across polls: a department's `top` bonus is
+    /// Optional elections across polls: a department's newest bonus is
     /// absent while no member has a bonus, present once the first
     /// arrives, and absent again when it is retracted. The member
     /// read, over a relation every member contributes to, keeps the
     /// department's row throughout.
     #[dialog_common::test]
-    async fn it_transitions_optional_max_between_present_and_absent() -> anyhow::Result<()> {
+    async fn it_transitions_an_optional_election_between_present_and_absent() -> anyhow::Result<()>
+    {
         use concepts::{Bonus, Dept};
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4549,10 +4600,10 @@ mod tests {
             "bonus": { "the": "staff/bonus", "as": "natural:" }
         }}))?;
         let members: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "member": { "the": "payroll/member", "as": "entity:", "pick": "all:" }
+            "member": { "the": "payroll/member", "as": "entity:", "cardinality": "many" }
         }}))?;
         let bonuses: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "bonus": { "the": "payroll/bonus", "as": "natural:", "pick": "all:" }
+            "bonus": { "the": "payroll/bonus", "as": "natural:", "cardinality": "many" }
         }}))?;
         let member_rule = concept_rule(
             &members,
@@ -4578,9 +4629,9 @@ mod tests {
 
         let stats = concept_query(
             serde_json::json!({ "with": {
-                "member": { "the": "payroll/member", "as": "entity:", "pick": "all:" },
+                "member": { "the": "payroll/member", "as": "entity:", "cardinality": "many" },
                 "top": {
-                    "the": "payroll/bonus", "as": "natural:", "pick": "max:",
+                    "the": "payroll/bonus", "as": "natural:",
                     "optional": true
                 }
             }}),
@@ -4646,8 +4697,8 @@ mod tests {
     }
 
     /// Composition depth 2 under subscriptions: a deductive rule reads
-    /// a `max` attribute over a derived relation, so a consumer concept
-    /// projects the department's top salary, and a standing query over
+    /// a cardinality-one attribute over a derived relation, so a consumer
+    /// concept projects the department's newest salary, and a standing query over
     /// the consumer updates when the base facts change, through both
     /// the election and the projection.
     #[dialog_common::test]
@@ -4729,7 +4780,8 @@ mod tests {
     /// through change in both directions. A child department inherits
     /// its parent's salaries through a step rule reading the relation
     /// it derives into, so the component yields each department's
-    /// candidate set and the subscription's `max` chooses at the exit:
+    /// candidate set and the subscription's cardinality-one read chooses
+    /// the newest at the exit:
     /// a new winner replaces both departments' elected rows, and
     /// retracting it hands both back to the runner-up.
     #[dialog_common::test]

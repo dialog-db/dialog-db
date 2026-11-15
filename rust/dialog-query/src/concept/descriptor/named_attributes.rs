@@ -241,12 +241,6 @@ impl NamedAttributes {
             return Err(TypeError::EmptyConcept);
         }
         for field in map.values() {
-            if let Some(reason) = field.descriptor().pick_error() {
-                return Err(TypeError::UnfitPick {
-                    the: field.the().to_string(),
-                    reason,
-                });
-            }
             if field.is_optional() && field.the().attribute().is_none() {
                 return Err(TypeError::OptionalCollection {
                     domain: field.domain().to_string(),

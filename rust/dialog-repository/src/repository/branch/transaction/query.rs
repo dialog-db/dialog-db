@@ -716,11 +716,9 @@ mod tests {
     }
 
     /// An uncommitted rule staged on a transaction derives a relation
-    /// the transaction's query elects over: the pending view reads the
-    /// pending candidates under `max` without the rule or the data
-    /// being committed. The choice is the query's, read over the
-    /// relation the rule derives into, whatever pick the rule's own
-    /// head declared.
+    /// another staged rule folds with `max`: the pending view reads the
+    /// pending candidates without the rules or the data being
+    /// committed.
     #[dialog_common::test]
     async fn it_elects_over_a_derived_relation_pending_in_the_transaction() -> anyhow::Result<()> {
         use dialog_query::rule::DeductiveRuleDescriptor;
@@ -734,7 +732,7 @@ mod tests {
         let rule = {
             let json = serde_json::json!({
                 "deduce": { "with": {
-                    "salary": { "the": "org/dept-salary", "as": "natural:", "pick": "all:" }
+                    "salary": { "the": "org/dept-salary", "as": "natural:", "cardinality": "many" }
                 }},
                 "when": [{
                     "assert": { "with": {
@@ -752,8 +750,23 @@ mod tests {
                 serde_json::from_value(json).expect("descriptor parses");
             descriptor.compile().expect("rule compiles")
         };
+        // dept-top(dept) := max(salary) :- dept-salary(dept, salary)
+        let top: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": { "top": { "the": "org/dept-top", "as": "natural:" } } },
+            "when": [{
+                "assert": { "with": {
+                    "salary": { "the": "org/dept-salary", "as": "natural:", "cardinality": "many" }
+                }},
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "salary": { "?": { "name": "salary" } }
+                }
+            }],
+            "reduce": { "top": { "apply": "max", "of": { "?": { "name": "salary" } } } }
+        }))?;
+        let top = top.compile()?;
         let dept_top: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max:" }
+            "top": { "the": "org/dept-top", "as": "natural:" }
         }}))?;
 
         let dept: Entity = "id:dept-a".parse()?;
@@ -762,6 +775,7 @@ mod tests {
         let tx = branch
             .transaction()
             .assert(&rule)
+            .assert(&top)
             .assert(the!("org/dept").of(alice.clone()).is(dept.clone()))
             .assert(the!("org/salary").of(alice.clone()).is(3u32))
             .assert(the!("org/dept").of(bob.clone()).is(dept.clone()))
@@ -782,7 +796,7 @@ mod tests {
         assert_eq!(
             rows.len(),
             1,
-            "the query elects among the pending rule's candidates"
+            "the fold chooses among the pending rule's candidates"
         );
         assert_eq!(*rows[0].entity(), dept);
         assert_eq!(rows[0].get::<u64>("top")?, 4);

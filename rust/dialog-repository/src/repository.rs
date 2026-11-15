@@ -958,7 +958,7 @@ mod tests {
             // (entity, attribute) inside a single transaction must keep
             // both — cardinality-many accumulates, it does not collapse.
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[pick(all)]
+            #[cardinality(many)]
             #[domain("app.meta")]
             pub struct Tag(pub String);
 

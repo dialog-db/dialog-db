@@ -139,9 +139,6 @@ pub use reduce::{Aggregator, Reduce, ReduceEntry, ReduceSpec};
 pub use resolver::*;
 pub use rule::*;
 pub use schema::*;
-// The pick a field reads under, from the facts crate.
-mod pick;
-pub use pick::Pick;
 pub use scope::*;
 pub use selection::*;
 pub use session::*;

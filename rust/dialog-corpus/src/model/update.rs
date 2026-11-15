@@ -540,8 +540,8 @@ impl Changes {
         })
     }
 
-    /// Whether any cell of this batch holds an assertion under a
-    /// choosing pick, which the transactor has yet to resolve.
+    /// Whether any cell of this batch holds an assertion under
+    /// cardinality one, which the transactor has yet to resolve.
     pub fn has_successions(&self) -> bool {
         self.iter().any(|(_, _, change)| change.elects())
     }

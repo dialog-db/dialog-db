@@ -1018,7 +1018,7 @@ mod tests {
 
     /// A transaction reads the overlay above its own writes, as a read
     /// after its commit will: the overlay row stays the newest fact.
-    /// A transaction's writes under a choosing pick read back through
+    /// A transaction's writes under cardinality one read back through
     /// the transaction, by entity and over the whole relation, on a line
     /// holding nothing of them; a cell written twice reads as its later
     /// write alone, and a value written back after another reads once.
@@ -1090,8 +1090,8 @@ mod tests {
         Ok(())
     }
 
-    /// A value the line holds, retracted and written back under a
-    /// choosing pick in one transaction, reads through the transaction
+    /// A value the line holds, retracted and written back under
+    /// cardinality one in one transaction, reads through the transaction
     /// once, and the commit keeps it; one retracted and replaced reads as
     /// the replacement, and the commit lands that.
     #[dialog_common::test]
@@ -1155,7 +1155,7 @@ mod tests {
     }
 
     /// A commit that installs a rule lands every other cell it writes
-    /// under a choosing pick: one written once, which the tree
+    /// under cardinality one: one written once, which the tree
     /// settles, and one written twice with one value, which the
     /// transactor settles to a single claim.
     #[dialog_common::test]
@@ -1272,7 +1272,7 @@ mod tests {
         Ok(())
     }
 
-    /// A write under a choosing pick reads, through its transaction,
+    /// A write under cardinality one reads, through its transaction,
     /// as the commit will leave the cell: the line's claim it succeeds
     /// is gone from an `all` read, and a write of the value the line
     /// holds reads that claim once. A read of another cell settles
@@ -1860,10 +1860,9 @@ mod tests {
         Ok(())
     }
 
-    /// A write under `last` succeeds the claim a `last` read returns:
-    /// of two live claims, the newer. The older stays, as under any
-    /// other pick; a `last` read returns the write afterwards, since
-    /// it is newer than both.
+    /// A write under cardinality one succeeds the claim a read returns:
+    /// of two live claims, the newer. The older stays; a read returns
+    /// the write afterwards, since it is newer than both.
     #[dialog_common::test]
     async fn it_succeeds_the_newest_claim_under_last() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -1871,7 +1870,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
 
-        // Two claims written without a pick, one revision apart, so
+        // Two claims written under cardinality many, one revision apart, so
         // the second is the newer.
         for value in [100u32, 200] {
             branch
