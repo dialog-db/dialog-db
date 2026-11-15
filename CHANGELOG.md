@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A session's transaction lands its commands when it publishes, a session opens through a read-only environment, and a whole layer is a legal scan
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD).
+[#809](https://github.com/dialog-db/dialog-db/pull/809).
 
 Three gaps an embedder met moving onto sessions. A transaction a
 session hands out (`Session::transaction`), committed and published
