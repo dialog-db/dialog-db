@@ -79,16 +79,26 @@
 //! `in` to it. [`Branch::overlay`] stays, as the same store under its
 //! older name: what is written through one is read through the other.
 //!
-//! After each dispatch publishes, the session records in its own layer
-//! the revision every layer stands at, one `dialog.layer/revision` row
-//! per layer, under `last`: of [`MEMORY`] the primary's tree, of each
-//! declared layer its instant chain, and of [`SESSION`] its own as it
-//! stood before the row was written. Of the same rows, as the layers
-//! stood when the dispatch began, those the session has not recorded
-//! are its stimulus, so a rule premised on a layer's revision fires
-//! when the layer moved. The session's own
-//! layer moves with every recording, so its row is stimulus on every
-//! dispatch after the first.
+//! The session records in its own layer the revision every layer
+//! stands at, one `dialog.layer/revision` row per layer, under `last`:
+//! of [`MEMORY`] the primary's tree, of each durable layer its branch's
+//! tree, of each memory layer its instant chain, and of [`SESSION`] its
+//! own chain as it stood before the recordings that followed its last
+//! change. A row is written only when its layer **moved**, when the
+//! revision it stands at is not the one the session holds for it: after
+//! a dispatch publishes, for the layers its commit and its writes moved,
+//! and after [`Session::sync`] pulls and pushes, for the layers the
+//! pulls moved. Writing the rows is not itself a move of the session's
+//! own layer: its row moves only when something else was written into
+//! `session:`, a dispatch's writes into it among them, and then names
+//! the revision those writes left it at. So a dispatch that writes
+//! nothing into `session:` and moves no other layer writes no row and
+//! mints no instant in `session:`. Of the same rows, as the layers stood
+//! when a dispatch began, those the session has not recorded are its
+//! stimulus, so a rule premised on a layer's revision fires when the
+//! layer moved outside a dispatch (a pull moved the primary or a durable
+//! layer, something wrote into a memory layer directly) and on the
+//! session's first dispatch, which finds nothing recorded.
 //!
 //! The session's own layer also holds which layer is **selected**
 //! ([`Session::select`]): while one is, a write with no layer named
@@ -1211,8 +1221,15 @@ mod tests {
         Ok(())
     }
 
-    /// A rule premised on `dialog.layer/revision` fires on every dispatch,
-    /// with the revisions the layers stood at as the dispatch began.
+    /// A rule premised on `dialog.layer/revision` fires for a layer that
+    /// moved since the session last recorded it, with the revision it
+    /// stood at as the dispatch began: on the first dispatch, which finds
+    /// nothing recorded, for every layer. The second dispatch finds the
+    /// primary and the session's own layer where the first recorded
+    /// them, so the rule fires for neither. (It used to fire for the
+    /// session's own layer on every dispatch after the first, since the
+    /// recording itself moved that layer; recording is no longer a move
+    /// of it, so its row moves only when something wrote into it.)
     #[dialog_common::test]
     async fn it_fires_a_rule_premised_on_a_layers_revision() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
@@ -1258,6 +1275,8 @@ mod tests {
         let doc: Entity = "doc:1".parse()?;
 
         let start = branch.revision().expect("a revision");
+        let own_name = crate::session_layer();
+        let own_start = chain_text(&own);
         session
             .transact(
                 dialog_query::the!("doc/title")
@@ -1271,13 +1290,17 @@ mod tests {
             vec![tree_text(&start)],
             "the rule fired, on the primary's revision as the dispatch began"
         );
+        assert_eq!(
+            held(&memory, "seen/revision", &own_name)?,
+            vec![own_start.clone()],
+            "nothing was recorded, so the rule fired for the session's own layer"
+        );
 
-        // The next dispatch moves no durable layer: the primary stands
-        // where the last dispatch recorded it, so its revision is no
-        // stimulus and the rule does not fire for it again. The session's
-        // own layer moved, by the recording itself, so its revision is.
-        let own_name = crate::session_layer();
-        let own_before = chain_text(&own);
+        // The next dispatch finds the primary where the last dispatch
+        // recorded it, so its revision is no stimulus and the rule does
+        // not fire for it again. Nothing but the recording wrote into
+        // the session's own layer, and a recording is no move of it, so
+        // the rule does not fire for it either.
         session
             .transact(flag(&doc, true, &state))
             .perform(&operator)
@@ -1289,8 +1312,114 @@ mod tests {
         );
         assert_eq!(
             held(&memory, "seen/revision", &own_name)?,
-            vec![own_before],
-            "the session's own layer moved, so the rule fired for it"
+            vec![own_start],
+            "the session's own layer did not move, so the rule did not fire for it"
+        );
+        Ok(())
+    }
+
+    /// Every `dialog.layer/revision` row `own` holds, as `of = is` text,
+    /// sorted.
+    fn revision_rows_of(own: &Ephemeral) -> Vec<String> {
+        let mut rows: Vec<String> = own
+            .scan(&Selector::new().the(crate::revision_attr()))
+            .into_iter()
+            .map(|fact| format!("{} = {:?}", fact.of, fact.is))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// A dispatch after which no layer stands anywhere new writes no
+    /// revision row and mints no instant in `session:`: one that writes
+    /// nothing, and one that only dispatches a command no rule answers
+    /// (a write into `control:`, which lands in no layer the session
+    /// records).
+    #[dialog_common::test]
+    async fn it_records_no_revision_when_nothing_moved() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        session
+            .transact(flag(&doc, true, &state))
+            .perform(&operator)
+            .await?;
+        let sequence = branch.overlay().revision().sequence;
+        let rows = revision_rows_of(branch.overlay());
+        assert_eq!(rows.len(), 3, "the first dispatch recorded every layer");
+
+        session.transact(Changes::new()).perform(&operator).await?;
+        assert_eq!(
+            branch.overlay().revision().sequence,
+            sequence,
+            "a dispatch that wrote nothing minted nothing in session:"
+        );
+        assert_eq!(revision_rows_of(branch.overlay()), rows);
+
+        session
+            .transact(flag(&doc, false, &crate::control_layer()))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            branch.overlay().revision().sequence,
+            sequence,
+            "a dispatch of a command no rule answers minted nothing in session:"
+        );
+        assert_eq!(revision_rows_of(branch.overlay()), rows);
+        Ok(())
+    }
+
+    /// A dispatch that moves the primary alone rewrites the primary's
+    /// row alone, to the tree it published, as one instant of
+    /// `session:`: the memory layer's row and the session's own stay as
+    /// the dispatch before recorded them.
+    #[dialog_common::test]
+    async fn it_records_only_the_layer_that_moved() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let session = branch.session().perform(&operator).await?;
+        let own = branch.overlay().clone();
+        let (memory, own_name) = (crate::memory_layer(), crate::session_layer());
+        let doc: Entity = "doc:1".parse()?;
+        session
+            .transact(flag(&doc, true, &state))
+            .perform(&operator)
+            .await?;
+        let primary_before = revision_of(&own, &memory)?;
+        let state_before = revision_of(&own, &state)?;
+        let own_before = revision_of(&own, &own_name)?;
+        let sequence = own.revision().sequence;
+
+        let published = session
+            .transact(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Moved".to_string()),
+            )
+            .perform(&operator)
+            .await?;
+        let primary_after = revision_of(&own, &memory)?;
+        assert_eq!(primary_after, vec![tree_text(&published)], "the new tree");
+        assert_ne!(primary_after, primary_before, "the primary's row moved");
+        assert_eq!(
+            revision_of(&own, &state)?,
+            state_before,
+            "the memory layer did not move, so its row was not written"
+        );
+        assert_eq!(
+            revision_of(&own, &own_name)?,
+            own_before,
+            "nothing was written into session:, so its row was not either"
+        );
+        assert_eq!(
+            own.revision().sequence,
+            sequence + 1,
+            "the recording is one instant"
         );
         Ok(())
     }

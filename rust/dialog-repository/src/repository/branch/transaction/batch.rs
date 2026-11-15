@@ -132,8 +132,8 @@ pub struct TransactionBatch {
     overlay: Ephemeral,
     overlay_retractions: Vec<Fact>,
     /// Whether the chain was committed through a session: its publish
-    /// then records every layer's revision in the session's own layer
-    /// (see [`record_revisions`]).
+    /// then records, in the session's own layer, the revision of every
+    /// layer that moved (see [`record_revisions`]).
     revisions: bool,
     /// The chains this one staged on the session's durable layers, by
     /// layer: what the chain wrote into each, committed on its branch.
@@ -911,18 +911,28 @@ fn apply_shares(
     Ok(())
 }
 
-/// Record in the session's own layer, `overlay`, the revision every
-/// layer of the session stands at once `tip` has published: one
-/// `dialog.layer/revision` row per layer under `last`, so each publish
-/// replaces the rows the one before wrote and mints one instant. The
-/// session's own row names its revision before the rows are written.
+/// Record in the session's own layer, `overlay`, the revision of every
+/// layer of the session that moved, once `tip` has published: one
+/// `dialog.layer/revision` row under `last` for each layer whose
+/// revision is not the one `overlay` holds, replacing the row it held,
+/// as one instant; a publish after which no layer stands anywhere new
+/// writes nothing and mints no instant.
+///
+/// The session's own row names the revision `overlay` stood at before
+/// the records that followed its last change: once this dispatch's
+/// writes into it have landed, the revision they left it at, and for a
+/// dispatch that wrote nothing into it, the one it already stood at.
+/// The recording is written as a record ([`Ephemeral::record`]), which
+/// does not move that revision, so recording is never itself a move of
+/// the session's own layer, and a dispatch that wrote nothing into
+/// `session:` and moved no other layer records nothing.
 fn record_revisions(
     memories: &[(Entity, Ephemeral)],
     durables: &[(Entity, Option<Revision>)],
     overlay: &Ephemeral,
     tip: &Revision,
 ) -> Result<(), CommitError> {
-    overlay.apply(revision_rows(Some(tip), durables, memories, overlay))?;
+    overlay.record(revision_rows(Some(tip), durables, memories, overlay))?;
     Ok(())
 }
 
@@ -1086,8 +1096,8 @@ where
     // Through a session, the revision of every layer that moved since the
     // session last recorded it is the dispatch's stimulus, read as rows of
     // `session:`: a rule premised on a layer's revision fires when the
-    // layer moved. The session's own layer moves with every recording, so
-    // its row is stimulus on every dispatch after the first.
+    // layer moved. A recording does not move the session's own layer, so
+    // its row is stimulus only when something else wrote into it since.
     if let Some(session) = &session {
         let source = view.to_source();
         transients.merge(

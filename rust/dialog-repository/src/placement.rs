@@ -65,7 +65,7 @@ use base58::ToBase58 as _;
 
 // The declaration attribute is parsed once: every session open asks for it.
 static STORE_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.layer/store").into());
-// The revision and selection attributes are written on every dispatch
+// The revision and selection attributes are read on every dispatch
 // through a session.
 static REVISION_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.layer/revision").into());
 static SELECTION_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.session/layer").into());
@@ -102,8 +102,9 @@ pub(crate) fn store_attr() -> Relation {
 }
 
 /// The `dialog.layer/revision` attribute: of a layer's entity, the
-/// revision the layer stands at, as text. A session writes one row of it
-/// per layer into [`SESSION`] after each dispatch publishes.
+/// revision the layer stands at, as text. A session holds one row of it
+/// per layer in [`SESSION`], rewritten by the dispatch, or the sync,
+/// after which the layer stands somewhere else.
 pub fn revision_attr() -> Relation {
     REVISION_ATTR.clone()
 }
@@ -171,8 +172,11 @@ pub(crate) fn tree_revision(revision: &Revision) -> Value {
 /// The revision every layer of a session stands at, as text: of
 /// [`MEMORY`] the tree of `primary`'s revision (none for a primary with
 /// no revision); of each of `durables` the tree of its branch's (none
-/// for one with no revision); of each of `memories` and of [`SESSION`],
-/// `own`, the hash of its instant chain. Each is base58, as
+/// for one with no revision); of each of `memories` the hash of its
+/// instant chain; and of [`SESSION`], `own`, the hash of its chain as
+/// it stood before the records that followed its last change
+/// ([`Ephemeral::settled`]), so that recording the revisions is not
+/// itself a move of the session's own layer. Each is base58, as
 /// `dialog.branch/tree` renders a tree.
 fn revisions(
     primary: Option<&Revision>,
@@ -196,13 +200,41 @@ fn revisions(
             rows.push((layer.clone(), chain(memory)));
         }
     }
-    rows.push((session, chain(own)));
+    rows.push((session, Value::String(own.settled().as_bytes().to_base58())));
     rows
 }
 
-/// The `dialog.layer/revision` rows of a session's layers as they stand
-/// (see [`revisions`]), each under `last`, bound for no layer: what a
-/// session records in its own layer once a dispatch has published.
+/// The layers whose revision moved since `own`, a session's own layer,
+/// last recorded it: each layer (see [`revisions`]) whose revision as it
+/// stands now is not the one `own`'s `dialog.layer/revision` row of it
+/// holds, with that revision and the rows `own` holds of it. A layer
+/// `own` holds no row of has moved: nothing recorded it yet. What both
+/// the recording ([`revision_rows`]) and the stimulus
+/// ([`revision_stimulus`]) of a dispatch are made of.
+fn moved_revisions(
+    primary: Option<&Revision>,
+    durables: &[(Entity, Option<Revision>)],
+    memories: &[(Entity, Ephemeral)],
+    own: &Ephemeral,
+) -> Vec<(Entity, Value, Vec<Fact>)> {
+    revisions(primary, durables, memories, own)
+        .into_iter()
+        .filter_map(|(layer, revision)| {
+            let recorded = own.scan(&Selector::new().the(revision_attr()).of(layer.clone()));
+            if recorded.iter().any(|fact| fact.is == revision) {
+                None
+            } else {
+                Some((layer, revision, recorded))
+            }
+        })
+        .collect()
+}
+
+/// The `dialog.layer/revision` rows of the layers whose revision moved
+/// since `own` last recorded it (see [`moved_revisions`]), each under
+/// `last`, bound for no layer: what a session records in its own layer
+/// once a dispatch has published. Empty when no layer moved, so the
+/// recording mints no instant.
 pub(crate) fn revision_rows(
     primary: Option<&Revision>,
     durables: &[(Entity, Option<Revision>)],
@@ -210,15 +242,15 @@ pub(crate) fn revision_rows(
     own: &Ephemeral,
 ) -> Changes {
     let mut rows = Changes::new();
-    for (layer, revision) in revisions(primary, durables, memories, own) {
+    for (layer, revision, _) in moved_revisions(primary, durables, memories, own) {
         rows.associate(revision_attr(), layer, revision, Pick::Last);
     }
     rows
 }
 
 /// The change in the `dialog.layer/revision` rows since `own` last
-/// recorded them: for each layer whose revision `own` does not hold,
-/// the retraction of the row it holds and the row as it stands now.
+/// recorded them (see [`moved_revisions`]): for each layer that moved,
+/// the retraction of the row `own` holds and the row as it stands now.
 /// What a dispatch through a session takes as stimulus, so a rule
 /// premised on a layer's revision fires when the layer moved, and on
 /// the first dispatch, which finds nothing recorded. The retraction
@@ -231,11 +263,7 @@ pub(crate) fn revision_stimulus(
     own: &Ephemeral,
 ) -> Changes {
     let mut rows = Changes::new();
-    for (layer, revision) in revisions(primary, durables, memories, own) {
-        let recorded = own.scan(&Selector::new().the(revision_attr()).of(layer.clone()));
-        if recorded.iter().any(|fact| fact.is == revision) {
-            continue;
-        }
+    for (layer, revision, recorded) in moved_revisions(primary, durables, memories, own) {
         for fact in recorded {
             rows.dissociate(revision_attr(), layer.clone(), fact.is);
         }
