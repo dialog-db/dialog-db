@@ -1728,3 +1728,69 @@ async fn a_rule_takes_the_last_of_a_group() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// "A fold reads the groups a query names." Naming a department reads
+/// its total and no other; naming a total reads the departments whose
+/// sum it is, since a constant for a reduced field is compared with
+/// the fold's result and restricts no group's rows.
+#[dialog_common::test]
+async fn a_query_naming_a_group_reads_that_groups_fold() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    staff(&operator, &branch).await?;
+    let mut registry = RuleRegistry::new();
+    registry.register(dept_total()?)?;
+    let source = TestEnv::new(&branch, &operator, registry);
+    let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "total": { "the": "org.dept/total", "as": "natural:" }
+    }}))?;
+    let read = |this: Term<Any>, total: Term<Any>| {
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), this);
+        terms.insert("total".into(), total);
+        let query = ConceptQuery {
+            terms,
+            predicate: predicate.clone(),
+        };
+        let source = &source;
+        async move {
+            let rows = query
+                .evaluate(Match::new().seed(), source)
+                .try_vec()
+                .await?;
+            let mut pairs: Vec<(Value, Value)> = rows
+                .iter()
+                .map(|row| {
+                    Ok((
+                        row.lookup(&Term::<Any>::var("who"))
+                            .and_then(|found| found.content())
+                            .unwrap_or(dept("id:dept-a")),
+                        row.lookup(&Term::<Any>::var("sum"))
+                            .and_then(|found| found.content())
+                            .unwrap_or(Value::UnsignedInt(7)),
+                    ))
+                })
+                .collect::<anyhow::Result<_>>()?;
+            pairs.sort_by_key(|pair| format!("{pair:?}"));
+            anyhow::Ok(pairs)
+        }
+    };
+    let dept_a: Entity = "id:dept-a".parse()?;
+    assert_eq!(
+        read(Term::constant(dept_a), Term::var("sum")).await?,
+        vec![(dept("id:dept-a"), Value::UnsignedInt(150))],
+        "the named department's sum, over both its members"
+    );
+    assert_eq!(
+        read(Term::var("who"), Term::constant(7u32)).await?,
+        vec![(dept("id:dept-b"), Value::UnsignedInt(7))],
+        "the department whose sum is seven"
+    );
+    assert_eq!(
+        read(Term::var("who"), Term::constant(100u32)).await?,
+        vec![],
+        "one member's salary is no department's sum"
+    );
+    Ok(())
+}

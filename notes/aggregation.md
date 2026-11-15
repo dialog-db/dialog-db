@@ -107,10 +107,13 @@ it competes with a stored claim of the head's relation as any derived
 value does. A computed value cites no fact and stands below every
 stored claim.
 
-A fold reads its rule's whole body: a caller's bindings join against
-the folded rows and never restrict the body, so a read naming one
-entity costs what a read of every entity does. Restricting the body by
-a bound grouping field would be sound, and is not done.
+A fold reads every row of a group, so a caller's bindings never
+restrict the rows within one: they join against the folded rows. A
+constant the query names for a grouping field (the entity, or a head
+field not reduced) restricts which groups are folded and nothing else,
+so the body is evaluated with it bound, and a read naming one entity
+reads one group. A grouping field bound by an earlier premise of the
+caller is still joined against every group's fold.
 
 ## Stratification
 

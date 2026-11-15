@@ -51,10 +51,10 @@ What this changes for you:
 - `min` and `max` over values that compare equal return the one bound
   from the newest fact, where they returned the one of the smaller
   encoding; values that also stand equal still fall to the encoding.
-- A read through a folding rule evaluates the rule's whole body, even
-  when the query names one entity: a ranked read written as a rule
-  costs time in proportion to the relation, where a ranked pick on the
-  attribute reads one cell. Picks stay for that reason.
+- A query naming a constant for a folding rule's entity, or for a head
+  field it does not reduce, folds the groups that constant names and
+  reads no other. A grouping field bound by an earlier premise is still
+  joined against every group's fold.
 
 Why: a status derived by rank over every state an account has been
 given is a rule, not a property of how the relation is stored. With the

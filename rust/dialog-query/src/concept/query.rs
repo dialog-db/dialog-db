@@ -627,14 +627,16 @@ impl ConceptQuery {
                 return;
             }
 
-            // A reducing rule's fold reads its whole body relation, so caller
-            // bindings must never restrict the body: each reducing rule's
-            // folded rows are computed once, over the full relation, and the
+            // A reducing rule's fold reads every row of a group, so a
+            // caller's bindings must never restrict the rows within one:
+            // each reducing rule's folded rows are computed once and the
             // caller's bindings join against the output (the fixpoint-table
-            // shape). The plain rules plan as usual.
+            // shape). A constant the query names for a grouping field
+            // restricts which groups are folded, never a group's rows, so
+            // it seeds the body. The plain rules plan as usual.
             let mut reduced: Vec<fixpoint::Answer> = Vec::new();
             for rule in rules.reducing() {
-                reduced.extend(reduce_rows(rule, env).await?);
+                reduced.extend(reduce_rows(rule, &app.terms, env).await?);
             }
             // All matches in the selection share the first one's binding
             // pattern (same variables bound), only the values differ.
@@ -1553,6 +1555,7 @@ fn entity_key(value: &Value) -> Result<Vec<u8>, EvaluationError> {
 /// [`Reduce`]: crate::reduce::Reduce
 async fn reduce_rows<'a, Env>(
     rule: &DeductiveRule,
+    terms: &Parameters,
     env: &'a Env,
 ) -> Result<Vec<fixpoint::Answer>, EvaluationError>
 where
@@ -1561,9 +1564,18 @@ where
     let reducer = rule
         .reducer()
         .expect("only rules with a reduce clause reach reduce_rows");
-    let body = rule
-        .plan(&Environment::new())
-        .evaluate(Match::new().seed(), env);
+    // The groups the query names: a constant for the entity or for a
+    // head field the rule does not reduce is part of every wanted
+    // group's key, so the body is evaluated with it bound and only
+    // those groups are read. A constant for a reduced field restricts
+    // nothing here: it is compared with the fold's result, by the join.
+    let mut seed = Match::new();
+    for group in &reducer.groups {
+        if let Some(Term::Constant(value)) = terms.get(group) {
+            seed.bind(&Term::var(group.as_str()), value.clone())?;
+        }
+    }
+    let body = rule.plan(&seed.environment()).evaluate(seed.seed(), env);
     let folded = reducer.fold(body).await?;
     // A folded row cites a standing only for a field a choosing fold
     // bound, from the fact it chose.
