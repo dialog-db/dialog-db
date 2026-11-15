@@ -205,6 +205,17 @@ the ticks.
    `next`) and answer by invoking. `Session::commands()`, `Handler`
    and the feed are gone; a dispatch's commands stand in `control:`
    for one instant once it has published (point 18).
+4a. Done, in [#809](https://github.com/dialog-db/dialog-db/pull/809),
+   from what tonk's move (tonk-labs/tonk#1318) found: a transaction a
+   session hands out lands its commands when its publish wins, however
+   it is published; a session opens through a read-only env
+   (`OpenSessionEnv`); a whole layer is a legal scan (`in:` constant,
+   all else variables; `Selector::only_in`), and `Arrivals` reads rows
+   without a query (`arrivals_rows`). Still open from that move: the
+   session's revision rows live in `Branch::overlay()`, which an
+   embedder may sweep for its own reasons; and whether the asking tab
+   becomes a field of the command so a provider can run on `next`
+   outside the request.
 5. Sapling and tonk move onto `invoke` and subscriptions over
    channels, and delete their wiring, registry and retry code.
 6. Done, in [#808](https://github.com/dialog-db/dialog-db/pull/808):
