@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### The stack has a crate of its own, `dialog-stack`, which re-exports it from `dialog-repository`
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[#818](https://github.com/dialog-db/dialog-db/pull/818), argued in
 [notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
 point 1).
 
