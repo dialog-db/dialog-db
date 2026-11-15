@@ -5,8 +5,10 @@
 //! collecting or not, so its counts take in the setup. These count only
 //! between [`start`] and [`stop`], around the measured phase.
 //!
-//! Besides the calls, two byte counts: the bytes asked for, and the
-//! bytes a `realloc` was asked to grow or shrink from. The second is
+//! Besides the calls, two byte counts: the bytes asked for, counting
+//! what a `realloc` grows a block by, so a buffer is counted at the size
+//! it reaches whether it is grown or sized up front; and the bytes a
+//! `realloc` was asked to grow or shrink from. The second is
 //! what the allocator may have to copy. Whether it does copy depends on
 //! where the heap put the block, and varies between runs; what it may
 //! copy depends on how the code grows its buffers, so a buffer grown
@@ -75,6 +77,9 @@ unsafe impl GlobalAlloc for Counting {
         if ON.load(Relaxed) {
             REALLOC.fetch_add(1, Relaxed);
             REALLOC_FROM_BYTES.fetch_add(layout.size() as u64, Relaxed);
+            if new_size > layout.size() {
+                ALLOC_BYTES.fetch_add((new_size - layout.size()) as u64, Relaxed);
+            }
         }
         // SAFETY: the caller's contract, passed on.
         unsafe { System.realloc(ptr, layout, new_size) }

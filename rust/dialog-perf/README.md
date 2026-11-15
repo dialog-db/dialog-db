@@ -24,7 +24,7 @@ poll) off the record, then its **measured phase**, and reports:
 | `outcome` | what the phase produced: rows read, facts committed | exact |
 | `counters` | archive blocks read and written (and their bytes), the engine's own steps: rule resolutions, rule hydrations, cell settlements, commits, tree writes, and any measure the scenario adds (`first-query` adds the root frame's bytes) | steps exact; blocks within two, bytes within 15% |
 | `instructions_outside_allocator` | instructions the phase retired under callgrind, less every call into the allocator from outside it, callees included | within 1% (and 50 K) |
-| `allocations` | the phase's calls into the allocator (`alloc`, `free`, `realloc`), the bytes it asked for, and the bytes its `realloc`s started from | within 1%, or 16 calls and 8 KB |
+| `allocations` | the phase's calls into the allocator (`alloc`, `free`, `realloc`), the bytes it asked for (a `realloc` counted by what it grows a block by), and the bytes its `realloc`s started from | within 1%, or 16 calls and 8 KB |
 | `instructions` | every instruction the phase retired, under callgrind | shown, not gated |
 
 The counters come from the tracing spans the engine emits
@@ -68,8 +68,10 @@ its measured spread).
 The allocator is held by its counts instead, taken in the process by
 a global allocator that passes every call to the system one and counts
 only during the measured phase (callgrind counts calls whether it is
-collecting or not). Besides the calls, it counts the bytes asked for
-and the bytes each `realloc` started from: what the allocator may have
+collecting or not). Besides the calls, it counts the bytes asked for,
+with each `realloc` counted by what it grows a block by (so a buffer
+counts the same whether it is grown or sized up front), and the bytes
+each `realloc` started from: what the allocator may have
 to copy. Whether a `realloc` does copy depends on the layout; what it
 may copy depends on how the code grows its buffers, so a buffer grown
 without a `reserve` shows there. Six sweeps moved the calls by six at
