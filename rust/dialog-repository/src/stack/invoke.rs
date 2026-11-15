@@ -64,14 +64,12 @@ impl Stack {
         .assert(facts)
     }
 
-    /// Read again the head of the primary and of every durable layer:
-    /// what a dispatch re-run after a lost compare-and-swap builds on.
+    /// Read again the head of the primary, and where it points every
+    /// durable layer: what a dispatch re-run after a lost
+    /// compare-and-swap builds on.
     pub(crate) async fn refresh<Env: StackEnv>(&self, env: &Env) -> Result<(), CommitError> {
         self.primary().refresh(env).await?;
-        for (_, branch) in self.durables() {
-            branch.refresh(env).await?;
-        }
-        Ok(())
+        self.repoint(env).await
     }
 }
 
@@ -112,9 +110,9 @@ impl Invocation {
 }
 
 /// One dispatch of `changes` and `transients` through `stack`: commit
-/// and publish, re-run from the new heads when the publish loses its
-/// compare-and-swap, on the primary or on any durable layer. Answers the
-/// head it left the primary at. The publish that wins lands the
+/// and publish, re-run from the new head when the publish loses its
+/// compare-and-swap, the primary's, which is the durable layers' too.
+/// Answers the head it left the primary at. The publish that wins lands the
 /// dispatch's commands in the stack's `control:`, as every publish of
 /// a transaction through the stack does.
 async fn dispatch<Env: StackEnv>(
@@ -124,6 +122,10 @@ async fn dispatch<Env: StackEnv>(
     env: &Env,
 ) -> Result<Revision, CommitError> {
     let mut reruns = 0;
+    // The durable layers are read where the primary points them now: a
+    // commit through another handle may have moved it since the stack
+    // last read them.
+    stack.repoint(env).await?;
     loop {
         let transaction = stack
             .transaction()

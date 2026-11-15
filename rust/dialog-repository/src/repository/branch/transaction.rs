@@ -21,9 +21,11 @@ use crate::Commit;
 use crate::placement::control_layer;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::session::{Composite, shared_metadata};
-use crate::repository::source::{Live, Source, View};
+use crate::repository::source::{Live, View};
 use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
 use crate::stack::Loopback;
+pub(crate) use crate::stack::durable::DurableLayer;
+use crate::stack::durable::{Durables, Pinned};
 use crate::{Branch, CommitError, Ephemeral, PublishError, RemoteSite, Revision, Snapshot, Staged};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -39,6 +41,7 @@ use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{self, Edition, Publish, Resolve};
 use dialog_search_tree::nodes;
 use std::slice::from_ref;
+use std::sync::Arc;
 
 /// A transaction on a line of the repository.
 ///
@@ -98,9 +101,9 @@ pub struct Transaction<L: Line> {
 
 /// What a transaction through a [`Stack`](crate::Stack) carries: the
 /// composite its reads and its induction see, the memory layers that
-/// take their shares once the commit publishes, the durable layers
-/// that commit theirs on their branches, and the loopback the publish
-/// lands the transaction's commands in.
+/// take their shares once the commit publishes, the durable layers whose
+/// next trees its commit mints and points the primary at, and the
+/// loopback the publish lands the transaction's commands in.
 #[derive(Clone)]
 pub(crate) struct StackContext {
     /// The primary's branch entity, whose `dialog.branch/revision` row
@@ -108,58 +111,17 @@ pub(crate) struct StackContext {
     pub(crate) branch: Entity,
     pub(crate) composite: Composite,
     pub(crate) memories: Vec<(Entity, Ephemeral)>,
+    /// The durable layers, each at the revision the primary pointed it
+    /// at when the transaction opened.
     pub(crate) durables: Vec<DurableLayer>,
+    /// The stack's durable layers, and where the transaction read them
+    /// from: its commit refuses a primary other than the one the layers
+    /// were read at, and its publish records where it left them.
+    pub(crate) pinned: Pinned,
+    pub(crate) state: Arc<Durables>,
     /// The stack's loopback, where the publish lands the commands the
     /// transaction dispatched.
     pub(crate) loopback: Loopback,
-}
-
-/// A durable layer of a stack as one dispatch reads and writes it: the
-/// layer's name, its branch's entity (what its pointer fact in the
-/// primary is of), its branch, and the head the dispatch pinned when it
-/// began, which its reads see and its commit on the branch builds on and
-/// compares and swaps against.
-#[derive(Clone)]
-pub(crate) struct DurableLayer {
-    pub(crate) layer: Entity,
-    pub(crate) entity: Entity,
-    pub(crate) branch: Branch,
-    pinned: Option<Edition<Revision>>,
-}
-
-impl DurableLayer {
-    /// The layer `layer`, the branch `branch`, whose entity is `entity`,
-    /// pinned at its head now.
-    pub(crate) fn pin(layer: Entity, entity: Entity, branch: Branch) -> Self {
-        let pinned = (&branch).pin();
-        Self {
-            layer,
-            entity,
-            branch,
-            pinned,
-        }
-    }
-
-    /// The layer's branch at the pinned head, as a line a read sees.
-    pub(crate) fn source(&self) -> Source {
-        View::at(
-            Live::Branch(&self.branch),
-            self.pinned.as_ref().map(|edition| &edition.content),
-        )
-        .to_source()
-    }
-
-    /// A transaction on the layer's branch, pinned where the dispatch
-    /// pinned it, so its commit refuses a head that moved since.
-    pub(crate) fn transaction(&self) -> Transaction<&Branch> {
-        Transaction {
-            line: &self.branch,
-            pinned: self.pinned.clone(),
-            changes: Staged::default(),
-            transients: Staged::default(),
-            stack: None,
-        }
-    }
 }
 
 /// What a [`Transaction`] runs on: a `&`[`Branch`], a `&`[`Snapshot`]

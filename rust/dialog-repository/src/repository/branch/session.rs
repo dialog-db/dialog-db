@@ -111,9 +111,10 @@ pub struct QueryLayer<'a> {
     /// Memory layers read beside the lines, live, each by the name a
     /// row's `in` binds to.
     memories: Vec<(Entity, &'a Ephemeral)>,
-    /// Lines read after `lines`, each a layer of a session read by the
-    /// name a row's `in` binds to: its durable layers.
-    named: Vec<(Entity, Live<'a>)>,
+    /// Lines read after `lines`, each a layer of a stack read by the
+    /// name a row's `in` binds to: its durable layers, each pinned at the
+    /// tree its primary points at.
+    named: Vec<(Entity, Source)>,
     changes: Changes,
 }
 
@@ -182,10 +183,10 @@ impl<'a> QueryLayer<'a> {
         self
     }
 
-    /// Read `branch` after the lines, live, as the durable layer named
-    /// `layer`: a layer of a session that is a branch.
-    pub(crate) fn with_line(mut self, layer: Entity, branch: &'a Branch) -> Self {
-        self.named.push((layer, Live::from(branch)));
+    /// Read `source` after the lines, pinned, as the durable layer named
+    /// `layer`: a layer of a stack, at the tree its primary points at.
+    pub(crate) fn with_pinned(mut self, layer: Entity, source: Source) -> Self {
+        self.named.push((layer, source));
         self
     }
 
@@ -199,7 +200,11 @@ impl<'a> QueryLayer<'a> {
             .chain(self.named.iter().map(|(layer, _)| Some(layer.clone())))
             .collect();
         Composite {
-            sources: views.into_iter().map(View::into_source).collect(),
+            sources: views
+                .into_iter()
+                .map(View::into_source)
+                .chain(self.named.iter().map(|(_, source)| source.clone()))
+                .collect(),
             memories: self
                 .memories
                 .iter()
@@ -209,14 +214,9 @@ impl<'a> QueryLayer<'a> {
         }
     }
 
-    /// The branches this layer reads from, in join order, then the
-    /// durable layers'.
+    /// The branches this layer reads from, in join order.
     pub fn branches(&self) -> Vec<&'a Branch> {
-        self.lines
-            .iter()
-            .chain(self.named.iter().map(|(_, line)| line))
-            .filter_map(|line| line.branch())
-            .collect()
+        self.lines.iter().filter_map(|line| line.branch()).collect()
     }
 
     /// The snapshots this layer reads from, in join order.
@@ -248,13 +248,10 @@ impl<'a> QueryLayer<'a> {
     }
 
     /// Pin every line of this layer at the head it stands at now: what
-    /// one query of the layer reads throughout.
+    /// one query of the layer reads throughout. A durable layer is pinned
+    /// already, and is not among them.
     pub(crate) fn pin(&self) -> Vec<View<'a>> {
-        self.lines
-            .iter()
-            .chain(self.named.iter().map(|(_, line)| line))
-            .map(|line| line.pin())
-            .collect()
+        self.lines.iter().map(|line| line.pin()).collect()
     }
 
     /// The full per-query overlay: this layer's own

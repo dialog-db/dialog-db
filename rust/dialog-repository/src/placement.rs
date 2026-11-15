@@ -5,14 +5,12 @@
 //! the **primary**, a branch whose schema defines the others, and the
 //! layers that schema declares beside it. A layer is declared on the
 //! primary and replicated with it, by its **type**, a bare-scheme entity
-//! ([`LayerType`]), and, for a layer that is a branch, the branch's
-//! entity, the one the meta branch derives from `(replica, name)`:
+//! ([`LayerType`]):
 //!
 //! ```text
 //! session:state   dialog.layer/type     session:
 //! control:mail    dialog.layer/type     channel:
 //! memory:notes    dialog.layer/type     branch:
-//! memory:notes    dialog.layer/branch   <the notes branch's entity>
 //! ```
 //!
 //! Where a row lies is a dimension of the row (`in:`), said by the
@@ -32,18 +30,20 @@
 //! memory:    dialog.layer/branch   <the primary's branch entity>
 //! ```
 //!
-//! A **branch** layer, `memory:<name>` ([`LayerType::Branch`]), is the
-//! repository's branch `<name>`: a stack reads it as a line beside the
-//! primary and commits what a dispatch writes into it on that branch.
-//! The primary records the revision each branch layer stands at as a
-//! pointer fact of its own, the meta branch's `dialog.branch/revision`
-//! of the layer's branch entity, naming the revision entity
-//! ([`Revision::entity`]), written by the dispatch that moved the layer,
-//! so the primary's history says which revision of each branch layer
-//! goes with each of its own:
+//! A **durable** layer, `memory:<name>` ([`LayerType::Branch`]), has no
+//! head of its own: it is the tree the primary points at. The primary
+//! holds, keyed by the layer's entity, the meta branch's
+//! `dialog.branch/revision`, naming the entity of the revision the layer
+//! stands at ([`Revision::entity`]), and beside it `dialog.branch/tree`,
+//! that revision's tree hash in base58, as the meta branch renders a
+//! branch's tree, so the tree is found without the revision. A dispatch
+//! that writes into the layer builds the layer's new tree and names it
+//! in the same commit of the primary, so the primary's history says which
+//! tree of each durable layer goes with each of its own:
 //!
 //! ```text
-//! <the notes branch's entity>   dialog.branch/revision   <its revision's entity>
+//! memory:notes   dialog.branch/revision   <its revision's entity>
+//! memory:notes   dialog.branch/tree       "<its tree, base58>"
 //! ```
 //!
 //! [`CONTROL`] holds a row for one tick: what a dispatch writes into it
@@ -88,6 +88,7 @@ static BRANCH_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.layer/bra
 static REVISION_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.layer/revision").into());
 static BRANCH_REVISION_ATTR: LazyLock<Relation> =
     LazyLock::new(|| the!("dialog.branch/revision").into());
+static BRANCH_TREE_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.branch/tree").into());
 static SELECTION_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.session/layer").into());
 
 pub use dialog_corpus::{MEMORY, memory_layer};
@@ -100,7 +101,7 @@ pub const CONTROL: &str = "control:";
 
 /// The type entity of a channel layer, [`LayerType::Channel`].
 const CHANNEL_TYPE: &str = "channel:";
-/// The type entity of a branch layer, [`LayerType::Branch`].
+/// The type entity of a durable layer, [`LayerType::Branch`].
 const BRANCH_TYPE: &str = "branch:";
 
 // The layer entities are parsed once: a read asks for them per line it
@@ -130,10 +131,11 @@ pub fn layer_type_attr() -> Relation {
     TYPE_ATTR.clone()
 }
 
-/// The `dialog.layer/branch` declaration attribute: of a branch layer's
-/// entity, the entity of the branch it is, the one the meta branch
-/// derives from `(replica, name)`
-/// ([`schema::Branch`](crate::schema::Branch)).
+/// The `dialog.layer/branch` attribute: of [`MEMORY`], the entity of the
+/// primary's branch, the one the meta branch derives from
+/// `(replica, name)` ([`schema::Branch`](crate::schema::Branch)), as a
+/// stack writes it into [`SESSION`] when it opens. A durable layer has no
+/// branch, and no such fact.
 pub fn layer_branch_attr() -> Relation {
     BRANCH_ATTR.clone()
 }
@@ -143,9 +145,10 @@ pub fn layer_branch_attr() -> Relation {
 /// channel), the revision the layer stands at, as text: the base58 hash
 /// of its instant chain. A stack holds one row of it per memory layer in
 /// [`SESSION`], rewritten by the dispatch, or the sync, after which the
-/// layer stands somewhere else. A branch layer's revision is the meta
-/// branch's `dialog.branch/revision` of its branch entity instead, which
-/// names the revision entity; a memory layer's revision
+/// layer stands somewhere else. A durable layer's revision is the meta
+/// branch's `dialog.branch/revision` of the layer's entity in the
+/// primary instead, which names the revision entity; a memory layer's
+/// revision
 /// ([`Ephemeral`]'s chain) has no entity form yet, so it stays text.
 pub fn revision_attr() -> Relation {
     REVISION_ATTR.clone()
@@ -154,9 +157,17 @@ pub fn revision_attr() -> Relation {
 /// The meta branch's `dialog.branch/revision` attribute: of a branch
 /// entity, the entity of the revision it stands at
 /// ([`Revision::entity`]). The primary's row of it lives in
-/// [`SESSION`]; a branch layer's is the pointer fact in the primary.
+/// [`SESSION`]; a durable layer's is a pointer fact in the primary, of
+/// the layer's entity.
 pub(crate) fn branch_revision_attr() -> Relation {
     BRANCH_REVISION_ATTR.clone()
+}
+
+/// The meta branch's `dialog.branch/tree` attribute: of a durable
+/// layer's entity, in the primary, the tree hash of the revision its
+/// `dialog.branch/revision` names, in base58.
+pub(crate) fn branch_tree_attr() -> Relation {
+    BRANCH_TREE_ATTR.clone()
 }
 
 /// The `dialog.session/layer` attribute: of [`SESSION`], the layer a
@@ -212,7 +223,7 @@ impl Statement for Selection {
 }
 
 /// The revision a branch stands at, as its `dialog.branch/revision` row
-/// and a branch layer's pointer fact carry it: the revision's entity.
+/// and a durable layer's pointer fact carry it: the revision's entity.
 pub(crate) fn revision_entity(revision: &Revision) -> Value {
     Value::Entity(revision.entity())
 }
@@ -230,7 +241,7 @@ type Row = (Entity, Relation, Value);
 /// records that followed its last change ([`Ephemeral::settled`]), so
 /// that recording the revisions is not itself a move of the stack's own
 /// layer. A memory layer's hash is base58 text: an [`Ephemeral`]'s
-/// revision has no entity form yet. A branch layer has no row: the
+/// revision has no entity form yet. A durable layer has no row: the
 /// primary's pointer fact of it is the record.
 fn revisions(
     branch: &Entity,
@@ -404,9 +415,8 @@ pub(crate) fn take_dispatched(changes: &mut Changes) -> Changes {
 }
 
 /// What a layer a stack builds from the primary's schema is: its
-/// `dialog.layer/type`, a bare-scheme entity, and, for a branch, the
-/// branch it is.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// `dialog.layer/type`, a bare-scheme entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LayerType {
     /// `session:`, an in-memory layer: the stack mints it when it opens,
     /// and it is gone when the stack is.
@@ -421,25 +431,19 @@ pub enum LayerType {
     /// it consumed. Bare [`CONTROL`], the loopback, is every stack's,
     /// and declaring it builds nothing.
     Channel,
-    /// `branch:`, a durable layer, `memory:<name>`: the repository's
-    /// branch `<name>`, whose entity (the meta branch's, derived from
-    /// `(replica, name)`) this carries and the declaration stores as
-    /// `dialog.layer/branch`. The stack opens the branch beside the
-    /// primary, reads it as a line stamped with the layer's name, and
-    /// commits what a dispatch writes into the layer on it. No memory
-    /// cell holds its rows. The primary records the revision the layer
-    /// stands at as a pointer fact (`dialog.branch/revision` of the
-    /// branch entity), and [`Stack::sync`](crate::Stack::sync) pulls and
-    /// pushes it with the primary when its branch has upstreams. A
-    /// declaration whose branch entity is not the one the stack derives
-    /// for `<name>` on the primary's replica fails the open with
-    /// [`CommitError::InvalidPlacement`] when this process declared it
-    /// (on the stack, or in the primary's session store). One the
-    /// primary's tree holds may have been written by another replica,
-    /// whose entity for the branch is its own, since a branch entity is
-    /// derived from the replica: the stack opens this replica's branch
-    /// `<name>` for it and names that branch's entity.
-    Branch(Entity),
+    /// `branch:`, a durable layer, `memory:<name>`: a tree the primary
+    /// points at. It has no head and no branch of its own: the layer is
+    /// at the tree the primary's `dialog.branch/revision` and
+    /// `dialog.branch/tree` of the layer's entity name, and is empty
+    /// while the primary names none. A stack reads that tree as a line
+    /// stamped with the layer's name, and a dispatch that writes into
+    /// the layer builds its next tree and names it in the same commit of
+    /// the primary, so the primary's compare-and-swap is the layer's
+    /// too. No memory cell holds its rows.
+    /// [`Stack::sync`](crate::Stack::sync) carries the pointed trees with
+    /// the primary: a pull downloads them before the primary moves, and
+    /// a push uploads them before the primary's head.
+    Branch,
 }
 
 impl LayerType {
@@ -449,15 +453,7 @@ impl LayerType {
         match self {
             LayerType::Session => session_layer(),
             LayerType::Channel => CHANNEL_TYPE_ENTITY.clone(),
-            LayerType::Branch(_) => BRANCH_TYPE_ENTITY.clone(),
-        }
-    }
-
-    /// The branch entity of a [`Branch`](LayerType::Branch) layer.
-    pub fn branch(&self) -> Option<&Entity> {
-        match self {
-            LayerType::Branch(branch) => Some(branch),
-            _ => None,
+            LayerType::Branch => BRANCH_TYPE_ENTITY.clone(),
         }
     }
 
@@ -466,21 +462,12 @@ impl LayerType {
     }
 }
 
-/// The scheme a `dialog.layer/type` fact names, before a branch layer's
-/// branch fact is joined to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Scheme {
-    Session,
-    Channel,
-    Branch,
-}
-
-/// Read a `dialog.layer/type` value as a scheme, or fail the open.
-fn scheme(layer: &Entity, value: &Value) -> Result<Scheme, CommitError> {
+/// Read a `dialog.layer/type` value as a layer type, or fail the open.
+fn scheme(layer: &Entity, value: &Value) -> Result<LayerType, CommitError> {
     let scheme = match value {
-        Value::Entity(kind) if *kind == *SESSION_LAYER => Some(Scheme::Session),
-        Value::Entity(kind) if *kind == *CHANNEL_TYPE_ENTITY => Some(Scheme::Channel),
-        Value::Entity(kind) if *kind == *BRANCH_TYPE_ENTITY => Some(Scheme::Branch),
+        Value::Entity(kind) if *kind == *SESSION_LAYER => Some(LayerType::Session),
+        Value::Entity(kind) if *kind == *CHANNEL_TYPE_ENTITY => Some(LayerType::Channel),
+        Value::Entity(kind) if *kind == *BRANCH_TYPE_ENTITY => Some(LayerType::Branch),
         _ => None,
     };
     scheme.ok_or_else(|| CommitError::InvalidPlacement {
@@ -492,8 +479,7 @@ fn scheme(layer: &Entity, value: &Value) -> Result<Scheme, CommitError> {
 /// [`Statement`] declaring a layer beside the primary: `layer` is the
 /// entity a descriptor's `in:` names, and `kind` what it is. A stack
 /// opened on the primary builds the layer from this. Asserting it
-/// writes the layer's `dialog.layer/type` and, for a
-/// [`LayerType::Branch`], its `dialog.layer/branch`, both under `last`.
+/// writes the layer's `dialog.layer/type`, under `last`.
 ///
 /// ```no_run
 /// # use dialog_repository::{Branch, LayerDeclaration, LayerType};
@@ -524,119 +510,84 @@ impl LayerDeclaration {
 
 impl Statement for LayerDeclaration {
     fn assert(self, update: &mut impl Update) {
-        if let Some(branch) = self.kind.branch() {
-            update.associate(
-                layer_branch_attr(),
-                self.layer.clone(),
-                Value::Entity(branch.clone()),
-                Pick::Last,
-            );
-        }
         update.associate(layer_type_attr(), self.layer, self.kind.value(), Pick::Last);
     }
 
     fn retract(self, update: &mut impl Update) {
-        if let Some(branch) = self.kind.branch() {
-            update.dissociate(
-                layer_branch_attr(),
-                self.layer.clone(),
-                Value::Entity(branch.clone()),
-            );
-        }
         update.dissociate(layer_type_attr(), self.layer, self.kind.value());
     }
 }
 
-/// [`Statement`] recording, in the primary, the revision a branch layer
-/// stands at: its pointer fact, the `dialog.branch/revision` of the
-/// layer's branch entity, naming the revision entity, under `last`,
-/// bound for no layer, so it lands in the primary and never follows a
-/// selection. A dispatch that moves a branch layer writes it; so does
-/// [`Stack::sync`](crate::Stack::sync) when a pull moved the layer.
-pub(crate) struct Pointer {
-    /// The layer's branch entity.
-    pub(crate) branch: Entity,
-    /// The revision it stands at, as [`revision_entity`] renders it.
-    pub(crate) revision: Value,
+/// [`Statement`] recording, in the primary, where a durable layer
+/// stands: its pointer facts, the `dialog.branch/revision` of the
+/// layer's entity, naming the revision entity, and beside it its
+/// `dialog.branch/tree`, the revision's tree in base58, both under
+/// `last`, bound for no layer, so they land in the primary and never
+/// follow a selection. A dispatch that moves a durable layer writes
+/// them; so does [`Stack::sync`](crate::Stack::sync) when it merges what
+/// a pull brought.
+pub(crate) struct Pointer<'a> {
+    /// The layer's entity.
+    pub(crate) layer: &'a Entity,
+    /// The revision it stands at.
+    pub(crate) revision: &'a Revision,
 }
 
-impl Statement for Pointer {
+impl Pointer<'_> {
+    /// The two cells and the values this pointer writes into them.
+    fn facts(&self) -> [(Relation, Value); 2] {
+        [
+            (branch_revision_attr(), revision_entity(self.revision)),
+            (branch_tree_attr(), tree_value(&self.revision.tree)),
+        ]
+    }
+}
+
+impl Statement for Pointer<'_> {
     fn assert(self, update: &mut impl Update) {
-        update.associate(
-            branch_revision_attr(),
-            self.branch,
-            self.revision,
-            Pick::Last,
-        );
+        for (the, is) in self.facts() {
+            update.associate(the, self.layer.clone(), is, Pick::Last);
+        }
     }
 
     fn retract(self, update: &mut impl Update) {
-        update.dissociate(branch_revision_attr(), self.branch, self.revision);
+        for (the, is) in self.facts() {
+            update.dissociate(the, self.layer.clone(), is);
+        }
     }
 }
 
-/// The branch a branch layer is: `<name>` of `memory:<name>`. A layer
-/// declared a branch under any other name, or with a name that is not a
-/// branch name, fails the open.
-pub(crate) fn durable_branch(layer: &Entity) -> Result<String, CommitError> {
+/// A tree as a durable layer's `dialog.branch/tree` fact carries it:
+/// its hash in base58, as the meta branch renders a branch's tree.
+pub(crate) fn tree_value(tree: &crate::TreeReference) -> Value {
+    Value::String(tree.hash().to_base58())
+}
+
+/// Check that `layer`, declared durable, is named `memory:<name>`: a
+/// layer declared durable under any other name, or with a name that is
+/// not a branch name, fails the open. The name is the layer's alone; no
+/// branch is opened for it.
+pub(crate) fn durable_name(layer: &Entity) -> Result<(), CommitError> {
     let text = layer.to_string();
     let name = text.strip_prefix(MEMORY).unwrap_or_default();
     if name.is_empty() || invalid_name(name).is_some() {
         return Err(CommitError::InvalidPlacement {
             attribute: format!("dialog.layer/type of {layer}"),
-            value: "branch: names a layer memory:<branch>".into(),
+            value: "branch: names a layer memory:<name>".into(),
         });
     }
-    Ok(name.to_string())
+    Ok(())
 }
 
-/// A declaration as one place holds it: the scheme its type fact names,
-/// and the branch its branch fact names, if any.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Declared {
-    scheme: Scheme,
-    branch: Option<Entity>,
-}
-
-impl Declared {
-    /// The layer type this declaration of `layer` says, or a refusal
-    /// for a branch layer that names no branch.
-    fn kind(&self, layer: &Entity) -> Result<LayerType, CommitError> {
-        Ok(match self.scheme {
-            Scheme::Session => LayerType::Session,
-            Scheme::Channel => LayerType::Channel,
-            Scheme::Branch => match &self.branch {
-                Some(branch) => LayerType::Branch(branch.clone()),
-                None => {
-                    return Err(CommitError::InvalidPlacement {
-                        attribute: format!("dialog.layer/branch of {layer}"),
-                        value: "a branch: layer names its branch".into(),
-                    });
-                }
-            },
-        })
-    }
-}
-
-/// The declarations among `types` and `branches`, the
-/// `dialog.layer/type` and `dialog.layer/branch` facts one place holds,
-/// by layer.
+/// The declarations among `types`, the `dialog.layer/type` facts one
+/// place holds, by layer.
 fn declarations(
     types: impl IntoIterator<Item = Fact>,
-    branches: impl IntoIterator<Item = Fact>,
-) -> Result<HashMap<Entity, Declared>, CommitError> {
-    let branches: HashMap<Entity, Entity> = branches
-        .into_iter()
-        .filter_map(|fact| match fact.is {
-            Value::Entity(branch) => Some((fact.of, branch)),
-            _ => None,
-        })
-        .collect();
+) -> Result<HashMap<Entity, LayerType>, CommitError> {
     let mut declared = HashMap::new();
     for fact in types {
-        let scheme = scheme(&fact.of, &fact.is)?;
-        let branch = branches.get(&fact.of).cloned();
-        declared.insert(fact.of, Declared { scheme, branch });
+        let kind = scheme(&fact.of, &fact.is)?;
+        declared.insert(fact.of, kind);
     }
     Ok(declared)
 }
@@ -646,9 +597,9 @@ fn declarations(
 /// laid over, in that order.
 #[derive(Debug, Default)]
 pub(crate) struct Layers {
-    committed: HashMap<Entity, Declared>,
-    declared: HashMap<Entity, Declared>,
-    retracted: HashMap<Entity, Scheme>,
+    committed: HashMap<Entity, LayerType>,
+    declared: HashMap<Entity, LayerType>,
+    retracted: HashMap<Entity, LayerType>,
 }
 
 impl Layers {
@@ -664,18 +615,13 @@ impl Layers {
         let mut layers = Layers::default();
         if primary.revision().is_some() {
             let types = committed(primary, Selector::new().the(layer_type_attr()), env).await?;
-            let branches =
-                committed(primary, Selector::new().the(layer_branch_attr()), env).await?;
-            layers.committed = declarations(types, branches)?;
+            layers.committed = declarations(types)?;
         }
         // A declaration held in the primary's session store is this
         // process's own: it never reaches the tree or a peer, outranks
         // the committed one, and yields to what the stack holds.
         let overlay = primary.overlay();
-        layers.declared = declarations(
-            overlay.scan(&Selector::new().the(layer_type_attr())),
-            overlay.scan(&Selector::new().the(layer_branch_attr())),
-        )?;
+        layers.declared = declarations(overlay.scan(&Selector::new().the(layer_type_attr())))?;
         layers.lay(held)?;
         Ok(layers)
     }
@@ -684,91 +630,43 @@ impl Layers {
     /// later one for the same layer outranks an earlier, and a retraction
     /// of what was declared undeclares it.
     fn lay(&mut self, changes: &Changes) -> Result<(), CommitError> {
-        let (type_attr, branch_attr) = (layer_type_attr(), layer_branch_attr());
-        let mut branches: HashMap<Entity, Entity> = HashMap::new();
-        for (entity, the, change) in changes.iter() {
-            if *the == branch_attr
-                && let Change::Assert(Value::Entity(branch), _) = change
-            {
-                branches.insert(entity.clone(), branch.clone());
-            }
-        }
+        let type_attr = layer_type_attr();
         for (entity, the, change) in changes.iter() {
             if *the != type_attr {
                 continue;
             }
             let (Change::Assert(value, _) | Change::Retract(value)) = change;
-            let scheme = scheme(entity, value)?;
+            let kind = scheme(entity, value)?;
             match change {
                 Change::Retract(_) => {
-                    if self.declared.get(entity).map(|held| held.scheme) == Some(scheme) {
+                    if self.declared.get(entity) == Some(&kind) {
                         self.declared.remove(entity);
                     }
-                    self.retracted.insert(entity.clone(), scheme);
+                    self.retracted.insert(entity.clone(), kind);
                 }
                 _ => {
-                    let branch = branches.get(entity).cloned();
-                    self.declared
-                        .insert(entity.clone(), Declared { scheme, branch });
+                    self.declared.insert(entity.clone(), kind);
                 }
             }
         }
         Ok(())
     }
 
-    /// Every layer declared, with what it is, by name. A branch layer
-    /// that names no branch fails the open.
-    pub(crate) fn layers(&self) -> Result<Vec<(Entity, LayerType)>, CommitError> {
-        let mut layers: HashMap<Entity, &Declared> = self
+    /// Every layer declared, with what it is, by name.
+    pub(crate) fn layers(&self) -> Vec<(Entity, LayerType)> {
+        let mut layers: HashMap<Entity, LayerType> = self
             .committed
             .iter()
-            .filter(|(layer, held)| self.retracted.get(*layer) != Some(&held.scheme))
-            .map(|(layer, held)| (layer.clone(), held))
+            .filter(|(layer, kind)| self.retracted.get(*layer) != Some(kind))
+            .map(|(layer, kind)| (layer.clone(), *kind))
             .collect();
-        for (layer, held) in &self.declared {
-            layers.insert(layer.clone(), held);
+        for (layer, kind) in &self.declared {
+            layers.insert(layer.clone(), *kind);
         }
-        let mut layers: Vec<(Entity, LayerType)> = layers
-            .into_iter()
-            .map(|(layer, held)| held.kind(&layer).map(|kind| (layer, kind)))
-            .collect::<Result<_, _>>()?;
+        let mut layers: Vec<(Entity, LayerType)> = layers.into_iter().collect();
         layers.sort_by_key(|a| a.0.to_string());
-        Ok(layers)
+        layers
     }
-
-    /// Whether the declaration of `layer` in force is the one the
-    /// primary's tree holds, replicated with it from whichever replica
-    /// wrote it, rather than one this process holds (in the primary's
-    /// session store, or declared on the stack).
-    pub(crate) fn replicated(&self, layer: &Entity) -> bool {
-        !self.declared.contains_key(layer) && self.committed.contains_key(layer)
-    }
-}
-
-/// The pointer facts `primary`'s tree holds of the branch entities in
-/// `branches`: the revision it records each branch layer at, as the
-/// cell's elected claim, by branch entity.
-pub(crate) async fn pointers(
-    primary: &Source,
-    branches: impl IntoIterator<Item = &Entity>,
-    env: &Erased,
-) -> Result<Vec<(Entity, Value)>, CommitError> {
-    if primary.revision().is_none() {
-        return Ok(Vec::new());
-    }
-    let mut pointed = Vec::new();
-    for branch in branches {
-        let selector = Selector::new()
-            .the(branch_revision_attr())
-            .of(branch.clone());
-        pointed.extend(
-            committed(primary, selector, env)
-                .await?
-                .into_iter()
-                .map(|fact| (fact.of, fact.is)),
-        );
-    }
-    Ok(pointed)
 }
 
 /// Collect the facts a selector matches on the primary's committed tree,
@@ -837,14 +735,13 @@ mod tests {
     #[dialog_common::test]
     fn it_reads_back_every_layer_type_it_names() -> anyhow::Result<()> {
         let layer: Entity = "memory:notes".parse()?;
-        let branch: Entity = "branch:notes".parse()?;
-        for (kind, expected, named) in [
-            (LayerType::Session, Scheme::Session, "session:"),
-            (LayerType::Channel, Scheme::Channel, "channel:"),
-            (LayerType::Branch(branch.clone()), Scheme::Branch, "branch:"),
+        for (kind, named) in [
+            (LayerType::Session, "session:"),
+            (LayerType::Channel, "channel:"),
+            (LayerType::Branch, "branch:"),
         ] {
             assert_eq!(kind.entity().to_string(), named);
-            assert_eq!(scheme(&layer, &kind.value())?, expected);
+            assert_eq!(scheme(&layer, &kind.value())?, kind);
         }
         for refused in [
             Value::String("memory".into()),
@@ -862,17 +759,16 @@ mod tests {
         Ok(())
     }
 
-    /// A declaration writes the layer's type and, for a branch layer,
-    /// its branch, both under `last`; laid over nothing it resolves to
-    /// the type it declared, and its retraction undeclares it.
+    /// A declaration writes the layer's type and nothing else, under
+    /// `last`, a durable layer's as any other's; laid over nothing it
+    /// resolves to the type it declared, and its retraction undeclares
+    /// it.
     #[dialog_common::test]
     fn it_resolves_what_a_declaration_writes() -> anyhow::Result<()> {
         let notes: Entity = "memory:notes".parse()?;
         let state: Entity = "session:state".parse()?;
-        let branch: Entity = "branch:notes".parse()?;
         let mut changes = Changes::new();
-        LayerDeclaration::new(notes.clone(), LayerType::Branch(branch.clone()))
-            .assert(&mut changes);
+        LayerDeclaration::new(notes.clone(), LayerType::Branch).assert(&mut changes);
         LayerDeclaration::new(state.clone(), LayerType::Session).assert(&mut changes);
         let facts: Vec<(Entity, Relation, Value)> = changes
             .iter()
@@ -883,13 +779,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(facts.len(), 3, "{facts:?}");
+        assert_eq!(facts.len(), 2, "{facts:?}");
         for fact in [
-            (
-                notes.clone(),
-                layer_branch_attr(),
-                Value::Entity(branch.clone()),
-            ),
             (
                 notes.clone(),
                 layer_type_attr(),
@@ -906,51 +797,30 @@ mod tests {
         let mut layers = Layers::default();
         layers.lay(&changes)?;
         assert_eq!(
-            layers.layers()?,
+            layers.layers(),
             vec![
-                (notes.clone(), LayerType::Branch(branch.clone())),
+                (notes.clone(), LayerType::Branch),
                 (state.clone(), LayerType::Session),
             ]
         );
         let mut retraction = Changes::new();
         LayerDeclaration::new(state, LayerType::Session).retract(&mut retraction);
         layers.lay(&retraction)?;
-        assert_eq!(layers.layers()?, vec![(notes, LayerType::Branch(branch))]);
+        assert_eq!(layers.layers(), vec![(notes, LayerType::Branch)]);
         Ok(())
     }
 
-    /// A branch layer whose declaration names no branch is refused with
-    /// `InvalidPlacement` when its layers are listed.
+    /// A durable layer is named `memory:<name>`; one declared under
+    /// another store, or with no name after `memory:`, is refused with
+    /// `InvalidPlacement`.
     #[dialog_common::test]
-    fn it_refuses_a_branch_layer_that_names_no_branch() -> anyhow::Result<()> {
-        let notes: Entity = "memory:notes".parse()?;
-        let mut changes = Changes::new();
-        changes.associate(
-            layer_type_attr(),
-            notes,
-            Value::Entity("branch:".parse()?),
-            Pick::Last,
-        );
-        let mut layers = Layers::default();
-        layers.lay(&changes)?;
-        assert!(matches!(
-            layers.layers(),
-            Err(CommitError::InvalidPlacement { .. })
-        ));
-        Ok(())
-    }
-
-    /// A durable layer is the branch its name gives after `memory:`; a
-    /// durable layer named under another store, or with no branch name,
-    /// is refused with `InvalidPlacement`.
-    #[dialog_common::test]
-    fn it_names_the_branch_a_durable_layer_is() -> anyhow::Result<()> {
-        assert_eq!(durable_branch(&"memory:notes".parse()?)?, "notes");
+    fn it_names_a_durable_layer_under_memory() -> anyhow::Result<()> {
+        durable_name(&"memory:notes".parse()?)?;
         for refused in ["session:notes", "memory:", "control:notes"] {
             let refused: Entity = refused.parse()?;
             assert!(
                 matches!(
-                    durable_branch(&refused),
+                    durable_name(&refused),
                     Err(CommitError::InvalidPlacement { .. })
                 ),
                 "{refused}"

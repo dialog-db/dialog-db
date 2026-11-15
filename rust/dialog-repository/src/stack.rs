@@ -58,20 +58,20 @@
 //! **channel** instead, `control:<name>`, a layer declared with
 //! [`LayerType::Channel`] whose rows stay until the consumer retracts them.
 //!
-//! A layer declared with [`LayerType::Branch`], `memory:<name>`, is a
-//! branch: the repository's branch `<name>`, opened with the stack and
-//! read as a line beside the primary, its rows binding `in` to
-//! `memory:<name>` ([`Stack::durable`] hands the branch out). Its
-//! declaration names the branch's entity, the one the meta branch
-//! derives from the primary's replica and `<name>`
-//! ([`Stack::branch_of`]), and a declaration naming another is refused
-//! when the stack opens. A write into it is committed on that branch as
-//! part of the dispatch's publication, and the primary records the
-//! revision it lands at as a pointer fact, `<branch entity>
-//! dialog.branch/revision <revision entity>`, in the same dispatch: the layers publish bottom to top, the primary last,
-//! and a lost compare-and-swap on any of them re-runs the dispatch from
-//! the new heads. [`Stack::sync`] pulls and pushes the primary and
-//! every durable layer with upstreams.
+//! A layer declared with [`LayerType::Branch`], `memory:<name>`, is
+//! durable: a tree the primary points at, with no head of its own. The
+//! primary names it by two facts of the layer's entity, `memory:<name>
+//! dialog.branch/revision <revision entity>` and `memory:<name>
+//! dialog.branch/tree "<tree, base58>"`, and the stack reads that tree
+//! as a line beside the primary, its rows binding `in` to
+//! `memory:<name>`; a layer the primary names nothing for is empty. A
+//! write into it is minted as the layer's next tree, built on the one
+//! the primary pointed at when the dispatch began, and the dispatch's
+//! commit of the primary carries the pointer facts naming it: one
+//! compare-and-swap, the primary's. A lost one leaves the minted tree an
+//! orphan nothing names, and the dispatch re-runs from the new head,
+//! reading the layer where the new head points it. [`Stack::sync`] pulls
+//! and pushes the primary, and the pointed trees with it.
 //!
 //! Every stack has its own layer, [`SESSION`], whether or not the
 //! schema declares it: a table in memory, the stack's alone, gone
@@ -128,6 +128,7 @@
 //! [`CONTROL`]: crate::CONTROL
 
 pub mod arrivals;
+pub(crate) mod durable;
 pub mod invoke;
 pub mod sync;
 
@@ -151,9 +152,8 @@ use dialog_search_tree::nodes;
 use parking_lot::RwLock;
 use tokio::sync::Notify;
 
-use crate::RepositoryMemoryExt as _;
 use crate::placement::{
-    LayerType, Layers, Recorded, Selection, control_layer, durable_branch, memory_layer, selected,
+    LayerType, Layers, Recorded, Selection, control_layer, durable_name, memory_layer, selected,
     session_layer,
 };
 use crate::repository::branch::session::Composite;
@@ -161,10 +161,11 @@ use crate::repository::branch::transaction::{DurableLayer, StackContext};
 use crate::repository::source::Source;
 use crate::schema::Replica;
 use crate::{Branch, CommitError, Ephemeral, QueryLayer, RemoteSite, Transaction};
+use durable::Durables;
 
 /// What opening a stack and reading through it need of the
 /// environment: a read of the primary, to resolve the layers its schema
-/// declares, the open of each durable layer's branch, and what a query
+/// declares and where it points each durable layer, and what a query
 /// through the stack reads with. Nothing in it commits or publishes:
 /// an environment that can open branches and query them opens a stack
 /// beside them ([`OpenStack::perform`]), and reads what arrives in its
@@ -250,15 +251,15 @@ impl OpenStack {
     }
 
     /// Read the primary's schema at its head and build every layer it
-    /// declares. Opening reads and opens branches, and commits nothing,
-    /// so it needs no more of `env` than a read does
-    /// ([`OpenStackEnv`]).
+    /// declares, each durable layer at the tree the primary points it
+    /// at. Opening reads and commits nothing, so it needs no more of
+    /// `env` than a read does ([`OpenStackEnv`]).
     pub async fn perform<Env: OpenStackEnv>(self, env: &Env) -> Result<Stack, CommitError> {
         let primary = Source::from(self.primary.clone());
         let resolved = Layers::resolve(&primary, &self.declared, env).await?;
-        let layers = resolved.layers()?;
-        // A branch is named by the entity the meta branch derives from
-        // `(replica, name)`, the replica being the primary's: this
+        let layers = resolved.layers();
+        // The primary is named by the entity the meta branch derives
+        // from `(replica, name)`, the replica being the primary's: this
         // profile's view of the repository.
         let operator = Identify.perform(env).await?;
         let replica = Replica::new(operator.profile().clone(), self.primary.of().clone());
@@ -268,9 +269,9 @@ impl OpenStack {
         // declaration naming one builds nothing apart.
         let (memory, own, control) = (memory_layer(), session_layer(), control_layer());
         let mut memories = Vec::new();
-        let mut named = Vec::new();
-        // Every branch layer is checked before any is opened, so a
-        // refused declaration opens no branch and writes nothing.
+        let mut durables = Vec::new();
+        // Every durable layer's name is checked before anything is read
+        // or written, so a refused declaration writes nothing.
         for (entity, kind) in layers {
             if entity == memory || entity == own || entity == control {
                 continue;
@@ -279,42 +280,16 @@ impl OpenStack {
                 LayerType::Session | LayerType::Channel => {
                     memories.push((entity, Ephemeral::new()));
                 }
-                LayerType::Branch(declared) => {
-                    let name = durable_branch(&entity)?;
-                    let derived = replica.branch(name.as_str()).this;
-                    // A declaration this process holds names this
-                    // replica's branch, or is refused. One replicated in
-                    // the primary's tree names the branch of the replica
-                    // that wrote it, which is this replica's only when it
-                    // wrote it: the layer is this replica's branch
-                    // `<name>` either way.
-                    if declared != derived && !resolved.replicated(&entity) {
-                        return Err(CommitError::InvalidPlacement {
-                            attribute: format!("dialog.layer/branch of {entity}"),
-                            value: format!(
-                                "{declared} is not the branch {name} of the primary's replica, {derived}"
-                            ),
-                        });
-                    }
-                    named.push((entity, name, derived));
+                LayerType::Branch => {
+                    durable_name(&entity)?;
+                    durables.push(entity);
                 }
             }
         }
-        // A branch layer is the repository's branch it names, opened
-        // through `env` as any branch is.
-        let mut durables = Vec::with_capacity(named.len());
-        let mut branches = vec![(memory, branch.clone())];
-        for (entity, name, derived) in named {
-            let opened = self
-                .primary
-                .subject()
-                .branch(name)
-                .open()
-                .perform(env)
-                .await?;
-            durables.push((entity.clone(), opened));
-            branches.push((entity, derived));
-        }
+        // A durable layer is where the primary, as the stack read it,
+        // points it.
+        let durables = Arc::new(Durables::new(&self.primary, durables, operator.profile()));
+        durables.refresh(primary.revision(), env).await?;
         let loopback = Loopback::default();
         // The revision rows of every layer exist from the moment the
         // stack opens, with the facts of the three layers every stack
@@ -339,7 +314,6 @@ impl OpenStack {
                 branch,
                 layers: memories,
                 durables,
-                branches,
                 declared: RwLock::new(self.declared),
                 loopback,
             }),
@@ -359,14 +333,9 @@ struct Inner {
     /// primary's process-local store ([`Branch::overlay`]), read with the
     /// primary.
     layers: Vec<(Entity, Ephemeral)>,
-    /// The durable layers the schema declares, each with the entity that
-    /// names it, `memory:<name>`, and the branch `<name>` it is, in the
-    /// order the schema lists them.
-    durables: Vec<(Entity, Branch)>,
-    /// The branch entity of every branch layer by the layer's name:
-    /// [`MEMORY`](crate::MEMORY) first, then each durable layer's, in
-    /// the order of [`durables`](Self::durables).
-    branches: Vec<(Entity, Entity)>,
+    /// The durable layers the schema declares, `memory:<name>`, in the
+    /// order the schema lists them, and where the primary points them.
+    durables: Arc<Durables>,
     declared: RwLock<Changes>,
     /// The loopback, [`CONTROL`](crate::CONTROL), as the stack holds
     /// it between dispatches, and what wakes a reader of it.
@@ -467,49 +436,50 @@ impl Stack {
     /// [`MEMORY`](crate::MEMORY), the primary, first, then its own,
     /// [`SESSION`](crate::SESSION), then the loopback,
     /// [`CONTROL`](crate::CONTROL); then the session layers and channels
-    /// the schema declares, in the schema's order, then its branch
+    /// the schema declares, in the schema's order, then its durable
     /// layers, in the schema's order.
     pub fn layers(&self) -> Vec<Entity> {
         [memory_layer(), session_layer(), control_layer()]
             .into_iter()
             .chain(self.inner.layers.iter().map(|(layer, _)| layer.clone()))
-            .chain(self.inner.durables.iter().map(|(layer, _)| layer.clone()))
+            .chain(self.inner.durables.layers().iter().cloned())
             .collect()
     }
 
-    /// The branch entity of the branch layer `name`, if the stack holds
-    /// one by that name: of [`MEMORY`](crate::MEMORY) the primary's, and
-    /// of a durable layer `memory:<name>` the branch `<name>`'s, each the
-    /// entity the meta branch derives from the primary's replica and the
-    /// branch's name ([`schema::Branch`](crate::schema::Branch)). What
-    /// the layer's `dialog.branch/revision` is of: the primary's row in
-    /// [`SESSION`](crate::SESSION), a durable layer's pointer fact in
-    /// the primary.
+    /// The branch entity of [`MEMORY`](crate::MEMORY), the primary: the
+    /// entity the meta branch derives from the primary's replica and its
+    /// name ([`schema::Branch`](crate::schema::Branch)), what the
+    /// primary's `dialog.branch/revision` row in
+    /// [`SESSION`](crate::SESSION) is of. `None` for any other layer: a
+    /// durable layer has no branch, and its pointer facts in the primary
+    /// are of the layer's own entity.
     pub fn branch_of(&self, name: &Entity) -> Option<&Entity> {
-        self.inner
-            .branches
-            .iter()
-            .find(|(layer, _)| layer == name)
-            .map(|(_, branch)| branch)
+        (*name == memory_layer()).then_some(&self.inner.branch)
     }
 
-    /// The branch the durable layer `name` is, if the stack holds one
-    /// by that name: the repository's branch `<name>` of
-    /// `memory:<name>`, declared with [`LayerType::Branch`]. A durable layer
-    /// holds no [`Ephemeral`]: [`layer`](Self::layer) answers `None` for
-    /// it.
-    pub fn durable(&self, name: &Entity) -> Option<&Branch> {
-        self.inner
-            .durables
-            .iter()
-            .find(|(layer, _)| layer == name)
-            .map(|(_, branch)| branch)
-    }
-
-    /// The durable layers this stack holds, by name, with the branch
-    /// each is, in the schema's order.
-    pub fn durables(&self) -> &[(Entity, Branch)] {
+    /// The stack's durable layers and where the primary points them.
+    pub(crate) fn durables(&self) -> &Arc<Durables> {
         &self.inner.durables
+    }
+
+    /// The revision the primary points the durable layer `name` at, as
+    /// the stack last read it: `None` for a layer the primary points
+    /// nowhere, or one the stack does not hold.
+    #[cfg(test)]
+    pub(crate) fn pointed(&self, name: &Entity) -> Option<crate::Revision> {
+        let durables = &self.inner.durables;
+        let at = durables.layers().iter().position(|layer| layer == name)?;
+        durables.pinned().revisions.get(at).cloned().flatten()
+    }
+
+    /// Read again where the primary, at its head, points the durable
+    /// layers, when the stack last read them at another head.
+    pub(crate) async fn repoint<Env: OpenStackEnv>(&self, env: &Env) -> Result<(), CommitError> {
+        let head = self.inner.primary.revision();
+        if self.inner.durables.stale(head.as_ref()) {
+            self.inner.durables.refresh(head.as_ref(), env).await?;
+        }
+        Ok(())
     }
 
     /// Select `layer`, or clear the selection with `None`: a dispatch
@@ -586,8 +556,8 @@ impl Stack {
     }
 
     /// The layers a transaction through this stack reads and induces
-    /// over: the primary pinned as `primary`, each durable layer as
-    /// `durables` pins it, and the memory layers.
+    /// over: the primary pinned as `primary`, each durable layer at the
+    /// revision `durables` holds it at, and the memory layers.
     fn composite(&self, primary: Source, durables: &[DurableLayer]) -> Composite {
         let mut sources = vec![primary];
         let mut names = vec![None];
@@ -604,7 +574,10 @@ impl Stack {
 
     /// A query over the stack: the primary and every layer. A read
     /// with `in` unbound reads them all and binds each row's layer; one
-    /// with `in` bound reads that layer alone.
+    /// with `in` bound reads that layer alone. A durable layer is read at
+    /// the tree the primary pointed it at when the stack last read the
+    /// primary: when it opened, after each dispatch through it and each
+    /// sync, and before each dispatch that finds the primary moved.
     pub fn query(&self) -> QueryLayer<'_> {
         // The primary's line reads its session overlay as `session:`, so
         // the stack's own layer is read once, with the primary.
@@ -612,8 +585,8 @@ impl Stack {
         for (name, memory) in &self.inner.layers {
             layer = layer.with_memory(name.clone(), memory);
         }
-        for (name, branch) in &self.inner.durables {
-            layer = layer.with_line(name.clone(), branch);
+        for (name, source) in self.inner.durables.sources() {
+            layer = layer.with_pinned(name, source);
         }
         layer
     }
@@ -634,20 +607,15 @@ impl Stack {
     pub fn transaction(&self) -> Transaction<&Branch> {
         let transaction = self.inner.primary.transaction();
         let primary = transaction.view().to_source();
-        let durables: Vec<DurableLayer> = self
-            .inner
-            .durables
-            .iter()
-            .zip(self.inner.branches.iter().skip(1))
-            .map(|((layer, branch), (_, entity))| {
-                DurableLayer::pin(layer.clone(), entity.clone(), branch.clone())
-            })
-            .collect();
+        let pinned = self.inner.durables.pinned();
+        let durables = self.inner.durables.lines(&pinned);
         transaction.with_stack(StackContext {
             branch: self.inner.branch.clone(),
             composite: self.composite(primary, &durables),
             memories: self.inner.layers.clone(),
             durables,
+            pinned,
+            state: self.inner.durables.clone(),
             loopback: self.inner.loopback.clone(),
         })
     }
@@ -660,7 +628,7 @@ mod tests {
 
     use super::*;
     use crate::helpers::test_repo;
-    use crate::placement::revision_entity;
+    use crate::placement::{revision_entity, tree_value};
     use crate::{LayerDeclaration, PublishError};
     use anyhow::Result;
     use dialog_common::ConditionalSend;
@@ -1414,10 +1382,10 @@ mod tests {
     /// A schema declaring one layer of each type opens a stack that
     /// lists them after the three every stack has: the session layer and
     /// the channel, held in memory, in the schema's order, then the
-    /// branch layer, opened as its branch. The declarations are stored
-    /// in the primary as `dialog.layer/type` and, for the branch layer,
-    /// `dialog.layer/branch`; the stack's own layer holds the implied
-    /// layers' type and branch facts.
+    /// durable layer, which is neither a cell nor a branch. The
+    /// declarations are stored in the primary as `dialog.layer/type`
+    /// alone; the stack's own layer holds the implied layers' type
+    /// facts and the primary's branch.
     #[dialog_common::test]
     async fn it_opens_a_layer_of_each_type_the_schema_declares() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
@@ -1426,15 +1394,11 @@ mod tests {
         let tab: Entity = "session:tab".parse()?;
         let mail: Entity = "control:mail".parse()?;
         let notes: Entity = "memory:notes".parse()?;
-        let entity = branch_entity(&branch, &operator, "notes").await?;
         branch
             .transaction()
             .assert(LayerDeclaration::new(tab.clone(), LayerType::Session))
             .assert(LayerDeclaration::new(mail.clone(), LayerType::Channel))
-            .assert(LayerDeclaration::new(
-                notes.clone(),
-                LayerType::Branch(entity.clone()),
-            ))
+            .assert(LayerDeclaration::new(notes.clone(), LayerType::Branch))
             .commit()
             .publish()
             .perform(&operator)
@@ -1449,12 +1413,11 @@ mod tests {
             "the session layer is in memory"
         );
         assert!(stack.layer(&mail).is_some(), "so is the channel");
-        assert_eq!(
-            stack.durable(&notes).map(Branch::name),
-            Some("notes"),
-            "the branch layer is its branch"
+        assert!(
+            stack.layer(&notes).is_none(),
+            "the durable layer is no cell"
         );
-        assert_eq!(stack.branch_of(&notes), Some(&entity));
+        assert_eq!(stack.branch_of(&notes), None, "and no branch");
 
         for (layer, kind) in [(&tab, "session:"), (&mail, "channel:"), (&notes, "branch:")] {
             assert_eq!(
@@ -1463,9 +1426,11 @@ mod tests {
                 "{layer}'s type is stored in the primary"
             );
         }
-        assert_eq!(
-            stored(&branch, &operator, "dialog.layer/branch", &notes).await?,
-            vec![format!("Entity({entity})")]
+        assert!(
+            stored(&branch, &operator, "dialog.layer/branch", &notes)
+                .await?
+                .is_empty(),
+            "a durable layer names no branch"
         );
 
         let own = branch.overlay();
@@ -1528,108 +1493,9 @@ mod tests {
             .await?;
         let stack = branch.stack().perform(&operator).await?;
         assert_eq!(stack.layers(), implied_and([]));
-        assert!(stack.durables().is_empty(), "no branch was opened");
-        Ok(())
-    }
-
-    /// A branch layer this process declares (on the stack it opens, or
-    /// in the primary's session store) whose `dialog.layer/branch` is
-    /// not the entity the stack derives for its branch on the primary's
-    /// replica is refused with `InvalidPlacement` when the stack opens,
-    /// and the refused open writes nothing: no row in `session:`, and
-    /// the primary does not move.
-    #[dialog_common::test]
-    async fn it_refuses_a_branch_layer_naming_another_branch() -> Result<()> {
-        let (operator, peer) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &peer).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-        let notes: Entity = "memory:notes".parse()?;
-        let other = branch_entity(&branch, &operator, "other").await?;
-        let head = branch.revision();
-        let declaration = LayerDeclaration::new(notes.clone(), LayerType::Branch(other));
-
-        let refused = branch
-            .stack()
-            .declare(declaration.clone())
-            .perform(&operator)
-            .await;
         assert!(
-            matches!(refused, Err(CommitError::InvalidPlacement { .. })),
-            "the open is refused"
-        );
-        let nothing_written = |branch: &Branch| -> Result<()> {
-            assert_eq!(
-                branch.overlay().revision().sequence,
-                0,
-                "nothing was written into session:"
-            );
-            assert!(
-                branch
-                    .overlay()
-                    .scan(&Selector::new().the(crate::revision_attr()))
-                    .is_empty(),
-                "no revision row"
-            );
-            Ok(())
-        };
-        nothing_written(&branch)?;
-
-        // The same declaration in the primary's session store.
-        let mut stored = Changes::new();
-        declaration.assert(&mut stored);
-        branch.overlay().apply(stored)?;
-        let sequence = branch.overlay().revision().sequence;
-        let refused = branch.stack().perform(&operator).await;
-        assert!(
-            matches!(refused, Err(CommitError::InvalidPlacement { .. })),
-            "the open is refused"
-        );
-        assert_eq!(
-            branch.overlay().revision().sequence,
-            sequence,
-            "nothing was written into session:"
-        );
-        assert!(
-            held(branch.overlay(), "dialog.layer/type", &memory_layer())?.is_empty(),
-            "no implied fact"
-        );
-        branch.refresh(&operator).await?;
-        assert_eq!(branch.revision(), head, "the primary did not move");
-        Ok(())
-    }
-
-    /// A branch layer declared in the primary's tree may have been
-    /// written by another replica, whose entity for the branch is
-    /// derived from its own replica: the stack opens this replica's
-    /// branch of the layer's name for it and names that branch's entity.
-    #[dialog_common::test]
-    async fn it_opens_a_replicated_branch_layer_as_this_replicas_branch() -> Result<()> {
-        let (operator, peer) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &peer).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-        let notes: Entity = "memory:notes".parse()?;
-        let subject = Replica::new(peer.did(), branch.of().clone()).subject.0;
-        let elsewhere = Replica::derive("did:web:elsewhere.example".parse()?, subject)
-            .branch("notes")
-            .this;
-        let here = branch_entity(&branch, &operator, "notes").await?;
-        assert_ne!(elsewhere, here, "the replicas differ");
-        branch
-            .transaction()
-            .assert(LayerDeclaration::new(
-                notes.clone(),
-                LayerType::Branch(elsewhere),
-            ))
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        let stack = branch.stack().perform(&operator).await?;
-        assert_eq!(stack.branch_of(&notes), Some(&here));
-        assert_eq!(
-            stack.durable(&notes).map(Branch::name),
-            Some("notes"),
-            "this replica's branch"
+            stack.durables().layers().is_empty(),
+            "no durable layer is declared"
         );
         Ok(())
     }
@@ -3524,13 +3390,9 @@ mod tests {
     /// The durable layer `memory:notes`, declared in `branch`'s tree.
     async fn declare_notes(branch: &Branch, env: &Operator) -> Result<Entity> {
         let notes: Entity = "memory:notes".parse()?;
-        let entity = branch_entity(branch, env, "notes").await?;
         branch
             .transaction()
-            .assert(LayerDeclaration::new(
-                notes.clone(),
-                LayerType::Branch(entity),
-            ))
+            .assert(LayerDeclaration::new(notes.clone(), LayerType::Branch))
             .commit()
             .publish()
             .perform(env)
@@ -3545,6 +3407,46 @@ mod tests {
             .of(doc.clone())
             .is(text.to_string())
             .at(at.clone())
+    }
+
+    /// `doc/headline` of `doc` as `text`, under `last`, written into
+    /// `at`: a cell that holds one value.
+    fn headline(doc: &Entity, text: &str, at: &Entity) -> impl Statement {
+        AttributeStatement {
+            the: QueryRelation::from("doc/headline".parse::<dialog_corpus::Relation>().unwrap()),
+            of: doc.clone(),
+            is: dialog_corpus::Value::String(text.to_string()),
+            cause: None,
+            cardinality: Some(Cardinality::One),
+            pick: Some(dialog_corpus::Pick::Last),
+        }
+        .at(at.clone())
+    }
+
+    /// The `doc/headline` of `doc` a read through `stack` elects in
+    /// `layer`, the one a read of the cell under `last` returns.
+    async fn headline_read(
+        stack: &Stack,
+        env: &Operator,
+        doc: &Entity,
+        layer: &Entity,
+    ) -> Result<Vec<String>> {
+        let query = AttributeQuery::new(
+            Term::from(QueryRelation::from(
+                "doc/headline".parse::<dialog_corpus::Relation>()?,
+            )),
+            Term::from(doc.clone()),
+            Term::var("v"),
+            Term::blank(),
+            Some(Cardinality::One),
+        )
+        .with_layer(Term::Constant(dialog_corpus::Value::Entity(layer.clone())));
+        let claims: Vec<dialog_query::Claim> =
+            stack.query().select(query).perform(env).try_vec().await?;
+        Ok(claims
+            .iter()
+            .map(|claim| format!("{:?}", claim.is))
+            .collect())
     }
 
     /// The claims of `the` on `of` that `branch`'s committed tree holds,
@@ -3573,14 +3475,27 @@ mod tests {
         Ok(rows)
     }
 
-    /// The pointer fact a primary holding `branch`'s head as a durable
-    /// layer's revision carries, the revision's entity, as [`stored`]
-    /// renders it.
-    fn pointer_to(branch: &Branch) -> Result<String> {
-        let revision = branch
-            .revision()
-            .ok_or_else(|| anyhow::anyhow!("the layer's branch has a head"))?;
-        Ok(format!("{:?}", revision_entity(&revision)))
+    /// Every claim of the pointer facts `branch`'s committed tree holds of
+    /// `layer`: its `dialog.branch/revision`, then its
+    /// `dialog.branch/tree`, as [`stored`] renders them.
+    async fn pointers(branch: &Branch, env: &Operator, layer: &Entity) -> Result<Vec<String>> {
+        let mut claims = stored(branch, env, "dialog.branch/revision", layer).await?;
+        claims.extend(stored(branch, env, "dialog.branch/tree", layer).await?);
+        Ok(claims)
+    }
+
+    /// A revision a durable layer is pointed at, by what the pointer
+    /// names of it: its entity and its tree.
+    fn named(revision: Option<crate::Revision>) -> Option<(Entity, crate::TreeReference)> {
+        revision.map(|revision| (revision.entity(), revision.tree))
+    }
+
+    /// The pointer facts naming `revision`, as [`pointers`] renders them.
+    fn pointer_to(revision: &crate::Revision) -> Vec<String> {
+        vec![
+            format!("{:?}", revision_entity(revision)),
+            format!("{:?}", tree_value(&revision.tree)),
+        ]
     }
 
     /// The `doc/note` values `query` reads through `stack`, each with
@@ -3621,35 +3536,48 @@ mod tests {
         )
     }
 
+    /// `doc/note` of every entity in `layer` alone.
+    fn notes_in(layer: &Entity) -> AttributeQuery {
+        note_query().with_layer(Term::Constant(dialog_corpus::Value::Entity(layer.clone())))
+    }
+
     /// A schema declaring `memory:notes` durable opens a stack holding
-    /// it as the repository's `notes` branch, with no memory cell of its
-    /// own. A write `in: memory:notes` is committed on that branch and
-    /// lands nowhere in the primary's tree, and the primary gains the
-    /// pointer fact naming the layer's new revision: one claim, which the
-    /// next write into the layer succeeds.
+    /// it with no memory cell and no branch of its own, empty while the
+    /// primary points it nowhere. A write `in: memory:notes` lands in a
+    /// tree the primary points at and nowhere in the primary's tree: the
+    /// primary gains one `dialog.branch/revision` and one
+    /// `dialog.branch/tree` of the layer's entity, naming the revision
+    /// and the tree the write left the layer at. The next write builds on
+    /// that tree, and its pointer succeeds the first. No branch is
+    /// written for the layer.
     #[dialog_common::test]
-    async fn it_commits_a_write_into_a_durable_layer_on_its_branch() -> Result<()> {
+    async fn it_writes_a_durable_layer_into_the_tree_the_primary_points_at() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let notes = declare_notes(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
         assert_eq!(stack.layers(), implied_and([notes.clone()]));
-        let layer = stack.durable(&notes).expect("the notes layer").clone();
-        assert_eq!(layer.name(), "notes");
         assert!(stack.layer(&notes).is_none(), "no memory cell holds it");
-        assert_eq!(layer.revision(), None, "the branch starts empty");
+        assert_eq!(stack.branch_of(&notes), None, "and no branch is it");
+        assert_eq!(stack.pointed(&notes), None, "the primary points it nowhere");
+        assert!(pointers(&branch, &operator, &notes).await?.is_empty());
 
         let doc: Entity = "doc:1".parse()?;
         stack
             .transact(note(&doc, "first", &notes))
             .perform(&operator)
             .await?;
-        let on_layer = repo.branch("notes").open().perform(&operator).await?;
+        let first = stack.pointed(&notes).expect("the layer moved");
         assert_eq!(
-            stored(&on_layer, &operator, "doc/note", &doc).await?,
-            vec!["String(\"first\")".to_string()],
-            "the write is committed on the layer's branch"
+            pointers(&branch, &operator, &notes).await?,
+            pointer_to(&first),
+            "the primary points at the layer's new tree, one claim of each"
+        );
+        assert_eq!(
+            notes_read(&stack, &operator, notes_in(&notes)).await?,
+            vec!["String(\"first\") in memory:notes".to_string()],
+            "the write is in the pointed tree"
         );
         assert!(
             stored(&branch, &operator, "doc/note", &doc)
@@ -3658,41 +3586,33 @@ mod tests {
             "the primary's tree holds none of it"
         );
         assert!(held(branch.overlay(), "doc/note", &doc)?.is_empty());
-        assert_eq!(
-            stored(
-                &branch,
-                &operator,
-                "dialog.branch/revision",
-                stack.branch_of(&notes).expect("the notes branch")
-            )
-            .await?,
-            vec![pointer_to(&on_layer)?],
-            "the primary points at the layer's new revision"
-        );
 
         stack
             .transact(note(&doc, "second", &notes))
             .perform(&operator)
             .await?;
-        on_layer.refresh(&operator).await?;
+        let second = stack.pointed(&notes).expect("the layer moved");
         assert_eq!(
-            stored(&on_layer, &operator, "doc/note", &doc).await?,
-            vec![
-                "String(\"first\")".to_string(),
-                "String(\"second\")".to_string()
-            ]
+            second.edition,
+            first.edition.successor(),
+            "the second tree is built on the first"
         );
         assert_eq!(
-            stored(
-                &branch,
-                &operator,
-                "dialog.branch/revision",
-                stack.branch_of(&notes).expect("the notes branch")
-            )
-            .await?,
-            vec![pointer_to(&on_layer)?],
+            pointers(&branch, &operator, &notes).await?,
+            pointer_to(&second),
             "the new pointer succeeds the old one"
         );
+        let reopened = branch.stack().perform(&operator).await?;
+        assert_eq!(
+            notes_read(&reopened, &operator, notes_in(&notes)).await?,
+            vec![
+                "String(\"first\") in memory:notes".to_string(),
+                "String(\"second\") in memory:notes".to_string(),
+            ],
+            "a stack opened afresh reads the layer where the primary points it"
+        );
+        let nowhere = repo.branch("notes").open().perform(&operator).await?;
+        assert_eq!(nowhere.revision(), None, "no branch was written for it");
         Ok(())
     }
 
@@ -3726,38 +3646,26 @@ mod tests {
             "`in` unbound reads every layer and binds each row's"
         );
         assert_eq!(
-            notes_read(
-                &stack,
-                &operator,
-                note_query()
-                    .with_layer(Term::Constant(dialog_corpus::Value::Entity(notes.clone())))
-            )
-            .await?,
+            notes_read(&stack, &operator, notes_in(&notes)).await?,
             vec!["String(\"kept\") in memory:notes".to_string()],
             "`in` bound to the durable layer reads it alone"
         );
         assert_eq!(
-            notes_read(
-                &stack,
-                &operator,
-                note_query().with_layer(Term::Constant(dialog_corpus::Value::Entity(
-                    crate::memory_layer()
-                )))
-            )
-            .await?,
+            notes_read(&stack, &operator, notes_in(&crate::memory_layer())).await?,
             vec!["String(\"primary\") in memory:".to_string()],
             "`in` bound to the primary reads it alone"
         );
         Ok(())
     }
 
-    /// A dispatch whose publish of the durable layer loses its
-    /// compare-and-swap, because another handle moved the layer's branch
-    /// under it, re-runs from the new heads and lands once on each
-    /// branch: one commit on the layer after the other writer's, one on
-    /// the primary, which points at the layer's tip.
+    /// A dispatch writing into the durable layer, whose primary another
+    /// handle moved under it, loses the primary's compare-and-swap and
+    /// re-runs from the new head, reading the layer where the new head
+    /// points it: it lands once, one commit on the primary after the
+    /// other writer's, and the layer's tree holds both its writes, the
+    /// pointer naming the tree the re-run minted.
     #[dialog_common::test]
-    async fn it_re_runs_a_dispatch_whose_durable_layer_moved_under_it() -> Result<()> {
+    async fn it_re_runs_a_dispatch_whose_primary_moved_under_it() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -3768,15 +3676,15 @@ mod tests {
             .transact(note(&doc, "first", &notes))
             .perform(&operator)
             .await?;
-        let primary_before = branch.revision().expect("a head");
+        let first = stack.pointed(&notes).expect("the layer moved");
 
-        // Another handle of the layer's branch moves it; the stack's
-        // handle is stale, so its publish of the layer loses the CAS.
-        let other = repo.branch("notes").open().perform(&operator).await?;
+        // Another handle of the primary moves its head; the stack's
+        // handle has not seen it.
+        let other = repo.branch("main").open().perform(&operator).await?;
         let moved = other
             .transaction()
             .assert(
-                dialog_query::the!("doc/note")
+                dialog_query::the!("doc/title")
                     .of("doc:2".parse::<Entity>()?)
                     .is("other".to_string()),
             )
@@ -3784,58 +3692,105 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        assert_ne!(
-            stack.durable(&notes).expect("notes").revision().as_ref(),
-            Some(&moved),
-            "the stack's handle has not seen the move"
-        );
+        assert_ne!(branch.revision().as_ref(), Some(&moved));
 
         let published = stack
             .transact(note(&doc, "second", &notes))
             .perform(&operator)
             .await?;
-        let layer = stack.durable(&notes).expect("notes");
-        let tip = layer.revision().expect("the layer has a head");
-        assert_eq!(
-            tip.version().edition,
-            moved.version().edition.successor(),
-            "the layer took one commit, after the other writer's"
-        );
         assert_eq!(
             published.version().edition,
-            primary_before.version().edition.successor(),
-            "the primary took one commit"
+            moved.version().edition.successor(),
+            "the primary took one commit, after the other writer's"
+        );
+        let second = stack.pointed(&notes).expect("the layer moved");
+        assert_eq!(
+            second.edition,
+            first.edition.successor(),
+            "the layer's tree was minted once, on the one the new head points at"
         );
         assert_eq!(
-            stored(layer, &operator, "doc/note", &"doc:2".parse()?).await?,
-            vec!["String(\"other\")".to_string()],
-            "the other writer's commit stands"
+            pointers(&branch, &operator, &notes).await?,
+            pointer_to(&second),
+            "the primary points at it alone"
         );
         assert_eq!(
-            stored(layer, &operator, "doc/note", &doc).await?,
+            notes_read(&stack, &operator, notes_in(&notes)).await?,
             vec![
-                "String(\"first\")".to_string(),
-                "String(\"second\")".to_string()
+                "String(\"first\") in memory:notes".to_string(),
+                "String(\"second\") in memory:notes".to_string(),
             ]
         );
-        assert_eq!(
-            stored(
-                &branch,
-                &operator,
-                "dialog.branch/revision",
-                stack.branch_of(&notes).expect("the notes branch")
+        Ok(())
+    }
+
+    /// A transaction through the stack writing into the durable layer,
+    /// whose primary another handle moved before its publish, loses the
+    /// compare-and-swap with `VersionMismatch`: the primary's pointer
+    /// facts stay the one claim of each they were, naming the tree the
+    /// layer stood at, and the layer reads as it did. The tree the lost
+    /// commit minted is named by nothing.
+    #[dialog_common::test]
+    async fn it_leaves_a_durable_layer_where_it_was_when_the_head_is_lost() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let notes = declare_notes(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        stack
+            .transact(note(&doc, "kept", &notes))
+            .perform(&operator)
+            .await?;
+        let kept = stack.pointed(&notes).expect("the layer moved");
+
+        let staged = stack
+            .transaction()
+            .assert(note(&doc, "lost", &notes))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let other = repo.branch("main").open().perform(&operator).await?;
+        other
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of("doc:2".parse::<Entity>()?)
+                    .is("other".to_string()),
             )
-            .await?,
-            vec![pointer_to(layer)?],
-            "the primary points at the layer's tip"
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let lost = staged.publish().perform(&operator).await;
+        assert!(
+            matches!(
+                lost,
+                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
+            ),
+            "{lost:?}"
+        );
+        other.refresh(&operator).await?;
+        assert_eq!(
+            pointers(&other, &operator, &notes).await?,
+            pointer_to(&kept),
+            "the primary still points at the tree the layer stood at, once"
+        );
+        assert_eq!(named(stack.pointed(&notes)), named(Some(kept)));
+        branch.refresh(&operator).await?;
+        let reopened = branch.stack().perform(&operator).await?;
+        assert_eq!(
+            notes_read(&reopened, &operator, notes_in(&notes)).await?,
+            vec!["String(\"kept\") in memory:notes".to_string()],
+            "the lost write is nowhere"
         );
         Ok(())
     }
 
     /// A write `in: memory:missing`, a layer declared nowhere, is refused
-    /// with `UnboundLayer` before anything is committed: the primary and
-    /// the durable layer stay where they were, and no `missing` branch
-    /// is written.
+    /// with `UnboundLayer` before anything is committed: the primary does
+    /// not move, its pointer of the durable layer stays as it was, and it
+    /// gains none of the missing layer.
     #[dialog_common::test]
     async fn it_refuses_a_write_into_a_durable_layer_declared_nowhere() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
@@ -3849,7 +3804,7 @@ mod tests {
             .perform(&operator)
             .await?;
         let primary = branch.revision();
-        let layer = stack.durable(&notes).expect("notes").revision();
+        let pointed = pointers(&branch, &operator, &notes).await?;
         let missing: Entity = "memory:missing".parse()?;
 
         let refused = stack
@@ -3865,100 +3820,186 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(branch.revision(), primary, "the primary did not move");
-        let on_layer = repo.branch("notes").open().perform(&operator).await?;
-        assert_eq!(on_layer.revision(), layer, "the layer did not move");
         assert_eq!(
-            stored(&on_layer, &operator, "doc/note", &doc).await?,
-            vec!["String(\"kept\")".to_string()]
+            pointers(&branch, &operator, &notes).await?,
+            pointed,
+            "the layer did not move"
         );
-        let nowhere = repo.branch("missing").open().perform(&operator).await?;
-        assert_eq!(nowhere.revision(), None, "no branch was written for it");
+        assert!(pointers(&branch, &operator, &missing).await?.is_empty());
+        assert_eq!(
+            notes_read(&stack, &operator, notes_in(&notes)).await?,
+            vec!["String(\"kept\") in memory:notes".to_string()]
+        );
         Ok(())
     }
 
-    /// `stack.sync()` pulls a durable layer whose branch pulls from an
-    /// upstream before the primary, and records where the pull left it as
-    /// the primary's pointer fact; the pulled rows read with `in` bound to
-    /// the layer. It pushes the layer to the upstream it pushes to. A
-    /// memory layer, and a primary with no upstream, are left alone.
+    /// A layer declared durable under a name that is not `memory:<name>`
+    /// is refused with `InvalidPlacement` when the stack opens, and the
+    /// refused open writes nothing: no row in `session:`, and the
+    /// primary does not move.
     #[dialog_common::test]
-    async fn it_syncs_a_durable_layer_and_records_where_the_pull_left_it() -> Result<()> {
+    async fn it_refuses_a_durable_layer_named_outside_memory() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
+        let head = branch.revision();
+        let refused = branch
+            .stack()
+            .declare(LayerDeclaration::new(
+                "session:notes".parse()?,
+                LayerType::Branch,
+            ))
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(refused, Err(CommitError::InvalidPlacement { .. })),
+            "the open is refused"
+        );
+        assert_eq!(
+            branch.overlay().revision().sequence,
+            0,
+            "nothing was written into session:"
+        );
+        branch.refresh(&operator).await?;
+        assert_eq!(branch.revision(), head, "the primary did not move");
+        Ok(())
+    }
+
+    /// `stack.sync()` pushes the primary to the upstream it pushes to,
+    /// carrying the tree it points the durable layer at, and a second
+    /// replica tracking that upstream reads the layer once it pulls: the
+    /// pointer came with the primary, and the tree with it. A durable
+    /// layer has no upstream of its own. A sync after which nothing moved
+    /// writes nothing.
+    #[dialog_common::test]
+    async fn it_syncs_the_tree_a_primary_points_a_durable_layer_at() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let upstream = repo.branch("upstream").open().perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.set_upstream(&upstream).perform(&operator).await?;
         let notes = declare_notes(&branch, &operator).await?;
+        branch.push().perform(&operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let upstream = repo
-            .branch("notes-upstream")
-            .open()
-            .perform(&operator)
-            .await?;
         let doc: Entity = "doc:1".parse()?;
-        upstream
-            .transaction()
-            .assert(
-                dialog_query::the!("doc/note")
-                    .of(doc.clone())
-                    .is("upstream".to_string()),
-            )
-            .commit()
-            .publish()
+        stack
+            .transact(note(&doc, "kept", &notes))
             .perform(&operator)
             .await?;
-        let layer = stack.durable(&notes).expect("notes");
-        layer.set_upstream(&upstream).perform(&operator).await?;
-
         stack
-            .sync(crate::Download::MinimalRanges)
-            .perform(&operator)
-            .await?;
-        assert_eq!(
-            layer.revision(),
-            upstream.revision(),
-            "the layer was pulled"
-        );
-        assert_eq!(
-            stored(
-                &branch,
-                &operator,
-                "dialog.branch/revision",
-                stack.branch_of(&notes).expect("the notes branch")
-            )
-            .await?,
-            vec![pointer_to(layer)?],
-            "the primary points where the pull left the layer"
-        );
-        assert_eq!(
-            notes_read(
-                &stack,
-                &operator,
-                note_query()
-                    .with_layer(Term::Constant(dialog_corpus::Value::Entity(notes.clone())))
-            )
-            .await?,
-            vec!["String(\"upstream\") in memory:notes".to_string()]
-        );
-
-        stack
-            .transact(note(&doc, "local", &notes))
-            .perform(&operator)
-            .await?;
-        let pointed = branch.revision();
-        stack
-            .sync(crate::Download::MinimalRanges)
+            .sync(crate::Download::QueriedRanges)
             .perform(&operator)
             .await?;
         upstream.refresh(&operator).await?;
         assert_eq!(
             upstream.revision(),
-            layer.revision(),
-            "the layer was pushed"
+            branch.revision(),
+            "the primary was pushed"
         );
+        let pointed = branch.revision();
+        stack
+            .sync(crate::Download::QueriedRanges)
+            .perform(&operator)
+            .await?;
         assert_eq!(
             branch.revision(),
             pointed,
-            "a pointer that already names the layer is not written again"
+            "nothing moved, nothing was written"
         );
+
+        let replica = repo.branch("replica").open().perform(&operator).await?;
+        replica.set_upstream(&upstream).perform(&operator).await?;
+        let mirrored = replica
+            .stack()
+            .declare(LayerDeclaration::new(notes.clone(), LayerType::Branch))
+            .perform(&operator)
+            .await?;
+        mirrored
+            .sync(crate::Download::QueriedRanges)
+            .perform(&operator)
+            .await?;
+        assert_eq!(replica.revision(), branch.revision(), "the replica pulled");
+        assert_eq!(
+            named(mirrored.pointed(&notes)),
+            named(stack.pointed(&notes)),
+            "the replica's primary points the layer where the first's does"
+        );
+        assert_eq!(
+            notes_read(&mirrored, &operator, notes_in(&notes)).await?,
+            vec!["String(\"kept\") in memory:notes".to_string()],
+            "the second replica reads the layer"
+        );
+        Ok(())
+    }
+
+    /// Two replicas each write the durable layer, different cells and the
+    /// same single-valued cell with different values, then each syncs
+    /// through one upstream, the first and then the second, and the first
+    /// again. The second's pull merges two primaries that each moved the
+    /// layer: its changes are replayed onto the first's tree rather than
+    /// `last` picking one tree. Both then read the union, with the
+    /// second-synced replica's value in the shared cell, and each primary
+    /// points at one tree, the same one, which both load.
+    #[dialog_common::test]
+    async fn it_merges_a_durable_layer_two_replicas_moved() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let upstream = repo.branch("upstream").open().perform(&operator).await?;
+        let first = repo.branch("main").open().perform(&operator).await?;
+        first.set_upstream(&upstream).perform(&operator).await?;
+        let notes = declare_notes(&first, &operator).await?;
+        first.push().perform(&operator).await?;
+        let second = repo.branch("replica").open().perform(&operator).await?;
+        second.set_upstream(&upstream).perform(&operator).await?;
+        second
+            .pull(crate::Download::QueriedRanges)
+            .perform(&operator)
+            .await?;
+        let a = first.stack().perform(&operator).await?;
+        let b = second.stack().perform(&operator).await?;
+        assert_eq!(b.layers(), a.layers(), "the declaration replicated");
+
+        let shared: Entity = "doc:shared".parse()?;
+        a.transact(note(&"doc:a".parse()?, "from a", &notes))
+            .assert(headline(&shared, "a", &notes))
+            .perform(&operator)
+            .await?;
+        b.transact(note(&"doc:b".parse()?, "from b", &notes))
+            .assert(headline(&shared, "b", &notes))
+            .perform(&operator)
+            .await?;
+        for stack in [&a, &b, &a] {
+            stack
+                .sync(crate::Download::QueriedRanges)
+                .perform(&operator)
+                .await?;
+        }
+
+        for (stack, replica) in [(&a, "first"), (&b, "second")] {
+            assert_eq!(
+                notes_read(stack, &operator, notes_in(&notes)).await?,
+                vec![
+                    "String(\"from a\") in memory:notes".to_string(),
+                    "String(\"from b\") in memory:notes".to_string(),
+                ],
+                "the {replica} replica reads both replicas' notes"
+            );
+            assert_eq!(
+                headline_read(stack, &operator, &shared, &notes).await?,
+                vec!["String(\"b\")".to_string()],
+                "the {replica} replica reads the second-synced value"
+            );
+        }
+        let merged = b.pointed(&notes).expect("the layer is pointed at");
+        assert_eq!(named(a.pointed(&notes)), named(Some(merged.clone())));
+        for primary in [&first, &second] {
+            assert_eq!(
+                pointers(primary, &operator, &notes).await?,
+                pointer_to(&merged),
+                "{}'s primary points at the merged tree alone",
+                primary.name()
+            );
+        }
         Ok(())
     }
 
@@ -4169,9 +4210,14 @@ mod tests {
     }
 
     /// Two replicas of a space sync a stack through one S3 upstream:
-    /// the first writes into its primary and its durable layer and syncs;
-    /// the second, whose primary and layer track the same remote
-    /// branches, syncs and reads the same rows with the same `in`.
+    /// the first writes into its primary and its durable layer and
+    /// syncs, which uploads the tree the primary points the layer at
+    /// before the primary's head; the second, whose primary tracks the
+    /// same remote branch and whose stack declares the layer, syncs with
+    /// `Download::Everything` and reads the same rows with the same `in`.
+    /// The pull brought the layer's tree local before the primary moved:
+    /// every block of it is in the second replica's own store, read with
+    /// no remote to fall back on.
     #[cfg(any(feature = "integration-tests", feature = "web-integration-tests"))]
     #[dialog_common::test]
     async fn it_syncs_a_durable_layer_to_a_second_replica(s3: S3Address) -> Result<()> {
@@ -4179,6 +4225,7 @@ mod tests {
         use crate::helpers::connect;
         use dialog_peer::helpers::unique_name;
         use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
+        use futures_util::StreamExt as _;
 
         let (operator, profile) = test_session_with_peer().await;
         let site = crate::SiteAddress::from(
@@ -4206,18 +4253,24 @@ mod tests {
         main.set_upstream(origin.branch("main").open().perform(&operator).await?)
             .perform(&operator)
             .await?;
-        stack
-            .durable(&notes)
-            .expect("notes")
-            .set_upstream(origin.branch("notes").open().perform(&operator).await?)
-            .perform(&operator)
-            .await?;
         let doc: Entity = "doc:1".parse()?;
         stack
             .transact(note(&doc, "kept", &notes))
             .assert(note(&doc, "primary", &crate::memory_layer()))
             .perform(&operator)
             .await?;
+        // Enough rows that the layer's tree is more than the one leaf a
+        // read of its revision record reaches.
+        let mut bulk = Changes::new();
+        for at in 0..200 {
+            note(
+                &format!("doc:bulk-{at}").parse()?,
+                &format!("bulk {at} ").repeat(16),
+                &notes,
+            )
+            .assert(&mut bulk);
+        }
+        stack.transact(bulk).perform(&operator).await?;
         stack
             .sync(crate::Download::MinimalRanges)
             .perform(&operator)
@@ -4234,21 +4287,32 @@ mod tests {
             .set_upstream(origin.branch("main").open().perform(&operator).await?)
             .perform(&operator)
             .await?;
-        replica
-            .pull(crate::Download::MinimalRanges)
-            .perform(&operator)
-            .await?;
-        let mirrored = replica.stack().perform(&operator).await?;
-        mirrored
-            .durable(&notes)
-            .expect("the declaration replicated with the primary")
-            .set_upstream(origin.branch("notes").open().perform(&operator).await?)
+        let mirrored = replica
+            .stack()
+            .declare(LayerDeclaration::new(notes.clone(), LayerType::Branch))
             .perform(&operator)
             .await?;
         mirrored
-            .sync(crate::Download::MinimalRanges)
+            .sync(crate::Download::Everything)
             .perform(&operator)
             .await?;
+
+        let pointed = mirrored
+            .pointed(&notes)
+            .expect("the pull pointed the layer");
+        assert_eq!(named(Some(pointed.clone())), named(stack.pointed(&notes)));
+        // Every block of the pointed tree is in the second replica's own
+        // store: an export that must find each one locally, and fails on
+        // the first it lacks, reads the whole tree.
+        let local = crate::Snapshot::new(replica.subject(), pointed).export();
+        let items = local.perform(&operator);
+        futures_util::pin_mut!(items);
+        let mut blocks = 0;
+        while let Some(item) = items.next().await {
+            item?;
+            blocks += 1;
+        }
+        assert!(blocks > 0, "the layer's tree was read from the local store");
 
         let every = note_query().with_layer(Term::var("where"));
         assert_eq!(
@@ -4256,13 +4320,16 @@ mod tests {
             notes_read(&stack, &operator, every).await?,
             "the second replica reads the same rows with the same `in`"
         );
+        let doc_notes = AttributeQuery::from(
+            Term::<QueryRelation>::from(QueryRelation::from(
+                "doc/note".parse::<dialog_corpus::Relation>()?,
+            ))
+            .of(Term::<Entity>::from(doc.clone()))
+            .is(Term::<String>::var("v")),
+        )
+        .with_layer(Term::var("where"));
         assert_eq!(
-            notes_read(
-                &mirrored,
-                &operator,
-                note_query().with_layer(Term::var("where"))
-            )
-            .await?,
+            notes_read(&mirrored, &operator, doc_notes).await?,
             vec![
                 "String(\"kept\") in memory:notes".to_string(),
                 "String(\"primary\") in memory:".to_string(),
@@ -4568,9 +4635,9 @@ mod tests {
 
     /// A stack opens through an environment that can only read: one
     /// that opens branches and queries them, and provides nothing a
-    /// commit needs. It builds the memory layer and opens the durable
-    /// layer the primary declares, and reads the primary and what
-    /// arrives in `control:` through the same environment.
+    /// commit needs. It builds the memory layer, reads where the primary
+    /// points the durable layer it declares, and reads the primary and
+    /// what arrives in `control:` through the same environment.
     #[dialog_common::test]
     async fn it_opens_a_stack_through_an_environment_that_only_reads() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
@@ -4586,11 +4653,21 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
+        branch
+            .stack()
+            .perform(&operator)
+            .await?
+            .transact(note(&doc, "noted", &notes))
+            .perform(&operator)
+            .await?;
         let reader = ReadOnly(operator.clone());
 
         let stack = branch.stack().perform(&reader).await?;
         assert_eq!(stack.layers(), implied_and([state, notes.clone()]));
-        assert!(stack.durable(&notes).is_some(), "the durable layer opened");
+        assert!(
+            stack.pointed(&notes).is_some(),
+            "the durable layer is read where the primary points it"
+        );
         let titles: Vec<dialog_query::Claim> = stack
             .query()
             .select(AttributeQuery::from(

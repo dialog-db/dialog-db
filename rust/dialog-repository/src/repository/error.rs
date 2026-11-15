@@ -623,13 +623,11 @@ pub enum CommitError {
 
     /// A placement declaration carries a value that is not a layer, or a
     /// layer declaration one a stack cannot build: a `dialog.layer/type`
-    /// that names no layer type, a branch layer not named
-    /// `memory:<branch>`, or one whose `dialog.layer/branch` is missing
-    /// or is not the branch the stack derives for it.
+    /// that names no layer type, or a durable layer not named
+    /// `memory:<name>`.
     #[error("Placement of {attribute} names no layer: {value}")]
     InvalidPlacement {
-        /// The attribute declared, such as `dialog.layer/type of <layer>`
-        /// or `dialog.layer/branch of <layer>`.
+        /// The attribute declared, such as `dialog.layer/type of <layer>`.
         attribute: String,
         /// The value found.
         value: String,

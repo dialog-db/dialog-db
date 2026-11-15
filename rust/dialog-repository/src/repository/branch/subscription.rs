@@ -882,24 +882,29 @@ where
             .collect()
     }
 
-    /// The head each of the stack's durable layers stands at now, in
-    /// the stack's order; none without a stack.
+    /// The revision the primary points each of the stack's durable
+    /// layers at now, as the stack last read it, in the stack's order;
+    /// none without a stack.
     fn durable_heads_now(&self) -> Vec<Option<Revision>> {
         self.stack
             .iter()
-            .flat_map(|stack| stack.durables().iter())
-            .map(|(_, branch)| branch.revision())
+            .flat_map(|stack| stack.durables().pinned().revisions)
             .collect()
     }
 
-    /// `primary` followed by the stack's durable layers, each as its
-    /// branch stands now, with the names their rows bind `in` to.
+    /// `primary` followed by the stack's durable layers, each at the
+    /// tree the primary points it at now, with the names their rows bind
+    /// `in` to.
     fn lines(&self, primary: Source) -> (Vec<Source>, Vec<Option<Entity>>) {
         let mut sources = vec![primary];
         let mut names = vec![None];
-        for (layer, branch) in self.stack.iter().flat_map(|stack| stack.durables()) {
-            sources.push(Source::from(branch.clone()));
-            names.push(Some(layer.clone()));
+        for (layer, source) in self
+            .stack
+            .iter()
+            .flat_map(|stack| stack.durables().sources())
+        {
+            sources.push(source);
+            names.push(Some(layer));
         }
         (sources, names)
     }

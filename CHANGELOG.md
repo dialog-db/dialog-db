@@ -14,7 +14,98 @@ says how to cut a release.
 
 ## Unreleased
 
-### A `Session` is a `Stack`, every stack lists and records its three implied layers from open, and a layer is declared by its type and a branch layer by its branch entity
+### A durable layer is the tree the primary points at, with no head of its own, and a pull merges a layer two replicas moved
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+point 4).
+
+A durable layer `memory:<name>` was a branch with a head of its own
+beside the primary's pointer to it, so the two could disagree: a
+partial publish moved one and not the other, and a pull could race
+them. Now the primary's pointer is the only head. The layer is the
+tree named by two facts of the layer's own entity in the primary,
+`memory:<name> dialog.branch/revision <revision entity>` and
+`memory:<name> dialog.branch/tree "<tree hash, base58>"`, written
+together under `last`. A dispatch that writes into the layer mints
+the layer's next tree on the one the primary pointed at, uploads its
+blocks to the local store, and names it in the same commit of the
+primary: one compare-and-swap, the primary's. A lost one leaves the
+minted tree an orphan nothing names, and the dispatch re-runs from the
+new head, reading the layer where that head points it. The pointer is
+keyed by the layer's entity because a branch entity is derived from
+the replica, so a pointer keyed by one is never the same cell on two
+replicas.
+
+`Stack::sync` pulls and pushes the primary alone. Its pull downloads
+the trees the incoming primary points the layers at, to the
+`Download` given, before the primary's head moves, as it downloads
+the primary's own tree, so a replica that goes offline after a pull
+reads every layer. When the pull merged two primaries that each moved
+a layer, the pointer cells hold a claim of each; rather than `last`
+picking one, the sync replays this replica's changes to the layer
+since the two met onto the other's tree, as a branch pull rebases
+local commits: our writes win on the cells they touch (a write that
+succeeded a cell's claims replaces theirs there), theirs stand
+elsewhere. The merged tree is minted locally and the primary pointed
+at it alone. The push uploads the pointed trees' blocks before the
+primary's head.
+
+What this changes for you:
+
+- `LayerType::Branch` carries no entity: declare a durable layer with
+  `LayerDeclaration::new("memory:notes".parse()?, LayerType::Branch)`,
+  which writes `dialog.layer/type branch:` alone. `LayerType` is
+  `Copy`. `LayerType::branch()` is gone.
+- `Stack::durable(name)` and `Stack::durables()` are gone: a durable
+  layer has no branch to hand out, and no upstreams of its own; the
+  primary's `dialog.branch/pull` and `dialog.branch/push` carry it.
+  `Stack::layers()` still lists it, and `Stack::layer` still answers
+  `None` for it.
+- `Stack::branch_of(name)` answers for `memory:` alone; `None` for a
+  durable layer.
+- The `dialog.layer/branch` refusal of a durable layer naming another
+  branch's entity, and the acceptance of one naming another replica's,
+  are gone with the fact. A durable layer named outside `memory:`
+  still fails the open with `CommitError::InvalidPlacement`.
+- A write into a durable layer no longer commits on a branch `<name>`:
+  no such branch is opened or written. A rule premised on the layer's
+  `dialog.branch/revision` reads the fact of the layer's entity.
+- A `Stack::query` reads a durable layer at the tree the primary
+  pointed it at when the stack last read the primary (at open, after
+  each dispatch and sync through it, and before a dispatch that finds
+  the primary moved). A transaction from `Stack::transaction` whose
+  primary moved since the stack last read the pointers is refused with
+  `PublishError::VersionMismatch`, after reading them again, so its
+  retry builds on fresh ones.
+- `SyncError::Upstreams` and `SyncError::Pull` and `SyncError::Push`
+  now speak of the primary alone; `SyncError::Commit` also covers
+  minting a merged layer.
+- The corpus write gate admits `dialog.branch/tree` from an application
+  write, beside `dialog.branch/revision`.
+
+Why: two heads for one layer can disagree, and nothing can say which
+is right; one head cannot. A pull of the primary already downloads
+what it adopts before moving, so the trees it points at are part of
+that download, and a merge of the primary that leaves two pointers has
+to rebase the layer the way a branch pull rebases commits, not drop
+one replica's writes.
+
+#### Compatibility and migration
+
+- A primary written by an earlier pre-release build of this line
+  holds `dialog.branch/revision` facts of its layer branches' entities,
+  and those branches have heads. This build reads the pointer facts of
+  the layer's own entity and ignores the branch heads: such a primary
+  opens its durable layers empty until a dispatch writes into them,
+  and the rows on the old branches stay there, unread. Nothing is
+  rewritten. A build from before this change refuses a durable layer
+  declared by this one, which names no `dialog.layer/branch`, with
+  `CommitError::InvalidPlacement` when it opens a stack.
+- Nothing already released is affected: no release carries durable
+  layers.
+
+### A `Session` is a `Stack`, every stack lists and records its three implied layers from open, and a layer is declared by its type
 
 [#813](https://github.com/dialog-db/dialog-db/pull/813), argued in
 [notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
@@ -28,14 +119,13 @@ says, `memory:` (the primary), `session:` (its own) and `control:`
 from the moment it opens, written with the facts that describe the
 three layers. A layer is declared by its type, a bare-scheme entity,
 `dialog.layer/type session:`, `channel:` or `branch:`, in place of
-`dialog.layer/store "memory"`, `"control"` or `"durable"`, and a
-branch layer names its branch by the entity the meta branch derives
-from `(replica, name)`, `dialog.layer/branch`. A branch's revision is
-the meta branch's `dialog.branch/revision`, naming the revision
-entity: the primary's row in `session:` and a durable layer's pointer
-fact in the primary are that attribute of the branch's entity, where
-both were `dialog.layer/revision` of `memory:` and `memory:<name>`
-with the tree's hash as text.
+`dialog.layer/store "memory"`, `"control"` or `"durable"`. A branch's
+revision is the meta branch's `dialog.branch/revision`, naming the
+revision entity: the primary's row in `session:` is that attribute of
+the primary's branch entity, the one the meta branch derives from
+`(replica, name)`, where it was `dialog.layer/revision` of `memory:`
+with the tree's hash as text. A durable layer's pointer facts are the
+same attribute of the layer's own entity (see the entry above).
 
 What this changes for you:
 
@@ -46,24 +136,16 @@ What this changes for you:
   (`dialog_repository::stack::invoke`, `stack::arrivals`,
   `stack::sync`). `Store` is `LayerType`: `Store::Memory` is
   `LayerType::Session`, `Store::Control` is `LayerType::Channel`, and
-  `Store::Durable` is `LayerType::Branch(entity)`, carrying the
-  branch's entity. `LayerDeclaration`'s `store` field is `kind`.
+  `Store::Durable` is `LayerType::Branch`. `LayerDeclaration`'s
+  `store` field is `kind`.
   `CommitError::UnboundLayer` says "stack" where it said "session".
-- `LayerDeclaration::new(layer, kind)` writes `dialog.layer/type` and,
-  for `LayerType::Branch`, `dialog.layer/branch`, both under `last`.
-  `layer_type_attr()` and `layer_branch_attr()` are new; `LayerType::entity`
-  is the type's bare-scheme entity. `dialog.layer/store` is no longer
+- `LayerDeclaration::new(layer, kind)` writes `dialog.layer/type`, under
+  `last`. `layer_type_attr()` and `layer_branch_attr()` are new, the
+  latter naming the primary's branch entity of `memory:`;
+  `LayerType::entity` is the type's bare-scheme entity. `dialog.layer/store` is no longer
   read: a schema declaring its layers that way opens a stack with the
   three implied layers alone.
-- A durable layer `memory:<name>` declared by this process (on the
-  stack, `OpenStack::declare`, or in the primary's session store)
-  whose `dialog.layer/branch` is not the entity of the branch `<name>`
-  on the primary's replica fails the open with
-  `CommitError::InvalidPlacement`, before anything is written. One the
-  primary's tree holds may have come from another replica, whose
-  entity for the branch is its own: the stack opens this replica's
-  branch `<name>` for it. `Stack::branch_of(layer)` is new: the branch
-  entity of `memory:` and of each durable layer.
+- `Stack::branch_of(layer)` is new: the branch entity of `memory:`.
 - `Stack::layers()` lists `memory:`, `session:` and `control:` first,
   then the session layers and channels the schema declares, then its
   durable layers. It used to list `session:` first and leave the other
@@ -85,12 +167,12 @@ What this changes for you:
   layer's row (`session:`, `control:`, a declared session layer or
   channel) stays `<layer> dialog.layer/revision "<chain hash,
   base58>"`: an in-memory layer's revision has no entity form yet.
-- A durable layer's pointer fact in the primary is `<its branch's
-  entity> dialog.branch/revision <the revision's entity>`, in place of
-  `memory:<name> dialog.layer/revision "<tree, base58>"`; `Stack::sync`
-  reads and writes that. `session:` holds no row for a durable layer
-  any more: the primary's pointer fact is the record. A rule premised
-  on a durable layer's revision reads the pointer fact.
+- A durable layer's pointer fact in the primary is
+  `dialog.branch/revision` naming the revision's entity, in place of
+  `memory:<name> dialog.layer/revision "<tree, base58>"` (its form is
+  in the entry above). `session:` holds no row for a durable layer any
+  more: the primary's pointer fact is the record. A rule premised on a
+  durable layer's revision reads the pointer fact.
 - `control:` is recorded like any memory layer, after the dispatch's
   commands land in it: a dispatch whose commands land there rewrites
   `control:`'s row, as one instant of `session:`.
@@ -104,9 +186,9 @@ What this changes for you:
 Why: the thing an embedder opens is a stack of layers, and naming it
 a session collided with the session the schema already has. A layer's
 revision row is where it stands, so it exists as soon as the stack
-does. A branch layer is a branch, so everything about it is the branch
-entity's own meta facts, the ones a pull and a push already read,
-rather than a second vocabulary of layer facts and base58 text.
+does. A revision is the meta branch's `dialog.branch/revision`, the
+fact a pull and a push already read, rather than a second vocabulary
+of layer facts and base58 text.
 
 #### Compatibility and migration
 
@@ -115,7 +197,7 @@ rather than a second vocabulary of layer facts and base58 text.
   are no longer read: a primary holding them opens a stack with the
   three implied layers alone, and its durable layers' pointer facts
   are written afresh under `dialog.branch/revision` by the next
-  dispatch or sync that moves them. Re-declare the layers with
+  dispatch that moves them. Re-declare the layers with
   `LayerDeclaration` to keep them. Nothing is rewritten. A build from
   before this change reads the new declarations as facts it does not
   understand and opens no layer from them.
@@ -229,49 +311,44 @@ concept's.
   `control:` is process-local, and a scan of a whole layer reads what
   is already stored.
 
-### A durable layer is a branch the primary points at, and `Stack::sync` pulls and pushes it with the primary
+### A durable layer is a tree the primary points at, and `Stack::sync` carries it with the primary
 
 [#808](https://github.com/dialog-db/dialog-db/pull/808), argued in
 [notes/layers.md](./notes/layers.md) (points 1, 11 and 13, and
-"Durable layers" under "Open").
+"Durable layers" under "Open"); the model is the one
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD) settled (see
+the first entry above).
 
-A stack's layers were all in memory. A layer can now be durable: a
-branch of the repository, declared in the primary as
-`memory:<name> dialog.layer/type branch:` and `memory:<name>
-dialog.layer/branch <the branch's entity>` (`LayerType::Branch`). A
-stack opens the branch `<name>` beside the primary and reads it as a
-line whose rows bind `in` to `memory:<name>`. A write `in:
+A stack's layers were all in memory. A layer can now be durable,
+declared in the primary as `memory:<name> dialog.layer/type branch:`
+(`LayerType::Branch`): a tree the primary points at. A stack reads it
+as a line whose rows bind `in` to `memory:<name>`. A write `in:
 memory:<name>`, a rule head whose descriptor names it, and a write
-while it is selected are committed on that branch as part of the
-dispatch, and nothing of them lives in memory. The primary records the
-revision each durable layer stands at as a pointer fact of its own,
-`<the branch's entity> dialog.branch/revision <its revision's entity>`,
-under `last`, written by the dispatch that moved the layer, so the primary's
-history says which revision of each layer goes with each of its own.
-The layers publish bottom to top, the primary last since it carries the
-pointers, and a lost compare-and-swap on any of them re-runs the whole
-dispatch from the new heads. `Stack::sync` pulls every durable layer
-with upstreams, then the primary, writes the pointer of a layer the
-pulls moved, and pushes the layers, then the primary.
+while it is selected are minted as the layer's next tree as part of
+the dispatch, and nothing of them lives in memory. The primary records
+the tree each durable layer stands at as pointer facts of the layer's
+entity, `dialog.branch/revision <its revision's entity>` and
+`dialog.branch/tree "<its tree, base58>"`, under `last`, written by
+the dispatch that moved the layer, so the primary's history says which
+tree of each layer goes with each of its own, and the primary's
+compare-and-swap is the layer's. `Stack::sync` pulls the primary,
+downloading the trees it points at, and pushes it, uploading them.
 
 What this changes for you:
 
 - `LayerType::Branch` is new; `LayerDeclaration::new("memory:notes".parse()?,
-  LayerType::Branch(entity))` declares one, `entity` being the branch
-  `notes`'s on the primary's replica (`schema::Replica::branch`). A durable layer named under another
-  store (`session:notes`) or with no branch name (`memory:`) fails the
+  LayerType::Branch)` declares one. A durable layer named under another
+  store (`session:notes`) or with no name (`memory:`) fails the
   stack's open with `CommitError::InvalidPlacement`.
 - `Stack::layers` lists the durable layers after the memory layers.
-  `Stack::durable(name)` and `Stack::durables()` hand out their
-  branches, for setting their upstreams; `Stack::layer` answers
-  `None` for a durable layer, which holds no memory cell.
-- A dispatch that writes a durable layer commits on its branch and on
-  the primary, with the pointer fact, so it publishes on the primary
-  even when it wrote nothing else there. A rule premised on a durable
-  layer's pointer fact fires when the dispatch that moved the layer
-  writes it.
+  `Stack::layer` answers `None` for a durable layer, which holds no
+  memory cell.
+- A dispatch that writes a durable layer publishes on the primary,
+  with the pointer facts, even when it wrote nothing else there. A
+  rule premised on a durable layer's pointer fact fires when the
+  dispatch that moved the layer writes it.
 - `CommitError::UnboundLayer` refuses a write into `memory:<name>` the
-  primary does not declare, before any branch moves.
+  primary does not declare, before anything is minted.
 - `Stack::sync(download)` and `SyncStack`, `SyncEnv` and
   `SyncError` are new. A sync names its `Download`, as every pull does.
 - A query through a stack, `Stack::query`, a transaction through
@@ -286,18 +363,15 @@ composite.
 
 #### Compatibility and migration
 
-- `dialog.layer/type branch:`, `dialog.layer/branch` and the pointer
-  fact `dialog.branch/revision` of the layer's branch entity are new
-  stored facts in the primary, replicated with it; the layer's rows are in its own branch,
-  synced as any branch is. 0.4.0 and earlier know no layer declarations
-  and read both as ordinary facts, and read the primary without the
-  layer's rows. A build of this release line from before this change
-  opens no stack on a primary that declares a durable layer: it
-  refuses the declaration with `CommitError::InvalidPlacement`. Nothing
-  already stored is rewritten, and nothing has to be run.
-- What a durable layer syncs to is its branch's own upstreams, set on
-  the branch (`Stack::durable(name)` then `Branch::set_upstream`), on
-  each replica. The declaration carries no upstream.
+- `dialog.layer/type branch:` and the pointer facts
+  `dialog.branch/revision` and `dialog.branch/tree` of the layer's
+  entity are new stored facts in the primary, replicated with it; the
+  layer's rows are in the tree they name, synced with the primary.
+  0.4.0 and earlier know no layer declarations and read them as
+  ordinary facts, and read the primary without the layer's rows.
+  Nothing already stored is rewritten, and nothing has to be run.
+- What a durable layer syncs to is the primary's upstreams. The
+  declaration carries no upstream.
 
 ### `control:` is the layer a command lives in for one tick, a channel is a layer its consumer empties, and a provider reads what arrives in either
 

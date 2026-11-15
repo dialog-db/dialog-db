@@ -26,8 +26,8 @@ use super::{
 };
 use crate::Ephemeral;
 use crate::placement::{
-    Pointer, Recorded, control_layer, follows_selection, memory_layer, revision_entity, selected,
-    session_layer, take_dispatched,
+    Pointer, Recorded, control_layer, follows_selection, memory_layer, selected, session_layer,
+    take_dispatched,
 };
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
@@ -35,12 +35,13 @@ use crate::repository::branch::session::{Composite, shared_metadata};
 use crate::repository::branch::transaction::{DurableLayer, StackContext};
 use crate::repository::source::{Caches, Live, View};
 use crate::stack::Loopback;
+use crate::stack::durable::{Durables, Pinned};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
     SelectQuery, Snapshot, SnapshotClaims, Staged, TransactionQuery, origin_of,
 };
 use dialog_capability::history::Origin;
-use dialog_capability::{Did, Fork, Provider};
+use dialog_capability::{Capability, Did, Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
 use dialog_corpus::tree::CorpusNode;
@@ -48,7 +49,7 @@ use dialog_corpus::tree::WriteScope;
 use dialog_corpus::{Change, Changes, Entity, Fact, Selector, Statement, Update as _};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
-use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
+use dialog_effects::authority::{Attest, Identify, Operator, OperatorExt as _};
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
@@ -135,11 +136,15 @@ pub struct TransactionBatch {
     /// a stack: its publish then records, in the stack's own layer, the
     /// revision of every layer that moved (see [`record_revisions`]).
     revisions: Option<Entity>,
-    /// The chains this one staged on the stack's durable layers, by
-    /// layer: what the chain wrote into each, committed on its branch.
-    /// Published before the primary's, which carries the pointer fact
-    /// naming each one's tip.
-    durables: Vec<(Entity, TransactionBatch)>,
+    /// The trees this chain minted for the stack's durable layers, by
+    /// layer: the revision each layer's writes left it at, which the
+    /// chain's primary commit points at. Nothing publishes them: the
+    /// primary's publish is the layers' too.
+    durables: Vec<(Entity, Revision)>,
+    /// The stack's durable layers and where the chain read them from:
+    /// once the publish has won, the layers stand where the chain left
+    /// them. `None` for a chain committed on the branch alone.
+    pinned: Option<(Arc<Durables>, Pinned)>,
     /// The commands the chain's transactions dispatched themselves, the
     /// writes into `control:` among them: with
     /// [`induced`](Self::induced), what the publish lands in the
@@ -332,6 +337,7 @@ impl BatchPublish {
             overlay_retractions,
             revisions,
             durables,
+            pinned,
             dispatched,
             loopback,
         } = self.batch;
@@ -359,14 +365,22 @@ impl BatchPublish {
                 None => Ok(()),
             }
         };
-        // The durable layers publish first, bottom to top: the primary
-        // carries the pointer facts naming their tips, so it publishes
-        // last. A lost compare-and-swap on any of them fails the publish
-        // before the primary moves, and the dispatch re-runs from the new
-        // heads.
-        for (_, durable) in durables {
-            Box::pin(durable.publish().perform(env)).await?;
-        }
+        // The durable layers have no head: the trees the chain minted
+        // for them are named by the primary's commit, so once the
+        // primary's publish has won they stand there, and a lost one
+        // leaves them pointed where they were, the minted trees an orphan
+        // block set nothing names.
+        let settle = |tip: &Revision| {
+            if let Some((state, mut pinned)) = pinned {
+                for (layer, revision) in durables {
+                    if let Some(at) = state.layers().iter().position(|held| *held == layer) {
+                        pinned.revisions[at] = Some(revision);
+                    }
+                }
+                pinned.at = Some(tip.tree.clone());
+                state.set(pinned);
+            }
+        };
 
         if chain.is_empty() {
             // Nothing staged. A same-value publish would bump the cell
@@ -385,6 +399,7 @@ impl BatchPublish {
                 .into());
             }
             advance_watermark(&induction, &tip, Some(tip.version()), env).await?;
+            settle(&tip);
             retract_from_overlay(&overlay, overlay_retractions)?;
             apply_shares(&memories, shares)?;
             land(loopback)?;
@@ -397,6 +412,7 @@ impl BatchPublish {
             .first()
             .and_then(|(_, record)| record.parents.first().cloned());
         head.publish(tip.clone(), env).await?;
+        settle(&tip);
         retract_from_overlay(&overlay, overlay_retractions)?;
         // The memory layers take their shares only now that the primary's
         // commit is published: a refused publish shows in no layer. Each
@@ -645,6 +661,24 @@ impl TransactionCommit<&Branch> {
             .into());
         }
 
+        // Through a stack with durable layers, the layers were read where
+        // the primary pointed them when the transaction opened. A primary
+        // the transaction pinned elsewhere than where they were read
+        // would have its commit point the layers at trees built on stale
+        // ones: they are read again, and the transaction refused as if
+        // its head had moved, so the caller runs it again on fresh ones.
+        if let Some(stack) = &self.stack
+            && stack.pinned.at != base.as_ref().map(|head| head.tree.clone())
+            && !stack.state.layers().is_empty()
+        {
+            stack.state.refresh(base.as_ref(), env).await?;
+            return Err(PublishError::VersionMismatch {
+                expected: base_version,
+                current: Current::Unknown,
+            }
+            .into());
+        }
+
         // The line staged commits mint on: the branch's own identity,
         // derived once here (memoized) so the batch's snapshot can carry
         // it for the links that follow.
@@ -664,6 +698,10 @@ impl TransactionCommit<&Branch> {
             .unwrap_or_default();
         memories.push((session_layer(), overlay.clone()));
         let loopback = self.stack.as_ref().map(|stack| stack.loopback.clone());
+        let pinned = self
+            .stack
+            .as_ref()
+            .map(|stack| (stack.state.clone(), stack.pinned.clone()));
         let (outcome, induced, shares, durables, dispatched) = Box::pin(mint_link(
             View::at(Live::Branch(branch), base.as_ref()),
             |profile, issuer| branch.commit_identity(profile, issuer),
@@ -708,6 +746,7 @@ impl TransactionCommit<&Branch> {
                 overlay_retractions: retractions,
                 revisions,
                 durables,
+                pinned,
                 dispatched,
                 loopback,
             },
@@ -740,6 +779,7 @@ impl TransactionCommit<&Branch> {
                     overlay_retractions: retractions,
                     revisions,
                     durables,
+                    pinned,
                     dispatched,
                     loopback,
                 }
@@ -800,6 +840,12 @@ impl TransactionCommit<TransactionBatch> {
         }
         if batch.loopback.is_none() {
             batch.loopback = self.stack.as_ref().map(|stack| stack.loopback.clone());
+        }
+        if batch.pinned.is_none() {
+            batch.pinned = self
+                .stack
+                .as_ref()
+                .map(|stack| (stack.state.clone(), stack.pinned.clone()));
         }
         let staged = take(&mut batch.durables);
 
@@ -988,7 +1034,7 @@ async fn mint_link<Env>(
     canonicalize: bool,
     amend: Option<Amended>,
     stack: Option<StackContext>,
-    staged: Vec<(Entity, TransactionBatch)>,
+    staged: Vec<(Entity, Revision)>,
     env: &Env,
 ) -> Result<Link, CommitError>
 where
@@ -1136,11 +1182,12 @@ where
     }
     let durables = match &stack {
         Some(stack) => {
-            Box::pin(commit_durables(
+            Box::pin(mint_durables(
                 &stack.durables,
                 &mut ticks,
                 &mut changes,
                 staged,
+                &operator,
                 env,
             ))
             .await?
@@ -1181,31 +1228,33 @@ where
 
 /// What [`mint_link`] mints: the link's outcome on the primary, the
 /// transients its rules emitted, its writes into memory layers tick by
-/// tick, the chains it staged on durable layers, by layer, and the
+/// tick, the trees it minted for durable layers, by layer, and the
 /// commands it dispatched itself.
 type Link = (
     Outcome,
     Changes,
     Vec<Vec<(Entity, Changes)>>,
-    Vec<(Entity, TransactionBatch)>,
+    Vec<(Entity, Revision)>,
     Changes,
 );
 
-/// Take the writes into `durables` out of `ticks` and commit each
-/// layer's, every tick of them together, on the layer's branch: as a
-/// link of the chain `staged` holds for it, or as the first link of a
-/// chain built on the head the dispatch pinned. Each layer a write moved
-/// gets its pointer fact in `changes`, the primary's writes, naming the
-/// tip it is staged at. Answers the chains, by layer, `staged` among
-/// them. Nothing is published: the primary's publish publishes them
-/// first.
-async fn commit_durables<Env>(
+/// Take the writes into `durables` out of `ticks` and mint each
+/// layer's, every tick of them together, as the layer's next tree: on
+/// the tree an earlier link of the chain minted for it (`staged`), or on
+/// the one the primary pointed it at when the dispatch began. The writes
+/// are settled against the layer as a commit on it would settle them.
+/// Each layer a write moved gets its pointer facts in `changes`, the
+/// primary's writes, naming the tree it was minted at. Answers the minted
+/// revisions, by layer, `staged` among them. Nothing is published: the
+/// primary's commit is what names them.
+async fn mint_durables<Env>(
     durables: &[DurableLayer],
     ticks: &mut Vec<Vec<(Entity, Changes)>>,
     changes: &mut Changes,
-    mut staged: Vec<(Entity, TransactionBatch)>,
+    mut staged: Vec<(Entity, Revision)>,
+    operator: &Capability<Operator>,
     env: &Env,
-) -> Result<Vec<(Entity, TransactionBatch)>, CommitError>
+) -> Result<Vec<(Entity, Revision)>, CommitError>
 where
     Env: Provider<BlobSize>
         + Provider<BlobImport>
@@ -1245,19 +1294,35 @@ where
         let Some(durable) = durables.iter().find(|durable| durable.layer == layer) else {
             continue;
         };
-        let batch = match staged.iter().position(|(held, _)| *held == layer) {
-            Some(at) => {
-                let (_, chain) = staged.remove(at);
-                Box::pin(chain.transaction().integrate(share).commit().perform(env)).await?
-            }
-            None => Box::pin(durable.transaction().integrate(share).commit().perform(env)).await?,
+        let at = staged.iter().position(|(held, _)| *held == layer);
+        let base = match at {
+            Some(at) => Some(staged.remove(at).1),
+            None => durable.revision.clone(),
         };
-        Pointer {
-            branch: durable.entity.clone(),
-            revision: revision_entity(&batch.revision()),
-        }
-        .assert(changes);
-        staged.push((layer, batch));
+        let view = durable.view_at(base.as_ref());
+        let settled = Box::pin(succession::settle(
+            Composite::of(view.to_source()),
+            shared_metadata(from_ref(&view), operator),
+            &Staged::from(share),
+            env,
+        ))
+        .await?;
+        drop(view);
+        let revision = match Box::pin(durable.mint(base.as_ref(), settled, env)).await? {
+            Some(minted) => {
+                Pointer {
+                    layer: &layer,
+                    revision: &minted,
+                }
+                .assert(changes);
+                minted
+            }
+            None => match base {
+                Some(base) => base,
+                None => continue,
+            },
+        };
+        staged.push((layer, revision));
     }
     Ok(staged)
 }
