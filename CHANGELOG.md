@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A stack's `session:` is its own store, apart from `Branch::overlay`, and `Stack::backup` and `OpenStack::restore` carry it to another stack
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD), argued in
+[#817](https://github.com/dialog-db/dialog-db/pull/817), argued in
 [notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
 point 8).
 
