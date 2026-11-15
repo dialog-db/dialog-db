@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A session writes a layer's revision row only when the layer moved, and `Session::sync` writes the rows its pulls moved
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD).
+[#810](https://github.com/dialog-db/dialog-db/pull/810).
 
 A session's own layer, `session:`, holds a `dialog.layer/revision` row
 for each of its layers. Every dispatch used to rewrite all of them
