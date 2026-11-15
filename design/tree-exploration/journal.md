@@ -4,7 +4,7 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | *What do we know?* The problem and the approach (top story). Three of the four things to build in dialog are built and tested on the draft branch: the readings over a decoded node, the five resolvers, the entities. That an index node's buffered ops are readable by no resolver. | *Where are we at?* Building. All four things are built on the draft branch, which now sits on top of the session stack (`claude/layers-8`, 0.5.0-rc.4) instead of beside it. |
+| **Status** | *What do we know?* The problem and the approach (top story). Three of the four things to build in dialog are built and tested on the draft branch: the readings over a decoded node, the five resolvers, the entities. That an index node's buffered ops are readable by no resolver. | *Where are we at?* Building. All four things are built on the draft branch, which now sits on top of the stack (`claude/layers-15`) instead of beside it. |
 | **Agenda** | *What do we need to know?* The maintainer's word on what building settled without them: a span's and an entry's entity being its place, `fanout-bits`, `of` taking an entity only. Whether buffered ops are to be exposed, and as what. How a row's details are reached by its own entity. | *Where are we going?* Tonk: pin, a query step that is not a concept, the component, and the removal of its reader. In dialog: the points still open in what is built. |
 
 ## 2026-11-12, Describing: what was tried and what was seen
@@ -853,4 +853,47 @@ waiting on more than one command.
 check pass on the merge.
 
 **Decided.** Nothing.
+
+## 2026-11-15, Building: on `layers-15`; the node commands are two providers of a stack
+
+**Asked.** By the stack session, at the maintainer's word: where do
+tonk's `tree/*` formulas end up, and does anything have to stay a
+formula. Answered from this topic's decisions: in dialog, as the
+resolvers; locality as a provider; nothing stays a formula, and tonk's
+tree arms are to be deleted, not ported. It also asked what entity a
+tree and a revision are here: a tree is `node:` (`Entity::from_node`);
+a revision's entity is the one main already has (`Revision::entity()`,
+`did:key:z6Mk…`, from origin and edition), which this branch does not
+touch. Whether revisions move to a `revision:` scheme is the
+maintainer's, and was put to them.
+
+**Learned.** The stack moved seven steps: a `Session` is a `Stack`
+(`branch.stack()`, module `stack/`); `Stack::provide(Provider)`
+registers a provider per command concept; performing an invocation runs
+none, and its report's `effect()` is a step the embedder performs when
+it chooses; a command's life is rows under `dialog.command/` (`invoked`,
+`answered`, `failed`, `unhandled`, `progress`). Three of the four points
+raised on 2026-11-15 are answered by it: a stack holds and runs its own
+providers; a provider that fails has a convention; the embedder still
+chooses when. Awaiting an answer was not looked for.
+
+`claude/layers-15` was merged into the draft branch. `Holdings` as a
+reader of `control:` is gone, as that session said it would be:
+`holdings::providers(&stack, env)` is two `Provider`s, one per command
+concept, and `holdings::provide` registers them. A provider is handed a
+command and nothing to read through, so it keeps the environment it was
+made with. An answer is written `.at(control_layer())`, which makes it
+a command a rule captures and nothing keeps. A command naming no node
+now fails with a reason where it used to go unanswered.
+
+1,843 tests in the three crates, the crate's doc tests, the workspace
+clippy gate and a wasm check pass on the merge.
+
+That session also said the stack sits at +2.1 to +2.9% on the read
+scenarios against a 3% gate, and asked that resolver cost stay off any
+path a plain read takes. Nothing here is on such a path: a resolver runs
+only where a query names one. The perf gate was not run on this branch.
+
+**Decided.** Nothing. `claude/layers-16` (stack subscriptions) is in
+progress; a further merge will follow.
 

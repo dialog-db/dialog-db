@@ -17,13 +17,15 @@ pub(crate) use succession::ReadSettlement;
 #[cfg(test)]
 pub(crate) use succession::{settle, stored_claims};
 
+use crate::Channel;
 use crate::Commit;
-use crate::placement::control_layer;
+use crate::placement::{Observed, control_layer};
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::session::{Composite, shared_metadata};
-use crate::repository::source::{Live, Source, View};
+use crate::repository::source::{Live, View};
 use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
-use crate::session::Loopback;
+pub(crate) use crate::stack::durable::DurableLayer;
+use crate::stack::durable::{Durables, Pinned};
 use crate::{Branch, CommitError, Ephemeral, PublishError, RemoteSite, Revision, Snapshot, Staged};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -39,6 +41,7 @@ use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{self, Edition, Publish, Resolve};
 use dialog_search_tree::nodes;
 use std::slice::from_ref;
+use std::sync::Arc;
 
 /// A transaction on a line of the repository.
 ///
@@ -90,74 +93,46 @@ pub struct Transaction<L: Line> {
     /// [`Staged`]); exported to a [`Changes`] batch once, at commit.
     changes: Staged,
     transients: Staged,
-    /// The session this transaction commits through, if one: its layers,
+    /// The stack this transaction commits through, if one: its layers,
     /// which its reads and its induction see, and which take the writes
     /// named for them.
-    session: Option<SessionContext>,
+    stack: Option<StackContext>,
 }
 
-/// What a transaction through a [`Session`](crate::Session) carries: the
+/// What a transaction through a [`Stack`](crate::Stack) carries: the
 /// composite its reads and its induction see, the memory layers that
-/// take their shares once the commit publishes, the durable layers
-/// that commit theirs on their branches, and the loopback the publish
-/// lands the transaction's commands in.
+/// take their shares once the commit publishes, the durable layers whose
+/// next trees its commit mints and points the primary at, and the
+/// channels the publish lands what the transaction wrote into them in.
 #[derive(Clone)]
-pub(crate) struct SessionContext {
+pub(crate) struct StackContext {
+    /// The primary's branch entity, whose `dialog.branch/revision` cell
+    /// the stack reads in `session:` from the branch metadata.
+    pub(crate) branch: Entity,
+    /// The stack's own layer, `session:`, where it records the revisions
+    /// of its layers and holds its selection.
+    pub(crate) own: Ephemeral,
+    /// Where the stack last recorded the primary.
+    pub(crate) observed: Observed,
     pub(crate) composite: Composite,
+    /// The stack's memory layers, its own first.
     pub(crate) memories: Vec<(Entity, Ephemeral)>,
+    /// The durable layers, each at the revision the primary pointed it
+    /// at when the transaction opened.
     pub(crate) durables: Vec<DurableLayer>,
-    /// The session's loopback, where the publish lands the commands the
-    /// transaction dispatched.
-    pub(crate) loopback: Loopback,
-}
-
-/// A durable layer of a session as one dispatch reads and writes it: the
-/// layer's name, its branch, and the head the dispatch pinned when it
-/// began, which its reads see and its commit on the branch builds on and
-/// compares and swaps against.
-#[derive(Clone)]
-pub(crate) struct DurableLayer {
-    pub(crate) layer: Entity,
-    pub(crate) branch: Branch,
-    pinned: Option<Edition<Revision>>,
-}
-
-impl DurableLayer {
-    /// The layer `layer`, the branch `branch`, pinned at its head now.
-    pub(crate) fn pin(layer: Entity, branch: Branch) -> Self {
-        let pinned = (&branch).pin();
-        Self {
-            layer,
-            branch,
-            pinned,
-        }
-    }
-
-    /// The revision the layer was pinned at.
-    pub(crate) fn revision(&self) -> Option<Revision> {
-        self.pinned.as_ref().map(|edition| edition.content.clone())
-    }
-
-    /// The layer's branch at the pinned head, as a line a read sees.
-    pub(crate) fn source(&self) -> Source {
-        View::at(
-            Live::Branch(&self.branch),
-            self.pinned.as_ref().map(|edition| &edition.content),
-        )
-        .to_source()
-    }
-
-    /// A transaction on the layer's branch, pinned where the dispatch
-    /// pinned it, so its commit refuses a head that moved since.
-    pub(crate) fn transaction(&self) -> Transaction<&Branch> {
-        Transaction {
-            line: &self.branch,
-            pinned: self.pinned.clone(),
-            changes: Staged::default(),
-            transients: Staged::default(),
-            session: None,
-        }
-    }
+    /// The stack's durable layers, and where the transaction read them
+    /// from: its commit refuses a primary other than the one the layers
+    /// were read at, and its publish records where it left them.
+    pub(crate) pinned: Pinned,
+    pub(crate) state: Arc<Durables>,
+    /// The stack's channels, the loopback first: the publish lands on
+    /// each one's outside end what the transaction wrote into it, the
+    /// commands it dispatched in the loopback's.
+    pub(crate) channels: Vec<Channel>,
+    /// What the outside ends of the channels other than the loopback
+    /// sent, each named for its channel: stimulus of the first tick, read
+    /// as rows of the channel, landing nowhere.
+    pub(crate) received: Changes,
 }
 
 /// What a [`Transaction`] runs on: a `&`[`Branch`], a `&`[`Snapshot`]
@@ -217,15 +192,15 @@ impl<L: Line> Transaction<L> {
             pinned,
             changes: Staged::default(),
             transients: Staged::default(),
-            session: None,
+            stack: None,
         }
     }
 
-    /// Commit through `session`: induction reads its layers, and the
+    /// Commit through `stack`: induction reads its layers, and the
     /// writes placed outside the primary are handed back as the shares of
     /// its memory layers instead of landing in the tree.
-    pub(crate) fn with_session(mut self, session: SessionContext) -> Self {
-        self.session = Some(session);
+    pub(crate) fn with_stack(mut self, stack: StackContext) -> Self {
+        self.stack = Some(stack);
         self
     }
 
@@ -283,7 +258,7 @@ impl<L: Line> Transaction<L> {
             allow_empty: false,
             canonicalize: false,
             amend: false,
-            session: self.session.clone(),
+            stack: self.stack.clone(),
         }
     }
 }
@@ -319,8 +294,8 @@ impl Transaction<&Branch> {
     /// view too. The transaction itself stays open and committable.
     pub fn query(&self) -> TransactionQuery<'_> {
         let query = TransactionQuery::new(self.view(), self.layers());
-        match &self.session {
-            Some(session) => query.over(session.composite.clone()),
+        match &self.stack {
+            Some(stack) => query.over(stack.composite.clone()),
             None => query,
         }
     }
@@ -391,7 +366,7 @@ pub struct TransactionCommit<L: Line> {
     pub(super) allow_empty: bool,
     pub(super) canonicalize: bool,
     pub(super) amend: bool,
-    pub(super) session: Option<SessionContext>,
+    pub(super) stack: Option<StackContext>,
 }
 
 impl<L: Line> TransactionCommit<L> {

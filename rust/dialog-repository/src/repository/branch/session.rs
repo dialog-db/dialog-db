@@ -111,15 +111,16 @@ pub struct QueryLayer<'a> {
     /// Memory layers read beside the lines, live, each by the name a
     /// row's `in` binds to.
     memories: Vec<(Entity, &'a Ephemeral)>,
-    /// Lines read after `lines`, each a layer of a session read by the
-    /// name a row's `in` binds to: its durable layers.
-    named: Vec<(Entity, Live<'a>)>,
+    /// Lines read after `lines`, each a layer of a stack read by the
+    /// name a row's `in` binds to: its durable layers, each pinned at the
+    /// tree its primary points at.
+    named: Vec<(Entity, Source)>,
     changes: Changes,
 }
 
 /// The lines a query env reads, owned: every tree line, pinned, plus
 /// every memory layer, live. What a [`QueryLayer`] resolves to when a
-/// query is performed, and what a [`Session`](crate::Session) hands its
+/// query is performed, and what a [`Stack`](crate::Stack) hands its
 /// induction.
 #[derive(Default, Clone)]
 pub(crate) struct Composite {
@@ -130,6 +131,11 @@ pub(crate) struct Composite {
     /// a durable layer's. A line with none named here is named as
     /// [`QueryEnv::line_layer`] says.
     pub(crate) names: Vec<Option<Entity>>,
+    /// The channels of the stack the composite is read through, by name,
+    /// the loopback among them: a rule head landing in one is stimulus
+    /// of the next round, as one landing in [`control:`](crate::CONTROL)
+    /// is, and is never written into a layer.
+    pub(crate) channels: Vec<Entity>,
 }
 
 impl Composite {
@@ -182,10 +188,10 @@ impl<'a> QueryLayer<'a> {
         self
     }
 
-    /// Read `branch` after the lines, live, as the durable layer named
-    /// `layer`: a layer of a session that is a branch.
-    pub(crate) fn with_line(mut self, layer: Entity, branch: &'a Branch) -> Self {
-        self.named.push((layer, Live::from(branch)));
+    /// Read `source` after the lines, pinned, as the durable layer named
+    /// `layer`: a layer of a stack, at the tree its primary points at.
+    pub(crate) fn with_pinned(mut self, layer: Entity, source: Source) -> Self {
+        self.named.push((layer, source));
         self
     }
 
@@ -199,24 +205,24 @@ impl<'a> QueryLayer<'a> {
             .chain(self.named.iter().map(|(layer, _)| Some(layer.clone())))
             .collect();
         Composite {
-            sources: views.into_iter().map(View::into_source).collect(),
+            sources: views
+                .into_iter()
+                .map(View::into_source)
+                .chain(self.named.iter().map(|(_, source)| source.clone()))
+                .collect(),
             memories: self
                 .memories
                 .iter()
                 .map(|(layer, memory)| (layer.clone(), (*memory).clone()))
                 .collect(),
             names,
+            channels: Vec::new(),
         }
     }
 
-    /// The branches this layer reads from, in join order, then the
-    /// durable layers'.
+    /// The branches this layer reads from, in join order.
     pub fn branches(&self) -> Vec<&'a Branch> {
-        self.lines
-            .iter()
-            .chain(self.named.iter().map(|(_, line)| line))
-            .filter_map(|line| line.branch())
-            .collect()
+        self.lines.iter().filter_map(|line| line.branch()).collect()
     }
 
     /// The snapshots this layer reads from, in join order.
@@ -248,13 +254,10 @@ impl<'a> QueryLayer<'a> {
     }
 
     /// Pin every line of this layer at the head it stands at now: what
-    /// one query of the layer reads throughout.
+    /// one query of the layer reads throughout. A durable layer is pinned
+    /// already, and is not among them.
     pub(crate) fn pin(&self) -> Vec<View<'a>> {
-        self.lines
-            .iter()
-            .chain(self.named.iter().map(|(_, line)| line))
-            .map(|line| line.pin())
-            .collect()
+        self.lines.iter().map(|line| line.pin()).collect()
     }
 
     /// The full per-query overlay: this layer's own
@@ -583,6 +586,8 @@ pub(crate) struct QueryEnv<'a> {
     /// The name a row of each line binds its `in` to, by index, where the
     /// composite named one: a durable layer's (see [`Composite::names`]).
     names: Vec<Option<Entity>>,
+    /// The channels of the stack read through (see [`Composite::channels`]).
+    channels: Vec<Entity>,
     /// The query's own overlay: caller-asserted facts and the
     /// auto-injected metadata, held as a line (see
     /// [`QueryLayer::overlay`]) and read under the lines' format.
@@ -703,6 +708,7 @@ impl<'a> QueryEnv<'a> {
             sources,
             memories: Vec::new(),
             names: Vec::new(),
+            channels: Vec::new(),
             overlay,
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
@@ -722,16 +728,39 @@ impl<'a> QueryEnv<'a> {
             sources,
             memories,
             names,
+            channels,
         } = composite;
         let mut env = Self::new(sources, overlay, env);
         env.memories = memories;
         env.names = names;
+        env.channels = channels;
         env
     }
 
-    /// The primary's session store, read as [`session:`](crate::SESSION):
-    /// the first line's overlay. `None` for a read over no line.
+    /// Whether `layer` is a channel of the stack read through, the
+    /// loopback, [`control:`](crate::CONTROL), always among them.
+    pub(crate) fn is_channel(&self, layer: &Entity) -> bool {
+        *layer == crate::control_layer() || self.channels.contains(layer)
+    }
+
+    /// Whether a stack's own layer is read here, as a memory layer named
+    /// [`session:`](crate::SESSION): then that is what `session:` is, and
+    /// the primary's session overlay is read as a part of the primary.
+    fn holds_own_layer(&self) -> bool {
+        self.memories
+            .iter()
+            .any(|(layer, _)| *layer == session_layer())
+    }
+
+    /// The primary's session store when it is read as
+    /// [`session:`](crate::SESSION), live: the first line's overlay.
+    /// `None` for a read over no line, and for one through a stack, whose
+    /// own layer is `session:`, a memory layer read with the ticks
+    /// applied.
     pub(crate) fn session_store(&self) -> Option<&Ephemeral> {
+        if self.holds_own_layer() {
+            return None;
+        }
         self.sources.first().map(Source::overlay)
     }
 
@@ -750,11 +779,15 @@ impl<'a> QueryEnv<'a> {
     }
 
     /// The name a row of the line at `index`'s session overlay binds its
-    /// `in` to: the primary's is [`session:`](crate::SESSION); another
-    /// line's is read as the line's own.
+    /// `in` to: the primary's is [`session:`](crate::SESSION), but
+    /// through a stack, whose own layer is `session:`, it is a part of
+    /// the primary, [`memory:`](crate::MEMORY); another line's is read as
+    /// the line's own.
     fn overlay_layer(&self, index: usize) -> Entity {
-        if index == 0 {
+        if index == 0 && !self.holds_own_layer() {
             session_layer()
+        } else if index == 0 {
+            memory_layer()
         } else {
             self.line_layer(index)
         }
@@ -825,6 +858,7 @@ impl<'a> QueryEnv<'a> {
                 sources: self.sources.clone(),
                 memories: self.memories.clone(),
                 names: self.names.clone(),
+                channels: self.channels.clone(),
             };
             Box::pin(settlement.advance(&composite, &self.overlay, layer, self.env))
                 .await
@@ -969,6 +1003,7 @@ impl Clone for QueryEnv<'_> {
             sources: self.sources.clone(),
             memories: self.memories.clone(),
             names: self.names.clone(),
+            channels: self.channels.clone(),
             overlay: self.overlay.clone(),
             layers: self.layers.clone(),
             format: self.format.clone(),

@@ -66,6 +66,7 @@ use crate::repository::source::View;
 use crate::rules::{
     TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
 };
+use crate::stack::effect::invoked;
 use crate::{CommitError, RemoteSite, Revision, Staged};
 use std::slice::from_ref;
 
@@ -81,14 +82,20 @@ pub(crate) const MAX_ROUNDS: u32 = 16;
 /// [`control:`](crate::CONTROL). A write of `changes` or of `transients`
 /// into `control:` is a transient too.
 ///
-/// Returns every transient a rule head emitted, across all rounds, and
-/// the writes each round's heads landed in a layer, one entry per round
-/// that wrote one, in round order: each round is a tick, and a layer
-/// takes each tick's writes as an instant of its own. The dispatched
-/// `transients` are not part of either. The writes `transients` names
-/// for a layer are stimulus too, read as rows of that layer. The
-/// layered writes stay in `changes` as well, merged, which is how each
-/// round's view reads every earlier round's.
+/// Returns every transient a rule head emitted, across all rounds, the
+/// writes each round's heads landed in a layer, one entry per round
+/// that wrote one, in round order, and how many rounds ran: each round
+/// is a tick, and a layer takes each tick's writes as an instant of its
+/// own. The dispatched `transients` are not part of the first two. The
+/// writes `transients` names for a layer are stimulus too, read as rows
+/// of that layer. The layered writes stay in `changes` as well, merged,
+/// which is how each round's view reads every earlier round's.
+///
+/// Through a stack (a composite holding the loopback), each command
+/// entity a round's stimulus carries in `control:` is marked as
+/// invoked in that round: its `dialog.command/invoked` row, naming the
+/// round, is a row of `control:` beside the command's own for that one
+/// round (see [`invoked`]), and is no emitted transient.
 ///
 /// `selected` is the layer a session selects: a durable head cell whose
 /// descriptor names no layer lands there, unless its attribute is
@@ -100,7 +107,7 @@ pub(crate) async fn induce<Env>(
     mut transients: Changes,
     selected: Option<&Entity>,
     env: &Env,
-) -> Result<(Changes, Vec<Vec<(Entity, Changes)>>), CommitError>
+) -> Result<(Changes, Vec<Vec<(Entity, Changes)>>, u32), CommitError>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
@@ -133,6 +140,13 @@ where
     if transients.has_assets() {
         return Err(DialogCorpusError::AssetsUnsupported("a dispatched transient".into()).into());
     }
+    // Through a stack, every command is marked in the round it is
+    // stimulus of: the first, for the ones dispatched.
+    let marks = composite.channels.contains(&control_layer());
+    if marks {
+        let marked = invoked(&transients, 1);
+        transients.merge(marked);
+    }
 
     // Round 1 stimulus: everything the commit changes, plus the
     // watermark lag — facts that entered the branch since the last
@@ -147,7 +161,7 @@ where
     let mut induced = Changes::new();
     let mut ticks = Vec::new();
     if stimulus.is_empty() {
-        return Ok((induced, ticks));
+        return Ok((induced, ticks, 0));
     }
 
     // Committed trigger structures, resolved once per induction: the
@@ -264,17 +278,17 @@ where
         // so a head under `last` succeeds the layer's own row of the
         // cell; a layer it does not hold reads them as a staged layer.
         let written = Staged::from(changes.clone());
-        let mut round = composite.clone();
+        let mut layered = composite.clone();
         let mut shares: Vec<Staged> = Vec::new();
         for (layer, share) in written.shares() {
-            match round.memories.iter_mut().find(|(held, _)| held == layer) {
+            match layered.memories.iter_mut().find(|(held, _)| held == layer) {
                 Some((_, memory)) => *memory = memory.extending(share.clone()),
                 None => shares.push(Staged::from(share.clone()).in_layer(layer.clone())),
             }
         }
         let mut control = transient_overlay.clone();
         let transient_shares = control.take_shares();
-        let view = QueryEnv::over(round, shared_metadata(from_ref(view), &operator), env)
+        let view = QueryEnv::over(layered, shared_metadata(from_ref(view), &operator), env)
             .with_layers(
                 [written, Staged::from(control).in_layer(control_layer())]
                     .into_iter()
@@ -372,6 +386,7 @@ where
         stimulus = layered_instructions(&novelty);
         stimulus.extend(novelty.clone().into_instructions());
         stimulus.extend(emitted_transients.clone().into_instructions());
+        stimulus.extend(layered_instructions(&emitted_transients));
         let shares = novelty.take_shares();
         for (layer, share) in &shares {
             share.clone().into_layer(layer.clone()).assert(changes);
@@ -381,10 +396,15 @@ where
         }
         novelty.assert(changes);
         emitted_transients.clone().assert(&mut induced);
+        if marks {
+            let marked = invoked(&emitted_transients, round + 1);
+            stimulus.extend(marked.clone().into_instructions());
+            emitted_transients.merge(marked);
+        }
         transient_overlay = emitted_transients;
     }
 
-    Ok((induced, ticks))
+    Ok((induced, ticks, round))
 }
 
 /// The committed side of trigger dispatch for one induction run: the
@@ -1414,7 +1434,8 @@ async fn emit_matches<'a>(
             continue;
         }
         let mut head = Changes::new();
-        // The cells landing in the loopback: the next round's stimulus.
+        // The cells landing in the loopback, or another channel: the next
+        // round's stimulus.
         let mut dispatched = Changes::new();
         // The cells whose descriptor names a layer (`in:`) other than
         // the primary. The layer elects among its own rows of a cell,
@@ -1442,6 +1463,28 @@ async fn emit_matches<'a>(
                     ),
                     Polarity::Assert => dialog_corpus::Update::associate(
                         &mut dispatched,
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                        pick,
+                    ),
+                }
+                continue;
+            }
+            // A cell landing in another channel is the next round's
+            // stimulus too, read as a row of that channel.
+            if let Some(channel) = layer.as_ref().filter(|layer| view.is_channel(layer)) {
+                match rule.polarity() {
+                    Polarity::Retract => dialog_corpus::Update::dissociate_in(
+                        &mut dispatched,
+                        channel.clone(),
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                    ),
+                    Polarity::Assert => dialog_corpus::Update::associate_in(
+                        &mut dispatched,
+                        channel.clone(),
                         fact.the,
                         fact.of,
                         fact.is,

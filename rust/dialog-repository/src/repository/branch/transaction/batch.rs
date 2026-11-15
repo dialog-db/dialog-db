@@ -24,23 +24,24 @@ use super::succession;
 use super::{
     Line, Transaction, TransactionCommit, carry_footprint, touches_rule_facts, touches_rules,
 };
+use crate::Channel;
 use crate::Ephemeral;
 use crate::placement::{
-    Pointer, control_layer, follows_selection, memory_layer, revision_rows, revision_stimulus,
-    selected, session_layer, take_dispatched, tree_revision,
+    Observed, Pointer, Recorded, control_layer, follows_selection, memory_layer, selected,
+    session_layer, take_dispatched,
 };
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::branch::session::{Composite, shared_metadata};
-use crate::repository::branch::transaction::{DurableLayer, SessionContext};
+use crate::repository::branch::transaction::{DurableLayer, StackContext};
 use crate::repository::source::{Caches, Live, View};
-use crate::session::Loopback;
+use crate::stack::durable::{Durables, Pinned};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
     SelectQuery, Snapshot, SnapshotClaims, Staged, TransactionQuery, origin_of,
 };
 use dialog_capability::history::Origin;
-use dialog_capability::{Did, Fork, Provider};
+use dialog_capability::{Capability, Did, Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
 use dialog_corpus::tree::CorpusNode;
@@ -48,7 +49,7 @@ use dialog_corpus::tree::WriteScope;
 use dialog_corpus::{Change, Changes, Entity, Fact, Selector, Statement, Update as _};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
-use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
+use dialog_effects::authority::{Attest, Identify, Operator, OperatorExt as _};
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
@@ -120,44 +121,51 @@ pub struct TransactionBatch {
     induced: Changes,
     /// The writes of this chain placed outside the primary, tick by
     /// tick in the order the ticks ran, each tick's by the layer each is
-    /// placed on, as a session routes them: what its memory layers take
+    /// placed on, as a stack routes them: what its memory layers take
     /// once the chain publishes, one instant per tick that wrote a layer.
     /// Empty for a chain committed on the branch alone.
     shares: Vec<Vec<(Entity, Changes)>>,
-    /// The session's memory layers, by name, that take the shares.
+    /// The stack's memory layers, by name, that take the shares.
     memories: Vec<(Entity, Ephemeral)>,
     /// The branch's session overlay, and the facts the staged links
     /// retract that only it holds: retracted from it once the publish
     /// lands, so what a transaction read is what its publish leaves.
     overlay: Ephemeral,
     overlay_retractions: Vec<Fact>,
-    /// Whether the chain was committed through a session: its publish
-    /// then records every layer's revision in the session's own layer
-    /// (see [`record_revisions`]).
-    revisions: bool,
-    /// The chains this one staged on the session's durable layers, by
-    /// layer: what the chain wrote into each, committed on its branch.
-    /// Published before the primary's, which carries the pointer fact
-    /// naming each one's tip.
-    durables: Vec<(Entity, TransactionBatch)>,
-    /// The session's durable layers, by name, whose revisions the
-    /// publish records beside the memory layers'.
-    lines: Vec<(Entity, Branch)>,
+    /// What the stack the chain was committed through records where its
+    /// layers stand with: its publish then records, in the stack's own
+    /// layer, the revision of every layer that moved (see
+    /// [`record_revisions`]). `None` for a chain committed on the branch
+    /// alone.
+    revisions: Option<Recording>,
+    /// The trees this chain minted for the stack's durable layers, by
+    /// layer: the revision each layer's writes left it at, which the
+    /// chain's primary commit points at. Nothing publishes them: the
+    /// primary's publish is the layers' too.
+    durables: Vec<(Entity, Revision)>,
+    /// The stack's durable layers and where the chain read them from:
+    /// once the publish has won, the layers stand where the chain left
+    /// them. `None` for a chain committed on the branch alone.
+    pinned: Option<(Arc<Durables>, Pinned)>,
     /// The commands the chain's transactions dispatched themselves, the
-    /// writes into `control:` among them: with
-    /// [`induced`](Self::induced), what the publish lands in the
-    /// session's `control:`.
+    /// writes into `control:` among them, and their writes into the
+    /// other channels, named for each: with [`induced`](Self::induced),
+    /// what the publish lands on the stack's channels.
     dispatched: Changes,
-    /// The loopback of the session the chain was committed through,
-    /// where the publish lands its commands. `None` for a chain committed
-    /// on the branch alone, which lands nothing.
-    loopback: Option<Loopback>,
+    /// The channels of the stack the chain was committed through, the
+    /// loopback first, where the publish lands what was written into
+    /// them. `None` for a chain committed on the branch alone, which
+    /// lands nothing.
+    channels: Option<Vec<Channel>>,
+    /// How many ticks the chain's links ran, every link's induction
+    /// rounds summed.
+    ticks: u32,
 }
 
 /// The facts `changes` retracts that `overlay` holds. A transaction's
 /// read hides such a fact, and the commit's retraction of it lands
 /// nothing in the tree, which never held it: the publish retracts it
-/// from the overlay, so the session's row does not come back.
+/// from the overlay, so the overlay's row does not come back.
 fn overlay_retractions(changes: &Staged, overlay: &Ephemeral) -> Vec<Fact> {
     let mut retracted = Vec::new();
     for (the, of, change) in changes.log() {
@@ -245,6 +253,35 @@ impl TransactionBatch {
     /// each tick's writes as an instant of its own, in this order.
     pub fn shares(&self) -> &[Vec<(Entity, Changes)>] {
         &self.shares
+    }
+
+    /// How many ticks the chain ran: the rounds of induction of every
+    /// staged link, summed. A link whose writes and commands fired
+    /// nothing runs one; one with nothing to read runs none.
+    pub(crate) fn ticks(&self) -> u32 {
+        self.ticks
+    }
+
+    /// The rows the publish lands on the outside end of the loopback,
+    /// [`control:`](crate::CONTROL), as it lands them: the facts the
+    /// chain's transactions dispatched and its rules dispatched, bound
+    /// for no layer, grouped by entity.
+    pub(crate) fn looped(&self) -> Vec<Fact> {
+        let mut written = self.dispatched.clone();
+        written.merge(self.induced.clone());
+        written.take_shares();
+        written
+            .iter()
+            .filter_map(|(of, the, change)| match change {
+                Change::Assert(is, _) => Some(Fact {
+                    the: the.clone(),
+                    of: of.clone(),
+                    is: is.clone(),
+                    cause: None,
+                }),
+                Change::Retract(_) => None,
+            })
+            .collect()
     }
 
     /// Start the next transaction on this chain. Its commit extends the
@@ -335,39 +372,51 @@ impl BatchPublish {
             overlay_retractions,
             revisions,
             durables,
-            lines,
+            pinned,
             dispatched,
-            loopback,
+            channels,
+            ticks: _,
         } = self.batch;
         let tip = snapshot.revision();
-        // Through a session, the chain's commands, the ones its
-        // transactions dispatched and the ones its rules dispatched in
-        // any tick, land in the session's `control:` once the publish
-        // has won, as one instant gone in the next: a refused publish
-        // lands none, so a dispatch re-run from a moved head re-runs no
-        // effect.
-        let land = |loopback: Option<Loopback>| -> Result<(), CommitError> {
-            match loopback {
-                Some(loopback) => {
-                    let mut commands = dispatched;
-                    commands.merge(induced);
-                    loopback.land(&commands)
+        // Through a stack, what the chain wrote into its channels, the
+        // commands its transactions dispatched and the ones its rules
+        // dispatched in any tick among them, lands on each channel's
+        // outside end once the publish has won, as one tick of its log:
+        // a refused publish lands none, so a dispatch re-run from a moved
+        // head re-runs no effect.
+        // The stack's own layer then records the revision of every layer
+        // that moved, the channels' among them, so the recording names
+        // where each stands once the dispatch is done.
+        let land = |channels: Option<Vec<Channel>>| -> Result<(), CommitError> {
+            match channels {
+                Some(channels) => {
+                    let mut written = dispatched;
+                    written.merge(induced);
+                    land_in(&channels, written);
+                    if let Some(recording) = &revisions {
+                        record_revisions(recording, &memories, &channels, &tip)?;
+                    }
+                    Ok(())
                 }
                 None => Ok(()),
             }
         };
-        // The durable layers publish first, bottom to top: the primary
-        // carries the pointer facts naming their tips, so it publishes
-        // last. A lost compare-and-swap on any of them fails the publish
-        // before the primary moves, and the dispatch re-runs from the new
-        // heads.
-        for (_, durable) in durables {
-            Box::pin(durable.publish().perform(env)).await?;
-        }
-        let heads: Vec<(Entity, Option<Revision>)> = lines
-            .iter()
-            .map(|(layer, branch)| (layer.clone(), branch.revision()))
-            .collect();
+        // The durable layers have no head: the trees the chain minted
+        // for them are named by the primary's commit, so once the
+        // primary's publish has won they stand there, and a lost one
+        // leaves them pointed where they were, the minted trees an orphan
+        // block set nothing names.
+        let settle = |tip: &Revision| {
+            if let Some((state, mut pinned)) = pinned {
+                for (layer, revision) in durables {
+                    if let Some(at) = state.layers().iter().position(|held| *held == layer) {
+                        pinned.revisions[at] = Some(revision);
+                    }
+                }
+                pinned.at = Some(tip.tree.clone());
+                state.set(pinned);
+            }
+        };
 
         if chain.is_empty() {
             // Nothing staged. A same-value publish would bump the cell
@@ -386,12 +435,10 @@ impl BatchPublish {
                 .into());
             }
             advance_watermark(&induction, &tip, Some(tip.version()), env).await?;
+            settle(&tip);
             retract_from_overlay(&overlay, overlay_retractions)?;
             apply_shares(&memories, shares)?;
-            if revisions {
-                record_revisions(&memories, &heads, &overlay, &tip)?;
-            }
-            land(loopback)?;
+            land(channels)?;
             return Ok(tip);
         }
 
@@ -401,14 +448,12 @@ impl BatchPublish {
             .first()
             .and_then(|(_, record)| record.parents.first().cloned());
         head.publish(tip.clone(), env).await?;
+        settle(&tip);
         retract_from_overlay(&overlay, overlay_retractions)?;
         // The memory layers take their shares only now that the primary's
         // commit is published: a refused publish shows in no layer. Each
         // tick lands as its own instant, in the order the ticks ran.
         apply_shares(&memories, shares)?;
-        if revisions {
-            record_revisions(&memories, &heads, &overlay, &tip)?;
-        }
 
         // Only now that the head has actually advanced do the staged
         // records and context enter the branch's shared memos: they are
@@ -425,8 +470,30 @@ impl BatchPublish {
         // commit-time induction, so the published head is fully induced.
         advance_watermark(&induction, &tip, base, env).await?;
 
-        land(loopback)?;
+        land(channels)?;
         Ok(tip)
+    }
+}
+
+/// Land `written` on the outside ends of `channels`, the loopback first:
+/// what it writes bound for no layer in the loopback's, what it writes
+/// into each other channel in that one's. Every channel is landed in,
+/// so every reader waiting is woken, whether or not anything landed for
+/// it.
+fn land_in(channels: &[Channel], mut written: Changes) {
+    let mut shares = written.take_shares();
+    for (at, channel) in channels.iter().enumerate() {
+        if at == 0 {
+            channel.land(&written);
+            continue;
+        }
+        match shares
+            .iter()
+            .position(|(layer, _)| layer == channel.entity())
+        {
+            Some(index) => channel.land(&shares.swap_remove(index).1),
+            None => channel.land(&Changes::new()),
+        }
     }
 }
 
@@ -652,6 +719,24 @@ impl TransactionCommit<&Branch> {
             .into());
         }
 
+        // Through a stack with durable layers, the layers were read where
+        // the primary pointed them when the transaction opened. A primary
+        // the transaction pinned elsewhere than where they were read
+        // would have its commit point the layers at trees built on stale
+        // ones: they are read again, and the transaction refused as if
+        // its head had moved, so the caller runs it again on fresh ones.
+        if let Some(stack) = &self.stack
+            && stack.pinned.at != base.as_ref().map(|head| head.tree.clone())
+            && !stack.state.layers().is_empty()
+        {
+            stack.state.refresh(base.as_ref(), env).await?;
+            return Err(PublishError::VersionMismatch {
+                expected: base_version,
+                current: Current::Unknown,
+            }
+            .into());
+        }
+
         // The line staged commits mint on: the branch's own identity,
         // derived once here (memoized) so the batch's snapshot can carry
         // it for the links that follow.
@@ -661,26 +746,19 @@ impl TransactionCommit<&Branch> {
         let retractions = overlay_retractions(&self.changes, &overlay);
 
         // The layers a write named for them lands in once the commit
-        // publishes: the session's, and the branch's own session overlay
-        // as `session:`.
-        let revisions = self.session.is_some();
-        let mut memories = self
-            .session
+        // publishes: the stack's, its own `session:` among them, and on
+        // a branch alone, the branch's session overlay as `session:`.
+        let revisions = self.stack.as_ref().map(Recording::of);
+        let memories = match self.stack.as_ref() {
+            Some(stack) => stack.memories.clone(),
+            None => vec![(session_layer(), overlay.clone())],
+        };
+        let channels = self.stack.as_ref().map(|stack| stack.channels.clone());
+        let pinned = self
+            .stack
             .as_ref()
-            .map(|session| session.memories.clone())
-            .unwrap_or_default();
-        memories.push((session_layer(), overlay.clone()));
-        let lines: Vec<(Entity, Branch)> = self
-            .session
-            .iter()
-            .flat_map(|session| session.durables.iter())
-            .map(|durable| (durable.layer.clone(), durable.branch.clone()))
-            .collect();
-        let loopback = self
-            .session
-            .as_ref()
-            .map(|session| session.loopback.clone());
-        let (outcome, induced, shares, durables, dispatched) = Box::pin(mint_link(
+            .map(|stack| (stack.state.clone(), stack.pinned.clone()));
+        let (outcome, induced, shares, durables, dispatched, ticks) = Box::pin(mint_link(
             View::at(Live::Branch(branch), base.as_ref()),
             |profile, issuer| branch.commit_identity(profile, issuer),
             self.changes,
@@ -688,7 +766,7 @@ impl TransactionCommit<&Branch> {
             self.allow_empty,
             self.canonicalize,
             None,
-            self.session,
+            self.stack,
             Vec::new(),
             env,
         ))
@@ -724,9 +802,10 @@ impl TransactionCommit<&Branch> {
                 overlay_retractions: retractions,
                 revisions,
                 durables,
-                lines,
+                pinned,
                 dispatched,
-                loopback,
+                channels,
+                ticks,
             },
             Outcome::Minted(minted) => {
                 let Minted {
@@ -757,9 +836,10 @@ impl TransactionCommit<&Branch> {
                     overlay_retractions: retractions,
                     revisions,
                     durables,
-                    lines,
+                    pinned,
                     dispatched,
-                    loopback,
+                    channels,
+                    ticks,
                 }
             }
         })
@@ -813,25 +893,21 @@ impl TransactionCommit<TransactionBatch> {
         };
         let amending = amend.is_some();
         let retractions = overlay_retractions(&self.changes, &batch.overlay);
-        batch.revisions |= self.session.is_some();
-        if let Some(session) = &self.session {
-            for durable in &session.durables {
-                if !batch.lines.iter().any(|(layer, _)| *layer == durable.layer) {
-                    batch
-                        .lines
-                        .push((durable.layer.clone(), durable.branch.clone()));
-                }
-            }
+        if batch.revisions.is_none() {
+            batch.revisions = self.stack.as_ref().map(Recording::of);
         }
-        if batch.loopback.is_none() {
-            batch.loopback = self
-                .session
+        if batch.channels.is_none() {
+            batch.channels = self.stack.as_ref().map(|stack| stack.channels.clone());
+        }
+        if batch.pinned.is_none() {
+            batch.pinned = self
+                .stack
                 .as_ref()
-                .map(|session| session.loopback.clone());
+                .map(|stack| (stack.state.clone(), stack.pinned.clone()));
         }
         let staged = take(&mut batch.durables);
 
-        let (outcome, induced, shares, durables, dispatched) = Box::pin(mint_link(
+        let (outcome, induced, shares, durables, dispatched, ticks) = Box::pin(mint_link(
             View::at(Live::Snapshot(&batch.snapshot), Some(&base)),
             |_, issuer| (line.clone(), origin_of(&line, issuer)),
             self.changes,
@@ -839,7 +915,7 @@ impl TransactionCommit<TransactionBatch> {
             self.allow_empty,
             self.canonicalize,
             amend,
-            self.session,
+            self.stack,
             staged,
             env,
         ))
@@ -847,6 +923,7 @@ impl TransactionCommit<TransactionBatch> {
         batch.durables = durables;
         induced.assert(&mut batch.induced);
         batch.dispatched.merge(dispatched);
+        batch.ticks += ticks;
         batch.shares.extend(shares);
         batch.overlay_retractions.extend(retractions);
 
@@ -895,7 +972,7 @@ fn merge_shares(shares: &mut Vec<(Entity, Changes)>, more: Vec<(Entity, Changes)
 /// Land each tick's share of each layer in it, tick by tick in the order
 /// the ticks ran: a layer mints one instant per tick that changed it, so
 /// a reader of its instants sees every state the rules saw. A share of a
-/// layer the session does not hold was refused at commit, so none is
+/// layer the stack does not hold was refused at commit, so none is
 /// left over here.
 fn apply_shares(
     memories: &[(Entity, Ephemeral)],
@@ -911,18 +988,61 @@ fn apply_shares(
     Ok(())
 }
 
-/// Record in the session's own layer, `overlay`, the revision every
-/// layer of the session stands at once `tip` has published: one
-/// `dialog.layer/revision` row per layer under `last`, so each publish
-/// replaces the rows the one before wrote and mints one instant. The
-/// session's own row names its revision before the rows are written.
+/// What a stack records where its layers stand with, carried by a chain
+/// committed through it to its publish: the primary's branch entity, the
+/// stack's own layer and its mark of where it last recorded the primary.
+#[derive(Clone)]
+pub(crate) struct Recording {
+    branch: Entity,
+    own: Ephemeral,
+    observed: Observed,
+}
+
+impl Recording {
+    fn of(stack: &StackContext) -> Self {
+        Self {
+            branch: stack.branch.clone(),
+            own: stack.own.clone(),
+            observed: stack.observed.clone(),
+        }
+    }
+}
+
+/// Record in the stack's own layer the revision of every layer of the
+/// stack that moved, once `tip` has published and the dispatch's writes
+/// have landed on `channels`: one row under `last` for each memory layer
+/// and channel whose revision is not the one the own layer holds,
+/// replacing the row it held, as one instant; a publish after which no
+/// layer stands anywhere new writes nothing and mints no instant. Every
+/// memory layer's and every channel's row is its
+/// `dialog.layer/revision`. The primary has no row of the stack's: the
+/// branch metadata read as `session:` carries its
+/// `dialog.branch/revision`, and the stack moves its mark of where it
+/// last recorded the primary to `tip`.
+///
+/// The stack's own row names the revision its own layer stood at before
+/// the records that followed its last change: once this dispatch's
+/// writes into it have landed, the revision they left it at, and for a
+/// dispatch that wrote nothing into it, the one it already stood at.
+/// The recording is written as a record ([`Ephemeral::record`]), which
+/// does not move that revision, so recording is never itself a move of
+/// the stack's own layer, and a dispatch that wrote nothing into
+/// `session:` and moved no other layer records nothing.
 fn record_revisions(
+    recording: &Recording,
     memories: &[(Entity, Ephemeral)],
-    durables: &[(Entity, Option<Revision>)],
-    overlay: &Ephemeral,
+    channels: &[Channel],
     tip: &Revision,
 ) -> Result<(), CommitError> {
-    overlay.apply(revision_rows(Some(tip), durables, memories, overlay))?;
+    let recorded = Recorded {
+        branch: &recording.branch,
+        primary: Some(tip),
+        observed: &recording.observed,
+        memories,
+        channels,
+        own: &recording.own,
+    };
+    recorded.record()?;
     Ok(())
 }
 
@@ -980,7 +1100,7 @@ fn refuse_nan<'a>(changes: impl Iterator<Item = &'a Change>) -> Result<(), Commi
 /// what happens to the [`Outcome`], to the transients induction emitted,
 /// and to the shares, returned alongside it.
 ///
-/// Through a `session`, settlement and induction read the session's
+/// Through a `stack`, settlement and induction read the stack's
 /// composite, and the writes placed outside the primary, the ones the
 /// rules derived included, are taken out before anything is settled or
 /// minted and returned as the shares, tick by tick: the link's own
@@ -995,8 +1115,8 @@ async fn mint_link<Env>(
     allow_empty: bool,
     canonicalize: bool,
     amend: Option<Amended>,
-    session: Option<SessionContext>,
-    staged: Vec<(Entity, TransactionBatch)>,
+    stack: Option<StackContext>,
+    staged: Vec<(Entity, Revision)>,
     env: &Env,
 ) -> Result<Link, CommitError>
 where
@@ -1027,49 +1147,64 @@ where
 {
     refuse_nan(changes.log().iter().map(|(_, _, change)| change))?;
     let operator = Identify.perform(env).await?;
-    let composite = match &session {
-        Some(session) => session.composite.clone(),
+    let composite = match &stack {
+        Some(stack) => stack.composite.clone(),
         None => Composite::of(view.to_source()),
     };
     // The layers a write named for them (`in:`) can land in: the
-    // session's, and the line's own session overlay as `session:`. A
+    // stack's, its own `session:` among them, and on a line alone, the
+    // line's session overlay as `session:`. A
     // write named for any other is refused before anything is settled
     // or minted; one named for `memory:` is the primary's.
-    let held: Vec<Entity> = session
+    let held: Vec<Entity> = stack
         .iter()
-        .flat_map(|session| {
-            session
+        .flat_map(|stack| {
+            stack
                 .memories
                 .iter()
                 .map(|(layer, _)| layer.clone())
-                .chain(session.durables.iter().map(|durable| durable.layer.clone()))
+                .chain(stack.durables.iter().map(|durable| durable.layer.clone()))
         })
         .chain(once(session_layer()))
         .collect();
     let mut changes = changes;
     let mut transients = transients;
     let mut shares = changes.take_shares();
-    // Through a session, the layer its own layer selects takes the
+    // Through a stack, the layer its own layer selects takes the
     // writes named for no layer, but the machinery under `dialog.`,
     // before anything is settled: the primary never settles a cell that
     // will not land in it. The selected layer is routed as any named
-    // one, so one the session does not hold refuses the commit.
-    let selection = session
+    // one, so one the stack does not hold refuses the commit.
+    let selection = stack
         .as_ref()
-        .and_then(|_| selected(view.to_source().overlay()))
+        .and_then(|stack| selected(&stack.own))
         .filter(|layer| *layer != memory_layer());
     if let Some(layer) = &selection {
         let moved = changes.take_cells(follows_selection);
         merge_shares(&mut shares, moved.into_layer(layer.clone()).take_shares());
     }
-    // A write into the loopback, `control:`, is a dispatch: the first
-    // tick's stimulus, landing in no layer.
+    // A write into a channel is a dispatch: the first tick's stimulus,
+    // read as a row of the channel, landing in no layer. One into the
+    // loopback, `control:`, is bound for no layer, as a dispatched
+    // command is.
     let control = control_layer();
+    let channels: Vec<Entity> = stack
+        .iter()
+        .flat_map(|stack| {
+            stack
+                .channels
+                .iter()
+                .map(|channel| channel.entity().clone())
+        })
+        .collect();
     let shares: Vec<(Entity, Changes)> = shares
         .into_iter()
         .filter_map(|(layer, share)| {
             if layer == control {
                 transients.merge(share);
+                None
+            } else if channels.contains(&layer) {
+                transients.merge(share.into_layer(layer));
                 None
             } else {
                 Some((layer, share))
@@ -1078,31 +1213,28 @@ where
         .collect();
     let (shares, primary) = route_shares(shares, &held)?;
     changes.apply(primary);
-    // The link's commands, before the session's revision rows join its
-    // stimulus: what its publish lands in the session's `control:`.
+    // The link's commands and its writes into channels, before the rows
+    // the channels' outside ends sent and the stack's revision rows join
+    // its stimulus: what its publish lands on the stack's channels.
     let mut dispatched = transients.clone();
     let looped = take_dispatched(&mut dispatched);
     dispatched.merge(looped);
-    // Through a session, the revision of every layer that moved since the
-    // session last recorded it is the dispatch's stimulus, read as rows of
+    // Through a stack, the revision of every layer that moved since the
+    // stack last recorded it is the dispatch's stimulus, read as rows of
     // `session:`: a rule premised on a layer's revision fires when the
-    // layer moved. The session's own layer moves with every recording, so
-    // its row is stimulus on every dispatch after the first.
-    if let Some(session) = &session {
-        let source = view.to_source();
-        transients.merge(
-            revision_stimulus(
-                view.revision(),
-                &session
-                    .durables
-                    .iter()
-                    .map(|durable| (durable.layer.clone(), durable.revision()))
-                    .collect::<Vec<_>>(),
-                &session.memories,
-                source.overlay(),
-            )
-            .into_layer(session_layer()),
-        );
+    // layer moved. A recording does not move the stack's own layer, so
+    // its row is stimulus only when something else wrote into it since.
+    if let Some(stack) = &stack {
+        let recorded = Recorded {
+            branch: &stack.branch,
+            primary: view.revision(),
+            observed: &stack.observed,
+            memories: &stack.memories,
+            channels: &stack.channels,
+            own: &stack.own,
+        };
+        transients.merge(recorded.stimulus().into_layer(session_layer()));
+        transients.merge(stack.received.clone());
     }
     let mut changes = Box::pin(succession::settle(
         composite.clone(),
@@ -1115,13 +1247,17 @@ where
     // read each layer as that tick leaves it, and they are stimulus of
     // the first round, as the link's writes into the primary are.
     for (layer, share) in &shares {
-        if *layer == session_layer() {
+        // A line's session overlay is read live, and its row of a cell
+        // stands above a write staged for it; a stack's own layer is a
+        // memory layer of the composite, which the rounds read with the
+        // ticks applied, and needs none of this.
+        if *layer == session_layer() && stack.is_none() {
             let source = view.to_source();
             changes.merge(succession_in_own(source.overlay(), share).into_layer(layer.clone()));
         }
         changes.merge(share.clone().into_layer(layer.clone()));
     }
-    let (induced, rounds) = induce(
+    let (induced, rounds, ran) = induce(
         &view,
         &composite,
         &mut changes,
@@ -1147,13 +1283,14 @@ where
             ticks.push(derived);
         }
     }
-    let durables = match &session {
-        Some(session) => {
-            Box::pin(commit_durables(
-                &session.durables,
+    let durables = match &stack {
+        Some(stack) => {
+            Box::pin(mint_durables(
+                &stack.durables,
                 &mut ticks,
                 &mut changes,
                 staged,
+                &operator,
                 env,
             ))
             .await?
@@ -1189,36 +1326,39 @@ where
             );
         }
     }
-    Ok((outcome, induced, ticks, durables, dispatched))
+    Ok((outcome, induced, ticks, durables, dispatched, ran))
 }
 
 /// What [`mint_link`] mints: the link's outcome on the primary, the
 /// transients its rules emitted, its writes into memory layers tick by
-/// tick, the chains it staged on durable layers, by layer, and the
-/// commands it dispatched itself.
+/// tick, the trees it minted for durable layers, by layer, the
+/// commands it dispatched itself, and how many ticks its induction ran.
 type Link = (
     Outcome,
     Changes,
     Vec<Vec<(Entity, Changes)>>,
-    Vec<(Entity, TransactionBatch)>,
+    Vec<(Entity, Revision)>,
     Changes,
+    u32,
 );
 
-/// Take the writes into `durables` out of `ticks` and commit each
-/// layer's, every tick of them together, on the layer's branch: as a
-/// link of the chain `staged` holds for it, or as the first link of a
-/// chain built on the head the dispatch pinned. Each layer a write moved
-/// gets its pointer fact in `changes`, the primary's writes, naming the
-/// tip it is staged at. Answers the chains, by layer, `staged` among
-/// them. Nothing is published: the primary's publish publishes them
-/// first.
-async fn commit_durables<Env>(
+/// Take the writes into `durables` out of `ticks` and mint each
+/// layer's, every tick of them together, as the layer's next tree: on
+/// the tree an earlier link of the chain minted for it (`staged`), or on
+/// the one the primary pointed it at when the dispatch began. The writes
+/// are settled against the layer as a commit on it would settle them.
+/// Each layer a write moved gets its pointer facts in `changes`, the
+/// primary's writes, naming the tree it was minted at. Answers the minted
+/// revisions, by layer, `staged` among them. Nothing is published: the
+/// primary's commit is what names them.
+async fn mint_durables<Env>(
     durables: &[DurableLayer],
     ticks: &mut Vec<Vec<(Entity, Changes)>>,
     changes: &mut Changes,
-    mut staged: Vec<(Entity, TransactionBatch)>,
+    mut staged: Vec<(Entity, Revision)>,
+    operator: &Capability<Operator>,
     env: &Env,
-) -> Result<Vec<(Entity, TransactionBatch)>, CommitError>
+) -> Result<Vec<(Entity, Revision)>, CommitError>
 where
     Env: Provider<BlobSize>
         + Provider<BlobImport>
@@ -1255,24 +1395,38 @@ where
     }
     ticks.retain(|tick| !tick.is_empty());
     for (layer, share) in writes {
-        let batch = match staged.iter().position(|(held, _)| *held == layer) {
-            Some(at) => {
-                let (_, chain) = staged.remove(at);
-                Box::pin(chain.transaction().integrate(share).commit().perform(env)).await?
-            }
-            None => {
-                let Some(durable) = durables.iter().find(|durable| durable.layer == layer) else {
-                    continue;
-                };
-                Box::pin(durable.transaction().integrate(share).commit().perform(env)).await?
-            }
+        let Some(durable) = durables.iter().find(|durable| durable.layer == layer) else {
+            continue;
         };
-        Pointer {
-            layer: layer.clone(),
-            revision: tree_revision(&batch.revision()),
-        }
-        .assert(changes);
-        staged.push((layer, batch));
+        let at = staged.iter().position(|(held, _)| *held == layer);
+        let base = match at {
+            Some(at) => Some(staged.remove(at).1),
+            None => durable.revision.clone(),
+        };
+        let view = durable.view_at(base.as_ref());
+        let settled = Box::pin(succession::settle(
+            Composite::of(view.to_source()),
+            shared_metadata(from_ref(&view), operator),
+            &Staged::from(share),
+            env,
+        ))
+        .await?;
+        drop(view);
+        let revision = match Box::pin(durable.mint(base.as_ref(), settled, env)).await? {
+            Some(minted) => {
+                Pointer {
+                    layer: &layer,
+                    revision: &minted,
+                }
+                .assert(changes);
+                minted
+            }
+            None => match base {
+                Some(base) => base,
+                None => continue,
+            },
+        };
+        staged.push((layer, revision));
     }
     Ok(staged)
 }
