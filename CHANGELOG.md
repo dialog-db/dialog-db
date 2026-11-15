@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A stack shares one evaluation of a query among its readers, and delivers to them after a dispatch
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD).
+[#819](https://github.com/dialog-db/dialog-db/pull/819).
 
 `Stack::subscribe(query)` now registers the stack's subscription to a
 query, or attaches to the one it holds, and returns a `Subscriber`: a
