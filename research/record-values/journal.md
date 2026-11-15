@@ -597,6 +597,34 @@ records under byte 7; the byte does not change any size or time it measured.
 
 Commits: this entry.
 
+## 2026-11-15 — The single-file archive landed as `dialog-chronicle`
+
+**Question.** #733 merged as `dialog-chronicle` (`c41287b`). What of the
+design's proposals does it already do, and what is left for composites?
+
+**Method.** Read `rust/dialog-chronicle` on main (`node.rs`, `tokens.rs`,
+`hash.rs`), the tree's scans in `dialog-search-tree`, and the changelog.
+
+**Results.**
+
+- A key splits into entity, attribute and value tokens, history keys into a
+  version and the same three (`key_tokens`, `split_record_components`). A
+  value is one token, its type byte and its payload together, so the
+  payload-interning proposal (design, section 4) is not built and no value is
+  split into parts.
+- Tokens are indexed by a 64-bit hash of their bytes (`hash.rs`), not a merkle
+  reference; keeping one beside a token is a format addition.
+- Nodes are served in place over the file's mapping; the tree's scans still
+  hand values out owned (`into_owned`, `tree.rs`, `differential.rs`).
+- A space opts into the file; the browser is still research.
+
+**Decision.** The view model's first steps do not wait on the chronicle:
+composites as a value type, keyed whole, come first; splitting them in the
+chronicle and yielding views follow (design, section 0). Building starts on
+its own branch.
+
+Commits: this entry.
+
 ## How to reproduce
 
 The commands are in [the results](results/2026-11-11-spike.md#reproduce).
