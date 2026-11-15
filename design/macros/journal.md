@@ -1075,6 +1075,21 @@ Not examined yet. They are columns, not recommendations.
 
 In the same conversation he settled how a pattern is written in a stored rule (`match`; [rule-format](https://github.com/dialog-db/dialog-db/pull/779)), which turned up a question of its own, now in the queue.
 
+## 2026-11-15, Designing: a struct read is open, and what goes with it
+
+**Asked.** The maintainer had said a map pattern with no rest should match a map of at least its entries. Put to him against three of his decisions of 2026-11-13 that give a trailing `...` its meaning, with exact as the other choice: "Open".
+
+**Learned.**
+
+- Open cannot be the meaning of dialog's own pattern: built, `{title: ?t}` is the map of a title alone, and taken apart it is any map with a title, so a rule means two things by which premise runs first (#778, `design/patterns/design-pattern-meaning.md`). That note leaves the open reading to the notation.
+- So here: where a struct is read, `{title: ?t}` is lowered to `{title: ?t ... _}`. A struct read with no variable in it is a pattern too, and no longer the value. Where a struct is written, an assert or a rule's head, it is the value it says.
+- What that takes back, of 2026-11-13: a trailing `...` in a read is allowed and adds nothing; a concept read that leaves fields out is no longer refused. `... ?rest` keeps its meaning.
+- A list stays exact: `[?a ?b]` is two items. He spoke of maps.
+- Lost for now: a way to say exactly these entries in a read.
+- A key in a struct is text, since a map's key is (#778, rebuilt the same day as plain dag-cbor): `{author: ?who}` keys by the text `author`. A struct node of a kept tree keeps its entries in a map keyed by nodes today, and becomes a list of pairs.
+
+**Decided.** By the maintainer: open. Not built here yet: this branch has the exact reading, the refusal, and symbol keys, until #778 and #799 are merged in.
+
 ## The queue
 
 In order. One is asked, answered and written down before the next.
