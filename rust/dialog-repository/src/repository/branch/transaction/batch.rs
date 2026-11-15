@@ -24,6 +24,7 @@ use super::succession;
 use super::{
     Line, Transaction, TransactionCommit, carry_footprint, touches_rule_facts, touches_rules,
 };
+use crate::Channel;
 use crate::Ephemeral;
 use crate::placement::{
     Pointer, Recorded, control_layer, follows_selection, memory_layer, selected, session_layer,
@@ -34,7 +35,6 @@ use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::branch::session::{Composite, shared_metadata};
 use crate::repository::branch::transaction::{DurableLayer, StackContext};
 use crate::repository::source::{Caches, Live, View};
-use crate::Channel;
 use crate::stack::durable::{Durables, Pinned};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
@@ -452,7 +452,10 @@ fn land_in(channels: &[Channel], mut written: Changes) {
             channel.land(&written);
             continue;
         }
-        match shares.iter().position(|(layer, _)| layer == channel.entity()) {
+        match shares
+            .iter()
+            .position(|(layer, _)| layer == channel.entity())
+        {
             Some(index) => channel.land(&shares.swap_remove(index).1),
             None => channel.land(&Changes::new()),
         }
@@ -1127,7 +1130,12 @@ where
     let control = control_layer();
     let channels: Vec<Entity> = stack
         .iter()
-        .flat_map(|stack| stack.channels.iter().map(|channel| channel.entity().clone()))
+        .flat_map(|stack| {
+            stack
+                .channels
+                .iter()
+                .map(|channel| channel.entity().clone())
+        })
         .collect();
     let shares: Vec<(Entity, Changes)> = shares
         .into_iter()

@@ -984,6 +984,7 @@ impl Clone for QueryEnv<'_> {
             sources: self.sources.clone(),
             memories: self.memories.clone(),
             names: self.names.clone(),
+            channels: self.channels.clone(),
             overlay: self.overlay.clone(),
             layers: self.layers.clone(),
             format: self.format.clone(),

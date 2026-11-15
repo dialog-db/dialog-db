@@ -13,7 +13,8 @@
 //! and each memory layer's share lands in it once the publish does, so
 //! no layer shows a commit that was refused. The layers every stack
 //! has are named [`MEMORY`], the primary, [`SESSION`], the stack's own,
-//! and [`CONTROL`], the loopback a command lands in.
+//! and [`CONTROL`], the loopback a command lands in. [`Stack::layer`]
+//! hands each out by its type ([`Layer`]).
 //!
 //! ```no_run
 //! # use dialog_repository::{Branch, LayerDeclaration, LayerType};
@@ -43,20 +44,24 @@
 //! same commit without the re-run, for a caller that handles a lost head
 //! itself.
 //!
-//! A command is a write into [`CONTROL`], the loopback: one dispatched
-//! ([`Invocation::dispatch`](invoke::Invocation::dispatch)), one written
+//! A **channel** ([`Channel`]) is a layer whose rows live one tick, with
+//! two ends: what its outside end sends is read by the next dispatch's
+//! first tick as rows of the channel, and what a dispatch writes into it
+//! lands on its outside end once the dispatch has published. A command
+//! is a row of [`CONTROL`], the built-in channel, the loopback: one
+//! invoked ([`Stack::invoke`] sends it and runs a dispatch), one written
 //! `.at(control_layer())`, or a rule head landing there (its descriptor
 //! names `in: control:`, or its concept carries the
 //! `dialog.concept/transient` marker). It is the stimulus of the next
 //! tick, read as a row of `control:` by a rule premised on it, and gone
-//! after that tick. Once a dispatch has published, its commands land in
-//! the stack's `control:` layer as one instant and leave it in the
-//! next: a **provider**, something that performs an effect, reads them
-//! there with [`Stack::arrivals`], each once, and answers by invoking
-//! ([`Stack::invoke`]), naming the command it answers by its entity.
-//! A provider outside the invoke loop, or outside the process, reads a
-//! **channel** instead, `control:<name>`, a layer declared with
-//! [`LayerType::Channel`] whose rows stay until the consumer retracts them.
+//! after that tick. Once a dispatch has published, its commands land on
+//! the loopback's outside end as one tick: a **provider**, something that
+//! performs an effect, reads them there with [`Stack::arrivals`], each
+//! once, and answers by invoking, naming the command it answers by its
+//! entity. A provider outside the invoke loop, or outside the process,
+//! reads another channel instead: one the schema declares with
+//! [`LayerType::Channel`], or one [`Stack::channel`] creates, named by
+//! any entity outside [`MEMORY`] and [`SESSION`].
 //!
 //! A layer declared with [`LayerType::Branch`], `memory:<name>`, is
 //! durable: a tree the primary points at, with no head of its own. The
@@ -85,9 +90,11 @@
 //! The stack records in its own layer the revision every layer but a
 //! durable one stands at, one row per layer, under `last`: of
 //! [`MEMORY`] the primary's branch entity's `dialog.branch/revision`,
-//! naming its revision's entity; of each memory layer, [`CONTROL`]
-//! among them, its `dialog.layer/revision`, the hash of its instant
-//! chain as text; and of [`SESSION`] the same of its own chain as it
+//! naming its revision's entity; of each memory layer its
+//! `dialog.layer/revision`, the hash of its instant chain as text; of
+//! each channel, [`CONTROL`] among them, the same, the hash of the
+//! sequence of its last tick ([`Channel::revision`]); and of
+//! [`SESSION`] the hash of its own chain as it
 //! stood before the recordings that followed its last change. A durable
 //! layer has no row: the primary's pointer fact of it is the record.
 //! The rows exist from the moment the stack opens, which writes them as
@@ -154,16 +161,15 @@ use parking_lot::RwLock;
 
 use crate::placement::{
     LayerDeclaration, LayerType, Layers, Recorded, Selection, channel_name, control_layer,
-    durable_name, memory_layer, selected,
-    session_layer,
+    durable_name, memory_layer, selected, session_layer,
 };
 use crate::repository::branch::session::Composite;
 use crate::repository::branch::transaction::{DurableLayer, StackContext};
 use crate::repository::source::Source;
 use crate::schema::Replica;
 use crate::{Branch, Channel, CommitError, Ephemeral, QueryLayer, RemoteSite, Transaction};
-use durable::Durables;
 pub use durable::Durable;
+use durable::Durables;
 
 /// What opening a stack and reading through it need of the
 /// environment: a read of the primary, to resolve the layers its schema
@@ -622,7 +628,10 @@ impl Stack {
     pub(crate) fn unrecorded(&self) -> bool {
         let revision = self.inner.primary.revision();
         let channels = self.channels();
-        !self.recorded(revision.as_ref(), &channels).rows().is_empty()
+        !self
+            .recorded(revision.as_ref(), &channels)
+            .rows()
+            .is_empty()
     }
 
     /// What the stack records of its layers' revisions, with the
@@ -747,6 +756,7 @@ mod tests {
     use anyhow::Result;
     use dialog_common::ConditionalSend;
     use dialog_corpus::Selector;
+    use dialog_corpus::Update as _;
     use dialog_peer::Peer;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::Cardinality;
@@ -828,6 +838,27 @@ mod tests {
         T: Scalar + Debug + Clone + ConditionalSend + ConditionalSync + 'static,
     {
         read::<T>(branch.query(), env, the, of).await
+    }
+
+    /// The layer `name` of `stack`, if it is one held in memory.
+    fn ephemeral<'a>(stack: &'a Stack, name: &Entity) -> Option<&'a Ephemeral> {
+        stack.layer(name)?.ephemeral()
+    }
+
+    /// Whether the channel `name` of `stack` was sent rows no dispatch
+    /// has taken.
+    fn waiting(stack: &Stack, name: &Entity) -> bool {
+        stack.channel_of(name).expect("a channel").is_waiting()
+    }
+
+    /// A channel's revision as its `dialog.layer/revision` row names it.
+    fn channel_text(stack: &Stack, name: &Entity) -> String {
+        use base58::ToBase58 as _;
+        let channel = stack.channel_of(name).expect("a channel");
+        format!(
+            "{:?}",
+            dialog_corpus::Value::String(channel.revision().as_bytes().to_base58())
+        )
     }
 
     /// The values of `the` on `of` a memory layer holds.
@@ -931,7 +962,7 @@ mod tests {
             implied_and([state.clone()]),
             "the three layers every stack has come first, then the schema's"
         );
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
 
         let doc: Entity = "doc:1".parse()?;
         let revision = stack
@@ -1013,7 +1044,7 @@ mod tests {
         branch
             .overlay()
             .assert(primary_flag(&"doc:2".parse()?, true))?;
-        let layer = stack.layer(&own).expect("the stack's own layer");
+        let layer = ephemeral(&stack, &own).expect("the stack's own layer");
         assert_eq!(
             held(layer, "ui/selected", &"doc:2".parse()?)?,
             vec!["Boolean(true)".to_string()],
@@ -1058,7 +1089,7 @@ mod tests {
         assert_eq!(declared.layers(), implied_and([]));
         assert!(
             !held(
-                declared.layer(&own).expect("its own layer"),
+                ephemeral(&declared, &own).expect("its own layer"),
                 "ui/selected",
                 &doc
             )?
@@ -1079,7 +1110,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
         stack
             .transaction()
@@ -1127,7 +1158,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
         stack
             .transact(count(&counter, 1, &state))
@@ -1191,7 +1222,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
         let before = stack
             .transact(count(&counter, 1, &state))
@@ -1224,7 +1255,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let before = branch.revision();
         let doc: Entity = "doc:1".parse()?;
         let refused = stack
@@ -1275,7 +1306,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let doc: Entity = "doc:1".parse()?;
         let transaction = stack
             .transaction()
@@ -1452,10 +1483,7 @@ mod tests {
         assert_eq!(
             revision_rows_of(&own),
             vec![
-                format!(
-                    "control: = {}",
-                    chain_text(stack.layer(&control_layer()).expect("control:"))
-                ),
+                format!("control: = {}", channel_text(&stack, &control_layer())),
                 format!("session: = {}", settled_text(&own)),
             ],
             "the memory layers' rows"
@@ -1506,7 +1534,7 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let tab: Entity = "session:tab".parse()?;
-        let mail: Entity = "control:mail".parse()?;
+        let mail: Entity = "mail:box".parse()?;
         let notes: Entity = "memory:notes".parse()?;
         branch
             .transaction()
@@ -1523,12 +1551,15 @@ mod tests {
             implied_and([mail.clone(), tab.clone(), notes.clone()])
         );
         assert!(
-            stack.layer(&tab).is_some(),
+            matches!(stack.layer(&tab), Some(Layer::Ephemeral(_))),
             "the session layer is in memory"
         );
-        assert!(stack.layer(&mail).is_some(), "so is the channel");
         assert!(
-            stack.layer(&notes).is_none(),
+            matches!(stack.layer(&mail), Some(Layer::Channel(_))),
+            "the channel is a channel"
+        );
+        assert!(
+            matches!(stack.layer(&notes), Some(Layer::Durable(_))),
             "the durable layer is no cell"
         );
         assert_eq!(stack.branch_of(&notes), None, "and no branch");
@@ -1627,7 +1658,7 @@ mod tests {
         let state = declare_state(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
         let own_name = crate::session_layer();
-        let own = stack.layer(&own_name).expect("its own layer").clone();
+        let own = ephemeral(&stack, &own_name).expect("its own layer").clone();
         let control = crate::control_layer();
         let doc: Entity = "doc:1".parse()?;
 
@@ -1757,9 +1788,9 @@ mod tests {
             .branch_of(&crate::memory_layer())
             .expect("the primary's branch")
             .clone();
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let own_name = crate::session_layer();
-        let own = stack.layer(&own_name).expect("its own layer").clone();
+        let own = ephemeral(&stack, &own_name).expect("its own layer").clone();
         let doc: Entity = "doc:1".parse()?;
         let seen = |of: &Entity| held(&memory, "seen/revision", of);
         let seen_primary = || held(&memory, "seen/branch-revision", &primary);
@@ -1885,7 +1916,7 @@ mod tests {
         assert_ne!(after, before, "the command moved control:");
         assert_eq!(
             after,
-            vec![chain_text(stack.layer(&control).expect("control:"))],
+            vec![channel_text(&stack, &control)],
             "control:'s row names where the landing left it"
         );
         let others = |rows: Vec<String>| -> Vec<String> {
@@ -1969,7 +2000,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let doc: Entity = "doc:1".parse()?;
         let title = |text: &str| {
             dialog_query::the!("doc/title")
@@ -2062,7 +2093,7 @@ mod tests {
             .await?;
         branch.refresh(&operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         stack.select(Some(state.clone())).perform(&operator).await?;
 
         let doc: Entity = "doc:1".parse()?;
@@ -2103,7 +2134,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let nowhere = layer("nowhere");
         stack
             .select(Some(nowhere.clone()))
@@ -2428,7 +2459,7 @@ mod tests {
         let state = declare_state(&branch, &operator).await?;
         declare_steps(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
         stack
             .transact(count(&counter, 1, &state))
@@ -2491,7 +2522,7 @@ mod tests {
         let state = declare_state(&branch, &operator).await?;
         declare_steps(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
 
         let start = memory.revision().sequence;
@@ -2570,7 +2601,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
         let doc: Entity = "doc:1".parse()?;
         stack
@@ -2703,7 +2734,7 @@ mod tests {
         let state = declare_state(&branch, &operator).await?;
         declare_spread(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let mut subscription = stack.subscribe(selected_query());
         subscription.poll(&operator).await?;
 
@@ -2960,7 +2991,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_fetch(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let control = crate::control_layer();
         let mut fetches = stack
             .arrivals(&control, fetch_query())
@@ -3019,10 +3050,7 @@ mod tests {
             fetches.poll(&operator).await?.is_empty(),
             "read once: the answer is no fetch, and the expiry is no arrival"
         );
-        assert!(
-            stack.layer(&control).expect("control:").is_empty(),
-            "nothing stays in control:"
-        );
+        assert!(!waiting(&stack, &control), "nothing stays in control:");
         Ok(())
     }
 
@@ -3049,10 +3077,10 @@ mod tests {
     }
 
     /// Declare, beside [`declare_fetch`]'s capture, a channel
-    /// `control:host`: a layer for a consumer outside the invoke loop.
+    /// `mail:host`: a layer for a consumer outside the invoke loop.
     async fn declare_host(branch: &Branch, env: &Operator) -> Result<(Entity, Entity)> {
         let state = declare_fetch(branch, env).await?;
-        let host: Entity = "control:host".parse()?;
+        let host: Entity = "mail:host".parse()?;
         branch
             .transaction()
             .assert(LayerDeclaration::new(host.clone(), LayerType::Channel))
@@ -3064,110 +3092,322 @@ mod tests {
         Ok((state, host))
     }
 
-    /// A consumer of a channel reads the rows the dispatches wrote there,
-    /// each once, as rows of the channel, and answers by invoking, retracting
-    /// what it consumed. The rows stay until then; after, the channel holds
-    /// nothing, and the consumer reads nothing: its own retraction is no
-    /// arrival.
-    #[dialog_common::test]
-    async fn it_reads_a_channel_until_its_consumer_retracts_the_rows() -> Result<()> {
-        let (operator, peer) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &peer).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-        let (state, host) = declare_host(&branch, &operator).await?;
-        let stack = branch.stack().perform(&operator).await?;
-        assert!(stack.layers().contains(&host), "the channel is held");
-        let memory = stack.layer(&state).expect("the state layer").clone();
-        let channel = stack.layer(&host).expect("the channel").clone();
-        let mut fetches = stack.arrivals(&host, fetch_query()).expect("the channel");
-        assert!(fetches.poll(&operator).await?.is_empty());
-        let before = branch.revision();
-        let node: Entity = "node:1".parse()?;
-        for command in ["cmd:1", "cmd:2"] {
-            stack
-                .transact(fetch(command, &node).at(host.clone()))
-                .perform(&operator)
-                .await?;
-        }
-        assert_eq!(
-            held(&channel, "cmd.fetch/node", &"cmd:1".parse()?)?,
-            vec!["Entity(node:1)".to_string()],
-            "a channel's row outlives its dispatch"
-        );
-        assert!(held(&memory, "node/fetched", &node)?.is_empty());
-
-        let commands = fetches.poll(&operator).await?;
-        assert_eq!(
-            subjects(&commands),
-            vec!["cmd:1".to_string(), "cmd:2".to_string()]
-        );
-        assert!(
-            commands
-                .iter()
-                .all(|command| command.layer() == Some(&host))
-        );
-        let mut answer = stack.transact(Changes::new());
-        for command in &commands {
-            answer = answer
-                .dispatch(fetched(command)?)
-                .retract(fetch(&command.of.to_string(), &node).at(host.clone()));
-        }
-        answer.perform(&operator).await?;
-
-        assert_eq!(
-            held(&memory, "node/fetched", &node)?,
-            vec!["Entity(cmd:1)".to_string(), "Entity(cmd:2)".to_string()]
-        );
-        assert!(channel.is_empty(), "the consumer retracted what it read");
-        assert!(
-            fetches.poll(&operator).await?.is_empty(),
-            "read once: a retraction is no arrival"
-        );
-        assert_eq!(branch.revision(), before, "nothing durable was written");
+    /// A rule answering a `cmd.ping/target` command with a
+    /// `mail.out/target` of the same entity whose descriptor names
+    /// `in: <at>`: a rule's write into a channel.
+    async fn declare_forward(branch: &Branch, env: &Operator, at: &Entity) -> Result<()> {
+        let forward: InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": {
+                    "target": { "the": "mail.out/target", "as": "Entity", "in": at.to_string() }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": { "target": { "the": "cmd.ping/target", "as": "Entity" } }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "target": { "?": { "name": "target" } }
+                    }
+                }
+            ]
+        }))?;
+        branch
+            .transaction()
+            .assert(forward)
+            .commit()
+            .publish()
+            .perform(env)
+            .await?;
+        branch.refresh(env).await?;
         Ok(())
     }
 
-    /// A consumer that was not reading loses nothing: a channel keeps
-    /// every row until it is retracted, so a reader built after the rows
-    /// landed reads every one, and so does a reader the layer's bounded
-    /// instants moved past, from what the channel holds.
+    /// What a dispatch writes into a channel, `.at(channel)` and through a
+    /// rule's head, lands on the channel's outside end once its publish
+    /// has won, and a reader reads each row once, as a row of the channel.
+    /// Nothing of it is a row of any layer after its dispatch. A
+    /// transaction through the stack whose publish lost its head is
+    /// refused with `VersionMismatch` and lands nothing.
     #[dialog_common::test]
-    async fn it_keeps_a_channels_rows_for_a_consumer_that_was_not_reading() -> Result<()> {
-        // One more than the instants a layer keeps.
-        const PAST_THE_INSTANTS: usize = 1025;
+    async fn it_lands_what_a_dispatch_wrote_into_a_channel_on_its_outside_end() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let mailbox: Entity = "mail:box".parse()?;
+        declare_forward(&branch, &operator, &mailbox).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let channel = stack.channel(&mailbox)?;
+        let mut rows = stack.arrivals_rows(&mailbox).expect("the channel");
+        let node: Entity = "node:1".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        let before = branch.revision();
+
+        stack
+            .transact(fetch("cmd:1", &node).at(mailbox.clone()))
+            .perform(&operator)
+            .await?;
+        stack
+            .invoke(ping("cmd:2", &target))
+            .perform(&operator)
+            .await?;
+        let text = |facts: Vec<dialog_corpus::Fact>| -> Vec<String> {
+            facts
+                .into_iter()
+                .map(|fact| format!("{} {} {:?}", fact.of, fact.the, fact.is))
+                .collect()
+        };
+        assert_eq!(
+            text(rows.rows()),
+            vec![
+                "cmd:1 cmd.fetch/node Entity(node:1)".to_string(),
+                "cmd:2 mail.out/target Entity(doc:1)".to_string(),
+            ],
+            "the write, then the rule's, each a tick of the channel"
+        );
+        assert!(rows.rows().is_empty(), "read once");
+        assert_eq!(channel.sequence(), 2, "two ticks landed");
+        assert!(
+            fresh(&stack, &operator, whole(&mailbox)).await?.is_empty(),
+            "no row of the channel outlives its tick"
+        );
+        assert_eq!(branch.revision(), before, "nothing durable was written");
+
+        let transaction = stack
+            .transaction()
+            .assert(fetch("cmd:3", &node).at(mailbox.clone()));
+        branch
+            .transaction()
+            .assert(title(&"doc:2".parse()?, "moved"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let refused = transaction.commit().publish().perform(&operator).await;
+        assert!(
+            matches!(
+                refused,
+                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
+            ),
+            "{refused:?}"
+        );
+        assert!(rows.rows().is_empty(), "a lost publish lands nothing");
+        assert_eq!(channel.sequence(), 2, "and moves no tick");
+        Ok(())
+    }
+
+    /// What the outside end of `mail:box` sends is read by the next
+    /// dispatch's first tick as rows of `mail:box`, so a rule premised on
+    /// it fires once, and by no later tick; it is not landed back on the
+    /// outside end. A send no dispatch has taken waits for one.
+    #[dialog_common::test]
+    async fn it_reads_a_send_at_the_next_dispatchs_first_tick_alone() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let mailbox: Entity = "mail:box".parse()?;
+        let state = declare_counter_on(&branch, &operator, &mailbox).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        let counter: Entity = "ctr:1".parse()?;
+        stack
+            .transact(count(&counter, 1, &state))
+            .perform(&operator)
+            .await?;
+        let channel = stack.channel(&mailbox)?;
+        let mut rows = stack.arrivals_rows(&mailbox).expect("the channel");
+
+        channel.send(increment("cmd:1", &counter));
+        assert!(channel.is_waiting(), "sent, not yet taken");
+        assert_eq!(
+            held(&memory, "counter/count", &counter)?,
+            vec!["UnsignedInt(1)".to_string()],
+            "nothing reads a send before a dispatch takes it"
+        );
+        stack.transact(Changes::new()).perform(&operator).await?;
+        assert!(!channel.is_waiting(), "taken");
+        assert_eq!(
+            held(&memory, "counter/count", &counter)?,
+            vec!["UnsignedInt(2)".to_string()],
+            "the rule read the send as a row of mail:box, once"
+        );
+        stack.transact(Changes::new()).perform(&operator).await?;
+        assert_eq!(
+            held(&memory, "counter/count", &counter)?,
+            vec!["UnsignedInt(2)".to_string()],
+            "no later dispatch reads it"
+        );
+        assert!(rows.rows().is_empty(), "a send is not landed back outside");
+        assert_eq!(channel.sequence(), 0);
+
+        stack
+            .transact(increment("cmd:2", &counter))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            held(&memory, "counter/count", &counter)?,
+            vec!["UnsignedInt(2)".to_string()],
+            "a row of the primary is not a row of the channel"
+        );
+        Ok(())
+    }
+
+    /// `stack.channel` creates a channel the stack does not hold, writing
+    /// its type into `session:` as one instant, and lists it; a second
+    /// call writes nothing and hands out the same channel. The loopback is
+    /// the channel of `control:`: what is sent into it is read back on
+    /// its outside end once a dispatch has taken it.
+    #[dialog_common::test]
+    async fn it_creates_a_channel_at_run_time() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let own = branch.overlay().clone();
+        let mailbox: Entity = "mail:box".parse()?;
+        let sequence = own.revision().sequence;
+
+        let channel = stack.channel(&mailbox)?;
+        assert_eq!(channel.entity(), &mailbox);
+        assert_eq!(own.revision().sequence, sequence + 1, "one instant");
+        assert_eq!(
+            held(&own, "dialog.layer/type", &mailbox)?,
+            vec!["Entity(channel:)".to_string()]
+        );
+        assert_eq!(stack.layers(), implied_and([mailbox.clone()]));
+        assert!(matches!(stack.layer(&mailbox), Some(Layer::Channel(_))));
+        let again = stack.channel(&mailbox)?;
+        assert_eq!(own.revision().sequence, sequence + 1, "writes nothing");
+        again.send(fetch("cmd:1", &"node:1".parse()?));
+        assert!(channel.is_waiting(), "the same channel");
+        assert_eq!(stack.layers(), implied_and([mailbox.clone()]));
+
+        let control = control_layer();
+        let loopback = stack.channel(&control)?;
+        assert_eq!(loopback.entity(), &control);
+        assert_eq!(own.revision().sequence, sequence + 1, "control: is held");
+        let mut fetches = stack.arrivals(&control, fetch_query()).expect("control:");
+        loopback.send(fetch("cmd:2", &"node:2".parse()?));
+        stack.transact(Changes::new()).perform(&operator).await?;
+        assert_eq!(
+            subjects(&fetches.poll(&operator).await?),
+            vec!["cmd:2".to_string()],
+            "the loopback hands back what it was sent"
+        );
+
+        let reopened = branch.stack().perform(&operator).await?;
+        assert_eq!(
+            reopened.layers(),
+            implied_and([mailbox.clone()]),
+            "a stack opened later reads the channel's type from session:"
+        );
+        Ok(())
+    }
+
+    /// A channel named under `memory:` or `session:` is refused with
+    /// `InvalidPlacement`, declared in the schema or created at run time,
+    /// and nothing is written into `session:`.
+    #[dialog_common::test]
+    async fn it_refuses_a_channel_named_for_another_type_of_layer() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let own = branch.overlay().clone();
+        let sequence = own.revision().sequence;
+        for name in ["memory:x", "session:x"] {
+            let refused: Entity = name.parse()?;
+            let created = stack.channel(&refused);
+            assert!(
+                matches!(created, Err(CommitError::InvalidPlacement { .. })),
+                "{name}: {created:?}"
+            );
+            assert_eq!(own.revision().sequence, sequence, "{name}: nothing written");
+            assert_eq!(stack.layers(), implied_and([]), "{name}: nothing held");
+        }
+
+        for name in ["memory:x", "session:x"] {
+            let (operator, peer) = test_session_with_peer().await;
+            let repo = test_repo(&operator, &peer).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+            branch
+                .transaction()
+                .assert(LayerDeclaration::new(name.parse()?, LayerType::Channel))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            branch.refresh(&operator).await?;
+            let opened = branch.stack().perform(&operator).await;
+            assert!(
+                matches!(opened, Err(CommitError::InvalidPlacement { .. })),
+                "{name}: {:?}",
+                opened.err()
+            );
+            assert_eq!(
+                branch.overlay().revision().sequence,
+                0,
+                "{name}: nothing written"
+            );
+        }
+        Ok(())
+    }
+
+    /// A channel's log holds each tick until every reader has passed it:
+    /// a reader that was not reading reads every tick once, oldest first,
+    /// a reader built late reads every tick the log holds, and a tick
+    /// both have passed is dropped. With no reader, the latest tick alone
+    /// is kept.
+    #[dialog_common::test]
+    async fn it_keeps_a_channels_ticks_for_every_reader() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let (_, host) = declare_host(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let mut behind = stack.arrivals(&host, fetch_query()).expect("the channel");
+        let channel = stack.channel_of(&host).expect("the channel");
         let node: Entity = "node:1".parse()?;
-        for index in 0..PAST_THE_INSTANTS {
+        let send = |index: usize| {
             stack
                 .transact(fetch(&format!("cmd:{index}"), &node).at(host.clone()))
                 .perform(&operator)
-                .await?;
+        };
+        send(0).await?;
+        send(1).await?;
+        assert_eq!(channel.held(), 1, "no reader: the latest tick alone");
+
+        let mut behind = stack.arrivals(&host, fetch_query()).expect("the channel");
+        for index in 2..5 {
+            send(index).await?;
         }
-        assert_eq!(
-            stack.layer(&host).expect("the channel").len(),
-            PAST_THE_INSTANTS,
-            "every row is still there"
-        );
         let mut late = stack.arrivals(&host, fetch_query()).expect("the channel");
-        assert_eq!(late.poll(&operator).await?.len(), PAST_THE_INSTANTS);
-        assert!(late.poll(&operator).await?.is_empty());
-        assert_eq!(
-            behind.poll(&operator).await?.len(),
-            PAST_THE_INSTANTS,
-            "moved past, it reads what the channel holds"
-        );
-        assert!(behind.poll(&operator).await?.is_empty());
+        assert_eq!(channel.held(), 4);
+        let every = vec![
+            "cmd:1".to_string(),
+            "cmd:2".to_string(),
+            "cmd:3".to_string(),
+            "cmd:4".to_string(),
+        ];
+        assert_eq!(subjects(&late.poll(&operator).await?), every);
+        assert!(late.poll(&operator).await?.is_empty(), "once");
+        assert_eq!(channel.held(), 4, "the reader behind holds them");
+        assert_eq!(subjects(&behind.poll(&operator).await?), every);
+        assert!(behind.poll(&operator).await?.is_empty(), "once");
+        assert_eq!(channel.held(), 0, "a tick both passed is dropped");
         Ok(())
     }
 
     /// [`declare_state`]'s counter, with its command premise read from
     /// `control:` alone (`in: control:`).
     async fn declare_state_on_control(branch: &Branch, env: &Operator) -> Result<Entity> {
+        declare_counter_on(branch, env, &control_layer()).await
+    }
+
+    /// [`declare_state`]'s counter, with its command premise read from
+    /// the layer `at` alone (`in: <at>`).
+    async fn declare_counter_on(branch: &Branch, env: &Operator, at: &Entity) -> Result<Entity> {
         let state = layer("state");
         let increment: InductiveRule = serde_json::from_value(serde_json::json!({
             "assert!": {
@@ -3183,7 +3423,8 @@ mod tests {
                     "assert": {
                         "with": {
                             "counter": {
-                                "the": "cmd.increment/counter", "as": "Entity", "in": "control:"
+                                "the": "cmd.increment/counter", "as": "Entity",
+                                "in": at.to_string()
                             }
                         }
                     },
@@ -3245,7 +3486,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state_on_control(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
         stack
             .transact(count(&counter, 1, &state))
@@ -3403,7 +3644,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_ping(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let control = crate::control_layer();
         let target: Entity = "doc:1".parse()?;
 
@@ -3485,8 +3726,15 @@ mod tests {
                 .is_empty()
         );
         assert!(held(branch.overlay(), "ui/selected", &doc)?.is_empty());
-        assert!(held(stack.layer(&state).expect("state"), "ui/selected", &doc)?.is_empty());
-        assert!(stack.layer(&control).expect("control:").is_empty());
+        assert!(
+            held(
+                ephemeral(&stack, &state).expect("state"),
+                "ui/selected",
+                &doc
+            )?
+            .is_empty()
+        );
+        assert!(!waiting(&stack, &control));
         assert!(
             fresh(
                 &stack,
@@ -3672,7 +3920,13 @@ mod tests {
         let notes = declare_notes(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
         assert_eq!(stack.layers(), implied_and([notes.clone()]));
-        assert!(stack.layer(&notes).is_none(), "no memory cell holds it");
+        assert!(
+            matches!(
+                stack.layer(&notes),
+                Some(Layer::Durable(durable)) if durable.revision().is_none()
+            ),
+            "no memory cell holds it"
+        );
         assert_eq!(stack.branch_of(&notes), None, "and no branch is it");
         assert_eq!(stack.pointed(&notes), None, "the primary points it nowhere");
         assert!(pointers(&branch, &operator, &notes).await?.is_empty());
@@ -4196,7 +4450,7 @@ mod tests {
             .await?;
         branch.set_upstream(&upstream).perform(&operator).await?;
         let stack = branch.stack().perform(&operator).await?;
-        let memory = stack.layer(&state).expect("the state layer").clone();
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let own = branch.overlay().clone();
         let primary = stack
             .branch_of(&crate::memory_layer())
@@ -4521,10 +4775,7 @@ mod tests {
         assert_eq!(subjects(&commands), vec!["cmd:1".to_string()]);
         assert_eq!(commands[0].layer(), Some(&control), "a row of control:");
         assert!(fetches.poll(&operator).await?.is_empty(), "read once");
-        assert!(
-            stack.layer(&control).expect("control:").is_empty(),
-            "nothing stays in control:"
-        );
+        assert!(!waiting(&stack, &control), "nothing stays in control:");
         assert_eq!(
             committed::<String>(&branch, &operator, "doc/title", &doc).await?,
             vec!["String(\"kept\")".to_string()],
@@ -4586,7 +4837,7 @@ mod tests {
             "{refused:?}"
         );
         assert!(fetches.poll(&operator).await?.is_empty(), "nothing landed");
-        assert!(stack.layer(&control).expect("control:").is_empty());
+        assert!(!waiting(&stack, &control));
         assert!(
             committed::<String>(&branch, &operator, "doc/title", &doc)
                 .await?

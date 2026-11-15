@@ -335,7 +335,10 @@ mod tests {
         );
         assert_eq!(channel.held(), 0, "a tick both passed is dropped");
         channel.land(&rows(&["message:3"]));
-        assert_eq!(subjects(channel.read(&early)), vec!["message:3".to_string()]);
+        assert_eq!(
+            subjects(channel.read(&early)),
+            vec!["message:3".to_string()]
+        );
         assert_eq!(subjects(channel.read(&late)), vec!["message:3".to_string()]);
         Ok(())
     }

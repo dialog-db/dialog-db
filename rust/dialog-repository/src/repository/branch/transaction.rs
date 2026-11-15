@@ -17,13 +17,13 @@ pub(crate) use succession::ReadSettlement;
 #[cfg(test)]
 pub(crate) use succession::{settle, stored_claims};
 
+use crate::Channel;
 use crate::Commit;
 use crate::placement::control_layer;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::session::{Composite, shared_metadata};
 use crate::repository::source::{Live, View};
 use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
-use crate::Channel;
 pub(crate) use crate::stack::durable::DurableLayer;
 use crate::stack::durable::{Durables, Pinned};
 use crate::{Branch, CommitError, Ephemeral, PublishError, RemoteSite, Revision, Snapshot, Staged};

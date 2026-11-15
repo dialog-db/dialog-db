@@ -14,6 +14,84 @@ says how to cut a release.
 
 ## Unreleased
 
+### A channel is a layer of its own type, with two ends, whose rows live one tick
+
+[#TBD](https://github.com/dialog-db/dialog-db/pulls), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+point 5).
+
+A channel was an `Ephemeral` layer like a session layer: a table whose
+rows stayed until its consumer retracted them, with an instant chain a
+reader followed. It is now a `Channel`, simpler than `Ephemeral`: it
+keeps no table, and a row of it lives one tick. It has two ends. What
+the outside end sends (`Channel::send`) is read by the next dispatch
+through the stack at its first tick, as rows of the channel, and by no
+tick after; a send while a dispatch runs is the next dispatch's. What a
+dispatch writes into the channel, `.at(channel)` or through a rule head
+naming it, is the next tick's stimulus inside the dispatch, and once its
+publish has won lands on the outside end as one tick of a log, each
+tick a sequence and its rows. A lost publish lands nothing. `control:`
+is the built-in channel, the loopback: `Stack::invoke` sends its
+command into it and runs a dispatch, and what lands on its outside end
+is what the stack's providers read. The log keeps every tick some
+reader has not passed and drops a tick every reader has; while no
+reader exists, it keeps the latest tick alone. A channel is any entity
+but one under `memory:` or `session:`, and `Stack::channel` creates one
+at run time.
+
+What this changes for you:
+
+- `Channel` is new (`dialog_repository::Channel`): `send`,
+  `send_changes`, `entity`, `sequence`, `revision` (a hash over the
+  sequence of the last tick that landed), `is_waiting`.
+- `Stack::channel(&entity)` is new: it returns the stack's channel of
+  that name, the loopback for `control_layer()`, creating one if the
+  stack holds none and asserting `<entity> dialog.layer/type channel:`
+  into `session:` as one instant. It returns `Result<Channel,
+  CommitError>`: a name under `memory:` or `session:` is refused with
+  `CommitError::InvalidPlacement` and nothing is written. `layers()`
+  lists a channel it created after the durable layers.
+- `Stack::layer(&entity)` returns `Option<Layer<'_>>` instead of
+  `Option<&Ephemeral>`: `Layer::Ephemeral(&Ephemeral)` for `session:`
+  and the declared session layers, `Layer::Durable(Durable)` (its
+  `name()` and the `revision()` it stands at) for `memory:` and the
+  declared durable layers, and `Layer::Channel(Channel)` for
+  `control:` and every other channel. `Layer::ephemeral()`,
+  `durable()` and `channel()` pick one out.
+- A channel is no longer required to be named `control:<name>`: any
+  entity outside `memory:` and `session:` names one. A declared
+  channel named under either is refused at open with
+  `CommitError::InvalidPlacement`.
+- The rows-until-retracted model is gone: a channel's rows are no rows
+  of any layer after their tick, a query through the stack reads none
+  of them, and a consumer retracts nothing. A reader built late reads
+  every tick the log holds, once.
+- `Arrivals` keeps its API (`poll`, `next`, `rows`, `next_rows`,
+  `layer`); it reads the channel's log from its position, and
+  `Stack::arrivals` returns `None` for a layer that is no channel.
+- `Stack::invoke` and `Invocation::dispatch` send into `control:`,
+  and every dispatch takes what each channel's outside end was sent;
+  what a caller observes of `invoke` is unchanged. A dispatch that
+  fails puts back what the channels were sent, not its own commands.
+- A channel's `dialog.layer/revision` row in `session:` names the
+  channel's revision, the base58 of the hash over its last tick's
+  sequence, and moves when a tick lands in it.
+
+Why: a channel is state of one tick with a transport, so the place it
+lives is a layer with two ends, and the simplest one: nothing to
+rewind, nothing to retract. A log read from each reader's own position
+gives a reader that was not reading every tick, which the retained
+rows gave before, without keeping rows in a layer a query reads.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: a channel's declaration is still
+  `dialog.layer/type channel:` on its entity, and its rows were never
+  stored. A schema declaring `control:<name>` channels keeps working.
+  A schema declaring a channel under `memory:` or `session:`, which no
+  earlier build could have used as a channel either, now fails the
+  open with `CommitError::InvalidPlacement`.
+
 ### A durable layer is the tree the primary points at, with no head of its own, and a pull merges a layer two replicas moved
 
 [#814](https://github.com/dialog-db/dialog-db/pull/814), argued in
@@ -373,7 +451,7 @@ composite.
 - What a durable layer syncs to is the primary's upstreams. The
   declaration carries no upstream.
 
-### `control:` is the layer a command lives in for one tick, a channel is a layer its consumer empties, and a provider reads what arrives in either
+### `control:` is the layer a command lives in for one tick, a channel is a layer whose rows live one tick, and a provider reads what arrives in either
 
 [#807](https://github.com/dialog-db/dialog-db/pull/807), argued in
 [notes/layers.md](./notes/layers.md) (points 7 to 18, and "Open").
@@ -388,11 +466,12 @@ next tick's stimulus, read as a row of `control:`, and is gone after
 that tick. Once a dispatch has published, its commands stand in the
 stack's `control:` layer for one instant and leave it in the next, so
 the layer's instants are every command, in order, once, and nothing of
-them stays. A channel, `control:<name>`, is a layer for a consumer
-outside the invoke loop or the process: what lands in it stays until
-the consumer retracts it. A provider reads either through
-`Stack::arrivals`, which yields each newly asserted row of its query
-once and drops retractions, and answers by invoking.
+them stays. A channel is a layer for a consumer outside the invoke
+loop or the process; since #TBD (see its entry above),
+its rows live one tick too, and what a dispatch writes into it lands
+on its outside end as one tick of a log every reader reads in full. A
+provider reads either through `Stack::arrivals`, which yields each
+row of its query that arrived, once, and answers by invoking.
 
 What this changes for you:
 
@@ -410,23 +489,21 @@ What this changes for you:
   say, in that layer, where before the layer it named was ignored.
 - `LayerType::Channel` is new: `LayerDeclaration::new(entity,
   LayerType::Channel)` declares a channel, stored as `dialog.layer/type
-  channel:`. A stack builds it in memory, as it builds a
-  `LayerType::Session` layer, and writes into it are routed and land tick by
-  tick as into any layer the stack holds. Declaring bare `control:`
-  builds nothing apart.
+  channel:`. A stack builds it as a `Channel` (see #TBD below):
+  a write into it is the next tick's stimulus, read as a row of the
+  channel, and lands on its outside end once the dispatch has
+  published. Declaring bare `control:` builds nothing apart.
 - `Stack::arrivals(layer, query)` and `Arrivals` are new: a reader
   of what arrives in `control:` or a channel. `poll` yields the rows of
-  the query the layer's assertions since the last read make, evaluated
-  over those rows alone; `next` waits for the stack's next dispatch
-  while there are none. `Stack::layer(&control_layer())` hands out
-  the loopback, which holds nothing between dispatches.
+  the query the ticks landed since the last read make, evaluated over
+  those rows alone; `next` waits for the stack's next dispatch while
+  there are none. `Stack::layer(&control_layer())` hands out the
+  loopback, which holds nothing between dispatches.
 - `Stack::commands()`, `Commands`, `Dispatched`, `Lost` and
   `FEED_CAPACITY` are gone: read `control:` with
-  `Stack::arrivals(&control_layer(), query)` instead, or a channel's
-  instants with `Ephemeral::since`. A reader that falls further behind
-  than a layer's instants reach reads what the layer holds now: on a
-  channel nothing is lost; the commands that stood in `control:`
-  meanwhile are.
+  `Stack::arrivals(&control_layer(), query)` instead, or a channel with
+  `Stack::arrivals(&channel, query)`. A reader loses nothing: the log
+  keeps every tick some reader has not passed.
 - `Handler`, `HandlerError`, `Answering`, `Stack::handle` and
   `MAX_ANSWERS` are gone: a provider reads its commands with
   `Stack::arrivals` and answers with `Stack::invoke`, a dispatch
@@ -438,9 +515,8 @@ What this changes for you:
 
 Why: a command is state of one tick, so the place it lives is a layer,
 and observing it is reading that layer, not a mechanism apart. A
-channel that keeps its rows until its consumer retracts them loses
-nothing to a consumer that was not polling, where a view polled after
-a one-tick row came and went sees nothing. Commands reach `control:`
+channel's log keeps every tick for a reader that was not polling, where
+a view polled after a one-tick row came and went sees nothing. Commands reach `control:`
 only after their dispatch has published, so a dispatch re-run from a
 moved head re-runs no effect, and an answer needs no isolation of its
 own.
