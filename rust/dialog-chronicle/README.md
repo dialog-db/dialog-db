@@ -55,10 +55,9 @@ any other (see `dialog-peer`'s README); only the storage's type changes:
 
 ```rs
 use dialog_capability::Subject;
-use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::{Directory, Location};
 use dialog_identity::OpenCredential;
-use dialog_peer::{Allowance, Peer};
+use dialog_peer::{Allowance, Peer, SpaceVaultExt as _};
 use dialog_repository::{Repository, RepositoryExt as _};
 use dialog_storage::provider::Storage;
 use dialog_storage::provider::storage::{CredentialStore, NativeSpace};
@@ -67,14 +66,22 @@ use dialog_varsig::Principal as _;
 // Every space the peer opens is a directory under `base`.
 let base = Directory::At("/path/to/profiles".into());
 
-// The storage belongs to a system: opening spaces in it takes the
-// system's grant.
-let system = SignerCredential::from(Ed25519Signer::generate().await?);
+// Keys are kept in a credential store under `base`, a file each. The
+// storage and the store belong to a system: opening spaces takes its
+// grant, so every start must act as the same system. `open` loads the
+// system's key, and makes it the first time.
+let credentials = CredentialStore::<NativeSpace>::new();
+let system = OpenCredential::open("system")
+    .at(base.clone())
+    .perform(&credentials)
+    .await?;
+let credentials = credentials.owned_by(system.did());
 let storage = Storage::<FileSpace>::new().owned_by(system.did());
 
+// The peer's key, opened from the store the same way.
 let credential = OpenCredential::open("alice")
     .at(base.clone())
-    .perform(&CredentialStore::<NativeSpace>::default())
+    .perform(&credentials)
     .await?;
 
 let alice = Peer::new(credential.clone())
@@ -82,9 +89,22 @@ let alice = Peer::new(credential.clone())
     .with(storage)
     .space(Repository::from(credential.did()).branch("main"))
     .grant(Allowance::storage(&system))
-    .base(base)
+    .base(base.clone())
     .build()
     .await?;
+
+// Onboarding, the first time: the peer acts for an account, whose key a
+// custodian guards and which delegates to the peer. It opens no space
+// until it is onboarded.
+if alice.authority().await.is_err() {
+    let custodian = OpenCredential::open("alice-custodian")
+        .at(base.clone())
+        .perform(&credentials)
+        .await?;
+    let account = alice.state().vault("account").create().perform(&alice).await?;
+    account.add(custodian.did()).perform(&alice).await?;
+    account.delegate(alice.did()).perform(&alice).await?;
+}
 
 let session = alice
     .session(b"my-app")
@@ -130,8 +150,9 @@ space's `archive/` directory. The `chronicle` migration of
 
 It moves **blocks only**. A space's cells, branch heads among them, stay
 in its `memory/` directory, so a migrated replica opens as `BlockSpace`
-(`Chronicle` archive, file system memory). Opened as `FileSpace` it would
-find no branch heads.
+(`Chronicle` archive, file system memory). Opened as `FileSpace` it opens
+without an error and every branch reads as empty, and the setup above
+would onboard the peer again, into the file.
 
 ### From an application
 

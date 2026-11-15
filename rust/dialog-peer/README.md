@@ -26,31 +26,49 @@ See `notes/peer-and-session.md`.
 
 ```rust,no_run
 # use dialog_capability::Subject;
-# use dialog_credentials::{Ed25519Signer, SignerCredential};
 # use dialog_identity::OpenCredential;
-# use dialog_peer::{Allowance, Peer};
+# use dialog_effects::storage::Location;
+# use dialog_peer::{Allowance, Peer, SpaceVaultExt as _};
 # use dialog_repository::{Repository, RepositoryExt as _};
 # use dialog_storage::provider::storage::{CredentialStore, Storage, VolatileSpace};
 # use dialog_varsig::Principal as _;
 # async fn example() -> anyhow::Result<()> {
-// The storage belongs to a system: opening spaces in it takes the
-// system's grant.
-let system = SignerCredential::from(Ed25519Signer::generate().await?);
+// Keys are opened from a credential store, apart from the peer. The
+// storage and the store belong to a system: opening spaces takes the
+// system's grant. The system's own key is kept in the store too, so every
+// start acts as the same system: `open` loads it, and makes it the first
+// time. Over `VolatileSpace` it lasts as long as the process; over
+// `NativeSpace` it is a file under the store's directory.
+let credentials = CredentialStore::<VolatileSpace>::new();
+let system = OpenCredential::open("system").perform(&credentials).await?;
+let credentials = credentials.owned_by(system.did());
 let storage = Storage::<VolatileSpace>::volatile().owned_by(system.did());
 
-// The key is opened from the credential store, apart from the peer.
-let credentials = CredentialStore::<VolatileSpace>::new().owned_by(system.did());
+// The peer's key, opened from the store the same way.
 let credential = OpenCredential::open("alice").perform(&credentials).await?;
 
 // The peer, acting with its own key on its own behalf, keeping its
-// records in the main branch of its own repository, and granted the
-// storage.
+// records in the main branch of its own repository, mounted at `at`, and
+// granted the storage.
 let alice = Peer::new(credential.clone())
+    .at(Location::temp("alice"))
     .space(Repository::from(credential.did()).branch("main"))
     .with(storage)
     .grant(Allowance::storage(&system))
     .build()
     .await?;
+
+// Onboarding, once per peer: the peer acts for an account, whose key a
+// custodian guards and which delegates to the peer. The peer holds no
+// copy of the account's key, and opens no space until it is onboarded.
+if alice.authority().await.is_err() {
+    let custodian = OpenCredential::open("alice-custodian")
+        .perform(&credentials)
+        .await?;
+    let account = alice.state().vault("account").create().perform(&alice).await?;
+    account.add(custodian.did()).perform(&alice).await?;
+    account.delegate(alice.did()).perform(&alice).await?;
+}
 
 // A session: a derived key, allowed what the peer grants it, keeping its
 // state in the peer's branch.
