@@ -14,6 +14,43 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule that leaves a premise's subject unnamed fires for the entity a commit wrote
+
+[#802](https://github.com/dialog-db/dialog-db/pull/802), fixes
+[#801](https://github.com/dialog-db/dialog-db/issues/801)
+
+Commit-time induction starts a rule from each row a commit changed. It
+bound the row's value to the premise's field, and the row's entity to
+the variable the premise gives `this`. A premise that gave `this` no
+variable left the entity unbound, so the premise was read at every
+entity holding the value written, and the rule fired for entities the
+commit did not touch. Such a premise is now seeded with its subject
+named, in a variable nothing else in the rule reads, so the seed binds
+the entity the row is about.
+
+What this changes for you:
+
+- **A rule whose premise names no `this` fires for fewer entities.**
+  Writing one field of one entity no longer fires the rule for every
+  entity that holds the same value in that field. A command is no
+  longer issued again for them, and a durable head under `last` no
+  longer writes its value again over what was written since. It fires
+  for what the same rule with its subject named fired for already.
+- A commit that writes one field of an entity and a commit that writes
+  two now fire such a rule for the same entities. Before, the two
+  fields together found the entity written and the one field found
+  every holder of its value.
+- A rule fired in full is not seeded and is unchanged: a rule installed
+  over existing state, one whose premise changed through a deductive
+  rule, and one enabled by a retraction under `unless` fire for every
+  match, as before.
+- Nothing stored changes shape. A rule that relied on being fired for
+  every holder of a value has to be given a premise that says so.
+
+Why: a row is a fact of one entity, and the matches it newly makes are
+those where the premise is read at that entity. Reading by value alone
+found matches the commit did not make and fired for them again.
+
 ### A tree write sizes its segments before filling them
 
 When a write regroups a window of entries into segments, each segment
