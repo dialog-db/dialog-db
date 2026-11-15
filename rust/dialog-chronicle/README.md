@@ -40,10 +40,11 @@ the memory second. Name `Chronicle` in either place:
 use dialog_chronicle::Chronicle;
 use dialog_storage::provider::{FileSystem, Space, Storage};
 
-// Blocks and cells, branch heads among them, in archive.dialog.
+// Blocks and cells, branch heads among them, in archive.dialog: for a
+// replica made this way from the start.
 type FileSpace = Space<Chronicle, Chronicle, FileSystem, FileSystem, FileSystem>;
 
-// Blocks only; cells stay a file each.
+// Blocks only; cells stay a file each. What a migrated replica uses.
 type BlockSpace = Space<Chronicle, FileSystem, FileSystem, FileSystem, FileSystem>;
 
 let storage = Storage::<FileSpace>::new();
@@ -76,9 +77,13 @@ release tag (see [RELEASING.md](../../RELEASING.md)).
 
 ## Moving an existing replica
 
-`dialog-migration`, behind its `chronicle` feature, moves every space of
-a replica the `fs` provider wrote into its `archive.dialog`. An
-application runs it before it opens the replica:
+`dialog-migration`, behind its `chronicle` feature, moves the blocks of
+every space of a replica the `fs` provider wrote into its
+`archive.dialog`. It moves blocks only: a space's cells, branch heads
+among them, stay in its `memory` directory. Open a migrated replica with
+`Chronicle` as the archive and the file system as the memory (`BlockSpace`
+above), not as `FileSpace`, which would find no branch heads. An
+application runs the migration before it opens the replica:
 
 ```rs
 use dialog_migration::Migrations;

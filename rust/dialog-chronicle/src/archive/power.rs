@@ -16,8 +16,7 @@
 //! - every block the cell's value names reads back.
 //!
 //! The last two hold because a cell's every value is a record appended in
-//! the writer's turn after what it names, as a commit in SQLite's
-//! write-ahead log follows its pages (see the `cells` module). A failure
+//! the writer's turn after what it names (see the `cells` module). A failure
 //! names the point and the seed that built its image.
 
 use std::fs::OpenOptions;
