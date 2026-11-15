@@ -756,7 +756,8 @@ pub mod cap {
             return Vec::new();
         }
 
-        let mut candidates: Vec<Anchor> = Vec::new();
+        // At most one candidate per seam.
+        let mut candidates: Vec<Anchor> = Vec::with_capacity(keys.len() - 1);
         for at in 1..keys.len() {
             let left = keys[at - 1].bytes();
             let right = keys[at].bytes();
@@ -889,7 +890,8 @@ pub mod cap {
             return Vec::new();
         }
 
-        let mut candidates: Vec<Anchor> = Vec::new();
+        // At most one candidate per seam.
+        let mut candidates: Vec<Anchor> = Vec::with_capacity(keys.len() - 1);
         for at in 1..keys.len() {
             if vetoed[at - 1] {
                 continue;

@@ -3085,16 +3085,21 @@ where
         .children
         .splice(lo..=hi, std::iter::empty())
         .collect();
-    let mut entries = Vec::new();
-    let mut separator = Separator::default();
-    let mut origins: Vec<PieceOrigin> = Vec::new();
-    for (offset, member) in members.into_iter().enumerate() {
+    let mut pieces = Vec::with_capacity(members.len());
+    for member in members {
         let TransientNode::Segment(segment) = member.into_transient()? else {
             return Err(DialogSearchTreeError::Node(
                 "Vetoed-stretch window member was not a leaf segment".into(),
             ));
         };
-        let (segment_entries, segment_separator) = segment.into_parts();
+        pieces.push(segment.into_parts());
+    }
+    // The merged segment is sized to the stretch up front, so it is
+    // allocated once instead of grown (and copied) piece by piece.
+    let mut entries = Vec::with_capacity(pieces.iter().map(|(entries, _)| entries.len()).sum());
+    let mut separator = Separator::default();
+    let mut origins: Vec<PieceOrigin> = Vec::new();
+    for (offset, (segment_entries, segment_separator)) in pieces.into_iter().enumerate() {
         if offset == 0 {
             separator = segment_separator;
         }
