@@ -2,6 +2,11 @@
 //! pulled everything, so its reads may warm ahead of demand, though every
 //! block they touch is already local.
 
+// The scenario commits through the one-shot publish, as the others here do:
+// what the gate measures stays what its baseline recorded, and moving it to
+// `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
+
 use std::future::Future;
 use std::pin::Pin;
 
