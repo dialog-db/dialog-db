@@ -43,11 +43,16 @@ pub use placement::{
     layer_type_attr, memory_layer, revision_attr, selection_attr, session_layer,
 };
 
+/// A channel: a layer whose rows live one tick, with two ends.
+pub mod channel;
+pub use channel::Channel;
+
 /// A stack: the primary branch and the layers its schema declares.
 pub mod stack;
 pub use stack::invoke::{Invocation, MAX_RERUNS};
 pub use stack::{
-    Arrivals, OpenStack, OpenStackEnv, Stack, StackEnv, SyncEnv, SyncError, SyncStack,
+    Arrivals, Durable, Layer, OpenStack, OpenStackEnv, Stack, StackEnv, SyncEnv, SyncError,
+    SyncStack,
 };
 
 /// Streaming-merge and tombstone helpers used by the query-session

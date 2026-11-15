@@ -372,6 +372,7 @@ where
         stimulus = layered_instructions(&novelty);
         stimulus.extend(novelty.clone().into_instructions());
         stimulus.extend(emitted_transients.clone().into_instructions());
+        stimulus.extend(layered_instructions(&emitted_transients));
         let shares = novelty.take_shares();
         for (layer, share) in &shares {
             share.clone().into_layer(layer.clone()).assert(changes);
@@ -1414,7 +1415,8 @@ async fn emit_matches<'a>(
             continue;
         }
         let mut head = Changes::new();
-        // The cells landing in the loopback: the next round's stimulus.
+        // The cells landing in the loopback, or another channel: the next
+        // round's stimulus.
         let mut dispatched = Changes::new();
         // The cells whose descriptor names a layer (`in:`) other than
         // the primary. The layer elects among its own rows of a cell,
@@ -1442,6 +1444,28 @@ async fn emit_matches<'a>(
                     ),
                     Polarity::Assert => dialog_corpus::Update::associate(
                         &mut dispatched,
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                        pick,
+                    ),
+                }
+                continue;
+            }
+            // A cell landing in another channel is the next round's
+            // stimulus too, read as a row of that channel.
+            if let Some(channel) = layer.as_ref().filter(|layer| view.is_channel(layer)) {
+                match rule.polarity() {
+                    Polarity::Retract => dialog_corpus::Update::dissociate_in(
+                        &mut dispatched,
+                        channel.clone(),
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                    ),
+                    Polarity::Assert => dialog_corpus::Update::associate_in(
+                        &mut dispatched,
+                        channel.clone(),
                         fact.the,
                         fact.of,
                         fact.is,

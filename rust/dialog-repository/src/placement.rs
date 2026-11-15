@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! session:state   dialog.layer/type     session:
-//! control:mail    dialog.layer/type     channel:
+//! mail:box        dialog.layer/type     channel:
 //! memory:notes    dialog.layer/type     branch:
 //! ```
 //!
@@ -46,14 +46,15 @@
 //! memory:notes   dialog.branch/tree       "<its tree, base58>"
 //! ```
 //!
-//! [`CONTROL`] holds a row for one tick: what a dispatch writes into it
-//! (`.at(control_layer())`, a rule head whose descriptor names
-//! `in: control:`, or a command, whose concept carries the
-//! `dialog.concept/transient` marker) is the next tick's stimulus, read
-//! as a row of `control:`, and is gone after that tick. A **channel**,
-//! `control:<name>`, is a layer for a consumer outside the dispatch
-//! ([`LayerType::Channel`]): its rows stay until the consumer retracts
-//! them.
+//! A **channel** ([`LayerType::Channel`], [`Channel`](crate::Channel))
+//! holds a row for one tick: what a dispatch writes into it (`.at(..)`,
+//! a rule head whose descriptor names it, or, for [`CONTROL`], a
+//! command, whose concept carries the `dialog.concept/transient`
+//! marker) is the next tick's stimulus, read as a row of the channel,
+//! and is gone after that tick; once the dispatch has published, it
+//! lands on the channel's outside end. [`CONTROL`] is the built-in one,
+//! the loopback. A channel is named by any entity but one under
+//! [`MEMORY`] or [`SESSION`].
 //!
 //! The declarations in force are resolved from three places, each
 //! outranking the one before: the primary's tree, the primary's session
@@ -75,7 +76,7 @@ use dialog_query::the;
 use futures_util::TryStreamExt as _;
 
 use crate::repository::source::Source;
-use crate::{CommitError, Ephemeral, Revision};
+use crate::{Channel, CommitError, Ephemeral, Revision};
 use crate::{Erased, select_from_source};
 use base58::ToBase58 as _;
 
@@ -141,15 +142,17 @@ pub fn layer_branch_attr() -> Relation {
 }
 
 /// The `dialog.layer/revision` attribute: of a memory layer's entity
-/// (one of [`SESSION`], [`CONTROL`], a declared session layer or
-/// channel), the revision the layer stands at, as text: the base58 hash
-/// of its instant chain. A stack holds one row of it per memory layer in
+/// ([`SESSION`] or a declared session layer) or a channel's ([`CONTROL`]
+/// or another), the revision the layer stands at, as text: the base58
+/// hash of a memory layer's instant chain, or of the sequence of the
+/// last tick that landed in a channel ([`Channel::revision`](crate::Channel::revision)).
+/// A stack holds one row of it per memory layer and channel in
 /// [`SESSION`], rewritten by the dispatch, or the sync, after which the
 /// layer stands somewhere else. A durable layer's revision is the meta
 /// branch's `dialog.branch/revision` of the layer's entity in the
-/// primary instead, which names the revision entity; a memory layer's
-/// revision
-/// ([`Ephemeral`]'s chain) has no entity form yet, so it stays text.
+/// primary instead, which names the revision entity; neither an
+/// [`Ephemeral`]'s chain nor a channel's revision has an entity form
+/// yet, so they stay text.
 pub fn revision_attr() -> Relation {
     REVISION_ATTR.clone()
 }
@@ -235,24 +238,25 @@ type Row = (Entity, Relation, Value);
 /// The revision every layer of a stack holds a row for stands at: of
 /// the primary, `branch`'s `dialog.branch/revision`, the entity of
 /// `primary`'s revision (none for a primary with no revision); of each
-/// of `memories` and of [`CONTROL`], `control`, the
-/// `dialog.layer/revision` hash of its instant chain; and of
+/// of `memories` the `dialog.layer/revision` hash of its instant chain;
+/// of each of `channels`, [`CONTROL`] among them, the
+/// `dialog.layer/revision` hash of the sequence of its last tick; and of
 /// [`SESSION`], `own`, the hash of its chain as it stood before the
 /// records that followed its last change ([`Ephemeral::settled`]), so
 /// that recording the revisions is not itself a move of the stack's own
-/// layer. A memory layer's hash is base58 text: an [`Ephemeral`]'s
-/// revision has no entity form yet. A durable layer has no row: the
+/// layer. A memory layer's and a channel's hash is base58 text: neither
+/// revision has an entity form yet. A durable layer has no row: the
 /// primary's pointer fact of it is the record.
 fn revisions(
     branch: &Entity,
     primary: Option<&Revision>,
     memories: &[(Entity, Ephemeral)],
-    control: &Ephemeral,
+    channels: &[Channel],
     own: &Ephemeral,
 ) -> Vec<Row> {
     let chain = |memory: &Ephemeral| Value::String(memory.revision().hash.as_bytes().to_base58());
     let session = session_layer();
-    let mut rows = Vec::with_capacity(memories.len() + 3);
+    let mut rows = Vec::with_capacity(memories.len() + channels.len() + 2);
     if let Some(revision) = primary {
         rows.push((
             branch.clone(),
@@ -265,7 +269,13 @@ fn revisions(
             rows.push((layer.clone(), revision_attr(), chain(memory)));
         }
     }
-    rows.push((control_layer(), revision_attr(), chain(control)));
+    for channel in channels {
+        rows.push((
+            channel.entity().clone(),
+            revision_attr(),
+            Value::String(channel.revision().as_bytes().to_base58()),
+        ));
+    }
     rows.push((
         session,
         revision_attr(),
@@ -276,7 +286,7 @@ fn revisions(
 
 /// What a stack records of its layers' revisions, and where: the
 /// primary's branch entity, the primary's revision, the memory layers,
-/// the loopback and the stack's own layer (see [`revisions`]).
+/// the channels and the stack's own layer (see [`revisions`]).
 pub(crate) struct Recorded<'a> {
     /// The primary's branch entity.
     pub(crate) branch: &'a Entity,
@@ -284,8 +294,8 @@ pub(crate) struct Recorded<'a> {
     pub(crate) primary: Option<&'a Revision>,
     /// The memory layers the schema declares, by name.
     pub(crate) memories: &'a [(Entity, Ephemeral)],
-    /// The loopback, [`CONTROL`].
-    pub(crate) control: &'a Ephemeral,
+    /// The channels, the loopback, [`CONTROL`], among them.
+    pub(crate) channels: &'a [Channel],
     /// The stack's own layer, [`SESSION`].
     pub(crate) own: &'a Ephemeral,
 }
@@ -303,7 +313,7 @@ impl Recorded<'_> {
             self.branch,
             self.primary,
             self.memories,
-            self.control,
+            self.channels,
             self.own,
         )
         .into_iter()
@@ -421,15 +431,17 @@ pub enum LayerType {
     /// `session:`, an in-memory layer: the stack mints it when it opens,
     /// and it is gone when the stack is.
     Session,
-    /// `channel:`, a channel, `control:<name>`: a table in memory the
-    /// stack mints when it opens, for a consumer outside the dispatch
-    /// (the embedder, another process). What lands in it stays until
-    /// the consumer retracts it, so a consumer that was not reading
-    /// loses nothing: it reads the layer's instants
-    /// ([`Ephemeral::since`]) or
-    /// [`Stack::arrivals`](crate::Stack::arrivals), and retracts what
-    /// it consumed. Bare [`CONTROL`], the loopback, is every stack's,
-    /// and declaring it builds nothing.
+    /// `channel:`, a channel ([`Channel`](crate::Channel)): a layer
+    /// whose rows live one tick, with two ends. What the outside end
+    /// sends is read by the next dispatch's first tick as rows of the
+    /// channel; what a dispatch writes into it lands on the outside end
+    /// as one tick of its log once the dispatch has published, read with
+    /// [`Stack::arrivals`](crate::Stack::arrivals). Named by any entity
+    /// but one under [`MEMORY`] or [`SESSION`]: a channel named so fails
+    /// the open with [`CommitError::InvalidPlacement`]. Bare
+    /// [`CONTROL`], the loopback, is every stack's, and declaring it
+    /// builds nothing; [`Stack::channel`](crate::Stack::channel) creates
+    /// one at run time.
     Channel,
     /// `branch:`, a durable layer, `memory:<name>`: a tree the primary
     /// points at. It has no head and no branch of its own: the layer is
@@ -574,6 +586,20 @@ pub(crate) fn durable_name(layer: &Entity) -> Result<(), CommitError> {
         return Err(CommitError::InvalidPlacement {
             attribute: format!("dialog.layer/type of {layer}"),
             value: "branch: names a layer memory:<name>".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Check that `layer`, a channel, is not named under [`MEMORY`] or
+/// [`SESSION`], which name the other types of layer: a channel named so
+/// is refused with [`CommitError::InvalidPlacement`].
+pub(crate) fn channel_name(layer: &Entity) -> Result<(), CommitError> {
+    let text = layer.to_string();
+    if text.starts_with(MEMORY) || text.starts_with(SESSION) {
+        return Err(CommitError::InvalidPlacement {
+            attribute: format!("dialog.layer/type of {layer}"),
+            value: "channel: names a layer outside memory: and session:".into(),
         });
     }
     Ok(())

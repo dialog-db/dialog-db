@@ -60,6 +60,34 @@ use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot, TreeReference, 
 use crate::{Mint, Outcome};
 use crate::{TreeEnv, erased};
 
+/// A durable layer of a stack as [`Stack::layer`](crate::Stack::layer)
+/// hands it out: its name and the revision it stands at, as the stack
+/// last read it. The primary, [`MEMORY`](crate::MEMORY), is one too, at
+/// its head; a declared `memory:<name>` stands where the primary points
+/// it, and at no revision while the primary points it nowhere.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Durable {
+    name: Entity,
+    revision: Option<Revision>,
+}
+
+impl Durable {
+    /// A durable layer named `name`, at `revision`.
+    pub(crate) fn new(name: Entity, revision: Option<Revision>) -> Self {
+        Self { name, revision }
+    }
+
+    /// The layer's name: `memory:` or `memory:<name>`.
+    pub fn name(&self) -> &Entity {
+        &self.name
+    }
+
+    /// The revision the layer stands at, if any.
+    pub fn revision(&self) -> Option<&Revision> {
+        self.revision.as_ref()
+    }
+}
+
 /// One claim of a durable layer's pointer, as a primary's tree holds it:
 /// the revision entity its `dialog.branch/revision` names and the tree
 /// its `dialog.branch/tree` names beside it, written by the same commit.

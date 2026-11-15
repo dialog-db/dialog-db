@@ -34,7 +34,7 @@ use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::branch::session::{Composite, shared_metadata};
 use crate::repository::branch::transaction::{DurableLayer, StackContext};
 use crate::repository::source::{Caches, Live, View};
-use crate::stack::Loopback;
+use crate::Channel;
 use crate::stack::durable::{Durables, Pinned};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
@@ -146,14 +146,15 @@ pub struct TransactionBatch {
     /// them. `None` for a chain committed on the branch alone.
     pinned: Option<(Arc<Durables>, Pinned)>,
     /// The commands the chain's transactions dispatched themselves, the
-    /// writes into `control:` among them: with
-    /// [`induced`](Self::induced), what the publish lands in the
-    /// stack's `control:`.
+    /// writes into `control:` among them, and their writes into the
+    /// other channels, named for each: with [`induced`](Self::induced),
+    /// what the publish lands on the stack's channels.
     dispatched: Changes,
-    /// The loopback of the stack the chain was committed through,
-    /// where the publish lands its commands. `None` for a chain committed
-    /// on the branch alone, which lands nothing.
-    loopback: Option<Loopback>,
+    /// The channels of the stack the chain was committed through, the
+    /// loopback first, where the publish lands what was written into
+    /// them. `None` for a chain committed on the branch alone, which
+    /// lands nothing.
+    channels: Option<Vec<Channel>>,
 }
 
 /// The facts `changes` retracts that `overlay` holds. A transaction's
@@ -339,26 +340,26 @@ impl BatchPublish {
             durables,
             pinned,
             dispatched,
-            loopback,
+            channels,
         } = self.batch;
         let tip = snapshot.revision();
-        // Through a stack, the chain's commands, the ones its
-        // transactions dispatched and the ones its rules dispatched in
-        // any tick, land in the stack's `control:` once the publish
-        // has won, as one instant gone in the next: a refused publish
-        // lands none, so a dispatch re-run from a moved head re-runs no
-        // effect.
+        // Through a stack, what the chain wrote into its channels, the
+        // commands its transactions dispatched and the ones its rules
+        // dispatched in any tick among them, lands on each channel's
+        // outside end once the publish has won, as one tick of its log:
+        // a refused publish lands none, so a dispatch re-run from a moved
+        // head re-runs no effect.
         // The stack's own layer then records the revision of every layer
-        // that moved, the loopback's among them, so the recording names
+        // that moved, the channels' among them, so the recording names
         // where each stands once the dispatch is done.
-        let land = |loopback: Option<Loopback>| -> Result<(), CommitError> {
-            match loopback {
-                Some(loopback) => {
-                    let mut commands = dispatched;
-                    commands.merge(induced);
-                    loopback.land(&commands)?;
+        let land = |channels: Option<Vec<Channel>>| -> Result<(), CommitError> {
+            match channels {
+                Some(channels) => {
+                    let mut written = dispatched;
+                    written.merge(induced);
+                    land_in(&channels, written);
                     if let Some(branch) = &revisions {
-                        record_revisions(branch, &memories, &loopback, &overlay, &tip)?;
+                        record_revisions(branch, &memories, &channels, &overlay, &tip)?;
                     }
                     Ok(())
                 }
@@ -402,7 +403,7 @@ impl BatchPublish {
             settle(&tip);
             retract_from_overlay(&overlay, overlay_retractions)?;
             apply_shares(&memories, shares)?;
-            land(loopback)?;
+            land(channels)?;
             return Ok(tip);
         }
 
@@ -434,8 +435,27 @@ impl BatchPublish {
         // commit-time induction, so the published head is fully induced.
         advance_watermark(&induction, &tip, base, env).await?;
 
-        land(loopback)?;
+        land(channels)?;
         Ok(tip)
+    }
+}
+
+/// Land `written` on the outside ends of `channels`, the loopback first:
+/// what it writes bound for no layer in the loopback's, what it writes
+/// into each other channel in that one's. Every channel is landed in,
+/// so every reader waiting is woken, whether or not anything landed for
+/// it.
+fn land_in(channels: &[Channel], mut written: Changes) {
+    let mut shares = written.take_shares();
+    for (at, channel) in channels.iter().enumerate() {
+        if at == 0 {
+            channel.land(&written);
+            continue;
+        }
+        match shares.iter().position(|(layer, _)| layer == channel.entity()) {
+            Some(index) => channel.land(&shares.swap_remove(index).1),
+            None => channel.land(&Changes::new()),
+        }
     }
 }
 
@@ -697,7 +717,7 @@ impl TransactionCommit<&Branch> {
             .map(|stack| stack.memories.clone())
             .unwrap_or_default();
         memories.push((session_layer(), overlay.clone()));
-        let loopback = self.stack.as_ref().map(|stack| stack.loopback.clone());
+        let channels = self.stack.as_ref().map(|stack| stack.channels.clone());
         let pinned = self
             .stack
             .as_ref()
@@ -748,7 +768,7 @@ impl TransactionCommit<&Branch> {
                 durables,
                 pinned,
                 dispatched,
-                loopback,
+                channels,
             },
             Outcome::Minted(minted) => {
                 let Minted {
@@ -781,7 +801,7 @@ impl TransactionCommit<&Branch> {
                     durables,
                     pinned,
                     dispatched,
-                    loopback,
+                    channels,
                 }
             }
         })
@@ -838,8 +858,8 @@ impl TransactionCommit<TransactionBatch> {
         if batch.revisions.is_none() {
             batch.revisions = self.stack.as_ref().map(|stack| stack.branch.clone());
         }
-        if batch.loopback.is_none() {
-            batch.loopback = self.stack.as_ref().map(|stack| stack.loopback.clone());
+        if batch.channels.is_none() {
+            batch.channels = self.stack.as_ref().map(|stack| stack.channels.clone());
         }
         if batch.pinned.is_none() {
             batch.pinned = self
@@ -931,12 +951,12 @@ fn apply_shares(
 
 /// Record in the stack's own layer, `overlay`, the revision of every
 /// layer of the stack that moved, once `tip` has published and the
-/// dispatch's commands have landed in `loopback`: one row under `last`
+/// dispatch's writes have landed on `channels`: one row under `last`
 /// for each layer whose revision is not the one `overlay` holds,
 /// replacing the row it held, as one instant; a publish after which no
 /// layer stands anywhere new writes nothing and mints no instant. The
 /// primary's row is `branch`'s `dialog.branch/revision`; every memory
-/// layer's, the loopback's among them, its `dialog.layer/revision`.
+/// layer's and every channel's, its `dialog.layer/revision`.
 ///
 /// The stack's own row names the revision `overlay` stood at before
 /// the records that followed its last change: once this dispatch's
@@ -949,7 +969,7 @@ fn apply_shares(
 fn record_revisions(
     branch: &Entity,
     memories: &[(Entity, Ephemeral)],
-    loopback: &Loopback,
+    channels: &[Channel],
     overlay: &Ephemeral,
     tip: &Revision,
 ) -> Result<(), CommitError> {
@@ -957,7 +977,7 @@ fn record_revisions(
         branch,
         primary: Some(tip),
         memories,
-        control: loopback.control(),
+        channels,
         own: overlay,
     };
     overlay.record(recorded.rows())?;
@@ -1100,14 +1120,23 @@ where
         let moved = changes.take_cells(follows_selection);
         merge_shares(&mut shares, moved.into_layer(layer.clone()).take_shares());
     }
-    // A write into the loopback, `control:`, is a dispatch: the first
-    // tick's stimulus, landing in no layer.
+    // A write into a channel is a dispatch: the first tick's stimulus,
+    // read as a row of the channel, landing in no layer. One into the
+    // loopback, `control:`, is bound for no layer, as a dispatched
+    // command is.
     let control = control_layer();
+    let channels: Vec<Entity> = stack
+        .iter()
+        .flat_map(|stack| stack.channels.iter().map(|channel| channel.entity().clone()))
+        .collect();
     let shares: Vec<(Entity, Changes)> = shares
         .into_iter()
         .filter_map(|(layer, share)| {
             if layer == control {
                 transients.merge(share);
+                None
+            } else if channels.contains(&layer) {
+                transients.merge(share.into_layer(layer));
                 None
             } else {
                 Some((layer, share))
@@ -1116,8 +1145,9 @@ where
         .collect();
     let (shares, primary) = route_shares(shares, &held)?;
     changes.apply(primary);
-    // The link's commands, before the stack's revision rows join its
-    // stimulus: what its publish lands in the stack's `control:`.
+    // The link's commands and its writes into channels, before the rows
+    // the channels' outside ends sent and the stack's revision rows join
+    // its stimulus: what its publish lands on the stack's channels.
     let mut dispatched = transients.clone();
     let looped = take_dispatched(&mut dispatched);
     dispatched.merge(looped);
@@ -1132,10 +1162,11 @@ where
             branch: &stack.branch,
             primary: view.revision(),
             memories: &stack.memories,
-            control: stack.loopback.control(),
+            channels: &stack.channels,
             own: source.overlay(),
         };
         transients.merge(recorded.stimulus().into_layer(session_layer()));
+        transients.merge(stack.received.clone());
     }
     let mut changes = Box::pin(succession::settle(
         composite.clone(),

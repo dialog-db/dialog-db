@@ -917,6 +917,7 @@ where
             sources,
             memories: self.memories(),
             names,
+            channels: Vec::new(),
         }
     }
 
@@ -942,6 +943,7 @@ where
             sources,
             memories,
             names,
+            channels: Vec::new(),
         })
     }
 

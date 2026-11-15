@@ -131,6 +131,11 @@ pub(crate) struct Composite {
     /// a durable layer's. A line with none named here is named as
     /// [`QueryEnv::line_layer`] says.
     pub(crate) names: Vec<Option<Entity>>,
+    /// The channels of the stack the composite is read through, by name,
+    /// the loopback among them: a rule head landing in one is stimulus
+    /// of the next round, as one landing in [`control:`](crate::CONTROL)
+    /// is, and is never written into a layer.
+    pub(crate) channels: Vec<Entity>,
 }
 
 impl Composite {
@@ -211,6 +216,7 @@ impl<'a> QueryLayer<'a> {
                 .map(|(layer, memory)| (layer.clone(), (*memory).clone()))
                 .collect(),
             names,
+            channels: Vec::new(),
         }
     }
 
@@ -580,6 +586,8 @@ pub(crate) struct QueryEnv<'a> {
     /// The name a row of each line binds its `in` to, by index, where the
     /// composite named one: a durable layer's (see [`Composite::names`]).
     names: Vec<Option<Entity>>,
+    /// The channels of the stack read through (see [`Composite::channels`]).
+    channels: Vec<Entity>,
     /// The query's own overlay: caller-asserted facts and the
     /// auto-injected metadata, held as a line (see
     /// [`QueryLayer::overlay`]) and read under the lines' format.
@@ -700,6 +708,7 @@ impl<'a> QueryEnv<'a> {
             sources,
             memories: Vec::new(),
             names: Vec::new(),
+            channels: Vec::new(),
             overlay,
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
@@ -719,11 +728,19 @@ impl<'a> QueryEnv<'a> {
             sources,
             memories,
             names,
+            channels,
         } = composite;
         let mut env = Self::new(sources, overlay, env);
         env.memories = memories;
         env.names = names;
+        env.channels = channels;
         env
+    }
+
+    /// Whether `layer` is a channel of the stack read through, the
+    /// loopback, [`control:`](crate::CONTROL), always among them.
+    pub(crate) fn is_channel(&self, layer: &Entity) -> bool {
+        *layer == crate::control_layer() || self.channels.contains(layer)
     }
 
     /// The primary's session store, read as [`session:`](crate::SESSION):
@@ -822,6 +839,7 @@ impl<'a> QueryEnv<'a> {
                 sources: self.sources.clone(),
                 memories: self.memories.clone(),
                 names: self.names.clone(),
+                channels: self.channels.clone(),
             };
             Box::pin(settlement.advance(&composite, &self.overlay, layer, self.env))
                 .await

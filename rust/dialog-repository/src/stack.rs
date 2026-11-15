@@ -135,12 +135,13 @@ pub mod sync;
 pub use arrivals::Arrivals;
 pub use sync::{SyncEnv, SyncError, SyncStack};
 
+use std::iter::once;
 use std::sync::Arc;
 
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::tree::CorpusNode;
-use dialog_corpus::{Change, Changes, Entity, Statement, Update as _};
+use dialog_corpus::{Changes, Entity, Statement};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
@@ -150,18 +151,19 @@ use dialog_effects::blob::{
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::nodes;
 use parking_lot::RwLock;
-use tokio::sync::Notify;
 
 use crate::placement::{
-    LayerType, Layers, Recorded, Selection, control_layer, durable_name, memory_layer, selected,
+    LayerDeclaration, LayerType, Layers, Recorded, Selection, channel_name, control_layer,
+    durable_name, memory_layer, selected,
     session_layer,
 };
 use crate::repository::branch::session::Composite;
 use crate::repository::branch::transaction::{DurableLayer, StackContext};
 use crate::repository::source::Source;
 use crate::schema::Replica;
-use crate::{Branch, CommitError, Ephemeral, QueryLayer, RemoteSite, Transaction};
+use crate::{Branch, Channel, CommitError, Ephemeral, QueryLayer, RemoteSite, Transaction};
 use durable::Durables;
+pub use durable::Durable;
 
 /// What opening a stack and reading through it need of the
 /// environment: a read of the primary, to resolve the layers its schema
@@ -269,16 +271,24 @@ impl OpenStack {
         // declaration naming one builds nothing apart.
         let (memory, own, control) = (memory_layer(), session_layer(), control_layer());
         let mut memories = Vec::new();
+        let mut channels = Vec::new();
+        let mut order = Vec::new();
         let mut durables = Vec::new();
-        // Every durable layer's name is checked before anything is read
+        // Every declared layer's name is checked before anything is read
         // or written, so a refused declaration writes nothing.
         for (entity, kind) in layers {
             if entity == memory || entity == own || entity == control {
                 continue;
             }
             match kind {
-                LayerType::Session | LayerType::Channel => {
+                LayerType::Session => {
+                    order.push(entity.clone());
                     memories.push((entity, Ephemeral::new()));
+                }
+                LayerType::Channel => {
+                    channel_name(&entity)?;
+                    order.push(entity.clone());
+                    channels.push(Channel::new(entity));
                 }
                 LayerType::Branch => {
                     durable_name(&entity)?;
@@ -290,7 +300,7 @@ impl OpenStack {
         // points it.
         let durables = Arc::new(Durables::new(&self.primary, durables, operator.profile()));
         durables.refresh(primary.revision(), env).await?;
-        let loopback = Loopback::default();
+        let control = Channel::new(control);
         // The revision rows of every layer exist from the moment the
         // stack opens, with the facts of the three layers every stack
         // has, written as one record into its own layer: what it already
@@ -298,11 +308,12 @@ impl OpenStack {
         // nothing.
         let overlay = self.primary.overlay();
         let head = self.primary.revision();
+        let every: Vec<Channel> = once(control.clone()).chain(channels.clone()).collect();
         let recorded = Recorded {
             branch: &branch,
             primary: head.as_ref(),
             memories: &memories,
-            control: &loopback.control,
+            channels: &every,
             own: overlay,
         };
         let mut opening = recorded.implied();
@@ -313,9 +324,11 @@ impl OpenStack {
                 primary: self.primary,
                 branch,
                 layers: memories,
+                order,
                 durables,
                 declared: RwLock::new(self.declared),
-                loopback,
+                control,
+                channels: RwLock::new(channels),
             }),
         })
     }
@@ -327,62 +340,25 @@ struct Inner {
     /// primary's `(replica, name)`: what its `dialog.branch/revision`
     /// row in [`SESSION`](crate::SESSION) is of.
     branch: Entity,
-    /// The layers the schema declares, each with the entity that names
-    /// it, in the order the schema lists them. The stack's own layer,
-    /// [`SESSION`](crate::SESSION), is not among them: it is the
+    /// The session layers the schema declares, each with the entity that
+    /// names it, in the order the schema lists them. The stack's own
+    /// layer, [`SESSION`](crate::SESSION), is not among them: it is the
     /// primary's process-local store ([`Branch::overlay`]), read with the
     /// primary.
     layers: Vec<(Entity, Ephemeral)>,
+    /// The session layers and channels the schema declares, by name, in
+    /// the order the schema lists them.
+    order: Vec<Entity>,
     /// The durable layers the schema declares, `memory:<name>`, in the
     /// order the schema lists them, and where the primary points them.
     durables: Arc<Durables>,
     declared: RwLock<Changes>,
-    /// The loopback, [`CONTROL`](crate::CONTROL), as the stack holds
-    /// it between dispatches, and what wakes a reader of it.
-    loopback: Loopback,
-}
-
-/// The stack's loopback, [`CONTROL`](crate::CONTROL), as it holds it
-/// between dispatches: empty, but for the one instant each published
-/// dispatch's commands stand in it, so its instants are every command,
-/// in order, once. A dispatch's own ticks read their commands as rows of
-/// `control:` without it. Every transaction through the stack carries
-/// it, so the publish that lands the dispatch lands its commands here,
-/// whichever way the transaction was driven. Cheap to clone: clones
-/// share the layer and the waiters.
-#[derive(Clone, Default)]
-pub(crate) struct Loopback {
-    control: Ephemeral,
-    /// Woken once each dispatch through the stack has published and
-    /// landed its commands: what [`Arrivals::next`] waits on.
-    landed: Arc<Notify>,
-}
-
-impl Loopback {
-    /// The loopback's layer, [`CONTROL`](crate::CONTROL).
-    pub(crate) fn control(&self) -> &Ephemeral {
-        &self.control
-    }
-
-    /// Land a published dispatch's `commands` for one tick: asserted as
-    /// one instant, gone in the next, so a reader of the layer's
-    /// instants sees each once and nothing of them stays. A retraction
-    /// among them dispatched nothing to read and lands nothing. Wakes
-    /// every [`Arrivals`] waiting for the next dispatch.
-    pub(crate) fn land(&self, commands: &Changes) -> Result<(), CommitError> {
-        let mut asserted = Changes::new();
-        for (of, the, change) in commands.iter() {
-            if let Change::Assert(is, pick) = change {
-                asserted.associate(the.clone(), of.clone(), is.clone(), pick.clone());
-            }
-        }
-        if !asserted.is_empty() {
-            self.control.apply(asserted)?;
-            self.control.clear();
-        }
-        self.landed.notify_waiters();
-        Ok(())
-    }
+    /// The loopback, [`CONTROL`](crate::CONTROL): the channel every
+    /// stack has.
+    control: Channel,
+    /// The other channels: those the schema declares, in its order, then
+    /// those [`Stack::channel`] created, in the order it did.
+    channels: RwLock<Vec<Channel>>,
 }
 
 /// The primary branch and the layers its schema declares, read and
@@ -391,6 +367,48 @@ impl Loopback {
 #[derive(Clone)]
 pub struct Stack {
     inner: Arc<Inner>,
+}
+
+/// A layer of a stack, by its type, as [`Stack::layer`] hands it out.
+#[derive(Debug, Clone)]
+pub enum Layer<'a> {
+    /// A layer held in memory, whose rows stay until retracted: the
+    /// stack's own, [`SESSION`](crate::SESSION), or a session layer the
+    /// schema declares ([`LayerType::Session`]).
+    Ephemeral(&'a Ephemeral),
+    /// A durable layer: the primary, [`MEMORY`](crate::MEMORY), or a tree
+    /// the primary points at ([`LayerType::Branch`]).
+    Durable(Durable),
+    /// A channel, whose rows live one tick: the loopback,
+    /// [`CONTROL`](crate::CONTROL), or another ([`LayerType::Channel`],
+    /// [`Stack::channel`]).
+    Channel(Channel),
+}
+
+impl<'a> Layer<'a> {
+    /// The layer held in memory, if this is one.
+    pub fn ephemeral(&self) -> Option<&'a Ephemeral> {
+        match self {
+            Layer::Ephemeral(memory) => Some(memory),
+            _ => None,
+        }
+    }
+
+    /// The durable layer, if this is one.
+    pub fn durable(&self) -> Option<&Durable> {
+        match self {
+            Layer::Durable(durable) => Some(durable),
+            _ => None,
+        }
+    }
+
+    /// The channel, if this is one.
+    pub fn channel(&self) -> Option<&Channel> {
+        match self {
+            Layer::Channel(channel) => Some(channel),
+            _ => None,
+        }
+    }
 }
 
 impl Branch {
@@ -410,26 +428,86 @@ impl Stack {
         &self.inner.primary
     }
 
-    /// The layer named `name`, if the stack holds one: the stack's
-    /// own, [`SESSION`](crate::SESSION), which every stack has, the
-    /// loopback, [`CONTROL`](crate::CONTROL), which every stack has
-    /// too, or one the schema declares (a memory layer or a channel).
-    /// The stack's own is the primary's process-local store, the one
-    /// [`Branch::overlay`] hands out: a clone of either shares its state.
-    /// The loopback holds nothing between dispatches; its instants are
-    /// the commands of each published dispatch (see [`invoke`]).
-    pub fn layer(&self, name: &Entity) -> Option<&Ephemeral> {
+    /// The layer named `name`, if the stack holds one, by its type:
+    /// [`Layer::Ephemeral`] for the stack's own, [`SESSION`](crate::SESSION),
+    /// which every stack has, and a session layer the schema declares;
+    /// [`Layer::Durable`] for the primary, [`MEMORY`](crate::MEMORY), and
+    /// a durable layer the schema declares; [`Layer::Channel`] for the
+    /// loopback, [`CONTROL`](crate::CONTROL), which every stack has too,
+    /// and every other channel the stack holds. The stack's own layer is
+    /// the primary's process-local store, the one [`Branch::overlay`]
+    /// hands out: a clone of either shares its state.
+    pub fn layer(&self, name: &Entity) -> Option<Layer<'_>> {
         if *name == session_layer() {
-            return Some(self.inner.primary.overlay());
+            return Some(Layer::Ephemeral(self.inner.primary.overlay()));
         }
-        if *name == control_layer() {
-            return Some(&self.inner.loopback.control);
+        if *name == memory_layer() {
+            return Some(Layer::Durable(Durable::new(
+                name.clone(),
+                self.inner.primary.revision(),
+            )));
+        }
+        if let Some(channel) = self.channel_of(name) {
+            return Some(Layer::Channel(channel));
+        }
+        if let Some((_, memory)) = self.inner.layers.iter().find(|(layer, _)| layer == name) {
+            return Some(Layer::Ephemeral(memory));
+        }
+        let durables = &self.inner.durables;
+        let at = durables.layers().iter().position(|layer| layer == name)?;
+        let revision = durables.pinned().revisions.get(at).cloned().flatten();
+        Some(Layer::Durable(Durable::new(name.clone(), revision)))
+    }
+
+    /// The channel named `name`, creating it if the stack holds none of
+    /// that name: [`control_layer`](crate::control_layer) is the
+    /// loopback, a channel the schema declares is the one the stack built
+    /// when it opened, and any other entity is a new channel, listed by
+    /// [`layers`](Self::layers) from then on. Creating one asserts
+    /// `<name> dialog.layer/type channel:` into the stack's own layer,
+    /// [`SESSION`](crate::SESSION), as one instant; a second call returns
+    /// the same channel and writes nothing.
+    ///
+    /// A channel is any entity but one under [`MEMORY`](crate::MEMORY)
+    /// or [`SESSION`](crate::SESSION), which name the other types of
+    /// layer: those are refused with [`CommitError::InvalidPlacement`],
+    /// and nothing is written.
+    pub fn channel(&self, name: &Entity) -> Result<Channel, CommitError> {
+        if let Some(channel) = self.channel_of(name) {
+            return Ok(channel);
+        }
+        channel_name(name)?;
+        let mut channels = self.inner.channels.write();
+        if let Some(channel) = channels.iter().find(|channel| channel.entity() == name) {
+            return Ok(channel.clone());
+        }
+        let mut changes = Changes::new();
+        LayerDeclaration::new(name.clone(), LayerType::Channel).assert(&mut changes);
+        self.inner.primary.overlay().apply(changes)?;
+        let channel = Channel::new(name.clone());
+        channels.push(channel.clone());
+        Ok(channel)
+    }
+
+    /// The channel named `name`, if the stack holds one: the loopback, or
+    /// one the schema declares or [`channel`](Self::channel) created.
+    pub(crate) fn channel_of(&self, name: &Entity) -> Option<Channel> {
+        if name == self.inner.control.entity() {
+            return Some(self.inner.control.clone());
         }
         self.inner
-            .layers
+            .channels
+            .read()
             .iter()
-            .find(|(layer, _)| layer == name)
-            .map(|(_, memory)| memory)
+            .find(|channel| channel.entity() == name)
+            .cloned()
+    }
+
+    /// Every channel the stack holds, the loopback first.
+    pub(crate) fn channels(&self) -> Vec<Channel> {
+        once(self.inner.control.clone())
+            .chain(self.inner.channels.read().iter().cloned())
+            .collect()
     }
 
     /// The layers this stack holds, by name: the three every stack has,
@@ -437,12 +515,22 @@ impl Stack {
     /// [`SESSION`](crate::SESSION), then the loopback,
     /// [`CONTROL`](crate::CONTROL); then the session layers and channels
     /// the schema declares, in the schema's order, then its durable
-    /// layers, in the schema's order.
+    /// layers, in the schema's order, then the channels
+    /// [`channel`](Self::channel) created, in the order it did.
     pub fn layers(&self) -> Vec<Entity> {
+        let created: Vec<Entity> = self
+            .inner
+            .channels
+            .read()
+            .iter()
+            .map(|channel| channel.entity().clone())
+            .filter(|channel| !self.inner.order.contains(channel))
+            .collect();
         [memory_layer(), session_layer(), control_layer()]
             .into_iter()
-            .chain(self.inner.layers.iter().map(|(layer, _)| layer.clone()))
+            .chain(self.inner.order.iter().cloned())
             .chain(self.inner.durables.layers().iter().cloned())
+            .chain(created)
             .collect()
     }
 
@@ -533,17 +621,22 @@ impl Stack {
     /// next dispatch would record (see the [module docs](self)).
     pub(crate) fn unrecorded(&self) -> bool {
         let revision = self.inner.primary.revision();
-        !self.recorded(revision.as_ref()).rows().is_empty()
+        let channels = self.channels();
+        !self.recorded(revision.as_ref(), &channels).rows().is_empty()
     }
 
     /// What the stack records of its layers' revisions, with the
     /// primary at `primary`.
-    fn recorded<'a>(&'a self, primary: Option<&'a crate::Revision>) -> Recorded<'a> {
+    fn recorded<'a>(
+        &'a self,
+        primary: Option<&'a crate::Revision>,
+        channels: &'a [Channel],
+    ) -> Recorded<'a> {
         Recorded {
             branch: &self.inner.branch,
             primary,
             memories: &self.inner.layers,
-            control: &self.inner.loopback.control,
+            channels,
             own: self.inner.primary.overlay(),
         }
     }
@@ -558,7 +651,12 @@ impl Stack {
     /// The layers a transaction through this stack reads and induces
     /// over: the primary pinned as `primary`, each durable layer at the
     /// revision `durables` holds it at, and the memory layers.
-    fn composite(&self, primary: Source, durables: &[DurableLayer]) -> Composite {
+    fn composite(
+        &self,
+        primary: Source,
+        durables: &[DurableLayer],
+        channels: &[Channel],
+    ) -> Composite {
         let mut sources = vec![primary];
         let mut names = vec![None];
         for durable in durables {
@@ -569,6 +667,10 @@ impl Stack {
             sources,
             memories: self.memories(),
             names,
+            channels: channels
+                .iter()
+                .map(|channel| channel.entity().clone())
+                .collect(),
         }
     }
 
@@ -605,18 +707,30 @@ impl Stack {
     /// [`PublishError::VersionMismatch`](crate::PublishError::VersionMismatch)
     /// and lands nothing, and the caller runs it again.
     pub fn transaction(&self) -> Transaction<&Branch> {
+        self.receiving(Changes::new())
+    }
+
+    /// A transaction through the stack, as [`transaction`](Self::transaction)
+    /// starts one, whose first tick also reads `received`: the rows the
+    /// outside ends of the stack's channels other than the loopback sent,
+    /// each named for its channel. They are stimulus, read as rows of the
+    /// channel, and the publish does not land them back on its outside
+    /// end.
+    pub(crate) fn receiving(&self, received: Changes) -> Transaction<&Branch> {
         let transaction = self.inner.primary.transaction();
         let primary = transaction.view().to_source();
         let pinned = self.inner.durables.pinned();
         let durables = self.inner.durables.lines(&pinned);
+        let channels = self.channels();
         transaction.with_stack(StackContext {
             branch: self.inner.branch.clone(),
-            composite: self.composite(primary, &durables),
+            composite: self.composite(primary, &durables, &channels),
             memories: self.inner.layers.clone(),
             durables,
             pinned,
             state: self.inner.durables.clone(),
-            loopback: self.inner.loopback.clone(),
+            channels,
+            received,
         })
     }
 }

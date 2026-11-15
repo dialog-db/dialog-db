@@ -23,7 +23,7 @@ use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::session::{Composite, shared_metadata};
 use crate::repository::source::{Live, View};
 use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
-use crate::stack::Loopback;
+use crate::Channel;
 pub(crate) use crate::stack::durable::DurableLayer;
 use crate::stack::durable::{Durables, Pinned};
 use crate::{Branch, CommitError, Ephemeral, PublishError, RemoteSite, Revision, Snapshot, Staged};
@@ -103,7 +103,7 @@ pub struct Transaction<L: Line> {
 /// composite its reads and its induction see, the memory layers that
 /// take their shares once the commit publishes, the durable layers whose
 /// next trees its commit mints and points the primary at, and the
-/// loopback the publish lands the transaction's commands in.
+/// channels the publish lands what the transaction wrote into them in.
 #[derive(Clone)]
 pub(crate) struct StackContext {
     /// The primary's branch entity, whose `dialog.branch/revision` row
@@ -119,9 +119,14 @@ pub(crate) struct StackContext {
     /// were read at, and its publish records where it left them.
     pub(crate) pinned: Pinned,
     pub(crate) state: Arc<Durables>,
-    /// The stack's loopback, where the publish lands the commands the
-    /// transaction dispatched.
-    pub(crate) loopback: Loopback,
+    /// The stack's channels, the loopback first: the publish lands on
+    /// each one's outside end what the transaction wrote into it, the
+    /// commands it dispatched in the loopback's.
+    pub(crate) channels: Vec<Channel>,
+    /// What the outside ends of the channels other than the loopback
+    /// sent, each named for its channel: stimulus of the first tick, read
+    /// as rows of the channel, landing nowhere.
+    pub(crate) received: Changes,
 }
 
 /// What a [`Transaction`] runs on: a `&`[`Branch`], a `&`[`Snapshot`]
