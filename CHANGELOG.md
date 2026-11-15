@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A channel is a layer of its own type, with two ends, whose rows live one tick
 
-[#TBD](https://github.com/dialog-db/dialog-db/pulls), argued in
+[#815](https://github.com/dialog-db/dialog-db/pull/815), argued in
 [notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
 point 5).
 
@@ -467,7 +467,7 @@ that tick. Once a dispatch has published, its commands stand in the
 stack's `control:` layer for one instant and leave it in the next, so
 the layer's instants are every command, in order, once, and nothing of
 them stays. A channel is a layer for a consumer outside the invoke
-loop or the process; since #TBD (see its entry above),
+loop or the process; since #815 (see its entry above),
 its rows live one tick too, and what a dispatch writes into it lands
 on its outside end as one tick of a log every reader reads in full. A
 provider reads either through `Stack::arrivals`, which yields each
@@ -489,7 +489,7 @@ What this changes for you:
   say, in that layer, where before the layer it named was ignored.
 - `LayerType::Channel` is new: `LayerDeclaration::new(entity,
   LayerType::Channel)` declares a channel, stored as `dialog.layer/type
-  channel:`. A stack builds it as a `Channel` (see #TBD below):
+  channel:`. A stack builds it as a `Channel` (see #815 below):
   a write into it is the next tick's stimulus, read as a row of the
   channel, and lands on its outside end once the dispatch has
   published. Declaring bare `control:` builds nothing apart.
