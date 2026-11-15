@@ -388,6 +388,19 @@ pointed trees, with the merge on pull; (c) channels as a layer type and
 `effect`, lifecycle events, discovery facts; (e) `backup`/`restore` and
 the bookkeeping split.
 
+Done, in that order: (a) [#813](https://github.com/dialog-db/dialog-db/pull/813),
+(b) [#814](https://github.com/dialog-db/dialog-db/pull/814),
+(c) [#815](https://github.com/dialog-db/dialog-db/pull/815),
+(d) [#816](https://github.com/dialog-db/dialog-db/pull/816),
+(e) [#817](https://github.com/dialog-db/dialog-db/pull/817); the tip is
+`0.5.0-rc.5`. Three departures from the points above, each argued in
+its PR: a durable layer's pointer is keyed by the layer entity
+(`memory:notes dialog.branch/revision`, with `dialog.branch/tree`
+beside it), not a branch entity, since `(replica, name)` differs per
+replica (#814); the merge on pull runs as a dispatch after the pull
+lands, both trees already local (#814); only `control:` echoes what it
+was sent onto its outside end (#815). Point 9 is still open.
+
 ## Open
 
 - Channels as layers, named by address. The maintainer's proposal,
