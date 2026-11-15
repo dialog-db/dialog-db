@@ -108,7 +108,11 @@ type Erased = dyn Any;
 /// The environment a [`Stack::settle`] polls with, its type erased so
 /// the registry can poll a subscription of any query type with it: a
 /// shared handle, `Sized` and `'static` as the evaluation asks, that
-/// provides what the environment provides.
+/// provides what the environment provides, through the `Arc` blanket
+/// impls of `Provider` and `Holds`. On native it is also `Send`:
+/// `OpenStackEnv` asks only `Sync`, and an `Arc` is `Send` and `Sync`
+/// only over what is both, which is why [`Stack::settle`] asks its
+/// environment to be `ConditionalSend`.
 #[cfg(not(target_arch = "wasm32"))]
 type Environment = Arc<dyn OpenStackEnv + Send>;
 /// The environment a [`Stack::settle`] polls with, its type erased.
