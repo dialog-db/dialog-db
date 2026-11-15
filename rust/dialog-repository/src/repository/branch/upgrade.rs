@@ -21,11 +21,26 @@
 //! the current format, which holds the rule's canonical spelling, so a
 //! later retraction finds the body by encoding the rule.
 //!
-//! The earlier release also gave every attribute and concept another
-//! identity (see [`dialog_query::migration`]), and keyed a concept's
-//! `dialog.concept/transient` marker by it. For the concept every rule
-//! on the branch concludes, a marker under the concept's earlier
-//! identity is moved to its current one.
+//! The earlier releases also gave every attribute and concept other
+//! identities (see [`dialog_query::migration`]), and keyed a concept's
+//! `dialog.concept/transient` marker by them. For the concept every rule
+//! on the branch concludes, a marker under either of the concept's
+//! earlier identities is moved to its current one.
+//!
+//! The release before this one (0.3 and 0.4) read every attribute under
+//! a pick, and stored its rules spelling one. This release refuses an
+//! attribute spelled with a pick, so such a body does not decode and its
+//! rule is inert. The upgrade rewrites it with
+//! [`dialog_query::migration::rewrite_body`]: an attribute read under
+//! `last` is cardinality one and one read under `all` cardinality many,
+//! which is what each pick read and wrote. The rewritten rule is
+//! asserted under its identity now, and every rule fact the earlier
+//! release wrote is retracted. A rule reading an attribute under `max`,
+//! `min` or `top` (which a listed `as` without a pick meant), or over a
+//! chain of relations, has no rewriting with the same meaning: a ranked
+//! read is now a rule folding with that aggregator, which the author
+//! writes. Such a rule is left as it is, inert, and reported in
+//! [`RulesUpgraded::unmapped`] with why.
 //!
 //! The upgrade is idempotent and convergent: a second run finds
 //! nothing, and two replicas that upgrade concurrently write the same
@@ -51,7 +66,10 @@ use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead, Size as BlobSize};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_query::attribute::Relation;
-use dialog_query::migration::concept_identity_v0;
+use dialog_query::migration::{
+    Rewritten, Unmapped, concept_identity_v0, concept_identity_v1, rewrite_body,
+};
+use dialog_query::rule::body::{FORMAT, format_of};
 use dialog_query::rule::statement::source_attr;
 use dialog_query::rule::{DeductiveRule, InductiveRule};
 use dialog_query::{AttributeStatement, Cardinality, ConceptDescriptor};
@@ -68,8 +86,15 @@ pub struct RulesUpgraded {
     /// earlier format and is now rewritten in the current one.
     pub rewritten: Vec<Entity>,
     /// Rule entities whose stored body this release cannot decode as
-    /// either kind of rule. They are left as they are.
+    /// either kind of rule, in its own format or rewritten from an
+    /// earlier one. They are left as they are.
     pub undecodable: Vec<Entity>,
+    /// Rule entities an earlier release stored whose body reads some
+    /// attribute in a way no cardinality reproduces: under `max`, `min`
+    /// or `top`, or over a chain of relations. Each is left as it is,
+    /// inert, with what keeps it from being rewritten. A ranked read is
+    /// now a rule folding with that aggregator, for the author to write.
+    pub unmapped: Vec<(Entity, Vec<Unmapped>)>,
     /// Each transient marker moved: the concept identity the earlier
     /// release keyed it by, and the concept's identity now.
     pub remarked: Vec<(Entity, Entity)>,
@@ -81,7 +106,8 @@ pub struct RulesUpgraded {
 impl Branch {
     /// Re-install every rule this branch stores under an entity that is
     /// not its identity, as an earlier release stored rules, and rewrite
-    /// every body stored in an earlier format. See the
+    /// every body stored in an earlier format, the bodies spelling picks
+    /// among them. See the
     /// [module documentation](self) for when to run it.
     pub fn upgrade_rules(&self) -> UpgradeRules<'_> {
         UpgradeRules { branch: self }
@@ -99,12 +125,48 @@ enum Decoded {
     Inductive(InductiveRule),
 }
 
+/// What reading a stored rule body came to.
+enum Read {
+    /// The rule, decoded as stored or rewritten from an earlier format.
+    Rule(Decoded),
+    /// A body an earlier release stored that no rewriting reads with
+    /// its meaning.
+    Unmapped(Vec<Unmapped>),
+    /// A body that decodes as no rule.
+    Undecodable,
+}
+
 impl Decoded {
     fn decode(bytes: &[u8]) -> Option<Self> {
         if let Ok(rule) = DeductiveRule::decode(bytes) {
             return Some(Decoded::Deductive(rule));
         }
         InductiveRule::decode(bytes).ok().map(Decoded::Inductive)
+    }
+
+    /// The rule `bytes` hold. A body in an earlier format is rewritten
+    /// first ([`rewrite_body`]): its attributes may spell the picks 0.3
+    /// and 0.4 wrote, or list values without one, which those releases
+    /// read under `top` and this one reads as an enumerated type, so such
+    /// a body is never decoded as it stands. A body in the current
+    /// format is decoded as it is.
+    fn read(bytes: &[u8]) -> Read {
+        if format_of(bytes) != Some(FORMAT) {
+            match rewrite_body(bytes) {
+                Ok(Rewritten::Rewritten(rewritten)) => {
+                    return match Decoded::decode(&rewritten) {
+                        Some(rule) => Read::Rule(rule),
+                        None => Read::Undecodable,
+                    };
+                }
+                Ok(Rewritten::Unmapped(unmapped)) => return Read::Unmapped(unmapped),
+                Ok(Rewritten::Unchanged) | Err(_) => {}
+            }
+        }
+        match Decoded::decode(bytes) {
+            Some(rule) => Read::Rule(rule),
+            None => Read::Undecodable,
+        }
     }
 
     fn identity(&self) -> Option<Entity> {
@@ -178,9 +240,18 @@ impl UpgradeRules<'_> {
             let Value::Bytes(bytes) = &stored.is else {
                 continue;
             };
-            let Some(rule) = Decoded::decode(bytes) else {
-                upgraded.undecodable.push(stored.of.clone());
-                continue;
+            let rule = match Decoded::read(bytes) {
+                Read::Rule(rule) => rule,
+                Read::Unmapped(unmapped) => {
+                    if !upgraded.unmapped.iter().any(|(of, _)| *of == stored.of) {
+                        upgraded.unmapped.push((stored.of.clone(), unmapped));
+                    }
+                    continue;
+                }
+                Read::Undecodable => {
+                    upgraded.undecodable.push(stored.of.clone());
+                    continue;
+                }
             };
             let Some(identity) = rule.identity() else {
                 continue;
@@ -242,27 +313,28 @@ impl UpgradeRules<'_> {
             upgraded.reinstalled.push((stored.of.clone(), identity));
         }
         // A transient marker under a concluded concept's earlier
-        // identity, moved to its current one.
+        // identities, moved to its current one.
         for concept in conclusions {
-            let earlier = concept_identity_v0(&concept);
             let current = concept.this();
-            if earlier == current {
-                continue;
+            for earlier in [concept_identity_v0(&concept), concept_identity_v1(&concept)] {
+                if earlier == current {
+                    continue;
+                }
+                let marked = branch
+                    .claims()
+                    .select(Selector::new().the(transient_attr()).of(earlier.clone()))
+                    .perform(env)
+                    .await?
+                    .try_collect::<Vec<_>>()
+                    .await?;
+                if marked.is_empty() {
+                    continue;
+                }
+                transaction = transaction
+                    .retract(Transient(earlier.clone()))
+                    .assert(Transient(current.clone()));
+                upgraded.remarked.push((earlier, current.clone()));
             }
-            let marked = branch
-                .claims()
-                .select(Selector::new().the(transient_attr()).of(earlier.clone()))
-                .perform(env)
-                .await?
-                .try_collect::<Vec<_>>()
-                .await?;
-            if marked.is_empty() {
-                continue;
-            }
-            transaction = transaction
-                .retract(Transient(earlier.clone()))
-                .assert(Transient(current.clone()));
-            upgraded.remarked.push((earlier, current));
         }
         if upgraded.reinstalled.is_empty()
             && upgraded.rewritten.is_empty()

@@ -1738,6 +1738,7 @@ dependencies = [
  "futures",
  "futures-core",
  "futures-util",
+ "ipld-core",
  "merkle-reference",
  "serde",
  "serde_ipld_dagcbor",

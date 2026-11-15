@@ -7,6 +7,8 @@ mod migration;
 #[cfg(test)]
 mod oracle;
 #[cfg(test)]
+mod pick_migration;
+#[cfg(test)]
 mod quarantine;
 pub(crate) use induce::induction_ignores;
 mod query;
@@ -174,7 +176,7 @@ impl<L: Line> Transaction<L> {
     ///
     /// Each instruction is replayed as if it had been asserted or
     /// retracted on the transaction directly — `Assert` becomes an
-    /// entry under its pick, `Retract` a retraction entry —
+    /// entry under its cardinality, `Retract` a retraction entry —
     /// and the batch's asset changes are staged on the transaction.
     /// Useful for callers that build a [`Changes`] independently
     /// (e.g. a reactor accumulating effect outputs across rounds) and
