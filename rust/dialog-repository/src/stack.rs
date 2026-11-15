@@ -5065,4 +5065,671 @@ mod tests {
         assert!(fetches.poll(&reader).await?.is_empty());
         Ok(())
     }
+
+    /// `counter/value` of `of` as `value`, under `last`, in the primary.
+    fn counter_value(of: &Entity, value: u64) -> impl Statement + use<> {
+        AttributeStatement {
+            the: QueryRelation::from("counter/value".parse::<dialog_corpus::Relation>().unwrap()),
+            of: of.clone(),
+            is: dialog_corpus::Value::UnsignedInt(value.into()),
+            cause: None,
+            cardinality: Some(Cardinality::One),
+            pick: Some(dialog_corpus::Pick::Last),
+        }
+    }
+
+    /// The `counter/value` of `of` that `query` reads, zero for none.
+    async fn counter_read(
+        query: QueryLayer<'_>,
+        env: &Operator,
+        of: &Entity,
+    ) -> Result<u64, CommitError> {
+        let rows = query
+            .select(AttributeQuery::from(
+                Term::<QueryRelation>::from(QueryRelation::from(
+                    "counter/value"
+                        .parse::<dialog_corpus::Relation>()
+                        .expect("an attribute"),
+                ))
+                .of(Term::<Entity>::from(of.clone()))
+                .is(Term::<u64>::var("v")),
+            ))
+            .perform(env)
+            .try_vec()
+            .await?;
+        Ok(match rows.first().map(|row| &row.is) {
+            Some(dialog_corpus::Value::UnsignedInt(n)) => u64::try_from(*n).unwrap_or(0),
+            _ => 0,
+        })
+    }
+
+    /// A transact body is run again from the head that moved under it:
+    /// another handle moves the counter between the first run's read and
+    /// its publish, so the publish loses, the body runs a second time,
+    /// reads the moved value and stages its increment of that, and the
+    /// value lands once, computed from the moved head.
+    #[dialog_common::test]
+    async fn it_re_runs_a_transact_body_from_the_head_that_moved_under_it() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let counter: Entity = "ctr:1".parse()?;
+        stack
+            .assert(counter_value(&counter, 1))
+            .perform(&operator)
+            .await?;
+        let other = repo.branch("main").open().perform(&operator).await?;
+        let runs = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let read = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+        let (env, ctr, ran, seen) = (operator.clone(), counter.clone(), runs.clone(), read.clone());
+        let report = stack
+            .transact(move |tx| {
+                let (env, ctr, other) = (env.clone(), ctr.clone(), other.clone());
+                let (ran, seen) = (ran.clone(), seen.clone());
+                async move {
+                    ran.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let n = counter_read(tx.query(), &env, &ctr).await?;
+                    seen.lock().push(n);
+                    if tx.number() == 1 {
+                        // Another handle moves the counter after this
+                        // run read it, before its publish.
+                        other
+                            .transaction()
+                            .assert(counter_value(&ctr, 10))
+                            .commit()
+                            .publish()
+                            .perform(&env)
+                            .await?;
+                    }
+                    tx.assert(counter_value(&ctr, n + 1));
+                    Ok(())
+                }
+            })
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            runs.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the body ran again from the moved head"
+        );
+        assert_eq!(*read.lock(), vec![1, 10], "the re-run read the moved value");
+        assert_eq!(
+            committed::<u64>(&branch, &operator, "counter/value", &counter).await?,
+            vec!["UnsignedInt(11)".to_string()],
+            "the value landed once, computed from the moved head"
+        );
+        assert_eq!(branch.revision().as_ref(), Some(report.revision()));
+        Ok(())
+    }
+
+    /// A transact body that gives up fails the invocation with its
+    /// reason, and nothing it staged is written: not the write, not the
+    /// command beside it.
+    #[dialog_common::test]
+    async fn it_writes_nothing_of_a_transact_body_that_gives_up() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let control = crate::control_layer();
+        let mut arrivals = stack.arrivals_rows(&control).expect("control:");
+        let doc: Entity = "doc:1".parse()?;
+        let before = branch.revision();
+
+        let staged = doc.clone();
+        let refused = stack
+            .transact(move |tx| {
+                let doc = staged.clone();
+                async move {
+                    tx.assert(title(&doc, "staged"));
+                    tx.invoke(fetch("cmd:1", &doc));
+                    Err(CommitError::Aborted("nothing to do".into()))
+                }
+            })
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(&refused, Err(CommitError::Aborted(reason)) if reason == "nothing to do"),
+            "the body's reason fails the invocation: {refused:?}"
+        );
+        branch.refresh(&operator).await?;
+        assert_eq!(branch.revision(), before, "nothing durable was written");
+        assert!(
+            committed::<String>(&branch, &operator, "doc/title", &doc)
+                .await?
+                .is_empty()
+        );
+        assert!(arrivals.rows().is_empty(), "no command landed");
+        Ok(())
+    }
+
+    /// An invocation's report names the head it left the primary at, the
+    /// ticks its dispatch ran and exactly the commands it landed in
+    /// `control:`: the ping it sent and the pong a rule dispatched, and
+    /// not the writes beside them.
+    #[dialog_common::test]
+    async fn it_reports_what_an_invocation_landed() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        declare_ping(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let target: Entity = "doc:1".parse()?;
+
+        let report = stack
+            .invoke(ping("cmd:1", &target))
+            .assert(title(&target, "pinged"))
+            .perform(&operator)
+            .await?;
+        assert_eq!(branch.revision().as_ref(), Some(report.revision()));
+        let mut landed: Vec<String> = report
+            .commands()
+            .iter()
+            .map(|fact| format!("{} {} {:?}", fact.of, fact.the, fact.is))
+            .collect();
+        landed.sort();
+        assert_eq!(
+            landed,
+            vec![
+                "cmd:1 cmd.ping/target Entity(doc:1)".to_string(),
+                "cmd:1 cmd.pong/target Entity(doc:1)".to_string(),
+            ],
+            "the command sent and the one its rule dispatched"
+        );
+        // The ping and the writes are the first tick's stimulus, where
+        // the rules record the ping and dispatch the pong; the pong and
+        // that record are the second's, where a rule records the pong;
+        // that record is the third's, where nothing fires.
+        assert_eq!(report.ticks(), 3);
+
+        let quiet = stack.assert(title(&target, "again")).perform(&operator).await?;
+        assert!(quiet.commands().is_empty(), "a write alone lands no command");
+        Ok(())
+    }
+
+    /// A rule copying `from`, of type `kind`, from `control:` into
+    /// `to` of the same entity in `session:state`, every value kept.
+    fn copy_rule(from: &str, kind: &str, to: &str) -> Result<InductiveRule> {
+        Ok(serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "v": { "the": to, "as": kind, "pick": "all", "in": "session:state" } }
+            },
+            "when": [
+                {
+                    "assert": { "with": { "v": { "the": from, "as": kind, "in": "control:" } } },
+                    "where": { "this": { "?": { "name": "this" } }, "v": { "?": { "name": "v" } } }
+                }
+            ]
+        }))?)
+    }
+
+    /// Rules copying each lifecycle row of a command into
+    /// `session:state`, which an earlier declaration declared: `log/invoked`,
+    /// `log/answered`, `log/failed` and `log/unhandled`.
+    async fn declare_lifecycle(branch: &Branch, env: &Operator) -> Result<()> {
+        branch
+            .transaction()
+            .assert(copy_rule(
+                "dialog.command/invoked",
+                "UnsignedInteger",
+                "log/invoked",
+            )?)
+            .assert(copy_rule(
+                "dialog.command/answered",
+                "Entity",
+                "log/answered",
+            )?)
+            .assert(copy_rule("dialog.command/failed", "Text", "log/failed")?)
+            .assert(copy_rule(
+                "dialog.command/unhandled",
+                "Boolean",
+                "log/unhandled",
+            )?)
+            .commit()
+            .publish()
+            .perform(env)
+            .await?;
+        branch.refresh(env).await?;
+        Ok(())
+    }
+
+    /// A command is marked `dialog.command/invoked` in the tick it is
+    /// stimulus of, beside its own rows: a rule premised on the mark
+    /// copies it into a session layer, the ping invoked in the first
+    /// tick, the pong a rule dispatched in the second. The mark is in no
+    /// layer after its tick, and no command a report names.
+    #[dialog_common::test]
+    async fn it_marks_a_command_invoked_in_the_tick_it_is_stimulus_of() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_ping(&branch, &operator).await?;
+        declare_lifecycle(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        let control = crate::control_layer();
+        let target: Entity = "doc:1".parse()?;
+        let command: Entity = "cmd:1".parse()?;
+
+        let report = stack
+            .invoke(ping("cmd:1", &target))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            held(&memory, "log/invoked", &command)?,
+            vec!["UnsignedInt(1)".to_string(), "UnsignedInt(2)".to_string()],
+            "the ping marked in the first tick, the pong in the second"
+        );
+        assert!(
+            report.commands().iter().all(|fact| fact.the.as_str() != "dialog.command/invoked"),
+            "the mark is no command"
+        );
+        let rows: Vec<dialog_query::Claim> = stack
+            .query()
+            .select(whole(&control))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(rows.is_empty(), "nothing stays in control: after its tick");
+        Ok(())
+    }
+
+    /// A concept of one attribute, `the`, named `field`.
+    fn concept_of(field: &str, the: QueryRelation) -> dialog_query::ConceptDescriptor {
+        dialog_query::ConceptDescriptor::try_from([(
+            field,
+            dialog_query::AttributeDescriptor::new(the, "", Cardinality::One, None),
+        )])
+        .expect("a concept")
+    }
+
+    /// The concept of a fetch command, `cmd.fetch/node`.
+    fn fetch_concept() -> dialog_query::ConceptDescriptor {
+        concept_of("node", dialog_query::the!("cmd.fetch/node"))
+    }
+
+    /// The concept of a fetch's answer, `cmd.fetched/node`.
+    fn fetched_concept() -> dialog_query::ConceptDescriptor {
+        concept_of("node", dialog_query::the!("cmd.fetched/node"))
+    }
+
+    /// The node a command's rows name, the value of its first row.
+    fn node_of(command: &crate::Command) -> Result<Entity, crate::Failure> {
+        match command.rows().first().map(|row| &row.is) {
+            Some(dialog_corpus::Value::Entity(node)) => Ok(node.clone()),
+            other => Err(crate::Failure::new(format!("no node: {other:?}"))),
+        }
+    }
+
+    /// The `dialog.provider/command` rows the stack's own layer holds.
+    fn provided(stack: &Stack) -> Result<Vec<String>> {
+        held(
+            ephemeral(stack, &session_layer()).expect("session:"),
+            "dialog.provider/command",
+            &session_layer(),
+        )
+    }
+
+    /// Registering a provider writes its concept into `session:` once,
+    /// as `dialog.provider/command`; registering the concept again
+    /// replaces the handler and writes nothing; another concept is one
+    /// more row.
+    #[dialog_common::test]
+    async fn it_records_each_provided_concept_in_session_once() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        declare_fetch(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let own = ephemeral(&stack, &session_layer()).expect("session:").clone();
+        assert!(provided(&stack)?.is_empty());
+
+        stack.provide(crate::Provider::new(&fetch_concept(), |_| async {
+            Err(crate::Failure::new("the first handler"))
+        }))?;
+        assert_eq!(
+            provided(&stack)?,
+            vec![format!("Entity({})", fetch_concept().this())]
+        );
+        let once = own.revision();
+        stack.provide(crate::Provider::new(&fetch_concept(), |_| async {
+            Ok(Changes::new())
+        }))?;
+        assert_eq!(own.revision(), once, "a second registration writes nothing");
+        assert_eq!(provided(&stack)?.len(), 1);
+        stack.provide(crate::Provider::new(&fetched_concept(), |_| async {
+            Ok(Changes::new())
+        }))?;
+        assert_eq!(provided(&stack)?.len(), 2, "one row per concept");
+
+        let report = stack
+            .invoke(fetch("cmd:1", &"node:1".parse()?))
+            .perform(&operator)
+            .await?;
+        let effect = report.effect().perform(&operator).await?;
+        assert_eq!(
+            effect.answered(),
+            &["cmd:1".parse::<Entity>()?],
+            "the second handler replaced the first"
+        );
+        Ok(())
+    }
+
+    /// Performing an invocation runs no provider; its effect does: the
+    /// provider answers the landed command, the answer lands in the
+    /// state layer with the command's `answered` row, which a rule
+    /// copies there, and nothing remains.
+    #[dialog_common::test]
+    async fn it_answers_a_landed_command_through_its_effect() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        declare_lifecycle(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        let node: Entity = "node:1".parse()?;
+        let command: Entity = "cmd:1".parse()?;
+        let at = state.clone();
+        stack.provide(crate::Provider::new(&fetch_concept(), move |command| {
+            let at = at.clone();
+            async move {
+                let node = node_of(&command)?;
+                let mut answer = Changes::new();
+                dialog_query::the!("node/fetched")
+                    .of(node)
+                    .is(command.entity().clone())
+                    .at(at)
+                    .assert(&mut answer);
+                Ok(answer)
+            }
+        }))?;
+
+        let report = stack
+            .invoke(fetch("cmd:1", &node))
+            .perform(&operator)
+            .await?;
+        assert_eq!(cells_of(report.commands()), vec!["cmd:1 cmd.fetch/node"]);
+        assert!(
+            held(&memory, "node/fetched", &node)?.is_empty(),
+            "performing the invocation ran no provider"
+        );
+
+        let effect = report.effect().perform(&operator).await?;
+        assert_eq!(effect.answered(), std::slice::from_ref(&command));
+        assert!(effect.failed().is_empty() && effect.unhandled().is_empty());
+        assert!(!effect.remaining(), "the answer is no command");
+        assert_eq!(
+            held(&memory, "node/fetched", &node)?,
+            vec!["Entity(cmd:1)".to_string()],
+            "the answer landed"
+        );
+        assert_eq!(
+            held(&memory, "log/answered", &command)?,
+            vec![format!("Entity({})", fetch_concept().this())],
+            "the answered row named the provider's concept"
+        );
+        Ok(())
+    }
+
+    /// A provider whose answer is a command leaves it remaining, and the
+    /// next effect answers it through the provider of its concept.
+    #[dialog_common::test]
+    async fn it_continues_the_chain_while_commands_remain() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        let node: Entity = "node:1".parse()?;
+        let command: Entity = "cmd:1".parse()?;
+        stack.provide(crate::Provider::new(&fetch_concept(), |command| async move {
+            let node = node_of(&command)?;
+            let mut answer = Changes::new();
+            dialog_query::the!("cmd.fetched/node")
+                .of(command.entity().clone())
+                .is(node)
+                .at(crate::control_layer())
+                .assert(&mut answer);
+            Ok(answer)
+        }))?;
+        let at = state.clone();
+        stack.provide(crate::Provider::new(&fetched_concept(), move |command| {
+            let at = at.clone();
+            async move {
+                let mut answer = Changes::new();
+                dialog_query::the!("log/acked")
+                    .of(command.entity().clone())
+                    .is(true)
+                    .at(at)
+                    .assert(&mut answer);
+                Ok(answer)
+            }
+        }))?;
+
+        let report = stack
+            .invoke(fetch("cmd:1", &node))
+            .perform(&operator)
+            .await?;
+        let first = report.effect().perform(&operator).await?;
+        assert!(first.remaining(), "the answer is a command");
+        assert_eq!(
+            cells_of(first.invocation().commands()),
+            vec!["cmd:1 cmd.fetched/node"]
+        );
+        assert_eq!(
+            held(&memory, "node/fetched", &node)?,
+            vec!["Entity(cmd:1)".to_string()],
+            "a rule captured the answering command in its tick"
+        );
+        assert!(held(&memory, "log/acked", &command)?.is_empty());
+
+        let second = first.effect().perform(&operator).await?;
+        assert_eq!(second.answered(), std::slice::from_ref(&command));
+        assert!(!second.remaining());
+        assert_eq!(
+            held(&memory, "log/acked", &command)?,
+            vec!["Boolean(true)".to_string()]
+        );
+        Ok(())
+    }
+
+    /// The facts `rows` as `of the`, sorted.
+    fn cells_of(rows: &[dialog_corpus::Fact]) -> Vec<String> {
+        let mut cells: Vec<String> = rows
+            .iter()
+            .map(|fact| format!("{} {}", fact.of, fact.the))
+            .collect();
+        cells.sort();
+        cells
+    }
+
+    /// A provider that fails answers its command with the `failed` row
+    /// and its reason, and the other provider's answer lands beside it.
+    #[dialog_common::test]
+    async fn it_answers_a_failed_provider_with_its_reason() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        declare_lifecycle(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        let doc: Entity = "doc:1".parse()?;
+        stack.provide(crate::Provider::new(&fetch_concept(), |_| async {
+            Err(crate::Failure::new("unreachable"))
+        }))?;
+        let at = state.clone();
+        stack.provide(crate::Provider::new(
+            &concept_of("doc", dialog_query::the!("cmd.store/doc")),
+            move |command| {
+                let at = at.clone();
+                async move {
+                    let doc = node_of(&command)?;
+                    let mut answer = Changes::new();
+                    dialog_query::the!("log/stored")
+                        .of(doc)
+                        .is(true)
+                        .at(at)
+                        .assert(&mut answer);
+                    Ok(answer)
+                }
+            },
+        ))?;
+
+        let report = stack
+            .invoke(fetch("cmd:1", &"node:1".parse()?))
+            .invoke(
+                dialog_query::the!("cmd.store/doc")
+                    .of("cmd:2".parse::<Entity>()?)
+                    .is(doc.clone()),
+            )
+            .perform(&operator)
+            .await?;
+        let effect = report.effect().perform(&operator).await?;
+        assert_eq!(
+            effect.failed(),
+            &[("cmd:1".parse::<Entity>()?, "unreachable".to_string())]
+        );
+        assert_eq!(effect.answered(), &["cmd:2".parse::<Entity>()?]);
+        assert_eq!(
+            held(&memory, "log/failed", &"cmd:1".parse()?)?,
+            vec!["String(\"unreachable\")".to_string()]
+        );
+        assert!(held(&memory, "log/answered", &"cmd:1".parse()?)?.is_empty());
+        assert_eq!(
+            held(&memory, "log/stored", &doc)?,
+            vec!["Boolean(true)".to_string()],
+            "the other provider's answer landed"
+        );
+        Ok(())
+    }
+
+    /// A command no provider claims is answered `unhandled`, not an
+    /// error.
+    #[dialog_common::test]
+    async fn it_marks_a_command_no_provider_claims_unhandled() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        declare_lifecycle(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        stack.provide(crate::Provider::new(&fetch_concept(), |_| async {
+            Ok(Changes::new())
+        }))?;
+        let command: Entity = "cmd:9".parse()?;
+
+        let report = stack
+            .invoke(increment("cmd:9", &"ctr:1".parse()?))
+            .perform(&operator)
+            .await?;
+        let effect = report.effect().perform(&operator).await?;
+        assert_eq!(effect.unhandled(), std::slice::from_ref(&command));
+        assert!(effect.answered().is_empty() && effect.failed().is_empty());
+        assert!(!effect.remaining());
+        assert_eq!(
+            held(&memory, "log/unhandled", &command)?,
+            vec!["Boolean(true)".to_string()]
+        );
+        Ok(())
+    }
+
+    /// An effect whose answer dispatch loses its head re-runs the
+    /// dispatch from the new head, not the provider: the provider runs
+    /// once, the other writer's commit stands, and the answer and its
+    /// `answered` row land once.
+    #[dialog_common::test]
+    async fn it_re_runs_an_answer_dispatch_from_the_head_that_moved_under_it() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        declare_lifecycle(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        let other = repo.branch("main").open().perform(&operator).await?;
+        let runs = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let (env, ran) = (operator.clone(), runs.clone());
+        stack.provide(crate::Provider::new(&fetch_concept(), move |command| {
+            let (env, ran, other) = (env.clone(), ran.clone(), other.clone());
+            async move {
+                ran.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Another handle moves the head while the provider runs,
+                // before the answer dispatch begins.
+                other
+                    .transaction()
+                    .assert(title(&"doc:2".parse().expect("entity"), "Other"))
+                    .commit()
+                    .publish()
+                    .perform(&env)
+                    .await?;
+                let mut answer = Changes::new();
+                title(&node_of(&command)?, "answered").assert(&mut answer);
+                Ok(answer)
+            }
+        }))?;
+        let node: Entity = "node:1".parse()?;
+        let report = stack
+            .invoke(fetch("cmd:1", &node))
+            .perform(&operator)
+            .await?;
+
+        let effect = report.effect().perform(&operator).await?;
+        assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            effect.invocation().revision().version().edition,
+            report.revision().version().edition.successor().successor(),
+            "the answer published on the moved head"
+        );
+        assert_eq!(
+            committed::<String>(&branch, &operator, "doc/title", &node).await?,
+            vec!["String(\"answered\")".to_string()]
+        );
+        assert_eq!(
+            committed::<String>(&branch, &operator, "doc/title", &"doc:2".parse()?).await?,
+            vec!["String(\"Other\")".to_string()],
+            "the other writer's commit stands"
+        );
+        assert_eq!(
+            held(&memory, "log/answered", &"cmd:1".parse()?)?.len(),
+            1,
+            "the answered row landed once"
+        );
+        Ok(())
+    }
+
+    /// The effect of a report that landed no command runs no dispatch:
+    /// `control:`'s revision row and `session:`'s revision are unchanged,
+    /// and nothing remains.
+    #[dialog_common::test]
+    async fn it_performs_no_dispatch_for_an_effect_with_no_commands() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let control = crate::control_layer();
+        let own = ephemeral(&stack, &session_layer()).expect("session:").clone();
+        let report = stack
+            .assert(title(&"doc:1".parse()?, "x"))
+            .perform(&operator)
+            .await?;
+        let effect = report.effect();
+        assert!(effect.is_empty());
+        let (row, at, head) = (revision_of(&own, &control)?, own.revision(), branch.revision());
+
+        let performed = effect.perform(&operator).await?;
+        assert!(!performed.remaining());
+        assert_eq!(performed.invocation().ticks(), 0);
+        assert_eq!(performed.invocation().revision(), report.revision());
+        assert_eq!(revision_of(&own, &control)?, row, "control: did not move");
+        assert_eq!(own.revision(), at, "session: did not move");
+        assert_eq!(branch.revision(), head);
+        Ok(())
+    }
 }
