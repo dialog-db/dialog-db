@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A `Session` is a `Stack`, every stack lists and records its three implied layers from open, and a layer is declared by its type and a branch layer by its branch entity
 
-[#TBD](https://github.com/dialog-db/dialog-db/pulls), argued in
+[#813](https://github.com/dialog-db/dialog-db/pull/813), argued in
 [notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
 points 1 to 3).
 
