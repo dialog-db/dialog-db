@@ -316,7 +316,7 @@ concept's.
 [#808](https://github.com/dialog-db/dialog-db/pull/808), argued in
 [notes/layers.md](./notes/layers.md) (points 1, 11 and 13, and
 "Durable layers" under "Open"); the model is the one
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD) settled (see
+[#814](https://github.com/dialog-db/dialog-db/pull/814) settled (see
 the first entry above).
 
 A stack's layers were all in memory. A layer can now be durable,
