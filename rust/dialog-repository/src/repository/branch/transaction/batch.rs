@@ -155,6 +155,9 @@ pub struct TransactionBatch {
     /// them. `None` for a chain committed on the branch alone, which
     /// lands nothing.
     channels: Option<Vec<Channel>>,
+    /// How many ticks the chain's links ran, every link's induction
+    /// rounds summed.
+    ticks: u32,
 }
 
 /// The facts `changes` retracts that `overlay` holds. A transaction's
@@ -250,6 +253,35 @@ impl TransactionBatch {
         &self.shares
     }
 
+    /// How many ticks the chain ran: the rounds of induction of every
+    /// staged link, summed. A link whose writes and commands fired
+    /// nothing runs one; one with nothing to read runs none.
+    pub(crate) fn ticks(&self) -> u32 {
+        self.ticks
+    }
+
+    /// The rows the publish lands on the outside end of the loopback,
+    /// [`control:`](crate::CONTROL), as it lands them: the facts the
+    /// chain's transactions dispatched and its rules dispatched, bound
+    /// for no layer, oldest tick's first within each entity.
+    pub(crate) fn looped(&self) -> Vec<Fact> {
+        let mut written = self.dispatched.clone();
+        written.merge(self.induced.clone());
+        written.take_shares();
+        written
+            .iter()
+            .filter_map(|(of, the, change)| match change {
+                Change::Assert(is, _) => Some(Fact {
+                    the: the.clone(),
+                    of: of.clone(),
+                    is: is.clone(),
+                    cause: None,
+                }),
+                Change::Retract(_) => None,
+            })
+            .collect()
+    }
+
     /// Start the next transaction on this chain. Its commit extends the
     /// batch by one more staged revision.
     pub fn transaction(self) -> Transaction<TransactionBatch> {
@@ -341,6 +373,7 @@ impl BatchPublish {
             pinned,
             dispatched,
             channels,
+            ticks: _,
         } = self.batch;
         let tip = snapshot.revision();
         // Through a stack, what the chain wrote into its channels, the
@@ -725,7 +758,7 @@ impl TransactionCommit<&Branch> {
             .stack
             .as_ref()
             .map(|stack| (stack.state.clone(), stack.pinned.clone()));
-        let (outcome, induced, shares, durables, dispatched) = Box::pin(mint_link(
+        let (outcome, induced, shares, durables, dispatched, ticks) = Box::pin(mint_link(
             View::at(Live::Branch(branch), base.as_ref()),
             |profile, issuer| branch.commit_identity(profile, issuer),
             self.changes,
@@ -772,6 +805,7 @@ impl TransactionCommit<&Branch> {
                 pinned,
                 dispatched,
                 channels,
+                ticks,
             },
             Outcome::Minted(minted) => {
                 let Minted {
@@ -805,6 +839,7 @@ impl TransactionCommit<&Branch> {
                     pinned,
                     dispatched,
                     channels,
+                    ticks,
                 }
             }
         })
@@ -872,7 +907,7 @@ impl TransactionCommit<TransactionBatch> {
         }
         let staged = take(&mut batch.durables);
 
-        let (outcome, induced, shares, durables, dispatched) = Box::pin(mint_link(
+        let (outcome, induced, shares, durables, dispatched, ticks) = Box::pin(mint_link(
             View::at(Live::Snapshot(&batch.snapshot), Some(&base)),
             |_, issuer| (line.clone(), origin_of(&line, issuer)),
             self.changes,
@@ -888,6 +923,7 @@ impl TransactionCommit<TransactionBatch> {
         batch.durables = durables;
         induced.assert(&mut batch.induced);
         batch.dispatched.merge(dispatched);
+        batch.ticks += ticks;
         batch.shares.extend(shares);
         batch.overlay_retractions.extend(retractions);
 
@@ -1193,7 +1229,7 @@ where
         }
         changes.merge(share.clone().into_layer(layer.clone()));
     }
-    let (induced, rounds) = induce(
+    let (induced, rounds, ran) = induce(
         &view,
         &composite,
         &mut changes,
@@ -1262,19 +1298,20 @@ where
             );
         }
     }
-    Ok((outcome, induced, ticks, durables, dispatched))
+    Ok((outcome, induced, ticks, durables, dispatched, ran))
 }
 
 /// What [`mint_link`] mints: the link's outcome on the primary, the
 /// transients its rules emitted, its writes into memory layers tick by
-/// tick, the trees it minted for durable layers, by layer, and the
-/// commands it dispatched itself.
+/// tick, the trees it minted for durable layers, by layer, the
+/// commands it dispatched itself, and how many ticks its induction ran.
 type Link = (
     Outcome,
     Changes,
     Vec<Vec<(Entity, Changes)>>,
     Vec<(Entity, Revision)>,
     Changes,
+    u32,
 );
 
 /// Take the writes into `durables` out of `ticks` and mint each

@@ -152,7 +152,7 @@ impl SyncStack<'_> {
         // write, it runs only when a revision moved, to record it.
         if !merged.is_empty() || stack.unrecorded() {
             let repointed = !merged.is_empty();
-            Box::pin(stack.transact(merged).perform(env)).await?;
+            Box::pin(stack.assert(merged).perform(env)).await?;
             // The merged pointers were written as facts of the primary,
             // not by a write into the layers: read them back.
             if repointed {
@@ -163,7 +163,7 @@ impl SyncStack<'_> {
             Box::pin(primary.push().pointing(layers).perform(env)).await?;
         }
         if stack.unrecorded() {
-            Box::pin(stack.transact(Changes::new()).perform(env)).await?;
+            Box::pin(stack.invocation().perform(env)).await?;
         }
         Ok(())
     }

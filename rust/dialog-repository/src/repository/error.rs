@@ -643,6 +643,16 @@ pub enum CommitError {
         /// The layer its placement names.
         layer: String,
     },
+
+    /// A read the body of a [`Stack::transact`](crate::Stack::transact)
+    /// made through the stack failed: the transaction writes nothing.
+    #[error("A read in the transaction's body failed: {0}")]
+    Read(#[from] dialog_query::EvaluationError),
+
+    /// The body of a [`Stack::transact`](crate::Stack::transact) gave
+    /// up, for the reason it gives: the transaction writes nothing.
+    #[error("The transaction's body gave up: {0}")]
+    Aborted(String),
 }
 
 /// Errors specific to a pull operation.

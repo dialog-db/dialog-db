@@ -30,7 +30,7 @@
 //!     .await?;
 //! let stack = branch.stack().perform(&env).await?;
 //! stack
-//!     .transact(dialog_query::the!("ui/selected").of("doc:1".parse()?).is(true).at(state))
+//!     .assert(dialog_query::the!("ui/selected").of("doc:1".parse()?).is(true).at(state))
 //!     .perform(&env)
 //!     .await?;
 //! # Ok(())
@@ -136,6 +136,7 @@
 
 pub mod arrivals;
 pub(crate) mod durable;
+pub mod effect;
 pub mod invoke;
 pub mod sync;
 
@@ -335,6 +336,7 @@ impl OpenStack {
                 declared: RwLock::new(self.declared),
                 control,
                 channels: RwLock::new(channels),
+                providers: RwLock::new(Vec::new()),
             }),
         })
     }
@@ -365,6 +367,8 @@ struct Inner {
     /// The other channels: those the schema declares, in its order, then
     /// those [`Stack::channel`] created, in the order it did.
     channels: RwLock<Vec<Channel>>,
+    /// The providers [`Stack::provide`] registered, in the order it did.
+    providers: RwLock<Vec<effect::Provider>>,
 }
 
 /// The primary branch and the layers its schema declares, read and
@@ -551,6 +555,11 @@ impl Stack {
         (*name == memory_layer()).then_some(&self.inner.branch)
     }
 
+    /// The providers [`provide`](Self::provide) registered.
+    pub(crate) fn providers(&self) -> &RwLock<Vec<effect::Provider>> {
+        &self.inner.providers
+    }
+
     /// The stack's durable layers and where the primary points them.
     pub(crate) fn durables(&self) -> &Arc<Durables> {
         &self.inner.durables
@@ -591,9 +600,9 @@ impl Stack {
     /// writes it, once it has published.
     pub fn select(&self, layer: Option<Entity>) -> invoke::Invocation {
         match (layer, self.selected()) {
-            (Some(layer), _) => self.transact(Selection(layer)),
-            (None, Some(current)) => self.transact(Changes::new()).retract(Selection(current)),
-            (None, None) => self.transact(Changes::new()),
+            (Some(layer), _) => self.assert(Selection(layer)),
+            (None, Some(current)) => self.invocation().retract(Selection(current)),
+            (None, None) => self.invocation(),
         }
     }
 
@@ -1033,7 +1042,7 @@ mod tests {
 
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(flag(&doc, true, &own))
+            .assert(flag(&doc, true, &own))
             .perform(&operator)
             .await?;
         assert_eq!(
@@ -1161,7 +1170,7 @@ mod tests {
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
         stack
-            .transact(count(&counter, 1, &state))
+            .assert(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
         // Another handle moves the head; this stack's handle is stale.
@@ -1192,7 +1201,7 @@ mod tests {
             .perform(&operator)
             .await?;
         assert_eq!(
-            published.version().edition,
+            published.revision().version().edition,
             moved.version().edition.successor(),
             "the re-run published on the moved head"
         );
@@ -1225,7 +1234,7 @@ mod tests {
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
         let before = stack
-            .transact(count(&counter, 1, &state))
+            .assert(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
         let after = stack
@@ -1236,8 +1245,12 @@ mod tests {
             )
             .perform(&operator)
             .await?;
-        assert_eq!(after, before, "nothing durable was written");
-        assert_eq!(branch.revision(), Some(before));
+        assert_eq!(
+            after.revision(),
+            before.revision(),
+            "nothing durable was written"
+        );
+        assert_eq!(branch.revision().as_ref(), Some(before.revision()));
         assert_eq!(
             held(&memory, "counter/count", &counter)?,
             vec!["UnsignedInt(2)".to_string()]
@@ -1353,7 +1366,7 @@ mod tests {
         let counter: Entity = "ctr:1".parse()?;
         stack.primary().refresh(&operator).await?;
         stack
-            .transact(count(&counter, 1, &state))
+            .assert(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
         let start = memory.revision();
@@ -1665,7 +1678,7 @@ mod tests {
         let mut primary_rows = Vec::new();
         for title in ["First", "Second"] {
             let revision = stack
-                .transact(
+                .assert(
                     dialog_query::the!("doc/title")
                         .of(doc.clone())
                         .is(title.to_string()),
@@ -1681,7 +1694,7 @@ mod tests {
             let primary = primary_revision_of(&own, &stack)?;
             assert_eq!(
                 primary,
-                vec![entity_text(&revision)],
+                vec![entity_text(revision.revision())],
                 "the published revision"
             );
             primary_rows.push(primary);
@@ -1796,7 +1809,7 @@ mod tests {
         let seen_primary = || held(&memory, "seen/branch-revision", &primary);
 
         stack
-            .transact(flag(&doc, true, &state))
+            .assert(flag(&doc, true, &state))
             .perform(&operator)
             .await?;
         assert!(
@@ -1827,7 +1840,7 @@ mod tests {
         own.assert(primary_flag(&"doc:3".parse()?, true))?;
         let (state_at, own_at) = (chain_text(&memory), settled_text(&own));
 
-        stack.transact(Changes::new()).perform(&operator).await?;
+        stack.assert(Changes::new()).perform(&operator).await?;
         assert_eq!(
             seen_primary()?,
             vec![entity_text(&moved)],
@@ -1851,7 +1864,7 @@ mod tests {
         // The next dispatch finds every layer where the last dispatch
         // recorded it (the memory layer as the rule's own writes left
         // it), so no revision is stimulus and the rule does not fire.
-        stack.transact(Changes::new()).perform(&operator).await?;
+        stack.assert(Changes::new()).perform(&operator).await?;
         assert_eq!(seen_primary()?, vec![entity_text(&moved)]);
         assert_eq!(seen(&state)?, vec![state_at]);
         assert_eq!(seen(&own_name)?, vec![own_at]);
@@ -1884,7 +1897,7 @@ mod tests {
         let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(flag(&doc, true, &state))
+            .assert(flag(&doc, true, &state))
             .perform(&operator)
             .await?;
         let sequence = branch.overlay().revision().sequence;
@@ -1892,7 +1905,7 @@ mod tests {
         assert_eq!(rows.len(), 3, "every memory layer is recorded");
         let primary = primary_revision_of(branch.overlay(), &stack)?;
 
-        stack.transact(Changes::new()).perform(&operator).await?;
+        stack.assert(Changes::new()).perform(&operator).await?;
         assert_eq!(
             branch.overlay().revision().sequence,
             sequence,
@@ -1904,7 +1917,7 @@ mod tests {
         let control = crate::control_layer();
         let before = revision_of(branch.overlay(), &control)?;
         stack
-            .transact(flag(&doc, false, &control))
+            .assert(flag(&doc, false, &control))
             .perform(&operator)
             .await?;
         assert_eq!(
@@ -1948,7 +1961,7 @@ mod tests {
         let own_name = crate::session_layer();
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(flag(&doc, true, &state))
+            .assert(flag(&doc, true, &state))
             .perform(&operator)
             .await?;
         let primary_before = primary_revision_of(&own, &stack)?;
@@ -1957,7 +1970,7 @@ mod tests {
         let sequence = own.revision().sequence;
 
         let published = stack
-            .transact(
+            .assert(
                 dialog_query::the!("doc/title")
                     .of(doc.clone())
                     .is("Moved".to_string()),
@@ -1967,7 +1980,7 @@ mod tests {
         let primary_after = primary_revision_of(&own, &stack)?;
         assert_eq!(
             primary_after,
-            vec![entity_text(&published)],
+            vec![entity_text(published.revision())],
             "the new revision"
         );
         assert_ne!(primary_after, primary_before, "the primary's row moved");
@@ -2013,7 +2026,7 @@ mod tests {
         assert_eq!(stack.selected(), Some(state.clone()));
 
         let before = branch.revision();
-        stack.transact(title("Notes")).perform(&operator).await?;
+        stack.assert(title("Notes")).perform(&operator).await?;
         branch.refresh(&operator).await?;
         assert_eq!(
             held(&memory, "doc/title", &doc)?,
@@ -2030,7 +2043,7 @@ mod tests {
 
         let other = layer("other");
         stack
-            .transact(LayerDeclaration::new(other.clone(), LayerType::Session))
+            .assert(LayerDeclaration::new(other.clone(), LayerType::Session))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2044,7 +2057,7 @@ mod tests {
 
         stack.select(None).perform(&operator).await?;
         assert_eq!(stack.selected(), None, "the selection is cleared");
-        stack.transact(title("Other")).perform(&operator).await?;
+        stack.assert(title("Other")).perform(&operator).await?;
         assert_eq!(
             committed::<String>(&branch, &operator, "doc/title", &doc).await?,
             vec!["String(\"Other\")".to_string()],
@@ -2144,7 +2157,7 @@ mod tests {
         let doc: Entity = "doc:1".parse()?;
         let before = branch.revision();
         let refused = stack
-            .transact(
+            .assert(
                 dialog_query::the!("doc/title")
                     .of(doc.clone())
                     .is("Notes".to_string()),
@@ -2235,7 +2248,7 @@ mod tests {
         assert!(initial.asserted.is_empty());
 
         stack
-            .transact(flag(&doc, true, &state))
+            .assert(flag(&doc, true, &state))
             .perform(&operator)
             .await?;
         let delta = subscription
@@ -2255,7 +2268,7 @@ mod tests {
         assert_eq!(subscription.recomputes(), 1);
 
         stack
-            .transact(
+            .assert(
                 dialog_query::the!("doc/title")
                     .of(doc.clone())
                     .is("Notes".to_string()),
@@ -2268,7 +2281,7 @@ mod tests {
         );
 
         stack
-            .transact(Changes::new())
+            .assert(Changes::new())
             .retract(flag(&doc, true, &state))
             .perform(&operator)
             .await?;
@@ -2294,7 +2307,7 @@ mod tests {
         let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(flag(&doc, true, &state))
+            .assert(flag(&doc, true, &state))
             .assert(primary_flag(&doc, false))
             .perform(&operator)
             .await?;
@@ -2462,7 +2475,7 @@ mod tests {
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
         stack
-            .transact(count(&counter, 1, &state))
+            .assert(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
         let mut subscription = stack.subscribe(count_query());
@@ -2527,7 +2540,7 @@ mod tests {
 
         let start = memory.revision().sequence;
         stack
-            .transact(count(&counter, 2, &state))
+            .assert(count(&counter, 2, &state))
             .perform(&operator)
             .await?;
         assert_eq!(
@@ -2570,7 +2583,7 @@ mod tests {
 
         // A row the layer holds before the dispatch, which no step follows.
         stack
-            .transact(count(&counter, 1, &own))
+            .assert(count(&counter, 1, &own))
             .perform(&operator)
             .await?;
         assert_eq!(
@@ -2579,7 +2592,7 @@ mod tests {
         );
         // The dispatch writes 2 above it; the steps follow to 4.
         stack
-            .transact(count(&counter, 2, &own))
+            .assert(count(&counter, 2, &own))
             .perform(&operator)
             .await?;
         assert_eq!(
@@ -2605,7 +2618,7 @@ mod tests {
         let counter: Entity = "ctr:1".parse()?;
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(count(&counter, 1, &state))
+            .assert(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
         let increment = || {
@@ -2644,7 +2657,7 @@ mod tests {
 
         let start = memory.revision().sequence;
         stack
-            .transact(
+            .assert(
                 dialog_query::the!("doc/title")
                     .of(doc.clone())
                     .is("Other".to_string()),
@@ -2817,7 +2830,7 @@ mod tests {
             .collect::<Result<_, _>>()?;
         let counter: Entity = "ctr:1".parse()?;
         stack
-            .transact(count(&counter, 1, &state))
+            .assert(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
         let mut subscription = stack.subscribe(selected_query());
@@ -2830,21 +2843,21 @@ mod tests {
                 let label = match rng.below(7) {
                     0 => {
                         stack
-                            .transact(flag(&doc, true, &state))
+                            .assert(flag(&doc, true, &state))
                             .perform(&operator)
                             .await?;
                         "select"
                     }
                     1 => {
                         stack
-                            .transact(flag(&doc, false, &state))
+                            .assert(flag(&doc, false, &state))
                             .perform(&operator)
                             .await?;
                         "deselect"
                     }
                     2 => {
                         stack
-                            .transact(Changes::new())
+                            .assert(Changes::new())
                             .retract(flag(&doc, true, &state))
                             .perform(&operator)
                             .await?;
@@ -2868,7 +2881,7 @@ mod tests {
                     }
                     4 => {
                         stack
-                            .transact(primary_flag(&doc, step % 2 == 0))
+                            .assert(primary_flag(&doc, step % 2 == 0))
                             .perform(&operator)
                             .await?;
                         "select in the primary"
@@ -3146,7 +3159,7 @@ mod tests {
         let before = branch.revision();
 
         stack
-            .transact(fetch("cmd:1", &node).at(mailbox.clone()))
+            .assert(fetch("cmd:1", &node).at(mailbox.clone()))
             .perform(&operator)
             .await?;
         stack
@@ -3213,7 +3226,7 @@ mod tests {
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
         stack
-            .transact(count(&counter, 1, &state))
+            .assert(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
         let channel = stack.channel(&mailbox)?;
@@ -3226,14 +3239,14 @@ mod tests {
             vec!["UnsignedInt(1)".to_string()],
             "nothing reads a send before a dispatch takes it"
         );
-        stack.transact(Changes::new()).perform(&operator).await?;
+        stack.assert(Changes::new()).perform(&operator).await?;
         assert!(!channel.is_waiting(), "taken");
         assert_eq!(
             held(&memory, "counter/count", &counter)?,
             vec!["UnsignedInt(2)".to_string()],
             "the rule read the send as a row of mail:box, once"
         );
-        stack.transact(Changes::new()).perform(&operator).await?;
+        stack.assert(Changes::new()).perform(&operator).await?;
         assert_eq!(
             held(&memory, "counter/count", &counter)?,
             vec!["UnsignedInt(2)".to_string()],
@@ -3243,7 +3256,7 @@ mod tests {
         assert_eq!(channel.sequence(), 0);
 
         stack
-            .transact(increment("cmd:2", &counter))
+            .assert(increment("cmd:2", &counter))
             .perform(&operator)
             .await?;
         assert_eq!(
@@ -3290,7 +3303,7 @@ mod tests {
         assert_eq!(own.revision().sequence, sequence + 1, "control: is held");
         let mut fetches = stack.arrivals(&control, fetch_query()).expect("control:");
         loopback.send(fetch("cmd:2", &"node:2".parse()?));
-        stack.transact(Changes::new()).perform(&operator).await?;
+        stack.assert(Changes::new()).perform(&operator).await?;
         assert_eq!(
             subjects(&fetches.poll(&operator).await?),
             vec!["cmd:2".to_string()],
@@ -3371,7 +3384,7 @@ mod tests {
         let node: Entity = "node:1".parse()?;
         let send = |index: usize| {
             stack
-                .transact(fetch(&format!("cmd:{index}"), &node).at(host.clone()))
+                .assert(fetch(&format!("cmd:{index}"), &node).at(host.clone()))
                 .perform(&operator)
         };
         send(0).await?;
@@ -3489,7 +3502,7 @@ mod tests {
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let counter: Entity = "ctr:1".parse()?;
         stack
-            .transact(count(&counter, 1, &state))
+            .assert(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
 
@@ -3504,7 +3517,7 @@ mod tests {
         );
 
         stack
-            .transact(increment("cmd:2", &counter))
+            .assert(increment("cmd:2", &counter))
             .perform(&operator)
             .await?;
         assert_eq!(
@@ -3525,7 +3538,7 @@ mod tests {
         );
 
         stack
-            .transact(increment("cmd:3", &counter).at(crate::control_layer()))
+            .assert(increment("cmd:3", &counter).at(crate::control_layer()))
             .perform(&operator)
             .await?;
         assert_eq!(
@@ -3711,7 +3724,7 @@ mod tests {
         let before = branch.revision();
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(flag(&doc, true, &control))
+            .assert(flag(&doc, true, &control))
             .perform(&operator)
             .await?;
 
@@ -3933,7 +3946,7 @@ mod tests {
 
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(note(&doc, "first", &notes))
+            .assert(note(&doc, "first", &notes))
             .perform(&operator)
             .await?;
         let first = stack.pointed(&notes).expect("the layer moved");
@@ -3956,7 +3969,7 @@ mod tests {
         assert!(held(branch.overlay(), "doc/note", &doc)?.is_empty());
 
         stack
-            .transact(note(&doc, "second", &notes))
+            .assert(note(&doc, "second", &notes))
             .perform(&operator)
             .await?;
         let second = stack.pointed(&notes).expect("the layer moved");
@@ -3996,7 +4009,7 @@ mod tests {
         let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(note(&doc, "kept", &notes))
+            .assert(note(&doc, "kept", &notes))
             .assert(note(&doc, "primary", &crate::memory_layer()))
             .perform(&operator)
             .await?;
@@ -4041,7 +4054,7 @@ mod tests {
         let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(note(&doc, "first", &notes))
+            .assert(note(&doc, "first", &notes))
             .perform(&operator)
             .await?;
         let first = stack.pointed(&notes).expect("the layer moved");
@@ -4063,11 +4076,11 @@ mod tests {
         assert_ne!(branch.revision().as_ref(), Some(&moved));
 
         let published = stack
-            .transact(note(&doc, "second", &notes))
+            .assert(note(&doc, "second", &notes))
             .perform(&operator)
             .await?;
         assert_eq!(
-            published.version().edition,
+            published.revision().version().edition,
             moved.version().edition.successor(),
             "the primary took one commit, after the other writer's"
         );
@@ -4107,7 +4120,7 @@ mod tests {
         let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(note(&doc, "kept", &notes))
+            .assert(note(&doc, "kept", &notes))
             .perform(&operator)
             .await?;
         let kept = stack.pointed(&notes).expect("the layer moved");
@@ -4168,7 +4181,7 @@ mod tests {
         let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(note(&doc, "kept", &notes))
+            .assert(note(&doc, "kept", &notes))
             .perform(&operator)
             .await?;
         let primary = branch.revision();
@@ -4176,7 +4189,7 @@ mod tests {
         let missing: Entity = "memory:missing".parse()?;
 
         let refused = stack
-            .transact(note(&doc, "lost", &notes))
+            .assert(note(&doc, "lost", &notes))
             .assert(note(&doc, "lost", &missing))
             .perform(&operator)
             .await;
@@ -4251,7 +4264,7 @@ mod tests {
         let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(note(&doc, "kept", &notes))
+            .assert(note(&doc, "kept", &notes))
             .perform(&operator)
             .await?;
         stack
@@ -4328,11 +4341,11 @@ mod tests {
         assert_eq!(b.layers(), a.layers(), "the declaration replicated");
 
         let shared: Entity = "doc:shared".parse()?;
-        a.transact(note(&"doc:a".parse()?, "from a", &notes))
+        a.assert(note(&"doc:a".parse()?, "from a", &notes))
             .assert(headline(&shared, "a", &notes))
             .perform(&operator)
             .await?;
-        b.transact(note(&"doc:b".parse()?, "from b", &notes))
+        b.assert(note(&"doc:b".parse()?, "from b", &notes))
             .assert(headline(&shared, "b", &notes))
             .perform(&operator)
             .await?;
@@ -4546,7 +4559,7 @@ mod tests {
 
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(note(&doc, "kept", &notes))
+            .assert(note(&doc, "kept", &notes))
             .perform(&operator)
             .await?;
         let delta = subscription
@@ -4623,7 +4636,7 @@ mod tests {
             .await?;
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(note(&doc, "kept", &notes))
+            .assert(note(&doc, "kept", &notes))
             .assert(note(&doc, "primary", &crate::memory_layer()))
             .perform(&operator)
             .await?;
@@ -4638,7 +4651,7 @@ mod tests {
             )
             .assert(&mut bulk);
         }
-        stack.transact(bulk).perform(&operator).await?;
+        stack.assert(bulk).perform(&operator).await?;
         stack
             .sync(crate::Download::MinimalRanges)
             .perform(&operator)
@@ -4926,7 +4939,7 @@ mod tests {
 
         stack
             .invoke(fetch("cmd:2", &node))
-            .dispatch(priority("cmd:2", 3))
+            .invoke(priority("cmd:2", 3))
             .perform(&operator)
             .await?;
         let mut second = text(rows.rows());
@@ -5022,7 +5035,7 @@ mod tests {
             .stack()
             .perform(&operator)
             .await?
-            .transact(note(&doc, "noted", &notes))
+            .assert(note(&doc, "noted", &notes))
             .perform(&operator)
             .await?;
         let reader = ReadOnly(operator.clone());

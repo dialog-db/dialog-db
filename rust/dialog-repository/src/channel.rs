@@ -47,7 +47,7 @@
 //!         .is("Hello".to_string()),
 //! );
 //! // The next dispatch reads the message as a row of `mail:box`.
-//! stack.transact(dialog_corpus::Changes::new()).perform(&env).await?;
+//! stack.assert(dialog_corpus::Changes::new()).perform(&env).await?;
 //! # Ok(())
 //! # }
 //! ```

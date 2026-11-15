@@ -49,7 +49,11 @@ pub use channel::Channel;
 
 /// A stack: the primary branch and the layers its schema declares.
 pub mod stack;
-pub use stack::invoke::{Invocation, MAX_RERUNS};
+pub use stack::effect::{
+    Command, Effect, EffectReport, Failure, Provider, answered_attr, failed_attr, invoked_attr,
+    progress_attr, provided_attr, unhandled_attr,
+};
+pub use stack::invoke::{Attempt, Invocation, InvocationReport, MAX_RERUNS};
 pub use stack::{
     Arrivals, Durable, Layer, OpenStack, OpenStackEnv, Stack, StackEnv, SyncEnv, SyncError,
     SyncStack,
