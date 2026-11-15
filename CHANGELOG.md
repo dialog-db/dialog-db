@@ -14,6 +14,66 @@ says how to cut a release.
 
 ## Unreleased
 
+### A stack shares one evaluation of a query among its readers, and delivers to them after a dispatch
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD).
+
+`Stack::subscribe(query)` now registers the stack's subscription to a
+query, or attaches to the one it holds, and returns a `Subscriber`: a
+second reader of the same query reads the same evaluation instead of
+running its own. A subscription is keyed by `QueryHash`, a new hash of
+the query's canonical encoding in `dialog-query`, and its type. A
+dispatch through the stack that published or wrote into a memory layer
+schedules a poll; `Stack::settle(&env)` polls every subscription once
+when one is scheduled, delivers each reader the `Delta` the poll made,
+and clears the mark, so the writes of one request cost one
+evaluation. `Effect::perform` settles after its answer dispatch. The
+evaluation is still dialog's demand-gated `Subscription`, unchanged.
+
+What this changes for you:
+
+- `Stack::subscribe` returns a `Subscriber<Q>`, not a `Subscription<Q>`,
+  and asks `Q: Serialize`. The unshared evaluation it returned is now
+  `Stack::subscription(query)`; `Branch::subscribe` is unchanged.
+- `Subscriber` has `poll()` (the deltas delivered since the last read,
+  without waiting), `next().await` (waits for a delivery), `hash()`,
+  `results()` (the whole current set), `evaluated()`, `recomputes()`,
+  `maintenances()` and `close()`. A reader's first delivery is the whole
+  result set as `asserted`; each later one is what a poll changed, and a
+  poll that changed nothing delivers nothing.
+- `Stack::settle`, `Stack::schedule_poll`, `Stack::poll_scheduled` and
+  `Stack::subscriptions_held` are new. A write the stack does not see,
+  into `Branch::overlay()` among them, is scheduled with
+  `schedule_poll`. A sync that moved the primary, `Stack::channel`
+  creating a channel and `Stack::provide` schedule one too; a write into
+  a channel does not.
+- A subscription lives as long as a reader of it: the stack holds it
+  weakly, and it goes when its last `Subscriber` is dropped or closed.
+- `Effect::perform` settles the stack, with or without commands to
+  perform. A failed poll does not fail the effect: it is reported by
+  `EffectReport::unsettled()` and stays scheduled.
+- `dialog_query::QueryHash` is new: `QueryHash::of(&query)` hashes the
+  query's DAG-CBOR encoding with its fresh variables (`__<n>`) named
+  again by where they first occur, so two queries built alike hash
+  alike.
+- `dialog-stack` re-exports `Subscriber`, `Subscription`, `Delta` and
+  `QueryHash`, and `dialog-repository` re-exports `QueryHash`.
+
+Why: tonk kept this registry, the fan-out and the poll scheduling in a
+reactive layer of its own over dialog, keyed by a query hash it
+computed itself. They are generic: one evaluation per query, delivery
+to every reader, and polls scheduled by writes and drained once per
+turn belong beside the stack's channels, so an embedder keeps only its
+transport.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: subscriptions and their deliveries
+  live in memory, and the stack writes no fact for them.
+- A caller of `Stack::subscribe` that polled the returned
+  `Subscription` itself calls `Stack::subscription` instead, or moves
+  to the `Subscriber` and `Stack::settle`.
+
 ### The stack has a crate of its own, `dialog-stack`, which re-exports it from `dialog-repository`
 
 [#818](https://github.com/dialog-db/dialog-db/pull/818), argued in

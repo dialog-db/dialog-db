@@ -51,8 +51,8 @@ use std::sync::{Arc, LazyLock};
 
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_corpus::{Change, Changes, Entity, Fact, Pick, Relation, Update as _, Value};
-use dialog_query::ConceptDescriptor;
 use dialog_query::attribute::The;
+use dialog_query::{ConceptDescriptor, EvaluationError};
 
 use super::invoke::{Invocation, InvocationReport};
 use crate::placement::session_layer;
@@ -344,6 +344,10 @@ impl Stack {
         );
         self.own().apply(row)?;
         providers.push(provider);
+        drop(providers);
+        // The provider's row is a row of `session:`, which a
+        // subscription may read.
+        self.schedule_poll();
         Ok(self)
     }
 }
@@ -395,9 +399,13 @@ impl Effect {
     /// `dialog.command/failed` with the reason of a provider that
     /// failed, or `dialog.command/unhandled` for a command no provider
     /// claims. The answer dispatch is re-run from a moved head as any
-    /// invocation is; the providers are not. Returns the
-    /// [`EffectReport`]. An effect with no commands runs no dispatch and
-    /// reports nothing remaining.
+    /// invocation is; the providers are not. Then it settles the stack
+    /// ([`Stack::settle`]), delivering to every reader of a subscription
+    /// what the polls scheduled since the last `settle` moved; a failed
+    /// poll is reported by [`EffectReport::unsettled`], not as an error
+    /// of the effect. Returns the [`EffectReport`]. An effect with no
+    /// commands runs no dispatch, reports nothing remaining, and
+    /// settles all the same.
     pub async fn perform<Env: StackEnv>(self, env: &Env) -> Result<EffectReport, CommitError> {
         let Effect {
             stack,
@@ -405,11 +413,13 @@ impl Effect {
             commands,
         } = self;
         if commands.is_empty() {
+            let unsettled = Box::pin(stack.settle(env)).await.err();
             return Ok(EffectReport {
                 invocation: InvocationReport::unmoved(stack, revision),
                 answered: Vec::new(),
                 failed: Vec::new(),
                 unhandled: Vec::new(),
+                unsettled,
             });
         }
         let providers = stack.providers().read().clone();
@@ -457,11 +467,16 @@ impl Effect {
             }
         }
         let invocation = Box::pin(stack.assert(answers).invoke(lifecycle).perform(env)).await?;
+        // The polls the dispatches before this one and the answer
+        // dispatch scheduled run once, here, so an embedder that drives
+        // effects is delivered to without settling itself.
+        let unsettled = Box::pin(stack.settle(env)).await.err();
         Ok(EffectReport {
             invocation,
             answered,
             failed,
             unhandled,
+            unsettled,
         })
     }
 }
@@ -484,6 +499,7 @@ pub struct EffectReport {
     answered: Vec<Entity>,
     failed: Vec<(Entity, String)>,
     unhandled: Vec<Entity>,
+    unsettled: Option<EvaluationError>,
 }
 
 impl EffectReport {
@@ -507,6 +523,14 @@ impl EffectReport {
     /// The commands no provider claims.
     pub fn unhandled(&self) -> &[Entity] {
         &self.unhandled
+    }
+
+    /// Why the [`Stack::settle`] the effect ran after its answer
+    /// dispatch failed, if it did: a subscription's poll failed. The
+    /// answer dispatch has published all the same, and the poll stays
+    /// scheduled for the next `settle`.
+    pub fn unsettled(&self) -> Option<&EvaluationError> {
+        self.unsettled.as_ref()
     }
 
     /// Whether the answer dispatch landed commands of its own on

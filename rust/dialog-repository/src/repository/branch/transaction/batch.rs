@@ -62,6 +62,7 @@ use std::iter::once;
 use std::mem::take;
 use std::slice::from_ref;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// A staged chain of commits on a branch: minted, persisted, invisible.
 ///
@@ -437,8 +438,12 @@ impl BatchPublish {
             advance_watermark(&induction, &tip, Some(tip.version()), env).await?;
             settle(&tip);
             retract_from_overlay(&overlay, overlay_retractions)?;
+            let wrote = writes(&shares);
             apply_shares(&memories, shares)?;
             land(channels)?;
+            if let Some(recording) = &revisions {
+                recording.schedule(false, wrote);
+            }
             return Ok(tip);
         }
 
@@ -453,7 +458,11 @@ impl BatchPublish {
         // The memory layers take their shares only now that the primary's
         // commit is published: a refused publish shows in no layer. Each
         // tick lands as its own instant, in the order the ticks ran.
+        let wrote = writes(&shares);
         apply_shares(&memories, shares)?;
+        if let Some(recording) = &revisions {
+            recording.schedule(true, wrote);
+        }
 
         // Only now that the head has actually advanced do the staged
         // records and context enter the branch's shared memos: they are
@@ -996,6 +1005,8 @@ pub(crate) struct Recording {
     branch: Entity,
     own: Ephemeral,
     observed: Observed,
+    /// The stack's mark that a poll of its subscriptions is scheduled.
+    scheduled: Arc<AtomicBool>,
 }
 
 impl Recording {
@@ -1004,8 +1015,26 @@ impl Recording {
             branch: stack.branch.clone(),
             own: stack.own.clone(),
             observed: stack.observed.clone(),
+            scheduled: stack.scheduled.clone(),
         }
     }
+
+    /// Schedule a poll of the stack's subscriptions, when the publish
+    /// moved the primary or wrote into a memory layer: what a
+    /// subscription reads. A write into a channel alone does not.
+    fn schedule(&self, published: bool, wrote: bool) {
+        if published || wrote {
+            self.scheduled.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Whether `shares` write anything into a memory layer.
+fn writes(shares: &[Vec<(Entity, Changes)>]) -> bool {
+    shares
+        .iter()
+        .flatten()
+        .any(|(_, changes)| !changes.is_empty())
 }
 
 /// Record in the stack's own layer the revision of every layer of the

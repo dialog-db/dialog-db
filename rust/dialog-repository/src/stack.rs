@@ -69,6 +69,13 @@
 //! [`Stack::channel`] creates, named by any entity outside [`MEMORY`]
 //! and [`SESSION`].
 //!
+//! A **subscription** ([`Stack::subscribe`]) is one evaluation of a
+//! query over the stack, shared by every reader of it ([`Subscriber`]).
+//! A dispatch that published or wrote into a memory layer schedules a
+//! poll, and [`Stack::settle`] runs the polls scheduled since the last
+//! one, once, and delivers what moved to each reader; an effect
+//! settles after its answer dispatch (see [`subscribe`](crate::stack::subscribe)).
+//!
 //! A layer declared with [`LayerType::Branch`], `memory:<name>`, is
 //! durable: a tree the primary points at, with no head of its own. The
 //! primary names it by two facts of the layer's entity, `memory:<name>
@@ -157,10 +164,12 @@ pub mod backup;
 pub(crate) mod durable;
 pub mod effect;
 pub mod invoke;
+pub mod subscribe;
 pub mod sync;
 
 pub use arrivals::Arrivals;
 pub use backup::{Backup, LayerBackup};
+pub use subscribe::{QueryHash, Subscriber};
 pub use sync::{SyncEnv, SyncError, SyncStack};
 
 use std::iter::once;
@@ -191,6 +200,7 @@ use crate::schema::Replica;
 use crate::{Branch, Channel, CommitError, Ephemeral, QueryLayer, RemoteSite, Transaction};
 pub use durable::Durable;
 use durable::Durables;
+use subscribe::Subscriptions;
 
 /// What opening a stack and reading through it need of the
 /// environment: a read of the primary, to resolve the layers its schema
@@ -390,6 +400,7 @@ impl OpenStack {
                 control,
                 channels: RwLock::new(channels),
                 providers: RwLock::new(Vec::new()),
+                subscriptions: Subscriptions::default(),
             }),
         })
     }
@@ -426,6 +437,9 @@ struct Inner {
     channels: RwLock<Vec<Channel>>,
     /// The providers [`Stack::provide`] registered, in the order it did.
     providers: RwLock<Vec<effect::Provider>>,
+    /// The subscriptions [`Stack::subscribe`] registered, held while a
+    /// reader reads them, and whether a poll of them is scheduled.
+    subscriptions: Subscriptions,
 }
 
 /// The primary branch and the layers its schema declares, read and
@@ -555,6 +569,10 @@ impl Stack {
         self.inner.own.apply(changes)?;
         let channel = Channel::new(name.clone());
         channels.push(channel.clone());
+        drop(channels);
+        // The layer fact is a row of `session:`, which a subscription
+        // may read.
+        self.schedule_poll();
         Ok(channel)
     }
 
@@ -617,6 +635,11 @@ impl Stack {
     /// The providers [`provide`](Self::provide) registered.
     pub(crate) fn providers(&self) -> &RwLock<Vec<effect::Provider>> {
         &self.inner.providers
+    }
+
+    /// The stack's subscriptions (see [`subscribe`](crate::stack::subscribe)).
+    pub(crate) fn subscriptions(&self) -> &Subscriptions {
+        &self.inner.subscriptions
     }
 
     /// The stack's durable layers and where the primary points them.
@@ -817,6 +840,7 @@ impl Stack {
             state: self.inner.durables.clone(),
             channels,
             received,
+            scheduled: self.inner.subscriptions.scheduled(),
         })
     }
 }
@@ -852,7 +876,7 @@ mod tests {
     use std::sync::atomic::AtomicU32;
     use std::sync::atomic::Ordering::SeqCst;
 
-    type Operator = Peer<VolatileSpace, dialog_peer::Session>;
+    pub(crate) type Operator = Peer<VolatileSpace, dialog_peer::Session>;
 
     /// The layers every stack has, [`MEMORY`](crate::MEMORY),
     /// [`SESSION`](crate::SESSION) and [`CONTROL`](crate::CONTROL), in
@@ -973,7 +997,7 @@ mod tests {
     /// Declare a memory layer `state`, and a counter rule whose head
     /// `counter/count`, under `last`, lands there (`in:`) and whose
     /// premise reads the count from there.
-    async fn declare_state(branch: &Branch, env: &Operator) -> Result<Entity> {
+    pub(crate) async fn declare_state(branch: &Branch, env: &Operator) -> Result<Entity> {
         let state = layer("state");
         let increment: InductiveRule = serde_json::from_value(serde_json::json!({
             "assert!": {
@@ -2284,7 +2308,7 @@ mod tests {
     }
 
     /// The selected flags, as `(entity, value)` strings, sorted.
-    fn selected(claims: &[dialog_query::Claim]) -> Vec<String> {
+    pub(crate) fn selected(claims: &[dialog_query::Claim]) -> Vec<String> {
         let mut rows: Vec<String> = claims
             .iter()
             .map(|claim| format!("{} {:?}", claim.of, claim.is))
@@ -2294,7 +2318,7 @@ mod tests {
     }
 
     /// `ui/selected` of every entity, with the value a variable.
-    fn selected_query() -> AttributeQuery {
+    pub(crate) fn selected_query() -> AttributeQuery {
         AttributeQuery::from(
             Term::<QueryRelation>::from(QueryRelation::from(
                 "ui/selected".parse::<dialog_corpus::Relation>().unwrap(),
@@ -2312,7 +2336,7 @@ mod tests {
     }
 
     /// `ui/selected` of `doc` as `value`, written into `at`.
-    fn flag(doc: &Entity, value: bool, at: &Entity) -> impl Statement {
+    pub(crate) fn flag(doc: &Entity, value: bool, at: &Entity) -> impl Statement {
         dialog_query::the!("ui/selected")
             .of(doc.clone())
             .is(value)
@@ -2321,7 +2345,7 @@ mod tests {
 
     /// `ui/selected` of `doc` as `value`, written with no layer named:
     /// into the primary.
-    fn primary_flag(doc: &Entity, value: bool) -> impl Statement {
+    pub(crate) fn primary_flag(doc: &Entity, value: bool) -> impl Statement {
         dialog_query::the!("ui/selected").of(doc.clone()).is(value)
     }
 
@@ -2337,7 +2361,7 @@ mod tests {
         let state = declare_state(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
-        let mut subscription = stack.subscribe(selected_query());
+        let mut subscription = stack.subscription(selected_query());
         let initial = subscription.poll(&operator).await?.expect("initial");
         assert!(initial.asserted.is_empty());
 
@@ -2572,7 +2596,7 @@ mod tests {
             .assert(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
-        let mut subscription = stack.subscribe(count_query());
+        let mut subscription = stack.subscription(count_query());
         subscription.poll(&operator).await?;
 
         let start = memory.revision().sequence;
@@ -2843,7 +2867,7 @@ mod tests {
         declare_spread(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
-        let mut subscription = stack.subscribe(selected_query());
+        let mut subscription = stack.subscription(selected_query());
         subscription.poll(&operator).await?;
 
         let start = memory.revision().sequence;
@@ -2928,7 +2952,7 @@ mod tests {
             .assert(count(&counter, 1, &state))
             .perform(&operator)
             .await?;
-        let mut subscription = stack.subscribe(selected_query());
+        let mut subscription = stack.subscription(selected_query());
         subscription.poll(&operator).await?;
 
         for seed in [7u64, 99, 2024] {
@@ -3015,7 +3039,7 @@ mod tests {
     /// Declare a memory layer `state`, and a rule capturing a
     /// `cmd.fetched/node` answer there (`in:`): the node records every
     /// command that fetched it.
-    async fn declare_fetch(branch: &Branch, env: &Operator) -> Result<Entity> {
+    pub(crate) async fn declare_fetch(branch: &Branch, env: &Operator) -> Result<Entity> {
         let state = layer("state");
         let capture: InductiveRule = serde_json::from_value(serde_json::json!({
             "assert!": {
@@ -3050,7 +3074,7 @@ mod tests {
         Ok(state)
     }
 
-    fn fetch(command: &str, node: &Entity) -> impl Statement {
+    pub(crate) fn fetch(command: &str, node: &Entity) -> impl Statement {
         dialog_query::the!("cmd.fetch/node")
             .of(command.parse::<Entity>().expect("entity"))
             .is(node.clone())
@@ -3109,7 +3133,7 @@ mod tests {
             "nothing dispatched yet"
         );
         let node: Entity = "node:1".parse()?;
-        let mut subscription = stack.subscribe(AttributeQuery::from(
+        let mut subscription = stack.subscription(AttributeQuery::from(
             Term::<QueryRelation>::from(QueryRelation::from(
                 "node/fetched".parse::<dialog_corpus::Relation>()?,
             ))
@@ -4638,7 +4662,7 @@ mod tests {
         let notes = declare_notes(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
         let every = || note_query().with_layer(Term::var("where"));
-        let mut subscription = stack.subscribe(every());
+        let mut subscription = stack.subscription(every());
         let initial = subscription.poll(&operator).await?.expect("initial");
         assert!(initial.asserted.is_empty());
 
@@ -5437,7 +5461,7 @@ mod tests {
     }
 
     /// A concept of one attribute, `the`, named `field`.
-    fn concept_of(field: &str, the: QueryRelation) -> dialog_query::ConceptDescriptor {
+    pub(crate) fn concept_of(field: &str, the: QueryRelation) -> dialog_query::ConceptDescriptor {
         dialog_query::ConceptDescriptor::try_from([(
             field,
             dialog_query::AttributeDescriptor::new(the, "", Cardinality::One, None),
@@ -5446,7 +5470,7 @@ mod tests {
     }
 
     /// The concept of a fetch command, `cmd.fetch/node`.
-    fn fetch_concept() -> dialog_query::ConceptDescriptor {
+    pub(crate) fn fetch_concept() -> dialog_query::ConceptDescriptor {
         concept_of("node", dialog_query::the!("cmd.fetch/node"))
     }
 
@@ -5456,7 +5480,7 @@ mod tests {
     }
 
     /// The node a command's rows name, the value of its first row.
-    fn node_of(command: &crate::Command) -> Result<Entity, crate::Failure> {
+    pub(crate) fn node_of(command: &crate::Command) -> Result<Entity, crate::Failure> {
         match command.rows().first().map(|row| &row.is) {
             Some(dialog_corpus::Value::Entity(node)) => Ok(node.clone()),
             other => Err(crate::Failure::new(format!("no node: {other:?}"))),

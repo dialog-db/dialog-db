@@ -42,6 +42,7 @@ use dialog_effects::memory::{self, Edition, Publish, Resolve};
 use dialog_search_tree::nodes;
 use std::slice::from_ref;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// A transaction on a line of the repository.
 ///
@@ -133,6 +134,10 @@ pub(crate) struct StackContext {
     /// sent, each named for its channel: stimulus of the first tick, read
     /// as rows of the channel, landing nowhere.
     pub(crate) received: Changes,
+    /// The stack's mark that a poll of its subscriptions is scheduled:
+    /// set by a publish that moved the primary or wrote into a memory
+    /// layer.
+    pub(crate) scheduled: Arc<AtomicBool>,
 }
 
 /// What a [`Transaction`] runs on: a `&`[`Branch`], a `&`[`Snapshot`]

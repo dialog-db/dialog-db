@@ -488,6 +488,71 @@ A consumer that performs one concept reads through a query instead,
 with [`Stack::arrivals`]: `Arrivals::poll` reads what has arrived, and
 `Arrivals::next` waits for the next dispatch to publish.
 
+## Subscriptions
+
+[`Stack::subscribe`] registers the stack's subscription to a query, or
+attaches to the one it holds, and returns a [`Subscriber`]: every
+reader of one query reads one evaluation, keyed by the query's
+[`QueryHash`] and its type. The evaluation is
+dialog's demand-gated [`Subscription`], the one [`Stack::subscription`]
+hands out unshared.
+
+A dispatch through the stack that published, or that wrote into a
+memory layer (`session:`, a session layer), schedules a poll; a write
+into a channel does not. A write the stack does not see, into the
+primary's session overlay among them, is scheduled with
+[`Stack::schedule_poll`]. [`Stack::settle`] polls every subscription of
+the stack once when a poll is scheduled, delivers what moved to each
+reader, and clears the mark, so a commit and a write into a memory
+layer in one request cost one evaluation, and a second `settle` does
+nothing. [`Effect::perform`] settles after its answer dispatch: an
+embedder that drives effects need not call `settle` itself.
+
+A reader's first delivery is the whole result set, as `asserted`, and
+each later one is the [`Delta`] a poll made; [`Subscriber::results`]
+reads the whole current set. The stack holds its subscriptions weakly:
+one goes when its last reader is dropped or closed.
+
+```rust,no_run
+# use dialog_corpus::Entity;
+# use dialog_query::attribute::Relation;
+# use dialog_query::{AttributeQuery, Term};
+# use dialog_stack::{Stack, StackEnv};
+# async fn example(stack: Stack, env: impl StackEnv) -> anyhow::Result<()> {
+/// `ui/selected` of every entity.
+fn selected() -> AttributeQuery {
+    AttributeQuery::from(
+        Term::<Relation>::from(Relation::from(
+            "ui/selected".parse::<dialog_corpus::Relation>().expect("an attribute"),
+        ))
+        .of(Term::<Entity>::var("doc"))
+        .is(Term::<bool>::var("on")),
+    )
+}
+
+// Two readers of one query share one subscription.
+let mut tab = stack.subscribe(selected());
+let mut panel = stack.subscribe(selected());
+assert_eq!(tab.hash(), panel.hash());
+
+// A dispatch schedules a poll; one settle evaluates once and delivers to both.
+stack
+    .assert(dialog_query::the!("ui/selected").of("doc:1".parse::<Entity>()?).is(true))
+    .perform(&env)
+    .await?;
+stack.settle(&env).await?;
+for delta in tab.poll() {
+    println!("+{:?} -{:?}", delta.asserted, delta.retracted);
+}
+let everything = panel.results();
+
+// A reader that waits is woken by the next settle that delivers.
+let next = tab.next().await;
+# let _ = (everything, next);
+# Ok(())
+# }
+```
+
 ## Durable layers
 
 A layer declared with [`LayerType::Branch`], named `memory:<name>`, is
