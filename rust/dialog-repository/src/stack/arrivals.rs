@@ -5,7 +5,7 @@
 //! A provider subscribes to the command concept it performs, in the
 //! layer the commands land in: the loopback, [`control:`](crate::CONTROL),
 //! where every published dispatch's commands stand for one tick, or a
-//! channel, `control:<name>` ([`Store::Control`](crate::Store::Control)),
+//! channel, `control:<name>` ([`LayerType::Channel`](crate::LayerType::Channel)),
 //! where they stay until the consumer retracts them. Either way the
 //! provider wants the commands, not a view: a row's retraction, the
 //! one-tick expiry of `control:` or the consumer's own on a channel, is

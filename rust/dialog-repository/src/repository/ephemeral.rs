@@ -717,7 +717,7 @@ impl Ephemeral {
     /// something about the line rather than changing it: the revision
     /// moves, as for any instant, and the instant is read as any other
     /// is, but [`settled`](Self::settled) stays where it was. What a
-    /// session writes when it records its layers' revisions in its own
+    /// stack writes when it records its layers' revisions in its own
     /// layer, so the recording is not itself a move of that layer.
     pub(crate) fn record(&self, changes: Changes) -> Result<Option<Instant>, DialogCorpusError> {
         if changes.has_assets() {

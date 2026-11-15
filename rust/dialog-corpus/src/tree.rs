@@ -1535,7 +1535,10 @@ where
         // content-addressed, so a forged rule fact fails the hydration
         // check upstream and is inert, and a marker or a declaration only
         // ever selects a behaviour for facts the writer could have written
-        // anyway.
+        // anyway. So is one attribute, `dialog.branch/revision`: the
+        // pointer a primary holds to the revision a branch layer of its
+        // schema stands at, which names a tree the writer could have
+        // committed on that branch anyway.
         if scope == WriteScope::Application {
             let (Instruction::Assert(fact, _) | Instruction::Retract(fact)) = &instruction;
             let the = fact.the.as_str();
@@ -1543,6 +1546,7 @@ where
                 && !the.starts_with("dialog.rule/")
                 && !the.starts_with("dialog.concept/")
                 && !the.starts_with("dialog.layer/")
+                && the != "dialog.branch/revision"
             {
                 return Err(DialogCorpusError::ReservedRelation(fact.the.to_string()));
             }

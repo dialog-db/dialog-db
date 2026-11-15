@@ -8,9 +8,11 @@ use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::Publish;
 use thiserror::Error;
 
-use crate::placement::{Pointer, pointers, tree_revision};
+use crate::placement::{Pointer, pointers, revision_entity};
 use crate::repository::branch::resolve::resolve;
 use crate::repository::source::Source;
+use dialog_corpus::Entity;
+
 use crate::{
     Branch, CommitError, Download, PullEnv, PullError, PushError, RemoteSite,
     ResolveUpstreamsError, Stack, StackEnv,
@@ -83,15 +85,18 @@ impl Stack {
     /// that pulls a pointer finds the layer revision it names upstream.
     ///
     /// After the pulls, and again after the pushes, the stack records
-    /// the `dialog.layer/revision` row of every layer that stands
-    /// somewhere other than its row says, as a dispatch does once it
-    /// publishes, and only those: the dispatch that writes the pointer
-    /// facts records them, and with no pointer to write but a layer the
-    /// pulls moved, an empty dispatch does. Each such dispatch takes the
-    /// moved rows as its stimulus, so a rule premised on the revision of
-    /// `memory:` fires when a pull moved the primary, as it fires when a
-    /// commit did. A sync after which no layer stands anywhere new
-    /// dispatches nothing and writes nothing into `session:`.
+    /// in `session:` the revision row of every layer that stands
+    /// somewhere other than its row says (the primary's
+    /// `dialog.branch/revision`, a memory layer's `dialog.layer/revision`),
+    /// as a dispatch does once it publishes, and only those: the
+    /// dispatch that writes the pointer facts records them, and with no
+    /// pointer to write but a layer the pulls moved, an empty dispatch
+    /// does. Each such dispatch takes the moved rows as its stimulus, so
+    /// a rule premised on the primary's `dialog.branch/revision` fires
+    /// when a pull moved the primary, as it fires when a commit did, and
+    /// one premised on a durable layer's pointer fact fires when the
+    /// dispatch writes it. A sync after which no layer stands anywhere
+    /// new dispatches nothing and writes nothing into `session:`.
     pub fn sync(&self, download: Download) -> SyncStack<'_> {
         SyncStack {
             stack: self,
@@ -118,20 +123,25 @@ impl SyncStack<'_> {
                 Box::pin(branch.pull(self.download.clone()).perform(env)).await?;
             }
         }
-        let pointed = pointers(&Source::from(primary.clone()), env).await?;
+        let entities: Vec<&Entity> = stack
+            .durables()
+            .iter()
+            .filter_map(|(layer, _)| stack.branch_of(layer))
+            .collect();
+        let pointed = pointers(&Source::from(primary.clone()), entities, env).await?;
         let mut moved = dialog_corpus::Changes::new();
         for (layer, branch) in stack.durables() {
-            let Some(revision) = branch.revision() else {
+            let (Some(revision), Some(entity)) = (branch.revision(), stack.branch_of(layer)) else {
                 continue;
             };
-            let revision = tree_revision(&revision);
+            let revision = revision_entity(&revision);
             let recorded = pointed
                 .iter()
-                .any(|(pointed, at)| pointed == layer && *at == revision);
+                .any(|(pointed, at)| pointed == entity && *at == revision);
             if !recorded {
                 dialog_corpus::Statement::assert(
                     Pointer {
-                        layer: layer.clone(),
+                        branch: entity.clone(),
                         revision,
                     },
                     &mut moved,

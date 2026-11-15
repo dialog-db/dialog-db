@@ -39,8 +39,8 @@ pub use repository::*;
 /// Attribute placement: which layer an attribute's facts live in.
 pub mod placement;
 pub use placement::{
-    CONTROL, LayerDeclaration, MEMORY, SESSION, Store, control_layer, memory_layer, revision_attr,
-    selection_attr, session_layer,
+    CONTROL, LayerDeclaration, LayerType, MEMORY, SESSION, control_layer, layer_branch_attr,
+    layer_type_attr, memory_layer, revision_attr, selection_attr, session_layer,
 };
 
 /// A stack: the primary branch and the layers its schema declares.

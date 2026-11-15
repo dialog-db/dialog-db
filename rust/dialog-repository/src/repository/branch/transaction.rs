@@ -103,6 +103,9 @@ pub struct Transaction<L: Line> {
 /// lands the transaction's commands in.
 #[derive(Clone)]
 pub(crate) struct StackContext {
+    /// The primary's branch entity, whose `dialog.branch/revision` row
+    /// the stack records in its own layer.
+    pub(crate) branch: Entity,
     pub(crate) composite: Composite,
     pub(crate) memories: Vec<(Entity, Ephemeral)>,
     pub(crate) durables: Vec<DurableLayer>,
@@ -112,30 +115,29 @@ pub(crate) struct StackContext {
 }
 
 /// A durable layer of a stack as one dispatch reads and writes it: the
-/// layer's name, its branch, and the head the dispatch pinned when it
+/// layer's name, its branch's entity (what its pointer fact in the
+/// primary is of), its branch, and the head the dispatch pinned when it
 /// began, which its reads see and its commit on the branch builds on and
 /// compares and swaps against.
 #[derive(Clone)]
 pub(crate) struct DurableLayer {
     pub(crate) layer: Entity,
+    pub(crate) entity: Entity,
     pub(crate) branch: Branch,
     pinned: Option<Edition<Revision>>,
 }
 
 impl DurableLayer {
-    /// The layer `layer`, the branch `branch`, pinned at its head now.
-    pub(crate) fn pin(layer: Entity, branch: Branch) -> Self {
+    /// The layer `layer`, the branch `branch`, whose entity is `entity`,
+    /// pinned at its head now.
+    pub(crate) fn pin(layer: Entity, entity: Entity, branch: Branch) -> Self {
         let pinned = (&branch).pin();
         Self {
             layer,
+            entity,
             branch,
             pinned,
         }
-    }
-
-    /// The revision the layer was pinned at.
-    pub(crate) fn revision(&self) -> Option<Revision> {
-        self.pinned.as_ref().map(|edition| edition.content.clone())
     }
 
     /// The layer's branch at the pinned head, as a line a read sees.

@@ -622,19 +622,23 @@ pub enum CommitError {
     Detached,
 
     /// A placement declaration carries a value that is not a layer, or a
-    /// layer declaration one that names no store.
+    /// layer declaration one a stack cannot build: a `dialog.layer/type`
+    /// that names no layer type, a branch layer not named
+    /// `memory:<branch>`, or one whose `dialog.layer/branch` is missing
+    /// or is not the branch the stack derives for it.
     #[error("Placement of {attribute} names no layer: {value}")]
     InvalidPlacement {
-        /// The attribute declared, or `dialog.layer/store of <layer>`.
+        /// The attribute declared, such as `dialog.layer/type of <layer>`
+        /// or `dialog.layer/branch of <layer>`.
         attribute: String,
         /// The value found.
         value: String,
     },
 
-    /// A write is placed on a layer the session does not hold: the
-    /// primary declares no such layer, or declares one the session could
+    /// A write is placed on a layer the stack does not hold: the
+    /// primary declares no such layer, or declares one the stack could
     /// not build.
-    #[error("Attribute {attribute} is placed on layer {layer}, which this session does not hold")]
+    #[error("Attribute {attribute} is placed on layer {layer}, which this stack does not hold")]
     UnboundLayer {
         /// The attribute written.
         attribute: String,
