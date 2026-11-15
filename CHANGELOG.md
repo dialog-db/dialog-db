@@ -94,6 +94,9 @@ What this changes for you:
 - `control:` is recorded like any memory layer, after the dispatch's
   commands land in it: a dispatch whose commands land there rewrites
   `control:`'s row, as one instant of `session:`.
+- `OpenStackEnv` also requires `Provider<Identify>`: the stack derives
+  the primary's branch entity from the operator's profile when it
+  opens. Every env that attests already provides it.
 - The corpus write gate admits `dialog.branch/revision` from an
   application write, as it admits `dialog.layer/*`: the pointer fact is
   written by the stack's dispatch.
@@ -142,9 +145,10 @@ stimulus.
 What this changes for you:
 
 - A dispatch that writes nothing into `session:` and moves no other
-  layer (an empty transaction, a command no rule answers) writes no
-  revision row and mints no instant in `session:`. One that moves the
-  primary alone rewrites the primary's row alone.
+  layer (an empty transaction) writes no revision row and mints no
+  instant in `session:`. One that moves the primary alone rewrites the
+  primary's row alone. A command landing in `control:` moves that
+  layer, so its row is rewritten (see the entry above).
 - A rule premised on the `dialog.layer/revision` of `session:` fires on
   a stack's first dispatch and when something wrote into `session:`
   outside a dispatch, no longer on every dispatch after the first.
