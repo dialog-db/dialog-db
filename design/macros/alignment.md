@@ -15,7 +15,7 @@ The notation is designed on #728: `research/notation/design.md`, read here at `4
 | a variable of the body | is in the head, so a concept runs both ways | checked, for lines as for reads | done |
 | `!` | no form carries one: `assert`, `retract` | the same since 2026-11-16; `assert!` and `retract!` are refused with the word to write | done |
 | a parameter left out of a read | matches anything | refused since 2026-11-13; open again on 2026-11-15, not built | this branch |
-| a computing fold | only in a getter: `(rule (open-count (list ?l) is: (count ?t)) …)` | nothing | this branch, over the engine's folds |
+| a getter | a rule whose conclusion wraps a concept and gives a value in `is:`: `(rule (open-count (list ?l) is: (count ?t)) …)`, read as `(open-count (list list:home) is: ?n)` | read and expanded since 2026-11-16, to a relation of its own, `getter.open-count.list`. One that folds nothing runs. One that folds is refused as unsupported | a decision: the engine refuses a fold in a rule that derives (below) |
 | a layer | `in:` on a line, a constant or a field | nothing | the layers work (#795 on) |
 | a view | proposed: a template in Hiccup over one concept, kept as data | nothing | after the above |
 
@@ -33,6 +33,28 @@ Each of these was decided in this branch's sittings (`journal.md`) and is in no 
 | a macro | a rule: `(expand …)`; of the rules that apply, the one that leaves least to `...` wins |
 | the reader | gives `...` no meaning; `'x` is `(quote x)` |
 | a comment | right above a form it describes the form |
+
+## Two things that cannot both be true
+
+The design's getter is a rule that derives a fold, installed, and read wherever a read stands. The engine has the fold (`reduce`, `notes/aggregation.md`) and refuses it in a rule that derives (`ReduceInOpenRule`, argued in `notes/attribute-heads.md`):
+
+> `reduce` does not: a fold has no reading over a set still growing, and unlike a choice it cannot be deferred to the component's exit without giving the rules inside a different relation than the readers outside. A fold belongs to the closed places, a query, a subscription, an inductive rule.
+
+```
+ a getter, as designed            (rule (open-count (list ?l) is: (count ?t)) …)      installed; any rule may read it
+ a fold, as the engine has it     refused in a rule that derives                      admitted in a query, a subscription, a rule that writes
+```
+
+Both are the maintainer's. Which gives is his. What each way would mean for the notation, as columns and not as a recommendation:
+
+| | a getter stays a rule | a getter is a name for its body |
+|---|---|---|
+| what `(rule (open-count …) …)` is | a rule that derives, which the engine has to admit with a fold, outside a cycle at least | not installed: where it is read, its premises and its fold stand in its place |
+| where it may be read | anywhere a read stands | where the engine admits a fold: a query, a view, a rule that writes |
+| read in a rule that derives | allowed, so a fold feeds a derivation | refused, with the engine's reason |
+| what the engine needs | a fold in a rule that derives, stratified as `unless` is | a fold a query or a subscription can state, which main does not expose as a way to ask yet |
+
+Not checked: whether a query on main can state a fold at all. `DeductiveRule::with_reduce` is the one constructor found, and it is the one refused.
 
 ## One thing that may be one thing
 

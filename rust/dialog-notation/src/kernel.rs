@@ -21,6 +21,10 @@ pub const TYPES: [&str; 8] = [
 /// The picks a term may be read under: `(:last ?x)`.
 pub const PICKS: [&str; 4] = ["last", "all", "max", "min"];
 
+/// The folds a term may be: `(count ?t)`. Each makes one value of the
+/// many a variable is bound to, a group at a time.
+pub const FOLDS: [&str; 6] = ["count", "count-distinct", "sum", "min", "max", "avg"];
+
 /// A term: what stands where a value does.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Term {
@@ -42,6 +46,15 @@ pub enum Term {
     /// A struct, `{key value}`, or a list, `[a b]` or `'(a b)`. With no
     /// variable in it, it is a value; with one, a pattern.
     Struct(Syntax),
+    /// A fold, `(count ?t)`: one value made of every value its part is
+    /// bound to. It stands in a field of a head that derives, and the
+    /// rows are grouped by the entity and the head's other fields.
+    Fold {
+        /// Which fold: one of [`FOLDS`].
+        apply: String,
+        /// What is folded.
+        of: Box<Term>,
+    },
 }
 
 /// One field of a read: an attribute, the term its value stands under,
@@ -179,6 +192,23 @@ fn term(node: &Syntax) -> Result<Term, Error> {
         // `'(1 2 3)`: quoted, a `( )` is the list of what it holds, the
         // same list `[1 2 3]` is.
         quoted if quoted.applies() == Some(QUOTE) => Term::Struct(node.clone()),
+        Syntax::Application(_, operand)
+            if node.applies().is_some_and(|word| FOLDS.contains(&word)) =>
+        {
+            let (apply, [of], true) = (
+                node.applies().unwrap_or_default(),
+                operand.items.as_slice(),
+                operand.terms.is_empty(),
+            ) else {
+                return Err(Error::Refused(format!(
+                    "{node} folds one thing: `(count ?t)`"
+                )));
+            };
+            Term::Fold {
+                apply: apply.to_string(),
+                of: Box::new(term(of)?),
+            }
+        }
         Syntax::Application(..) => {
             return Err(Error::Refused(format!(
                 "{node} is not a term: it applies no formula, and a list where a value stands \
@@ -375,8 +405,8 @@ impl Rule {
 
     /// Every variable the premises may bind.
     pub fn bound(&self) -> BTreeSet<String> {
-        fn term(term: &Term, names: &mut BTreeSet<String>) {
-            match term {
+        fn term(part: &Term, names: &mut BTreeSet<String>) {
+            match part {
                 Term::Variable(name) => {
                     names.insert(name.clone());
                 }
@@ -386,6 +416,7 @@ impl Rule {
                     form.variables(&mut inside);
                     names.extend(inside);
                 }
+                Term::Fold { of, .. } => term(of, names),
                 _ => {}
             }
         }
@@ -484,6 +515,40 @@ mod tests {
                 head(&format!("(rule ({word} (command.go.x ?c about: ?c)) (xyz.c ?c n: ?n))")),
                 Err(Error::Refused(why)) if why.contains("keeps a command")
             ));
+        }
+    }
+
+    /// A fold is a term: one value made of every value its part is
+    /// bound to.
+    #[test]
+    fn it_reads_a_fold_where_a_term_stands() {
+        let form = forms(
+            "(rule (getter.open-count.list ?l is: (count ?t))
+               (xyz.todo ?t list: ?l))",
+        )
+        .unwrap()
+        .remove(0);
+        let rule = Rule::parse(&form).unwrap();
+        let Head::Derive(head) = &rule.head else {
+            panic!("the head derives");
+        };
+        assert_eq!(
+            head.fields[0].term,
+            Term::Fold {
+                apply: "count".into(),
+                of: Box::new(Term::Variable("t".into()))
+            }
+        );
+        for unread in ["(count)", "(count ?t ?u)", "(count ?t by: ?l)"] {
+            let form = forms(&format!(
+                "(rule (getter.open-count.list ?l is: {unread}) (xyz.todo ?t list: ?l))"
+            ))
+            .unwrap()
+            .remove(0);
+            assert!(
+                matches!(Rule::parse(&form), Err(Error::Refused(why)) if why.contains("folds one thing")),
+                "{unread}"
+            );
         }
     }
 

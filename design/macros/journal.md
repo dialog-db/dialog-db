@@ -1192,6 +1192,21 @@ Not looked at: what a write under `:one` retires. It is what the engine does for
 
 **Decided.** Nothing new. `it_keeps_a_struct_and_takes_it_apart_by_a_pattern` pins that a rule holding a struct derives from the branch and that one writes through it.
 
+## 2026-11-16, Building: getters, and what stopped them
+
+**Asked.** What a getter compiles to.
+
+**Learned.**
+
+- The engine has the fold a getter needs, `reduce` on a rule that derives, with `count`, `sum`, `min`, `max`, `avg` (`notes/aggregation.md`).
+- And refuses it there. `DeductiveRule::with_reduce` returns `ReduceInOpenRule` for any rule with a fold in it. `notes/attribute-heads.md` argues it: a fold has no reading over a set still growing, and belongs to a query, a subscription or a rule that writes. The agent's row in the alignment table, "over the engine's folds", was written without looking.
+- So the design's getter and the engine's rule cannot both stand ([alignment.md](alignment.md#two-things-that-cannot-both-be-true)). Both are the maintainer's.
+- A pattern cannot require a labelled part: one the form leaves out leaves its variable unbound. So the getter's rule matched a command, `(increment (xyz.counter counter:a))`, with `is:` taken as left out, and the two were ambiguous. The rule now asks that `is:` be said, with a formula for that, `(:said ?value)`.
+
+**Decided.** Not decided: where a fold lives, which is his. By the agent, in the build: the surface is the design's, and the refusal is the engine's, said as unsupported. A getter is read and expanded to a relation of its own, `getter.<name>.<concept>`; one that folds nothing runs; one that folds is refused with where the engine admits a fold. `is:` written is what makes the words a getter.
+
+Built: `Term::Fold` and `FOLDS` in `kernel.rs`; the refusal in `compile.rs`; `(:getter …)` and `(:said …)` in `expand.rs`; the getter's rule in the prelude. 101 unit tests, 27 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

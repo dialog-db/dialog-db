@@ -39,7 +39,7 @@ use crate::kernel::QUOTE;
 use crate::kernel::{Head, Rule, TYPES};
 use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, REST, fill, matches};
-use crate::syntax::{self, COMMAND, Parameters, Signature, Syntax};
+use crate::syntax::{self, COMMAND, GETTER, Parameters, Signature, Syntax};
 use crate::written::{Path, Segment};
 
 /// The core forms, written in the kernel.
@@ -794,7 +794,8 @@ impl Expander {
     }
 
     /// Whether a premise of a rule about syntax holds, and what it binds.
-    /// Such a premise applies one of a few formulas over names, or
+    /// Such a premise applies one of a few formulas over names, asks
+    /// whether the form said a part, `(:said ?value)`, or
     /// reads what this walker knows: the names syntax is defined for,
     /// `(dialog.name _ is: ?name)`, and the domains installed rules
     /// read, `(dialog.rule _ on: ?domain)`.
@@ -815,9 +816,9 @@ impl Expander {
         };
         let subject = operand.items.first();
         match (operator.keyword(), &**operator) {
-            (Some("command"), _) => {
+            (Some(word @ (COMMAND | GETTER)), _) => {
                 let domain = format!(
-                    "{COMMAND}.{}.{}",
+                    "{word}.{}.{}",
                     name(subject?)?,
                     name(operand.terms.get("")?)?
                 );
@@ -838,6 +839,9 @@ impl Expander {
             (Some("domain"), _) => {
                 (Kind::of(&name(subject?)?) == Kind::Domain).then_some(bindings.clone())
             }
+            // The form said the part: a labelled part a form leaves out
+            // leaves the pattern's variable for it unbound.
+            (Some("said"), _) => value(subject?).map(|_| bindings.clone()),
             (Some("name"), _) => {
                 (Kind::of(&name(subject?)?) == Kind::Name).then_some(bindings.clone())
             }
@@ -1697,6 +1701,47 @@ mod tests {
             ),
             Err(Error::Refused(why)) if why.contains("is not a cardinality")
         ));
+    }
+
+    /// A getter is a name around a concept's entity and `is:` a value.
+    /// Concluded and read it is one relation, of the getter's own. Only
+    /// `is:` tells it from a command, so with `is:` left out the same
+    /// words are a command.
+    #[test]
+    fn it_reads_a_getter_as_a_relation_of_its_own() {
+        let lists = "(concept (list ?l name: ?n)
+                       (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))
+                     (concept (todo ?t list: ?l state: ?s)
+                       (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
+                       (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one))";
+        let concluded = expanded(
+            lists,
+            "(rule (open-count (list ?l) is: (count ?t))
+               (list ?l)
+               (todo ?t list: ?l state: :open))",
+        )
+        .unwrap();
+        assert_eq!(concluded.len(), 1);
+        assert!(
+            concluded[0].starts_with(
+                "(rule (getter.open-count.list ?l is: (count ?t)) (xyz.list ?l name: "
+            ),
+            "{concluded:?}"
+        );
+        assert_eq!(
+            expanded(lists, "(query (open-count (list list:home) is: ?n))").unwrap(),
+            vec![
+                "(rule (report (getter.open-count.list list:home is: ?n)) (getter.open-count.list list:home is: ?n))"
+            ]
+        );
+        // With no `is:` it is a command, issued where it is a head.
+        let issued = expanded(lists, "(open-count (list list:home))").unwrap();
+        assert!(
+            issued[0].starts_with(
+                "(rule (command.open-count.list (:id command.open-count.list about: list:home"
+            ),
+            "{issued:?}"
+        );
     }
 
     /// A write was `assert!` and `retract!` while a mark told what is

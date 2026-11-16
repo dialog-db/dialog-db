@@ -58,6 +58,10 @@ use crate::written::{Note, Path, Segment, Slot, Written};
 /// what `(add (todo …))` issues and what a premise reads of it.
 pub const COMMAND: &str = "command";
 
+/// The domain every getter's relation is under: `getter.open-count.list`
+/// is what `(open-count (list ?l) is: ?n)` derives and reads.
+pub const GETTER: &str = "getter";
+
 /// Whether a domain is a command's: one whose facts hold one round.
 pub fn is_command(domain: &str) -> bool {
     domain

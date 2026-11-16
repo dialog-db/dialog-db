@@ -9,6 +9,7 @@
 //! | `(assert A)`, `(retract A)` with no premise | a [`ConceptStatement`], asserted or retracted |
 //! | a bare head on a command's domain, with no premise | a [`ConceptStatement`], dispatched: it holds one round |
 //! | a bare head with premises | a [`DeductiveRule`] |
+//! | a bare head with premises, a field of it a fold, `(count ?t)` | nothing yet: Dialog-DB refuses a fold in a rule that derives |
 //! | `(assert A)`, `(retract A)` with premises | an [`InductiveRule`] |
 //! | a bare head on a command's domain, with premises | an [`InductiveRule`] over a concept marked to hold one round |
 //! | `(:id domain label: term …)` | the entity `entity/derive` makes of the domain, the labels and each value in turn |
@@ -481,7 +482,11 @@ fn constant(term: &Term, kind: Option<&str>) -> Result<Option<Json>, Error> {
             Some(entity) => json!({ "entity:": entity.to_string() }),
             None => return Ok(None),
         },
-        Term::Variable(_) | Term::Blank | Term::Formula(_) | Term::Struct(_) => return Ok(None),
+        Term::Variable(_)
+        | Term::Blank
+        | Term::Formula(_)
+        | Term::Struct(_)
+        | Term::Fold { .. } => return Ok(None),
     }))
 }
 
@@ -725,6 +730,9 @@ impl Scope {
                 self.when.push(lifted);
                 Ok(result)
             }
+            Term::Fold { apply, .. } => Err(Error::Refused(format!(
+                "({apply} …) is a fold, and stands only in a field of a head that derives: what it makes is never written, and is no value a premise can ask for"
+            ))),
             _ => Err(Error::Refused("not a term".into())),
         }
     }
@@ -977,6 +985,19 @@ fn deductive(written: Json, patterns: Vec<Proposition>) -> Result<DeductiveRule,
 }
 
 fn deduce(rule: &Rule, read: &Read) -> Result<Step, Error> {
+    // Dialog-DB has the fold and refuses it here (`ReduceInOpenRule`):
+    // a rule that derives is read by rules installed after it, and a
+    // fold has no reading over a relation still being derived.
+    if let Some(field) = read
+        .fields
+        .iter()
+        .find(|field| matches!(field.term, Term::Fold { .. }))
+    {
+        return Err(Error::Unsupported(format!(
+            "{} is a fold in a rule that derives: Dialog-DB admits a fold where nothing is still being derived, in a query, a subscription or a rule that writes, and refuses one in a rule that derives",
+            field.attribute
+        )));
+    }
     let (written, patterns) = concluding(rule, read, "deduce")?;
     deductive(written, patterns).map(|rule| Step::Deduce(Box::new(rule)))
 }
@@ -1015,7 +1036,11 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
             Some(Syntax::Constant(Value::Boolean(name == "true")))
         }
         Term::Symbol(name) => Some(Syntax::Reference(name.clone())),
-        Term::Variable(_) | Term::Blank | Term::Formula(_) | Term::Struct(_) => None,
+        Term::Variable(_)
+        | Term::Blank
+        | Term::Formula(_)
+        | Term::Struct(_)
+        | Term::Fold { .. } => None,
     };
 
     if let ([Premise::Read(only)], []) = (rule.when.as_slice(), rule.unless.as_slice()) {
@@ -1224,6 +1249,32 @@ mod tests {
             panic!("a transient concept and the rule that concludes it");
         };
         assert_eq!(*concept, rule.conclusion().this());
+    }
+
+    /// A fold is read, and nothing runs it yet. In a head that derives
+    /// it is what Dialog-DB has and refuses there, which is said as
+    /// unsupported. Anywhere else it is no term.
+    #[test]
+    fn it_says_a_fold_in_a_head_that_derives_is_not_supported() {
+        assert!(matches!(
+            steps(
+                "(rule (getter.open-count.list ?l is: (count ?t))
+                   (xyz.todo ?t list: ?l))"
+            ),
+            Err(Error::Unsupported(said)) if said.contains("getter.open-count.list/is is a fold")
+        ));
+        for written in [
+            "(rule (assert (xyz.list ?l open: (count ?t))) (xyz.todo ?t list: ?l))",
+            "(rule (xyz.busy ?l n: ?n) (xyz.todo ?t list: ?l) (xyz.cap ?l n: (count ?t)))",
+        ] {
+            assert!(
+                matches!(
+                    steps(written),
+                    Err(Error::Refused(said)) if said.contains("stands only in a field of a head that derives")
+                ),
+                "{written}"
+            );
+        }
     }
 
     #[test]
