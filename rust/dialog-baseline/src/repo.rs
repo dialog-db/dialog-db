@@ -10,6 +10,9 @@
 //! commit path. The branch handle is opened once and held across commits —
 //! the realistic application shape, which also keeps the branch-owned record
 //! and node caches warm the way a running app would.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 use dialog_corpus::tree::CorpusNode;
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Size as BlobSize;

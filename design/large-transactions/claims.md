@@ -9,7 +9,7 @@ one); the numbers and their method are in that branch's
 
 | claim | kind | backing | status |
 |---|---|---|---|
-| The MusicBrainz sample is 100,000 entities: 1.8 GiB of JSON, 4.47 M facts, 488 MiB as a fact log | fact | the fetch and conversion scripts in #733's `research/single-file-format/bench/` | holds |
+| The MusicBrainz sample is 100,000 entities: 1.8 GiB of JSON, 4.47 M facts, 488 MiB as a fact log | fact | the fetch and conversion scripts in `research/single-file-format/bench/` on the `research-data` branch | holds |
 | As 2,000 commits (about 2,234 facts each) the replay wrote 2,883,182 node versions, about 1,440 a commit, a 1,003 MiB file, in 6,562 to 7,808 s of commits | fact | `breakdown` and the bench's timers, 2026-11-08 | holds |
 | The tree such a replay leaves is 77,808 nodes in three levels: a root of 169 children, 169 index nodes of about 459, 77,638 leaves of about 224 entries; written whole with the tokens it names, about 250 MiB | fact | `breakdown::live` on the replay's file, 2026-11-08 | holds |
 | As 100 commits (about 44,700 facts each): 1,013,154 node versions, 2,616 to 2,791 s of commits, 530 MiB, the commits holding up to 4.9 GiB of heap | fact | the bench with `DIALOG_BENCH_GROUP=20`, two runs, 2026-11-08 | holds |
