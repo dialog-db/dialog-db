@@ -1092,6 +1092,9 @@ In the same conversation he settled how a pattern is written in a stored rule (`
 
 ## The queue
 
+**First, 2026-11-16: which composite is the record.** #812 (from #748, the thread "record values in dialog") adds another `Composite`: a set of attribute and value pairs, a field holding several values, kept as a value type of its own, with no list. #778's is a map with text keys or a list, kept as a record. The maintainer decided both, in two threads. Put to him; a note is on #812. Held until he answers: the `match` form on #799 and this branch's keys, since a key is text in one and a relation in the other. What it means here either way: a kept syntax tree needs its parts in order, and #812 has sets.
+
+
 In order. One is asked, answered and written down before the next.
 
 
