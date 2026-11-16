@@ -1,0 +1,62 @@
+[package]
+name = "dialog-chronicle"
+description = "A dialog archive kept in one append-only file"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+# Native-only: one file through positioned reads and writes. The library
+# compiles to nothing on wasm32 (see the crate-level cfg in src/lib.rs), and
+# every dependency is target-gated so the workspace's wasm dependency set is
+# unaffected.
+
+[features]
+# Traces what the archive does to its files (`trace` module), for replaying
+# the file format's pattern elsewhere; Unix only.
+trace = []
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+async-trait = { workspace = true }
+crc32fast = { workspace = true }
+dialog-corpus = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-search-tree = { workspace = true }
+dialog-storage = { workspace = true }
+hashbrown = { workspace = true }
+memmap2 = { workspace = true }
+papaya = { workspace = true }
+parking_lot = { workspace = true, features = ["arc_lock"] }
+arc-swap = { workspace = true }
+rkyv = { workspace = true }
+# Appends run on tokio's blocking threads when one runs the caller: an
+# append can wait for the writer's turn and sync the file.
+tokio = { workspace = true, features = ["rt"] }
+zerocopy = { workspace = true }
+
+# Locks on single bytes of the file (the writer's turn, extents' owners).
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+anyhow = { workspace = true }
+dialog-common = { workspace = true, features = ["helpers"] }
+dialog-peer = { workspace = true, features = ["helpers"] }
+dialog-repository = { workspace = true }
+futures-util = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[lints.rust]
+# This cfg is used by the dialog_common::test proc macro for wasm inner tests
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)", "cfg(feature, values(\"web-integration-tests\", \"integration-tests\", \"helpers\"))"] }
+
+[[example]]
+name = "trace_open"
+required-features = ["trace"]
