@@ -132,13 +132,14 @@ So the template is not a new kind of thing. It is a list, and the view macro kee
 - A getter's head, `(open-count (list ?l) is: …)`, has a command's shape, `(rename (todo ?t) title: …)`. #728 has it open too.
 - Whether `top` ranks by the `as:` list (#728) or the order is kept apart in `among` (#793).
 - How a line names a key of a collection, now that lines are by attribute.
-- A read of exactly these entries has no spelling.
+- A read of exactly these entries has no spelling. Met already: `terms: {}` over a kept form used to say "no labelled part" and now says any.
+- `assert` without `!` is taken in this build: it is the head of a rule whose conclusion holds while its conditions do. Step 2 has to give that another spelling or none, as the design does (a conclusion with no word is a deduction).
 - How a view's template binds events.
 
 ## Order of the build
 
 ```
- 1  this branch on the record as rebuilt (#778): text keys, a record read open
+ 1  this branch on the record as rebuilt (#778): text keys, a record read open     done, 2026-11-16
  2  assert and retract without !
  3  a concept as lines, with as: and cardinality:   (:one and :many on main's engine)
  4  getters

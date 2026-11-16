@@ -171,7 +171,10 @@ fn pattern_reference(pattern: &Pattern) -> Option<Reference> {
             let entries = map
                 .entries()
                 .iter()
-                .map(|(key, part)| Some((key.reference(), pattern_reference(part)?)))
+                .map(|(key, part)| {
+                    let key = Value::String(key.clone()).reference();
+                    Some((key, pattern_reference(part)?))
+                })
                 .collect::<Option<Vec<_>>>()?;
             let mut shape = vec![(text("map:"), Type::MAP.map(entries))];
             if let Some(rest) = map.rest() {

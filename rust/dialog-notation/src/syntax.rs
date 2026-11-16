@@ -364,12 +364,29 @@ impl Syntax {
                 "map",
                 [(
                     "entries",
-                    data::map(
-                        entries
+                    // A key is a node, and a map's key is text, so the
+                    // entries are pairs. They are kept in the order of
+                    // their keys and not as written, since a struct
+                    // says the same in any order, and a key twice is
+                    // refused here as it would be in a map.
+                    {
+                        let mut pairs = entries
                             .iter()
                             .map(|(key, value)| Ok((key.value()?, value.value()?)))
-                            .collect::<Result<Vec<_>, Error>>()?,
-                    )?,
+                            .collect::<Result<Vec<_>, Error>>()?;
+                        pairs.sort_by_key(|(key, _)| key.to_bytes());
+                        if let Some(pair) = pairs.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+                            let twice = Syntax::try_from(&pair[0].0)?;
+                            return Err(Error::Refused(format!(
+                                "{self} says the key {twice} twice"
+                            )));
+                        }
+                        data::list(
+                            pairs
+                                .into_iter()
+                                .map(|(key, value)| data::list([key, value])),
+                        )
+                    },
                 )],
             ),
             Syntax::Tuple(items) => node("tuple", [("items", list(items)?)]),
@@ -634,12 +651,7 @@ impl TryFrom<&Value> for Parameters {
             .flatten()
             .ok_or_else(|| unread("terms"))?
             .iter()
-            .map(|(label, term)| {
-                Ok((
-                    data::spelled(label).ok_or_else(|| unread("label"))?,
-                    Syntax::try_from(term)?,
-                ))
-            })
+            .map(|(label, term)| Ok((label.to_string(), Syntax::try_from(term)?)))
             .collect::<Result<_, Error>>()?;
         Ok(Parameters {
             items: nodes(&node, "items")?,
@@ -673,10 +685,15 @@ impl TryFrom<&Value> for Syntax {
                 Syntax::Reference(data::spelled(part("name")?).ok_or_else(|| unread("name"))?)
             }
             "map" => Syntax::Map(
-                data::entries(part("entries")?)?
+                data::items(part("entries")?)?
                     .ok_or_else(|| unread("entries"))?
                     .iter()
-                    .map(|(key, value)| Ok((Syntax::try_from(key)?, Syntax::try_from(value)?)))
+                    .map(|entry| match data::items(entry)?.as_deref() {
+                        Some([key, value]) => {
+                            Ok((Syntax::try_from(key)?, Syntax::try_from(value)?))
+                        }
+                        _ => Err(unread("entries")),
+                    })
                     .collect::<Result<_, Error>>()?,
             ),
             "tuple" => Syntax::Tuple(nodes(&node, "items")?),
@@ -1047,19 +1064,20 @@ mod tests {
         Ok(())
     }
 
-    /// A name does not move with how a tree is kept: these are the names
-    /// the trees had under the layout the notation had of its own,
-    /// before it kept them as composite values.
+    /// A name does not move with how a tree's bytes are laid out. It
+    /// is the name of the tree as data, so it did move once, when a
+    /// record's key became text and a struct's entries pairs: these are
+    /// the names since.
     #[test]
     fn it_names_a_tree_apart_from_how_it_is_kept() -> Result<(), Error> {
         for (text, name) in [
             (
                 "(todo ?t state: :open)",
-                "form:6zdaZQpk7kebcAVHhZ7D2aHfm8qH2YH8DSpMFj3N8wzU",
+                "form:9TQWsJPcwttfkd7sWufN62rsyASugixRYZVs1LwmNx7A",
             ),
             (
                 "(rule (xyz.todo ?t done: true) (xyz.todo ?t state: :done) (unless (f 1.5 x/y +)))",
-                "form:DUVe6jwPbwVjGQu4D26HERqULgLWyxA8H5DN88bXZ9Px",
+                "form:6PWrKmJedtsCGApUiQxCSSU556HMDyqWGtJHcugzsZvY",
             ),
         ] {
             assert_eq!(one(text).entity()?.as_str(), name, "{text}");
@@ -1069,7 +1087,7 @@ mod tests {
                 .unwrap()
                 .entity()?
                 .as_str(),
-            "name:BDRfo9w4GFhULUXvQ921yhcqpwvQfKUgYTDZJM9gsx8q"
+            "name:9ejwBqd2F4Zef6rpryYD1FKQKCsmbPs4YsuHBxgLTZGz"
         );
         Ok(())
     }

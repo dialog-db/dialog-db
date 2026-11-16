@@ -121,14 +121,26 @@ fn written(value: &Value) -> Syntax {
     match value {
         Value::Record(_) if matches!(value.composite(), Ok(Some(_))) => {
             match value.composite() {
+                // A record has no order. It is said by its keys in the
+                // order of the alphabet, which is not the order it is
+                // kept in.
                 Ok(Some(Composite::Map(map))) => Syntax::Map(
                     map.iter()
+                        .collect::<std::collections::BTreeMap<_, _>>()
+                        .into_iter()
                         .map(|(key, value)| {
-                            // A symbol of no domain is the label a key
-                            // was written as.
-                            let key = match data::spelled(key) {
-                                Some(label) => Syntax::Reference(label),
-                                None => written(key),
+                            // A key that reads as a name is the label
+                            // it was written as; any other is text.
+                            let label = key.starts_with(|first: char| first.is_ascii_lowercase())
+                                && key.chars().all(|part| {
+                                    part.is_ascii_lowercase()
+                                        || part.is_ascii_digit()
+                                        || matches!(part, '-' | '.' | '/')
+                                });
+                            let key = if label {
+                                Syntax::Reference(key.to_string())
+                            } else {
+                                Syntax::Constant(data::text(key))
                             };
                             (key, written(value))
                         })
@@ -297,20 +309,26 @@ fn id(formula: &Formula) -> Result<Option<Entity>, Error> {
     Ok(Some(entity))
 }
 
-/// The pattern a struct or a list is, a list written `[a b]` or `'(a b)`. A key written as a label is a
-/// symbol of no domain; any other key is the value it is written as.
+/// The pattern a struct or a list is, a list written `[a b]` or
+/// `'(a b)`. A key is text: a label as it is written, or text itself.
 /// `name` says what a variable goes by where the pattern stands, and
 /// what a blank, given no name, is there.
+///
+/// `open` is how a struct that is read is meant: a struct with no
+/// `...` is any record that holds what it says, so it takes the entries
+/// it does not name under a blank. Where a struct is written it is the
+/// record of what it says and no more. A list is its items either way.
 fn shape(
     form: &Syntax,
+    open: bool,
     name: &mut dyn FnMut(Option<&str>) -> Variable<Any>,
 ) -> Result<Pattern, Error> {
-    fn key(node: &Syntax) -> Result<Value, Error> {
+    fn key(node: &Syntax) -> Result<String, Error> {
         match node {
-            Syntax::Constant(value) => Ok(value.clone()),
-            Syntax::Reference(label) => data::symbol(label),
+            Syntax::Constant(Value::String(text)) => Ok(text.clone()),
+            Syntax::Reference(label) => Ok(label.clone()),
             other => Err(Error::Refused(format!(
-                "{other} is not a key: a key is a value"
+                "{other} is not a key: a key is a label or text"
             ))),
         }
     }
@@ -334,6 +352,7 @@ fn shape(
         mut items: Vec<&Syntax>,
         name: &mut dyn FnMut(Option<&str>) -> Variable<Any>,
         quoted: bool,
+        open: bool,
     ) -> Result<Pattern, Error> {
         let dots = |part: &Syntax| matches!(part, Syntax::Reference(symbol) if symbol == REST);
         let run = match items.iter().position(|item| dots(item)) {
@@ -357,7 +376,7 @@ fn shape(
         let list = ListPattern::new(
             items
                 .into_iter()
-                .map(|item| walk(item, name, quoted))
+                .map(|item| walk(item, name, quoted, open))
                 .collect::<Result<Vec<_>, Error>>()?,
         );
         Ok(match run {
@@ -370,6 +389,7 @@ fn shape(
         node: &Syntax,
         name: &mut dyn FnMut(Option<&str>) -> Variable<Any>,
         quoted: bool,
+        open: bool,
     ) -> Result<Pattern, Error> {
         let dots = |part: &Syntax| matches!(part, Syntax::Reference(symbol) if symbol == REST);
         Ok(match node {
@@ -383,24 +403,25 @@ fn shape(
                     entries
                         .iter()
                         .filter(|(at, _)| !dots(at))
-                        .map(|(at, value)| Ok((key(at)?, walk(value, name, quoted)?)))
+                        .map(|(at, value)| Ok((key(at)?, walk(value, name, quoted, open)?)))
                         .collect::<Result<Vec<_>, Error>>()?,
                 )
                 .map_err(|error| refused("the struct", error))?;
                 match entries.iter().find(|(at, _)| dots(at)) {
                     Some((_, taken)) => named.with_rest(rest(taken, name)?),
+                    None if open => named.with_rest(name(None)),
                     None => named,
                 }
                 .into()
             }
             // `[a b]` is the list of what it holds: the data model has no
             // tuple, so a tuple where a value stands is a list.
-            Syntax::Tuple(items) => sequence(node, items.iter().collect(), name, quoted)?,
+            Syntax::Tuple(items) => sequence(node, items.iter().collect(), name, quoted, open)?,
             // `'(1 2 3)`: what is quoted is not applied, and a `( )` in
             // it is the list of what it holds.
             Syntax::Application(_, operand) if !quoted && node.applies() == Some(QUOTE) => {
                 match (operand.items.as_slice(), operand.terms.is_empty()) {
-                    ([list @ Syntax::Application(..)], true) => walk(list, name, true)?,
+                    ([list @ Syntax::Application(..)], true) => walk(list, name, true, open)?,
                     _ => {
                         return Err(Error::Refused(format!(
                             "{node} where a value stands: what is quoted there is a list, \
@@ -418,7 +439,7 @@ fn shape(
                     )));
                 }
                 let items = std::iter::once(&**first).chain(&operand.items).collect();
-                sequence(node, items, name, quoted)?
+                sequence(node, items, name, quoted, open)?
             }
             Syntax::Application(..) => {
                 return Err(Error::Refused(format!(
@@ -440,7 +461,7 @@ fn shape(
             }
         })
     }
-    walk(form, name, false)
+    walk(form, name, false, open)
 }
 
 /// A constant as Dialog-DB reads it. `None` for what is not a constant.
@@ -468,7 +489,7 @@ fn constant(term: &Term, kind: Option<&str>) -> Result<Option<Json>, Error> {
 /// no variable in it.
 fn value(term: &Term, kind: Option<&str>) -> Result<Option<Value>, Error> {
     if let Term::Struct(form) = term {
-        return Ok(shape(form, &mut |name| match name {
+        return Ok(shape(form, false, &mut |name| match name {
             Some(name) => Variable::var(name.to_string()),
             None => Variable::blank(),
         })?
@@ -671,7 +692,7 @@ impl Scope {
                 // A blank is a variable of its own here, which binds
                 // what stood there and joins nothing, so that a row can
                 // say it.
-                let pattern = shape(form, &mut |name| match name {
+                let pattern = shape(form, true, &mut |name| match name {
                     Some(name) => Variable::var(self.name(name)),
                     None => Variable::var(self.fresh()),
                 })?;
@@ -1013,7 +1034,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                         .map(|(_, _, pattern)| pattern.clone());
                     match read {
                         Some(pattern) => Ok(Slot::Built(pattern)),
-                        None => Ok(Slot::Built(shape(form, &mut |name| match name {
+                        None => Ok(Slot::Built(shape(form, false, &mut |name| match name {
                             Some(name) => Variable::var(scope.name(name)),
                             None => Variable::blank(),
                         })?)),

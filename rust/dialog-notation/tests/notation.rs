@@ -4,6 +4,12 @@
 //! report back. Nothing here stands in for Dialog-DB: a concept
 //! application is a concept query, a rule is a rule the branch stores
 //! and fires, and a command is a dispatched transient.
+//!
+//! Each test is the one writer of its branch, so it publishes with the
+//! call that fails when a commit loses a race, which is deprecated for
+//! `Branch::transact`.
+
+#![allow(deprecated)]
 
 use anyhow::Result;
 use dialog_corpus::Value;
@@ -671,8 +677,9 @@ async fn it_keeps_definitions_on_a_branch_under_their_signatures() -> Result<()>
 
 /// A struct is a value like 5: written as a field's value it is kept,
 /// and comes back as the struct it was. With a variable in it, it is a
-/// pattern: a query takes the kept struct apart by it, and one that does
-/// not have its shape is no match.
+/// pattern: a query takes the kept struct apart by it. Read, a struct is
+/// open: a record that holds more than it says still matches, and one
+/// that lacks what it says does not.
 #[dialog_common::test]
 async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     let mut notebook = Notebook::open().await?;
@@ -691,11 +698,34 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
             r#"(xyz.note note:2 about: {author: "Grace"})"#,
         ]
     );
-    // Taken apart: a map pattern with no rest is the map of exactly its
-    // entries, so only the second note has this shape.
+    // Taken apart. A struct that is read is open: it is any record that
+    // holds what it says, so both notes have an author, and the row
+    // says the whole record that was there.
+    let both = vec![
+        r#"(xyz.note note:1 about: {author: "Ada" pinned: true tags: ["math" "engines"]})"#,
+        r#"(xyz.note note:2 about: {author: "Grace"})"#,
+    ];
     assert_eq!(
         report(&mut notebook, "(query (xyz.note ?n about: {author: ?who}))").await?,
-        vec![r#"(xyz.note note:2 about: {author: "Grace"})"#]
+        both
+    );
+    // A trailing `...` says the same, and so does a struct with no
+    // variable in it: read, it is not the value but what a record holds.
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(query (xyz.note ?n about: {author: ?who ...}))"
+        )
+        .await?,
+        both
+    );
+    assert_eq!(
+        report(
+            &mut notebook,
+            r#"(query (xyz.note ?n about: {author: "Ada"}))"#
+        )
+        .await?,
+        both[..1]
     );
     assert_eq!(
         report(
@@ -728,8 +758,8 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
         .await?,
         vec![r#"(xyz.note note:1 about: {author: "Ada" pinned: true tags: ["math" "engines"]})"#]
     );
-    // A constant struct in a query is the value, whatever order it is
-    // written in.
+    // A struct of constants is read in whatever order it is written
+    // in.
     assert_eq!(
         report(
             &mut notebook,
@@ -765,7 +795,10 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(notebook.held(), 1);
     assert_eq!(
         report(&mut notebook, "(query (xyz.by ?n author: ?who))").await?,
-        vec![r#"(xyz.by note:2 author: "Grace")"#]
+        vec![
+            r#"(xyz.by note:1 author: "Ada")"#,
+            r#"(xyz.by note:2 author: "Grace")"#,
+        ]
     );
     // A query of several premises reads through the held rule.
     notebook
@@ -778,7 +811,10 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
                (xyz.by ?n author: ?who) (xyz.person ?p name: ?who))",
         )
         .await?,
-        vec![r#"(xyz.person person:grace name: "Grace")"#]
+        vec![
+            r#"(xyz.person person:ada name: "Ada")"#,
+            r#"(xyz.person person:grace name: "Grace")"#,
+        ]
     );
 
     // A rule that writes runs when a transaction commits, where a rule
@@ -994,8 +1030,10 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     expected.sort();
     assert_eq!(applies, expected);
 
-    // Taken further apart: the applications with no labelled part, by
-    // the shape of their parameters, whatever name they apply.
+    // Taken further apart: the applications, by the shape of their
+    // parameters, whatever name they apply. A struct that is read is
+    // open, so `terms: {}` is any terms at all and not "no labelled
+    // part": a read has no way to say a record holds nothing more.
     let bare = report(
         &mut notebook,
         "(query (syntax.form ?f is: {type: :application
@@ -1003,9 +1041,10 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
                                      operand: {type: :parameters items: ?items terms: {}}}))",
     )
     .await?;
-    assert_eq!(bare.len(), 2, "{bare:?}");
-    assert!(bare.iter().any(|row| row.contains(&entities[0])));
-    assert!(bare.iter().any(|row| row.contains(&entities[2])));
+    assert_eq!(bare.len(), 3, "{bare:?}");
+    for applied in [0, 1, 2] {
+        assert!(bare.iter().any(|row| row.contains(&entities[applied])));
+    }
 
     // A tuple is no application, so it has no such shape, and it has
     // one of its own.

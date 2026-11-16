@@ -80,21 +80,17 @@ pub fn list(items: impl IntoIterator<Item = Value>) -> Value {
     Composite::list(items).into()
 }
 
-/// A map of `entries`, in whatever order. A key given twice is
-/// refused.
-pub fn map(entries: impl IntoIterator<Item = (Value, Value)>) -> Result<Value, Error> {
+/// A map of `entries`, in whatever order. A key is text, and one given
+/// twice is refused.
+pub fn map<K: Into<String>>(entries: impl IntoIterator<Item = (K, Value)>) -> Result<Value, Error> {
     Composite::map(entries)
         .map(Value::from)
         .map_err(|error| Error::Refused(error.to_string()))
 }
 
-/// A map whose keys are names: symbols of no domain, or of the domain
-/// a name is written with.
+/// A map whose keys are names, each the text it is written as.
 pub fn record<'a>(fields: impl IntoIterator<Item = (&'a str, Value)>) -> Result<Value, Error> {
-    map(fields
-        .into_iter()
-        .map(|(name, value)| Ok((symbol(name)?, value)))
-        .collect::<Result<Vec<_>, Error>>()?)
+    map(fields)
 }
 
 fn unread(error: CompositeError) -> Error {
@@ -121,7 +117,7 @@ pub fn items(value: &Value) -> Result<Option<Vec<Value>>, Error> {
 
 /// What a map holds under the name `field`.
 pub fn field<'a>(map: &'a CompositeMap, field: &str) -> Option<&'a Value> {
-    map.get(&symbol(field).ok()?)
+    map.get(field)
 }
 
 /// Whether a name is written with a domain: something stands before
@@ -164,19 +160,21 @@ mod tests {
         Ok(())
     }
 
+    /// A map's key is text: a name as it is written, or any text.
     #[test]
-    fn it_takes_any_data_as_a_key() -> Result<(), Error> {
+    fn it_keys_a_map_by_text() -> Result<(), Error> {
         let pair = list([natural(1), natural(2)]);
-        let inner = record([("k", natural(1))])?;
         let kept = map([
-            (pair.clone(), text("pair")),
-            (entity("open:")?, Value::Boolean(true)),
-            (inner.clone(), text("map")),
+            ("pair", pair.clone()),
+            ("xyz.todo/text", text("attribute")),
+            ("N1", Value::Boolean(true)),
         ])?;
         let read = entries(&kept)?.expect("a map");
-        assert_eq!(read.get(&pair), Some(&text("pair")));
-        assert_eq!(read.get(&inner), Some(&text("map")));
+        assert_eq!(read.get("pair"), Some(&pair));
+        assert_eq!(field(&read, "xyz.todo/text"), Some(&text("attribute")));
+        assert_eq!(read.get("N1"), Some(&Value::Boolean(true)));
         assert_eq!(items(&pair)?, Some(vec![natural(1), natural(2)]));
+        assert!(map([("a", natural(1)), ("a", natural(2))]).is_err());
         Ok(())
     }
 

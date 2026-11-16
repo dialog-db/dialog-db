@@ -65,8 +65,9 @@ const _: () = assert!(size_of::<Pattern>() == size_of::<Term<Any>>());
 /// what the entries it did not name are bound to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MapPattern {
-    /// The named entries, in the order a map of them is written in.
-    entries: Vec<(Value, Pattern)>,
+    /// The named entries, in the order a map of them is written in. A
+    /// key is text, as a map's is.
+    entries: Vec<(String, Pattern)>,
     /// What the entries not named are bound to, as a map. `None` when
     /// the map holds no other entry. Boxed, as a run is, so that a
     /// pattern is no larger than the term its leaf is.
@@ -87,10 +88,13 @@ pub struct ListPattern {
 impl MapPattern {
     /// The pattern of a map that holds exactly `entries`. Refuses a key
     /// given twice, as a map does.
-    pub fn new(
-        entries: impl IntoIterator<Item = (Value, Pattern)>,
+    pub fn new<K: Into<String>>(
+        entries: impl IntoIterator<Item = (K, Pattern)>,
     ) -> Result<Self, CompositeError> {
-        let entries: Vec<(Value, Pattern)> = entries.into_iter().collect();
+        let entries: Vec<(String, Pattern)> = entries
+            .into_iter()
+            .map(|(key, pattern)| (key.into(), pattern))
+            .collect();
         // A map decides which keys are one and in what order they are
         // written, so the entries are put through one.
         let order = CompositeMap::new(
@@ -107,7 +111,7 @@ impl MapPattern {
             .iter()
             .filter_map(|(key, index)| {
                 let index = usize::try_from(index.clone()).ok()?;
-                Some((key.clone(), slots.get_mut(index)?.take()?))
+                Some((key.to_string(), slots.get_mut(index)?.take()?))
             })
             .collect();
         Ok(Self {
@@ -124,7 +128,7 @@ impl MapPattern {
     }
 
     /// The named entries, in the order a map of them is written in.
-    pub fn entries(&self) -> &[(Value, Pattern)] {
+    pub fn entries(&self) -> &[(String, Pattern)] {
         &self.entries
     }
 
@@ -164,7 +168,7 @@ impl ListPattern {
 impl Pattern {
     /// The pattern of a map that holds exactly `entries`. Refuses a key
     /// given twice. Use [`MapPattern::with_rest`] to take the others.
-    pub fn map<K: Into<Value>, P: Into<Pattern>>(
+    pub fn map<K: Into<String>, P: Into<Pattern>>(
         entries: impl IntoIterator<Item = (K, P)>,
     ) -> Result<Self, CompositeError> {
         MapPattern::new(
@@ -347,11 +351,7 @@ impl Pattern {
                         };
                         Composite::Map(
                             named
-                                .with(
-                                    others
-                                        .iter()
-                                        .map(|(key, value)| (key.clone(), value.clone())),
-                                )
+                                .with(others.iter().map(|(key, value)| (key, value.clone())))
                                 .ok()?,
                         )
                     }
@@ -417,7 +417,8 @@ impl Pattern {
                     None => Ok(map.len() == pattern.entries.len()),
                     Some(Term::Variable { name: None, .. }) => Ok(true),
                     Some(rest) => {
-                        let others = map.without(pattern.entries.iter().map(|(key, _)| key));
+                        let others =
+                            map.without(pattern.entries.iter().map(|(key, _)| key.as_str()));
                         Ok(unify_leaf(rest, &Value::from(Composite::Map(others)), row))
                     }
                 }

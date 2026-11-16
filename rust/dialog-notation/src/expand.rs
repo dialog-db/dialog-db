@@ -716,38 +716,15 @@ impl Expander {
         // names it. `(?concept ... ?fields)` and
         // `(?concept ?subject ... ?fields)` both match a call with a
         // part that has no label, and the second is the one meant.
-        // A trailing `...` says the fields not written are left out on
-        // purpose. With it a read fits a concept that has more fields
-        // than it says; without it a read says every field, as a write
-        // does.
-        let (said, open) = open(tree);
-        let reads = position == Position::Premise || self.reporting;
-        let written: BTreeSet<&String> = said
-            .operand()
-            .map(|operand| operand.terms.keys().collect())
-            .unwrap_or_default();
-        let mut left_out: Option<Vec<String>> = None;
+        // A part a read leaves out matches anything, so a trailing
+        // `...` adds nothing to one and is taken off.
+        let (said, _) = open(tree);
         let mut found: Vec<(Syntax, Option<Signature>)> = Vec::new();
         let mut least = usize::MAX;
         for rule in &self.syntax {
             if let (Answer::Syntax(template), Some(bindings)) =
                 (&rule.answer, self.applies(rule, &said, position))
             {
-                if let Some(signature) = rule.signature.as_ref()
-                    && reads
-                    && !open
-                {
-                    let missing: Vec<String> = signature
-                        .parameters
-                        .iter()
-                        .filter(|label| !written.contains(label))
-                        .cloned()
-                        .collect();
-                    if !missing.is_empty() {
-                        left_out.get_or_insert(missing);
-                        continue;
-                    }
-                }
                 let left: usize = bindings
                     .values()
                     .map(|binding| match binding {
@@ -782,18 +759,7 @@ impl Expander {
             )
         };
         match found.len() {
-            0 => match left_out {
-                Some(missing) => Err(Error::Refused(format!(
-                    "{tree} leaves out {}: say them, or write `...` after what it says for \
-                     the fields it does not",
-                    missing
-                        .iter()
-                        .map(|label| format!("`{label}:`"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))),
-                None => Err(Error::Unknown(tree.to_string())),
-            },
+            0 => Err(Error::Unknown(tree.to_string())),
             1 => Ok(found.remove(0).0),
             _ if self.negating => Err(ambiguous(&found)),
             _ if position == Position::Head && !self.reporting => {
@@ -1045,19 +1011,14 @@ mod tests {
         Ok(kernel.iter().map(Syntax::to_string).collect())
     }
 
-    /// A read of a concept says every field, as a write does, or says
-    /// with `...` that it leaves the others out. A relation has no list
-    /// of its fields, so it reads the same with `...` and without.
+    /// A part a read leaves out matches anything, so a read of a
+    /// concept may say some of its fields. A trailing `...` is allowed
+    /// and adds nothing.
     #[test]
-    fn it_refuses_a_concept_read_that_leaves_fields_out_untold() {
-        assert_eq!(
-            expanded(TODO, "(query (todo ?t text: ?x))"),
-            Err(Error::Refused(
-                "(todo ?t text: ?x) leaves out `list:`, `state:`: say them, or write `...` \
-                 after what it says for the fields it does not"
-                    .into()
-            ))
-        );
+    fn it_reads_a_concept_by_the_fields_a_read_says() {
+        let bare = expanded(TODO, "(query (todo ?t text: ?x))").unwrap();
+        assert_eq!(bare.len(), 1);
+        assert!(bare[0].contains("text: (:last (:text ?x))"), "{bare:?}");
         let open = expanded(TODO, "(query (todo ?t text: ?x ...))").unwrap();
         assert_eq!(open.len(), 1);
         // `...` alone is `... _`. The two say one thing, and differ in

@@ -1,5 +1,11 @@
 //! A branch of a repository kept in memory, and the syntax submitted
 //! to it so far. The example and the tests share it.
+//!
+//! A notebook is the one writer of its branch, so it publishes with the
+//! call that fails when a commit loses a race, which is deprecated for
+//! `Branch::transact`, the one that runs again.
+
+#![allow(deprecated)]
 
 use anyhow::Result;
 use dialog_notation::{Analyzer, Diagnostic, Error, Step, check};

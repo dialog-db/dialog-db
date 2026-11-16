@@ -1120,6 +1120,22 @@ In the same conversation he settled how a pattern is written in a stored rule (`
 
 **Decided.** By the agent, as he left it: carry on with dag-cbor; the move to #812's record waits on a list in order there. The synthesis is [synthesis.md](synthesis.md), a proposal: its "what had two answers" table is where he can disagree row by row. The build goes in the order it ends on.
 
+## 2026-11-16, Building: the first step, on the record as rebuilt
+
+**Learned.**
+
+- Merged #778 as rebuilt. A key is text: a label as written, or text. `{1 ?x}` is refused.
+- A struct read is open: `shape` in `compile.rs` gives a struct in a premise a blank rest, at every depth, so it is never the value looked up. `{author: "Ada"}` in a query is every note whose record has that author, and the row says the whole record. A struct written is the value, as before.
+- A concept read says the fields it wants. The refusal of 2026-11-13 is gone; a trailing `...` is taken off and adds nothing.
+- A kept struct node keeps its entries as pairs, in the order of their keys, since a node is no text and cannot be a key. A key twice is still refused there.
+- A record is printed by its keys in the order of the alphabet, not the order it is kept in (the shorter key first).
+- Names of kept forms moved once, with the data they are names of: three are pinned again.
+- The cost said in the synthesis showed in a test: `terms: {}` over a kept form meant "no labelled part" and now means any.
+- `assert` without `!` already means something in this build, a deduction's head, so dropping `!` is not a renaming.
+- The notebook and the tests publish with the call main has deprecated for `Branch::transact`; allowed there with the reason, since each is the one writer of its branch.
+
+**Decided.** Nothing new. 92 unit, 25 integration and 2 doc tests pass; the lint is clean but for main's own future size on this container's toolchain.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

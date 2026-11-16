@@ -12,6 +12,11 @@ publish = false
 # crate-level cfg in src/lib.rs), and every native-only dependency is
 # target-gated so the workspace's wasm dependency set is unaffected.
 
+[features]
+# Traces one member's archive file in `tonk_bench` (`DIALOG_TRACE`), for
+# replaying the file format's pattern in the browser spike.
+trace = ["dialog-chronicle/trace"]
+
 [dependencies]
 anyhow = { workspace = true }
 base58 = { workspace = true }
@@ -39,7 +44,23 @@ dialog-search-tree = { workspace = true, features = ["audit"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# The single-file archive, measured against the `fs` archive
+# (`examples/file_archive_bench.rs`).
+dialog-chronicle = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
+# The single-file census (`examples/single_file_census.rs`) serializes tree
+# values to measure them and models compressed and delta-encoded stores.
+blake3 = { workspace = true }
+rkyv = { workspace = true }
+zstd = "0.13"
+# The tonk benchmarks (`examples/tonk_dataset.rs`, `examples/tonk_bench.rs`)
+# read a space's rules and concepts and keep their dataset as JSON lines.
+dialog-credentials = { workspace = true }
+dialog-query = { workspace = true }
+dialog-remote-fs = { workspace = true }
+dialog-varsig = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 # The search tree's volatile test archive, for the examples that build
 # trees outside a repository.
 dialog-search-tree = { workspace = true, features = ["audit", "helpers"] }
@@ -51,3 +72,8 @@ harness = false
 [[bench]]
 name = "se_replay"
 harness = false
+
+[lints.rust]
+# `tonk_bench` builds in a worktree of main with `--cfg dialog_main`,
+# leaving out the stores main does not have.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_main)"] }
