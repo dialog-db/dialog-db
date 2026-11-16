@@ -225,7 +225,10 @@ enum Backing {
         /// scanned, so its fields are read without walking the key again.
         layout: KeyLayout,
         datum: Datum,
-        spilled: Option<Vec<u8>>,
+        /// Held as a boxed slice, not a `Vec`: the eight bytes a `Vec`'s
+        /// capacity takes keep a row within 256 bytes, which a row is
+        /// moved by value through every scan stage under.
+        spilled: Option<Box<[u8]>>,
     },
     /// A row synthesized without a stored key (e.g. an uncommitted overlay
     /// fact), carried as the owned [`Fact`] it was made from. Boxed so
@@ -258,7 +261,7 @@ impl FactView {
         key: KeyHandle,
         layout: KeyLayout,
         datum: Datum,
-        spilled: Option<Vec<u8>>,
+        spilled: Option<Box<[u8]>>,
     ) -> Self {
         Self {
             backing: Backing::Scanned {
@@ -397,7 +400,9 @@ impl FactView {
     /// from the spilled block fetched at scan time.
     pub fn value(&self) -> Result<Value, DialogCorpusError> {
         match &self.backing {
-            Backing::Scanned { spilled, .. } => decode_value_parts(&self.parts()?, spilled.clone()),
+            Backing::Scanned { spilled, .. } => {
+                decode_value_parts(&self.parts()?, spilled.as_deref().map(<[u8]>::to_vec))
+            }
             Backing::Owned { fact, .. } => Ok(fact.is.clone()),
         }
     }
@@ -443,9 +448,11 @@ impl FactView {
     /// default — reach for it only when ownership is genuinely needed.
     pub fn to_owned(&self) -> Result<Fact, DialogCorpusError> {
         match &self.backing {
-            Backing::Scanned { datum, spilled, .. } => {
-                reconstruct(&self.parts()?, datum, spilled.clone())
-            }
+            Backing::Scanned { datum, spilled, .. } => reconstruct(
+                &self.parts()?,
+                datum,
+                spilled.as_deref().map(<[u8]>::to_vec),
+            ),
             Backing::Owned { fact, .. } => Ok(fact.as_ref().clone()),
         }
     }
