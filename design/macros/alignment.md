@@ -37,10 +37,4 @@ The design counts three meanings of `[ ]`: a variant in `as:`, markup in a view,
 
 ## Order
 
-1. `assert` and `retract` without `!`.
-2. A concept as lines by attribute, with `as:` and `cardinality:`; a body variable must be in the head.
-3. A read that leaves a parameter out, and a struct read, open.
-4. Getters.
-5. Electors, layers and views, as the engine work they stand on lands.
-
-Not started. What a record is comes first (the queue in `journal.md`), since 3 touches it.
+In [synthesis.md](synthesis.md), which puts the two tables above together with the layers, the cardinality work and the record.

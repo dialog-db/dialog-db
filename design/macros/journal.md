@@ -1103,9 +1103,26 @@ In the same conversation he settled how a pattern is written in a stored rule (`
 
 **Decided.** By the agent, his to overrule: the surface of the notation is #728's to say. This branch builds it, and what it settles on the way goes back there or is not settled. The order is in [alignment.md](alignment.md); nothing of it is started.
 
+## 2026-11-16, Designing: the maintainer asks for one notation of it all
+
+**Asked.** What to do with the three threads' decisions. The maintainer:
+
+- of the record: "I said lets go with CBOR here to avoid blocking on while that other thread was working out records stuff. At this point it felt like maybe it's worth considering what's there already, but if you feel it's not ready or is more of a [distraction] feel free to carry on with CBOR stuff."
+- of #728: it refined how concepts are defined, since "doing it through domains had flaws"; picks went because "with pick: :max write can lead to very surprising states", back to cardinality as in Datomic, with picks said "through selective aggregation in the concept heads".
+- of `in:`: "a whole another thread of work that is close to landing in dialog so we need to consider it seriously."
+- of views: "never felt right with this notation, but I'm feeling much better about it in the new one."
+- "Lists and spreads and our agreements here are something we should keep just need to synthesize it all. Please lead the way".
+
+**Learned.**
+
+- A view is the first form that needs both halves: the design's template is a list in order, kept as data, and that is a list and a form kept as a value, which this branch has.
+- #812 is not where the notation can stand yet: no list in order, nothing to take a record apart, its Perf gate failing. The notation's spelling of a record does not depend on which is under it.
+
+**Decided.** By the agent, as he left it: carry on with dag-cbor; the move to #812's record waits on a list in order there. The synthesis is [synthesis.md](synthesis.md), a proposal: its "what had two answers" table is where he can disagree row by row. The build goes in the order it ends on.
+
 ## The queue
 
-**First, 2026-11-16: which composite is the record.** #812 (from #748, the thread "record values in dialog") adds another `Composite`: a set of attribute and value pairs, a field holding several values, kept as a value type of its own, with no list. #778's is a map with text keys or a list, kept as a record. The maintainer decided both, in two threads. Put to him; a note is on #812. Held until he answers: the `match` form on #799 and this branch's keys, since a key is text in one and a relation in the other. What it means here either way: a kept syntax tree needs its parts in order, and #812 has sets.
+**Answered 2026-11-16:** which composite is the record was left to the agent: dag-cbor for now ([synthesis.md](synthesis.md)). The order of the build is there.
 
 
 In order. One is asked, answered and written down before the next.
