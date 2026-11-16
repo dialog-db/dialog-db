@@ -324,7 +324,7 @@ The maintainer asked for the pull requests to be reviewed. For the record, whose
 | read and written alike by the libraries | 3,000 as kept; 120,000 once | nothing |
 | a byte changed | 36,000 changes as kept; 960,000 once | one |
 
-The one: a symbol is 64 bytes, its name and zeroes. `Value::try_from` reads the name up to the first zero and reads past the rest, so a link that held a symbol with a byte after its name was read as the symbol and written back as other bytes: two byte strings, one record. It is how a symbol is read everywhere, on main, and is filed apart. Here the reader now takes a linked value only as the bytes it is written in (`NotCanonical`).
+The one: a symbol is 64 bytes, its name and zeroes. `Value::try_from` reads the name up to the first zero and reads past the rest, so a link that held a symbol with a byte after its name was read as the symbol and written back as other bytes: two byte strings, one record. It is how a symbol is read everywhere, on main, and is filed apart as #824. Here the reader now takes a linked value only as the bytes it is written in (`NotCanonical`).
 
 **Decided.** Nothing of the design. `it_writes_what_the_libraries_read_and_write_alike` and `it_reads_only_bytes_it_would_write` stay, at the smaller size.
 
