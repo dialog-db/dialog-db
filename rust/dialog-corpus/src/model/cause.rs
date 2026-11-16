@@ -33,6 +33,7 @@ use super::{Blake3Hash, Fact, Value};
     rkyv::Serialize,
     rkyv::Deserialize,
 )]
+#[rkyv(derive(PartialEq), compare(PartialEq))]
 pub struct Cause(pub Blake3Hash);
 
 impl From<&Fact> for Cause {
