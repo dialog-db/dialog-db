@@ -264,3 +264,64 @@ is the same as
 
 </details>
 
+
+## Addendum: a fifth document, `by`
+
+Added while the first four ran, before any `by` reader ran, at the maintainer's suggestion: `by: :name` and `by: :position`, the same values as `via`. 20 readers, scored as the others. Prediction: `by` scores as `via` does on question 4, within 2.
+
+<details><summary><code>by</code> (sha256 <code>eddd77a62ac1c492</code>)</summary>
+
+````text
+Below is code in a notation you have not seen before. Its only documentation is the passage after it. Otherwise answer from the code alone, saying what you think it does. Give a short reason with every answer. Answer every question, numbered.
+
+## The code
+
+```clj
+(concept (element-method ?e name: ?n source: ?s)
+  (xyz.tonk.element.method/?n of: ?e is: ?s as: :text cardinality: :one by: :name))
+
+(concept (notebook-entry ?b at: ?p block: ?x)
+  (xyz.tonk.notebook/?p of: ?b is: ?x as: :entity cardinality: :one by: :position))
+
+(assert (xyz.tonk.element.method/run of: element:1 is: "start()"))
+(assert (xyz.tonk.element.method/stop of: element:1 is: "halt()"))
+(assert (xyz.tonk.notebook/N1 of: notebook:1 is: block:a))
+```
+
+Nothing is stored before the first `assert`.
+
+## Documentation
+
+Each line such as `(xyz.todo/title of: ?t is: ?title as: :text cardinality: :one)` is a claim: the attribute `xyz.todo/title` of the entity `?t` is `?title`. When a concept is asked for, its lines are read. When a concept is concluded by a rule or asserted, its lines are what is concluded or asserted. `as:` is the type a value must have. One attribute of one entity can hold several claims, stored or concluded by rules. `cardinality:` says how a line treats them. Under `:one`, a write replaces the claim it read, and a read gives the one caused most recently, whether it was stored or concluded by a rule. Under `:many`, a write adds a claim and a read gives every claim. A concluded value is as recent as the newest fact it was concluded from.
+
+A concept is just a set of attributes: a convenient way to express derivations over those attributes more concisely. For example, given
+
+```clj
+(concept (titled ?t title: ?title)
+  (xyz.acme.task/title of: ?t is: ?title))
+```
+
+the rule
+
+```clj
+(rule (titled ?t title: ?title)
+  (ticket ?t title: ?title))
+```
+
+is the same as
+
+```clj
+(rule (xyz.acme.task/title of: ?t is: ?title)
+  (ticket ?t title: ?title))
+```
+
+## Questions
+
+1. In `element-method`, what does `?n` stand for?
+2. What does `(query (element-method element:1 name: ?n source: ?s))` give back? List every row.
+3. Device A asserts `(xyz.tonk.notebook/N2 of: notebook:1 is: block:b)` while device B, offline, asserts `(xyz.tonk.notebook/N3 of: notebook:1 is: block:c)`. After they sync, what does `(query (notebook-entry notebook:1 at: ?p block: ?x))` give back? List every row.
+4. How do `element-method` and `notebook-entry` differ in what their keys are? Answer in a sentence or two.
+5. Rate how readable this notation is from 1 to 5, and name the one thing you found hardest to guess.
+````
+
+</details>
