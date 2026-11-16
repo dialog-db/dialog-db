@@ -192,12 +192,17 @@ impl<'a> QueryLayer<'a> {
     /// The lines pinned as `views` (see [`pin`](Self::pin)), with the
     /// memory layers, owned: what one query reads.
     pub(crate) fn composite(&self, views: Vec<View<'a>>) -> Composite {
-        let names = self
-            .lines
-            .iter()
-            .map(|_| None)
-            .chain(self.named.iter().map(|(layer, _)| Some(layer.clone())))
-            .collect();
+        // A line with no name reads as no entry at all, so a read with no
+        // durable layer, the common one, allocates nothing for the names.
+        let names = if self.named.is_empty() {
+            Vec::new()
+        } else {
+            self.lines
+                .iter()
+                .map(|_| None)
+                .chain(self.named.iter().map(|(layer, _)| Some(layer.clone())))
+                .collect()
+        };
         Composite {
             sources: views.into_iter().map(View::into_source).collect(),
             memories: self
