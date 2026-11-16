@@ -329,3 +329,27 @@ The one: a symbol is 64 bytes, its name and zeroes. `Value::try_from` reads the 
 **Decided.** Nothing of the design. `it_writes_what_the_libraries_read_and_write_alike` and `it_reads_only_bytes_it_would_write` stay, at the smaller size.
 
 Not done by this: a reading of the pattern code line by line, and anything about speed.
+
+## 2026-11-16, Reviewing: a pattern against the value it builds
+
+The second part of the review, the same way: a test over patterns drawn at random, in place of a reading.
+
+**Asked.** Does a pattern say one thing both ways, as [design-pattern-meaning.md](design-pattern-meaning.md) has it? Put as something a test can refuse: whatever value a map or a list of patterns matches, what it binds builds that value.
+
+**Method.** `pattern/property_tests.rs`: 6,000 patterns from a fixed sequence, to three deep, with constants of every type, rests and runs, and a row that binds every variable. Each builds its value, takes it apart from nothing and with its variables already bound, and is tried with its variables typed and with other constants.
+
+**Results.** Two, both the same thing: a leaf inside a record was matched as a scan reads a value, through a type, and a scan's reading is not the value a pattern builds.
+
+| | matched | built | by plan order |
+|---|---|---|---|
+| a constant, `{n: 4 m: ?x}`, against a record that holds 4.3 | yes: the natural 4 reads 4.3 as 4 | `{n: 4 …}` | with `?x` bound first the record is built and not found; with the record read first it matched |
+| a constant `-0.0`, against the record it builds, which keeps 0 | no | `{n: 0}` | the reverse: built first it is found, read first it was not |
+| a variable typed a float, against a part that is 2^64 | yes, bound to the float | another number: the float is 18446744073709552000 | as the first row |
+
+The last column is read off how a premise that holds a pattern is planned (`lower` in `pattern.rs`: the record is built and looked for, or read and taken apart). It was not run through a branch in both orders.
+
+Both are what the meaning note set out to rule out, a rule that holds or not by which premise runs first, and came in by the leaf, where the note looked at the shape.
+
+**Decided.** By the agent, as the note already has it and not as a new choice: inside a map or a list a leaf matches a part only where it is the part, a number by the number it is (`Value::same_number`). A pattern that is a term alone is matched as a scan reads, as before. Pinned by `it_matches_a_number_in_a_record_only_where_it_is_that_number` and the property test.
+
+Not looked at: a typed variable outside a record, which is a scan's reading and main's.

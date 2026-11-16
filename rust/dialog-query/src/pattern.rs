@@ -414,8 +414,34 @@ impl Pattern {
     /// A record under a version this release does not read is refused,
     /// by its number: it may well match, and this release cannot tell.
     pub fn unify(&self, value: &Value, row: &mut Match) -> Result<bool, EvaluationError> {
+        match self {
+            Pattern::Term(term) => Ok(unify_leaf(term, value, row)),
+            _ => self.take_apart(value, row),
+        }
+    }
+
+    /// [`Self::unify`] for a pattern inside a map or a list, and for a
+    /// map or a list itself. A leaf there matches a part only where it
+    /// is the part: a number by the number it is, whatever type it was
+    /// given under, since that is the value the pattern builds.
+    ///
+    /// A scan reads a value through a type: the natural 4, and a
+    /// variable typed a natural, read a stored 4.3 as 4. Matched that
+    /// way here, `{n: 4}` would match a record that holds 4.3 and build
+    /// one that holds 4, and a rule would hold or not by which of its
+    /// premises ran first: the one that binds the pattern's variables,
+    /// after which the record is built and looked for, or the one that
+    /// reads the record, after which it is taken apart.
+    fn take_apart(&self, value: &Value, row: &mut Match) -> Result<bool, EvaluationError> {
         let composite = match self {
-            Pattern::Term(term) => return Ok(unify_leaf(term, value, row)),
+            Pattern::Term(Term::Constant(constant)) => return Ok(value.same_number(constant)),
+            Pattern::Term(term) => {
+                return Ok(unify_leaf(term, value, row)
+                    && term
+                        .name()
+                        .and_then(|name| row.value_of(name))
+                        .is_none_or(|bound| bound.same_number(value)));
+            }
             _ => match value.composite() {
                 Ok(Some(composite)) => composite,
                 Ok(None) => return Ok(false),
@@ -433,7 +459,7 @@ impl Pattern {
                     let Some(value) = map.get(key) else {
                         return Ok(false);
                     };
-                    if !part.unify(value, row)? {
+                    if !part.take_apart(value, row)? {
                         return Ok(false);
                     }
                 }
@@ -453,7 +479,7 @@ impl Pattern {
                     return Ok(false);
                 }
                 for (part, item) in pattern.items.iter().zip(items.iter()) {
-                    if !part.unify(item, row)? {
+                    if !part.take_apart(item, row)? {
                         return Ok(false);
                     }
                 }
@@ -471,9 +497,11 @@ impl Pattern {
     }
 }
 
-/// Match a leaf against a value: a constant by the value it reads as,
-/// as a scan matches one, and a variable by binding it, which a
-/// variable bound to another value, or typed for another, refuses.
+/// Match a pattern that is a term against a value: a constant by the
+/// value it reads as, as a scan matches one, and a variable by binding
+/// it, which a variable bound to another value, or typed for another,
+/// refuses. Inside a map or a list a leaf is matched more narrowly
+/// (`Pattern::take_apart`).
 fn unify_leaf(term: &Term<Any>, value: &Value, row: &mut Match) -> bool {
     match term {
         Term::Constant(constant) => value == constant || value.reads_as(constant),
@@ -983,5 +1011,7 @@ pub(crate) fn take_apart(
     Some(Ok(matched))
 }
 
+#[cfg(test)]
+mod property_tests;
 #[cfg(test)]
 mod tests;
