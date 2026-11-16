@@ -372,8 +372,8 @@ impl StackBatchPublish {
 impl InvocationReport {
     /// Publish `batch`, a chain committed through `stack`, and report
     /// what the publish did: the head it left the primary at, the ticks
-    /// the chain ran and the commands it landed on
-    /// [`control:`](crate::CONTROL), their lifecycle rows left out. A
+    /// the chain ran, and the commands and the tick's own rows it landed
+    /// on [`control:`](crate::CONTROL), their lifecycle rows left out. A
     /// lost compare-and-swap reports nothing.
     pub(crate) async fn publish<Env>(
         stack: Stack,
@@ -384,12 +384,12 @@ impl InvocationReport {
         Env: Provider<Publish> + Provider<Resolve> + ConditionalSync,
     {
         let ticks = batch.ticks();
-        let commands = batch
+        let landed = batch
             .looped()
             .into_iter()
             .filter(|fact| !is_lifecycle(&fact.the))
             .collect();
         let revision = batch.publish().perform(env).await?;
-        Ok(Self::published(stack, revision, ticks, commands))
+        Ok(Self::published(stack, revision, ticks, landed))
     }
 }
