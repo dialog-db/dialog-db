@@ -113,9 +113,14 @@ impl AttributeQueryAll {
     /// read that asks which layer a row came from, and so reads the same
     /// cell on two layers as two rows.
     pub(crate) fn binds_layer(&self) -> bool {
-        self.layer
-            .as_deref()
-            .is_some_and(|layer| layer.name().is_some())
+        self.bound_layer().is_some()
+    }
+
+    /// The named layer term a scan that [binds each row's
+    /// layer](Self::binds_layer) binds it to: the variable a row's `in`
+    /// is read back from.
+    pub(crate) fn bound_layer(&self) -> Option<&Term<Entity>> {
+        self.layer.as_deref().filter(|layer| layer.name().is_some())
     }
 
     /// Whether a row read from `layer` is one this scan reads: any row
@@ -215,8 +220,7 @@ impl AttributeQueryAll {
         version: Option<(Edition, [u8; 32])>,
         layer: Option<Entity>,
     ) -> Result<(), EvaluationError> {
-        let mut claim = Claim::from(fact);
-        claim.layer = layer;
+        let claim = Claim::from(fact);
         let standing = Standing::new(version, claim.cause().clone());
         // A slot for each of `the`, `of`, `is` and `cause`, and one for
         // `in` only when the scan binds it: a row's bindings are reserved
@@ -226,9 +230,10 @@ impl AttributeQueryAll {
             .as_deref()
             .and_then(|term| term.shared_name().map(|name| (term, name)));
         candidate.reserve(4 + usize::from(binds.is_some()));
-        // A row with no layer stamped is the primary's.
+        // The layer a row was read from lives only in this binding: a
+        // row with no layer stamped is the primary's.
         if let Some((term, name)) = binds {
-            let layer = claim.layer.clone().unwrap_or_else(memory_layer);
+            let layer = layer.unwrap_or_else(memory_layer);
             candidate.bind_variable(name, term.binding_kind(), Value::Entity(layer))?;
         }
         if let Some(name) = self.the.shared_name() {
