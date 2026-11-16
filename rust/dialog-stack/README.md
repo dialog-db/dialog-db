@@ -116,43 +116,49 @@ assert!(layers.contains(&tab) && layers.contains(&notes) && layers.contains(&scr
 [`Stack::query`] reads the primary and every layer. The `in` of an
 attribute query, or of a descriptor in a rule, says which layer it reads:
 a variable binds each row's layer and reads them all, and a constant
-reads one layer alone. A claim read through the stack carries the layer
-it came from (`Claim::layer`).
+reads one layer alone. A claim carries no layer: a read that asks where
+a row lies names `in` as a variable and reads the binding, as the field
+of a concept here (`memory:` for a row of the primary).
 
 ```rust,no_run
 # use dialog_corpus::{Entity, Value};
 # use dialog_query::attribute::Relation;
 # use dialog_query::query::Output as _;
-# use dialog_query::{AttributeQuery, Claim, Term};
+# use dialog_query::{AttributeQuery, Claim, ConceptQuery, Term};
 # use dialog_stack::{OpenStackEnv, Stack};
 # async fn example(stack: Stack, env: impl OpenStackEnv) -> anyhow::Result<()> {
-/// `ui/selected` of every entity.
-fn selected() -> AttributeQuery {
-    AttributeQuery::from(
-        Term::<Relation>::from(Relation::from(
-            "ui/selected".parse::<dialog_corpus::Relation>().expect("an attribute"),
-        ))
-        .of(Term::<Entity>::var("doc"))
-        .is(Term::<bool>::var("on")),
-    )
-}
-
-// A variable `in`: every layer, each row's layer bound.
-let everywhere: Vec<Claim> = stack
-    .query()
-    .select(selected().with_layer(Term::var("layer")))
-    .perform(&env)
-    .try_vec()
-    .await?;
-for claim in &everywhere {
-    println!("{} in {:?}", claim.of, claim.layer());
+// A variable `in`: every layer, each row's layer bound to `layer`.
+let everywhere: ConceptQuery = serde_json::from_value(serde_json::json!({
+    "assert": {
+        "with": {
+            "on": { "the": "ui/selected", "as": "Boolean", "in": { "?": { "name": "layer" } } }
+        }
+    },
+    "where": {
+        "this": { "?": { "name": "doc" } },
+        "on": { "?": { "name": "on" } },
+        "layer": { "?": { "name": "layer" } }
+    }
+}))?;
+for row in stack.query().select(everywhere).perform(&env).try_vec().await? {
+    let layer: Entity = row.get("layer")?;
+    println!("{} in {layer}", row.entity());
 }
 
 // A constant `in`: `session:tab` alone.
 let tab: Entity = "session:tab".parse()?;
 let in_tab: Vec<Claim> = stack
     .query()
-    .select(selected().with_layer(Term::Constant(Value::Entity(tab))))
+    .select(
+        AttributeQuery::from(
+            Term::<Relation>::from(Relation::from(
+                "ui/selected".parse::<dialog_corpus::Relation>().expect("an attribute"),
+            ))
+            .of(Term::<Entity>::var("doc"))
+            .is(Term::<bool>::var("on")),
+        )
+        .with_layer(Term::Constant(Value::Entity(tab))),
+    )
     .perform(&env)
     .try_vec()
     .await?;
