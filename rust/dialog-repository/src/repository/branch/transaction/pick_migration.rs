@@ -486,3 +486,114 @@ fn the_pick_release_identities_are_reproduced_for_migration() -> Result<()> {
     );
     Ok(())
 }
+
+/// The rule bodies `branch` does not read, as `dialog.rule/invalid`
+/// answers: each rule's entity and why, sorted by entity.
+async fn invalid(branch: &Branch, operator: &Operator) -> Result<Vec<(Entity, String)>> {
+    let predicate: ConceptDescriptor = serde_json::from_value(json!({ "with": {
+        "reason": { "the": "dialog.rule/invalid", "as": "text:" }
+    }}))?;
+    let mut terms = Parameters::new();
+    terms.insert("this".to_string(), Term::<Any>::var("this"));
+    terms.insert("reason".to_string(), Term::<Any>::var("reason"));
+    let rows: Vec<ConceptConclusion> = branch
+        .select(ConceptQuery { predicate, terms })
+        .perform(operator)
+        .try_vec()
+        .await?;
+    let mut listed: Vec<(Entity, String)> = rows
+        .iter()
+        .map(|row| Ok((row.get::<Entity>("this")?, row.get::<String>("reason")?)))
+        .collect::<Result<_>>()?;
+    listed.sort();
+    Ok(listed)
+}
+
+/// "A rule a branch cannot read is skipped and listed, and no read
+/// fails over it." Four bodies no evaluation reads: one `v0.4.0`
+/// stored, in an older format; one naming a format this release does
+/// not know; bytes that are no rule; and a rule's own body stored under
+/// an entity it does not hash to, which anyone can write. A query over
+/// the relation the stored rule would derive answers as if none were
+/// there, `dialog.rule/invalid` names each with why, and once the
+/// upgrade rewrites the older one it is no longer listed.
+#[dialog_common::test]
+async fn a_branch_lists_the_rule_bodies_it_does_not_read() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let doc: Entity = "doc:1".parse()?;
+    install(&branch, &operator, &["tag_from_label"]).await?;
+    let older = stored_by_release("tag_from_label");
+    assert_eq!(
+        invalid(&branch, &operator).await?,
+        vec![(
+            older.clone(),
+            "older: the body is in format 3, which `upgrade_rules` rewrites to 4".to_string()
+        )]
+    );
+
+    let newer: Entity = "rule:newer".parse()?;
+    let garbage: Entity = "rule:garbage".parse()?;
+    let forged: Entity = "rule:forged".parse()?;
+    let future = serde_ipld_dagcbor::to_vec(&json!({ "format": 99 }))?;
+    upgrade(&branch, &operator).await?;
+    let rewritten = branch
+        .claims()
+        .select(Selector::new().the("dialog.rule/source".parse()?))
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(|item| item.and_then(|view| view.to_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let [current] = rewritten.as_slice() else {
+        anyhow::bail!("the upgrade leaves one rule body: {}", rewritten.len());
+    };
+    assert_eq!(
+        invalid(&branch, &operator).await?,
+        vec![],
+        "the rewritten rule is read"
+    );
+    write(
+        &branch,
+        &operator,
+        vec![
+            ("dialog.rule/source", &newer, Value::Bytes(future)),
+            (
+                "dialog.rule/source",
+                &garbage,
+                Value::Bytes(vec![0xff, 0x00]),
+            ),
+            ("dialog.rule/source", &forged, current.is.clone()),
+            ("doc/label", &doc, Value::String("draft".into())),
+        ],
+    )
+    .await?;
+
+    let listed = invalid(&branch, &operator).await?;
+    let reason = |entity: &Entity| {
+        listed
+            .iter()
+            .find(|(listed, _)| listed == entity)
+            .map(|(_, reason)| reason.as_str())
+            .unwrap_or_default()
+    };
+    assert_eq!(listed.len(), 3, "{listed:?}");
+    assert_eq!(
+        reason(&newer),
+        "newer: the body is in format 99, and this release reads up to 4"
+    );
+    assert!(reason(&garbage).starts_with("undecodable: "), "{listed:?}");
+    assert_eq!(
+        reason(&forged),
+        "forged: the body does not hash to the identity it is stored under"
+    );
+    assert_eq!(
+        read(&branch, &operator, "org/tag", "text:", "many", &doc).await?,
+        vec![Value::String("draft".into())],
+        "the rule that reads still derives, beside three that do not"
+    );
+    Ok(())
+}

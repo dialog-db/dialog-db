@@ -14,6 +14,48 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule body a branch cannot read is skipped, and listed with why
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793)
+
+A stored rule body is whatever some peer wrote: one in a format an
+older release stored, one in a format this release does not know yet,
+bytes that are no rule, or a rule's body under an entity it does not
+hash to. None of them is evaluated, and no query fails over one: a
+query that met an undecodable body used to fail with `rule hydrate`,
+so one bad rule arriving by merge stopped every read of its relation.
+
+A branch now answers `dialog.rule/invalid`: one row per stored body it
+does not read, of the rule's entity, valued with the reason. The reason
+begins with its kind:
+
+- `older:` the body is in a format before this release's, which
+  `Branch::upgrade_rules` rewrites;
+- `newer:` the body is in a format after this release's, which a newer
+  release reads;
+- `undecodable:` the bytes do not decode as a rule, followed by what
+  the decoder said;
+- `forged:` the body decodes, and does not hash to the entity it is
+  stored under.
+
+The body's format is probed before it is decoded, so the first two are
+told apart from the third. Like `dialog.rule/quarantined`, the relation
+is never stored: it is answered from the rule bodies the branch's
+layers hold, and facts written under it are not read.
+
+What this changes for you:
+
+- A query over a relation some undecodable rule body would derive
+  answers from the rules that do read, where it failed.
+- An application lists the rules a branch skipped by querying
+  `dialog.rule/invalid`, as it lists the rules set aside by querying
+  `dialog.rule/quarantined`. `dialog_query::rule::statement::invalid_attr`
+  names the attribute.
+
+Why: rules are replicated facts, and a merge must never be able to stop
+a program that worked before it. Skipping a rule is only safe if the
+skip can be seen.
+
 ### A concept field reads its claim with a selective aggregator, and a listed `as` ranks its values least first
 
 Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
@@ -278,6 +320,12 @@ What this changes for you:
   over the relation returns what the remaining rules derive. Before, it
   returned that rule's conclusions too, the ones drawn from losing
   candidates among them.
+- So is a rule deciding on a field of a concept of several fields,
+  where the field is of cardinality one or declares a selective
+  aggregator: the concept elects the field's claim, and the premise
+  tests that election. A rule deriving a relation from the claim a
+  field's aggregator elects of that same relation closes its cycle
+  through a fold, and is set aside as one.
 - A rule carrying a value down a chain, or computing from it (a
   position from a successor's position, a depth from a parent's), is
   unaffected.

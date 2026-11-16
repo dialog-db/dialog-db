@@ -83,6 +83,17 @@ pub fn quarantined_attr() -> CorpusRelation {
     the!("dialog.rule/quarantined").into()
 }
 
+/// The `dialog.rule/invalid` attribute: a stored rule body a branch does
+/// not read, valued with why. A rule in a format older than this
+/// release reads is waiting for `Branch::upgrade_rules`; one in a newer
+/// format, for a newer release; one that does not decode, or is stored
+/// under an identity it does not hash to, is not a rule. None of them
+/// is evaluated, and no query fails over one. Never stored: a branch
+/// answers it from the rule bodies its layers hold.
+pub fn invalid_attr() -> CorpusRelation {
+    the!("dialog.rule/invalid").into()
+}
+
 /// The `on:<domain>/<name>` trigger-index entity for an attribute.
 /// Derivable from a runtime instruction alone — no schema lookup —
 /// which is what keeps dispatch probing cheap.
