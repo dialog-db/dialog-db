@@ -2,6 +2,7 @@ use crate::Cardinality;
 use crate::Claim;
 use crate::attribute::Relation;
 use crate::corpus::{Constrained, CorpusRelation, Selector};
+use crate::elector::Ranking;
 use crate::environment::Environment;
 use crate::negation::Negation;
 use crate::proposition::Proposition;
@@ -58,6 +59,22 @@ impl DynamicAttributeQuery {
             }
             _ => DynamicAttributeQuery::All(AttributeQueryAll::new(the, of, is, cause)),
         }
+    }
+
+    /// This query electing one claim of each cell by `ranking`: the
+    /// read a concept field declaring an elector makes of its stored
+    /// claims.
+    pub(crate) fn ranked(self, ranking: Ranking) -> Self {
+        let query = match self {
+            DynamicAttributeQuery::Only(query) => query,
+            DynamicAttributeQuery::All(query) => AttributeQueryOnly::new(
+                query.the().clone(),
+                query.of().clone(),
+                query.is().clone(),
+                query.cause().clone(),
+            ),
+        };
+        DynamicAttributeQuery::Only(query.ranked(ranking))
     }
 
     /// Get the 'the' (attribute) term.

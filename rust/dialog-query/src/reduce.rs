@@ -96,7 +96,7 @@ use futures_util::TryStreamExt;
 use crate::Standing;
 use crate::corpus::Type as ValueType;
 use crate::corpus::Value;
-use crate::corpus::encode_value_owned;
+use crate::elector::Elector;
 use crate::error::{EvaluationError, TypeError};
 use crate::formula::number::Numeric;
 use crate::selection::{Binding, Match, Selection};
@@ -104,7 +104,7 @@ use crate::term::Term;
 use crate::try_stream;
 use crate::type_system::{Primitive, Type};
 use crate::types::Any;
-use dialog_corpus::{Cardinality, Contender};
+use dialog_corpus::Contender;
 use std::sync::Arc;
 
 /// The fold applied to a reduced field's inputs, one group at a time.
@@ -133,9 +133,12 @@ pub enum Aggregator {
     /// greatest, as a cardinality-one read elects among a cell's
     /// claims.
     Last,
-    /// The present value listed first among the entry's ranked values
-    /// ([`ReduceEntry::among`]), best first; an unlisted value ranks
-    /// last, and the newest wins among equals.
+    /// The present value the elector `top` elects: the one listed last
+    /// in the attribute's `as`, which ranks values least first. Never
+    /// spelled in a rule's `reduce`: only a concept field electing with
+    /// `top` folds with it, its listing carried on the entry
+    /// ([`ReduceEntry::listed`]).
+    #[serde(skip_deserializing)]
     Top,
 }
 
@@ -254,10 +257,10 @@ pub struct ReduceSpec {
     pub apply: Aggregator,
     /// The term supplying the fold's input, one lookup per body row.
     pub of: Term<Any>,
-    /// The values a `top` ranks, best first; empty for every other
-    /// fold.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub among: Vec<Value>,
+    /// The values the field's attribute lists, least first: what a
+    /// `top` ranks by. Set only by a concept field electing with `top`.
+    #[serde(skip)]
+    pub listed: Vec<Value>,
 }
 
 impl ReduceSpec {
@@ -266,14 +269,20 @@ impl ReduceSpec {
         ReduceSpec {
             apply,
             of,
-            among: Vec::new(),
+            listed: Vec::new(),
         }
     }
 
-    /// This spec ranking `among`, best first: what a `top` chooses by.
-    pub fn ranking(mut self, among: Vec<Value>) -> Self {
-        self.among = among;
-        self
+    /// The fold a concept field electing with `elector` reads its claims
+    /// through: `of` the claims, ranked by `listed` under `top`.
+    pub fn elect(elector: Elector, of: Term<Any>, listed: Vec<Value>) -> Self {
+        let apply = match elector {
+            Elector::Last => Aggregator::Last,
+            Elector::Max => Aggregator::Max,
+            Elector::Min => Aggregator::Min,
+            Elector::Top => Aggregator::Top,
+        };
+        ReduceSpec { apply, of, listed }
     }
 }
 
@@ -282,7 +291,7 @@ impl From<&ReduceEntry> for ReduceSpec {
         ReduceSpec {
             apply: entry.aggregator,
             of: entry.input.clone(),
-            among: entry.among.clone(),
+            listed: entry.listed.clone(),
         }
     }
 }
@@ -299,10 +308,10 @@ pub struct ReduceEntry {
     /// `Absent` binding is skipped; an unbound variable is an
     /// evaluation error.
     pub input: Term<Any>,
-    /// The values a `top` ranks, best first; empty for every other
+    /// The values a `top` ranks by, least first; empty for every other
     /// fold.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub among: Vec<Value>,
+    #[serde(skip)]
+    pub listed: Vec<Value>,
 }
 
 impl ReduceEntry {
@@ -318,18 +327,12 @@ impl ReduceEntry {
             field: field.into(),
             aggregator,
             input,
-            among: Vec::new(),
+            listed: Vec::new(),
         }
     }
 
-    /// This entry ranking `among`, best first: what a `top` chooses by.
-    pub fn ranking(mut self, among: Vec<Value>) -> Self {
-        self.among = among;
-        self
-    }
-
-    /// Whether the fold returns one of its inputs (`min`, `max`, `last`,
-    /// `top`) rather than computing a value none of them is. A chosen
+    /// Whether the fold returns one of its inputs (`min`, `max`,
+    /// `last`) rather than computing a value none of them is. A chosen
     /// value stands as the fact it was bound from does.
     pub fn selects(&self) -> bool {
         matches!(
@@ -366,7 +369,7 @@ impl ReduceEntry {
             field,
             aggregator,
             input,
-            among: Vec::new(),
+            listed: Vec::new(),
         })
     }
 
@@ -532,8 +535,7 @@ fn fold_column(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>,
 }
 
 /// The input a choosing fold returns: the least or the greatest value
-/// (`min`, `max`), the newest (`last`), or the best ranked among the
-/// entry's listed values (`top`). Every one falls back on the order a
+/// (`min`, `max`) or the newest (`last`). Every one falls back on the order a
 /// cardinality-one read elects a cell's claims by
 /// ([`Cardinality::newer`]): `last` is that order alone, and the others
 /// take the newest among the values they hold equal. Among equal
@@ -579,42 +581,17 @@ fn choose(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>, Eval
     Ok(best)
 }
 
-/// Whether a choosing fold takes `candidate` over `incumbent`: `top`
-/// the better ranked among the entry's listed values, then the newer;
-/// `max` and `min` the greater or the lesser value, then the greater
-/// standing; `last` the newer.
+/// Whether a choosing fold takes `candidate` over `incumbent`: as the
+/// elector of the same name elects (see [`Elector::prefers`]), by value
+/// and then by standing.
 fn prefers(entry: &ReduceEntry, candidate: Contender<'_>, incumbent: Contender<'_>) -> bool {
-    match entry.aggregator {
-        Aggregator::Top => {
-            let mine = rank_among(&entry.among, candidate.0);
-            let theirs = rank_among(&entry.among, incumbent.0);
-            mine < theirs || (mine == theirs && Cardinality::newer(candidate, incumbent))
-        }
-        Aggregator::Max | Aggregator::Min => {
-            let ordering = candidate.0.partial_cmp(incumbent.0).unwrap_or_else(|| {
-                encode_value_owned(candidate.0).cmp(&encode_value_owned(incumbent.0))
-            });
-            let wanted = if entry.aggregator == Aggregator::Max {
-                Ordering::Greater
-            } else {
-                Ordering::Less
-            };
-            ordering == wanted || (ordering.is_eq() && candidate.1 > incumbent.1)
-        }
-        _ => Cardinality::newer(candidate, incumbent),
-    }
-}
-
-/// Where `value` ranks among `listed`, best first: an unlisted value
-/// ranks last, and every value ranks first when nothing is listed.
-fn rank_among(listed: &[Value], value: &Value) -> usize {
-    if listed.is_empty() {
-        return 0;
-    }
-    listed
-        .iter()
-        .position(|candidate| candidate == value)
-        .unwrap_or(usize::MAX)
+    let elector = match entry.aggregator {
+        Aggregator::Max => Elector::Max,
+        Aggregator::Min => Elector::Min,
+        Aggregator::Top => Elector::Top,
+        _ => Elector::Last,
+    };
+    elector.prefers(&entry.listed, candidate, incumbent)
 }
 
 /// Fold one group's column of present values into a computed one.

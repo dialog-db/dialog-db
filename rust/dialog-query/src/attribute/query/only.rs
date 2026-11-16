@@ -4,6 +4,7 @@ use crate::Claim;
 use crate::Value;
 use crate::attribute::Relation;
 use crate::corpus::{Constrained, CorpusRelation, Selector};
+use crate::elector::{Elector, Ranking};
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
@@ -15,6 +16,7 @@ use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
 use dialog_corpus::{Cause, DialogCorpusError, Fact, FactView, Select};
+use std::cmp::Ordering;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::pin::Pin;
@@ -39,6 +41,30 @@ fn materialize_winner(winner: FactView) -> Result<Option<Winner>, DialogCorpusEr
     }
 }
 
+/// The claim of a cell `ranking` elects between `current` and
+/// `challenger`: by the ranking's order of their values, and by
+/// [`FactView::elect`], the order every cardinality-one read shares,
+/// where the values do not decide. With no ranking, that order alone.
+/// A row whose value cannot be read falls to [`FactView::elect`], which
+/// ranks a corrupt row below any readable one.
+fn elect(
+    ranking: Option<&Ranking>,
+    current: FactView,
+    challenger: FactView,
+) -> Result<FactView, DialogCorpusError> {
+    let Some(ranking) = ranking.filter(|ranking| ranking.elector != Elector::Last) else {
+        return current.elect(challenger);
+    };
+    let (Ok(mine), Ok(theirs)) = (current.value(), challenger.value()) else {
+        return current.elect(challenger);
+    };
+    Ok(match ranking.order(&mine, &theirs) {
+        Ordering::Greater => current,
+        Ordering::Less => challenger,
+        Ordering::Equal => current.elect(challenger)?,
+    })
+}
+
 /// The `(attribute, entity)` lookup [`challenge`] verifies `candidate`
 /// against: every stored value of the candidate's attribute on its
 /// entity, among which the winner is elected.
@@ -61,6 +87,7 @@ fn challenged(
 fn challenge<'a, Env>(
     env: &'a Env,
     selector: AttributeQueryAll,
+    ranking: Option<Ranking>,
     candidate: Match,
 ) -> impl Selection + 'a
 where
@@ -92,7 +119,7 @@ where
             // through it.
             winner = Some(match winner {
                 None => challenger,
-                Some(winner) => winner.elect(challenger)?,
+                Some(winner) => elect(ranking.as_ref(), winner, challenger)?,
             });
         }
 
@@ -115,13 +142,16 @@ where
 /// Winner-selecting attribute query for `Cardinality::One`.
 ///
 /// Wraps an [`AttributeQueryAll`] and yields one value per
-/// `(attribute, entity)` pair. Which row survives is not this layer's
-/// decision: competing rows fold through [`FactView::elect`], the
-/// value layer's cardinality-one election, and the engine encodes no
-/// policy of its own.
+/// `(attribute, entity)` pair. Competing rows fold through
+/// [`FactView::elect`], the value layer's cardinality-one election,
+/// unless the query reads for a concept field that declares an
+/// elector: then by the elector's order of the values first (see
+/// [`Elector`]), and by that election where the values do not decide.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct AttributeQueryOnly {
     query: AttributeQueryAll,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ranking: Option<Ranking>,
 }
 
 impl AttributeQueryOnly {
@@ -130,6 +160,7 @@ impl AttributeQueryOnly {
     pub fn new(the: Term<Relation>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         Self {
             query: AttributeQueryAll::new(the, of, is, cause),
+            ranking: None,
         }
     }
 
@@ -153,6 +184,7 @@ impl AttributeQueryOnly {
     pub(crate) fn with_type(self, kind: Kind) -> Self {
         Self {
             query: self.query.with_type(kind),
+            ranking: self.ranking,
         }
     }
 
@@ -160,7 +192,22 @@ impl AttributeQueryOnly {
     pub(crate) fn with_subject_kinds(self, the: Option<Kind>, of: Option<Kind>) -> Self {
         Self {
             query: self.query.with_subject_kinds(the, of),
+            ranking: self.ranking,
         }
+    }
+
+    /// This query electing each cell's claim by `ranking` rather than
+    /// the newest.
+    pub(crate) fn ranked(self, ranking: Ranking) -> Self {
+        Self {
+            query: self.query,
+            ranking: Some(ranking),
+        }
+    }
+
+    /// The ranking the query elects by, when it is not the newest.
+    pub fn ranking(&self) -> Option<&Ranking> {
+        self.ranking.as_ref()
     }
 
     /// Get the 'cause' term.
@@ -223,6 +270,7 @@ impl AttributeQueryOnly {
         Env: crate::Scope<'a>,
     {
         let selector = self.query;
+        let ranking = self.ranking;
         // Pipeline the probes: while this loop awaits one row's scan, the
         // scans the next rows will issue are offered as preload hints, so
         // a cold replica replicates them concurrently instead of paying
@@ -303,7 +351,7 @@ impl AttributeQueryOnly {
                                 if current.the_bytes()? == fact.the_bytes()?
                                     && current.of_bytes()? == fact.of_bytes()?
                                 {
-                                    current.elect(fact)?
+                                    elect(ranking.as_ref(), current, fact)?
                                 } else {
                                     // Group closed: only its winner pays
                                     // for materialization, and only if it
@@ -371,7 +419,7 @@ impl AttributeQueryOnly {
                     }));
                     for await candidate in candidates {
                         let candidate = candidate?;
-                        let verified = Box::pin(challenge(env, selector.clone(), candidate));
+                        let verified = Box::pin(challenge(env, selector.clone(), ranking.clone(), candidate));
                         for await v in verified {
                             yield v?;
                         }

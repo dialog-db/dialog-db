@@ -7,6 +7,7 @@ use std::fmt;
 
 use crate::attribute::Keyed;
 use crate::corpus::{CorpusTypeError, DialogCorpusError, Type, Value};
+use crate::elector::Elector;
 pub use crate::environment::Environment;
 pub use crate::proposition::Proposition;
 use crate::reduce::Aggregator;
@@ -138,6 +139,17 @@ pub enum TypeError {
     OptionalConformance {
         /// The offending attribute selector.
         the: String,
+    },
+    /// A concept field declares an elector its attribute cannot be read
+    /// under.
+    #[error("{the} cannot elect with `{elector}`: {reason}")]
+    Election {
+        /// The field's attribute selector.
+        the: String,
+        /// The elector it declares.
+        elector: Elector,
+        /// Why the attribute cannot be read under it.
+        reason: String,
     },
     /// A keyed collection field is marked optional. A collection's
     /// key is projected by a formula over the matched attribute, and

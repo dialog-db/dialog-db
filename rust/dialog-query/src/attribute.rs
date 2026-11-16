@@ -53,8 +53,8 @@ pub use crate::{Predicate, Premise, Term};
 /// pub struct Tag(pub String);
 /// ```
 ///
-/// Nor does a ranking pick: a ranked read is a rule whose `reduce` folds
-/// with `max`, `min` or `top`.
+/// Nor does a ranking pick: a ranked read is a concept field electing
+/// with `max`, `min` or `top` over a cardinality-many attribute.
 ///
 /// ```compile_fail
 /// #[derive(dialog_macros::Attribute, Clone)]

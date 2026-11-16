@@ -1212,6 +1212,17 @@ fn merge_candidate(
         Source::Shared(rows, index) => merged.adopt_citations(&rows[*index]),
         Source::Folded => {}
     }
+    // The value stands as the claim it was elected as, stored or derived,
+    // so a fold over the caller's variable ranks it as that claim, as it
+    // ranks a value a scan bound.
+    if let (Some(standing), Some(name)) = (
+        candidate.standing,
+        terms
+            .get(ConceptDescriptor::VALUE)
+            .and_then(|term| term.shared_name()),
+    ) {
+        merged.cite_variable_standing(name, standing);
+    }
     Ok(Some(merged))
 }
 

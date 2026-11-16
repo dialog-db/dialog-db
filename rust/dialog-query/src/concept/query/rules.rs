@@ -273,9 +273,13 @@ impl ConceptRules {
     /// evaluation computes each reducing rule's folded rows once and
     /// joins caller bindings against them (the fixpoint-table shape),
     /// instead of piping caller bindings into the body.
+    ///
+    /// The selecting rule is one when a field that reads a derived
+    /// relation declares an elector: it folds the field's claims with
+    /// the elector.
     pub fn reducing(&self) -> impl Iterator<Item = &DeductiveRule> {
-        self.installed
-            .iter()
+        iter::once(&self.implicit)
+            .chain(self.installed.iter())
             .filter(|rule| !rule.reduce().is_empty())
     }
 
@@ -327,7 +331,11 @@ impl ConceptRules {
                 .conclusion()
                 .implicit_plan(adornment, || self.implicit.plan(&scope))
         };
-        let plan: Disjunction = iter::once(implicit)
+        // A selecting rule that folds an electing field is computed with
+        // the reducing rules, so it does not join the disjunction either.
+        let implicit = self.implicit.reduce().is_empty().then_some(implicit);
+        let plan: Disjunction = implicit
+            .into_iter()
             .chain(
                 self.installed
                     .iter()

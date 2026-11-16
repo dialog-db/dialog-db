@@ -27,7 +27,9 @@ use crate::reduce::{Reduce, ReduceEntry, ReduceSpec};
 use crate::rule::analyzer::AnalyzedRule;
 use crate::rule::body;
 use crate::rule::reference;
-use crate::rule::{Compile, RuleKind, compile_internal, compile_rule, fmt_rule_schema};
+use crate::rule::{
+    Compile, RuleKind, compile_electing, compile_internal, compile_rule, fmt_rule_schema,
+};
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
@@ -638,11 +640,18 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
                 ),
                 (kind, _) => kind,
             };
+            // A field that elects reads every claim of the relation into
+            // a variable of its own, which the selecting rule folds into
+            // the field with the elector (see `electing_reduce`).
+            let bound = match field.elector() {
+                Some(_) => claim_variable(name),
+                None => name.to_string(),
+            };
             let value = match (kind, field.is_optional()) {
-                (Some(kind), true) => Term::<Any>::typed_var(name, kind.optional()),
-                (Some(kind), false) => Term::<Any>::typed_var(name, kind),
-                (None, true) => Term::<Any>::typed_var(name, Kind::from(Primitive::ANY)),
-                (None, false) => Term::var(name),
+                (Some(kind), true) => Term::<Any>::typed_var(&bound, kind.optional()),
+                (Some(kind), false) => Term::<Any>::typed_var(&bound, kind),
+                (None, true) => Term::<Any>::typed_var(&bound, Kind::from(Primitive::ANY)),
+                (None, false) => Term::var(&bound),
             };
             let mut terms = Parameters::new();
             terms.insert("this".to_string(), Term::<Any>::var("this"));
@@ -693,26 +702,33 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
         };
 
         // The scan reads under the field's cardinality: the newest
-        // claim under one, every claim under many.
+        // claim under one, every claim under many; a field that
+        // declares an elector, the one claim of each cell it elects.
         let scanned = Some(field.descriptor().cardinality());
         let premise: Premise = if field.is_optional() {
-            OptionalAttributeQuery::new(
+            let query = OptionalAttributeQuery::new(
                 field.the().term(name),
                 this.clone(),
                 value.clone(),
                 Term::blank(),
                 scanned,
-            )
-            .into()
+            );
+            match field.ranking() {
+                Some(ranking) => query.ranked(ranking).into(),
+                None => query.into(),
+            }
         } else {
-            AttributeQuery::new(
+            let query = AttributeQuery::new(
                 field.the().term(name),
                 this.clone(),
                 value.clone(),
                 Term::blank(),
                 scanned,
-            )
-            .into()
+            );
+            match field.ranking() {
+                Some(ranking) => query.ranked(ranking).into(),
+                None => query.into(),
+            }
         };
         premises.push(premise);
 
@@ -758,6 +774,38 @@ impl From<&ConceptDescriptor> for DeductiveRule {
     }
 }
 
+/// The variable a field that declares an elector reads its relation's
+/// claims into when rules derive the relation: the selecting rule folds
+/// it into the field.
+fn claim_variable(field: &str) -> String {
+    format!("{field}/claim")
+}
+
+/// The folds by which a selecting rule elects the fields that read a
+/// derived relation and declare an elector: each field is the claim
+/// its elector chooses among the relation's stored and derived claims.
+fn electing_reduce(
+    concept: &ConceptDescriptor,
+    derived: &dyn Fn(&ConceptFieldDescriptor) -> bool,
+) -> Vec<(String, ReduceSpec)> {
+    concept
+        .with()
+        .iter()
+        .filter(|(_, field)| derived(field))
+        .filter_map(|(name, field)| {
+            let ranking = field.ranking()?;
+            Some((
+                name.to_string(),
+                ReduceSpec::elect(
+                    ranking.elector,
+                    Term::var(claim_variable(name)),
+                    ranking.listed,
+                ),
+            ))
+        })
+        .collect()
+}
+
 impl DeductiveRule {
     /// The rule by which `concept` selects its rows: every required
     /// field whose attribute `derived` says some rule derives is read
@@ -768,7 +816,16 @@ impl DeductiveRule {
         concept: &ConceptDescriptor,
         derived: &dyn Fn(&ConceptFieldDescriptor) -> bool,
     ) -> Result<Self, TypeError> {
-        compile_internal::<Self>(concept.clone(), selecting_premises(concept, derived))
+        let reduce = electing_reduce(concept, derived);
+        if reduce.is_empty() {
+            compile_internal::<Self>(concept.clone(), selecting_premises(concept, derived))
+        } else {
+            compile_electing::<Self>(
+                concept.clone(),
+                selecting_premises(concept, derived),
+                reduce,
+            )
+        }
     }
 
     /// Whether the body binds at most one row per `this`. Every premise

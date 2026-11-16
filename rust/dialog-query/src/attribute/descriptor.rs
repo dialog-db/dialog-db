@@ -260,9 +260,11 @@ impl FromStr for The {
 /// cardinality one a read returns the cell's newest claim and a write
 /// succeeds it; under cardinality many a read returns every claim and a
 /// write adds one. `as: [v1, v2]` lists the values the attribute holds,
-/// an enumerated type with no ranking meaning. A read that ranks
-/// candidates (the greatest, the least, the best listed) is a rule whose
-/// `reduce` clause folds them with `max`, `min` or `top`. Rules derive
+/// least first: an enumerated type, ordered, so `[registered, active,
+/// suspended]` ranks `suspended` greatest. A read that ranks candidates
+/// (the greatest, the least, the last listed) is a concept field that
+/// elects with `max`, `min` or `top` over a cardinality-many attribute
+/// (see [`Elector`](crate::elector::Elector)). Rules derive
 /// into relations and are found by them, so two attributes over one
 /// relation under different types or cardinalities are two attributes.
 ///
@@ -348,12 +350,14 @@ enum As {
 /// read.
 pub const PICK_REFUSED: &str = "an attribute no longer has a `pick`: it is written with \
      `cardinality: one` (what `last` read) or `cardinality: many` (what `all` read), and a \
-     read under `max`, `min` or `top` is a rule whose `reduce` folds with that aggregator";
+     read under `max`, `min` or `top` is a concept field over a cardinality-many attribute \
+     that elects with it (`elect: top`), `top` ranking the values `as` lists least first";
 
 /// Why an attribute listing relations under `the`, a ranked chain an
 /// earlier release read, is not read.
 pub const CHAIN_REFUSED: &str = "`the` names one relation: a list of relations, ranked, \
-     is no longer read; a rule reading each relation and folding with `top` replaces it";
+     is no longer read; a rule deriving one relation from each, read by a field that elects, \
+     replaces it";
 
 impl TryFrom<Wire> for AttributeDescriptor {
     type Error = String;
@@ -453,7 +457,8 @@ impl AttributeDescriptor {
     }
 
     /// This descriptor over the listed value domain: the values the
-    /// attribute holds. The list carries no ranking.
+    /// attribute holds, least first: the order a field electing with
+    /// `top` ranks them by.
     pub fn with_domain(mut self, values: Vec<Value>) -> Self {
         self.among = values;
         self
@@ -800,8 +805,8 @@ mod tests {
     }
 
     /// A listed `as` is an enumerated type: the values the attribute
-    /// holds, in no ranking order, read under the cardinality the
-    /// attribute declares. It is written back as listed.
+    /// holds, least first, read under the cardinality the attribute
+    /// declares. It is written back as listed, in its order.
     #[dialog_common::test]
     fn it_reads_a_listed_domain_as_an_enumerated_type() {
         let listed: AttributeDescriptor = serde_json::from_value(serde_json::json!({

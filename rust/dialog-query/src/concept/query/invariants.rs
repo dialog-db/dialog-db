@@ -1363,30 +1363,6 @@ async fn a_stored_claim_is_read_over_a_folded_value() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `account/status(a) := top(s) among [suspended, active] :-
-/// account/state(a) = s`, the states read as a set.
-fn ranked_status() -> anyhow::Result<DeductiveRule> {
-    compile(serde_json::json!({
-        "deduce": { "with": { "status": { "the": "account/status", "as": "text:" } } },
-        "when": [{
-            "assert": { "with": {
-                "state": { "the": "account/state", "as": "text:", "cardinality": "many" }
-            }},
-            "where": {
-                "this": { "?": { "name": "this" } },
-                "state": { "?": { "name": "state" } }
-            }
-        }],
-        "reduce": {
-            "status": {
-                "apply": "top",
-                "of": { "?": { "name": "state" } },
-                "among": ["suspended", "active"]
-            }
-        }
-    }))
-}
-
 /// Write `value` to `the` of `of`, added beside the cell's claims or
 /// succeeding the newest, in a commit of its own.
 async fn write(
@@ -1417,41 +1393,48 @@ async fn write(
     Ok(())
 }
 
-/// "`top` is an aggregator: every state is kept, and a rule derives
-/// the status by rank." With `active` and then `suspended` added to an
-/// account's states, the status is `suspended`, the better ranked; a
-/// stored status written before either state loses to it, since the
-/// chosen value stands as the fact it was chosen from; and a status
-/// written after wins, as a later write does.
+/// "Every state is kept, and the concept elects the status by rank."
+/// An account's status is its states read under `top`, which ranks the
+/// states its attribute lists from least to greatest: `active` stands
+/// alone, `suspended` outranks it, and an `active` written after
+/// `suspended` adds a claim but does not displace it. Un-suspending is
+/// retracting `suspended`.
 #[dialog_common::test]
-async fn a_rule_derives_a_status_by_rank_over_the_states_kept() -> anyhow::Result<()> {
+async fn a_concept_elects_a_status_by_rank_over_the_states_kept() -> anyhow::Result<()> {
     use crate::Cardinality;
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     let account: Entity = "id:account".parse()?;
-    let status = |value: &str| {
-        vec![(
-            Value::Entity(account.clone()),
-            Value::String(value.to_string()),
-        )]
-    };
+    let concept: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "status": {
+            "the": "account/state",
+            "as": ["active", "suspended"],
+            "cardinality": "many",
+            "elect": "top"
+        }
+    }}))?;
     let read = || async {
-        let mut registry = RuleRegistry::new();
-        registry.register(ranked_status()?)?;
-        let source = TestEnv::new(&branch, &operator, registry);
-        relation_under(&source, "account/status", "one").await
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let mut terms = Parameters::new();
+        terms.insert(
+            "this".into(),
+            Term::Constant(Value::Entity(account.clone())),
+        );
+        terms.insert("status".into(), Term::<Any>::var("status"));
+        let rows = ConceptQuery {
+            terms,
+            predicate: concept.clone(),
+        }
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+        rows.iter()
+            .map(|row| Ok(row.lookup(&Term::<Any>::var("status"))?.content()?))
+            .collect::<anyhow::Result<Vec<Value>>>()
     };
+    let status = |value: &str| vec![Value::String(value.to_string())];
 
-    write(
-        &operator,
-        &branch,
-        "account/status",
-        &account,
-        "frozen",
-        Cardinality::One,
-    )
-    .await?;
     write(
         &operator,
         &branch,
@@ -1461,11 +1444,7 @@ async fn a_rule_derives_a_status_by_rank_over_the_states_kept() -> anyhow::Resul
         Cardinality::Many,
     )
     .await?;
-    assert_eq!(
-        read().await?,
-        status("active"),
-        "newer than the stored status"
-    );
+    assert_eq!(read().await?, status("active"), "the one state");
     write(
         &operator,
         &branch,
@@ -1483,13 +1462,17 @@ async fn a_rule_derives_a_status_by_rank_over_the_states_kept() -> anyhow::Resul
     write(
         &operator,
         &branch,
-        "account/status",
+        "account/state",
         &account,
-        "closed",
-        Cardinality::One,
+        "active",
+        Cardinality::Many,
     )
     .await?;
-    assert_eq!(read().await?, status("closed"), "a later write wins");
+    assert_eq!(
+        read().await?,
+        status("suspended"),
+        "a later, lesser state does not displace it"
+    );
     Ok(())
 }
 

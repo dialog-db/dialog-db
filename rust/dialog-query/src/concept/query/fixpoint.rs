@@ -2177,10 +2177,9 @@ mod tests {
         Ok(())
     }
 
-    /// A rule folding a recursive relation with `top` reads it over the
-    /// completed closure: the ranking puts the root first, so every
-    /// descendant's top ancestor is the root, which only the transitive
-    /// closure reaches for `d`.
+    /// A rule folding a recursive relation reads it over the completed
+    /// closure: `d` counts three ancestors, which only the transitive
+    /// closure reaches, and `b` and `c` one each.
     #[dialog_common::test]
     async fn it_elects_over_the_completed_fixpoint() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -2211,11 +2210,10 @@ mod tests {
         }
         assert!(registry.is_recursive(&ancestor.this())?);
 
-        // The closure's relation folded by rank: the root outranks
-        // everyone, then its children.
+        // The closure's relation folded by count.
         use crate::rule::DeductiveRuleDescriptor;
         let fold: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-            "deduce": { "with": { "top": { "the": "family/top-ancestor", "as": "entity:" } } },
+            "deduce": { "with": { "top": { "the": "family/ancestor-count", "as": "natural:" } } },
             "when": [{
                 "assert": { "with": {
                     "ancestor": { "the": "family/ancestor", "as": "entity:", "cardinality": "many" }
@@ -2226,14 +2224,13 @@ mod tests {
                 }
             }],
             "reduce": { "top": {
-                "apply": "top",
-                "of": { "?": { "name": "ancestor" } },
-                "among": [a.to_string(), b.to_string(), c.to_string(), d.to_string()]
+                "apply": "count",
+                "of": { "?": { "name": "ancestor" } }
             } }
         }))?;
         registry.register(fold.compile()?)?;
         let ranked: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "top": { "the": "family/top-ancestor", "as": "entity:" }
+            "top": { "the": "family/ancestor-count", "as": "natural:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::var("who"));
@@ -2259,14 +2256,14 @@ mod tests {
         }
         tops.sort_by_key(|pair| format!("{pair:?}"));
         let mut expected = vec![
-            (Value::Entity(d.clone()), Value::Entity(a.clone())),
-            (Value::Entity(b.clone()), Value::Entity(a.clone())),
-            (Value::Entity(c.clone()), Value::Entity(a.clone())),
+            (Value::Entity(d.clone()), Value::UnsignedInt(3)),
+            (Value::Entity(b.clone()), Value::UnsignedInt(1)),
+            (Value::Entity(c.clone()), Value::UnsignedInt(1)),
         ];
         expected.sort_by_key(|pair| format!("{pair:?}"));
         assert_eq!(
             tops, expected,
-            "each top ancestor is elected over the completed closure"
+            "each count is folded over the completed closure"
         );
         Ok(())
     }

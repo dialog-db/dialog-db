@@ -57,7 +57,7 @@
         },
         "as": {
           "$ref": "#/$defs/Assert",
-          "description": "Value type of the attribute. If omitted, any type is allowed."
+          "description": "Value type of the attribute. If omitted, any type is allowed. A list of values is an enumerated type ranked least first, left to right."
         },
         "optional": {
           "type": "boolean",
@@ -67,6 +67,11 @@
         "conforms": {
           "type": "string",
           "description": "A concept the field's target entity must satisfy \u2014 a concept-typed field, written as the target's `concept:{hash}` URI. Entity-valued attributes only, and mutually exclusive with `optional`: the join over \"edge exists AND target conforms\" is absence over a derived predicate, which stratification has to own first. Enforced structurally, by conjoining the target's premises onto the field."
+        },
+        "elect": {
+          "type": "string",
+          "enum": ["last", "max", "min", "top"],
+          "description": "How the field chooses one of its relation's claims per entity: 'last' the newest, 'max' the greatest value, 'min' the least, 'top' the value listed last in the attribute's listed `as`, which ranks its values least first. 'max', 'min' and 'top' read a cardinality-many attribute; 'top' needs a listed `as`. Declaring an elector changes the concept's identity."
         }
       },
       "required": [

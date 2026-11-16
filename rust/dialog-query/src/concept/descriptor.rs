@@ -28,6 +28,7 @@ use crate::identity::{self, CONCEPT, field};
 use crate::memo::Memo;
 use crate::planner::Conjunction;
 use crate::rule::DeductiveRule;
+use dialog_corpus::identity::SYMBOL;
 use merkle_reference::{Reference, Type as ReferenceType};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -227,7 +228,11 @@ impl ConceptDescriptor {
     pub fn attribute_field(&self) -> Option<(&str, &ConceptFieldDescriptor)> {
         let mut fields = self.with().iter();
         let (name, field) = fields.next()?;
-        if fields.next().is_some() || field.is_optional() || field.conforms().is_some() {
+        if fields.next().is_some()
+            || field.is_optional()
+            || field.conforms().is_some()
+            || field.elector().is_some()
+        {
             return None;
         }
         Some((name, field))
@@ -251,7 +256,8 @@ impl ConceptDescriptor {
     /// It maps each attribute, by the attribute's
     /// [reference](AttributeDescriptor::reference), to the field's options:
     /// `optional` to `true` for an optional field, and `conforms` to the
-    /// reference of the concept a concept-typed field's value conforms to.
+    /// reference of the concept a concept-typed field's value conforms to,
+    /// and `elect` to the elector's name for a field that declares one.
     /// A required plain field's options are the empty map. Field names and
     /// the description are not part of it, and the attributes and the target
     /// concept enter by reference, so the concept is the same whether they
@@ -268,6 +274,9 @@ impl ConceptDescriptor {
             }
             if let Some(target) = field.conforms() {
                 options.push((field::CONFORMS, target.reference()));
+            }
+            if let Some(elector) = field.elector() {
+                options.push((field::ELECT, SYMBOL.reference_of(elector.name().as_bytes())));
             }
             (
                 field.descriptor().reference(),

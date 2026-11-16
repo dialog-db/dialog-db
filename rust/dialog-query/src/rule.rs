@@ -198,6 +198,17 @@ pub(crate) fn compile_internal<T: Compile>(
     compile_rule_as::<T>(conclusion, premises, Vec::new())
 }
 
+/// [`compile_internal`] for a selecting rule whose fields that read a
+/// derived relation elect their claim: each such field is folded with
+/// its elector over the claims the body binds.
+pub(crate) fn compile_electing<T: Compile>(
+    conclusion: ConceptDescriptor,
+    premises: Vec<Premise>,
+    reduce: Vec<(String, ReduceSpec)>,
+) -> Result<T, TypeError> {
+    compile_rule_as::<T>(conclusion, premises, reduce)
+}
+
 fn compile_rule_as<T: Compile>(
     conclusion: ConceptDescriptor,
     premises: Vec<Premise>,

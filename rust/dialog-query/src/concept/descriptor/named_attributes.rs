@@ -3,8 +3,10 @@ use crate::attribute::AttributeDescriptor;
 use crate::attribute::The;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::corpus::Type;
+use crate::elector::{Elector, Ranking};
 use crate::error::TypeError;
 use crate::memo::Memo;
+use crate::type_system::Primitive;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -59,6 +61,13 @@ pub struct ConceptFieldDescriptor {
     /// hashing uses only the target's `concept:{hash}` URI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     conforms: Option<Box<ConceptDescriptor>>,
+    /// How the field chooses one of its relation's claims, when it
+    /// elects by something other than its cardinality: `None` reads
+    /// the newest claim under cardinality one and every claim under
+    /// many. Like optionality, it is how the concept reads the
+    /// attribute, not a property of the attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    elect: Option<Elector>,
     /// The attribute concept of this field (see
     /// [`ConceptDescriptor::of_attribute`]), built on first use. Every
     /// resolution of a concept asks for it, and for its identity, per
@@ -78,6 +87,7 @@ impl ConceptFieldDescriptor {
                 .conforms
                 .as_ref()
                 .map(|target| Box::new(target.without_descriptions())),
+            elect: self.elect,
             attribute: Memo::default(),
         }
     }
@@ -88,6 +98,7 @@ impl ConceptFieldDescriptor {
             descriptor,
             optional: false,
             conforms: None,
+            elect: None,
             attribute: Memo::default(),
         }
     }
@@ -99,6 +110,7 @@ impl ConceptFieldDescriptor {
             descriptor,
             optional: true,
             conforms: None,
+            elect: None,
             attribute: Memo::default(),
         }
     }
@@ -129,8 +141,69 @@ impl ConceptFieldDescriptor {
             descriptor,
             optional: false,
             conforms: Some(Box::new(target)),
+            elect: None,
             attribute: Memo::default(),
         })
+    }
+
+    /// This field electing its claim with `elector`. A ranked elector
+    /// (`max`, `min`, `top`) reads a cardinality-many attribute, whose
+    /// cell keeps every claim to rank; `top` ranks by the values the
+    /// attribute lists, least first; `max` and `min` need a comparable
+    /// type; and a keyed collection, whose entries are each their own
+    /// claim, elects nothing.
+    pub fn electing(mut self, elector: Elector) -> Result<Self, TypeError> {
+        self.elect = Some(elector);
+        self.check_election()?;
+        Ok(self)
+    }
+
+    /// The elector the field chooses its claim by, if it declares one.
+    pub fn elector(&self) -> Option<Elector> {
+        self.elect
+    }
+
+    /// The elector and listed values a read of this field elects by,
+    /// when it declares an elector.
+    pub fn ranking(&self) -> Option<Ranking> {
+        self.elect
+            .map(|elector| Ranking::new(elector, self.descriptor.among().to_vec()))
+    }
+
+    /// Refuse an elector the field's attribute cannot be read under.
+    pub(crate) fn check_election(&self) -> Result<(), TypeError> {
+        let Some(elector) = self.elect else {
+            return Ok(());
+        };
+        let refuse = |reason: &str| {
+            Err(TypeError::Election {
+                the: self.the().to_string(),
+                elector,
+                reason: reason.to_string(),
+            })
+        };
+        if self.the().attribute().is_none() {
+            return refuse("a keyed collection's entries are each a claim of their own");
+        }
+        if elector != Elector::Last && self.cardinality() != Cardinality::Many {
+            return refuse(
+                "a ranked field reads a cardinality-many attribute: under one a write \
+                 succeeds the newest claim, so the cell keeps no other claim to rank",
+            );
+        }
+        if elector == Elector::Top && self.descriptor.among().is_empty() {
+            return refuse(
+                "`top` ranks by the values the attribute's `as` lists, and it lists none",
+            );
+        }
+        if elector.compares()
+            && self
+                .content_type()
+                .is_some_and(|kind| !Primitive::COMPARABLE.contains(kind))
+        {
+            return refuse("`max` and `min` compare values, and the attribute's type has no order");
+        }
+        Ok(())
     }
 
     /// The underlying attribute descriptor.
@@ -241,6 +314,7 @@ impl NamedAttributes {
             return Err(TypeError::EmptyConcept);
         }
         for field in map.values() {
+            field.check_election()?;
             if field.is_optional() && field.the().attribute().is_none() {
                 return Err(TypeError::OptionalCollection {
                     domain: field.domain().to_string(),

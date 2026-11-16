@@ -1,5 +1,6 @@
 use crate::attribute::Relation;
 use crate::attribute::query::DynamicAttributeQuery;
+use crate::elector::Ranking;
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::selection::{Binding, Match, Selection};
@@ -60,6 +61,14 @@ impl OptionalAttributeQuery {
     ) -> Self {
         Self {
             query: DynamicAttributeQuery::new(the, of, is, cause, cardinality),
+        }
+    }
+
+    /// This left-join electing one claim of each cell by `ranking` (see
+    /// [`DynamicAttributeQuery::ranked`]).
+    pub(crate) fn ranked(self, ranking: Ranking) -> Self {
+        Self {
+            query: self.query.ranked(ranking),
         }
     }
 

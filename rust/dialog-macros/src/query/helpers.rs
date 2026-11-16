@@ -209,7 +209,7 @@ pub fn parse_dialog_field_attributes(
 /// `#[cardinality(many)]` attribute into the `dialog_query::Cardinality`
 /// the attribute is read and written under. `#[pick(..)]`, the spelling
 /// of the release before, is refused with the cardinality that replaces
-/// it, and a ranking pick with the rule that does.
+/// it, and a ranking pick with the elector that does.
 pub fn parse_cardinality_attribute(attrs: &[Attribute]) -> Result<TokenStream, syn::Error> {
     for attr in attrs {
         if attr.path().is_ident("pick") {
@@ -220,8 +220,9 @@ pub fn parse_cardinality_attribute(attrs: &[Attribute]) -> Result<TokenStream, s
                 } else if meta.path.is_ident("all") {
                     "`#[pick(all)]` is now `#[cardinality(many)]`".to_string()
                 } else {
-                    "an attribute is no longer read under a ranking pick: a rule whose \
-                     `reduce` folds with `max`, `min` or `top` reads it ranked"
+                    "an attribute is no longer read under a ranking pick: write it \
+                     `#[cardinality(many)]` and read it through a concept field that elects \
+                     with `max`, `min` or `top` (`\"elect\": \"top\"`)"
                         .to_string()
                 });
                 Ok(())

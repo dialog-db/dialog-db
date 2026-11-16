@@ -34,6 +34,9 @@ pub mod concept;
 pub mod constraint;
 /// Static descriptor trait for attribute and concept metadata.
 pub mod descriptor;
+
+/// How a concept field chooses one of its relation's claims.
+pub mod elector;
 /// Variable binding environment used during query planning.
 pub mod environment;
 /// Error types for the query engine.
@@ -103,6 +106,10 @@ mod number_tests;
 /// tests.
 #[cfg(test)]
 mod typed_read_tests;
+
+/// Concept fields that elect their claim, pinned as tests.
+#[cfg(test)]
+mod elector_tests;
 
 mod sort_order;
 pub use sort_order::*;

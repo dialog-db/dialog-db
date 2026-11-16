@@ -4215,12 +4215,12 @@ mod rule_tests {
     }
 
     /// Tonk's `space/presence` shape: a concept whose optional field
-    /// is derived by rules whose bodies read the concept itself for a
-    /// required field. Two rules offer cases, every space with a subject
-    /// `case:remote` and the one whose subject has a replica
-    /// `case:replicated`, and a rule folding the cases with `top`, best
-    /// first, derives the presence: the better-ranked case wins, and no
-    /// rule negates anything.
+    /// reads a relation derived by rules whose bodies read the concept
+    /// itself for a required field. Two rules offer cases, every space
+    /// with a subject `case:remote` and the one whose subject has a
+    /// replica `case:replicated`, and the field elects among them with
+    /// `top`, the last listed greatest: the better-ranked case wins, and
+    /// no rule negates anything.
     #[dialog_common::test]
     async fn it_derives_an_optional_field_from_a_rule_reading_the_concept() -> anyhow::Result<()> {
         use dialog_query::rule::deductive::descriptor::DeductiveRuleDescriptor;
@@ -4229,10 +4229,16 @@ mod rule_tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let cases = serde_json::json!(["case:replicated", "case:remote"]);
+        let cases = serde_json::json!(["case:remote", "case:replicated"]);
         let space = serde_json::json!({ "with": {
             "subject": { "the": "load.space/subject", "as": "entity:" },
-            "presence": { "the": "load.space/presence", "as": cases, "optional": true }
+            "presence": {
+                "the": "load.space/case",
+                "as": cases,
+                "cardinality": "many",
+                "optional": true,
+                "elect": "top"
+            }
         } });
         let replica = serde_json::json!({ "with": {
             "subject": { "the": "load.replica/subject", "as": "entity:" },
@@ -4267,23 +4273,6 @@ mod rule_tests {
             ]
         }))?;
         let replicated = replicated.compile()?;
-        let ranked: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-            "deduce": { "with": {
-                "presence": { "the": "load.space/presence", "as": "entity:" }
-            } },
-            "when": [
-                { "assert": case, "where": {
-                    "this": { "?": { "name": "this" } },
-                    "case": { "?": { "name": "case" } } } }
-            ],
-            "reduce": { "presence": {
-                "apply": "top",
-                "of": { "?": { "name": "case" } },
-                "among": cases
-            } }
-        }))?;
-        let ranked = ranked.compile()?;
-
         let here: Entity = "id:space-here".parse()?;
         let away: Entity = "id:space-away".parse()?;
         let device: Entity = "id:device".parse()?;
@@ -4291,7 +4280,6 @@ mod rule_tests {
             .transaction()
             .assert(&remote)
             .assert(&replicated)
-            .assert(&ranked)
             .assert(
                 the!("load.space/subject")
                     .of(here.clone())
@@ -4316,38 +4304,6 @@ mod rule_tests {
             .publish()
             .perform(&operator)
             .await?;
-
-        // The relation the fold derives, over the listed cases.
-        let folded: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "presence": { "the": "load.space/presence", "as": cases }
-        } }))?;
-        let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("this"));
-        terms.insert("presence".into(), Term::var("presence"));
-        let mut presences: Vec<(Entity, String)> = branch
-            .select(ConceptQuery {
-                predicate: folded,
-                terms,
-            })
-            .perform(&operator)
-            .try_vec()
-            .await?
-            .into_iter()
-            .map(|row| {
-                Ok((
-                    row.entity().clone(),
-                    row.get::<Entity>("presence")?.to_string(),
-                ))
-            })
-            .collect::<anyhow::Result<_>>()?;
-        presences.sort();
-        assert_eq!(
-            presences,
-            vec![
-                (away.clone(), "case:remote".to_string()),
-                (here.clone(), "case:replicated".to_string()),
-            ]
-        );
 
         // Read through the concept itself: each space carries the
         // best-ranked case a rule derives for it.
