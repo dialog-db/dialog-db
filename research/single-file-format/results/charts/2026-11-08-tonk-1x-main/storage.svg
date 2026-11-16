@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 460" font-family="system-ui, sans-serif" font-size="12">
+<rect width="960" height="460" fill="#ffffff"/>
+<text x="70" y="24" font-size="16" font-weight="600">A replica on disk</text>
+<text x="70" y="44" fill="#4b5563">dataset 3ea7f49117155b92</text>
+<line x1="70" x2="940" y1="350.0" y2="350.0" stroke="#e5e7eb"/>
+<text x="64" y="354.0" text-anchor="end" fill="#4b5563">0.00</text>
+<line x1="70" x2="940" y1="294.0" y2="294.0" stroke="#e5e7eb"/>
+<text x="64" y="298.0" text-anchor="end" fill="#4b5563">37.35</text>
+<line x1="70" x2="940" y1="238.0" y2="238.0" stroke="#e5e7eb"/>
+<text x="64" y="242.0" text-anchor="end" fill="#4b5563">74.70</text>
+<line x1="70" x2="940" y1="182.0" y2="182.0" stroke="#e5e7eb"/>
+<text x="64" y="186.0" text-anchor="end" fill="#4b5563">112.05</text>
+<line x1="70" x2="940" y1="126.0" y2="126.0" stroke="#e5e7eb"/>
+<text x="64" y="130.0" text-anchor="end" fill="#4b5563">149.40</text>
+<line x1="70" x2="940" y1="70.0" y2="70.0" stroke="#e5e7eb"/>
+<text x="64" y="74.0" text-anchor="end" fill="#4b5563">186.75</text>
+<text x="16" y="210.0" transform="rotate(-90 16 210.0)" text-anchor="middle" fill="#4b5563">MiB</text>
+<rect x="113.5" y="238.4" width="114.0" height="111.6" fill="#6b7280"/>
+<line x1="170.5" x2="170.5" y1="238.4" y2="238.4" stroke="#111827"/>
+<text x="170.5" y="232.4" text-anchor="middle" font-weight="600">74.42</text>
+<rect x="229.5" y="348.2" width="114.0" height="1.8" fill="#2563eb"/>
+<line x1="286.5" x2="286.5" y1="348.2" y2="348.2" stroke="#111827"/>
+<text x="286.5" y="342.2" text-anchor="middle" font-weight="600">1.22</text>
+<rect x="345.5" y="348.0" width="114.0" height="2.0" fill="#d97706"/>
+<line x1="402.5" x2="402.5" y1="348.0" y2="348.0" stroke="#111827"/>
+<text x="402.5" y="342.0" text-anchor="middle" font-weight="600">1.31</text>
+<text x="287.5" y="366" text-anchor="end" transform="rotate(-30 287.5 366)">owner after setup</text>
+<rect x="548.5" y="95.5" width="114.0" height="254.5" fill="#6b7280"/>
+<line x1="605.5" x2="605.5" y1="95.5" y2="95.5" stroke="#111827"/>
+<text x="605.5" y="89.5" text-anchor="middle" font-weight="600">169.78</text>
+<rect x="664.5" y="347.0" width="114.0" height="3.0" fill="#2563eb"/>
+<line x1="721.5" x2="721.5" y1="347.0" y2="347.0" stroke="#111827"/>
+<text x="721.5" y="341.0" text-anchor="middle" font-weight="600">2.01</text>
+<rect x="780.5" y="347.0" width="114.0" height="3.0" fill="#d97706"/>
+<line x1="837.5" x2="837.5" y1="347.0" y2="346.9" stroke="#111827"/>
+<text x="837.5" y="340.9" text-anchor="middle" font-weight="600">2.03</text>
+<text x="722.5" y="366" text-anchor="end" transform="rotate(-30 722.5 366)">a member after the week</text>
+<rect x="674" y="436" width="12" height="12" fill="#6b7280"/>
+<text x="692" y="446">main/fs</text>
+<rect x="765" y="436" width="12" height="12" fill="#2563eb"/>
+<text x="783" y="446">file 9</text>
+<rect x="849" y="436" width="12" height="12" fill="#d97706"/>
+<text x="867" y="446">file 10</text>
+</svg>
