@@ -31,6 +31,7 @@ fn value_to_parts(value: &Value) -> (&'static str, String) {
         Value::Float(n) => ("float", n.to_string()),
         Value::Record(record) => ("record", record.to_base58()),
         Value::Symbol(attr) => ("attribute", attr.to_string()),
+        Value::Composite(composite) => ("composite", composite.as_bytes().to_base58()),
     }
 }
 
@@ -65,6 +66,9 @@ fn parts_to_value(value_type: &str, is: &str) -> Result<Value, DialogCorpusError
         }
         "record" => Ok(Value::Record(is.from_base58().map_err(parse_err)?)),
         "attribute" => Ok(Value::Symbol(Relation::from_str(is)?)),
+        "composite" => Ok(Value::Composite(dialog_corpus::Composite::from_bytes(
+            &is.from_base58().map_err(parse_err)?,
+        )?)),
         _ => Err(DialogCorpusError::InvalidValue(format!(
             "unknown value type: {value_type}"
         ))),

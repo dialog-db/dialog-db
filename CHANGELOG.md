@@ -14,6 +14,53 @@ says how to cut a release.
 
 ## Unreleased
 
+### A value can be a composite: attribute and value pairs, held as one value
+
+[#812](https://github.com/dialog-db/dialog-db/pull/812), from the record
+values research ([#748](https://github.com/dialog-db/dialog-db/pull/748))
+
+A value that is compound but atomic (a location's latitude and longitude, a
+table a view resolved) had nowhere to go but an opaque `record:`, each writer
+inventing its own encoding and its own tag. A composite is a value type of its
+own, `composite:`: a set of attribute and value pairs, written and replaced
+whole like any value. Its fields are named by relations, a field may hold
+several values, and a value may be a composite. Two composites are equal
+exactly when they hold the same pairs, whatever order they were given in, and
+the natural `3` and the float `3.0` are one value in a field as anywhere.
+
+A composite is held as one canonical encoding (every name it uses once,
+sorted, then its fields by index, a nested composite's fields naming the
+outer one's names), and reading bytes that are not that encoding is refused,
+so equal composites have equal bytes. Its identity is its merkle reference:
+a map under `composite:` from each attribute to its value's reference, or to
+the `set:` of its values' references, so no layout enters it.
+
+What this changes for you:
+
+- `Value` has a new variant, `Composite`, and `ValueDataType` (the query
+  layer's `Type`) a new `Composite`, written `composite:` and keyed with type
+  byte 22. A `match` over either needs an arm. `Value::Record` and
+  `record:` are unchanged, identities included.
+- `Composite::new` builds one from pairs, `Composite::get` reads the values
+  an attribute holds without decoding the rest, `Composite::fields` reads
+  every pair, `Composite::from_bytes` reads canonical bytes and refuses any
+  other, and `Composite::reference` gives its identity.
+- An attribute declared `as: composite:` holds composites, and a typed term
+  or formula field can be a `Composite`. A query cannot yet read a field out
+  of a composite it bound; that comes with destructuring.
+- In JSON a composite is `{"composite:": [["geo/lat", 37.77], ...]}`, its
+  pairs in canonical order; in a binary format, its canonical bytes; in a
+  CSV export, `composite` with its bytes in base58.
+- `ValueDataType::max()`, the largest type a key carries, is now
+  `Composite`, so a scan bound from it covers composites. The query layer's
+  `Primitive::ALL` includes them, and the wire names the type `composite`.
+
+Why: a value that has to change as a whole was either split into claims,
+which concurrent writers can leave half updated, or packed into opaque
+bytes no query could read and no two writers spelled alike. A composite is
+one value dialog can compare, key and, next, destructure.
+
+
 ### A rule that leaves a premise's subject unnamed fires for the entity a commit wrote
 
 [#802](https://github.com/dialog-db/dialog-db/pull/802), fixes
@@ -351,6 +398,11 @@ most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
 
 ### Compatibility and migration
 
+- Composites: nothing an existing space holds is rewritten or read
+  differently, and opaque `record:` values keep their encoding and identity.
+  A space that stores a composite cannot be read by an older release, which
+  takes a key with type byte 22 for corruption: once a replica writes one,
+  every replica reading that space needs this release.
 - Nothing an existing space holds changes or is read differently for the
   single-file archive: it is a new provider a space opts into. A space
   opened with `Chronicle` does not read an `fs` archive's directory of

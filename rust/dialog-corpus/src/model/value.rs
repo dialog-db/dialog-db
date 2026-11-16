@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::Blake3Hash;
-use crate::{Cause, DialogCorpusError, Entity, Relation, TypeError, make_reference};
+use crate::{Cause, Composite, DialogCorpusError, Entity, Relation, TypeError, make_reference};
 use base58::{FromBase58, ToBase58};
 use dialog_number::Number;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -59,6 +59,8 @@ pub enum Value {
     Record(Vec<u8>),
     /// A symbol type, used to distinguish attributes from other strings
     Symbol(Relation),
+    /// A value made of attribute and value pairs (see [`Composite`])
+    Composite(Composite),
 }
 
 /// A value as its bare payload, untagged: how a human-readable format
@@ -77,6 +79,7 @@ enum Bare<'a> {
     Float(f64),
     Record(&'a Vec<u8>),
     Symbol(&'a Relation),
+    Composite(&'a Composite),
 }
 
 impl Value {
@@ -91,6 +94,7 @@ impl Value {
             Value::Float(float) => Bare::Float(*float),
             Value::Record(record) => Bare::Record(record),
             Value::Symbol(relation) => Bare::Symbol(relation),
+            Value::Composite(composite) => Bare::Composite(composite),
         }
     }
 }
@@ -286,7 +290,7 @@ impl Value {
         match self {
             Value::String(text) => Entity::from_str(text).is_err(),
             Value::SignedInt(integer) => *integer < 0,
-            Value::Symbol(_) | Value::Record(_) => false,
+            Value::Symbol(_) | Value::Record(_) | Value::Composite(_) => false,
             Value::Bytes(_)
             | Value::Entity(_)
             | Value::Boolean(_)
@@ -395,6 +399,7 @@ impl<'de> de::Visitor<'de> for ValueVisitor {
                 }
                 ValueDataType::Record => Value::Record(map.next_value()?),
                 ValueDataType::Symbol => Value::Symbol(map.next_value()?),
+                ValueDataType::Composite => Value::Composite(map.next_value()?),
                 // Any number (`number:`) or one a sized number type holds
                 // (`natural:8` .. `float:64`), read as its bare spelling reads and
                 // held in the view's storage type.
@@ -486,6 +491,7 @@ impl Value {
             Value::Float(_) => ValueDataType::Float,
             Value::Record(_) => ValueDataType::Record,
             Value::Symbol(_) => ValueDataType::Symbol,
+            Value::Composite(_) => ValueDataType::Composite,
         }
     }
 
@@ -531,6 +537,7 @@ impl Value {
             Value::Record(value) => value.to_owned(),
             // TODO: Change this to bytes of string representation
             Value::Symbol(value) => value.key_bytes().to_vec(),
+            Value::Composite(composite) => composite.as_bytes().to_vec(),
         }
     }
 
@@ -546,6 +553,9 @@ impl Value {
             Value::Float(number) => format!("float:{}", number),
             Value::Record(record) => format!("record:{}", record.to_base58()),
             Value::Symbol(attribute) => format!("attribute:{}", attribute),
+            Value::Composite(composite) => {
+                format!("composite:{}", composite.as_bytes().to_base58())
+            }
         }
     }
 
@@ -579,6 +589,7 @@ impl Hash for Value {
             Value::SignedInt(i) => i.hash(state),
             Value::Record(r) => r.hash(state),
             Value::Symbol(s) => s.hash(state),
+            Value::Composite(c) => c.hash(state),
         }
     }
 }
@@ -595,6 +606,7 @@ impl PartialEq for Value {
             (Value::Float(a), Value::Float(b)) => a.to_le_bytes() == b.to_le_bytes(),
             (Value::Record(a), Value::Record(b)) => a == b,
             (Value::Symbol(a), Value::Symbol(b)) => a == b,
+            (Value::Composite(a), Value::Composite(b)) => a == b,
             _ => false,
         }
     }
@@ -660,6 +672,9 @@ impl FromStr for Value {
             }
             "record" => Value::Record(value.from_base58().map_err(to_dialog_error_debug)?),
             "attribute" => Value::Symbol(Relation::from_str(value)?),
+            "composite" => Value::Composite(Composite::from_bytes(
+                &value.from_base58().map_err(to_dialog_error_debug)?,
+            )?),
             _ => {
                 return Err(DialogCorpusError::InvalidValue(
                     "Value part of serialized string is empty".into(),
@@ -747,6 +762,9 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
             // spilled-value read-back path: a record above the inline
             // threshold must round-trip, not panic.
             ValueDataType::Record => Value::Record(value),
+            // A composite's bytes are its canonical encoding, checked as they
+            // are read: the spilled-value read-back path among others.
+            ValueDataType::Composite => Value::Composite(Composite::from_bytes(&value)?),
             ValueDataType::Symbol => match String::from_utf8(value) {
                 Ok(value) => Value::Symbol(Relation::try_from(
                     value.split('\u{0000}').take(1).collect::<String>(),
@@ -1025,6 +1043,26 @@ impl TryFrom<Value> for f32 {
                 value.data_type(),
             )),
         }
+    }
+}
+
+impl TryFrom<Value> for Composite {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Composite(composite) => Ok(composite),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::Composite,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+impl From<Composite> for Value {
+    fn from(value: Composite) -> Self {
+        Value::Composite(value)
     }
 }
 
@@ -1327,7 +1365,8 @@ pub use dialog_search_tree::NUMBER_BAND;
 /// as a [`Value`].
 ///
 /// A type is named by an entity: `text:`, `integer:`, `natural:`,
-/// `float:`, `boolean:`, `bytes:`, `entity:`, `symbol:` and `record:`.
+/// `float:`, `boolean:`, `bytes:`, `entity:`, `symbol:`, `record:` and
+/// `composite:`.
 /// That is how it is written wherever it is serialized and what an
 /// attribute's identity hashes. The names the release before type
 /// entities wrote (`Text`, `SignedInteger`, ...) are still read, so
@@ -1391,11 +1430,14 @@ pub enum ValueDataType {
     F32 = 20,
     /// A number read as the nearest double-precision float: `float:64`.
     F64 = 21,
+    /// A value made of attribute and value pairs: `composite:` (see
+    /// [`Composite`]).
+    Composite = 22,
 }
 
 impl ValueDataType {
     /// Every type, in discriminant order.
-    pub const ALL: [ValueDataType; 22] = [
+    pub const ALL: [ValueDataType; 23] = [
         ValueDataType::Bytes,
         ValueDataType::Entity,
         ValueDataType::Boolean,
@@ -1418,6 +1460,7 @@ impl ValueDataType {
         ValueDataType::I128,
         ValueDataType::F32,
         ValueDataType::F64,
+        ValueDataType::Composite,
     ];
 
     /// The entity that names this type, such as `text:`.
@@ -1445,6 +1488,7 @@ impl ValueDataType {
             ValueDataType::I128 => "integer:128",
             ValueDataType::F32 => "float:32",
             ValueDataType::F64 => "float:64",
+            ValueDataType::Composite => "composite:",
         }
     }
 
@@ -1474,6 +1518,7 @@ impl ValueDataType {
             ValueDataType::I128 => "integer:128",
             ValueDataType::F32 => "float:32",
             ValueDataType::F64 => "float:64",
+            ValueDataType::Composite => "Composite",
         }
     }
 
@@ -1621,10 +1666,10 @@ impl ValueDataType {
         ValueDataType::Bytes
     }
 
-    /// The largest [`ValueDataType`] an index key carries. `number:` and the
-    /// sized number types type slots, never keys.
+    /// The largest [`ValueDataType`] an index key carries. The sized
+    /// number types type slots, never keys.
     pub fn max() -> Self {
-        ValueDataType::Number
+        ValueDataType::Composite
     }
 
     /// Check if the given value is of this type.
@@ -1659,6 +1704,7 @@ impl Display for ValueDataType {
             ValueDataType::Record => write!(f, "Record"),
             ValueDataType::Symbol => write!(f, "Symbol"),
             ValueDataType::Number => write!(f, "Number"),
+            ValueDataType::Composite => write!(f, "Composite"),
             view => write!(f, "{}", view.uri()),
         }
     }
@@ -1683,6 +1729,7 @@ impl From<&u8> for ValueDataType {
             7 => ValueDataType::Record,
             8 => ValueDataType::Symbol,
             9 => ValueDataType::Number,
+            22 => ValueDataType::Composite,
             // A lossy fallback for infallible callers; the key-parse path
             // rejects unknown discriminants before reaching this (see
             // `varkey::value_payload_len`), so no persisted-byte path relies
