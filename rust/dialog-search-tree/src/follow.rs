@@ -32,7 +32,7 @@ use rkyv::{
 
 use crate::nodes::{Preload, Read};
 use crate::{
-    Accessor, ArchivedIndex, DialogSearchTreeError, Distribution, Key, NodeBody, PersistentNode,
+    Accessor, DialogSearchTreeError, Distribution, IndexView, Key, NodeBody, PersistentNode,
     PersistentTree, Value,
 };
 
@@ -69,9 +69,9 @@ impl Span {
 /// A child is routed the keys from its own separator up to the next
 /// child's. The first is also routed every key below its separator, and
 /// the last every key up to its parent's end, as
-/// [`ArchivedIndex::route`] sends them.
+/// [`IndexView::route`] sends them.
 fn children<Value>(
-    index: &ArchivedIndex<Value>,
+    index: IndexView<'_, Value>,
     span: &Span,
 ) -> Result<Vec<(Blake3Hash, Span)>, DialogSearchTreeError>
 where
