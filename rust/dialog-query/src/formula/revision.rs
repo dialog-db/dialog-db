@@ -24,6 +24,7 @@
 
 use dialog_corpus::history::{RevisionRecord, Version, verify_issuer_signature};
 use std::collections::HashSet;
+use std::iter;
 
 use crate::formula::Input;
 use crate::types::RecordBytes;
@@ -165,7 +166,7 @@ impl RevisionSlot {
             of: input.of.clone(),
             is,
         };
-        std::iter::once(input.of.clone())
+        iter::once(input.of.clone())
             .chain(Version::legacy_of(&input.of))
             .map(slot)
             .collect()
