@@ -1136,6 +1136,14 @@ In the same conversation he settled how a pattern is written in a stored rule (`
 
 **Decided.** Nothing new. 92 unit, 25 integration and 2 doc tests pass; the lint is clean but for main's own future size on this container's toolchain.
 
+## 2026-11-16, Designing: where the order of `top` lives
+
+**Asked.** Whether `top` ranks by the line's `as:` list, as #728 has it, or by an order kept apart in `among`, as the cardinality branch (#793) has it. It bears on #799, which fixes how a rule is written.
+
+**Decided.** By the maintainer: "It lives on the type but top takes optional among: parameter that can specify it. That can come later". So the `as:` list is the order, and `among:` is a later, optional parameter of `top`, not a second list on the attribute. Relayed to the cardinality thread in the dialog-db space, under the notation thread's memo on #793.
+
+Found on the way to the second step: this build's `assert` with no `!` is the word for issuing what holds in the tick (`Head::Hold`), so `assert!` cannot take its place until that has another spelling. The design leaves the same spot open. Not started.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

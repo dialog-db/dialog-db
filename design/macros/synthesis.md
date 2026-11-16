@@ -56,7 +56,7 @@ A concept is a set of attributes, a line each, and runs both ways.
 ```
 
 - `cardinality:` says what a write does: `:one` replaces, `:many` adds. There are no picks.
-- A fold in the head chooses one claim of many: `last`, `max`, `min`, `top`. `top` takes its order from the line's `as:` list.
+- A fold in the head chooses one claim of many: `last`, `max`, `min`, `top`. `top` takes its order from the line's `as:` list: the order lives on the type. `top` may later take `among:`, to say another order.
 - `in:` is the layer, a constant or a field.
 - Every variable of the body is in the head.
 
@@ -121,6 +121,7 @@ So the template is not a new kind of thing. It is a list, and the view macro kee
 | a part left out of a read | here, 2026-11-13: refused without `...` | #728: matches anything | matches anything | the maintainer, 2026-11-15: "Open" |
 | which claim is read | here: a pick in a wrapper, `(:last (:text ?x))` | #728 and #793: cardinality, and a fold in the head | cardinality and folds | a write under `pick: :max` leaves states nobody expects (the maintainer, 2026-11-16) |
 | `[ ]` | #728: a variant in `as:`, markup in a view | here: a list | a list, in each place | one meaning in three places. Not tested on readers |
+| the order `top` ranks by | #728: the line's `as:` list | #793: `among`, apart from the type | the `as:` list, with `among:` on `top` as an optional override, later | the maintainer, 2026-11-16: "It lives on the type but top takes optional among: parameter that can specify it. That can come later" |
 | the rest | #728's prelude: `… ?params` | here: `... ?more` | `...` | three plain dots, and the reader need not know it |
 | a record's key | here: text | #748: an attribute | the label, as written | `{geo/lat: ?l}` and `{title: ?t}` are one spelling; what a label means to a record is the record's |
 | a record's bytes | here: dag-cbor under a version byte | #812: its own, as a value type | dag-cbor for now | below |
@@ -130,10 +131,9 @@ So the template is not a new kind of thing. It is a list, and the view macro kee
 ## Open
 
 - A getter's head, `(open-count (list ?l) is: …)`, has a command's shape, `(rename (todo ?t) title: …)`. #728 has it open too.
-- Whether `top` ranks by the `as:` list (#728) or the order is kept apart in `among` (#793).
 - How a line names a key of a collection, now that lines are by attribute.
 - A read of exactly these entries has no spelling. Met already: `terms: {}` over a kept form used to say "no labelled part" and now says any.
-- `assert` without `!` is taken in this build: it is the head of a rule whose conclusion holds while its conditions do. Step 2 has to give that another spelling or none, as the design does (a conclusion with no word is a deduction).
+- `assert` without `!` is taken in this build: it is the word for what holds in this tick and is not kept (`Head::Hold`, which issues a command), where the design writes a command with no word. The design has the same thing open: an issued command and one in a premise look alike, and readers proposed `(do add …)`. Step 2 has to give that another spelling or none, as the design does (a conclusion with no word is a deduction).
 - How a view's template binds events.
 
 ## Order of the build
