@@ -484,6 +484,23 @@ fn terminated_len(bytes: &[u8], at: usize) -> Option<usize> {
 /// Returns `None` on malformed input, in which case the caller falls back to
 /// the opaque whole-key component.
 pub fn split_components(bytes: &[u8]) -> Option<Vec<&[u8]>> {
+    split(bytes, false)
+}
+
+/// [`split_components`], and the history and coverage regions' keys as
+/// well: their tag, version, entity, attribute and value slot (type byte,
+/// then payload, a spilled value's tail folded into the payload), each a
+/// slice of `bytes`, concatenating back to `bytes` exactly.
+///
+/// The tree's leaf codec splits only the fact orderings
+/// ([`split_components`]), and its encoding must not change; this split is
+/// for readers that keep a key's parts apart for their own reasons, such as
+/// a store that keeps each distinct entity, attribute and value once.
+pub fn split_record_components(bytes: &[u8]) -> Option<Vec<&[u8]>> {
+    split(bytes, true)
+}
+
+fn split(bytes: &[u8], records: bool) -> Option<Vec<&[u8]>> {
     let (tag, _) = bytes.split_first()?;
 
     let mut out: Vec<&[u8]> = Vec::with_capacity(5);
@@ -538,6 +555,15 @@ pub fn split_components(bytes: &[u8]) -> Option<Vec<&[u8]>> {
             // codec's component count agrees with the split.
             out.push(&bytes[at..]);
             at = bytes.len();
+        }
+        HISTORY_KEY_TAG | COVERAGE_KEY_TAG if records => {
+            // Version (raw, fixed width), then the entity ordering's fields.
+            let end = at.checked_add(VERSION_LENGTH)?;
+            out.push(bytes.get(at..end)?);
+            at = end;
+            push_var!(); // entity
+            push_var!(); // attribute
+            push_value_tail!();
         }
         _ => return None,
     }
