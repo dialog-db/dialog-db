@@ -571,9 +571,11 @@ mod tests {
     use dialog_query::attribute::Cardinality;
     use dialog_query::attribute::Relation as QueryRelation;
     use dialog_query::attribute::statement::AttributeStatement;
-    use dialog_query::query::Output as _;
-    use dialog_query::types::Scalar;
-    use dialog_query::{AttributeQuery, InductiveRule, Term};
+    use dialog_query::query::{Application, Output as _};
+    use dialog_query::types::{Any, Scalar};
+    use dialog_query::{
+        AttributeQuery, Conclusion, EvaluationError, InductiveRule, Match, Selection, Term,
+    };
     #[cfg(any(feature = "integration-tests", feature = "web-integration-tests"))]
     use dialog_remote_s3::helpers::S3Address;
     use dialog_storage::provider::storage::VolatileSpace;
@@ -824,21 +826,15 @@ mod tests {
             "a write into the overlay is read through `session:`"
         );
 
-        let claims: Vec<dialog_query::Claim> = session
+        let claims: Vec<Row> = session
             .query()
-            .select(selected_query().with_layer(Term::var("where")))
+            .select(Located(selected_query().with_layer(Term::var("where"))))
             .perform(&operator)
             .try_vec()
             .await?;
         let mut rows: Vec<String> = claims
             .iter()
-            .map(|claim| {
-                format!(
-                    "{} in {}",
-                    claim.of,
-                    claim.layer().map(ToString::to_string).unwrap_or_default()
-                )
-            })
+            .map(|Row { claim, layer }| format!("{} in {layer}", claim.of))
             .collect();
         rows.sort();
         assert_eq!(
@@ -1647,6 +1643,51 @@ mod tests {
         rows
     }
 
+    /// A row of a [`Located`] query: the claim and the layer it was read
+    /// from.
+    #[derive(Clone, Debug, PartialEq)]
+    struct Row {
+        claim: dialog_query::Claim,
+        layer: Entity,
+    }
+
+    impl Conclusion for Row {
+        fn this(&self) -> &Entity {
+            &self.claim.of
+        }
+    }
+
+    /// `query`'s rows, each with the layer it was read from: the
+    /// match's `in` binding, the term the query names for it. A
+    /// claim carries no layer.
+    #[derive(Clone)]
+    struct Located(AttributeQuery);
+
+    impl Application for Located {
+        type Conclusion = Row;
+
+        fn evaluate<'a, Env, M: Selection + 'a>(
+            self,
+            selection: M,
+            env: &'a Env,
+        ) -> impl Selection + 'a
+        where
+            Env: dialog_query::Scope<'a>,
+        {
+            Application::evaluate(self.0, selection, env)
+        }
+
+        fn realize(&self, input: Match) -> Result<Self::Conclusion, EvaluationError> {
+            let layer = input
+                .lookup(&Term::<Any>::from(self.0.layer()))?
+                .content()?;
+            Ok(Row {
+                claim: self.0.realize(input)?,
+                layer: Entity::try_from(layer)?,
+            })
+        }
+    }
+
     /// `ui/selected` of every entity, with the value a variable.
     fn selected_query() -> AttributeQuery {
         AttributeQuery::from(
@@ -1768,25 +1809,15 @@ mod tests {
             let session = session.clone();
             let operator = &operator;
             async move {
-                let claims: Vec<dialog_query::Claim> = session
+                let claims: Vec<Row> = session
                     .query()
-                    .select(query)
+                    .select(Located(query))
                     .perform(operator)
                     .try_vec()
                     .await?;
                 let mut rows: Vec<String> = claims
                     .iter()
-                    .map(|claim| {
-                        // A row with no layer stamped is the primary's.
-                        format!(
-                            "{:?} in {}",
-                            claim.is,
-                            claim
-                                .layer()
-                                .map(ToString::to_string)
-                                .unwrap_or_else(|| crate::MEMORY.to_string())
-                        )
-                    })
+                    .map(|Row { claim, layer }| format!("{:?} in {layer}", claim.is))
                     .collect();
                 rows.sort();
                 Ok::<_, anyhow::Error>(rows)
@@ -2462,7 +2493,10 @@ mod tests {
         let memory = session.layer(&state).expect("the state layer").clone();
         let control = crate::control_layer();
         let mut fetches = session
-            .arrivals(&control, fetch_query())
+            .arrivals(
+                &control,
+                Located(fetch_query().with_layer(Term::var("where"))),
+            )
             .expect("every session has control:");
         assert!(
             fetches.poll(&operator).await?.is_empty(),
@@ -2494,13 +2528,13 @@ mod tests {
             held(&memory, "node/fetched", &node)?.is_empty(),
             "nothing answered yet"
         );
-        let commands = fetches.poll(&operator).await?;
-        assert_eq!(subjects(&commands), vec!["cmd:1".to_string()]);
-        assert_eq!(
-            commands[0].layer(),
-            Some(&control),
+        let located = fetches.poll(&operator).await?;
+        assert!(
+            located.iter().all(|row| row.layer == control),
             "read as a row of control:"
         );
+        let commands: Vec<dialog_query::Claim> = located.into_iter().map(|row| row.claim).collect();
+        assert_eq!(subjects(&commands), vec!["cmd:1".to_string()]);
         for command in &commands {
             session.invoke(fetched(command)?).perform(&operator).await?;
         }
@@ -2581,7 +2615,9 @@ mod tests {
         assert!(session.layers().contains(&host), "the channel is held");
         let memory = session.layer(&state).expect("the state layer").clone();
         let channel = session.layer(&host).expect("the channel").clone();
-        let mut fetches = session.arrivals(&host, fetch_query()).expect("the channel");
+        let mut fetches = session
+            .arrivals(&host, Located(fetch_query().with_layer(Term::var("where"))))
+            .expect("the channel");
         assert!(fetches.poll(&operator).await?.is_empty());
         let before = branch.revision();
         let node: Entity = "node:1".parse()?;
@@ -2598,15 +2634,12 @@ mod tests {
         );
         assert!(held(&memory, "node/fetched", &node)?.is_empty());
 
-        let commands = fetches.poll(&operator).await?;
+        let located = fetches.poll(&operator).await?;
+        assert!(located.iter().all(|row| row.layer == host));
+        let commands: Vec<dialog_query::Claim> = located.into_iter().map(|row| row.claim).collect();
         assert_eq!(
             subjects(&commands),
             vec!["cmd:1".to_string(), "cmd:2".to_string()]
-        );
-        assert!(
-            commands
-                .iter()
-                .all(|command| command.layer() == Some(&host))
         );
         let mut answer = session.transact(Changes::new());
         for command in &commands {
@@ -2910,14 +2943,14 @@ mod tests {
         let target: Entity = "doc:1".parse()?;
 
         let transaction = session.transaction().dispatch(ping("cmd:1", &target));
-        let claims: Vec<dialog_query::Claim> = transaction
+        let claims: Vec<Row> = transaction
             .query()
-            .select(anywhere("cmd.ping/target"))
+            .select(Located(anywhere("cmd.ping/target")))
             .perform(&operator)
             .try_vec()
             .await?;
         assert_eq!(claims.len(), 1);
-        assert_eq!(claims[0].layer(), Some(&control), "a transaction reads it");
+        assert_eq!(claims[0].layer, control, "a transaction reads it");
 
         let before = branch.revision();
         let mut pongs = session
@@ -3068,20 +3101,15 @@ mod tests {
         env: &Operator,
         query: AttributeQuery,
     ) -> Result<Vec<String>> {
-        let claims: Vec<dialog_query::Claim> =
-            session.query().select(query).perform(env).try_vec().await?;
-        let mut rows: Vec<String> = claims
+        let located: Vec<Row> = session
+            .query()
+            .select(Located(query))
+            .perform(env)
+            .try_vec()
+            .await?;
+        let mut rows: Vec<String> = located
             .iter()
-            .map(|claim| {
-                format!(
-                    "{:?} in {}",
-                    claim.is,
-                    claim
-                        .layer()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| crate::MEMORY.to_string())
-                )
-            })
+            .map(|Row { claim, layer }| format!("{:?} in {layer}", claim.is))
             .collect();
         rows.sort();
         Ok(rows)
@@ -3558,7 +3586,7 @@ mod tests {
         let notes = declare_notes(&branch, &operator).await?;
         let session = branch.session().perform(&operator).await?;
         let every = || note_query().with_layer(Term::var("where"));
-        let mut subscription = session.subscribe(every());
+        let mut subscription = session.subscribe(Located(every()));
         let initial = subscription.poll(&operator).await?.expect("initial");
         assert!(initial.asserted.is_empty());
 
@@ -3574,17 +3602,11 @@ mod tests {
         let asserted: Vec<String> = delta
             .asserted
             .iter()
-            .map(|claim| {
-                format!(
-                    "{:?} in {:?}",
-                    claim.is,
-                    claim.layer().map(ToString::to_string)
-                )
-            })
+            .map(|Row { claim, layer }| format!("{:?} in {layer}", claim.is))
             .collect();
         assert_eq!(
             asserted,
-            vec!["String(\"kept\") in Some(\"memory:notes\")".to_string()]
+            vec!["String(\"kept\") in memory:notes".to_string()]
         );
         assert!(delta.retracted.is_empty());
         assert!(subscription.poll(&operator).await?.is_none());
@@ -3750,7 +3772,10 @@ mod tests {
         let session = branch.session().perform(&operator).await?;
         let control = crate::control_layer();
         let mut fetches = session
-            .arrivals(&control, fetch_query())
+            .arrivals(
+                &control,
+                Located(fetch_query().with_layer(Term::var("where"))),
+            )
             .expect("every session has control:");
         let node: Entity = "node:1".parse()?;
         let doc: Entity = "doc:1".parse()?;
@@ -3763,9 +3788,13 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        let commands = fetches.poll(&operator).await?;
+        let located = fetches.poll(&operator).await?;
+        assert!(
+            located.iter().all(|row| row.layer == control),
+            "a row of control:"
+        );
+        let commands: Vec<dialog_query::Claim> = located.into_iter().map(|row| row.claim).collect();
         assert_eq!(subjects(&commands), vec!["cmd:1".to_string()]);
-        assert_eq!(commands[0].layer(), Some(&control), "a row of control:");
         assert!(fetches.poll(&operator).await?.is_empty(), "read once");
         assert!(
             session.layer(&control).expect("control:").is_empty(),
@@ -3788,10 +3817,13 @@ mod tests {
             "a staged chain lands nothing before it publishes"
         );
         batch.publish().perform(&operator).await?;
-        assert_eq!(
-            subjects(&fetches.poll(&operator).await?),
-            vec!["cmd:2".to_string()]
-        );
+        let commands: Vec<dialog_query::Claim> = fetches
+            .poll(&operator)
+            .await?
+            .into_iter()
+            .map(|row| row.claim)
+            .collect();
+        assert_eq!(subjects(&commands), vec!["cmd:2".to_string()]);
         assert!(fetches.poll(&operator).await?.is_empty(), "read once");
         Ok(())
     }
@@ -3871,14 +3903,15 @@ mod tests {
             .assert(priority("cmd:1", 2).at(control.clone()))
             .assert(title(&doc, "kept"))
             .assert(flag(&doc, true, &state));
-        let during: Vec<dialog_query::Claim> = transaction
+        let during: Vec<Row> = transaction
             .query()
-            .select(whole(&control))
+            .select(Located(whole(&control)))
             .perform(&operator)
             .try_vec()
             .await?;
+        assert!(during.iter().all(|row| row.layer == control));
+        let during: Vec<dialog_query::Claim> = during.into_iter().map(|row| row.claim).collect();
         assert_eq!(cells(&during), expected, "the tick's commands alone");
-        assert!(during.iter().all(|claim| claim.layer() == Some(&control)));
         transaction.commit().publish().perform(&operator).await?;
 
         let arrived = arrivals.poll(&operator).await?;
