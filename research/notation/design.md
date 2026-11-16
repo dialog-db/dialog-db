@@ -261,7 +261,8 @@ Everything that changes anything is a command, written around a concept or a dom
 ```
 
 - A command's facts are not the concept's facts. They are tagged with the command's name, so `(query (todo …))` never sees them, and they are never carried, stored or synced: rules see them in the tick they are issued, and then they are gone. The `add` above keeps nothing; what lands is what its rules assert. In R25 all 20 readers, shown no documentation, took `add` to write the to-do itself, so this has to be said.
-- A command needs no declaration. The rules that read it decide what it takes: any of the concept's parameters, with or without its entity, as in `(remind (todo todo:9c1e))`. Issuing one with a parameter no rule reads is a compile error.
+- A command needs no declaration, and its labels are its own. Each is an attribute derived from the concept, the command's name and the label, as `list/count-open` is from `list`, so `(add (todo list: list:home text: "Buy milk"))` needs no `list` or `text` on `todo`: the concept anchors the names. The rules that read a command decide what it takes, with or without the concept's entity, as in `(remind (todo todo:9c1e))`, and the types its fields read as. Issuing one with a parameter no rule reads is a compile error, and so is a field two rules read as different types.
+- A command's attributes hold for the tick it is issued in and are never stored, like everything derived in a concept's domain. A name a rule concludes with a fold cannot be issued.
 - A command wraps exactly one concept or domain, one deep: its subject. It may add labels of its own beside it, as in `(rename (todo ?t) title: ?new)`.
 - A command's rows are keyed by its name and everything it passes, so identical commands in one tick are one. A command that must count twice in a tick, such as an increment, carries a field that tells them apart.
 
