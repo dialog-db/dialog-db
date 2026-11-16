@@ -569,8 +569,9 @@ pub(crate) struct QueryEnv<'a> {
     guide: Option<Arc<Guide>>,
     /// The placements a guided read reads by, resolved on the first read
     /// and shared by clones: those of the first line, with what the guide
-    /// and the query's overlay declare laid over.
-    placements: Arc<OnceCell<Arc<PlacementMap>>>,
+    /// and the query's overlay declare laid over. Made only for a
+    /// guided read: a read that no guide leads allocates nothing for it.
+    placements: Option<Arc<OnceCell<Arc<PlacementMap>>>>,
     /// The query's own overlay: caller-asserted facts and the
     /// auto-injected metadata, held as a line (see
     /// [`QueryLayer::overlay`]) and read under the lines' format.
@@ -691,7 +692,7 @@ impl<'a> QueryEnv<'a> {
             sources,
             memories: Vec::new(),
             guide: None,
-            placements: Arc::new(OnceCell::new()),
+            placements: None,
             overlay,
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
@@ -714,6 +715,7 @@ impl<'a> QueryEnv<'a> {
         } = composite;
         let mut env = Self::new(sources, overlay, env);
         env.memories = memories;
+        env.placements = guide.as_ref().map(|_| Arc::new(OnceCell::new()));
         env.guide = guide;
         env
     }
@@ -731,22 +733,24 @@ impl<'a> QueryEnv<'a> {
     /// query's overlay and the staged layers declare. `None` for a read
     /// that no guide leads.
     async fn guided(&self) -> Result<Option<(Arc<Guide>, Arc<PlacementMap>)>, DialogCorpusError> {
-        let (Some(guide), Some(primary)) = (&self.guide, self.sources.first()) else {
+        let (Some(guide), Some(primary), Some(placements)) =
+            (&self.guide, self.sources.first(), &self.placements)
+        else {
             return Ok(None);
         };
-        let map = self
-            .placements
-            .get_or_try_init(|| async {
-                let pending = pending_declarations(
-                    [guide.declared.clone(), declarations_held(&self.overlay)],
-                    &self.layers,
-                );
-                Placements::resolve(primary, &Changes::new(), &pending, self.env)
-                    .await
-                    .map(|placements| Arc::new(placements.map()))
-                    .map_err(|error| DialogCorpusError::Storage(error.to_string()))
-            })
-            .await?;
+        // Boxed, so every read's future does not carry the resolution's
+        // state: only a guided read pays for it.
+        let map = Box::pin(placements.get_or_try_init(|| async {
+            let pending = pending_declarations(
+                [guide.declared.clone(), declarations_held(&self.overlay)],
+                &self.layers,
+            );
+            Placements::resolve(primary, &Changes::new(), &pending, self.env)
+                .await
+                .map(|placements| Arc::new(placements.map()))
+                .map_err(|error| DialogCorpusError::Storage(error.to_string()))
+        }))
+        .await?;
         Ok(Some((guide.clone(), map.clone())))
     }
 
