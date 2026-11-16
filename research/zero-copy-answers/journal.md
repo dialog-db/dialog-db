@@ -137,6 +137,115 @@ stored fields (no rules, no optional fields): what tonk's list views read
 most. Whether that is worth an operator of its own depends on how often
 the planner could pick it, which `tonk_bench`'s views will say.
 
+## 2026-11-16 — tonk's workload, with late materialization
+
+**Question.** Does the engine's gain show on tonk's own views,
+subscriptions and commands?
+
+**Method.** `tonk_bench` over `tonk-1x.jsonl` (3 rounds) and
+`tonk-10x.jsonl` (2 rounds), `fs` store, main, the branch eager and the
+branch lazy, interleaved round by round. Medians of every round's
+samples, milliseconds.
+
+**Results.** Within noise almost everywhere: warm `v2/issue` at 10× is
+263 ms on main and 232 ms lazy (−12%), warm `v2/activity` 501 and 474;
+the subscription polls and commands do not move.
+
+**Decision.** The harness's concept was not tonk's. Warm `v2/issue` at
+10× is 87 µs a row, the harness's eight-field concept 14 µs: `v2/issue`
+has thirteen fields, ten of them optional, and `v2/activity` five
+optional of eight. A conjunction with an optional field was never
+merged (`merge_variable` refused every `OptionalScan`), so a list read
+folded: one scan, then every other field probed once per entity. That,
+not copying, is where a list view's time goes.
+
+## 2026-11-16 — left-merging optional fields
+
+**Question.** Read every optional field once, in entity order, beside
+the required scans (an entity a field lacks bound Absent), instead of
+probing it once per entity: what does it take off?
+
+**Method.** `left_merge_join` (`merge_join.rs`): each optional side a
+cursor advanced to the left row's key; a side standing on it extends the
+row, one that does not binds its value and cause Absent. A conjunction
+merges its optional fields when their scans sort on the merge variable
+and some required scan names the entities; a row that pins an optional
+field's value or cause, or a required scan pinned to a value or an
+entity, keeps the fold. An optional range is weighed against the
+required scans' size, not as one of them: the first cut weighed it as
+one, and a field present on 10% of issues made every list read look
+unbalanced and fold. `DIALOG_LEFT_MERGE=0` turns it off. Tests: an exact
+case (present, absent, many-valued sides) and 200 random shapes against
+the per-row probe it replaces; every `dialog-query` test in every mode.
+
+The `answers` harness gained `tonk-issue`, `v2/issue`'s shape: three
+required fields, ten optional at the fixture's rates. Every variant's
+answer hashes the same.
+
+**Results.** `answers`, `tonk-issue`, engine phase, wall time (median of
+seven) and allocations per row:
+
+| rows | main | lazy, no left merge | lazy, left merge |
+|---|---|---|---|
+| 300 | 20.6 ms, 445 | 15.3 ms, 384 | 7.8 ms, 74 |
+| 3,000 | 165 ms, 446 | 182 ms, 385 | 66 ms, 71 |
+
+`tonk_bench`, 10×, main / branch without the left merge / with it:
+
+| measure | main | no left merge | left merge |
+|---|---|---|---|
+| query/v2/issue/warm | 246 | 224 | 59 |
+| query/v2/issue/cold | 527 | 554 | 135 |
+| query/v2/activity/warm | 493 | 397 | 115 |
+| subscription/v2/issue/first | 300 | 271 | 60 |
+| subscription/v2/issue/poll | 845 | 806 | 21 |
+| subscription/v2/activity/poll | 1,238 | 1,248 | 41 |
+| query/issue-detail/cold | 2.9 | 3.4 | 12.8 |
+| steady/all (commands) | 4.1 | 4.4 | 4.6 |
+
+Every build answers every view with the same number of rows, at the
+start and at the end of the week.
+
+**Decision.** Keep, with one fix: `issue-detail` (the activity of one
+issue, `issue` pinned to a value) regressed 4×. The conjunction was
+newly eligible, and deciding it estimated every required range, which on
+a cold replica walks each range's edges; the decision was the fold all
+along. A required scan pinned to a value or an entity now folds without
+estimating (`66f04f6`); the rerun is in the next entry. The polls'
+30–40× is more than the query's 4×: a poll's delta joins and
+re-derivations run with the changed entity pinned, every scan a point
+read, which now merges instead of probing ten fields per entity per
+premise. Not yet profiled apart.
+
+## 2026-11-16 — the perf gate's scenarios
+
+**Question.** What do the gated `dialog-perf` scenarios say, main
+against the branch?
+
+**Method.** `perf sweep` of the read, query, rule and subscribe
+scenarios under callgrind, main's `perf` built in its worktree. The
+baselines are not touched.
+
+**Results.** Instructions: `query-join` −16.9%, `rule-scan` −15.2%,
+`read-scan` −12.3%, `query-member` −10.4%, `first-query` −4.0%, point
+reads and `subscribe-fanout`/`-pulled` within 1%, `subscribe-repoll`
+**+3.5%**. Allocation calls fall up to 54%; `read-scan`'s allocated bytes
+rise 8.4%, and a few scenarios' realloc bytes 2–4%: the gate would fail
+those.
+
+**Decision.** Two regressions to fix before anything lands:
+
+- `subscribe-repoll` +3.5%: subscription maintenance compares retained
+  conclusions by entity, so the lazy `ConceptConclusion::this` is always
+  materialized there, through a `OnceLock` and a slot lookup it did not
+  pay for before. `this` should be lazy only on the path that hands
+  answers on.
+- `read-scan` bytes +8.4%: one shared row per scanned fact
+  (`Arc<Scanned>`: the checked row, its pieces, four `OnceLock`s) is
+  bigger than the small allocations it replaces. Fewer calls, more
+  bytes; a leaner `Scanned` (one cell, the part known per slot) would
+  close it.
+
 ## How to reproduce
 
 ```sh
