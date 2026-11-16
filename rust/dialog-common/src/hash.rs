@@ -41,6 +41,7 @@ pub const BLAKE3_HASH_SIZE: usize = 32;
     KnownLayout,
 )]
 #[repr(transparent)]
+#[rkyv(derive(PartialEq), compare(PartialEq))]
 pub struct Blake3Hash([u8; 32]);
 
 impl ArchivedBlake3Hash {
