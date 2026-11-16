@@ -77,6 +77,10 @@ enum Commands {
         /// Timed repetitions of each phase, after one warm-up.
         #[arg(long, default_value_t = 15)]
         repeat: usize,
+        /// Write the snapshot's JSON and frame to `<dir>/<dataset>-<rows>.{json,frame}`,
+        /// for the page-side measurement (`research/zero-copy-answers/bench`).
+        #[arg(long)]
+        dump: Option<PathBuf>,
     },
     /// Run every dataset, size and binding mode under callgrind, then
     /// natively for wall time, interleaved; write one report each.
@@ -86,8 +90,15 @@ enum Commands {
         /// Native runs of each variant (interleaved), for wall time.
         #[arg(long, default_value_t = 3)]
         rounds: usize,
+        /// Main's build of this harness (`--cfg dialog_main`), run as the
+        /// `main` variant beside the branch's eager and lazy ones.
+        #[arg(long)]
+        main: Option<PathBuf>,
     },
 }
+
+/// Where `run --dump` writes the snapshot's encodings.
+static DUMP: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
 /// The phases, in order, by the name of the function each runs in.
 const PHASES: [&str; 7] = [
@@ -103,9 +114,9 @@ const PHASES: [&str; 7] = [
 /// The variants a sweep runs: dataset, rows.
 const DATASETS: [(&str, usize); 4] = [
     ("stuff", 2000),
-    ("stuff", 20000),
-    ("issue", 300),
     ("issue", 3000),
+    ("tonk-issue", 300),
+    ("tonk-issue", 3000),
 ];
 
 fn main() -> ExitCode {
@@ -124,7 +135,9 @@ fn run_cli() -> Result<()> {
             dataset,
             rows,
             repeat,
+            dump,
         } => {
+            DUMP.set(dump).expect("set once");
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
@@ -132,7 +145,11 @@ fn run_cli() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
-        Commands::Sweep { out_dir, rounds } => sweep(out_dir, rounds),
+        Commands::Sweep {
+            out_dir,
+            rounds,
+            main,
+        } => sweep(out_dir, rounds, main),
     }
 }
 
@@ -904,6 +921,11 @@ fn measure(
         check_same(&json, &columnar.into(), &columns)?;
     }
     bytes.insert("json_snapshot".into(), json.len());
+    if let Some(Some(dir)) = DUMP.get() {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join(format!("{name}-{rows}.json")), &json)?;
+        std::fs::write(dir.join(format!("{name}-{rows}.frame")), &frame[..])?;
+    }
     // The answer's identity: every variant of a dataset must agree on it.
     bytes.insert(
         "answer_hash".into(),
@@ -1024,22 +1046,37 @@ fn check_same(json: &[u8], frame: &Arc<[u8]>, columns: &[&str]) -> Result<()> {
 
 /// Every variant under callgrind for instructions, then natively for wall
 /// time, the variants interleaved round by round.
-fn sweep(out_dir: PathBuf, rounds: usize) -> Result<()> {
+fn sweep(out_dir: PathBuf, rounds: usize, main: Option<PathBuf>) -> Result<()> {
     std::fs::create_dir_all(&out_dir)?;
-    let binary = std::env::current_exe()?;
+    let branch = std::env::current_exe()?;
+    // (dataset, rows, binding mode, or "main" for main's build)
     let variants: Vec<(&str, usize, &str)> = DATASETS
         .iter()
-        .flat_map(|(name, rows)| [(*name, *rows, "0"), (*name, *rows, "1")])
+        .flat_map(|(name, rows)| {
+            let mut modes = vec![(*name, *rows, "0"), (*name, *rows, "1")];
+            if main.is_some() {
+                modes.insert(0, (*name, *rows, "main"));
+            }
+            modes
+        })
         .collect();
+    let label = |lazy: &str| match lazy {
+        "main" => "main",
+        "1" => "lazy",
+        _ => "eager",
+    };
+    let binary = |lazy: &str| -> PathBuf {
+        match (lazy, &main) {
+            ("main", Some(main)) => main.clone(),
+            _ => branch.clone(),
+        }
+    };
     let mut reports: BTreeMap<String, Report> = BTreeMap::new();
     for round in 0..rounds {
         for (name, rows, lazy) in &variants {
-            let key = format!(
-                "{name}-{rows}-{}",
-                if *lazy == "1" { "lazy" } else { "eager" }
-            );
+            let key = format!("{name}-{rows}-{}", label(lazy));
             eprintln!("round {round}: {key}");
-            let output = Command::new(&binary)
+            let output = Command::new(binary(lazy))
                 .args(["run", "--dataset", name, "--rows", &rows.to_string()])
                 .env("DIALOG_LAZY_BINDINGS", lazy)
                 .output()?;
@@ -1063,17 +1100,14 @@ fn sweep(out_dir: PathBuf, rounds: usize) -> Result<()> {
         }
     }
     for (name, rows, lazy) in &variants {
-        let key = format!(
-            "{name}-{rows}-{}",
-            if *lazy == "1" { "lazy" } else { "eager" }
-        );
+        let key = format!("{name}-{rows}-{}", label(lazy));
         eprintln!("callgrind: {key}");
         let out = out_dir.join(format!("{key}.callgrind"));
         let status = Command::new("valgrind")
             .args(["--tool=callgrind", "--quiet", "--collect-atstart=no"])
             .args(PHASES.map(|phase| format!("--toggle-collect=answers_phase_{phase}")))
             .arg(format!("--callgrind-out-file={}", out.display()))
-            .arg(&binary)
+            .arg(binary(lazy))
             .args([
                 "run",
                 "--dataset",

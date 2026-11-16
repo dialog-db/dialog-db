@@ -246,6 +246,81 @@ those.
   bytes; a leaner `Scanned` (one cell, the part known per slot) would
   close it.
 
+## 2026-11-16 — the rerun, and `issue-detail`
+
+**Question.** Does folding a pinned join without estimating it close
+`issue-detail`'s regression, and does the rest hold?
+
+**Method.** `tonk_bench`, main and the branch (lazy, left merge),
+interleaved, 3 rounds at 1×, 2 at 10×, each store removed once its report
+is copied (the first attempt filled the session's disk). Then
+`issue-detail` alone (`DIALOG_BENCH_WEEK=0`), 3 rounds of main, the
+branch with and without the left merge and eager with it.
+
+**Results.** 10×, ms:
+
+| measure | main | branch |
+|---|---|---|
+| query/v2/issue/warm | 288 | 82 |
+| query/v2/issue/cold | 701 | 172 |
+| query/v2/activity/warm | 486 | 106 |
+| subscription/v2/issue/poll | 939 | 23 |
+| subscription/v2/activity/poll | 1,398 | 46 |
+| query/issue-detail/cold | 2.4 | 8.4 |
+| command/all | 6.1 | 6.9 |
+
+`issue-detail` cold, alone, 3 rounds: main 2.9–3.3 ms, the branch without
+the left merge 2.8–3.2, with it 7.0–11.1 in either binding mode; warm
+the same everywhere. What it is not: the decision (instrumented: 2.8 µs,
+and it folds, as intended), the OS page cache (dropped before the cold
+read: main 4.1–4.5, the left merge 7.1–10.8), lingering background
+replication from the merged queries before it (a 2 s pause changes
+nothing).
+
+**Decision.** Not resolved. The decision is right and the fold is the
+same code either way, so what differs is the state the queries before it
+leave. The likeliest: the cold step releases the repository's caches,
+and something it does not release keeps the EAV leaves the earlier full
+`v2/activity` read touched when it probed every entity; with the left
+merge that read scans AEV instead and leaves nothing `issue-detail`
+reads. If so main's "cold" is partly warm, and the regression is in what
+the previous query leaves behind, not in `issue-detail`. To settle it:
+run `issue-detail` cold in a fresh process, or count the blocks it
+reads. `command/all` is 13–16% slower, with `steady/all` up at 1× and
+down at 10×: within what these runs separate, not decided.
+
+## 2026-11-16 — the page side
+
+**Question.** In the page, what does reading an answer cost: `JSON.parse`
+of tonk's JSON, against the JS frame reader?
+
+**Method.** `bench/run.mjs`: headless Chromium (V8, as the page has),
+over the exact bytes the engine produced (`answers run --dump`), median
+of 30 runs. `JSON.parse` of the SSE text, then reading two fields of
+every row (what a template showing two does), against accepting the
+frame and reading two fields, or every field. The page today also runs
+`serde_wasm_bindgen` over the parsed graph back into Rust structs; that
+is not counted, which flatters JSON. `performance.now()` is coarse in a
+page that is not cross-origin isolated (0.1 ms).
+
+**Results.** ms:
+
+| answer | JSON bytes | frame bytes | JSON.parse | JSON, two | frame, two | frame, all |
+|---|---|---|---|---|---|---|
+| stuff 2,000 | 184,705 | 85,926 | 0.4 | 0.5 | 0.6 | 1.1 |
+| stuff 20,000 | 1,906,705 | 897,926 | 4.1 | 5.3 | 5.5 | 12.2 |
+| issue 3,000 | 1,410,435 | 397,482 | 1.8 | 2.0 | 0.2 | 2.9 |
+| tonk-issue 3,000 | 1,421,621 | 436,031 | 2.2 | 3.7 | 0.2 | 3.0 |
+
+**Decision.** The frame wins where rows are wide and the page reads few
+fields: tonk's views are thirteen and eight fields wide, and a list
+template shows two or three (10–18× here). Reading every field it does
+not beat V8's native parser, and on narrow rows of unique strings it
+loses: the reader calls `TextDecoder` once per token, and a two-field row
+of unique strings is all tokens. The fix the numbers point at: write a
+frame's text tokens as one run, decode the run once per frame into one
+JS string, and record UTF-16 offsets, so a cell is a `slice`. Not built.
+
 ## How to reproduce
 
 ```sh

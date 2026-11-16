@@ -702,18 +702,24 @@ impl ConceptConclusion {
                 .terms
                 .get("this")
                 .expect("a realized row has a `this` term");
+            // Read by reference: a binding the row already materialized
+            // hands over its entity's `Arc`, not a copy of the value.
             let value = match this {
-                Term::Constant(value) => value.clone(),
+                Term::Constant(value) => value,
                 Term::Variable {
                     name: Some(name), ..
                 } => self
                     .source
-                    .lookup(&Term::<Any>::var(name.clone()))
-                    .and_then(|binding| binding.content())
+                    .value_of(name)
                     .expect("a realized row binds `this`"),
-                Term::Variable { name: None, .. } => unreachable!("realize refuses a blank `this`"),
+                Term::Variable { name: None, .. } => {
+                    unreachable!("realize refuses a blank `this`")
+                }
             };
-            Entity::try_from(value).expect("realize checked `this` is an entity")
+            match value {
+                Value::Entity(entity) => entity.clone(),
+                _ => unreachable!("realize checked `this` is an entity"),
+            }
         })
     }
 
