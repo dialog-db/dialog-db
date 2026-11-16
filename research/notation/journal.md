@@ -973,7 +973,27 @@ The list misreading is gone and the to-do holds. The note slipped to name matchi
 
 Set aside along the way: a `compute` form (another thing beside concepts), folds on concept fields that cannot be written (concepts must run both ways), a view as a rule (a template would change the rule's identity, and two rows give two cards), a view as a command, slot names in a template string that reach a getter with nothing on the page saying so, and `for`.
 
-**Decision.** The design takes these as proposed; R46 should test getters and views on readers.
+**Decision.** The design takes these as proposed; a later round should test getters and views on readers.
+
+## 2026-11-16 — R46: collections on attribute lines
+
+**Question.** The one [planned](results/r46-plan.md). A collection's line leaves the key as a variable in the attribute's name, `(xyz.tonk.element.method/?n of: ?e is: ?s)`. Do readers read `/?n` as every key without being told, and which label tells a dictionary from a sequence?
+
+**Method.** Clean runner, 20 readers each: no label, `keyed:`, `via:`, `shape:`, and (added before it ran) `by:`.
+
+**Results.** [r46](results/r46.md).
+
+| label | one by name, one by position |
+|---|---|
+| none | 2 of 20 |
+| `keyed: :dictionary` / `:sequence` | 20 of 20 |
+| `via: :name` / `:position` | 19 of 20 |
+| `shape: :dictionary` / `:sequence` | 17 of 20 |
+| `by: :name` / `:position` | 20 of 20 |
+
+`/?n` read as every key for all 100 readers.
+
+**Decision.** Keep `/?key`, and a label for its kind; `keyed:` or `by:` is the maintainer's choice.
 
 ## How to reproduce
 
