@@ -36,7 +36,33 @@ What is there to fit beside, in a stored body:
 
 It is C of the matrix with the shape words taken out of it: the shape is read off whether what is under `match` is a map or an array.
 
-## Open: what a map's key is
+## As built, 2026-11-16
+
+On #799, with a key as text. The form above, and what it left to settle:
+
+```
+ under match, a map is read as       when
+ a variable                          its one key is `?`
+ a constant                          its one key ends in `:`, the name of a type
+ a list's run                        it is a list's last item and its one key is `...`
+ a map pattern                       otherwise; `...` among its keys takes the rest
+```
+
+- **Three keys a map pattern cannot name:** `?`, `...`, and any key ending in `:`. Refused when the pattern is made (`PatternError::ReservedKey`), with one entry or with many, so no pattern is built that cannot be kept, which is what format 4 took `UnstorablePattern` out for. A map that holds such a key is still matched: a rest takes it. The matrix above had "ending in `:` alone in a map"; refused always, so that adding an entry does not change whether a key is allowed.
+- **A constant is written under its type inside `match`,** as it is drawn above, whoever reads it. A term alone is written bare for a reader that can tell (JSON): `true`, `"math"`, and bytes as an array of numbers, which under `match` is a list. Read, a bare text, number or boolean is taken as a term alone takes it.
+- **What takes the rest is a term.** An array there is refused.
+- **One list would read as another.** A map of a rest and no named entry is `{ "...": ?r }`, which as a list's last item is the list's run:
+
+  ```
+   [?a {... ?r}]        a list of two, the second any map      [ a, { "...": r }, { "...": [] } ]
+   [?a ... ?r]          a list that starts with ?a             [ a, { "...": r } ]
+  ```
+
+  The first says after its last item that nothing follows: the rest of the list is the list of nothing. Written only there. The agent's, 2026-11-16, the maintainer away. The other column was to refuse such a list when it is made, which the notation meets: a struct read is open, so `[{}]` in a premise is this list.
+
+Pinned by `it_writes_a_map_as_a_map_and_a_list_as_a_list_under_match`, `it_reads_back_every_pattern_it_writes`, `it_tells_a_list_that_ends_in_a_map_of_a_rest_from_a_list_with_a_run`, `it_refuses_a_key_a_pattern_is_written_with` and `it_refuses_what_is_under_match_and_is_no_pattern` (`rust/dialog-query/src/pattern/tests.rs`).
+
+## Was open: what a map's key is
 
 The form writes a key as the text of a dag-cbor map's key. What is built does not fit that yet:
 
@@ -56,4 +82,4 @@ So the form says less than a map pattern can hold, and something has to give. Th
 | a kept syntax tree | 🟡 a struct node keeps its entries in a map keyed by nodes (`syntax.rs`); they become a list of pairs | 🟡 the same | as today |
 | what else uses a key that is not a name | nothing found: 17 of the notation's 18 maps are records of names, the other is the row above | the same | ? |
 
-Not decided. The maintainer's: it is what a map is in the data model (#778), not only how a rule is written. The agent's hypothesis: names only, since nothing built needs another key and it is the one under which his form has no special case. Refuted by a use for a key that is not a name.
+**Answered: text.** Read off what the maintainer had already said, 2026-11-15: his form has text keys and the data model is IPLD's. The agent's hypothesis, names only, is set aside. A record is rebuilt on it (#778): a map's key is text, and the notation keys `{author: ?who}` by the text `author`.

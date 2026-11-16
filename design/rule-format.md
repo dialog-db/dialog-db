@@ -1,6 +1,6 @@
 # A stored rule says less than a rule can
 
-**Phase: Building.** The maintainer decided the approach on 2026-11-13, and format 4 is being built on top of the patterns build. The [journal](rule-format/journal.md) has how it got here, the [ledger](rule-format/claims.md) what is known, [stamping](rule-format/stamping.md) the matrix the decision was read off, and [the form of a pattern](rule-format/design-pattern-form.md) the one decision the build opened: settled by the maintainer on 2026-11-14 as `match`, and waiting on what a map's key is.
+**Phase: Building.** The maintainer decided the approach on 2026-11-13, and format 4 is being built on top of the patterns build. The [journal](rule-format/journal.md) has how it got here, the [ledger](rule-format/claims.md) what is known, [stamping](rule-format/stamping.md) the matrix the decision was read off, and [the form of a pattern](rule-format/design-pattern-form.md) the one decision the build opened: settled by the maintainer on 2026-11-14 as `match`, and built on 2026-11-16 once a map's key was text.
 
 ## Description
 
@@ -65,4 +65,4 @@ Format 4 writes what format 3 wrote, and a map or a list of terms where a parame
 - A rule that holds no pattern is written as it was, but for the number: one byte of its body moves, and its name does not.
 - A rule that holds a pattern keeps the name it has had since it could be built: it is named by its parts, and the bytes are new.
 - What the other direction costs, said to the maintainer and taken as accepted for one cycle: a release that reads up to 3 skips every rule this one writes, a rule of plain terms too, and says nothing. It lasts until every peer of a space has upgraded.
-- A pattern is written as what it is, under one key, `match`: a map for a map, an array for a list, `...` a key whose value takes the rest (Irakli, 2026-11-14: [the form of a pattern](rule-format/design-pattern-form.md)). Not built: it writes a map's key as text, and what a map's key is is open.
+- A pattern is written as what it is, under one key, `match`: a map for a map, an array for a list, `...` a key whose value takes the rest (Irakli, 2026-11-14: [the form of a pattern](rule-format/design-pattern-form.md)). Built 2026-11-16 on #799: a map's key is text, and a map pattern cannot name the keys `?`, `...` or one ending in `:`.
