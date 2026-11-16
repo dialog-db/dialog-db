@@ -3,7 +3,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | Dialog has a value made of values, kept as a record: a version byte, then plain dag-cbor, a map with text keys or a list, with a link that holds any value dag-cbor has no kind for. It is named by its parts. A parameter holds a pattern: a term, or a map or a list of terms. A concept premise that holds one is planned as the concept over the whole value and an equality between the whole and the pattern, and the equality runs both ways ([design-parameters.md](design-parameters.md)). A rule that holds one has an identity, runs, is laid over a branch for a query, and cannot be stored ([design-rule-identity.md](design-rule-identity.md)). A pattern is typed by its leaves, and has to stand where a record can ([design-typing.md](design-typing.md)). A premise of terms alone is moved and allocated as it was, and runs 80 to 290 instructions more a read ([design-leaf-cost.md](design-leaf-cost.md)). | **Building.** The six steps of [the plan](plan.md) are built and tested, in pull request #778. A record nested deep is named on any target's stack ([design-naming-depth.md](design-naming-depth.md)). |
-| **Agenda** | For the maintainer: the codec of a link, `0x30d1a0` and the type's byte, is a number the agent chose from the private range; whether an entity longer than 64 bytes, which a reader built on `cid` refuses, is to be bounded. Answered 2026-11-15, see the last two entries: open or exact, inline CIDs, the number's type, the version byte's exposure, the note. Earlier: what installing a rule that holds a pattern should do; today it is refused by a panic that says why, since an assertion returns nothing, and a stored form for it is the rule format topic's (#779). Whether the instructions left on a read of terms alone, each a test of whether a pattern is held, are a cost. Whether a pattern with no rest is the map of exactly its entries, as built. Whether a composite keeps a number under the narrowest type that holds it, as built. Whether any embedder has stored a record that starts with `0x01` to `0x17`. Found on the way, not about patterns: a variable a premise types, read from a concept field that declares no type, fails the query on a value of another type, where a scan drops the row; and one binary's instruction count moves by about 1% between two runs on the read scenarios, all of it inside the allocator, so the Perf gate cannot see less. Whether `notes/record-value.md` is amended: it says a record is opaque to the query layer, which "never looks inside", and patterns look inside a versioned one. The amendment would say a versioned record is the one kind the engine reads, and every other record stays opaque. | The maintainer's answers to the agenda. Then what the notation (#773) needs of patterns that it does not have. |
+| **Agenda** | **For the maintainer, first: which composite is the record, this branch's or #812's (the last entry).** Then: the codec of a link, `0x30d1a0` and the type's byte, is a number the agent chose from the private range; whether an entity longer than 64 bytes, which a reader built on `cid` refuses, is to be bounded. Answered 2026-11-15, see the last two entries: open or exact, inline CIDs, the number's type, the version byte's exposure, the note. Earlier: what installing a rule that holds a pattern should do; today it is refused by a panic that says why, since an assertion returns nothing, and a stored form for it is the rule format topic's (#779). Whether the instructions left on a read of terms alone, each a test of whether a pattern is held, are a cost. Whether a pattern with no rest is the map of exactly its entries, as built. Whether a composite keeps a number under the narrowest type that holds it, as built. Whether any embedder has stored a record that starts with `0x01` to `0x17`. Found on the way, not about patterns: a variable a premise types, read from a concept field that declares no type, fails the query on a value of another type, where a scan drops the row; and one binary's instruction count moves by about 1% between two runs on the read scenarios, all of it inside the allocator, so the Perf gate cannot see less. Whether `notes/record-value.md` is amended: it says a record is opaque to the query layer, which "never looks inside", and patterns look inside a versioned one. The amendment would say a versioned record is the one kind the engine reads, and every other record stays opaque. | The maintainer's answers to the agenda. Then what the notation (#773) needs of patterns that it does not have. |
 
 ## 2026-11-11, Directing: a pattern in place of a term
 
@@ -274,3 +274,34 @@ The agent's hypothesis: with text keys and inline CIDs the canonical writer, the
 - Names: a composite is named by its parts, so no name of one moved, but for a record nested past the depth a name follows, which is named by bytes that are now other bytes.
 
 **Decided.** By the maintainer: a map read in the notation is open; a record is written with inline CIDs, as version 1. By the agent, his to change: the type is in the link's codec, `0x30d1a0` and the type's byte; a link holds any length; the version byte stays.
+
+## 2026-11-16, Building: two composites
+
+**Asked.** The maintainer: coordinate with the thread "record values in dialog", "tasked with implementing record types but using our own representation".
+
+**Learned.**
+
+- That thread is #748 (research) and #812 (the first build, opened 2026-11-15, two hours before this branch's record was rebuilt as dag-cbor). Neither thread had named the other. The agent rebuilt this branch's bytes without looking for it.
+- Both add `dialog_corpus::Composite` in `model/composite.rs`. They are two things:
+
+```
+                  here (#778)                          there (#812, #748)
+ what one is      a map with text keys, or a list      a set of attribute and value pairs,
+                                                       a field may hold several values; no list
+ a key            text                                 a relation
+ kept as          Value::Record, 0x01 then dag-cbor,   Value::Composite, type byte 22,
+                  inline CIDs                          its own canonical bytes
+ named            under map: or list:                  under composite:
+ taking apart     built: Pattern, both ways            next: a premise over a bound record,
+                                                       a row for each value, never builds
+```
+
+- The maintainer decided both. Here, 2026-11-11: a composite stays a `Value::Record` under a version byte, and a `Value::Composite` variant was not taken. There, 2026-11-12: "a new variant, `Value::Composite`, for structured records". Here, 2026-11-14 and 15: maps and lists as IPLD has them, text keys, inline CIDs. There, 2026-11-06: fields are attributes, a field holds a set.
+- His "we'll switch format soon" of 2026-11-15 was that thread.
+- What this branch's patterns need of a composite is small: the value under a key, the entries not named, a list's items in order, and one built from parts.
+- That thread's destructure is open and never builds, which is what the maintainer chose on 2026-11-15 and what the notation was about to lower to.
+- That session cannot be messaged from this one. The note is a comment on #812.
+
+**Decided.** Not decided: which composite is the record. Held until it is: the stored form of a pattern (#799) and the notation's keys.
+
+The agent's reading, for him to judge: one composite, that thread's, with this branch's patterns moved onto it. A week of his decisions and measurements stand behind it and its destructure is the one he chose. What it leaves open is an ordered list, which a kept syntax tree needs and a set is not.
