@@ -1015,9 +1015,11 @@ Where a fact lies is now a dimension of the row, beside `the`, `of` and
 `is`: its layer, `in`. An attribute descriptor may name it (`in:`), a
 constant layer or a variable a concept field binds; a statement may
 name it for every fact it writes (`Statement::at`). A read with `in`
-unbound reads every layer and binds each row's; one with `in` bound
-reads that layer alone; a write lands in the layer named, the primary
-with none. `LayerDeclaration` (`dialog.layer/type`) declares a layer
+unbound reads every layer and binds each row's layer as `in` in the
+match, `memory:` for the primary's rows; one with `in` bound reads that
+layer alone; a write lands in the layer named, the primary with none. A
+claim carries no layer: a reader that asks where a row lies names `in`
+and reads the binding. `LayerDeclaration` (`dialog.layer/type`) declares a layer
 beside the primary, backed for now by memory. `Branch::stack()` opens
 a `Stack` over the primary: it mints a memory layer for every declared
 layer, reads the composite, and commits a transaction by routing each
@@ -1034,8 +1036,9 @@ the loopback a command lands in.
 What this changes for you:
 
 - `AttributeDescriptor::in_layer` and `layer`, the descriptor's `in` on
-  the wire, `Attribution::layer`, `Claim::layer`, and `Statement::at`
-  are new. `AttributeQuery::with_layer` reads a layer by a term.
+  the wire, `Attribution::layer`, and `Statement::at` are new. `Claim`
+  is unchanged: the layer a row was read from is the match's `in`
+  binding, bound only when the scan names `in:`. `AttributeQuery::with_layer` reads a layer by a term.
   `Selector::in_layer` and `FactView::layer` carry the layer through a
   store that reads several.
 - `Changes` keeps writes into layers apart (`associate_in`,
