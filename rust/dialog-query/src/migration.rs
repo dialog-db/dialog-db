@@ -364,8 +364,12 @@ fn rewrite_attribute(map: &mut BTreeMap<String, Ipld>, unmapped: &mut Vec<Unmapp
     }
     // A single relation listed reads as the relation.
     let mut changed = false;
-    if let Some(Ipld::List(relations)) = map.get("the") {
-        let the = relations[0].clone();
+    // A list naming no relation is left as it is: the descriptor
+    // refuses it by name, and a stored body is never trusted to be well
+    // formed.
+    if let Some(Ipld::List(relations)) = map.get("the")
+        && let Some(the) = relations.first().cloned()
+    {
         map.insert("the".to_string(), the);
         changed = true;
     }
@@ -413,4 +417,26 @@ fn rewrite_attribute(map: &mut BTreeMap<String, Ipld>, unmapped: &mut Vec<Unmapp
         map.insert("aggregate".to_string(), Ipld::String(aggregate.into()));
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stored body is never trusted to be well formed: an attribute
+    /// whose `the` lists no relation is left as it is, for the
+    /// descriptor to refuse by name, where indexing the list would
+    /// panic on a body any peer can write.
+    #[dialog_common::test]
+    fn it_leaves_an_attribute_listing_no_relation_as_it_is() {
+        let attribute = Ipld::Map(
+            [
+                ("the".to_string(), Ipld::List(Vec::new())),
+                ("as".to_string(), Ipld::String("text:".to_string())),
+            ]
+            .into(),
+        );
+        let bytes = serde_ipld_dagcbor::to_vec(&attribute).expect("encodes");
+        assert_eq!(rewrite_body(&bytes), Ok(Rewritten::Unchanged));
+    }
 }

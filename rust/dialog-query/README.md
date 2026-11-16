@@ -128,7 +128,7 @@ mod employee {
 }
 ```
 
-> Note: the cardinality governs writes too. Under one, asserting a new value succeeds the newest claim, the one a read returns; under many, claims accumulate. A ranked read (the greatest, the least, the best of a list) is a rule whose `reduce` folds with `max`, `min` or `top`.
+> Note: the cardinality governs writes too. Under one, asserting a new value succeeds the newest claim, the one a read returns; under many, claims accumulate. A ranked read (the greatest, the least, the last of a list) is a concept field over a cardinality-many attribute that declares the selective aggregator `max`, `min` or `top`.
 
 `Attribute::of(...).is(...)` constructs a statement that can be asserted or retracted:
 

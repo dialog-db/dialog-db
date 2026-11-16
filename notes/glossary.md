@@ -66,7 +66,7 @@ A relation, a value type and a cardinality: how a relation is read and written. 
 { "the": "job/status", "as": ["case:suspended", "case:active"] }
 ```
 
-A listed `as` is an enumerated type: the values the attribute holds, in no ranking order. An attribute's identity is a hash of its relation, its cardinality, its type and the values it lists.
+A listed `as` is an enumerated type: the values the attribute holds, least first, the order a field aggregating with `top` ranks them by. An attribute's identity is a hash of its relation, its cardinality, its type and the values it lists.
 
 #### Cardinality
 

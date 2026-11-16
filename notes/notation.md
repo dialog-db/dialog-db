@@ -181,7 +181,7 @@ The releases 0.3 and 0.4 spelled a `pick` (`last:`, `all:`, `top:`, `max:`, `min
         "description": "A concept the field's target entity must satisfy, as its 'concept:{hash}' URI. Entity-valued attributes only; mutually exclusive with 'optional'."
       },
       "as": {
-        "description": "Value type of the attribute, or the list of values it holds (an enumerated type, in no ranking order). If omitted, any type is allowed.",
+        "description": "Value type of the attribute, or the list of values it holds (an enumerated type, listed least first). If omitted, any type is allowed.",
         "oneOf": [
           { "type": "string", "enum": ["bytes:", "entity:", "boolean:", "text:", "natural:", "integer:", "float:", "record:", "symbol:"] },
           { "type": "array", "minItems": 1 }
@@ -220,7 +220,7 @@ makes of its own field.
 
 #### Listed values
 
-An attribute can constrain its values to a fixed list, an enumerated type. The list carries no ranking: a ranked read is a rule folding with `top`.
+An attribute can constrain its values to a fixed list, an enumerated type. The list is ordered least first: a concept field that declares `"aggregate": "top"` over the attribute reads the claim holding the last listed value.
 
 ```json
 {

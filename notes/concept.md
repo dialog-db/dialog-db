@@ -36,7 +36,7 @@ mod model {
 }
 ```
 
-By default an attribute has cardinality one (one value per entity, the newest). Use `#[cardinality(many)]` for multi-valued attributes; a read of the greatest or least value is a rule whose `reduce` folds with `max` or `min`:
+By default an attribute has cardinality one (one value per entity, the newest). Use `#[cardinality(many)]` for multi-valued attributes; a read of the greatest or least value is a concept field that declares `#[dialog(aggregate = max)]` or `min` over such an attribute:
 
 ```rs
 mod employee {
