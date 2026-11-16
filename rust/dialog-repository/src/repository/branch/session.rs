@@ -823,7 +823,7 @@ impl<'a> QueryEnv<'a> {
     /// [`session:`](crate::SESSION): then that is what `session:` is, and
     /// the primary's session overlay is read as a part of the primary.
     fn holds_own_layer(&self) -> bool {
-        self.memories
+        self.memories()
             .iter()
             .any(|(layer, _)| *layer == session_layer())
     }
