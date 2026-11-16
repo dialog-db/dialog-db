@@ -1011,7 +1011,7 @@ Set aside along the way: a `compute` form (another thing beside concepts), folds
 **Results.** Captured in [design](design.md):
 
 - A rule may conclude an attribute in a concept's own domain, `list/count-open`: the concept's hash and a name. A concept's domain is concluded only; asserting it is an error. Every fold, choosing or computing, concludes only there.
-- A view is such a rule whose conclusion is a template, folded over the group of rows for its entity: one value renders once, many repeat. Its head exposes only the entity, `(view (list/card ?l) [...] body…)`. A record template makes it a query.
+- A view is such a rule whose conclusion is a template, folded over the group of rows for its entity: one value renders once, many repeat. It is just a rule, `(rule (list/card ?l is: [...]) body…)`, with no form of its own; its conclusion exposes only the entity. A record template makes it a query.
 
 Set aside: slots as view parameters (internals leak into the head); positional view parameters (every other parameter is labeled); `(all ?row)` in a conclusion (the template's fold repeats on its own).
 

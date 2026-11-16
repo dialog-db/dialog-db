@@ -90,8 +90,7 @@ A document is a set of top-level forms evaluated as one run. The order of its fo
 - a question, `(query …)`;
 - a command, such as `(add (todo list: list:home text: "Buy milk"))` or `(assert (xyz.todo/state of: todo:9c1e is: :done))`;
 - a `rule`;
-- a `concept`;
-- a `view`.
+- a `concept`.
 
 A command at the top level is ground, or has a `when` that binds its variables (see [Writes succeed what they read](#writes-succeed-what-they-read)). A bare call, with variables or without, is not a top-level form.
 
@@ -398,37 +397,34 @@ A remote call, Unison's `fork` and `await`, is a layer on top: a request sent, a
 
 ## Views
 
-**Proposed.** A view is a rule whose conclusion is markup, folded over its body:
+**Proposed.** A view is a rule whose conclusion is markup, folded over its body. It has no form of its own:
 
 ```clj
-(view (list/card ?l)
-  [:article
-    [:h2 ?name]
-    [:p ?count " open"]
-    [:ul ?row]]
+(rule (list/card ?l is: [:article
+                          [:h2 ?name]
+                          [:p ?count " open"]
+                          [:ul ?row]])
   (list ?l name: ?name)
   (list/count-open ?l is: ?count)
   (todo ?t list: ?l)
   (todo/row ?t is: ?row))
 
-(view (todo/row ?t)
-  [:li ?title]
+(rule (todo/row ?t is: [:li ?title])
   (todo ?t title: ?title))
 ```
 
-- The head is a derived attribute of one concept, `list/card`, and exposes only its entity. From outside it is `(list/card ?l is: ?markup)`; the slots are the body's own variables.
+- The conclusion is a derived attribute of one concept, `list/card`, and exposes only its entity. From outside it is `(list/card ?l is: ?markup)`; the slots are the body's own variables.
 - The template is a fold over the group of rows for one `?l`. A slot whose variable takes one value in the group renders once; one that takes many renders each. There is no `for`: anything can be many, and many repeats, as tonk's templates do today.
 - A vector is markup, as in Hiccup. Correlated slots, a row and its tag, need a view of their own: two slots varying in one group render their own values each, unpaired.
 - Order comes from positional dictionaries, which sort by position, or from CSS `order`. Unordered values keep a stable order between renders, so nothing reshuffles when nothing changed.
 - A concept has as many views as names: `list/card`, `list/detail`.
 
-A view is a derived attribute like `list/count-open`, with a template for its fold. `view` names such a rule so it can be found as one. Editing the template changes the rule's hash, as editing any rule's body does, but consumers depend on `list/card`, the concept's hash and a name, which does not change.
+A view is a derived attribute like `list/count-open`, with a template for its fold where `list/count-open` has `count`. It is found as a view because its fold is markup. Editing the template changes the rule's hash, as editing any rule's body does, but consumers depend on `list/card`, the concept's hash and a name, which does not change.
 
 A view whose template is a record instead of markup is a query:
 
 ```clj
-(view (list/summary ?l)
-  {name: ?name  open: ?count}
+(rule (list/summary ?l is: {name: ?name  open: ?count})
   (list ?l name: ?name)
   (list/count-open ?l is: ?count))
 ```
@@ -484,7 +480,6 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 - The YAML spelling.
 - The cardinality work (`claude/pick-strategy-rules-crdt-tvdpm7`, #793) lets any deductive rule fold and ranks a fold's value against stored claims. The notation puts electors only in concept heads and every other fold only into a concept's domain, which is concluded only, so a folded value never competes with a stored claim. The engine and the notation have to agree on this.
 - A rename under `:many` when the old value is on another layer leaves the old value beside the new one.
-- Whether a view whose template is a record is still called `view`, or `query`.
 - What a fold gives for an empty group: `count` gives 0, but what an empty `all` or a view over no rows renders.
 - How a view's template binds events and names commands, now that it is Hiccup.
 - How a concept's domain is spelled when the concept's name is ambiguous: `list/` resolves by name in the document.
