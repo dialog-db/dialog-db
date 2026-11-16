@@ -1121,7 +1121,7 @@ impl CorpusExt for Corpus {
                             raw.key,
                             layout,
                             datum,
-                            Some(spilled),
+                            Some(spilled.into_boxed_slice()),
                         )))
                     }
                 })
