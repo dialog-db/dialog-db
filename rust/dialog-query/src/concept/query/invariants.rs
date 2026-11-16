@@ -1652,3 +1652,70 @@ async fn a_rule_deciding_on_a_concepts_field_inside_its_cycle_is_set_aside() -> 
     );
     Ok(())
 }
+
+/// "A read that names a derived value is answered as one that does not,
+/// filtered." `org.employee/outearned-by(e) := more :- salary(e) = mine,
+/// dept(e) = d, dept(peer) = d, salary(peer) = more, mine < more` is
+/// read for bob and the value `100`. The value a caller names is tested
+/// against what the relation's cardinality keeps and never seeds the
+/// body, so the body is planned with the value free: a comparison
+/// against it waits for the premise that binds it.
+#[dialog_common::test]
+async fn a_read_naming_a_derived_value_plans_its_rule_with_the_value_free() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    staff(&operator, &branch).await?;
+    let var = |name: &str| serde_json::json!({ "?": { "name": name } });
+    let outearned = compile(serde_json::json!({
+        "deduce": { "with": { "more": {
+            "the": "org.employee/outearned-by", "as": "natural:", "cardinality": "many"
+        } } },
+        "when": [{
+            "assert": { "with": { "salary": { "the": "org.employee/salary", "as": "natural:" } } },
+            "where": { "this": var("this"), "salary": var("mine") }
+        }, {
+            "assert": { "with": { "dept": { "the": "org.employee/dept", "as": "entity:" } } },
+            "where": { "this": var("this"), "dept": var("dept") }
+        }, {
+            "assert": { "with": { "dept": { "the": "org.employee/dept", "as": "entity:" } } },
+            "where": { "this": var("peer"), "dept": var("dept") }
+        }, {
+            "assert": { "with": { "salary": { "the": "org.employee/salary", "as": "natural:" } } },
+            "where": { "this": var("peer"), "salary": var("more") }
+        }, {
+            "assert": "<",
+            "where": { "of": var("mine"), "with": var("more") }
+        }]
+    }))?;
+    let mut registry = RuleRegistry::new();
+    registry.register(outearned)?;
+    assert!(registry.analysis()?.quarantined().is_empty());
+    let source = TestEnv::new(&branch, &operator, registry);
+    let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "more": { "the": "org.employee/outearned-by", "as": "natural:", "cardinality": "many" }
+    }}))?;
+    let read = |who: &str, more: u32| {
+        let mut terms = Parameters::new();
+        terms.insert(
+            "this".into(),
+            Term::<Any>::constant(who.parse::<Entity>().expect("an entity parses")),
+        );
+        terms.insert("more".into(), Term::<Any>::constant(more));
+        ConceptQuery {
+            terms,
+            predicate: predicate.clone(),
+        }
+    };
+    let bob = read("id:bob", 100)
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+    assert_eq!(bob.len(), 1, "alice's 100 is more than bob's 50");
+    let alice = read("id:alice", 50)
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+    assert!(alice.is_empty(), "nobody in the department outearns alice");
+    Ok(())
+}

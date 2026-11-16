@@ -14,6 +14,28 @@ says how to cut a release.
 
 ## Unreleased
 
+### A read that names a derived value no longer fails with an unbound variable
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793)
+
+A read of a relation some rule derives tests the value its caller
+names against what the relation's cardinality keeps; the value never
+seeds the rule's body. The body was still planned as if it did, so a
+premise reading the value could be ordered ahead of the one binding
+it, and the read failed with `Unbound variable "is"`.
+
+What this changes for you:
+
+- A query, a negation (`unless`) or an inductive rule that reads a
+  derived relation with both its entity and its value given now
+  answers where the rule's body compares or computes with that value.
+  A commit that failed with `Commit-time induction failed: rule body:
+  Unbound variable "is"` goes through.
+- No answer that was returned before differs.
+
+Why: the plan and the row it runs on have to agree on what is bound.
+A rule's body is now planned for the terms that seed it.
+
 ### A rule body a branch cannot read is skipped, and listed with why
 
 Refs [#793](https://github.com/dialog-db/dialog-db/issues/793)

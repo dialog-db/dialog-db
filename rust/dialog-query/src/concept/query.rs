@@ -652,7 +652,8 @@ impl ConceptQuery {
             if let Some(exact) = rules.exact()
                 && (app.predicate.attribute_field().is_some() || exact.rule.single_valued())
                 && stored_absent(&exact.attributes, env).await?
-                && let Some(plan) = rules.plan_exact(&app.terms, &first)
+                && let Some(plan) =
+                    rules.plan_exact(&app.seeds(app.election(&rules).is_some()), &first)
             {
                 let elect = app.election(&rules);
                 let rows = stream::iter([Ok(first)]).chain(selection);
@@ -674,7 +675,7 @@ impl ConceptQuery {
             }
 
             let elect = app.election(&rules);
-            let plan = rules.plan(&app.terms, &first);
+            let plan = rules.plan(&app.seeds(elect.is_some()), &first);
             let rows = stream::iter([Ok(first)]).chain(selection);
 
             if reduced.is_empty() {
@@ -753,15 +754,7 @@ impl ConceptQuery {
         Env: crate::Scope<'a>,
     {
         let key_operand = The::key_operand(ConceptDescriptor::VALUE);
-        // Under an election the caller's value, bound or constant, is
-        // tested against what the election yields, never used to seed
-        // the body: seeding would elect among the candidates that happen
-        // to equal it, or sum only those.
-        let mut into = self.terms.clone();
-        if elect.is_some() {
-            into.remove(ConceptDescriptor::VALUE);
-            into.remove(&key_operand);
-        }
+        let into = self.seeds(elect.is_some());
         let back = self.terms.clone();
         // A set-widened read keeps every caller to tell, once the plan
         // has run, which of them nothing matched.
@@ -905,7 +898,7 @@ impl ConceptQuery {
                 return;
             };
             let first = first?;
-            let plan = rules.plan(&app.terms, &first);
+            let plan = rules.plan(&app.seeds(true), &first);
             let widen = app.widens();
             let lens = lens(&app.terms);
             let election = match app.predicate.attribute_field() {
@@ -980,9 +973,7 @@ impl ConceptQuery {
                         _ => {
                             // Seeded with the caller's entity only: its
                             // value is tested after the election.
-                            let mut seed = app.terms.clone();
-                            seed.remove(ConceptDescriptor::VALUE);
-                            seed.remove(&key_operand);
+                            let seed = app.seeds(true);
                             let mut scoped = extract_parameters(&input, &seed)
                                 .map_err(|e| EvaluationError::Store(e.to_string()))?;
                             scoped.share();
@@ -1053,6 +1044,22 @@ impl ConceptQuery {
                 }
             }
         }
+    }
+
+    /// The terms that seed a rule's body, and so the terms its plan is
+    /// made for. Under an election the caller's value and key, bound or
+    /// constant, are tested against what the election yields and never
+    /// seed the body: seeding would elect among the candidates that
+    /// happen to equal them, or sum only those. A plan made for the
+    /// caller's terms as they are would take the value as bound and
+    /// order a premise that reads it ahead of the one that binds it.
+    fn seeds(&self, elected: bool) -> Parameters {
+        let mut seeds = self.terms.clone();
+        if elected {
+            seeds.remove(ConceptDescriptor::VALUE);
+            seeds.remove(&The::key_operand(ConceptDescriptor::VALUE));
+        }
+        seeds
     }
 
     /// Whether this query reads its attribute concept set-widened: the
