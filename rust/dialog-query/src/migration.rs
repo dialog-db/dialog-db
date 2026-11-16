@@ -23,9 +23,9 @@
 //! one this release reads with the same meaning: a `last` attribute is
 //! cardinality one and an `all` attribute cardinality many, and an
 //! attribute read under `max`, `min` or `top` (which a listed `as`
-//! without a pick implied) is a cardinality-many field aggregating with
-//! that aggregate, a `top`'s list reversed, since it ranked best first and
-//! a listing now ranks least first. A chain of relations has no such
+//! without a pick implied) is a cardinality-many field with that pick,
+//! a `top`'s list in the order it had, best first. A chain of relations
+//! has no such
 //! spelling: such a body is reported as [`Rewritten::Unmapped`] and left
 //! inert, never read with another meaning.
 
@@ -160,7 +160,7 @@ pub fn attribute_uri_v1(attribute: &AttributeDescriptor) -> String {
 /// concept's reference over its attributes' earlier references.
 pub fn concept_reference_v1(concept: &ConceptDescriptor) -> Reference {
     let entries = concept.with().iter().map(|(_name, field)| {
-        let attribute = match field.aggregate() {
+        let attribute = match field.pick() {
             Some(aggregate) => aggregated_reference_v1(field.descriptor(), aggregate),
             None => attribute_reference_v1(field.descriptor()),
         };
@@ -177,9 +177,8 @@ pub fn concept_reference_v1(concept: &ConceptDescriptor) -> Reference {
 }
 
 /// The reference the release before this one gave the attribute a field
-/// aggregating with `aggregate` was migrated from: the attribute read under
-/// the pick of the aggregate's name, a `top`'s values listed best first as
-/// that release ranked them.
+/// picking with `aggregate` was migrated from: the attribute read under
+/// that pick, its values listed as they are.
 fn aggregated_reference_v1(attribute: &AttributeDescriptor, aggregate: Selective) -> Reference {
     let pick = match aggregate {
         Selective::Last => return attribute_reference_v1(attribute),
@@ -200,10 +199,7 @@ fn aggregated_reference_v1(attribute: &AttributeDescriptor, aggregate: Selective
             ENTITY.reference_of(content_type.uri().as_bytes()),
         ));
     }
-    let mut among: Vec<&Value> = attribute.among().iter().collect();
-    if aggregate == Selective::Top {
-        among.reverse();
-    }
+    let among: Vec<&Value> = attribute.among().iter().collect();
     if !among.is_empty() {
         entries.push((
             field::AMONG,
@@ -373,12 +369,12 @@ fn rewrite_attribute(map: &mut BTreeMap<String, Ipld>, unmapped: &mut Vec<Unmapp
         map.insert("the".to_string(), the);
         changed = true;
     }
-    let (cardinality, aggregate) = match pick.as_deref() {
+    let (cardinality, picked) = match pick.as_deref() {
         // A listed domain with no pick was read under `top`.
-        None if listed => (Some("many"), Some("top")),
+        None if listed => (None, Some("top")),
         // `cardinality` alone is how this release spells it.
         None => return changed,
-        // Read newest and written adding: what a field aggregating with `last`
+        // Read newest and written adding: what a field picking `last`
         // over a cardinality-many attribute is.
         Some("last") if many => (Some("many"), Some("last")),
         Some("last") => (None, None),
@@ -386,7 +382,9 @@ fn rewrite_attribute(map: &mut BTreeMap<String, Ipld>, unmapped: &mut Vec<Unmapp
         // A `top` ranking nothing ranked every value alike and so read
         // the newest.
         Some("top") if !listed && ranking.is_none() => (Some("many"), Some("last")),
-        Some(ranked @ ("top" | "max" | "min")) => (Some("many"), Some(ranked)),
+        // A ranking pick reads a cardinality-many attribute, which the
+        // pick says by itself.
+        Some(ranked @ ("top" | "max" | "min")) => (None, Some(ranked)),
         Some(other) => {
             unmapped.push(Unmapped::Pick {
                 the: relations.into_iter().next().unwrap_or_default(),
@@ -395,17 +393,12 @@ fn rewrite_attribute(map: &mut BTreeMap<String, Ipld>, unmapped: &mut Vec<Unmapp
             return false;
         }
     };
-    if aggregate == Some("top") {
-        // That release ranked best first; a listing ranks least first.
-        let ranked = match (ranking, map.get("as")) {
-            (Some(ranking), _) => Some(ranking),
-            (None, Some(Ipld::List(values))) => Some(values.clone()),
-            (None, _) => None,
-        };
-        if let Some(mut ranked) = ranked {
-            ranked.reverse();
-            map.insert("as".to_string(), Ipld::List(ranked));
-        }
+    // A `top` that carried its ranking in the pick lists it under `as`,
+    // best first as it was.
+    if picked == Some("top")
+        && let Some(ranking) = ranking
+    {
+        map.insert("as".to_string(), Ipld::List(ranking));
     }
     map.remove("pick");
     map.remove("select");
@@ -413,8 +406,8 @@ fn rewrite_attribute(map: &mut BTreeMap<String, Ipld>, unmapped: &mut Vec<Unmapp
     if let Some(cardinality) = cardinality {
         map.insert("cardinality".to_string(), Ipld::String(cardinality.into()));
     }
-    if let Some(aggregate) = aggregate {
-        map.insert("aggregate".to_string(), Ipld::String(aggregate.into()));
+    if let Some(picked) = picked {
+        map.insert("pick".to_string(), Ipld::String(picked.into()));
     }
     true
 }

@@ -306,7 +306,7 @@ fn decides(rule: &DeductiveRule, index: usize, query: &ConceptQuery) -> bool {
     let named = |term: &Term<Any>| term.name().map(str::to_string);
     let Some((name, _)) = query.predicate.attribute_field() else {
         return query.predicate.with().iter().any(|(name, field)| {
-            (field.aggregate().is_some() || field.cardinality() == Cardinality::One)
+            (field.pick().is_some() || field.cardinality() == Cardinality::One)
                 && decides_on(rule, index, query.terms.get(name))
         });
     };
@@ -432,7 +432,7 @@ fn selecting_edges(
             // A field that declares a selective aggregator folds every
             // claim of the relation, so it needs the relation derived
             // in full, as any fold does.
-            let polarity = if field.aggregate().is_some() {
+            let polarity = if field.pick().is_some() {
                 Polarity::Aggregating
             } else if field.is_optional() {
                 Polarity::Optional

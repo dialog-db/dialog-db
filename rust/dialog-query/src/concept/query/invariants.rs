@@ -1409,9 +1409,8 @@ async fn a_concept_elects_a_status_by_rank_over_the_states_kept() -> anyhow::Res
     let concept: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
         "status": {
             "the": "account/state",
-            "as": ["active", "suspended"],
-            "cardinality": "many",
-            "aggregate": "top"
+            "as": ["suspended", "active"],
+            "pick": "top"
         }
     }}))?;
     let read = || async {

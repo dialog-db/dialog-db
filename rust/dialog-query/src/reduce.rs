@@ -133,9 +133,9 @@ pub enum Aggregator {
     /// greatest, as a cardinality-one read elects among a cell's
     /// claims.
     Last,
-    /// The present value listed last in the attribute's `as`, which
-    /// ranks values least first. Never spelled in a rule's `reduce`:
-    /// only a concept field declaring the selective aggregator `top`
+    /// The present value listed first in the attribute's `as`, which
+    /// ranks values best first. Never spelled in a rule's `reduce`:
+    /// only a concept field picking `top`
     /// folds with it, its listing carried on the entry
     /// ([`ReduceEntry::listed`]).
     #[serde(skip_deserializing)]
@@ -257,8 +257,8 @@ pub struct ReduceSpec {
     pub apply: Aggregator,
     /// The term supplying the fold's input, one lookup per body row.
     pub of: Term<Any>,
-    /// The values the field's attribute lists, least first: what a
-    /// `top` ranks by. Set only by a concept field aggregating with `top`.
+    /// The values the field's attribute lists, best first: what a
+    /// `top` ranks by. Set only by a concept field picking `top`.
     #[serde(skip)]
     pub listed: Vec<Value>,
 }
@@ -309,7 +309,7 @@ pub struct ReduceEntry {
     /// `Absent` binding is skipped; an unbound variable is an
     /// evaluation error.
     pub input: Term<Any>,
-    /// The values a `top` ranks by, least first; empty for every other
+    /// The values a `top` ranks by, best first; empty for every other
     /// fold.
     #[serde(skip)]
     pub listed: Vec<Value>,

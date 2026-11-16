@@ -260,10 +260,10 @@ impl FromStr for The {
 /// cardinality one a read returns the cell's newest claim and a write
 /// succeeds it; under cardinality many a read returns every claim and a
 /// write adds one. `as: [v1, v2]` lists the values the attribute holds,
-/// least first: an enumerated type, ordered, so `[registered, active,
-/// suspended]` ranks `suspended` greatest. A read that ranks candidates
-/// (the greatest, the least, the last listed) is a concept field that
-/// elects with `max`, `min` or `top` over a cardinality-many attribute
+/// best first: an enumerated type, ordered, so `[suspended, active,
+/// registered]` ranks `suspended` best. A read that ranks candidates
+/// (the greatest, the least, the first listed) is a concept field that
+/// picks `max`, `min` or `top` over a cardinality-many attribute
 /// (see [`Selective`](crate::selective::Selective)). Rules derive
 /// into relations and are found by them, so two attributes over one
 /// relation under different types or cardinalities are two attributes.
@@ -292,11 +292,14 @@ pub struct AttributeDescriptor {
 /// a type or a value list, and `cardinality` one (the default, and not
 /// written) or many.
 ///
-/// An earlier release spelled a `pick` (or its preview spelling,
-/// `select`) and could list relations under `the`, a ranked chain. Both
-/// are refused by name, so a definition in that format is never read
-/// with another meaning than it was written with; the migration in
-/// `dialog_query::migration` rewrites the ones that can be rewritten.
+/// `pick` may stand in for `cardinality`: `last` is one and `all` is
+/// many, and where both are written they have to agree. A ranking pick
+/// (`max`, `min`, `top`) is how a concept's field reads an attribute,
+/// so it is refused here by name, as are the preview spelling `select`
+/// and a list of relations under `the`, a ranked chain an earlier
+/// release read. A definition is never read with another meaning than
+/// it was written with; the migration in `dialog_query::migration`
+/// rewrites the ones that can be rewritten.
 #[derive(Serialize, Deserialize)]
 struct Wire {
     the: OneOrMany<The>,
@@ -306,9 +309,10 @@ struct Wire {
     cardinality: Option<CardinalityName>,
     #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
     content: Option<As>,
-    /// The pick an earlier release spelled: refused.
+    /// `last` or `all`, standing in for the cardinality; anything else
+    /// is refused.
     #[serde(default, skip_serializing)]
-    pick: Option<IgnoredAny>,
+    pick: Option<Picked>,
     /// The preview spelling of `pick`: refused.
     #[serde(default, skip_serializing)]
     select: Option<IgnoredAny>,
@@ -318,9 +322,27 @@ struct Wire {
 /// `many`, and nothing else.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum CardinalityName {
+pub(crate) enum CardinalityName {
     One,
     Many,
+}
+
+impl From<Cardinality> for CardinalityName {
+    fn from(cardinality: Cardinality) -> Self {
+        match cardinality {
+            Cardinality::One => CardinalityName::One,
+            Cardinality::Many => CardinalityName::Many,
+        }
+    }
+}
+
+/// A `pick` as an attribute's wire form may spell it: a name, or
+/// whatever else an earlier release wrote there.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Picked {
+    Name(String),
+    Other(IgnoredAny),
 }
 
 impl From<CardinalityName> for Cardinality {
@@ -348,11 +370,10 @@ enum As {
 
 /// Why an attribute an earlier release spelled with a `pick` is not
 /// read.
-pub const PICK_REFUSED: &str = "an attribute no longer has a `pick`: it is written with \
-     `cardinality: one` (what `last` read) or `cardinality: many` (what `all` read), and a \
-     read under `max`, `min` or `top` is a concept field over a cardinality-many attribute \
-     that declares it as its selective aggregator (`aggregate: top`), `top` ranking the \
-     values `as` lists least first";
+pub const PICK_REFUSED: &str = "an attribute's `pick` is `last` (cardinality one) or `all` \
+     (cardinality many), and agrees with its `cardinality` where both are written: a read \
+     under `max`, `min` or `top` is a concept's field over a cardinality-many attribute \
+     (`pick: top` on the field), `top` ranking the values `as` lists best first";
 
 /// Why an attribute listing relations under `the`, a ranked chain an
 /// earlier release read, is not read.
@@ -364,9 +385,25 @@ impl TryFrom<Wire> for AttributeDescriptor {
     type Error = String;
 
     fn try_from(wire: Wire) -> Result<Self, Self::Error> {
-        if wire.pick.is_some() || wire.select.is_some() {
+        if wire.select.is_some() {
             return Err(PICK_REFUSED.to_string());
         }
+        let stated = wire.cardinality.map(Cardinality::from);
+        let cardinality = match &wire.pick {
+            None => stated.unwrap_or_default(),
+            Some(Picked::Name(name)) => {
+                let picked = match name.as_str() {
+                    "last" => Cardinality::One,
+                    "all" => Cardinality::Many,
+                    _ => return Err(PICK_REFUSED.to_string()),
+                };
+                if stated.is_some_and(|stated| stated != picked) {
+                    return Err(PICK_REFUSED.to_string());
+                }
+                picked
+            }
+            Some(Picked::Other(_)) => return Err(PICK_REFUSED.to_string()),
+        };
         let the = match wire.the {
             OneOrMany::One(the) => the,
             OneOrMany::Many(_) => return Err(CHAIN_REFUSED.to_string()),
@@ -403,7 +440,7 @@ impl TryFrom<Wire> for AttributeDescriptor {
             description: wire.description,
             content_type,
             among,
-            cardinality: wire.cardinality.map(Cardinality::from).unwrap_or_default(),
+            cardinality,
         })
     }
 }
@@ -458,8 +495,8 @@ impl AttributeDescriptor {
     }
 
     /// This descriptor over the listed value domain: the values the
-    /// attribute holds, least first: the order a field aggregating with
-    /// `top` ranks them by.
+    /// attribute holds, best first: the order a field picking `top`
+    /// ranks them by.
     pub fn with_domain(mut self, values: Vec<Value>) -> Self {
         self.among = values;
         self
@@ -806,7 +843,7 @@ mod tests {
     }
 
     /// A listed `as` is an enumerated type: the values the attribute
-    /// holds, least first, read under the cardinality the attribute
+    /// holds, best first, read under the cardinality the attribute
     /// declares. It is written back as listed, in its order.
     #[dialog_common::test]
     fn it_reads_a_listed_domain_as_an_enumerated_type() {
@@ -836,23 +873,51 @@ mod tests {
         assert_ne!(many.to_uri(), listed.to_uri());
     }
 
-    /// An attribute spelled with a `pick`, in its preview spelling
-    /// `select`, or over a list of relations, as the release before this
-    /// one read it, is refused by name, whatever the pick: it is never
-    /// read with another meaning than it was written with.
+    /// An attribute's `pick` stands in for its cardinality: `last` is
+    /// one and `all` is many, the same attribute as the one spelled
+    /// with the cardinality, and written beside a cardinality it has to
+    /// agree with it. A ranking pick belongs to a concept's field, and
+    /// the preview spelling `select` and the entity spelling of the
+    /// release before (`last:`) are not read: each is refused by name.
+    /// So is a list of relations.
     #[dialog_common::test]
-    fn it_refuses_an_attribute_spelled_with_a_pick_or_a_chain() {
-        for pick in ["last:", "all:", "max:", "min:", "top:", "last", "all"] {
-            for key in ["pick", "select"] {
-                let mut spelled = serde_json::json!({ "the": "job/tag", "as": "text:" });
-                spelled[key] = pick.into();
-                let error = serde_json::from_value::<AttributeDescriptor>(spelled)
-                    .expect_err("a pick is refused");
-                assert!(
-                    error.to_string().contains("no longer has a `pick`"),
-                    "{error}"
-                );
+    fn it_reads_a_pick_as_the_cardinality_and_refuses_a_ranking_one() {
+        let spelled = |entries: serde_json::Value| {
+            let mut spelled = serde_json::json!({ "the": "job/tag", "as": "text:" });
+            for (key, value) in entries.as_object().expect("entries") {
+                spelled[key] = value.clone();
             }
+            serde_json::from_value::<AttributeDescriptor>(spelled)
+        };
+        let one = spelled(serde_json::json!({})).expect("a plain attribute");
+        let many = spelled(serde_json::json!({ "cardinality": "many" })).expect("many");
+        assert_eq!(
+            spelled(serde_json::json!({ "pick": "last" })).expect("last"),
+            one
+        );
+        assert_eq!(
+            spelled(serde_json::json!({ "pick": "all" })).expect("all"),
+            many
+        );
+        assert_eq!(
+            spelled(serde_json::json!({ "pick": "all", "cardinality": "many" })).expect("both"),
+            many
+        );
+        for refused in [
+            serde_json::json!({ "pick": "all", "cardinality": "one" }),
+            serde_json::json!({ "pick": "last", "cardinality": "many" }),
+            serde_json::json!({ "pick": "max" }),
+            serde_json::json!({ "pick": "min" }),
+            serde_json::json!({ "pick": "top" }),
+            serde_json::json!({ "pick": "last:" }),
+            serde_json::json!({ "pick": { "top:": ["a", "b"] } }),
+            serde_json::json!({ "select": "all" }),
+        ] {
+            let error = spelled(refused.clone()).expect_err("refused");
+            assert!(
+                error.to_string().contains("an attribute's `pick` is"),
+                "{refused}: {error}"
+            );
         }
         let error = serde_json::from_value::<AttributeDescriptor>(serde_json::json!({
             "the": ["user/email", "user/phone"],

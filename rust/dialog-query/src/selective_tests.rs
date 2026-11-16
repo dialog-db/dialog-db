@@ -36,9 +36,9 @@ fn text(text: &str) -> Value {
     Value::String(text.into())
 }
 
-/// The states an account's status lists, least first.
+/// The states an account's status lists, best first.
 fn states() -> serde_json::Value {
-    serde_json::json!(["registered", "active", "suspended"])
+    serde_json::json!(["suspended", "active", "registered"])
 }
 
 /// An account: its name, read newest, and its status, elected by
@@ -51,7 +51,7 @@ fn account(elect: &str) -> ConceptDescriptor {
                 "the": "account/status",
                 "as": states(),
                 "cardinality": "many",
-                "aggregate": elect
+                "pick": elect
             }
         }
     }))
@@ -253,7 +253,7 @@ async fn it_elects_by_value_under_max_and_min() -> anyhow::Result<()> {
                 "the": "game/score",
                 "as": "natural:",
                 "cardinality": "many",
-                "aggregate": elect
+                "pick": elect
             } }
         }))?;
         let mut terms = Parameters::new();
@@ -353,9 +353,7 @@ fn it_refuses_an_aggregator_its_attribute_cannot_be_read_under() {
     };
 
     assert!(
-        refused(
-            ConceptFieldDescriptor::required(listed(Cardinality::One)).aggregating(Selective::Top)
-        ),
+        refused(ConceptFieldDescriptor::required(listed(Cardinality::One)).picking(Selective::Top)),
         "a ranked field reads a cardinality-many attribute"
     );
     let unlisted = AttributeDescriptor::new(
@@ -365,7 +363,7 @@ fn it_refuses_an_aggregator_its_attribute_cannot_be_read_under() {
         Some(Type::String),
     );
     assert!(
-        refused(ConceptFieldDescriptor::required(unlisted).aggregating(Selective::Top)),
+        refused(ConceptFieldDescriptor::required(unlisted).picking(Selective::Top)),
         "`top` ranks by a listing"
     );
     let flags = AttributeDescriptor::new(
@@ -375,17 +373,17 @@ fn it_refuses_an_aggregator_its_attribute_cannot_be_read_under() {
         Some(Type::Boolean),
     );
     assert!(
-        refused(ConceptFieldDescriptor::required(flags.clone()).aggregating(Selective::Max)),
+        refused(ConceptFieldDescriptor::required(flags.clone()).picking(Selective::Max)),
         "`max` needs an order"
     );
     assert!(
         ConceptFieldDescriptor::required(flags)
-            .aggregating(Selective::Last)
+            .picking(Selective::Last)
             .is_ok()
     );
     assert!(
         ConceptFieldDescriptor::required(listed(Cardinality::Many))
-            .aggregating(Selective::Top)
+            .picking(Selective::Top)
             .is_ok()
     );
     assert!(
@@ -393,7 +391,8 @@ fn it_refuses_an_aggregator_its_attribute_cannot_be_read_under() {
             "with": { "status": {
                 "the": "account/status",
                 "as": states(),
-                "aggregate": "top"
+                "cardinality": "one",
+                "pick": "top"
             } }
         }))
         .is_err(),
@@ -417,7 +416,7 @@ fn it_hashes_the_aggregator_into_the_concept() {
             "cardinality": "many"
         });
         if let Some(elect) = elect {
-            status["aggregate"] = elect.into();
+            status["pick"] = elect.into();
         }
         serde_json::from_value(serde_json::json!({ "with": { "status": status } }))
             .expect("a one-field concept is well formed")
@@ -432,7 +431,7 @@ fn it_hashes_the_aggregator_into_the_concept() {
 fn it_round_trips_an_aggregating_field() -> anyhow::Result<()> {
     let concept = account("top");
     let encoded = serde_json::to_value(&concept)?;
-    assert_eq!(encoded["with"]["status"]["aggregate"], "top");
+    assert_eq!(encoded["with"]["status"]["pick"], "top");
     let decoded: ConceptDescriptor = serde_json::from_value(encoded)?;
     assert_eq!(decoded, concept);
     assert_eq!(decoded.this(), concept.this());
@@ -492,5 +491,89 @@ async fn it_sets_aside_a_rule_deriving_what_its_own_election_reads() -> anyhow::
         vec![pair("alice", "suspended"), pair("bob", "active")],
         "bob stays active: nothing is derived from his own election"
     );
+    Ok(())
+}
+
+/// "A field's cardinality is derived from its pick unless it is
+/// written." `last` reads cardinality one and every other pick many; a
+/// cardinality written beside a pick is kept when the pick can read it
+/// and refused when it cannot; and what is written back leaves out a
+/// cardinality the pick implies.
+#[dialog_common::test]
+fn it_derives_a_fields_cardinality_from_its_pick() -> anyhow::Result<()> {
+    let field = |entries: serde_json::Value| -> Result<ConceptDescriptor, serde_json::Error> {
+        let mut status = serde_json::json!({ "the": "account/status", "as": states() });
+        for (key, value) in entries.as_object().expect("entries") {
+            status[key] = value.clone();
+        }
+        serde_json::from_value(serde_json::json!({ "with": { "status": status } }))
+    };
+    let read = |concept: &ConceptDescriptor| {
+        let (_, field) = concept.with().iter().next().expect("one field");
+        (field.cardinality(), field.pick())
+    };
+    for (written, cardinality, pick, back) in [
+        (
+            serde_json::json!({}),
+            Cardinality::One,
+            None,
+            serde_json::json!({}),
+        ),
+        (
+            serde_json::json!({ "pick": "last" }),
+            Cardinality::One,
+            None,
+            serde_json::json!({}),
+        ),
+        (
+            serde_json::json!({ "pick": "all" }),
+            Cardinality::Many,
+            None,
+            serde_json::json!({ "cardinality": "many" }),
+        ),
+        (
+            serde_json::json!({ "pick": "top" }),
+            Cardinality::Many,
+            Some(Selective::Top),
+            serde_json::json!({ "pick": "top" }),
+        ),
+        (
+            serde_json::json!({ "pick": "top", "cardinality": "many" }),
+            Cardinality::Many,
+            Some(Selective::Top),
+            serde_json::json!({ "pick": "top" }),
+        ),
+        (
+            serde_json::json!({ "pick": "last", "cardinality": "many" }),
+            Cardinality::Many,
+            Some(Selective::Last),
+            serde_json::json!({ "pick": "last", "cardinality": "many" }),
+        ),
+    ] {
+        let concept = field(written.clone())?;
+        assert_eq!(read(&concept), (cardinality, pick), "{written}");
+        let mut expected = serde_json::json!({ "the": "account/status", "as": states() });
+        for (key, value) in back.as_object().expect("entries") {
+            expected[key] = value.clone();
+        }
+        let encoded = serde_json::to_value(&concept)?;
+        assert_eq!(encoded["with"]["status"], expected, "{written}");
+        let bytes = serde_ipld_dagcbor::to_vec(&concept)?;
+        let decoded: ConceptDescriptor = serde_ipld_dagcbor::from_slice(&bytes)?;
+        assert_eq!(decoded.this(), concept.this(), "{written}");
+    }
+    assert_eq!(
+        field(serde_json::json!({ "pick": "all" }))?.this(),
+        field(serde_json::json!({ "cardinality": "many" }))?.this(),
+        "two spellings of one concept"
+    );
+    for refused in [
+        serde_json::json!({ "pick": "top", "cardinality": "one" }),
+        serde_json::json!({ "pick": "max", "cardinality": "one" }),
+        serde_json::json!({ "pick": "all", "cardinality": "one" }),
+        serde_json::json!({ "pick": "sum" }),
+    ] {
+        assert!(field(refused.clone()).is_err(), "{refused}");
+    }
     Ok(())
 }

@@ -1271,7 +1271,7 @@ mod tests {
         Ok(())
     }
 
-    // Fields read with a selective aggregator: `#[dialog(aggregate = ..)]`.
+    // Fields read with a selective aggregator: `#[dialog(pick = ..)]`.
     mod game {
         use crate::Attribute;
 
@@ -1292,7 +1292,7 @@ mod tests {
         pub this: Entity,
         pub nickname: game::Nickname,
         /// The greatest of the player's scores.
-        #[dialog(aggregate = max)]
+        #[dialog(pick = max)]
         pub score: game::Score,
     }
 
@@ -1301,7 +1301,7 @@ mod tests {
     pub struct Latest {
         pub this: Entity,
         /// The newest of the player's scores.
-        #[dialog(aggregate = last)]
+        #[dialog(pick = last)]
         pub score: game::Score,
     }
 
@@ -1309,7 +1309,7 @@ mod tests {
     #[derive(Concept, Debug, Clone, PartialEq)]
     pub struct Misranked {
         pub this: Entity,
-        #[dialog(aggregate = max)]
+        #[dialog(pick = max)]
         pub nickname: game::Nickname,
     }
 
@@ -1325,11 +1325,11 @@ mod tests {
                 .expect("the field is present")
         };
         let best = Best::descriptor();
-        assert_eq!(field(best, "score").aggregate(), Some(Selective::Max));
+        assert_eq!(field(best, "score").pick(), Some(Selective::Max));
         assert_eq!(field(best, "score").cardinality(), crate::Cardinality::Many);
-        assert_eq!(field(best, "nickname").aggregate(), None);
+        assert_eq!(field(best, "nickname").pick(), None);
         assert_eq!(
-            field(Latest::descriptor(), "score").aggregate(),
+            field(Latest::descriptor(), "score").pick(),
             Some(Selective::Last)
         );
         assert_ne!(
@@ -1347,7 +1347,7 @@ mod tests {
     /// checks.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    #[should_panic(expected = "game/nickname cannot be read with the selective aggregator `max`")]
+    #[should_panic(expected = "game/nickname cannot be read with `pick: max`")]
     fn it_refuses_a_ranking_aggregator_over_cardinality_one() {
         let _ = Misranked::descriptor();
     }

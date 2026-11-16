@@ -644,7 +644,7 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
             // claim of the relation into a variable of its own, which the
             // selecting rule folds into the field with the aggregator
             // (see `selective_reduce`).
-            let bound = match field.aggregate() {
+            let bound = match field.pick() {
                 Some(_) => claim_variable(name),
                 None => name.to_string(),
             };

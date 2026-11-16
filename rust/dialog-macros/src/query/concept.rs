@@ -246,9 +246,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // newtypes, so a non-entity or `Option<_>` field fails to
         // compile rather than producing an invalid descriptor.
         //
-        // A `#[dialog(aggregate = max)]` field reads its claim with that
-        // selective aggregator. Whether the attribute can be read under
-        // it (a ranking aggregator needs a cardinality-many attribute, an
+        // A `#[dialog(pick = max)]` field reads its claim with that
+        // pick. Whether the attribute can be read under
+        // it (a ranking pick needs a cardinality-many attribute, an
         // ordered type) is known only once the attribute's descriptor is,
         // so a mismatch fails when the concept's descriptor is first
         // built, naming the attribute.
@@ -265,7 +265,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 <#field_type as dialog_query::ConceptField>::field_descriptor()
             },
         };
-        let field_descriptor = match &dialog_attrs.aggregate {
+        let field_descriptor = match &dialog_attrs.pick {
             Some(aggregate) => {
                 let variant = match aggregate.to_string().as_str() {
                     "last" => quote! { Last },
@@ -274,7 +274,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 };
                 quote! {
                     #field_descriptor
-                        .aggregating(dialog_query::selective::Selective::#variant)
+                        .picking(dialog_query::selective::Selective::#variant)
                         .unwrap_or_else(|error| panic!("{error}"))
                 }
             }

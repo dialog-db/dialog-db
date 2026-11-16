@@ -15,12 +15,12 @@
 //! | `last`     | standing: the newest claim                                    |
 //! | `max`      | value, greatest first, then standing                          |
 //! | `min`      | value, least first, then standing                             |
-//! | `top`      | the attribute's listed `as`, the last listed greatest, then standing |
+//! | `top`      | the attribute's listed `as`, the first listed best, then standing |
 //!
 //! Ties fall to standing and then to the value's hash
 //! ([`Cardinality::newer`]). `top` is `max` under the order the
-//! attribute's listing gives its values, which is bounded: the last
-//! listed value is the greatest any claim can hold.
+//! attribute's listing gives its values, which is bounded: the first
+//! listed value is the best any claim can hold.
 
 use std::cmp::Ordering;
 use std::fmt::{self, Display};
@@ -43,9 +43,9 @@ pub enum Selective {
     Max,
     /// The claim holding the least value.
     Min,
-    /// The claim holding the value listed last in the attribute's `as`,
-    /// which ranks its values from least to greatest. A value the list
-    /// does not hold ranks below every listed one.
+    /// The claim holding the value listed first in the attribute's `as`,
+    /// which ranks its values best first. A value the list does not hold
+    /// ranks below every listed one.
     Top,
 }
 
@@ -67,7 +67,7 @@ impl Selective {
     }
 
     /// Whether `candidate` is elected over `incumbent`. `listed` is the
-    /// attribute's `as` list, least first, which only `top` reads.
+    /// attribute's `as` list, best first, which only `top` reads.
     pub fn prefers(
         self,
         listed: &[Value],
@@ -109,20 +109,20 @@ impl Selective {
     }
 
     /// Whether `value` is the greatest any claim can hold, so no other
-    /// claim can be elected over it on value: `top`'s last listed value.
+    /// claim can be elected over it on value: `top`'s first listed value.
     /// Unbounded orders (`max`, `min` over numbers) and `last` have none.
     pub fn bounds(self, listed: &[Value], value: &Value) -> bool {
-        matches!(self, Selective::Top) && listed.last() == Some(value)
+        matches!(self, Selective::Top) && listed.first() == Some(value)
     }
 }
 
-/// Where `value` ranks in `listed`, least first: one past its position,
-/// and zero for a value the list does not hold.
+/// Where `value` ranks in `listed`, which lists best first: the greater
+/// the rank the better, and zero for a value the list does not hold.
 fn rank(listed: &[Value], value: &Value) -> usize {
     listed
         .iter()
         .position(|candidate| candidate == value)
-        .map_or(0, |position| position + 1)
+        .map_or(0, |position| listed.len() - position)
 }
 
 /// The order of two values, falling back on their encoding for values
@@ -167,13 +167,13 @@ impl<'de> Deserialize<'de> for Selective {
     }
 }
 
-/// A selective aggregator with the values its attribute lists, least first: what a
+/// A selective aggregator with the values its attribute lists, best first: what a
 /// read of a cell needs to elect one of its claims.
 #[derive(Debug, Clone, Serialize)]
 pub struct Ranking {
     /// The aggregator.
     pub aggregate: Selective,
-    /// The attribute's listed values, least first; `top` ranks by them.
+    /// The attribute's listed values, best first; `top` ranks by them.
     pub listed: Vec<Value>,
 }
 
@@ -221,8 +221,8 @@ mod tests {
     }
 
     #[test]
-    fn top_ranks_the_last_listed_greatest() {
-        let listed = [text("registered"), text("active"), text("suspended")];
+    fn top_ranks_the_first_listed_best() {
+        let listed = [text("suspended"), text("active"), text("registered")];
         let claims = [text("active"), text("suspended"), text("registered")];
         let elected = Selective::Top.elect(&listed, claims.iter().map(|value| (value, None)));
         assert_eq!(elected, Some(1));
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn top_ranks_an_unlisted_value_below_every_listed_one() {
-        let listed = [text("registered"), text("active")];
+        let listed = [text("active"), text("registered")];
         let claims = [text("unknown"), text("registered")];
         let elected = Selective::Top.elect(&listed, claims.iter().map(|value| (value, None)));
         assert_eq!(elected, Some(1));
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn an_election_ignores_the_order_of_its_claims() {
-        let listed = [text("registered"), text("active"), text("suspended")];
+        let listed = [text("suspended"), text("active"), text("registered")];
         let mut claims = [text("active"), text("suspended"), text("registered")];
         for _ in 0..claims.len() {
             claims.rotate_left(1);
@@ -262,8 +262,8 @@ mod tests {
     }
 
     #[test]
-    fn top_is_bounded_by_its_last_listed_value() {
-        let listed = [text("registered"), text("suspended")];
+    fn top_is_bounded_by_its_first_listed_value() {
+        let listed = [text("suspended"), text("registered")];
         assert!(Selective::Top.bounds(&listed, &text("suspended")));
         assert!(!Selective::Top.bounds(&listed, &text("registered")));
         assert!(!Selective::Max.bounds(&listed, &text("suspended")));

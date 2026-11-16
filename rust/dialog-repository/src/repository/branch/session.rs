@@ -4306,7 +4306,7 @@ mod rule_tests {
     /// itself for a required field. Two rules offer cases, every space
     /// with a subject `case:remote` and the one whose subject has a
     /// replica `case:replicated`, and the field elects among them with
-    /// `top`, the last listed greatest: the better-ranked case wins, and
+    /// `top`, the first listed best: the better-ranked case wins, and
     /// no rule negates anything.
     #[dialog_common::test]
     async fn it_derives_an_optional_field_from_a_rule_reading_the_concept() -> anyhow::Result<()> {
@@ -4316,7 +4316,7 @@ mod rule_tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let cases = serde_json::json!(["case:remote", "case:replicated"]);
+        let cases = serde_json::json!(["case:replicated", "case:remote"]);
         let space = serde_json::json!({ "with": {
             "subject": { "the": "load.space/subject", "as": "entity:" },
             "presence": {
@@ -4324,7 +4324,7 @@ mod rule_tests {
                 "as": cases,
                 "cardinality": "many",
                 "optional": true,
-                "aggregate": "top"
+                "pick": "top"
             }
         } });
         let replica = serde_json::json!({ "with": {

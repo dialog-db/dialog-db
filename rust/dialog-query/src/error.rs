@@ -142,7 +142,7 @@ pub enum TypeError {
     },
     /// A concept field declares a selective aggregator its attribute
     /// cannot be read under.
-    #[error("{the} cannot be read with the selective aggregator `{aggregate}`: {reason}")]
+    #[error("{the} cannot be read with `pick: {aggregate}`: {reason}")]
     SelectiveAggregate {
         /// The field's attribute selector.
         the: String,

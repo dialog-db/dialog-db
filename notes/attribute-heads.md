@@ -20,8 +20,8 @@
 > read returns the cell's newest claim (what `last` read) and a write
 > succeeds it, under many a read returns every claim (what `all` read)
 > and a write adds one. A read under `top`, `max` or `min` is now a
-> concept field reading with that selective aggregator over a cardinality-many
-> attribute, a listed `as` ranking its values least first; a chain of
+> concept field with that `pick` over a cardinality-many attribute, a
+> listed `as` ranking its values best first; a chain of
 > relations is a rule deriving one relation from each (see
 > [`aggregation.md`](./aggregation.md#selective-aggregators-on-concept-fields)). Where this note speaks of
 > a choosing pick, read cardinality one; of `all`, cardinality many. Its

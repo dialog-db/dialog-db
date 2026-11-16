@@ -70,10 +70,6 @@ pub(crate) mod field {
     /// `conforms`: the concept a field's value conforms to.
     pub(crate) const CONFORMS: Reference =
         Reference::from_hex("d6199f32e1f4a2425c343376f9c6eed70104bb908225d3ff7aedaa3b180bf829");
-    /// `aggregate`: the selective aggregator a concept field reads its
-    /// claim with.
-    pub(crate) const AGGREGATE: Reference =
-        Reference::from_hex("3227e601b89e8e9bb2500ee9d762ef0f43831b698c4e9037df3fc247d16f9c27");
     /// The boolean `true`.
     pub(crate) const TRUE: Reference =
         Reference::from_hex("e3cb54e243b031b0c67199ce21f399b77d32eebb1e598b5390acff770561a829");
@@ -118,7 +114,6 @@ mod tests {
             ("cardinality", field::CARDINALITY),
             ("optional", field::OPTIONAL),
             ("conforms", field::CONFORMS),
-            ("aggregate", field::AGGREGATE),
         ] {
             assert_eq!(TEXT.reference_of(name.as_bytes()), reference, "{name}");
         }

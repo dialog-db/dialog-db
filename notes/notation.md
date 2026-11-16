@@ -145,7 +145,7 @@ as: "text:"
 cardinality: many
 ```
 
-A read that ranks a cell's claims, the greatest, the least or the last listed, is not a property of an attribute but of the concept field that reads it: the field declares a selective aggregator, `max`, `min` or `top`, over a cardinality-many attribute (`"aggregate": "top"`; see [aggregation](./aggregation.md#selective-aggregators-on-concept-fields)). A listed `as` ranks its values least first.
+A read that ranks a cell's claims, the greatest, the least or the first listed, is not a property of an attribute but of the concept field that reads it: the field picks `max`, `min` or `top` over a cardinality-many attribute (`"pick": "top"`, from which the field's cardinality follows; see [aggregation](./aggregation.md#selective-aggregators-on-concept-fields)). A listed `as` ranks its values best first.
 
 The releases 0.3 and 0.4 spelled a `pick` (`last:`, `all:`, `top:`, `max:`, `min:`) where an attribute now spells its cardinality, and could list relations under `the`, a ranked chain. A descriptor spelling either is refused by name, so it is never read with another meaning. `Branch::upgrade_rules` rewrites a stored rule whose attributes read under `last` or `all` (cardinality one and many), and reports one reading under `max`, `min` or `top`, or over a chain, which it leaves inert.
 
@@ -181,7 +181,7 @@ The releases 0.3 and 0.4 spelled a `pick` (`last:`, `all:`, `top:`, `max:`, `min
         "description": "A concept the field's target entity must satisfy, as its 'concept:{hash}' URI. Entity-valued attributes only; mutually exclusive with 'optional'."
       },
       "as": {
-        "description": "Value type of the attribute, or the list of values it holds (an enumerated type, listed least first). If omitted, any type is allowed.",
+        "description": "Value type of the attribute, or the list of values it holds (an enumerated type, listed best first). If omitted, any type is allowed.",
         "oneOf": [
           { "type": "string", "enum": ["bytes:", "entity:", "boolean:", "text:", "natural:", "integer:", "float:", "record:", "symbol:"] },
           { "type": "array", "minItems": 1 }
@@ -220,7 +220,7 @@ makes of its own field.
 
 #### Listed values
 
-An attribute can constrain its values to a fixed list, an enumerated type. The list is ordered least first: a concept field that declares `"aggregate": "top"` over the attribute reads the claim holding the last listed value.
+An attribute can constrain its values to a fixed list, an enumerated type. The list is ordered best first: a concept field with `"pick": "top"` over the attribute reads the claim holding the first listed value.
 
 ```json
 {

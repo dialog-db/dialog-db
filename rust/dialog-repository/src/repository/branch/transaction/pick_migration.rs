@@ -206,15 +206,15 @@ async fn rule_facts(branch: &Branch, operator: &Operator, of: &Entity) -> Result
         .count())
 }
 
-/// A rule `v0.4.0` installed spells its attributes under picks, which
-/// this release refuses to read: the stored body decodes to an error,
+/// A rule `v0.4.0` installed spells its picks as entities (`all:`),
+/// which this release refuses to read: the stored body decodes to an error,
 /// and the rule derives nothing until the upgrade rewrites it. A read
 /// of its relation does not fail over it.
 #[dialog_common::test]
 async fn a_rule_the_pick_release_stored_is_refused_and_inert() -> Result<()> {
     let refused = DeductiveRule::decode(&source_from_release("tag_from_label"))
         .expect_err("a body spelling picks is refused");
-    assert!(refused.contains("no longer has a `pick`"), "{refused}");
+    assert!(refused.contains("a field's `pick` is"), "{refused}");
 
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
@@ -305,9 +305,9 @@ async fn the_upgrade_rewrites_last_and_all_into_cardinality() -> Result<()> {
 
 /// A rule reading an attribute under `max`, or under `top` (a listed
 /// `as` without a pick), is rewritten to read a cardinality-many field
-/// electing with that elector, and reads as that release read it: the
-/// greatest salary, and the state that release listed first (it ranked
-/// best first, and the rewritten listing ranks least first). A rule over
+/// with that pick, and reads as that release read it: the greatest
+/// salary, and the state listed first, the listing kept as it was. A
+/// rule over
 /// a chain of relations has no such spelling: it is left as it was,
 /// inert, and reported, and a second run reports it again and commits
 /// nothing.

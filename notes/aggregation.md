@@ -122,29 +122,29 @@ caller is still joined against every group's fold.
 
 A ranked read of a relation is not a fold a rule concludes into a
 relation of its own. It is how a concept field reads its relation: the
-field declares a selective aggregator, which chooses one claim of each
-entity's cell. The attribute says what a write does, the aggregator
-what a read returns.
+field's `pick` names a selective aggregator, which chooses one claim of
+each entity's cell. The attribute says what a write does, the pick what
+a read returns, and the field's cardinality follows from its pick
+unless it is written (`last` is one, every other pick many).
 
 ```json
 { "with": { "status": {
   "the": "account/status",
-  "as": ["registered", "active", "suspended"],
-  "cardinality": "many",
-  "aggregate": "top"
+  "as": ["suspended", "active", "registered"],
+  "pick": "top"
 } } }
 ```
 
-| aggregator | reads |
-|------------|-------|
+| pick | reads |
+|------|-------|
 | `last`  | the newest claim |
 | `max`   | the greatest value, then the newest |
 | `min`   | the least value, then the newest |
-| `top`   | the value listed last in the attribute's `as`, then the newest |
+| `top`   | the value listed first in the attribute's `as`, then the newest |
 
-A listed `as` ranks its values from least to greatest, left to right,
-so `top` is `max` under the order the listing gives a bounded set: the
-last listed value is the greatest any claim can hold. A value the
+A listed `as` ranks its values best first, so `top` is `max` under the
+order the listing gives a bounded set: the first listed value is the
+best any claim can hold. A value the
 listing does not hold ranks below every listed one. Every one is a
 total order, ties falling to standing and then to the value's hash, so
 every replica holding the same claims reads the same one.

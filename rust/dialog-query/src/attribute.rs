@@ -45,17 +45,22 @@ pub use crate::{Predicate, Premise, Term};
 /// assert_eq!(Tag::descriptor().cardinality(), dialog_query::Cardinality::Many);
 /// ```
 ///
-/// The pick an earlier release spelled no longer compiles:
+/// `#[pick(last)]` and `#[pick(all)]` say the same as cardinality one
+/// and many:
 ///
-/// ```compile_fail
+/// ```no_run
+/// use dialog_query::Attribute;
+///
 /// #[derive(dialog_macros::Attribute, Clone)]
 /// #[pick(all)]
 /// pub struct Tag(pub String);
+///
+/// assert_eq!(Tag::descriptor().cardinality(), dialog_query::Cardinality::Many);
 /// ```
 ///
-/// Nor does a ranking pick: a ranked read is a concept field over a
-/// cardinality-many attribute that declares the selective aggregator
-/// `max`, `min` or `top`.
+/// A ranking pick does not compile on an attribute: a ranked read is a
+/// concept field over a cardinality-many attribute that picks `max`,
+/// `min` or `top`.
 ///
 /// ```compile_fail
 /// #[derive(dialog_macros::Attribute, Clone)]
@@ -63,7 +68,7 @@ pub use crate::{Predicate, Premise, Term};
 /// pub struct Grade(pub u32);
 /// ```
 ///
-/// A concept field reads such an attribute with the aggregator:
+/// A concept field reads such an attribute with the pick:
 ///
 /// ```no_run
 /// use dialog_query::{Attribute, Concept, Entity};
@@ -79,7 +84,7 @@ pub use crate::{Predicate, Premise, Term};
 /// #[derive(Concept, Clone, Debug)]
 /// pub struct Best {
 ///     pub this: Entity,
-///     #[dialog(aggregate = max)]
+///     #[dialog(pick = max)]
 ///     pub grade: exam::Grade,
 /// }
 /// ```
@@ -99,7 +104,7 @@ pub use crate::{Predicate, Premise, Term};
 /// #[derive(Concept, Clone, Debug)]
 /// pub struct Best {
 ///     pub this: Entity,
-///     #[dialog(aggregate = top)]
+///     #[dialog(pick = top)]
 ///     pub grade: exam::Grade,
 /// }
 /// ```
