@@ -81,6 +81,13 @@ A call names a concept, a domain, a command or a formula, and passes its paramet
 (todo state: :open of: ?t)
 ```
 
+An attribute is a two-term relation, and takes both terms unlabeled, the entity then the value, as Datomic writes `[?e :attr ?v]`. `of:` and `is:` are their labeled spelling:
+
+```clj
+(xyz.todo/title ?t "Buy milk")
+(xyz.todo/title of: ?t is: "Buy milk")
+```
+
 In a question or a premise, a parameter left out matches anything. In an `assert` through a concept, leaving one out is a compile error (see [Commands](#commands)).
 
 ## Documents
@@ -182,11 +189,11 @@ Only electors fold in a concept. A fold that computes a value, `count`, `sum`, `
 A rule may conclude an attribute in a concept's own domain, named under the concept:
 
 ```clj
-(rule (list/count-open ?l is: (count ?t))
+(rule (list/count-open ?l (count ?t))
   (list ?l)
   (todo ?t list: ?l state: :open))
 
-(list/count-open list:home is: ?n)
+(list/count-open list:home ?n)
 ```
 
 - `list/count-open` is an attribute in the domain of the `list` concept: the concept's hash and the name `count-open`. It is hash-addressed like any attribute, and the name matters only inside that domain.
@@ -322,7 +329,7 @@ Two devices that `add` the same list and text make one to-do; every `jot` makes 
 A conclusion is one of:
 
 - a concept or an attribute, a deduction: it holds in this tick while the conditions do, and is never stored;
-- an attribute in a concept's domain, `(list/count-open ?l is: …)`, a deduction whose `is:` may fold;
+- an attribute in a concept's domain, `(list/count-open ?l …)`, a deduction whose value may fold;
 - a command, which holds in this tick for other rules to read;
 - `(assert …)` or `(retract …)`, which lands after the tick.
 
@@ -400,20 +407,20 @@ A remote call, Unison's `fork` and `await`, is a layer on top: a request sent, a
 **Proposed.** A view is a rule whose conclusion is markup, folded over its body. It has no form of its own:
 
 ```clj
-(rule (list/card ?l is: [:article
-                          [:h2 ?name]
-                          [:p ?count " open"]
-                          [:ul ?row]])
+(rule (list/card ?l [:article
+                      [:h2 ?name]
+                      [:p ?count " open"]
+                      [:ul ?row]])
   (list ?l name: ?name)
-  (list/count-open ?l is: ?count)
+  (list/count-open ?l ?count)
   (todo ?t list: ?l)
-  (todo/row ?t is: ?row))
+  (todo/row ?t ?row))
 
-(rule (todo/row ?t is: [:li ?title])
+(rule (todo/row ?t [:li ?title])
   (todo ?t title: ?title))
 ```
 
-- The conclusion is a derived attribute of one concept, `list/card`, and exposes only its entity. From outside it is `(list/card ?l is: ?markup)`; the slots are the body's own variables.
+- The conclusion is a derived attribute of one concept, `list/card`, and exposes only its entity. From outside it is `(list/card ?l ?markup)`; the slots are the body's own variables.
 - The template is a fold over the group of rows for one `?l`. A slot whose variable takes one value in the group renders once; one that takes many renders each. There is no `for`: anything can be many, and many repeats, as tonk's templates do today.
 - A vector is markup, as in Hiccup. Correlated slots, a row and its tag, need a view of their own: two slots varying in one group render their own values each, unpaired.
 - Order comes from positional dictionaries, which sort by position, or from CSS `order`. Unordered values keep a stable order between renders, so nothing reshuffles when nothing changed.
@@ -424,9 +431,9 @@ A view is a derived attribute like `list/count-open`, with a template for its fo
 A view whose template is a record instead of markup is a query:
 
 ```clj
-(rule (list/summary ?l is: {name: ?name  open: ?count})
+(rule (list/summary ?l {name: ?name  open: ?count})
   (list ?l name: ?name)
-  (list/count-open ?l is: ?count))
+  (list/count-open ?l ?count))
 ```
 
 Events and routes are as [macros](macros.md) left them, and are not redone here.
