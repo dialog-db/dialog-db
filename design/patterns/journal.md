@@ -305,3 +305,27 @@ The agent's hypothesis: with text keys and inline CIDs the canonical writer, the
 **Decided.** Not decided: which composite is the record. Held until it is: the stored form of a pattern (#799) and the notation's keys.
 
 The agent's reading, for him to judge: one composite, that thread's, with this branch's patterns moved onto it. A week of his decisions and measurements stand behind it and its destructure is the one he chose. What it leaves open is an ordered list, which a kept syntax tree needs and a set is not.
+
+## 2026-11-16, Reviewing: the record's bytes against the libraries
+
+The maintainer asked for the pull requests to be reviewed. For the record, whose reader and writer are written by hand, that was done as a test and not by reading.
+
+**Asked.** Are a record's bytes dag-cbor in the one way dag-cbor is written, and does the reader take nothing else?
+
+**Method.** `composite/differential_tests.rs`, over composites drawn from a sequence that is the same every run: maps and lists to four deep, values of every type, the numbers either side of where the way a number is written changes.
+
+- Each is written here, read by `serde_ipld_dagcbor` into `Ipld`, compared part for part, and written again by the library: the same bytes.
+- Each has a byte changed, dropped or added, 24 times. Whatever the reader then takes, it has to write back as those bytes.
+
+**Results.**
+
+| | drawn | found |
+|---|---|---|
+| read and written alike by the libraries | 3,000 as kept; 120,000 once | nothing |
+| a byte changed | 36,000 changes as kept; 960,000 once | one |
+
+The one: a symbol is 64 bytes, its name and zeroes. `Value::try_from` reads the name up to the first zero and reads past the rest, so a link that held a symbol with a byte after its name was read as the symbol and written back as other bytes: two byte strings, one record. It is how a symbol is read everywhere, on main, and is filed apart. Here the reader now takes a linked value only as the bytes it is written in (`NotCanonical`).
+
+**Decided.** Nothing of the design. `it_writes_what_the_libraries_read_and_write_alike` and `it_reads_only_bytes_it_would_write` stay, at the smaller size.
+
+Not done by this: a reading of the pattern code line by line, and anything about speed.

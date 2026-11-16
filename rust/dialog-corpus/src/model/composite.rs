@@ -797,6 +797,12 @@ mod read {
             if !linked(&value) || nested || kept(value.clone()) != value {
                 return Err(CompositeError::NotCanonical);
             }
+            // A value is held as the bytes it is written in. A symbol is
+            // read from more than those: whatever follows its name is
+            // read past.
+            if value.to_bytes() != held {
+                return Err(CompositeError::NotCanonical);
+            }
             Ok(value)
         }
 
@@ -904,6 +910,9 @@ mod read {
         Ok(composite)
     }
 }
+
+#[cfg(test)]
+mod differential_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1472,6 +1481,28 @@ mod tests {
                 "{held:?}"
             );
         }
+
+        // A symbol is 64 bytes, its name and nothing after it. With a
+        // byte after the name it still reads as the symbol, so the link
+        // that holds it is refused. Found by changing bytes
+        // (`it_reads_only_bytes_it_would_write`).
+        let symbol = Value::Symbol("xyz.todo/open".parse::<Relation>().expect("a symbol"));
+        let held = Composite::list([symbol.clone()]).to_bytes();
+        assert_eq!(
+            Composite::try_from_bytes(&held),
+            Ok(Composite::list([symbol.clone()]))
+        );
+        let mut padded = held.clone();
+        *padded.last_mut().expect("bytes") = 2;
+        assert_eq!(
+            Value::try_from((ValueDataType::Symbol, padded[padded.len() - 64..].to_vec())).ok(),
+            Some(symbol),
+            "the symbol is read past what follows its name"
+        );
+        assert_eq!(
+            Composite::try_from_bytes(&padded),
+            Err(CompositeError::NotCanonical)
+        );
     }
 
     /// What a composite holds is of a kind it is written in: no null,
