@@ -80,7 +80,11 @@ impl Invocation {
                 .transaction()
                 .assert(self.changes.clone())
                 .dispatch(self.transients.clone());
-            match Box::pin(transaction.commit().publish().perform(env)).await {
+            // This loop is the rebuild the deprecation asks for: a lost
+            // race refreshes the primary and builds the dispatch again.
+            #[allow(deprecated)]
+            let published = Box::pin(transaction.commit().publish().perform(env));
+            match published.await {
                 Err(CommitError::Publish(lost @ PublishError::VersionMismatch { .. })) => {
                     if reruns == MAX_RERUNS {
                         return Err(lost.into());
