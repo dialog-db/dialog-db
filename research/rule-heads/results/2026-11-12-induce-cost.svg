@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 527" width="920" height="527" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<rect width="920" height="527" fill="#fcfcfb"/>
+<text x="64" y="26" font-size="16" font-weight="600" fill="#0b0b0b">Instructions one commit of 500 move commands retires, in millions</text>
+<text x="64" y="46" font-size="12" fill="#52514e">spike/induce-cost e13e838, one build, callgrind, median of three runs; every number is in the tables under the chart</text>
+<rect x="64" y="64" width="12" height="12" rx="2" fill="#8a8985"/>
+<text x="82" y="74" font-size="12" fill="#0b0b0b">as it is</text>
+<rect x="64" y="81" width="12" height="12" rx="2" fill="#c9a227"/>
+<text x="82" y="91" font-size="12" fill="#0b0b0b">plan: a rule planned once</text>
+<rect x="64" y="98" width="12" height="12" rx="2" fill="#2a78d6"/>
+<text x="82" y="108" font-size="12" fill="#0b0b0b">subject: a seed binds its entity</text>
+<rect x="64" y="115" width="12" height="12" rx="2" fill="#1baf7a"/>
+<text x="82" y="125" font-size="12" fill="#0b0b0b">share: one body evaluated once</text>
+<rect x="64" y="132" width="12" height="12" rx="2" fill="#eb6834"/>
+<text x="82" y="142" font-size="12" fill="#0b0b0b">plan, subject and share together</text>
+<line x1="64" x2="900" y1="469.0" y2="469.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="473.0" font-size="11" text-anchor="end" fill="#52514e">0</text>
+<line x1="64" x2="900" y1="392.5" y2="392.5" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="396.5" font-size="11" text-anchor="end" fill="#52514e">1000</text>
+<line x1="64" x2="900" y1="316.0" y2="316.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="320.0" font-size="11" text-anchor="end" fill="#52514e">2000</text>
+<line x1="64" x2="900" y1="239.5" y2="239.5" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="243.5" font-size="11" text-anchor="end" fill="#52514e">3000</text>
+<line x1="64" x2="900" y1="163.0" y2="163.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="167.0" font-size="11" text-anchor="end" fill="#52514e">4000</text>
+<path d="M77.0,469 V404.0 Q77.0,400.0 81.0,400.0 H94.1 Q98.1,400.0 98.1,404.0 V469 Z" fill="#8a8985"><title>as it is, wide|1 read, 2 heads: 901.704</title></path>
+<text x="87.5" y="394.0" font-size="9" text-anchor="middle" fill="#0b0b0b">902</text>
+<path d="M100.1,469 V405.6 Q100.1,401.6 104.1,401.6 H117.1 Q121.1,401.6 121.1,405.6 V469 Z" fill="#c9a227"><title>plan: a rule planned once, wide|1 read, 2 heads: 881.445</title></path>
+<text x="110.6" y="395.6" font-size="9" text-anchor="middle" fill="#0b0b0b">881</text>
+<path d="M123.1,469 V429.9 Q123.1,425.9 127.1,425.9 H140.2 Q144.2,425.9 144.2,429.9 V469 Z" fill="#2a78d6"><title>subject: a seed binds its entity, wide|1 read, 2 heads: 563.706</title></path>
+<text x="133.7" y="419.9" font-size="9" text-anchor="middle" fill="#0b0b0b">564</text>
+<path d="M146.2,469 V403.9 Q146.2,399.9 150.2,399.9 H163.3 Q167.3,399.9 167.3,403.9 V469 Z" fill="#1baf7a"><title>share: one body evaluated once, wide|1 read, 2 heads: 902.855</title></path>
+<text x="156.7" y="393.9" font-size="9" text-anchor="middle" fill="#0b0b0b">903</text>
+<path d="M169.3,469 V431.5 Q169.3,427.5 173.3,427.5 H186.3 Q190.3,427.5 190.3,431.5 V469 Z" fill="#eb6834"><title>plan, subject and share together, wide|1 read, 2 heads: 541.931</title></path>
+<text x="179.8" y="421.5" font-size="9" text-anchor="middle" fill="#0b0b0b">542</text>
+<text x="133.7" y="493" font-size="12" text-anchor="middle" fill="#0b0b0b">wide</text>
+<text x="133.7" y="509" font-size="12" text-anchor="middle" fill="#52514e">1 read, 2 heads</text>
+<path d="M216.3,469 V385.6 Q216.3,381.6 220.3,381.6 H233.4 Q237.4,381.6 237.4,385.6 V469 Z" fill="#8a8985"><title>as it is, named|1 read, 2 heads: 1142.175</title></path>
+<text x="226.9" y="375.6" font-size="9" text-anchor="middle" fill="#0b0b0b">1142</text>
+<path d="M239.4,469 V388.7 Q239.4,384.7 243.4,384.7 H256.5 Q260.5,384.7 260.5,388.7 V469 Z" fill="#c9a227"><title>plan: a rule planned once, named|1 read, 2 heads: 1102.487</title></path>
+<text x="249.9" y="378.7" font-size="9" text-anchor="middle" fill="#0b0b0b">1102</text>
+<path d="M262.5,469 V411.7 Q262.5,407.7 266.5,407.7 H279.5 Q283.5,407.7 283.5,411.7 V469 Z" fill="#2a78d6"><title>subject: a seed binds its entity, named|1 read, 2 heads: 801.197</title></path>
+<text x="273.0" y="401.7" font-size="9" text-anchor="middle" fill="#0b0b0b">801</text>
+<path d="M285.5,469 V385.8 Q285.5,381.8 289.5,381.8 H302.6 Q306.6,381.8 306.6,385.8 V469 Z" fill="#1baf7a"><title>share: one body evaluated once, named|1 read, 2 heads: 1140.096</title></path>
+<text x="296.1" y="375.8" font-size="9" text-anchor="middle" fill="#0b0b0b">1140</text>
+<path d="M308.6,469 V414.7 Q308.6,410.7 312.6,410.7 H325.7 Q329.7,410.7 329.7,414.7 V469 Z" fill="#eb6834"><title>plan, subject and share together, named|1 read, 2 heads: 762.262</title></path>
+<text x="319.1" y="404.7" font-size="9" text-anchor="middle" fill="#0b0b0b">762</text>
+<text x="273.0" y="493" font-size="12" text-anchor="middle" fill="#0b0b0b">named</text>
+<text x="273.0" y="509" font-size="12" text-anchor="middle" fill="#52514e">1 read, 2 heads</text>
+<path d="M355.7,469 V361.9 Q355.7,357.9 359.7,357.9 H372.7 Q376.7,357.9 376.7,361.9 V469 Z" fill="#8a8985"><title>as it is, repeat|1 read, 2 heads: 1452.825</title></path>
+<text x="366.2" y="351.9" font-size="9" text-anchor="middle" fill="#0b0b0b">1453</text>
+<path d="M378.7,469 V365.5 Q378.7,361.5 382.7,361.5 H395.8 Q399.8,361.5 399.8,365.5 V469 Z" fill="#c9a227"><title>plan: a rule planned once, repeat|1 read, 2 heads: 1405.234</title></path>
+<text x="389.3" y="355.5" font-size="9" text-anchor="middle" fill="#0b0b0b">1405</text>
+<path d="M401.8,469 V414.1 Q401.8,410.1 405.8,410.1 H418.9 Q422.9,410.1 422.9,414.1 V469 Z" fill="#2a78d6"><title>subject: a seed binds its entity, repeat|1 read, 2 heads: 770.569</title></path>
+<text x="412.3" y="404.1" font-size="9" text-anchor="middle" fill="#0b0b0b">771</text>
+<path d="M424.9,469 V403.3 Q424.9,399.3 428.9,399.3 H441.9 Q445.9,399.3 445.9,403.3 V469 Z" fill="#1baf7a"><title>share: one body evaluated once, repeat|1 read, 2 heads: 911.164</title></path>
+<text x="435.4" y="393.3" font-size="9" text-anchor="middle" fill="#0b0b0b">911</text>
+<path d="M447.9,469 V431.0 Q447.9,427.0 451.9,427.0 H465.0 Q469.0,427.0 469.0,431.0 V469 Z" fill="#eb6834"><title>plan, subject and share together, repeat|1 read, 2 heads: 548.463</title></path>
+<text x="458.5" y="421.0" font-size="9" text-anchor="middle" fill="#0b0b0b">548</text>
+<text x="412.3" y="493" font-size="12" text-anchor="middle" fill="#0b0b0b">repeat</text>
+<text x="412.3" y="509" font-size="12" text-anchor="middle" fill="#52514e">1 read, 2 heads</text>
+<path d="M495.0,469 V353.5 Q495.0,349.5 499.0,349.5 H512.1 Q516.1,349.5 516.1,353.5 V469 Z" fill="#8a8985"><title>as it is, wide|4 reads, 4 heads: 1562.463</title></path>
+<text x="505.5" y="343.5" font-size="9" text-anchor="middle" fill="#0b0b0b">1562</text>
+<path d="M518.1,469 V359.7 Q518.1,355.7 522.1,355.7 H535.1 Q539.1,355.7 539.1,359.7 V469 Z" fill="#c9a227"><title>plan: a rule planned once, wide|4 reads, 4 heads: 1480.961</title></path>
+<text x="528.6" y="349.7" font-size="9" text-anchor="middle" fill="#0b0b0b">1481</text>
+<path d="M541.1,469 V379.6 Q541.1,375.6 545.1,375.6 H558.2 Q562.2,375.6 562.2,379.6 V469 Z" fill="#2a78d6"><title>subject: a seed binds its entity, wide|4 reads, 4 heads: 1220.352</title></path>
+<text x="551.7" y="369.6" font-size="9" text-anchor="middle" fill="#0b0b0b">1220</text>
+<path d="M564.2,469 V353.4 Q564.2,349.4 568.2,349.4 H581.3 Q585.3,349.4 585.3,353.4 V469 Z" fill="#1baf7a"><title>share: one body evaluated once, wide|4 reads, 4 heads: 1562.832</title></path>
+<text x="574.7" y="343.4" font-size="9" text-anchor="middle" fill="#0b0b0b">1563</text>
+<path d="M587.3,469 V385.6 Q587.3,381.6 591.3,381.6 H604.3 Q608.3,381.6 608.3,385.6 V469 Z" fill="#eb6834"><title>plan, subject and share together, wide|4 reads, 4 heads: 1142.331</title></path>
+<text x="597.8" y="375.6" font-size="9" text-anchor="middle" fill="#0b0b0b">1142</text>
+<text x="551.7" y="493" font-size="12" text-anchor="middle" fill="#0b0b0b">wide</text>
+<text x="551.7" y="509" font-size="12" text-anchor="middle" fill="#52514e">4 reads, 4 heads</text>
+<path d="M634.3,469 V314.1 Q634.3,310.1 638.3,310.1 H651.4 Q655.4,310.1 655.4,314.1 V469 Z" fill="#8a8985"><title>as it is, named|4 reads, 4 heads: 2077.303</title></path>
+<text x="644.9" y="304.1" font-size="9" text-anchor="middle" fill="#0b0b0b">2077</text>
+<path d="M657.4,469 V322.0 Q657.4,318.0 661.4,318.0 H674.5 Q678.5,318.0 678.5,322.0 V469 Z" fill="#c9a227"><title>plan: a rule planned once, named|4 reads, 4 heads: 1973.326</title></path>
+<text x="667.9" y="312.0" font-size="9" text-anchor="middle" fill="#0b0b0b">1973</text>
+<path d="M680.5,469 V339.9 Q680.5,335.9 684.5,335.9 H697.5 Q701.5,335.9 701.5,339.9 V469 Z" fill="#2a78d6"><title>subject: a seed binds its entity, named|4 reads, 4 heads: 1740.483</title></path>
+<text x="691.0" y="329.9" font-size="9" text-anchor="middle" fill="#0b0b0b">1740</text>
+<path d="M703.5,469 V313.9 Q703.5,309.9 707.5,309.9 H720.6 Q724.6,309.9 724.6,313.9 V469 Z" fill="#1baf7a"><title>share: one body evaluated once, named|4 reads, 4 heads: 2079.205</title></path>
+<text x="714.1" y="303.9" font-size="9" text-anchor="middle" fill="#0b0b0b">2079</text>
+<path d="M726.6,469 V348.2 Q726.6,344.2 730.6,344.2 H743.7 Q747.7,344.2 747.7,348.2 V469 Z" fill="#eb6834"><title>plan, subject and share together, named|4 reads, 4 heads: 1631.582</title></path>
+<text x="737.1" y="338.2" font-size="9" text-anchor="middle" fill="#0b0b0b">1632</text>
+<text x="691.0" y="493" font-size="12" text-anchor="middle" fill="#0b0b0b">named</text>
+<text x="691.0" y="509" font-size="12" text-anchor="middle" fill="#52514e">4 reads, 4 heads</text>
+<path d="M773.7,469 V176.0 Q773.7,172.0 777.7,172.0 H790.7 Q794.7,172.0 794.7,176.0 V469 Z" fill="#8a8985"><title>as it is, repeat|4 reads, 4 heads: 3882.795</title></path>
+<text x="784.2" y="166.0" font-size="9" text-anchor="middle" fill="#0b0b0b">3883</text>
+<path d="M796.7,469 V201.9 Q796.7,197.9 800.7,197.9 H813.8 Q817.8,197.9 817.8,201.9 V469 Z" fill="#c9a227"><title>plan: a rule planned once, repeat|4 reads, 4 heads: 3544.084</title></path>
+<text x="807.3" y="191.9" font-size="9" text-anchor="middle" fill="#0b0b0b">3544</text>
+<path d="M819.8,469 V281.6 Q819.8,277.6 823.8,277.6 H836.9 Q840.9,277.6 840.9,281.6 V469 Z" fill="#2a78d6"><title>subject: a seed binds its entity, repeat|4 reads, 4 heads: 2502.052</title></path>
+<text x="830.3" y="271.6" font-size="9" text-anchor="middle" fill="#0b0b0b">2502</text>
+<path d="M842.9,469 V349.6 Q842.9,345.6 846.9,345.6 H859.9 Q863.9,345.6 863.9,349.6 V469 Z" fill="#1baf7a"><title>share: one body evaluated once, repeat|4 reads, 4 heads: 1612.659</title></path>
+<text x="853.4" y="339.6" font-size="9" text-anchor="middle" fill="#0b0b0b">1613</text>
+<path d="M865.9,469 V381.8 Q865.9,377.8 869.9,377.8 H883.0 Q887.0,377.8 887.0,381.8 V469 Z" fill="#eb6834"><title>plan, subject and share together, repeat|4 reads, 4 heads: 1191.667</title></path>
+<text x="876.5" y="371.8" font-size="9" text-anchor="middle" fill="#0b0b0b">1192</text>
+<text x="830.3" y="493" font-size="12" text-anchor="middle" fill="#0b0b0b">repeat</text>
+<text x="830.3" y="509" font-size="12" text-anchor="middle" fill="#52514e">4 reads, 4 heads</text>
+<line x1="64" x2="900" y1="469" y2="469" stroke="#52514e" stroke-width="1"/>
+</svg>

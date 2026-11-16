@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 470" width="920" height="470" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<rect width="920" height="470" fill="#fcfcfb"/>
+<text x="64" y="26" font-size="16" font-weight="600" fill="#0b0b0b">Instructions one commit of 500 move commands retires, in billions</text>
+<text x="64" y="46" font-size="12" fill="#52514e">main dd19d6c, callgrind, median of three runs; the percentage is over the wide head</text>
+<rect x="64" y="64" width="12" height="12" rx="2" fill="#2a78d6"/>
+<text x="82" y="74" font-size="12" fill="#0b0b0b">one rule, one wide head (stands in for several heads)</text>
+<rect x="64" y="81" width="12" height="12" rx="2" fill="#eb6834"/>
+<text x="82" y="91" font-size="12" fill="#0b0b0b">a named condition: one rule issues a command, a rule a head reads it</text>
+<rect x="64" y="98" width="12" height="12" rx="2" fill="#1baf7a"/>
+<text x="82" y="108" font-size="12" fill="#0b0b0b">a rule a head, the body written again</text>
+<line x1="64" x2="900" y1="424.0" y2="424.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="428.0" font-size="11" text-anchor="end" fill="#52514e">0</text>
+<line x1="64" x2="900" y1="347.5" y2="347.5" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="351.5" font-size="11" text-anchor="end" fill="#52514e">1</text>
+<line x1="64" x2="900" y1="271.0" y2="271.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="275.0" font-size="11" text-anchor="end" fill="#52514e">2</text>
+<line x1="64" x2="900" y1="194.5" y2="194.5" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="198.5" font-size="11" text-anchor="end" fill="#52514e">3</text>
+<line x1="64" x2="900" y1="118.0" y2="118.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="122.0" font-size="11" text-anchor="end" fill="#52514e">4</text>
+<path d="M100.5,424 V359.1 Q100.5,355.1 104.5,355.1 H140.5 Q144.5,355.1 144.5,359.1 V424 Z" fill="#2a78d6"><title>wide, 1 read, 2 heads: 0.901 billion</title></path>
+<text x="122.5" y="349.1" font-size="11" text-anchor="middle" fill="#0b0b0b">0.90</text>
+<path d="M146.5,424 V340.8 Q146.5,336.8 150.5,336.8 H186.5 Q190.5,336.8 190.5,340.8 V424 Z" fill="#eb6834"><title>named, 1 read, 2 heads: 1.140 billion</title></path>
+<text x="168.5" y="330.8" font-size="11" text-anchor="middle" fill="#0b0b0b">1.14</text>
+<text x="168.5" y="317.8" font-size="10" text-anchor="middle" fill="#52514e">+27%</text>
+<path d="M192.5,424 V317.1 Q192.5,313.1 196.5,313.1 H232.5 Q236.5,313.1 236.5,317.1 V424 Z" fill="#1baf7a"><title>repeat, 1 read, 2 heads: 1.450 billion</title></path>
+<text x="214.5" y="307.1" font-size="11" text-anchor="middle" fill="#0b0b0b">1.45</text>
+<text x="214.5" y="294.1" font-size="10" text-anchor="middle" fill="#52514e">+61%</text>
+<text x="168.5" y="452" font-size="12" text-anchor="middle" fill="#0b0b0b">1 read, 2 heads</text>
+<path d="M309.5,424 V325.0 Q309.5,321.0 313.5,321.0 H349.5 Q353.5,321.0 353.5,325.0 V424 Z" fill="#2a78d6"><title>wide, 1 read, 4 heads: 1.346 billion</title></path>
+<text x="331.5" y="315.0" font-size="11" text-anchor="middle" fill="#0b0b0b">1.35</text>
+<path d="M355.5,424 V285.1 Q355.5,281.1 359.5,281.1 H395.5 Q399.5,281.1 399.5,285.1 V424 Z" fill="#eb6834"><title>named, 1 read, 4 heads: 1.868 billion</title></path>
+<text x="377.5" y="275.1" font-size="11" text-anchor="middle" fill="#0b0b0b">1.87</text>
+<text x="377.5" y="262.1" font-size="10" text-anchor="middle" fill="#52514e">+39%</text>
+<path d="M401.5,424 V197.5 Q401.5,193.5 405.5,193.5 H441.5 Q445.5,193.5 445.5,197.5 V424 Z" fill="#1baf7a"><title>repeat, 1 read, 4 heads: 3.013 billion</title></path>
+<text x="423.5" y="187.5" font-size="11" text-anchor="middle" fill="#0b0b0b">3.01</text>
+<text x="423.5" y="174.5" font-size="10" text-anchor="middle" fill="#52514e">+124%</text>
+<text x="377.5" y="452" font-size="12" text-anchor="middle" fill="#0b0b0b">1 read, 4 heads</text>
+<path d="M518.5,424 V342.6 Q518.5,338.6 522.5,338.6 H558.5 Q562.5,338.6 562.5,342.6 V424 Z" fill="#2a78d6"><title>wide, 4 reads, 2 heads: 1.116 billion</title></path>
+<text x="540.5" y="332.6" font-size="11" text-anchor="middle" fill="#0b0b0b">1.12</text>
+<path d="M564.5,424 V324.3 Q564.5,320.3 568.5,320.3 H604.5 Q608.5,320.3 608.5,324.3 V424 Z" fill="#eb6834"><title>named, 4 reads, 2 heads: 1.356 billion</title></path>
+<text x="586.5" y="314.3" font-size="11" text-anchor="middle" fill="#0b0b0b">1.36</text>
+<text x="586.5" y="301.3" font-size="10" text-anchor="middle" fill="#52514e">+22%</text>
+<path d="M610.5,424 V284.4 Q610.5,280.4 614.5,280.4 H650.5 Q654.5,280.4 654.5,284.4 V424 Z" fill="#1baf7a"><title>repeat, 4 reads, 2 heads: 1.878 billion</title></path>
+<text x="632.5" y="274.4" font-size="11" text-anchor="middle" fill="#0b0b0b">1.88</text>
+<text x="632.5" y="261.4" font-size="10" text-anchor="middle" fill="#52514e">+68%</text>
+<text x="586.5" y="452" font-size="12" text-anchor="middle" fill="#0b0b0b">4 reads, 2 heads</text>
+<path d="M727.5,424 V308.5 Q727.5,304.5 731.5,304.5 H767.5 Q771.5,304.5 771.5,308.5 V424 Z" fill="#2a78d6"><title>wide, 4 reads, 4 heads: 1.562 billion</title></path>
+<text x="749.5" y="298.5" font-size="11" text-anchor="middle" fill="#0b0b0b">1.56</text>
+<path d="M773.5,424 V268.5 Q773.5,264.5 777.5,264.5 H813.5 Q817.5,264.5 817.5,268.5 V424 Z" fill="#eb6834"><title>named, 4 reads, 4 heads: 2.084 billion</title></path>
+<text x="795.5" y="258.5" font-size="11" text-anchor="middle" fill="#0b0b0b">2.08</text>
+<text x="795.5" y="245.5" font-size="10" text-anchor="middle" fill="#52514e">+33%</text>
+<path d="M819.5,424 V131.4 Q819.5,127.4 823.5,127.4 H859.5 Q863.5,127.4 863.5,131.4 V424 Z" fill="#1baf7a"><title>repeat, 4 reads, 4 heads: 3.877 billion</title></path>
+<text x="841.5" y="121.4" font-size="11" text-anchor="middle" fill="#0b0b0b">3.88</text>
+<text x="841.5" y="108.4" font-size="10" text-anchor="middle" fill="#52514e">+148%</text>
+<text x="795.5" y="452" font-size="12" text-anchor="middle" fill="#0b0b0b">4 reads, 4 heads</text>
+<line x1="64" x2="900" y1="424" y2="424" stroke="#52514e" stroke-width="1"/>
+</svg>

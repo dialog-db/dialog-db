@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 510" width="920" height="510" font-family="system-ui, -apple-system, Segoe UI, sans-serif">
+<rect width="920" height="510" fill="#fcfcfb"/>
+<text x="64" y="26" font-size="16" font-weight="600" fill="#0b0b0b">Instructions one commit of one move command retires, in millions</text>
+<text x="64" y="46" font-size="12" fill="#52514e">main dd19d6c, callgrind, 100 commits over 500 to-dos, median of three runs; the percentage is over the wide head</text>
+<rect x="64" y="64" width="12" height="12" rx="2" fill="#8a8985"/>
+<text x="82" y="74" font-size="12" fill="#0b0b0b">no rule: the transaction asserts the facts itself</text>
+<rect x="64" y="81" width="12" height="12" rx="2" fill="#2a78d6"/>
+<text x="82" y="91" font-size="12" fill="#0b0b0b">one rule, one wide head (stands in for several heads)</text>
+<rect x="64" y="98" width="12" height="12" rx="2" fill="#eb6834"/>
+<text x="82" y="108" font-size="12" fill="#0b0b0b">a named condition: one rule issues a command, a rule a head reads it</text>
+<rect x="64" y="115" width="12" height="12" rx="2" fill="#1baf7a"/>
+<text x="82" y="125" font-size="12" fill="#0b0b0b">a rule a head, the body written again</text>
+<line x1="64" x2="900" y1="452.0" y2="452.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="456.0" font-size="11" text-anchor="end" fill="#52514e">0</text>
+<line x1="64" x2="900" y1="375.5" y2="375.5" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="379.5" font-size="11" text-anchor="end" fill="#52514e">3</text>
+<line x1="64" x2="900" y1="299.0" y2="299.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="303.0" font-size="11" text-anchor="end" fill="#52514e">6</text>
+<line x1="64" x2="900" y1="222.5" y2="222.5" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="226.5" font-size="11" text-anchor="end" fill="#52514e">9</text>
+<line x1="64" x2="900" y1="146.0" y2="146.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="150.0" font-size="11" text-anchor="end" fill="#52514e">12</text>
+<path d="M77.5,452 V381.8 Q77.5,377.8 81.5,377.8 H117.5 Q121.5,377.8 121.5,381.8 V452 Z" fill="#8a8985"><title>no rule: the transaction asserts the facts itself, 1 read, 2 heads: 2.909</title></path>
+<text x="99.5" y="371.8" font-size="10" text-anchor="middle" fill="#0b0b0b">2.91</text>
+<path d="M123.5,452 V340.8 Q123.5,336.8 127.5,336.8 H163.5 Q167.5,336.8 167.5,340.8 V452 Z" fill="#2a78d6"><title>one rule, one wide head (stands in for several heads), 1 read, 2 heads: 4.516</title></path>
+<text x="145.5" y="330.8" font-size="10" text-anchor="middle" fill="#0b0b0b">4.52</text>
+<path d="M169.5,452 V320.8 Q169.5,316.8 173.5,316.8 H209.5 Q213.5,316.8 213.5,320.8 V452 Z" fill="#eb6834"><title>a named condition: one rule issues a command, a rule a head reads it, 1 read, 2 heads: 5.302</title></path>
+<text x="191.5" y="310.8" font-size="10" text-anchor="middle" fill="#0b0b0b">5.30</text>
+<text x="191.5" y="298.8" font-size="9" text-anchor="middle" fill="#52514e">+17%</text>
+<path d="M215.5,452 V309.8 Q215.5,305.8 219.5,305.8 H255.5 Q259.5,305.8 259.5,309.8 V452 Z" fill="#1baf7a"><title>a rule a head, the body written again, 1 read, 2 heads: 5.733</title></path>
+<text x="237.5" y="299.8" font-size="10" text-anchor="middle" fill="#0b0b0b">5.73</text>
+<text x="237.5" y="287.8" font-size="9" text-anchor="middle" fill="#52514e">+27%</text>
+<text x="168.5" y="476" font-size="12" text-anchor="middle" fill="#0b0b0b">1 read, 2 heads</text>
+<path d="M286.5,452 V353.6 Q286.5,349.6 290.5,349.6 H326.5 Q330.5,349.6 330.5,353.6 V452 Z" fill="#8a8985"><title>no rule: the transaction asserts the facts itself, 1 read, 4 heads: 4.017</title></path>
+<text x="308.5" y="343.6" font-size="10" text-anchor="middle" fill="#0b0b0b">4.02</text>
+<path d="M332.5,452 V307.5 Q332.5,303.5 336.5,303.5 H372.5 Q376.5,303.5 376.5,307.5 V452 Z" fill="#2a78d6"><title>one rule, one wide head (stands in for several heads), 1 read, 4 heads: 5.825</title></path>
+<text x="354.5" y="297.5" font-size="10" text-anchor="middle" fill="#0b0b0b">5.83</text>
+<path d="M378.5,452 V266.6 Q378.5,262.6 382.5,262.6 H418.5 Q422.5,262.6 422.5,266.6 V452 Z" fill="#eb6834"><title>a named condition: one rule issues a command, a rule a head reads it, 1 read, 4 heads: 7.427</title></path>
+<text x="400.5" y="256.6" font-size="10" text-anchor="middle" fill="#0b0b0b">7.43</text>
+<text x="400.5" y="244.6" font-size="9" text-anchor="middle" fill="#52514e">+27%</text>
+<path d="M424.5,452 V193.5 Q424.5,189.5 428.5,189.5 H464.5 Q468.5,189.5 468.5,193.5 V452 Z" fill="#1baf7a"><title>a rule a head, the body written again, 1 read, 4 heads: 10.296</title></path>
+<text x="446.5" y="183.5" font-size="10" text-anchor="middle" fill="#0b0b0b">10.30</text>
+<text x="446.5" y="171.5" font-size="9" text-anchor="middle" fill="#52514e">+77%</text>
+<text x="377.5" y="476" font-size="12" text-anchor="middle" fill="#0b0b0b">1 read, 4 heads</text>
+<path d="M495.5,452 V381.8 Q495.5,377.8 499.5,377.8 H535.5 Q539.5,377.8 539.5,381.8 V452 Z" fill="#8a8985"><title>no rule: the transaction asserts the facts itself, 4 reads, 2 heads: 2.909</title></path>
+<text x="517.5" y="371.8" font-size="10" text-anchor="middle" fill="#0b0b0b">2.91</text>
+<path d="M541.5,452 V330.1 Q541.5,326.1 545.5,326.1 H581.5 Q585.5,326.1 585.5,330.1 V452 Z" fill="#2a78d6"><title>one rule, one wide head (stands in for several heads), 4 reads, 2 heads: 4.936</title></path>
+<text x="563.5" y="320.1" font-size="10" text-anchor="middle" fill="#0b0b0b">4.94</text>
+<path d="M587.5,452 V307.7 Q587.5,303.7 591.5,303.7 H627.5 Q631.5,303.7 631.5,307.7 V452 Z" fill="#eb6834"><title>a named condition: one rule issues a command, a rule a head reads it, 4 reads, 2 heads: 5.814</title></path>
+<text x="609.5" y="297.7" font-size="10" text-anchor="middle" fill="#0b0b0b">5.81</text>
+<text x="609.5" y="285.7" font-size="9" text-anchor="middle" fill="#52514e">+18%</text>
+<path d="M633.5,452 V284.6 Q633.5,280.6 637.5,280.6 H673.5 Q677.5,280.6 677.5,284.6 V452 Z" fill="#1baf7a"><title>a rule a head, the body written again, 4 reads, 2 heads: 6.720</title></path>
+<text x="655.5" y="274.6" font-size="10" text-anchor="middle" fill="#0b0b0b">6.72</text>
+<text x="655.5" y="262.6" font-size="9" text-anchor="middle" fill="#52514e">+36%</text>
+<text x="586.5" y="476" font-size="12" text-anchor="middle" fill="#0b0b0b">4 reads, 2 heads</text>
+<path d="M704.5,452 V353.6 Q704.5,349.6 708.5,349.6 H744.5 Q748.5,349.6 748.5,353.6 V452 Z" fill="#8a8985"><title>no rule: the transaction asserts the facts itself, 4 reads, 4 heads: 4.017</title></path>
+<text x="726.5" y="343.6" font-size="10" text-anchor="middle" fill="#0b0b0b">4.02</text>
+<path d="M750.5,452 V296.5 Q750.5,292.5 754.5,292.5 H790.5 Q794.5,292.5 794.5,296.5 V452 Z" fill="#2a78d6"><title>one rule, one wide head (stands in for several heads), 4 reads, 4 heads: 6.254</title></path>
+<text x="772.5" y="286.5" font-size="10" text-anchor="middle" fill="#0b0b0b">6.25</text>
+<path d="M796.5,452 V254.6 Q796.5,250.6 800.5,250.6 H836.5 Q840.5,250.6 840.5,254.6 V452 Z" fill="#eb6834"><title>a named condition: one rule issues a command, a rule a head reads it, 4 reads, 4 heads: 7.897</title></path>
+<text x="818.5" y="244.6" font-size="10" text-anchor="middle" fill="#0b0b0b">7.90</text>
+<text x="818.5" y="232.6" font-size="9" text-anchor="middle" fill="#52514e">+26%</text>
+<path d="M842.5,452 V158.6 Q842.5,154.6 846.5,154.6 H882.5 Q886.5,154.6 886.5,158.6 V452 Z" fill="#1baf7a"><title>a rule a head, the body written again, 4 reads, 4 heads: 11.663</title></path>
+<text x="864.5" y="148.6" font-size="10" text-anchor="middle" fill="#0b0b0b">11.66</text>
+<text x="864.5" y="136.6" font-size="9" text-anchor="middle" fill="#52514e">+86%</text>
+<text x="795.5" y="476" font-size="12" text-anchor="middle" fill="#0b0b0b">4 reads, 4 heads</text>
+<line x1="64" x2="900" y1="452" y2="452" stroke="#52514e" stroke-width="1"/>
+</svg>
