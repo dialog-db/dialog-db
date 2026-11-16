@@ -7688,7 +7688,27 @@ mod tests {
     /// prunes under shifted seams, and prunes of op lists that differ with
     /// the same winners all occur.
     #[dialog_common::test]
-    async fn it_matches_a_materialized_difference_under_divergent_flush_history() -> Result<()> {
+    async fn it_matches_a_materialized_difference_under_divergent_flush_history_part_1()
+    -> Result<()> {
+        divergent_flush_history_cases(0).await
+    }
+
+    /// The second half of the seeds of
+    /// [`it_matches_a_materialized_difference_under_divergent_flush_history_part_1`].
+    #[dialog_common::test]
+    async fn it_matches_a_materialized_difference_under_divergent_flush_history_part_2()
+    -> Result<()> {
+        divergent_flush_history_cases(1).await
+    }
+
+    /// Runs half `part` (0 or 1) of the divergent flush history seeds and
+    /// checks the census over that half. The seeds are split across two
+    /// tests so that each stays far under the wasm runner's per-test limit
+    /// on a slow runner, while together they run every seed the single test
+    /// ran. Halves, not smaller parts: prunes under shifted seams are rare,
+    /// and with the default 240 seeds a quarter can hold none, which would
+    /// fail the census though nothing is wrong.
+    async fn divergent_flush_history_cases(part: u64) -> Result<()> {
         use super::{MissingBlocks, MissingPolicy, Prefetch, prune_census};
 
         // `DIALOG_DIFF_ORACLE_CASES` runs more for a longer local soak.
@@ -7696,10 +7716,11 @@ mod tests {
             .ok()
             .and_then(|cases| cases.parse().ok())
             .unwrap_or(240);
+        let seeds = part * cases / 2..(part + 1) * cases / 2;
         prune_census::take();
         let mut heights: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         let mut shapes: BTreeMap<&str, usize> = BTreeMap::new();
-        for seed in 0..cases {
+        for seed in seeds.clone() {
             let mut rng = 0xD1B5_4A32_D192_ED03u64 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
             let mut next = move || {
                 rng ^= rng << 13;
@@ -8013,7 +8034,7 @@ mod tests {
         }
         let (routed, shifted, winners_only) = prune_census::take();
         eprintln!(
-            "{cases} cases (seeds 0..{cases}); shapes {shapes:?}; (source, target) heights \
+            "seeds {seeds:?} of {cases}; shapes {shapes:?}; (source, target) heights \
              {heights:?}; routed-op prunes {routed}, under shifted seams {shifted}, of \
              different lists with the same winners {winners_only}"
         );
