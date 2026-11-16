@@ -48,12 +48,5 @@ async fn main() -> Result<()> {
             println!("; {place}warning: {}{form}", diagnostic.message);
         }
     }
-    if notebook.held() > 0 {
-        println!(
-            "; {} rule(s) hold a struct, which Dialog-DB cannot keep yet: \
-             they ran here and are not on the branch",
-            notebook.held()
-        );
-    }
     Ok(())
 }

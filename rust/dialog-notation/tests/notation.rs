@@ -863,13 +863,12 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
         vec![r#"(xyz.person person:ada name: "Ada")"#]
     );
 
-    // Dialog-DB cannot keep a rule that holds a struct: a stored rule
-    // has no way to write one yet. The notebook holds the rule itself
-    // and lays it over the branch for every query after.
+    // A rule that holds a struct is kept on the branch like any other
+    // (format 4 of a stored rule writes a pattern), and the branch
+    // derives from it.
     notebook
         .submit("(rule (xyz.by ?n author: ?who) (xyz.note ?n about: {author: ?who}))")
         .await?;
-    assert_eq!(notebook.held(), 1);
     assert_eq!(
         report(&mut notebook, "(query (xyz.by ?n author: ?who))").await?,
         vec![
@@ -877,7 +876,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
             r#"(xyz.by note:2 author: "Grace")"#,
         ]
     );
-    // A query of several premises reads through the held rule.
+    // A query of several premises reads through the kept rule.
     notebook
         .submit(r#"(assert (xyz.person person:grace name: "Grace"))"#)
         .await?;
@@ -894,19 +893,33 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
         ]
     );
 
-    // A rule that writes runs when a transaction commits, where a rule
-    // held for queries is never seen. So one that holds a struct is
-    // refused until Dialog-DB can keep it.
-    let writing = notebook
+    // A rule that writes runs when a transaction commits, so it has to
+    // be on the branch. One that holds a struct is: installed, it
+    // writes what the struct takes out of the notes there are, and then
+    // out of a note written after it.
+    notebook
         .submit(
-            "(rule (assert (xyz.by ?n author: ?who))
+            "(rule (assert (xyz.signed ?n by: (:last (:text ?who))))
                (xyz.note ?n about: {author: ?who}))",
         )
-        .await
-        .map_err(|error| error.downcast::<Error>());
-    assert!(
-        matches!(writing, Err(Ok(Error::Unsupported(_)))),
-        "{writing:?}"
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.signed ?n by: ?who))").await?,
+        vec![
+            r#"(xyz.signed note:1 by: "Ada")"#,
+            r#"(xyz.signed note:2 by: "Grace")"#,
+        ]
+    );
+    notebook
+        .submit(r#"(assert (xyz.note note:3 about: {author: "Hedy" pinned: false}))"#)
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.signed ?n by: ?who))").await?,
+        vec![
+            r#"(xyz.signed note:1 by: "Ada")"#,
+            r#"(xyz.signed note:2 by: "Grace")"#,
+            r#"(xyz.signed note:3 by: "Hedy")"#,
+        ]
     );
     Ok(())
 }

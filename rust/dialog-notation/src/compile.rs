@@ -205,8 +205,8 @@ pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
     };
     // What a rule says it is for is a fact about the rule, kept beside
     // it: Dialog-DB leaves a description out of what a rule is and out
-    // of what it stores of one. A rule Dialog-DB cannot keep has no
-    // entity to say it of.
+    // of what it stores of one. A rule with no entity has none to say
+    // it of.
     let kept = steps.iter().find_map(|step| match step {
         Step::Deduce(rule) => rule.try_this(),
         Step::Induce(rule) => rule.try_this(),
@@ -616,8 +616,9 @@ struct Scope {
     /// The variables only what must not hold names, seen so far.
     absent: BTreeSet<String>,
     /// The patterns that stand where a term does, each under the
-    /// variable written in its place. A pattern has no wire form, so it
-    /// is put in once Dialog-DB has read the rest.
+    /// variable written in its place. The rest is written as JSON and
+    /// read by Dialog-DB, and a pattern is put in after: this was built
+    /// before a pattern had a written form (format 4 of a rule body).
     shapes: Vec<(String, Syntax, Pattern)>,
 }
 

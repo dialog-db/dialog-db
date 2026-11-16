@@ -1181,6 +1181,17 @@ Built: `line` and `lines` in `expand.rs`; the to-do example is in lines. 98 unit
 
 Not looked at: what a write under `:one` retires. It is what the engine does for the pick `last`, and it is where the cardinality work (#793) changes things.
 
+## 2026-11-16, Building: a rule that holds a struct is kept
+
+**Asked.** Nothing. The fifth step of the order was taken before the fourth: the stored form of a pattern was decided by the maintainer and waited only on a key being text, where a getter's spelling is still open on #728.
+
+**Learned.**
+
+- `match` is built on #799 ([rule-format journal](../rule-format/journal.md), 2026-11-16), and #799 is merged in here. `DeductiveRule::storable` is gone with what it refused, so the notebook's list of rules held aside went with it.
+- A rule that writes is run when it is installed, over what is already there: installed after two notes, `(rule (assert (xyz.signed ?n by: …)) (xyz.note ?n about: {author: ?who}))` signs both in that transaction, and a third when it is written. The agent expected the third alone, and the test now pins all of it.
+
+**Decided.** Nothing new. `it_keeps_a_struct_and_takes_it_apart_by_a_pattern` pins that a rule holding a struct derives from the branch and that one writes through it.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.
@@ -1195,7 +1206,7 @@ In order. One is asked, answered and written down before the next.
 **Diagnostics through the query engine: decided 2026-11-12, not built.** Asked again on 2026-11-14, the agent answered with options and a question back, without reading the ledger, which has it: every phase is reachable from the query engine, parsing and analysis as formulas, expansion as a resolver, "an LSP server is then queries" ([design-pipeline.md](design-pipeline.md)). The maintainer, 2026-11-15: a resolver takes a syntax form, or source text, and gives diagnostics; the LSP protocol is exposed over dialog, "so that it can then be exposed over HTTP or without". What stands before it: the analyzer reads its definitions from memory, and as a resolver it reads them from the branch, where a rule about syntax is not stored until format 4 (#799). Parsing alone reads no database and could be a formula now, but formulas are a closed set compiled into `dialog-query`.
 
 1. Decided 2026-11-14: the more specific rule wins. Built 2026-11-13: the reader that gives `...` no meaning, the quoted list, the record's refusals, a read that says every field or `...`, a struct's last key.
-1. Decided 2026-11-13: the new format always, the old read for one cycle. Built 2026-11-14 as #799, on #778, a draft: every rule body is written in format 4, a rule that holds a pattern is kept, and the bytes format 3 wrote are pinned as reading back. Not yet here: this branch still refuses a struct in a rule that writes, until #799 is merged in and the notebook stops holding such rules aside.
+1. Decided 2026-11-13: the new format always, the old read for one cycle. Built 2026-11-14 as #799, on #778, a draft: every rule body is written in format 4, a rule that holds a pattern is kept, and the bytes format 3 wrote are pinned as reading back. Merged in here on 2026-11-16, with a pattern written under `match`: the notebook holds no rule aside, and a rule that writes may hold a struct.
 2. Decided 2026-11-14, by the maintainer, shown #791's cases: it is a bug. Filed as #801 and fixed apart from everything here in #802, merged 2026-11-15 (b8b8ba3), on main: the tests alone are its first commit and four of five fail there; with the fix the crate's 711 pass. #802 is the first of #791's two changes. The second, a written attribute that a deductive rule also derives from itself, is not in it and is filed as #804: main misses the derived fact with the subject named, and #802 makes the unnamed spelling miss it too, where main found it by the bug. Not checked by anyone: whether a tonk rule relies on the old firing.
 2. Read off what the maintainer had said, 2026-11-15, after the agent asked three times: a key in a pattern is text. His `match` form has text keys and the data model is IPLD's. `{author: ?who}` keys by the text `author`; a pattern refuses the keys `?`, `...` and one ending in `:`. To build: `match` on #799, text keys here. What a record is written as is its own question now, on #778: he would write dialog's own types as inline CIDs.
 3. Answered 2026-11-13 by the quote, and 2026-11-14 by the list: `'(:open :done)` and `[:open :done]` are one list, and `[]` is the list of nothing.

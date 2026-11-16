@@ -387,14 +387,16 @@ fn it_is_written_one_way() {
 
     assert!(matches!(
         Pattern::map([("a".to_string(), var("x")), ("a".to_string(), var("y"))]),
-        Err(CompositeError::DuplicateKey(_))
+        Err(PatternError::Composite(CompositeError::DuplicateKey(_)))
     ));
 }
 
-/// A leaf is written to the wire as a term is. A map or a list has no
-/// wire form and is refused.
+/// A leaf is written as a term is. A map or a list is written as what
+/// it is, under `match`, which is neither `?`, as a variable is, nor
+/// the name of a type, as a constant is, so each reads back as what it
+/// was.
 #[dialog_common::test]
-fn it_has_no_wire_form_above_a_leaf() {
+fn it_writes_a_map_as_a_map_and_a_list_as_a_list_under_match() {
     assert_eq!(
         serde_json::to_value(var("x")).expect("a leaf is written"),
         serde_json::json!({"?": {"name": "x"}})
@@ -403,9 +405,247 @@ fn it_has_no_wire_form_above_a_leaf() {
         serde_json::from_value(serde_json::json!({"?": {"name": "x"}})).expect("reads");
     assert_eq!(read, var("x"));
 
-    let composite = Pattern::map([("a".to_string(), var("x"))]).expect("a pattern");
-    let refused = serde_json::to_value(&composite).expect_err("no wire form");
-    assert!(refused.to_string().contains("no wire form"), "{refused}");
+    // {author: ?who, pinned: true, ...?others}
+    let map = Pattern::Map(
+        shape(&[
+            ("author", var("who")),
+            (
+                "pinned",
+                Pattern::Term(Term::Constant(Value::Boolean(true))),
+            ),
+        ])
+        .with_rest(Term::var("others")),
+    );
+    let written = serde_json::to_value(&map).expect("a map is written");
+    assert_eq!(
+        written,
+        serde_json::json!({ "match": {
+            "author": { "?": { "name": "who" } },
+            "pinned": { "boolean:": true },
+            "...": { "?": { "name": "others" } },
+        } })
+    );
+    assert_eq!(
+        serde_json::from_value::<Pattern>(written).expect("reads"),
+        map
+    );
+
+    // [?first, "math", ...?more]
+    let list = Pattern::List(
+        ListPattern::new([var("first"), Pattern::Term(Term::Constant(text("math")))])
+            .with_run(Term::var("more")),
+    );
+    let written = serde_json::to_value(&list).expect("a list is written");
+    assert_eq!(
+        written,
+        serde_json::json!({ "match": [
+            { "?": { "name": "first" } },
+            { "text:": "math" },
+            { "...": { "?": { "name": "more" } } },
+        ] })
+    );
+    assert_eq!(
+        serde_json::from_value::<Pattern>(written).expect("reads"),
+        list
+    );
+
+    // Inside one another there is no `match` again, and `...` with
+    // nothing named after it is a blank.
+    let nested = Pattern::map([
+        (
+            "tags",
+            Pattern::List(ListPattern::new([var("first")]).with_run(Term::blank())),
+        ),
+        ("by", Pattern::Map(shape(&[("name", var("name"))]))),
+    ])
+    .expect("a pattern");
+    let written = serde_json::to_value(&nested).expect("is written");
+    assert_eq!(
+        written,
+        serde_json::json!({ "match": {
+            "by": { "name": { "?": { "name": "name" } } },
+            "tags": [{ "?": { "name": "first" } }, { "...": { "?": {} } }],
+        } })
+    );
+    assert_eq!(
+        serde_json::from_value::<Pattern>(written).expect("reads"),
+        nested
+    );
+
+    // A constant that is a record is a constant still, under the name
+    // of its type, alone and inside a pattern.
+    let constant = Pattern::Term(Term::Constant(self::map(&[("a", text("b"))])));
+    let bytes = serde_ipld_dagcbor::to_vec(&constant).expect("a constant is written");
+    let read: Pattern = serde_ipld_dagcbor::from_slice(&bytes).expect("reads");
+    assert_eq!(read, constant);
+    let holding = Pattern::list([constant, var("x")]);
+    let bytes = serde_ipld_dagcbor::to_vec(&holding).expect("is written");
+    let read: Pattern = serde_ipld_dagcbor::from_slice(&bytes).expect("reads");
+    assert_eq!(read, holding);
+}
+
+/// Every pattern reads back as itself, as JSON and as dag-cbor: the
+/// empty ones, a constant of each kind inside one, and a map or a list
+/// at any place inside another.
+#[dialog_common::test]
+fn it_reads_back_every_pattern_it_writes() {
+    let constant = |value: Value| Pattern::Term(Term::Constant(value));
+    let patterns = [
+        Pattern::map::<&str, Pattern>([]).expect("the map of nothing"),
+        Pattern::list::<Pattern>([]),
+        Pattern::Map(shape(&[]).with_rest(Term::var("all"))),
+        Pattern::Map(shape(&[]).with_rest(Term::blank())),
+        Pattern::List(ListPattern::new([]).with_run(Term::var("all"))),
+        Pattern::list([
+            constant(text("text")),
+            constant(Value::UnsignedInt(7)),
+            constant(Value::SignedInt(-7)),
+            constant(Value::Float(1.5)),
+            constant(Value::Boolean(false)),
+            constant(Value::Entity(entity("note:1"))),
+            constant(Value::Symbol("xyz/open".parse().expect("a symbol"))),
+            constant(map(&[("a", text("b"))])),
+        ]),
+        Pattern::list([
+            Pattern::list([Pattern::list::<Pattern>([])]),
+            Pattern::Map(shape(&[("a", Pattern::list([var("x")]))])),
+        ]),
+        // A map of one key is not read as a term.
+        Pattern::Map(shape(&[("name", var("x"))])),
+        Pattern::Map(shape(&[("match", var("x"))])),
+        Pattern::Map(shape(&[("a:b", var("x")), ("?x", var("y"))])),
+        // A constant run.
+        Pattern::List(
+            ListPattern::new([var("first")])
+                .with_run(Term::Constant(Composite::list([text("z")]).into())),
+        ),
+    ];
+    for pattern in patterns {
+        let json = serde_json::to_value(&pattern).expect("is written");
+        let read: Pattern = serde_json::from_value(json.clone()).expect("reads");
+        assert_eq!(read, pattern, "{json}");
+        let bytes = serde_ipld_dagcbor::to_vec(&pattern).expect("is written");
+        let read: Pattern = serde_ipld_dagcbor::from_slice(&bytes).expect("reads");
+        assert_eq!(read, pattern, "{json}");
+    }
+}
+
+/// The one list that would read as another. A map of a rest and no
+/// named entry is written `{ "...": rest }`, which as the last item of
+/// a list is the list's run. So where such a map is the last item and
+/// the list has no run, the list says after it that nothing follows.
+#[dialog_common::test]
+fn it_tells_a_list_that_ends_in_a_map_of_a_rest_from_a_list_with_a_run() {
+    let any_map = || Pattern::Map(shape(&[]).with_rest(Term::var("r")));
+    let ends_in_a_map = Pattern::list([var("a"), any_map()]);
+    let has_a_run = Pattern::List(ListPattern::new([var("a")]).with_run(Term::var("r")));
+    assert_ne!(ends_in_a_map, has_a_run);
+
+    let written = serde_json::to_value(&ends_in_a_map).expect("is written");
+    assert_eq!(
+        written,
+        serde_json::json!({ "match": [
+            { "?": { "name": "a" } },
+            { "...": { "?": { "name": "r" } } },
+            { "...": [] },
+        ] })
+    );
+    assert_eq!(
+        serde_json::from_value::<Pattern>(written).expect("reads"),
+        ends_in_a_map
+    );
+    assert_eq!(
+        serde_json::to_value(&has_a_run).expect("is written"),
+        serde_json::json!({ "match": [
+            { "?": { "name": "a" } },
+            { "...": { "?": { "name": "r" } } },
+        ] })
+    );
+    for pattern in [
+        ends_in_a_map,
+        has_a_run,
+        // Such a map before the last item is an item like any other,
+        // and so is one before a run.
+        Pattern::list([any_map(), var("a")]),
+        Pattern::List(ListPattern::new([any_map()]).with_run(Term::var("more"))),
+        Pattern::list([any_map(), any_map()]),
+    ] {
+        let bytes = serde_ipld_dagcbor::to_vec(&pattern).expect("is written");
+        let read: Pattern = serde_ipld_dagcbor::from_slice(&bytes).expect("reads");
+        assert_eq!(read, pattern);
+    }
+}
+
+/// A map pattern cannot name a key that says something else where a
+/// pattern is written, so no pattern is built that cannot be kept. A
+/// map that holds such a key is still matched: a rest takes it.
+#[dialog_common::test]
+fn it_refuses_a_key_a_pattern_is_written_with() {
+    for key in ["?", "...", "text:", ":", "anything:"] {
+        assert!(
+            matches!(
+                Pattern::map([(key, var("x"))]),
+                Err(PatternError::ReservedKey(refused)) if refused == key
+            ),
+            "{key}"
+        );
+        assert!(
+            matches!(
+                Pattern::map([("a", var("y")), (key, var("x"))]),
+                Err(PatternError::ReservedKey(refused)) if refused == key
+            ),
+            "{key}"
+        );
+    }
+    // Only the whole key is the word: one that holds it is a name.
+    for key in ["??", "....", "a:b", ":a", "? "] {
+        assert!(Pattern::map([(key, var("x"))]).is_ok(), "{key}");
+    }
+
+    let held = map(&[("text:", text("kept")), ("title", text("Buy milk"))]);
+    let pattern = Pattern::Map(shape(&[("title", var("title"))]).with_rest(Term::var("rest")));
+    let row = unify(&pattern, &held).expect("matches");
+    assert_eq!(row.value_of("title"), Some(&text("Buy milk")));
+    assert_eq!(row.value_of("rest"), Some(&map(&[("text:", text("kept"))])));
+}
+
+/// What is under `match` and is no pattern is refused, and so is
+/// anything beside it. A constant written bare is read, as a term
+/// alone reads one.
+#[dialog_common::test]
+fn it_refuses_what_is_under_match_and_is_no_pattern() {
+    for unread in [
+        // A variable beside an entry, and a type beside one.
+        serde_json::json!({ "match": { "?": { "name": "x" }, "a": 1 } }),
+        serde_json::json!({ "match": { "text:": "x", "a": 1 } }),
+        // The rest is a term, and so is a run.
+        serde_json::json!({ "match": { "...": { "a": 1 } } }),
+        serde_json::json!({ "match": { "...": [] } }),
+        serde_json::json!({ "match": [{ "...": [1] }] }),
+        serde_json::json!({ "match": [{ "...": { "a": 1, "b": 2 } }] }),
+        // A type that is none.
+        serde_json::json!({ "match": { "a": { "nothing:": 1 } } }),
+        // Something beside `match`.
+        serde_json::json!({ "match": [], "rest": { "?": {} } }),
+    ] {
+        assert!(
+            serde_json::from_value::<Pattern>(unread.clone()).is_err(),
+            "{unread}"
+        );
+    }
+    let read: Pattern = serde_json::from_value(serde_json::json!({ "match": {
+        "title": "Buy milk", "priority": 2, "done": false
+    } }))
+    .expect("reads");
+    let expected = Pattern::Map(shape(&[
+        ("title", Pattern::Term(Term::Constant(text("Buy milk")))),
+        (
+            "priority",
+            Pattern::Term(Term::Constant(Value::UnsignedInt(2))),
+        ),
+        ("done", Pattern::Term(Term::Constant(Value::Boolean(false)))),
+    ]));
+    assert_eq!(read, expected);
 }
 
 fn entity(uri: &str) -> Entity {
@@ -1245,24 +1485,25 @@ fn it_types_a_pattern_by_its_shape() {
     );
 }
 
-/// A rule that holds a pattern runs where it was built and cannot be
-/// stored: format 3 of a rule body has no way to write a pattern, and
-/// says so. The rule has an identity, by its parts, and no body.
+/// A rule that holds a pattern is stored: format 4 of a rule body
+/// writes a map or a list of terms where a parameter stands.
+/// The body reads back as the rule it was, under the name it had before
+/// it could be written, and encodes to the bytes it was read from.
 #[dialog_common::test]
-fn it_refuses_to_store_a_rule_that_holds_a_pattern() {
+fn it_stores_a_rule_that_holds_a_pattern() {
     let rule = card_rule([0, 1, 2]).expect("compiles");
-    assert!(rule.try_this().is_some(), "it has an identity");
-    assert_eq!(rule.try_encode(), None, "and no stored body");
-    let refused = rule.storable().expect_err("it holds a pattern");
-    assert!(
-        matches!(&refused, TypeError::UnstorablePattern { format, .. } if *format == body::FORMAT),
-        "{refused:?}"
-    );
-    let reason = refused.to_string();
-    assert!(reason.contains("format 3"), "{reason}");
-    assert!(reason.contains("no way to write a pattern"), "{reason}");
+    let named = rule.try_this().expect("it has an identity");
+    let stored = rule.try_encode().expect("and a stored body");
+    let read = DeductiveRule::decode(&stored).expect("the body reads back");
+    assert_eq!(read.try_this(), Some(named.clone()));
+    assert_eq!(read.try_encode(), Some(stored.clone()));
 
-    // Two rules that differ only inside their patterns are two rules.
+    // However its premises were given, it is one body.
+    let reordered = card_rule([2, 0, 1]).expect("compiles");
+    assert_eq!(reordered.try_encode(), Some(stored.clone()));
+
+    // Two rules that differ only inside their patterns are two rules,
+    // of two bodies.
     let other = DeductiveRule::new(
         card(),
         vec![
@@ -1283,44 +1524,53 @@ fn it_refuses_to_store_a_rule_that_holds_a_pattern() {
         ],
     )
     .expect("compiles");
-    assert_ne!(other.try_this(), rule.try_this());
+    assert_ne!(other.try_this(), Some(named));
+    assert_ne!(other.try_encode(), Some(stored));
+}
 
-    // A rule with no pattern is stored as before.
+/// A rule that holds no pattern is written in format 4 as format 3
+/// wrote it, but for the number: the body an earlier release stored
+/// reads as the same rule, under the same name, and is written again as
+/// what this release writes.
+#[dialog_common::test]
+fn it_reads_what_format_3_wrote_as_the_rule_format_4_writes() {
     let plain = DeductiveRule::new(
         concept("heading", "note/heading", "text:"),
         vec![read("note/title", "text:", var("heading"))],
     )
     .expect("compiles");
-    assert_eq!(plain.storable(), Ok(()));
-    assert!(plain.try_encode().is_some());
+    let current = plain.try_encode().expect("a body");
+    let earlier = body::encode_as(3, &plain.canonical_descriptor()).expect("a body");
+    assert_ne!(earlier, current, "the number is in the body");
+    assert_eq!(earlier.len(), current.len(), "and nothing else differs");
+    assert_eq!(
+        earlier
+            .iter()
+            .zip(&current)
+            .filter(|(before, after)| before != after)
+            .count(),
+        1
+    );
+
+    let read = DeductiveRule::decode(&earlier).expect("format 3 is read");
+    assert_eq!(read.try_this(), plain.try_this());
+    assert_eq!(read.try_encode(), Some(current));
 }
 
-/// Installing a rule that holds a pattern is refused, with the reason:
-/// asserting it stages nothing and panics, since an assertion has no
-/// error to return.
-///
-/// Native only: the test catches the panic, and a wasm test cannot
-/// unwind. What a wasm build does is the same refusal, which
-/// [`it_refuses_to_store_a_rule_that_holds_a_pattern`] pins on both
-/// targets through `storable`, the check the assertion makes.
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn it_refuses_to_install_a_rule_that_holds_a_pattern() {
+/// Asserting a rule that holds a pattern stages it with its body, as
+/// asserting any rule does.
+#[dialog_common::test]
+fn it_installs_a_rule_that_holds_a_pattern() {
     use crate::statement::Changes;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     let rule = card_rule([0, 1, 2]).expect("compiles");
     let mut changes = Changes::new();
-    let refused = catch_unwind(AssertUnwindSafe(|| {
-        changes.assert(&rule);
-    }))
-    .expect_err("the assertion is refused");
-    let reason = refused
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_default();
-    assert!(reason.contains("no way to write a pattern"), "{reason}");
-    assert_eq!(changes, Changes::new(), "nothing was staged");
+    changes.assert(&rule);
+    assert_ne!(changes, Changes::new(), "the rule is staged");
+
+    let mut again = Changes::new();
+    again.assert(card_rule([2, 1, 0]).expect("compiles"));
+    assert_eq!(again, changes, "under one name, with one body");
 }
 
 /// Parameters hold a pattern under a name. A premise reads a term
@@ -1362,10 +1612,35 @@ fn it_holds_a_pattern_under_a_name() {
     assert_eq!(renamed.shape("payload"), Some(&expected));
     assert_eq!(renamed.get("payload"), Some(&Shape::whole_of(&expected)));
 
-    // A pattern has no wire form, so the parameters holding one are
-    // not written.
-    let refused = serde_json::to_value(&terms).expect_err("no wire form");
-    assert!(refused.to_string().contains("no wire form"), "{refused}");
+    // Written, each name holds what it was given: a term as a term is
+    // written, and the pattern under `match`.
+    let written = serde_json::to_value(&terms).expect("parameters are written");
+    assert_eq!(
+        written,
+        serde_json::json!({
+            "this": { "?": { "name": "note" } },
+            "payload": { "match": {
+                "title": { "?": { "name": "title" } },
+                "...": { "?": { "name": "rest" } },
+            } },
+        })
+    );
+    let read: Parameters = serde_json::from_value(written).expect("and read back");
+    assert_eq!(read, terms);
+    let bytes = serde_ipld_dagcbor::to_vec(&terms).expect("as dag-cbor too");
+    let read: Parameters = serde_ipld_dagcbor::from_slice(&bytes).expect("and read back");
+    assert_eq!(read, terms);
+
+    // A list, with a run and with none, and a map inside one.
+    for pattern in [
+        Pattern::List(ListPattern::new([var("first")]).with_run(Term::var("others"))),
+        Pattern::List(ListPattern::new([var("only")])),
+        Pattern::list([var("left"), Pattern::Map(shape(&[("at", var("right"))]))]),
+    ] {
+        let bytes = serde_ipld_dagcbor::to_vec(&pattern).expect("a pattern is written");
+        let read: Pattern = serde_ipld_dagcbor::from_slice(&bytes).expect("and read back");
+        assert_eq!(read, pattern);
+    }
 }
 
 /// Two premises holding one pattern share its whole, since with its

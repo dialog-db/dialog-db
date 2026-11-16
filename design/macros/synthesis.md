@@ -143,7 +143,7 @@ So the template is not a new kind of thing. It is a list, and the view macro kee
  2  assert and retract without !                                                    done, 2026-11-16
  3  a concept as lines, with as: and cardinality:   (:one and :many on main's engine)  done, 2026-11-16
  4  getters
- 5  the stored form of a pattern, `match` (#799), so a rule that holds a record is kept
+ 5  the stored form of a pattern, `match` (#799), so a rule that holds a record is kept   done, 2026-11-16, before 4
  6  view as a macro that keeps its tree
  7  folds in a head, and in:, as #793 and the layers land
 ```
