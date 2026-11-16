@@ -43,4 +43,4 @@ tracing-subscriber = { workspace = true }
 
 [lints.rust]
 # This cfg is used by the dialog_common::test proc macro for wasm inner tests
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)", "cfg(dialog_main)"] }

@@ -44,7 +44,9 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use dialog_answer::{Cell, Dictionary, Kind, Scalar, Session};
-use dialog_corpus::{Entity, Pick, Value, ValueView};
+use dialog_corpus::{Entity, Pick, Value};
+#[cfg(not(dialog_main))]
+use dialog_corpus::ValueView;
 use dialog_perf::allocator;
 use dialog_perf::env::{Env, assert_all, concept, fact, query, text};
 use dialog_query::query::Output as _;
@@ -88,7 +90,8 @@ enum Commands {
 }
 
 /// The phases, in order, by the name of the function each runs in.
-const PHASES: [&str; 6] = [
+const PHASES: [&str; 7] = [
+    "columnar",
     "engine",
     "json_encode",
     "json_decode",
@@ -183,6 +186,7 @@ fn project(conclusion: &ConceptConclusion, terms: &Parameters) -> Conclusion {
 }
 
 /// A value read in place, as a frame cell.
+#[cfg(not(dialog_main))]
 fn scalar<'a>(view: &'a ValueView<'a>) -> Scalar<'a> {
     match view {
         ValueView::Bytes(bytes) => Scalar::Bytes(bytes),
@@ -197,11 +201,56 @@ fn scalar<'a>(view: &'a ValueView<'a>) -> Scalar<'a> {
     }
 }
 
+/// A field of `conclusion` read in place (`None` unbound, `Some(None)`
+/// absent).
+#[cfg(not(dialog_main))]
+fn view<'a>(conclusion: &'a ConceptConclusion, field: &str) -> Option<Option<ValueView<'a>>> {
+    conclusion.view(field)
+}
+
+/// Main has no in-place read: every field is looked up as main reads it,
+/// into an owned value, and written from that. The harness's queries name
+/// each variable after its field.
+#[cfg(dialog_main)]
+fn write_rows(frame: &mut dialog_answer::Frame<'_>, columns: &[&str], conclusions: &[ConceptConclusion]) {
+    for conclusion in conclusions {
+        let values: Vec<Option<Option<Value>>> = columns
+            .iter()
+            .map(|column| {
+                let binding = conclusion
+                    .source()
+                    .lookup(&dialog_query::Term::<dialog_query::Any>::var(*column))
+                    .ok()?;
+                Some(binding.as_value().cloned())
+            })
+            .collect();
+        frame.row_with(values.iter().map(|cell| {
+            cell.as_ref().map(|value| value.as_ref().map(owned_scalar))
+        }));
+    }
+}
+
+#[cfg(dialog_main)]
+fn owned_scalar(value: &Value) -> Scalar<'_> {
+    match value {
+        Value::Bytes(bytes) => Scalar::Bytes(bytes),
+        Value::Entity(entity) => Scalar::Entity(entity.as_str()),
+        Value::Boolean(b) => Scalar::Boolean(*b),
+        Value::String(text) => Scalar::Text(text),
+        Value::UnsignedInt(n) => Scalar::Natural(*n),
+        Value::SignedInt(n) => Scalar::Integer(*n),
+        Value::Float(n) => Scalar::Float(*n),
+        Value::Record(bytes) => Scalar::Record(bytes),
+        Value::Symbol(name) => Scalar::Symbol(name.as_str()),
+    }
+}
+
 /// Writes `conclusions` into `frame`, every column read in place.
+#[cfg(not(dialog_main))]
 fn write_rows(frame: &mut dialog_answer::Frame<'_>, columns: &[&str], conclusions: &[ConceptConclusion]) {
     for conclusion in conclusions {
         let views: Vec<Option<Option<ValueView<'_>>>> =
-            columns.iter().map(|column| conclusion.view(column)).collect();
+            columns.iter().map(|column| view(conclusion, column)).collect();
         frame.row_with(views.iter().map(|cell| {
             cell.as_ref()
                 .map(|value| value.as_ref().map(scalar))
@@ -234,6 +283,140 @@ fn answer(
                 .await
         })
         .expect("the query runs")
+}
+
+/// The columnar floor: a concept read of required cardinality-one fields
+/// answered straight into a frame, with no row in between. One scan per
+/// field over its attribute (AEV, so every scan is in entity order), each
+/// entity's competing rows elected as the engine elects them, the cursors
+/// aligned on the entity's stored bytes, and every cell written from the
+/// winner's key in place. What the engine's general path costs above this
+/// is the price of its generality: rules, joins of any shape, rows a
+/// caller can extend. It reads stored facts only, so a concept with rules
+/// installed is not answered by it; the harness's concepts have none.
+#[cfg(not(dialog_main))]
+#[unsafe(no_mangle)]
+#[inline(never)]
+fn answers_phase_columnar(
+    runtime: &tokio::runtime::Runtime,
+    env: &Env,
+    attributes: &[&str],
+    columns: &[&str],
+) -> Vec<u8> {
+    runtime
+        .block_on(columnar(env, attributes, columns))
+        .expect("the columnar read runs")
+}
+
+#[cfg(not(dialog_main))]
+struct Lane<'a> {
+    stream: dialog_corpus::FactStream<'a>,
+    /// The next row, read ahead of the group it opens.
+    next: Option<dialog_corpus::FactView>,
+    /// The current entity's elected winner.
+    winner: Option<dialog_corpus::CheckedRow>,
+}
+
+#[cfg(not(dialog_main))]
+impl Lane<'_> {
+    /// Reads the next entity's rows and elects its winner.
+    async fn advance(&mut self) -> Result<()> {
+        use futures_util::StreamExt as _;
+        self.winner = None;
+        loop {
+            let first = match self.next.take() {
+                Some(row) => row,
+                None => match self.stream.next().await {
+                    Some(row) => row?,
+                    None => return Ok(()),
+                },
+            };
+            let mut winner = first;
+            loop {
+                match self.stream.next().await {
+                    Some(row) => {
+                        let row = row?;
+                        if row.of_bytes()? == winner.of_bytes()? {
+                            winner = winner.elect(row)?;
+                        } else {
+                            self.next = Some(row);
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            // A corrupt winner is passed over, as the engine passes it.
+            if let Ok(winner) = winner.checked() {
+                self.winner = Some(winner);
+                return Ok(());
+            }
+        }
+    }
+
+    fn entity(&self) -> Option<&str> {
+        self.winner.as_ref().map(|winner| winner.of_str())
+    }
+}
+
+#[cfg(not(dialog_main))]
+async fn columnar(env: &Env, attributes: &[&str], columns: &[&str]) -> Result<Vec<u8>> {
+    let mut lanes = Vec::with_capacity(attributes.len());
+    for attribute in attributes {
+        let selector = dialog_corpus::Selector::new().the(attribute.parse()?);
+        let stream = env.branch.claims().select(selector).perform(&env.operator).await?;
+        let mut lane = Lane {
+            stream: Box::pin(stream),
+            next: None,
+            winner: None,
+        };
+        lane.advance().await?;
+        lanes.push(lane);
+    }
+    let mut session = Session::default();
+    let mut frame = session.frame(Kind::Snapshot, columns);
+    'rows: loop {
+        // The largest entity any lane stands on; every lane catches up.
+        let mut target: Option<String> = None;
+        for lane in &lanes {
+            match lane.entity() {
+                None => break 'rows,
+                Some(entity) => {
+                    if target.as_deref().is_none_or(|target| entity > target) {
+                        target = Some(entity.to_owned());
+                    }
+                }
+            }
+        }
+        let target = target.expect("lanes stand on entities");
+        let mut aligned = true;
+        for lane in &mut lanes {
+            while lane.entity().is_some_and(|entity| entity < target.as_str()) {
+                lane.advance().await?;
+            }
+            match lane.entity() {
+                None => break 'rows,
+                Some(entity) if entity != target => aligned = false,
+                Some(_) => {}
+            }
+        }
+        if !aligned {
+            continue;
+        }
+        let views: Vec<ValueView<'_>> = lanes
+            .iter()
+            .map(|lane| lane.winner.as_ref().expect("aligned").value_view())
+            .collect();
+        frame.row_with(
+            std::iter::once(Some(Some(Scalar::Entity(&target))))
+                .chain(views.iter().map(|view| Some(Some(scalar(view))))),
+        );
+        drop(views);
+        for lane in &mut lanes {
+            lane.advance().await?;
+        }
+    }
+    Ok(frame.finish())
 }
 
 #[unsafe(no_mangle)]
@@ -323,6 +506,8 @@ struct Dataset {
     shown: [&'static str; 2],
     /// The field a delta changes.
     changed: &'static str,
+    /// Each field's attribute, in `fields` order.
+    attributes: Vec<&'static str>,
 }
 
 fn dataset(name: &str) -> Result<Dataset> {
@@ -335,6 +520,7 @@ fn dataset(name: &str) -> Result<Dataset> {
             fields: vec!["name", "role"],
             shown: ["name", "role"],
             changed: "role",
+            attributes: vec!["stuff/name", "stuff/role"],
         },
         "issue" => Dataset {
             descriptor: concept(serde_json::json!({ "with": {
@@ -353,6 +539,10 @@ fn dataset(name: &str) -> Result<Dataset> {
             ],
             shown: ["title", "status"],
             changed: "status",
+            attributes: vec![
+                "issue/ident", "issue/title", "issue/status", "issue/priority",
+                "issue/created", "issue/creator", "issue/assignee", "issue/project",
+            ],
         },
         other => bail!("no dataset {other:?}: stuff or issue"),
     })
@@ -505,6 +695,16 @@ fn measure(runtime: &tokio::runtime::Runtime, name: &str, rows: usize, repeat: u
     let (_, read_two) = phase(repeat, || answers_phase_frame_read_two(frame.clone(), set.shown));
     phases.insert("frame_read_two".into(), read_two);
     check_same(&json, &frame, &columns)?;
+    #[cfg(not(dialog_main))]
+    {
+        let (columnar, run) = phase(repeat, || {
+            answers_phase_columnar(runtime, &env, &set.attributes, &columns)
+        });
+        phases.insert("columnar".into(), run);
+        // The columnar frame says what the engine's does, row for row: it
+        // writes them in entity order, which is the engine's too.
+        check_same(&json, &columnar.into(), &columns)?;
+    }
     bytes.insert("json_snapshot".into(), json.len());
     bytes.insert("frame_snapshot".into(), frame.len());
 
@@ -562,11 +762,21 @@ fn measure(runtime: &tokio::runtime::Runtime, name: &str, rows: usize, repeat: u
     Ok(Report {
         dataset: name.into(),
         rows,
-        lazy: dialog_query::lazy_bindings(),
+        lazy: lazy(),
         phases,
         bytes,
         instructions: BTreeMap::new(),
     })
+}
+
+#[cfg(not(dialog_main))]
+fn lazy() -> bool {
+    dialog_query::lazy_bindings()
+}
+
+#[cfg(dialog_main)]
+fn lazy() -> bool {
+    false
 }
 
 /// Refuses a run whose frame does not say what the JSON says: every row,

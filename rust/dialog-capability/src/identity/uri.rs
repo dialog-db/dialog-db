@@ -221,8 +221,18 @@ fn is_provably_canonical(s: &str) -> bool {
     if rest.is_empty() || rest[0] == b'/' {
         return false;
     }
-    rest.iter().all(|&b| {
-        b.is_ascii_alphanumeric()
+    rest.iter().all(|&b| OPAQUE[b as usize])
+}
+
+/// The bytes an opaque path may hold for its URI to be provably canonical:
+/// ASCII alphanumerics and `:/.-_~+=@!$&'()*,;`. A table, so the check is a
+/// load per byte: every stored entity is checked when it is read.
+static OPAQUE: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let b = byte as u8;
+        table[byte] = b.is_ascii_alphanumeric()
             || matches!(
                 b,
                 b':' | b'/'
@@ -242,9 +252,11 @@ fn is_provably_canonical(s: &str) -> bool {
                     | b'*'
                     | b','
                     | b';'
-            )
-    })
-}
+            );
+        byte += 1;
+    }
+    table
+};
 
 impl Display for Uri {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {

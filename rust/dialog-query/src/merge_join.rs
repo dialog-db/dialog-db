@@ -353,8 +353,22 @@ where
     S: Selection,
     Key: Ord + Clone,
 {
-    let mut acc: Vec<Match> = vec![Match::new()];
+    let mut cursors = cursors.iter();
+    let Some(first) = cursors.next() else {
+        return Vec::new();
+    };
+    let mut acc: Vec<Match> = first.run.clone();
     for cursor in cursors {
+        // A group of one row (every cardinality-one field) extends each
+        // partial row in place: cloning the partial for every input copied
+        // the row's growing bindings once per field.
+        if let [row] = cursor.run.as_slice() {
+            acc = acc.into_iter().filter_map(|partial| partial.combine(row)).collect();
+            if acc.is_empty() {
+                break;
+            }
+            continue;
+        }
         let mut next = Vec::new();
         for partial in &acc {
             for row in &cursor.run {

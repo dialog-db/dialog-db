@@ -15,6 +15,7 @@ use super::Selection;
 mod slot;
 pub(crate) use slot::Part;
 pub(crate) use slot::Scanned;
+pub use slot::JoinKey;
 use slot::{Cited, Slot};
 
 /// Whether a scan binds the rows it reads in place ([`Slot::Scanned`]),
@@ -478,6 +479,7 @@ impl Match {
     /// kept. Claims from `other` fill in only where `self` has none, so a
     /// row's own provenance is never overwritten by the row it joins with.
     pub fn combine(mut self, other: &Match) -> Option<Match> {
+        self.bindings.reserve(other.bindings.len());
         for (name, slot) in other.all_bindings() {
             match self.find_slot(name) {
                 None => self.bindings.push((name.clone(), slot.clone())),
@@ -516,6 +518,13 @@ impl Match {
             Some(Binding::Present(value)) => Some(value),
             _ => None,
         }
+    }
+
+    /// The join value bound to `name`, ordered as the index orders it,
+    /// read in place for a scanned binding: what a merge join compares
+    /// rows by. `None` when `name` is unbound or absent.
+    pub fn join_key(&self, name: &str) -> Option<JoinKey> {
+        JoinKey::of(self.find_slot(name)?)
     }
 
     /// The environment of variables this match binds to a `Present`

@@ -8,7 +8,7 @@ use core::pin::Pin;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_corpus::selector::Constrained;
-use dialog_corpus::{Estimate, Likelihood, Preload, PreloadRequest, Selector, encode_value_owned};
+use dialog_corpus::{Estimate, Likelihood, Preload, PreloadRequest, Selector};
 use futures_util::{StreamExt, stream};
 use std::collections::HashSet;
 
@@ -383,9 +383,10 @@ impl Conjunction {
                     }
 
                     let variable = variable.clone();
-                    let key = move |m: &Match| -> Option<Vec<u8>> {
-                        m.value_of(&variable).map(encode_value_owned)
-                    };
+                    // The key reads a scanned entity in place: ordering rows
+                    // by an encoding of a materialized entity built one, and
+                    // hashed its URI, for every row of every input.
+                    let key = move |m: &Match| m.join_key(&variable);
 
                     for await row in multi_merge_join(inputs, key) {
                         let row = row?;

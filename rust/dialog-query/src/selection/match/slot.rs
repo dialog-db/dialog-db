@@ -2,6 +2,7 @@
 //! row a scan read, materialized the first time something reads it as a
 //! [`Value`].
 
+use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
 use dialog_corpus::{Cause, CheckedRow, ValueView};
@@ -199,3 +200,91 @@ impl PartialEq for Cited {
         self.claim() == other.claim()
     }
 }
+
+/// A row's join value, ordered as the index orders it (the
+/// order-preserving encoding [`dialog_corpus::encode_value_owned`]
+/// writes), without materializing or encoding a scanned one.
+///
+/// A scanned entity, text or symbol that borrows from its key is
+/// escape-free, so it holds no zero byte, and its encoding is its bytes
+/// and the terminator: comparing the bytes compares the encodings.
+#[derive(Clone, Debug)]
+pub struct JoinKey(Key);
+
+#[derive(Clone, Debug)]
+enum Key {
+    /// A scanned component that borrows from its key, read in place.
+    Scanned(Arc<Scanned>, Part),
+    /// A value's encoding.
+    Encoded(Arc<[u8]>),
+}
+
+/// The text a borrowed view holds.
+fn borrowed<'a>(view: &ValueView<'a>) -> Option<&'a str> {
+    match view {
+        ValueView::Entity(Cow::Borrowed(text))
+        | ValueView::String(Cow::Borrowed(text))
+        | ValueView::Symbol(Cow::Borrowed(text)) => Some(text),
+        _ => None,
+    }
+}
+
+impl JoinKey {
+    pub(crate) fn of(slot: &Slot) -> Option<JoinKey> {
+        if let Slot::Scanned { row, part } = slot
+            && borrowed(&read(&row.row, *part)).is_some()
+        {
+            return Some(JoinKey(Key::Scanned(Arc::clone(row), *part)));
+        }
+        let value = slot.binding().as_value()?;
+        Some(JoinKey(Key::Encoded(
+            dialog_corpus::encode_value_owned(value).into(),
+        )))
+    }
+
+    /// The bytes of a scanned key, or the encoding of any other.
+    fn bytes(&self) -> (&[u8], bool) {
+        match &self.0 {
+            Key::Scanned(row, part) => (
+                borrowed(&read(&row.row, *part))
+                    .expect("a scanned join key borrows")
+                    .as_bytes(),
+                true,
+            ),
+            Key::Encoded(bytes) => (bytes, false),
+        }
+    }
+}
+
+impl Ord for JoinKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let ((left, left_raw), (right, right_raw)) = (self.bytes(), other.bytes());
+        // A raw key's encoding is its bytes and a terminator.
+        let terminated = |bytes: &'_ [u8], raw: bool| {
+            bytes
+                .iter()
+                .copied()
+                .chain(raw.then_some(0u8))
+                .collect::<Vec<u8>>()
+        };
+        if left_raw == right_raw {
+            left.cmp(right)
+        } else {
+            terminated(left, left_raw).cmp(&terminated(right, right_raw))
+        }
+    }
+}
+
+impl PartialOrd for JoinKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for JoinKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for JoinKey {}
