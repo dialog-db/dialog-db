@@ -295,7 +295,9 @@ pub struct AttributeDescriptor {
     /// read with none, or with the variable unbound, reads every layer;
     /// a write with none lands in the primary. No part of the
     /// attribute's identity: one attribute's rows may lie on any layer.
-    layer: Option<Term<Entity>>,
+    /// Boxed: few attributes name a layer, and a descriptor is held in
+    /// every concept's field map and cloned with it.
+    layer: Option<Box<Term<Entity>>>,
 }
 
 /// The wire form of an [`AttributeDescriptor`]: `the` is one relation
@@ -429,7 +431,7 @@ impl TryFrom<Wire> for AttributeDescriptor {
             content_type,
             among,
             pick,
-            layer: wire.layer,
+            layer: wire.layer.map(Box::new),
         };
         match descriptor.pick_error() {
             Some(reason) => Err(reason),
@@ -467,7 +469,7 @@ impl From<AttributeDescriptor> for Wire {
             content,
             pick: Some(name).filter(|name| *name != implied),
             select: None,
-            layer: descriptor.layer,
+            layer: descriptor.layer.map(|layer| *layer),
         }
     }
 }
@@ -505,20 +507,20 @@ impl AttributeDescriptor {
     /// This descriptor reading and writing `layer` (`in:`): a constant
     /// layer, or a variable a concept field binds.
     pub fn in_layer(mut self, layer: Term<Entity>) -> Self {
-        self.layer = Some(layer);
+        self.layer = Some(Box::new(layer));
         self
     }
 
     /// The layer the attribute reads from and writes to, when the
     /// descriptor names one. See [`in_layer`](Self::in_layer).
     pub fn layer(&self) -> Option<&Term<Entity>> {
-        self.layer.as_ref()
+        self.layer.as_deref()
     }
 
     /// The layer a write through this descriptor lands in, when the
     /// descriptor names a constant one.
     pub fn constant_layer(&self) -> Option<Entity> {
-        match &self.layer {
+        match self.layer.as_deref() {
             Some(Term::Constant(layer)) => Entity::try_from(layer.clone()).ok(),
             _ => None,
         }
@@ -528,7 +530,7 @@ impl AttributeDescriptor {
     /// bind it: the descriptor's constant, the caller's term for the
     /// descriptor's variable, or the variable itself.
     fn layer_term(&self, parameters: &Parameters) -> Option<Term<Entity>> {
-        let layer = self.layer.as_ref()?;
+        let layer = self.layer.as_deref()?;
         let name = layer.name()?;
         Some(match parameters.get(name).cloned() {
             Some(Term::Variable {
@@ -812,7 +814,10 @@ impl AttributeDescriptor {
             Some(self.cardinality()),
         );
         Ok(
-            match self.layer_term(&parameters).or_else(|| self.layer.clone()) {
+            match self
+                .layer_term(&parameters)
+                .or_else(|| self.layer().cloned())
+            {
                 Some(layer) => query.with_layer(layer),
                 None => query,
             },
