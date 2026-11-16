@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The approach is decided: format 4 writes a pattern, a release writes it always and reads the earlier ones for one release cycle, with `Branch::upgrade_rules` as the migration. Patterns are the one addition: a rule has one head, records ask nothing, a rule about syntax is not stored. A pattern is named by its parts already, so no name moves. | **Building**, on `feat/rule-format-4` over the patterns build. |
-| **Agenda** | Whether the maintainer wants other words for a pattern than `map`, `list`. What one entity holds once two releases have each written its body. | The build, its changelog entry with the compatibility note, and the notation storing a rule that holds a struct. |
+| **Agenda** | The maintainer's word on the two choices the build of `match` made without him ([the form of a pattern](design-pattern-form.md#as-built-2026-11-16)). What one entity holds once two releases have each written its body. | The build, its changelog entry with the compatibility note, and the notation storing a rule that holds a struct. |
 
 ## Candidate problems
 
@@ -49,3 +49,35 @@
 - The plan of the patterns topic left the words of that form undecided. Decided by the agent as a [matrix](design-pattern-form.md): a word for the shape, which is not shaped as the name of a type.
 
 **Decided.** By the maintainer: the approach. By the agent, until said otherwise: the problem's words, and the words of a pattern.
+
+## 2026-11-14, Designing: a pattern is written as what it is, under `match`
+
+**Asked.** The agent asked whether its words, `map`, `rest`, `list`, `run`, stand. The maintainer, by voice: is this JSON; "is there any reason why you wouldn't just use a map as it is", an array for a list, and `...` as a key for the rest.
+
+**Learned.**
+
+- The agent's one reason for a word a shape: a map with one entry is already a variable (`?`) or a constant (the name of a type), so a bare map where a parameter stands could be read as either. The maintainer took a wrapper for that, "to stay consistent", and named it: `match`, over `pattern` and `#`.
+- Shown `"..."` as a bare string among a list's items, he refused it. `...` is a key in both shapes, and in a list it is the one entry of the last item.
+- The form is drawn in [design-pattern-form.md](design-pattern-form.md).
+- Building it, the agent found what the conversation did not say: the form writes a key as text, and a map pattern holds a key of any type. The notation keys `{author: ?who}` by a symbol. So the form as decided cannot write every pattern #778 can hold, and the agent's remark in the conversation, that only a key ending in `:` is at stake, was short of it.
+- A symbol cannot be `?`, `...` or end in `:`. Were a map's key a name, the form would have no case to refuse.
+
+**Decided.** By the maintainer: `match`, a map as a map, a list as an array, `...` as a key. Not decided, and his: what a map's key is. Nothing of the form is built until it is, since the answer is either a change to #778 or a change to the form.
+
+#799 writes the agent's words until then and stays a draft. The topic stays in Building: this is the decision the build opened, moved.
+
+## 2026-11-16, Building: `match`, as built
+
+The maintainer was away and asked for the build to go on without him.
+
+**Asked.** Nothing of him. The form he settled on 2026-11-14 waited on what a map's key is, which is text since 2026-11-15, and a record is rebuilt on it (#778).
+
+**Learned.** Building the form met three things the drawing does not say ([design-pattern-form.md](design-pattern-form.md#as-built-2026-11-16)):
+
+- Refusing a key ending in `:` only where it is alone in a map makes whether a key is allowed depend on how many entries stand beside it. It is refused always, with `?` and `...`.
+- A constant alone is written bare as JSON, and bytes bare are an array of numbers, which under `match` is a list. Found by a test: a run written `[1]` was read as the bytes `01`. So inside `match` a constant is under its type, as the drawing has it, and what takes the rest is refused when it is an array.
+- `[?a {... ?r}]` and `[?a ... ?r]` are one array as drawn. The notation meets the first: a struct read is open, so `[{}]` in a premise is a list ending in a map of a rest.
+
+**Decided.** By the agent, each until he says otherwise: the three keys are refused always; a list that ends in a map of a rest and has no run says `{ "...": [] }` after it. Nothing of the maintainer's form moved.
+
+#799 writes `match`. A rule's entity does not move by any of this: it is named by its parts, and the names of the parts (`rest`, `run`) are not the words of the stored form.
