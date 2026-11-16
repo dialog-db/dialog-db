@@ -276,9 +276,10 @@ What this changes for you:
 - A computed value stands below every stored claim of its relation
   under cardinality one: a value written to the relation is read over
   the fold.
-- A subscription over a folding rule, or over a rule reading one, is
-  recomputed on each poll that touches what it reads, not maintained
-  row by row.
+- A subscription over a folding rule, a rule reading one, or a concept
+  with an aggregating field is maintained per entity: a change folds
+  again the groups of the entities whose body rows it touches, and no
+  other. A fold inside a recursion is still recomputed.
 
 Why: refusing every fold to prevent the unstratified ones is what the
 first refusal of `unless` did, and it left the rule an author would

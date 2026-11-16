@@ -472,8 +472,9 @@ and sees the built-in's head for it like any rule's.
 A deductive rule takes a `reduce` clause (see quarantine above). Its
 heads are split like any rule's, one per attribute it derives, each
 folding the shared body grouped by the head fields not reduced. A
-subscription over one is recomputed on a poll that touches what it
-reads; maintaining a fold row by row is not done.
+subscription over one is maintained per entity: a group is keyed by
+the head entity, so a change touching an entity's body rows folds that
+entity's group again and no other.
 
 ### Storage: `dialog.rule/derives`
 

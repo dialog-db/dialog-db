@@ -3066,11 +3066,12 @@ mod tests {
     }
 
     /// Aggregation lifecycle, assertion side: a subscription over a
-    /// reducing rule's concept re-derives per poll — asserting a
+    /// reducing rule's concept is maintained per entity. Asserting a
     /// contributing fact retracts the group's old aggregate row and
     /// asserts the new one; a fact for a fresh group asserts a new
-    /// row. Every delta comes from a recompute (A3's
-    /// recompute-per-poll model), proven by the counters.
+    /// row. After the first evaluation every delta comes from folding
+    /// the touched group again, never from a recompute, proven by the
+    /// counters.
     #[dialog_common::test]
     async fn it_updates_reducing_subscription_on_asserts() -> anyhow::Result<()> {
         use concepts::{Dept, DeptTotal, Salary, Staffed, Total};
@@ -3121,8 +3122,8 @@ mod tests {
         assert_eq!(totals(&delta.asserted), vec![(dept_a.clone(), 150)]);
         assert_eq!(
             (subscription.recomputes(), subscription.maintenances()),
-            (2, 0),
-            "the aggregate delta comes from a recompute, never per-entity maintenance"
+            (1, 1),
+            "the aggregate delta comes from folding the touched group again, not a recompute"
         );
 
         // A fresh group appears without touching the existing one.
@@ -3147,7 +3148,10 @@ mod tests {
             }),
             "the retained result still carries dept-a's row"
         );
-        assert_eq!(subscription.recomputes(), 3);
+        assert_eq!(
+            (subscription.recomputes(), subscription.maintenances()),
+            (1, 2)
+        );
         Ok(())
     }
 
@@ -3228,7 +3232,11 @@ mod tests {
         assert_eq!(totals(&delta.retracted), vec![(dept_b.clone(), 70)]);
         assert!(delta.asserted.is_empty(), "an empty group yields no row");
         assert_eq!(totals(subscription.results()), vec![(dept_a.clone(), 100)]);
-        assert_eq!(subscription.maintenances(), 0, "recompute-per-poll");
+        assert_eq!(
+            (subscription.recomputes(), subscription.maintenances()),
+            (1, 2),
+            "each retraction folds its group again"
+        );
         Ok(())
     }
 
