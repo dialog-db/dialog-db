@@ -9,6 +9,12 @@ use super::HistoryError;
 
 use super::{EDITION_LENGTH, Edition, ORIGIN_LENGTH, Origin};
 
+/// The scheme of a revision's entity: `revision:<base58(hash)>`.
+pub const REVISION_SCHEME: &str = "revision";
+
+/// What a revision's entity began with before `revision:`.
+const LEGACY_REVISION_PREFIX: &str = "did:key:z6Mk";
+
 /// The byte width of a [`Version`] in key encodings
 pub const VERSION_LENGTH: usize = EDITION_LENGTH + ORIGIN_LENGTH;
 
@@ -54,23 +60,9 @@ impl Version {
         bytes
     }
 
-    /// The content-derived DID naming the revision this version identifies.
-    /// Any replica that knows a revision's version derives the same DID, so
-    /// metadata can be attached to (or queried from) a revision without
-    /// holding it — this is the entity its revision record is recorded under.
-    ///
-    /// The `did:key:z6Mk<base58(hash)>` shape follows the repository-wide
-    /// convention for content-derived entities (see `EntityExt::of` in
-    /// `dialog-repository`'s schema): the `6Mk` prefix nominally means
-    /// ed25519 key material, but the bytes here are a blake3 hash and
-    /// nothing validates the multicodec — the string is an opaque,
-    /// deterministic name, not a resolvable key DID. If the convention
-    /// ever changes, it changes everywhere at once.
-    ///
-    /// Returned as a string: `Entity` lives in `dialog-corpus`, which
-    /// depends on this crate, so the parse happens there (see
-    /// `Version::entity`).
-    pub fn entity_did(&self) -> String {
+    /// The base58 of the hash a revision's entity is formed from: blake3
+    /// of the canonical dag-cbor of the version.
+    fn entity_reference(&self) -> String {
         /// Canonical dag-cbor input for the derivation. The shape (variant
         /// and field names) is part of the derivation; changing it changes
         /// every revision entity.
@@ -84,8 +76,26 @@ impl Version {
             edition: self.edition.value(),
         })
         .expect("dag-cbor encoding of a version cannot fail");
-        let hash = blake3::hash(&bytes);
-        format!("did:key:z6Mk{}", hash.as_bytes().to_base58())
+        blake3::hash(&bytes).as_bytes().to_base58()
+    }
+
+    /// The URI of the entity naming the revision this version identifies:
+    /// `revision:<base58(hash)>`, the hash being blake3 of the version's
+    /// canonical dag-cbor. Any replica that knows a revision's version
+    /// derives the same URI, so metadata can be attached to (or queried
+    /// from) a revision without holding it. It is the entity the
+    /// revision's record is recorded under.
+    pub fn entity_uri(&self) -> String {
+        format!("{REVISION_SCHEME}:{}", self.entity_reference())
+    }
+
+    /// The URI revisions were named by before they had a scheme of their
+    /// own: `did:key:z6Mk<base58(hash)>`, over the same hash as
+    /// [`entity_uri`](Self::entity_uri). It reads as a key and is none.
+    /// A replica written by an older release holds its revision records
+    /// under this name, so a reader looks under both.
+    pub fn legacy_entity_uri(&self) -> String {
+        format!("{LEGACY_REVISION_PREFIX}{}", self.entity_reference())
     }
 
     /// Reconstruct a [`Version`] from its key byte representation
@@ -130,12 +140,35 @@ impl Display for Version {
 
 impl Version {
     /// The content-derived entity naming the revision this version
-    /// identifies. Any replica that knows the version derives the same
-    /// entity, so metadata can be attached to (or queried from) a
-    /// revision without holding it.
+    /// identifies ([`entity_uri`](Self::entity_uri)).
     pub fn entity(&self) -> Entity {
-        self.entity_did()
+        self.entity_uri()
+            .parse()
+            .expect("a revision URI formed from a 32-byte hash is always a valid entity")
+    }
+
+    /// The entity an older release named this revision by
+    /// ([`legacy_entity_uri`](Self::legacy_entity_uri)).
+    pub fn legacy_entity(&self) -> Entity {
+        self.legacy_entity_uri()
             .parse()
             .expect("a did:key URI formed from a 32-byte hash is always a valid entity")
+    }
+
+    /// The entities a record of this revision may be stored under: the
+    /// one it is written at, then the one an older release wrote it at.
+    pub fn entities(&self) -> [Entity; 2] {
+        [self.entity(), self.legacy_entity()]
+    }
+
+    /// The entity an older release named a revision by, given the one it
+    /// is named by now; `None` for an entity that names no revision.
+    pub fn legacy_of(entity: &Entity) -> Option<Entity> {
+        let reference = entity
+            .to_string()
+            .strip_prefix(REVISION_SCHEME)?
+            .strip_prefix(':')?
+            .to_owned();
+        format!("{LEGACY_REVISION_PREFIX}{reference}").parse().ok()
     }
 }

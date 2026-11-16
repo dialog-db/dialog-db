@@ -275,14 +275,21 @@ where
         // only (the one ordering the query layer's projection rules
         // scan). Scan the (attribute, entity) prefix there; fall back
         // to the entity-ordered index for trees written before records
-        // were single-ordered.
-        let of = version.entity();
+        // were single-ordered. A tree written before revisions were
+        // named `revision:` holds the record under the older name, so
+        // that one is read when the current one has nothing.
         let the = Relation::from_str(REVISION_ATTRIBUTE)?;
-        let candidates = self
-            .tree
-            .clone()
-            .select_record(self.store.clone(), &of, &the)
-            .await?;
+        let mut candidates = Vec::new();
+        for of in version.entities() {
+            candidates = self
+                .tree
+                .clone()
+                .select_record(self.store.clone(), &of, &the)
+                .await?;
+            if !candidates.is_empty() {
+                break;
+            }
+        }
         // Tree blocks may have arrived from an untrusted peer; a record
         // only counts if it vouches for itself — issuer signature valid,
         // and derived version matching the slot it was found at. A

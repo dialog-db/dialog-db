@@ -176,7 +176,29 @@ impl RevisionRecord {
     /// store beside the tree.
     pub fn entries(&self, manifest: &Manifest) -> Result<RecordEntries, DialogCorpusError> {
         let version = self.version();
-        let fact = self.to_fact(&version)?;
+        self.entries_at(manifest, version, version.entity())
+    }
+
+    /// The entries [`entries`](Self::entries) gives, on the entity a
+    /// release before the `revision:` scheme named the revision by
+    /// ([`Version::legacy_entity`]). Nothing writes these any more; they
+    /// are how a test builds the tree such a release left, to see that a
+    /// reader still finds the record.
+    pub fn legacy_entries(&self, manifest: &Manifest) -> Result<RecordEntries, DialogCorpusError> {
+        let version = self.version();
+        self.entries_at(manifest, version, version.legacy_entity())
+    }
+
+    fn entries_at(
+        &self,
+        manifest: &Manifest,
+        version: Version,
+        of: Entity,
+    ) -> Result<RecordEntries, DialogCorpusError> {
+        let fact = Fact {
+            of,
+            ..self.to_fact(&version)?
+        };
 
         // Only the EAV and AEV orderings are written (see above), so the VAE
         // key this builds is dropped.

@@ -204,7 +204,14 @@ pub(crate) async fn revision_of(
     let the: Relation = REVISION_ATTRIBUTE
         .parse()
         .map_err(|error| CommitError::Induction(format!("revision attribute: {error}")))?;
-    let records = cell(archive, &pointed.tree, &the, &pointed.revision, store).await?;
+    let mut records = cell(archive, &pointed.tree, &the, &pointed.revision, store).await?;
+    if records.is_empty()
+        && let Some(legacy) = Version::legacy_of(&pointed.revision)
+    {
+        // A tree an older release wrote holds the record under the name
+        // revisions had before `revision:`.
+        records = cell(archive, &pointed.tree, &the, &legacy, store).await?;
+    }
     for (value, _) in records {
         let Value::Record(bytes) = value else {
             continue;
@@ -213,7 +220,7 @@ pub(crate) async fn revision_of(
             continue;
         };
         let version = record.version();
-        if version.entity() != pointed.revision || record.verify(&version).is_err() {
+        if !version.entities().contains(&pointed.revision) || record.verify(&version).is_err() {
             continue;
         }
         let issuer: Did = record.issuer.parse().map_err(|_| {

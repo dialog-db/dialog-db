@@ -1615,6 +1615,102 @@ mod tests {
             Ok(())
         }
 
+        /// A release before the `revision:` scheme recorded a revision
+        /// under `did:key:z6Mk…`. Such a record is still read: the
+        /// revision projects under its current name, asked by name or
+        /// not, a later commit finds it as its parent, and the older
+        /// name is no revision.
+        #[dialog_common::test]
+        async fn it_reads_a_revision_an_older_release_recorded() -> anyhow::Result<()> {
+            use crate::repository::branch::legacy;
+            use crate::schema;
+
+            let (operator, profile) = test_session_with_peer().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let older = legacy::write();
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            drop(older);
+            let branch = repo.branch("main").load().perform(&operator).await?;
+            let first = branch.revision().expect("first revision");
+            assert!(first.entity().to_string().starts_with("revision:"));
+
+            let named = |this: Entity| Query::<schema::Revision> {
+                this: this.into(),
+                branch: Term::var("branch"),
+                issuer: Term::var("issuer"),
+                authority: Term::var("authority"),
+                edition: Term::var("edition"),
+            };
+            let rows: Vec<schema::Revision> = branch
+                .query()
+                .select(named(first.entity()))
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(rows.len(), 1, "the older record projects by name");
+            assert_eq!(rows[0].issuer.0, operator.did().this());
+
+            let rows: Vec<schema::Revision> = branch
+                .query()
+                .select(named(first.version().legacy_entity()))
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert!(rows.is_empty(), "the older name is no revision");
+
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is("Bob".to_string()))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            let branch = repo.branch("main").load().perform(&operator).await?;
+            let second = branch.revision().expect("second revision");
+
+            let mut all: Vec<Entity> = branch
+                .query()
+                .select(Query::<schema::Revision> {
+                    this: Term::var("this"),
+                    branch: Term::var("branch"),
+                    issuer: Term::var("issuer"),
+                    authority: Term::var("authority"),
+                    edition: Term::var("edition"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?
+                .into_iter()
+                .map(|row| row.this)
+                .collect();
+            all.sort();
+            let mut expected = vec![first.entity(), second.entity()];
+            expected.sort();
+            assert_eq!(all, expected, "both project when no revision is named");
+
+            let edges: Vec<schema::RevisionParent> = branch
+                .query()
+                .select(Query::<schema::RevisionParent> {
+                    this: second.entity().into(),
+                    parent: Term::var("parent"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(edges.len(), 1);
+            assert_eq!(edges[0].parent.0, first.entity());
+
+            Ok(())
+        }
+
         #[dialog_common::test]
         async fn it_derives_transitive_revision_ancestry() -> anyhow::Result<()> {
             // schema::RevisionAncestor closes RevisionParent
