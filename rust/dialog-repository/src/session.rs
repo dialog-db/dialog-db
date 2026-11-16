@@ -2187,7 +2187,10 @@ mod tests {
         let memory = session.layer(&state).expect("the state layer").clone();
         let control = crate::control_layer();
         let mut fetches = session
-            .arrivals(&control, fetch_query())
+            .arrivals(
+                &control,
+                Located(fetch_query().with_layer(Term::var("where"))),
+            )
             .expect("every session has control:");
         assert!(
             fetches.poll(&operator).await?.is_empty(),
@@ -2219,13 +2222,14 @@ mod tests {
             held(&memory, "node/fetched", &node)?.is_empty(),
             "nothing answered yet"
         );
-        let commands = fetches.poll(&operator).await?;
-        assert_eq!(subjects(&commands), vec!["cmd:1".to_string()]);
-        assert_eq!(
-            commands[0].layer(),
-            Some(&control),
+        let located = fetches.poll(&operator).await?;
+        assert!(
+            located.iter().all(|(_, layer)| *layer == control),
             "read as a row of control:"
         );
+        let commands: Vec<dialog_query::Claim> =
+            located.into_iter().map(|(command, _)| command).collect();
+        assert_eq!(subjects(&commands), vec!["cmd:1".to_string()]);
         for command in &commands {
             session.invoke(fetched(command)?).perform(&operator).await?;
         }
@@ -2306,7 +2310,9 @@ mod tests {
         assert!(session.layers().contains(&host), "the channel is held");
         let memory = session.layer(&state).expect("the state layer").clone();
         let channel = session.layer(&host).expect("the channel").clone();
-        let mut fetches = session.arrivals(&host, fetch_query()).expect("the channel");
+        let mut fetches = session
+            .arrivals(&host, Located(fetch_query().with_layer(Term::var("where"))))
+            .expect("the channel");
         assert!(fetches.poll(&operator).await?.is_empty());
         let before = branch.revision();
         let node: Entity = "node:1".parse()?;
@@ -2323,15 +2329,13 @@ mod tests {
         );
         assert!(held(&memory, "node/fetched", &node)?.is_empty());
 
-        let commands = fetches.poll(&operator).await?;
+        let located = fetches.poll(&operator).await?;
+        assert!(located.iter().all(|(_, layer)| *layer == host));
+        let commands: Vec<dialog_query::Claim> =
+            located.into_iter().map(|(command, _)| command).collect();
         assert_eq!(
             subjects(&commands),
             vec!["cmd:1".to_string(), "cmd:2".to_string()]
-        );
-        assert!(
-            commands
-                .iter()
-                .all(|command| command.layer() == Some(&host))
         );
         let mut answer = session.transact(Changes::new());
         for command in &commands {
@@ -2635,14 +2639,14 @@ mod tests {
         let target: Entity = "doc:1".parse()?;
 
         let transaction = session.transaction().dispatch(ping("cmd:1", &target));
-        let claims: Vec<dialog_query::Claim> = transaction
+        let claims: Vec<(dialog_query::Claim, Entity)> = transaction
             .query()
-            .select(anywhere("cmd.ping/target"))
+            .select(Located(anywhere("cmd.ping/target")))
             .perform(&operator)
             .try_vec()
             .await?;
         assert_eq!(claims.len(), 1);
-        assert_eq!(claims[0].layer(), Some(&control), "a transaction reads it");
+        assert_eq!(claims[0].1, control, "a transaction reads it");
 
         let before = branch.revision();
         let mut pongs = session
