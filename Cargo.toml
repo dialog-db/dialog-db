@@ -16,6 +16,7 @@ strip = "debuginfo"
 
 [workspace]
 members = [
+    "rust/dialog-chronicle",
     "rust/dialog-corpus",
     "rust/dialog-baseline",
     "rust/dialog-capability",
@@ -24,6 +25,7 @@ members = [
     "rust/dialog-common",
     "rust/dialog-effects",
     "rust/dialog-macros",
+    "rust/dialog-migration",
     "rust/dialog-diagnose",
     "rust/dialog-encoding",
     "rust/dialog-number",
@@ -69,6 +71,7 @@ aes-gcm = "0.10"
 base58 = "0.2"
 base64 = "0.22"
 blake3 = "1"
+crc32fast = "1.5"
 brotli = "8"
 bytes = "1"
 chrono = "0.4"
@@ -87,6 +90,7 @@ futures-core = "0.3"
 flate2 = "1"
 futures-util = "0.3"
 hashbrown = "0.16"
+memmap2 = "0.9"
 hkdf = "0.12"
 hmac = "0.12"
 http-body-util = "0.1"
@@ -121,6 +125,8 @@ nom = "7"
 nom-unicode = "0.3"
 nonempty = "0.11"
 parking_lot = "0.12"
+papaya = "0.2"
+arc-swap = "1"
 p256 = "0.13"
 p384 = "0.13"
 p521 = "0.13"
@@ -204,6 +210,14 @@ windows-sys = "0.61"
 zerocopy = "0.8"
 zerocopy-derive = "0.8"
 zmij = "1"
+
+[workspace.dependencies.dialog-chronicle]
+path = "./rust/dialog-chronicle"
+version = "0.4.0"
+
+[workspace.dependencies.dialog-migration]
+path = "./rust/dialog-migration"
+version = "0.4.0"
 
 [workspace.dependencies.dialog-corpus]
 path = "./rust/dialog-corpus"
