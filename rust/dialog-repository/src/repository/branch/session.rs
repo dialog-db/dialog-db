@@ -714,11 +714,19 @@ struct LineFormat {
 }
 
 impl<'a> QueryEnv<'a> {
+    /// A runtime env over `sources` alone (see [`layered`](Self::layered)):
+    /// what the tests build directly.
+    #[cfg(test)]
+    pub(crate) fn new(sources: Vec<Source>, overlay: Ephemeral, env: &'a Erased) -> Self {
+        Self::layered(sources, None, overlay, env)
+    }
+
     /// Build a runtime env from already-resolved parts: the lines to
-    /// read, the per-query overlay (caller changes + injected metadata),
-    /// and the underlying capability env. The tombstones are lifted
-    /// on first read, once the lines' format is known: the per-query
-    /// retracts, keyed under each line's manifest.
+    /// read, what is read beside them (`None` for a read of branches
+    /// alone), the per-query overlay (caller changes + injected
+    /// metadata), and the underlying capability env, in place. The
+    /// tombstones are lifted on first read, once the lines' format is
+    /// known: the per-query retracts, keyed under each line's manifest.
     ///
     /// `Branch::query`, `Snapshot::query`, and the transaction-query
     /// paths all construct through here so there is exactly one query
@@ -734,12 +742,6 @@ impl<'a> QueryEnv<'a> {
     /// the branch has moved the head to since (dialog-db/dialog-db#757).
     /// A line's session overlay is not pinned: it is read live, as every
     /// read of the branch reads it.
-    pub(crate) fn new(sources: Vec<Source>, overlay: Ephemeral, env: &'a Erased) -> Self {
-        Self::layered(sources, None, overlay, env)
-    }
-
-    /// A runtime env over `sources` with `layered` read beside them, built
-    /// in place (see [`new`](Self::new)).
     fn layered(
         sources: Vec<Source>,
         layered: Option<Arc<Layered>>,
@@ -762,7 +764,7 @@ impl<'a> QueryEnv<'a> {
     }
 
     /// A runtime env over `composite`: its lines and its memory layers
-    /// (see [`new`](Self::new)).
+    /// (see [`layered`](Self::layered)).
     pub(crate) fn over(composite: Composite, overlay: Ephemeral, env: &'a Erased) -> Self {
         let Composite {
             sources,
