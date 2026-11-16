@@ -1017,3 +1017,13 @@ Set aside: slots as view parameters (internals leak into the head); positional v
 
 **Decision.** The design takes these as proposed.
 
+## 2026-11-16 — Empty groups
+
+**Question.** A fold over no rows: should `(list/count list:home status: :open count: ?n)` give 0 when the list has no open to-dos?
+
+**Method.** Design discussion, against Datomic.
+
+**Results.** Datomic gives nothing too, and gets its zeros from application code or an `or-join` with a `not-join` and `(ground 0)`. `get-else` defaults only a missing cardinality-one attribute, never an aggregate. Its enums are idents, entities a query can range over.
+
+**Decision.** Folds stay pure: no rows, no match. A zero is a rule over a domain with `unless`. A variant is the relation of its cases, so the domain exists. Defaults stay on reads of single values.
+

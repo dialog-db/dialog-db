@@ -199,7 +199,19 @@ A rule may conclude an attribute in a concept's own domain, named under the conc
 - `list/count-open` is an attribute in the domain of the `list` concept: the concept's hash and the name `count-open`. It is hash-addressed like any attribute, and the name matters only inside that domain.
 - A concept's domain is concluded only. Asserting `list/count-open` is an error. A stored domain, `xyz.todo`, holds facts; a concept's domain holds what rules conclude about its entities. Which is which shows in the name.
 - **Folds conclude only into a concept's domain**, choosing or computing: `count`, `all`, a view. A stored attribute never holds a folded value, so a stored `5` can never beat a count.
-- `(list ?l)` stays in the body. It anchors the group, so a list with no open to-dos has a count of 0 rather than none: a fold over an empty group gives a value, not a missing row.
+- A fold sees only the rows that exist. A list with no open to-dos has no group, so `(list/count-open list:home ?n)` matches nothing, as in Datalog and Datomic. A zero is written, not implied, over a domain and with `unless`:
+
+  ```clj
+  (rule (list/count ?l status: ?s count: (count ?t))
+    (todo ?t list: ?l state: ?s))
+
+  (rule (list/count ?l status: ?s count: 0)
+    (list ?l)
+    (todo/state ?s)
+    (unless (todo _ list: ?l state: ?s)))
+  ```
+
+- A variant is the relation of its cases. A keyword is an entity, so `[:open :done]` gives `open:` and `done:`, and `(todo/state ?s)` ranges over them, as a Datomic query ranges over idents. That is what gives a zero its domain.
 - Everything derived about a list is found under `list/`.
 
 ### Layers
@@ -488,6 +500,6 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 - The YAML spelling.
 - The cardinality work (`claude/pick-strategy-rules-crdt-tvdpm7`, #793) lets any deductive rule fold and ranks a fold's value against stored claims. The notation puts electors only in concept heads and every other fold only into a concept's domain, which is concluded only, so a folded value never competes with a stored claim. The engine and the notation have to agree on this.
 - A rename under `:many` when the old value is on another layer leaves the old value beside the new one.
-- What a fold gives for an empty group: `count` gives 0, but what an empty `all` or a view over no rows renders.
+- How a rule names a variant's cases: `(todo/state ?s)`, the concept's domain and the field, is the spelling used so far.
 - How a view's template binds events and names commands, now that it is Hiccup.
 - How a concept's domain is spelled when the concept's name is ambiguous: `list/` resolves by name in the document.
