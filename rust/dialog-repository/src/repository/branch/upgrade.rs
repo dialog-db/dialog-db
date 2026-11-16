@@ -270,7 +270,9 @@ impl UpgradeRules<'_> {
         {
             return Ok(upgraded);
         }
-        upgraded.revision = Some(transaction.commit().publish().perform(env).await?);
+        // Built from what this upgrade read: a lost race fails, for the
+        // caller to upgrade again over the new head.
+        upgraded.revision = Some(transaction.commit().publish().once(env).await?);
         Ok(upgraded)
     }
 }

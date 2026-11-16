@@ -39,6 +39,7 @@
 //! on every pull request. Re-baseline by sweeping into `perf/baseline`
 //! and committing the reports with the numbers in the pull request.
 
+pub mod allocator;
 pub mod compare;
 pub mod counters;
 pub mod env;
