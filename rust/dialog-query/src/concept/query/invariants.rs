@@ -1029,3 +1029,91 @@ async fn every_last_read_of_a_cell_elects_the_same_claim() -> anyhow::Result<()>
     );
     Ok(())
 }
+
+/// A stored value newer than the fact a derived value stands by wins
+/// its cell under `last`, until the derivation's source changes. A rule
+/// derives `todo/title` from `tracker/title`, so an issue reads as a
+/// to-do with the issue's title. Renaming that to-do stores a
+/// `todo/title` newer than the issue's title fact: the to-do reads the
+/// new title, and the issue keeps its own. A later `tracker/title` is
+/// then the newest fact in the to-do's cell, through the rule, so the
+/// to-do follows the issue again.
+#[dialog_common::test]
+async fn a_stored_value_newer_than_a_derivation_wins_until_its_source_changes() -> anyhow::Result<()>
+{
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let issue: Entity = "id:issue".parse()?;
+    let title = |text: &str| (Value::Entity(issue.clone()), Value::String(text.into()));
+    macro_rules! commit {
+        ($fact:expr) => {
+            branch
+                .transaction()
+                .assert($fact)
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        };
+    }
+    let mut registry = RuleRegistry::new();
+    registry.register(compile(serde_json::json!({
+        "deduce": { "with": { "title": { "the": "todo/title", "as": "text:" } } },
+        "when": [{
+            "assert": { "with": { "title": { "the": "tracker/title", "as": "text:" } } },
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "title": { "?": { "name": "title" } }
+            }
+        }]
+    }))?)?;
+
+    commit!(
+        the!("tracker/title")
+            .of(issue.clone())
+            .is("Fix login".to_string())
+    );
+    {
+        let source = TestEnv::new(&branch, &operator, registry.clone());
+        assert_eq!(
+            relation_under(&source, "todo/title", "last").await?,
+            vec![title("Fix login")],
+            "the to-do reads the issue's title through the rule"
+        );
+    }
+
+    commit!(
+        the!("todo/title")
+            .of(issue.clone())
+            .is("Fix login bug".to_string())
+    );
+    {
+        let source = TestEnv::new(&branch, &operator, registry.clone());
+        assert_eq!(
+            relation_under(&source, "todo/title", "last").await?,
+            vec![title("Fix login bug")],
+            "the stored title is newer than the issue fact the derived one stands by"
+        );
+        assert_eq!(
+            relation_under(&source, "tracker/title", "last").await?,
+            vec![title("Fix login")],
+            "renaming the to-do leaves the issue's title alone"
+        );
+    }
+
+    commit!(
+        the!("tracker/title")
+            .of(issue.clone())
+            .is("Login fails".to_string())
+    );
+    {
+        let source = TestEnv::new(&branch, &operator, registry);
+        assert_eq!(
+            relation_under(&source, "todo/title", "last").await?,
+            vec![title("Login fails")],
+            "a newer issue title is the newest fact in the to-do's cell"
+        );
+    }
+    Ok(())
+}
