@@ -897,3 +897,40 @@ only where a query names one. The perf gate was not run on this branch.
 **Decided.** Nothing. `claude/layers-16` (stack subscriptions) is in
 progress; a further merge will follow.
 
+
+## 2026-11-16: a revision is named by `revision:`
+
+**Did.** The maintainer chose the `revision:` scheme for a revision's
+entity over the `did:key:z6Mk…` it had, and left the compatibility
+approach to this session. Read every place a revision's record is found
+by entity, then changed the name and made each reader accept both.
+
+**Learned.** The record is a stored fact, so the name is part of what a
+replica holds, not only of what a query derives. Three readers find a
+record by entity: the history reader
+(`rust/dialog-corpus/src/history/query.rs`), the built-in projection
+rules (`rust/dialog-repository/src/rules.rs`) and a stack's durable
+layers (`rust/dialog-repository/src/stack/durable.rs`). `verify`
+compares versions, not entities, so it needed nothing.
+
+A second rule per concept for the older name would have made
+`Revision` a two-rule concept, and the single-rule exact path was not
+measured against that. One rule suffices: a formula,
+`dialog/revision-slot`, yields the entities a revision's record may be
+under, and the scan reads at those. Asked by name it is two lookups
+where it was one; asked of no revision it is the same attribute scan.
+A record at any other entity still joins nothing.
+
+A fact a space wrote about a revision under its older name does not
+join `this` any more. That is the cost of the change, and it falls on
+tonk.
+
+Tests: a record under the older name is read by the history reader; a
+tree committed as an older release did projects by name and unnamed,
+and a later commit finds it as a parent; the older name is no revision.
+2,097 tests across `dialog-capability`, `dialog-corpus`, `dialog-query`
+and `dialog-repository` pass. The perf gate was not run, and what an
+older release does on meeting a `revision:` record was not tested.
+
+**Decided.** `revision:<base58(hash)>` over the same hash; written
+under the new name, read under either, nothing rewritten.
