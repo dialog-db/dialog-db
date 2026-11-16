@@ -405,7 +405,12 @@ fn selecting_edges(
     for (_, field) in descriptor.with().iter() {
         let attribute = ConceptDescriptor::of_attribute(field);
         if derived.contains(&ProgramAnalysis::node(&attribute)) {
-            let polarity = if field.is_optional() {
+            // A field that declares a selective aggregator folds every
+            // claim of the relation, so it needs the relation derived
+            // in full, as any fold does.
+            let polarity = if field.aggregate().is_some() {
+                Polarity::Aggregating
+            } else if field.is_optional() {
                 Polarity::Optional
             } else if field.cardinality() == Cardinality::One {
                 Polarity::Electing { decides: false }

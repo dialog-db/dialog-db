@@ -438,3 +438,59 @@ fn it_round_trips_an_aggregating_field() -> anyhow::Result<()> {
     assert_eq!(decoded.this(), concept.this());
     Ok(())
 }
+
+/// "A rule deriving a relation from the claim a field elects of that
+/// relation closes a cycle through the election, and is set aside."
+/// `account/status(a) := "suspended" :- Account(a, status: "active")`
+/// reads the elected status and derives a claim that outranks it: left
+/// in, the claim would make its own premise false. The analysis sets
+/// the rule aside, and the stored states read as they did without it.
+#[dialog_common::test]
+async fn it_sets_aside_a_rule_deriving_what_its_own_election_reads() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    store_accounts(&branch, &operator).await?;
+    let status = serde_json::json!({
+        "the": "account/status",
+        "as": states(),
+        "cardinality": "many"
+    });
+    let rule: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+        "deduce": { "with": { "is": status } },
+        "when": [{
+            "assert": serde_json::to_value(account("top"))?,
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "name": { "?": { "name": "name" } },
+                "status": "active"
+            }
+        }, {
+            "assert": "==",
+            "where": { "this": "suspended", "is": { "?": { "name": "is" } } }
+        }]
+    }))?;
+    let rule = rule.compile()?;
+    let mut registry = RuleRegistry::new();
+    registry.register(rule.clone())?;
+    let analysis = registry.analysis()?;
+    let quarantined: Vec<Entity> = analysis
+        .quarantined()
+        .iter()
+        .map(|set_aside| set_aside.rule.clone())
+        .collect();
+    assert_eq!(quarantined, vec![rule.this()]);
+    let source = TestEnv::new(&branch, &operator, registry);
+    assert_eq!(
+        statuses(
+            &source,
+            account("top"),
+            Term::var("this"),
+            Term::var("status")
+        )
+        .await?,
+        vec![pair("alice", "suspended"), pair("bob", "active")],
+        "bob stays active: nothing is derived from his own election"
+    );
+    Ok(())
+}
