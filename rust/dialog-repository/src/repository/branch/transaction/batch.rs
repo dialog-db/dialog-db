@@ -416,7 +416,46 @@ impl TransactionPublish<&Branch> {
     /// Run induction, mint the commit, and publish it — returning the
     /// newly-published [`Revision`] (or the unchanged head when the
     /// settled batch is a no-op).
+    ///
+    /// Fails with [`VersionMismatch`](PublishError::VersionMismatch) when
+    /// another writer moved the head first; the transaction is consumed,
+    /// for its caller to build again over the new head.
+    #[deprecated(
+        note = "a commit that loses its branch's race fails; use `Branch::transact`, which builds the transaction again over the head that won"
+    )]
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
+    where
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
+            + ConditionalSync
+            + 'static,
+    {
+        self.once(env).await
+    }
+
+    /// [`perform`](Self::perform), for the commands that build on it.
+    pub(crate) async fn once<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
         Env: Provider<BlobSize>
             + Provider<BlobImport>

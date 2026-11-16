@@ -1,5 +1,8 @@
 //! A replica that faults blocks in on demand: what its first query costs
 //! once it has adopted a head by root and remembers nothing.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use std::future::Future;
 use std::pin::Pin;

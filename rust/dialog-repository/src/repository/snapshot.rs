@@ -832,7 +832,7 @@ impl SnapshotExport {
                     }
                 }
 
-                yield Item::Block(Block::new(node.buffer().clone()));
+                yield Item::Block(Block::new(node.buffer()?.clone()));
             }
 
             // Spilled values, discovered above. Their reads are

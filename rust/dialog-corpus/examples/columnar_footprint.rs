@@ -83,7 +83,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     frontier.push(index.hash_at(at)?.clone());
                 }
             }
-            NodeBody::Segment(segment) => {
+            NodeBody::Segment(dialog_search_tree::SegmentView::Rows(_)) => {
+                unreachable!("nodes read from a directory of blocks are blocks")
+            }
+            NodeBody::Segment(dialog_search_tree::SegmentView::Archived(segment)) => {
                 segment_nodes += 1;
                 segment_bytes += size;
                 entries += segment.len() as u64;

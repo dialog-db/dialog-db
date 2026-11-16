@@ -6,6 +6,7 @@
 use crate::{Cardinality, Fact};
 
 /// The instruction variants a commit applies to the fact indexes.
+#[derive(Clone)]
 pub enum Instruction {
     /// Add this [`Fact`] to the indexes under its attribute's
     /// cardinality. Under [`Cardinality::Many`] the write is purely

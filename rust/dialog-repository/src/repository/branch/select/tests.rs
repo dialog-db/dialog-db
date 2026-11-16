@@ -205,7 +205,7 @@ async fn without_spills(branch: &Branch, operator: &Operator) -> Result<Blocks> 
     let mut visits = pin!(visits);
     while let Some(visit) = visits.next().await {
         match visit? {
-            Visit::Present(node) => blocks.store(node.buffer().clone()),
+            Visit::Present(node) => blocks.store(node.buffer()?.clone()),
             Visit::Absent(hash) => anyhow::bail!("the branch's node {hash} is not local"),
         }
     }
