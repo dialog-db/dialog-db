@@ -62,6 +62,7 @@ impl Scanned {
 
     /// `part`'s binding, materialized on first read.
     #[cfg_attr(feature = "trace-hydration", track_caller)]
+    #[inline(never)]
     pub(crate) fn binding(&self, part: Part) -> &Binding {
         #[cfg(feature = "trace-hydration")]
         let site = std::panic::Location::caller();
@@ -118,8 +119,10 @@ impl Slot {
         }
     }
 
-    /// The binding, materialized on first read.
+    /// The binding, materialized on first read. Inlined: most reads are
+    /// of a value already bound, and pay only the match.
     #[cfg_attr(feature = "trace-hydration", track_caller)]
+    #[inline]
     pub(crate) fn binding(&self) -> &Binding {
         match self {
             Slot::Bound(binding) => binding,

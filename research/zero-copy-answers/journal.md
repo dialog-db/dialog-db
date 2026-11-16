@@ -452,6 +452,53 @@ remaining hydration is a question about three designs (the selector
 API, the fixpoint's rows, the election's rows), not about the engine's
 read path.
 
+## 2026-11-16 — binding in place only where nothing reads the value
+
+**Question.** `rule-recursive` was +3.1% against main (+1.1% with lazy
+bindings off). Do rules need every value, and can the plan defer only
+what nothing reads?
+
+**Method.** `rule-recursive` profiled main, eager and lazy; then the
+changes below, each remeasured; then the full `dialog-perf` sweep.
+
+**Results.** The fixpoint keeps every derived row as owned values
+(`Row`) to deduplicate it and feed it back, and projects every head
+operand into it: not because a rule needs owned values (it compares
+them), but because its row store is owned. So every value its scans
+bind is hydrated, and binding in place only added to it. Of the +3.1%,
+two thirds was that; the rest showed with lazy bindings off too: an
+out-of-line slot read on every `Match::find`, and a scan's placement
+built on every invocation, which a recursive probe makes many times
+for few rows.
+
+- The slot read for a bound value is inlined, and a scan decides its
+  placement on its first row: eager `rule-recursive` +1.1% → +0.5%.
+- *Plan-level deferral, first cut:* a binding mode on the scans of the
+  plans the fixpoint evaluates. +3.0% → +2.7%: most of a recursive
+  rule's scans are in the concepts its premises read, which evaluate
+  their own cached plans, so the flag did not reach them.
+- *The demand travels with the rows instead:* a row whose consumer
+  reads every value says so, the fixpoint seeds its rows that way,
+  derived rows and the rows of a concept evaluated for them inherit
+  it, and a scan extending such a row binds eagerly. On `Match` the
+  flag grew every row from 88 to 96 bytes (+3–6% bytes in the rule
+  scenarios); it lives on the row's shared frame instead, and every
+  eager seed shares one empty frame (a frame per seed was +2.1%
+  allocation calls).
+
+The full sweep against main, instructions / allocation calls:
+`query-join` −22.3% / −54.1%, `rule-scan` −19.9% / −50.2%, `read-scan`
+−18.8% / −42.7%, `query-member` −14.2% / −41.4%, `number-scan` −9.0% /
+−29.9%, `rule-ranked` −6.1% / −19.6%; `rule-recursive` +0.8% / +0.7%,
+`number-range-narrow` +0.4% / +1.0%; every other scenario within ±2%,
+most below main. The gate flags only bytes: 1–2% more allocated in
+`rule-ranked`, `subscribe-repoll` and `number-range-narrow`, and 2–7.5%
+more reallocated growing result vectors of the larger conclusion.
+
+**Decision.** The bytes are the trade (taken). The fixpoint's owned row
+store is the next place hydration could go, if a recursive rule's rows
+held references and compared bytes; not now.
+
 ## How to reproduce
 
 ```sh

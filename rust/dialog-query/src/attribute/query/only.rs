@@ -1,4 +1,4 @@
-use super::all::{AttributeQueryAll, Placed};
+use super::all::{AttributeQueryAll, Placed, Placement};
 use super::pipelined;
 use crate::Claim;
 use crate::Value;
@@ -259,7 +259,9 @@ impl AttributeQueryOnly {
         // so an unboxed input sat in its state twice, and returning the
         // generator unboxed copied the whole state again at every layer
         // that wrapped or boxed it (several KiB per scan step, per row).
-        let placement = selector.placement();
+        // Decided on the first row, not per invocation: a scan probed once
+        // per row of the step before it often yields nothing at all.
+        let mut placement: Option<Placement> = None;
         Box::pin(try_stream! {
             for await each in selection {
                 let mut base = each?;
@@ -318,7 +320,7 @@ impl AttributeQueryOnly {
                                     // entry: drop the group's yield rather
                                     // than failing the query.
                                     let placed = if value_constraint.is_none() {
-                                        selector.place(&placement, current)?
+                                        selector.place(placement.get_or_insert_with(|| selector.placement()), &base, current)?
                                     } else {
                                         #[cfg(feature = "trace-hydration")]
                                         hydration::here("eager: value pinned to a constant");
@@ -327,7 +329,7 @@ impl AttributeQueryOnly {
                                     match placed {
                                         Placed::InPlace(row, standing, viewed) => {
                                             let mut extension = base.clone();
-                                            selector.merge_scanned(&placement, &mut extension, row, standing, viewed)?;
+                                            selector.merge_scanned(placement.get_or_insert_with(|| selector.placement()), &mut extension, row, standing, viewed)?;
                                             yield extension;
                                         }
                                         Placed::Corrupt => {}
@@ -361,7 +363,7 @@ impl AttributeQueryOnly {
                     // bytes are corrupt; see the group-close arm above).
                     if let Some(winner) = candidate.take() {
                         let placed = if value_constraint.is_none() {
-                            selector.place(&placement, winner)?
+                            selector.place(placement.get_or_insert_with(|| selector.placement()), &base, winner)?
                         } else {
                             #[cfg(feature = "trace-hydration")]
                             hydration::here("eager: value pinned to a constant");
@@ -370,7 +372,7 @@ impl AttributeQueryOnly {
                         match placed {
                             Placed::InPlace(row, standing, viewed) => {
                                 let mut extension = base.clone();
-                                selector.merge_scanned(&placement, &mut extension, row, standing, viewed)?;
+                                selector.merge_scanned(placement.get_or_insert_with(|| selector.placement()), &mut extension, row, standing, viewed)?;
                                 yield extension;
                             }
                             Placed::Corrupt => {}

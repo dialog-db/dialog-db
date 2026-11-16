@@ -279,9 +279,10 @@ impl AttributeQueryAll {
     pub(crate) fn place(
         &self,
         placement: &Placement,
+        base: &Match,
         row: FactView,
     ) -> Result<Placed, DialogCorpusError> {
-        if !placement.lazy {
+        if !placement.lazy || base.binds_eagerly() {
             #[cfg(feature = "trace-hydration")]
             hydration::here("eager: lazy off or refined attribute");
             return Ok(Placed::Eager(row));
@@ -553,7 +554,9 @@ impl AttributeQueryAll {
         // so an unboxed input sat in its state twice, and returning the
         // generator unboxed copied the whole state again at every layer
         // that wrapped or boxed it (several KiB per scan step, per row).
-        let placement = selector.placement();
+        // Decided on the first row, not per invocation: a scan probed once
+        // per row of the step before it often yields nothing at all.
+        let mut placement: Option<Placement> = None;
         Box::pin(try_stream! {
             for await candidate in selection {
                 let mut base = candidate?;
@@ -577,10 +580,10 @@ impl AttributeQueryAll {
                     // corrupt or foreign-written tree entry: ignore it
                     // rather than failing the query.
                     let fact = fact?;
-                    let fact = match selector.place(&placement, fact)? {
+                    let fact = match selector.place(placement.get_or_insert_with(|| selector.placement()), &base, fact)? {
                         Placed::InPlace(row, standing, viewed) => {
                             let mut extension = base.clone();
-                            selector.merge_scanned(&placement, &mut extension, row, standing, viewed)?;
+                            selector.merge_scanned(placement.get_or_insert_with(|| selector.placement()), &mut extension, row, standing, viewed)?;
                             yield extension;
                             continue;
                         }

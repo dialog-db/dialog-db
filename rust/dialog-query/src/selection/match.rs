@@ -173,6 +173,14 @@ struct Frame {
     claims: Vec<(Arc<str>, Cited)>,
     standings: Vec<(Arc<str>, Standing)>,
     parent: Option<Arc<Frame>>,
+    /// Whether whatever consumes the rows extending this frame reads every
+    /// value they bind (a recursive rule's fixpoint, which keeps its rows
+    /// as owned values): a scan extending such a row binds eagerly, as
+    /// binding in place would only add to the hydration the consumer does
+    /// anyway. Held on the frame, which every row derived from the seed
+    /// shares, so that no row grows to carry it; a frame inherits it from
+    /// the frame it extends.
+    eager: bool,
 }
 
 /// What a row brings to a cardinality-one election: the standing of
@@ -227,6 +235,40 @@ impl Match {
         Self::default()
     }
 
+    /// A row whose consumer reads every value it binds; see
+    /// `Frame::eager`.
+    pub(crate) fn eager() -> Self {
+        // Every eager seed shares one empty frame: a seed per row would
+        // otherwise allocate a frame per row to say so.
+        static EAGER: OnceLock<Arc<Frame>> = OnceLock::new();
+        let frame = EAGER.get_or_init(|| {
+            Arc::new(Frame {
+                eager: true,
+                ..Frame::default()
+            })
+        });
+        Self {
+            frame: Some(Arc::clone(frame)),
+            ..Self::default()
+        }
+    }
+
+    /// An empty row for a scope evaluated on behalf of `caller`: it reads
+    /// what `caller`'s consumer reads.
+    pub(crate) fn for_scope_of(caller: &Match) -> Self {
+        if caller.binds_eagerly() {
+            Self::eager()
+        } else {
+            Self::default()
+        }
+    }
+
+    /// Whether this row's consumer reads every value it binds.
+    #[inline]
+    pub(crate) fn binds_eagerly(&self) -> bool {
+        self.frame.as_ref().is_some_and(|frame| frame.eager)
+    }
+
     /// Make room for `additional` more bindings on this row, so a premise
     /// that binds several slots at once grows the row's own bindings once.
     pub(crate) fn reserve(&mut self, additional: usize) {
@@ -240,11 +282,13 @@ impl Match {
         if self.bindings.is_empty() && self.claims.is_empty() && self.standings.is_empty() {
             return;
         }
+        let eager = self.binds_eagerly();
         let frame = Frame {
             bindings: mem::take(&mut self.bindings),
             claims: mem::take(&mut self.claims),
             standings: mem::take(&mut self.standings),
             parent: self.frame.take(),
+            eager,
         };
         self.frame = Some(Arc::new(frame));
     }
@@ -367,6 +411,7 @@ impl Match {
 
     /// The binding for `name` along this row's ancestry.
     #[cfg_attr(feature = "trace-hydration", track_caller)]
+    #[inline]
     fn find(&self, name: &str) -> Option<&Binding> {
         // Called, not mapped: the hydration trace follows the caller.
         match self.find_slot(name) {
@@ -376,6 +421,7 @@ impl Match {
     }
 
     /// The slot for `name` along this row's ancestry, as stored.
+    #[inline]
     fn find_slot(&self, name: &str) -> Option<&Slot> {
         probe(&self.bindings, name)
             .or_else(|| self.frames().find_map(|frame| probe(&frame.bindings, name)))
@@ -495,6 +541,15 @@ impl Match {
     /// kept. Claims from `other` fill in only where `self` has none, so a
     /// row's own provenance is never overwritten by the row it joins with.
     pub fn combine(mut self, other: &Match) -> Option<Match> {
+        // A row joined with one whose consumer reads every value is read
+        // as that one is.
+        if other.binds_eagerly() && !self.binds_eagerly() {
+            self.frame = Some(Arc::new(Frame {
+                parent: self.frame.take(),
+                eager: true,
+                ..Frame::default()
+            }));
+        }
         self.bindings.reserve(other.bindings.len());
         for (name, slot) in other.all_bindings() {
             match self.find_slot(name) {

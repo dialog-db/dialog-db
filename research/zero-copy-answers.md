@@ -209,14 +209,14 @@ cost of `project` + `serde_json`. Still open:
 - **Hydration three designs need**: a lookup's `Selector` takes an owned
   entity and attribute; the recursive fixpoint and the ranked election
   keep owned rows. Removing those is a change to each design.
-- **`rule-recursive`** +1.5% instructions outside the allocator and
-  +1.9% allocation calls: laziness where every value is read. The fix is
-  a plan decision: bind in place only the variables no later premise
-  reads.
+- **`rule-recursive`** is +0.8% instructions (within the gate): a
+  recursive rule's fixpoint keeps owned rows, so its rows bind eagerly
+  (the demand travels with the rows). Holding references in the
+  fixpoint's rows would take the rest.
 - **Bytes**: one shared row per scanned fact and a 16-byte `this` cost
-  1–2% more bytes allocated or reallocated in a few scenarios
-  (`rule-ranked`, `number-range-narrow`, the result vectors), with
-  30–55% fewer allocation calls. The maintainer's call.
+  1–2% more bytes allocated, and 2–7.5% more reallocated growing result
+  vectors, in a few scenarios, with up to 54% fewer allocation calls.
+  Taken as a trade; the gate's byte checks will flag it.
 - A **columnar operator** answered the eight-field read in 40% of the
   engine's time plus encoding. Not built as an operator.
 - `unsafe` in `CheckedRow` (an unchecked UTF-8 read of a span validated

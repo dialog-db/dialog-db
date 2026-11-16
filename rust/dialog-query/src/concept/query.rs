@@ -51,7 +51,7 @@ use std::sync::Mutex;
 /// Parameters are bound by name: a concept's parameter variables are
 /// untyped (`Term::var`), so no kind check applies to them.
 fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, EvaluationError> {
-    let mut matched = Match::new();
+    let mut matched = Match::for_scope_of(source);
 
     for (param_name, user_param) in terms.iter() {
         match user_param {
