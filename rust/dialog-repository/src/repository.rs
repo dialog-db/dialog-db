@@ -1624,6 +1624,7 @@ mod tests {
         async fn it_reads_a_revision_an_older_release_recorded() -> anyhow::Result<()> {
             use crate::repository::branch::legacy;
             use crate::schema;
+            use crate::schema::DidExt as _;
 
             let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
