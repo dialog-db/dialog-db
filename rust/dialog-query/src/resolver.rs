@@ -592,10 +592,17 @@ impl ResolverQuery {
                 }
                 projected
             }
-            Self::TreeBlock(query) => vec![vec![(
-                &query.bytes,
-                Some(Value::Bytes(node.buffer().as_ref().to_vec())),
-            )]],
+            // A node that cannot give its block is one that cannot be
+            // read: no rows, as for any node that does not decode.
+            Self::TreeBlock(query) => node
+                .buffer()
+                .map(|block| {
+                    vec![vec![(
+                        &query.bytes,
+                        Some(Value::Bytes(block.as_ref().to_vec())),
+                    )]]
+                })
+                .unwrap_or_default(),
             // Read through the blob store in `evaluate`, not as a node.
             Self::TreeValue(_) => Vec::new(),
         };

@@ -202,7 +202,7 @@ pub fn inspect_node(bytes: Vec<u8>) -> Result<NodeSummary, DialogCorpusError> {
 /// for several parts of one node decodes it once. The `inspect_*`
 /// functions are the same readings for a caller holding only bytes.
 pub fn summary(node: &CorpusNode) -> Result<NodeSummary, DialogCorpusError> {
-    let size = node.buffer().as_ref().len() as u64;
+    let size = node.buffer()?.as_ref().len() as u64;
     let scale = node.scale().as_u8() as u64;
 
     Ok(match node.as_index() {
