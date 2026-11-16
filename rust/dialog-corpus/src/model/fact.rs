@@ -406,6 +406,15 @@ impl FactView {
         }
     }
 
+    /// The stored value's type, as the key records it: read without
+    /// walking the key. `None` for a row with no stored key.
+    pub fn stored_type(&self) -> Option<ValueDataType> {
+        match &self.backing {
+            Backing::Scanned { layout, .. } => Some(layout.value_type()),
+            Backing::Owned { .. } => None,
+        }
+    }
+
     /// This row's entity, as the URI the key stores, borrowed.
     pub fn of_str(&self) -> Result<Cow<'_, str>, DialogCorpusError> {
         match &self.backing {
@@ -586,44 +595,71 @@ impl FactView {
     }
 }
 
-/// Where one checked text component of a row sits: a span of the row's
-/// key bytes, or (for a component that carried an escape, or a row with
-/// no stored key) the text itself.
+/// Where one checked component of a row sits: a span of the row's key
+/// bytes, or (for a component that carried an escape, a spilled value, or
+/// a row with no stored key) the bytes themselves.
 #[derive(Debug, Clone)]
 enum Piece {
     Span(u32, u32),
-    Owned(Box<str>),
+    Owned(Box<[u8]>),
 }
 
 impl Piece {
-    /// Locates `text` in `key` when it borrows from it, or owns it.
-    fn of(key: &[u8], text: Cow<'_, str>) -> Piece {
+    /// Locates `bytes` in `key` when they borrow from it, or owns them.
+    fn of(key: &[u8], bytes: Cow<'_, [u8]>) -> Piece {
         let base = key.as_ptr() as usize;
-        match text {
-            Cow::Borrowed(text)
-                if text.as_ptr() as usize >= base
-                    && text.as_ptr() as usize + text.len() <= base + key.len() =>
+        match bytes {
+            Cow::Borrowed(bytes)
+                if !key.is_empty()
+                    && bytes.as_ptr() as usize >= base
+                    && bytes.as_ptr() as usize + bytes.len() <= base + key.len() =>
             {
-                Piece::Span((text.as_ptr() as usize - base) as u32, text.len() as u32)
+                Piece::Span((bytes.as_ptr() as usize - base) as u32, bytes.len() as u32)
             }
-            // Text that lives elsewhere (an owned fact's, a spilled block's)
-            // or carried an escape: held as it is.
-            text => Piece::Owned(text.into_owned().into_boxed_str()),
+            bytes => Piece::Owned(bytes.into_owned().into_boxed_slice()),
         }
     }
 
-    fn read<'a>(&'a self, key: &'a [u8]) -> &'a str {
+    /// Locates checked text.
+    fn text(key: &[u8], text: Cow<'_, str>) -> Piece {
+        Piece::of(
+            key,
+            match text {
+                Cow::Borrowed(text) => Cow::Borrowed(text.as_bytes()),
+                Cow::Owned(text) => Cow::Owned(text.into_bytes()),
+            },
+        )
+    }
+
+    fn bytes<'a>(&'a self, key: &'a [u8]) -> &'a [u8] {
         match self {
-            Piece::Span(start, len) => {
-                let bytes = &key[*start as usize..(*start + *len) as usize];
-                // SAFETY: the span was taken from a `&str` validated over
-                // these same bytes when the row was checked, and a row's key
-                // bytes never change while it is held.
-                unsafe { from_utf8_unchecked(bytes) }
-            }
-            Piece::Owned(text) => text,
+            Piece::Span(start, len) => &key[*start as usize..(*start + *len) as usize],
+            Piece::Owned(bytes) => bytes,
         }
     }
+
+    /// The piece as text. Only for a piece made by [`Piece::text`].
+    fn read<'a>(&'a self, key: &'a [u8]) -> &'a str {
+        // SAFETY: a text piece holds, or spans, bytes validated as UTF-8
+        // when the row was checked, and a row's key bytes never change
+        // while it is held.
+        unsafe { from_utf8_unchecked(self.bytes(key)) }
+    }
+}
+
+/// A checked row's value: text, entities, symbols, bytes and records by
+/// where they sit, numbers and booleans read out.
+#[derive(Debug, Clone)]
+enum Stored {
+    String(Piece),
+    Entity(Piece),
+    Symbol(Piece),
+    Bytes(Piece),
+    Record(Piece),
+    UnsignedInt(u128),
+    SignedInt(i128),
+    Float(f64),
+    Boolean(bool),
 }
 
 /// A row validated once, so everything that reads it afterwards reads its
@@ -631,19 +667,17 @@ impl Piece {
 /// query binds when it binds a scanned row in place. Validation is what
 /// [`FactView::to_owned`] would do; a row that fails it is not a
 /// `CheckedRow` ([`FactView::checked`]).
+///
+/// It keeps the key, the cause and where each component sits, and nothing
+/// else of the scanned row: the payload's versions are read once, by the
+/// scan, when it takes the row's standing.
 #[derive(Debug, Clone)]
 pub struct CheckedRow {
-    view: FactView,
+    key: Option<KeyHandle>,
+    cause: Option<Cause>,
     entity: Piece,
     attribute: Piece,
-    /// The value, when it is a scalar (read out) or text that borrows from
-    /// the key; `None` when it is read from the view each time (bytes, a
-    /// record, a spilled value).
-    value: Option<(
-        ValueDataType,
-        Option<Piece>,
-        Option<super::ValueView<'static>>,
-    )>,
+    value: Stored,
 }
 
 impl FactView {
@@ -653,46 +687,56 @@ impl FactView {
     pub fn checked(self) -> Result<CheckedRow, DialogCorpusError> {
         let (entity, attribute, value) = {
             let key = self.key().unwrap_or(&[]);
-            let of = self.of_str()?;
+            // One walk of the key's components for all three.
+            let (of, the, value) = match &self.backing {
+                Backing::Scanned { spilled, .. } => {
+                    let parts = self.parts()?;
+                    let value = match parts.value {
+                        ValueRef::Inline(payload) => {
+                            super::decode_value_view(parts.value_type, payload)
+                        }
+                        ValueRef::Spilled { .. } => {
+                            let bytes = spilled.as_deref().ok_or_else(|| {
+                                DialogCorpusError::InvalidValue(
+                                    "spilled value key has no fetched block bytes".to_string(),
+                                )
+                            })?;
+                            super::spilled_value_view(parts.value_type, bytes)
+                        }
+                    }
+                    .map_err(as_corrupt_entry)?;
+                    (
+                        super::view::cow_str(parts.entity)?,
+                        super::view::cow_str(parts.attribute)?,
+                        value,
+                    )
+                }
+                Backing::Owned { .. } => (self.of_str()?, self.the_str()?, self.value_view()?),
+            };
             Uri::check_stored(&of)
                 .map_err(|error| DialogCorpusError::CorruptEntry(format!("{error}")))?;
-            let the = self.the_str()?;
             super::view::check_relation(&the)?;
-            let value = self.value_view().map_err(as_corrupt_entry)?;
             let value = match value {
-                super::ValueView::String(text) => {
-                    Some((ValueDataType::String, Some(Piece::of(key, text)), None))
-                }
-                super::ValueView::Entity(text) => {
-                    Some((ValueDataType::Entity, Some(Piece::of(key, text)), None))
-                }
-                super::ValueView::Symbol(text) => {
-                    Some((ValueDataType::Symbol, Some(Piece::of(key, text)), None))
-                }
-                super::ValueView::UnsignedInt(n) => Some((
-                    ValueDataType::UnsignedInt,
-                    None,
-                    Some(super::ValueView::UnsignedInt(n)),
-                )),
-                super::ValueView::SignedInt(n) => Some((
-                    ValueDataType::SignedInt,
-                    None,
-                    Some(super::ValueView::SignedInt(n)),
-                )),
-                super::ValueView::Float(n) => {
-                    Some((ValueDataType::Float, None, Some(super::ValueView::Float(n))))
-                }
-                super::ValueView::Boolean(b) => Some((
-                    ValueDataType::Boolean,
-                    None,
-                    Some(super::ValueView::Boolean(b)),
-                )),
-                super::ValueView::Bytes(_) | super::ValueView::Record(_) => None,
+                super::ValueView::String(text) => Stored::String(Piece::text(key, text)),
+                super::ValueView::Entity(text) => Stored::Entity(Piece::text(key, text)),
+                super::ValueView::Symbol(text) => Stored::Symbol(Piece::text(key, text)),
+                super::ValueView::Bytes(bytes) => Stored::Bytes(Piece::of(key, bytes)),
+                super::ValueView::Record(bytes) => Stored::Record(Piece::of(key, bytes)),
+                super::ValueView::UnsignedInt(n) => Stored::UnsignedInt(n),
+                super::ValueView::SignedInt(n) => Stored::SignedInt(n),
+                super::ValueView::Float(n) => Stored::Float(n),
+                super::ValueView::Boolean(b) => Stored::Boolean(b),
             };
-            (Piece::of(key, of), Piece::of(key, the), value)
+            (Piece::text(key, of), Piece::text(key, the), value)
+        };
+        let cause = self.cause().cloned();
+        let key = match self.backing {
+            Backing::Scanned { key, .. } => Some(key),
+            Backing::Owned { .. } => None,
         };
         Ok(CheckedRow {
-            view: self,
+            key,
+            cause,
             entity,
             attribute,
             value,
@@ -702,17 +746,7 @@ impl FactView {
 
 impl CheckedRow {
     fn key(&self) -> &[u8] {
-        self.view.key().unwrap_or(&[])
-    }
-
-    /// The row as it was scanned.
-    pub fn view(&self) -> &FactView {
-        &self.view
-    }
-
-    /// The row as it was scanned, given back.
-    pub fn into_view(self) -> FactView {
-        self.view
+        self.key.as_ref().map_or(&[], AsRef::as_ref)
     }
 
     /// The entity's URI, in place.
@@ -727,18 +761,17 @@ impl CheckedRow {
 
     /// The value, in place.
     pub fn value_view(&self) -> super::ValueView<'_> {
+        let key = self.key();
         match &self.value {
-            Some((ValueDataType::String, Some(piece), _)) => {
-                super::ValueView::String(Cow::Borrowed(piece.read(self.key())))
-            }
-            Some((ValueDataType::Entity, Some(piece), _)) => {
-                super::ValueView::Entity(Cow::Borrowed(piece.read(self.key())))
-            }
-            Some((ValueDataType::Symbol, Some(piece), _)) => {
-                super::ValueView::Symbol(Cow::Borrowed(piece.read(self.key())))
-            }
-            Some((_, _, Some(scalar))) => scalar.clone(),
-            _ => self.view.value_view().expect("a checked row's value reads"),
+            Stored::String(piece) => super::ValueView::String(Cow::Borrowed(piece.read(key))),
+            Stored::Entity(piece) => super::ValueView::Entity(Cow::Borrowed(piece.read(key))),
+            Stored::Symbol(piece) => super::ValueView::Symbol(Cow::Borrowed(piece.read(key))),
+            Stored::Bytes(piece) => super::ValueView::Bytes(Cow::Borrowed(piece.bytes(key))),
+            Stored::Record(piece) => super::ValueView::Record(Cow::Borrowed(piece.bytes(key))),
+            Stored::UnsignedInt(n) => super::ValueView::UnsignedInt(*n),
+            Stored::SignedInt(n) => super::ValueView::SignedInt(*n),
+            Stored::Float(n) => super::ValueView::Float(*n),
+            Stored::Boolean(b) => super::ValueView::Boolean(*b),
         }
     }
 
@@ -762,12 +795,7 @@ impl CheckedRow {
 
     /// The cause, as stored.
     pub fn cause(&self) -> Option<&Cause> {
-        self.view.cause()
-    }
-
-    /// The standing, as [`FactView::standing`].
-    pub fn standing(&self) -> Option<(Edition, [u8; 32])> {
-        self.view.standing()
+        self.cause.as_ref()
     }
 }
 

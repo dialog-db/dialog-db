@@ -255,6 +255,7 @@ impl AttributeQueryOnly {
         // so an unboxed input sat in its state twice, and returning the
         // generator unboxed copied the whole state again at every layer
         // that wrapped or boxed it (several KiB per scan step, per row).
+        let placement = selector.placement();
         Box::pin(try_stream! {
             for await each in selection {
                 let mut base = each?;
@@ -313,14 +314,14 @@ impl AttributeQueryOnly {
                                     // entry: drop the group's yield rather
                                     // than failing the query.
                                     let placed = if value_constraint.is_none() {
-                                        selector.place(current)?
+                                        selector.place(&placement, current)?
                                     } else {
                                         Placed::Eager(current)
                                     };
                                     match placed {
-                                        Placed::InPlace(row) => {
+                                        Placed::InPlace(row, standing) => {
                                             let mut extension = base.clone();
-                                            selector.merge_scanned(&mut extension, row)?;
+                                            selector.merge_scanned(&placement, &mut extension, row, standing)?;
                                             yield extension;
                                         }
                                         Placed::Corrupt => {}
@@ -354,14 +355,14 @@ impl AttributeQueryOnly {
                     // bytes are corrupt; see the group-close arm above).
                     if let Some(winner) = candidate.take() {
                         let placed = if value_constraint.is_none() {
-                            selector.place(winner)?
+                            selector.place(&placement, winner)?
                         } else {
                             Placed::Eager(winner)
                         };
                         match placed {
-                            Placed::InPlace(row) => {
+                            Placed::InPlace(row, standing) => {
                                 let mut extension = base.clone();
-                                selector.merge_scanned(&mut extension, row)?;
+                                selector.merge_scanned(&placement, &mut extension, row, standing)?;
                                 yield extension;
                             }
                             Placed::Corrupt => {}

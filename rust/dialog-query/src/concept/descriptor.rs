@@ -3,7 +3,6 @@ mod named_attributes;
 pub use named_attributes::{ConceptFieldDescriptor, NamedAttributes};
 
 use std::iter;
-use std::sync::OnceLock;
 
 use crate::Binding;
 use crate::Predicate;
@@ -651,11 +650,7 @@ impl<'a> Builder<'a> {
 /// used in the match.
 #[derive(Debug, Clone)]
 pub struct ConceptConclusion {
-    /// The entity, made from the row's `this` binding when first asked
-    /// for: a row bound in place hands its fields on (an answer's encoder
-    /// reads them with [`ConceptConclusion::view`]) without ever building
-    /// it.
-    this: OnceLock<Entity>,
+    this: Entity,
     terms: Parameters,
     source: Match,
 }
@@ -698,30 +693,7 @@ impl ConceptConclusion {
 impl ConceptConclusion {
     /// Returns the entity this conclusion describes.
     pub fn entity(&self) -> &Entity {
-        self.this.get_or_init(|| {
-            let this = self
-                .terms
-                .get("this")
-                .expect("a realized row has a `this` term");
-            // Read by reference: a binding the row already materialized
-            // hands over its entity's `Arc`, not a copy of the value.
-            let value = match this {
-                Term::Constant(value) => value,
-                Term::Variable {
-                    name: Some(name), ..
-                } => self
-                    .source
-                    .value_of(name)
-                    .expect("a realized row binds `this`"),
-                Term::Variable { name: None, .. } => {
-                    unreachable!("realize refuses a blank `this`")
-                }
-            };
-            match value {
-                Value::Entity(entity) => entity.clone(),
-                _ => unreachable!("realize checked `this` is an entity"),
-            }
-        })
+        &self.this
     }
 
     /// A field's value read in place: `None` when the field is not one
@@ -860,7 +832,7 @@ impl Application for ConceptQuery {
             source.bind(term, Value::Entity(this.clone()))?;
         }
         Ok(ConceptConclusion {
-            this: this.into(),
+            this,
             terms: self.terms.clone(),
             source,
         })
@@ -873,28 +845,20 @@ impl Application for ConceptQuery {
                 .ok_or_else(|| EvaluationError::UnboundVariable {
                     variable_name: "this".to_string(),
                 })?;
-        let this = OnceLock::new();
-        match this_param {
+        let this: Entity = match this_param {
             Term::Variable {
                 name: Some(name), ..
-            } => {
-                // A `this` bound in place is checked to be an entity and
-                // left in place; anything else is read as main reads it.
-                let in_place = matches!(
-                    source.view(name),
-                    Some(Some(dialog_corpus::ValueView::Entity(_)))
-                );
-                if !in_place {
+            } => match source.value_of(name) {
+                // Read by reference: a scanned `this` hands over its
+                // entity's `Arc`, built once for the row it binds.
+                Some(Value::Entity(entity)) => entity.clone(),
+                _ => {
                     let typed_term: Term<Entity> = Term::var(name.clone());
-                    let entity =
-                        Entity::try_from(source.lookup(&Term::from(&typed_term))?.content()?)?;
-                    let _ = this.set(entity);
+                    Entity::try_from(source.lookup(&Term::from(&typed_term))?.content()?)?
                 }
-            }
+            },
             Term::Constant(value) => match value {
-                Value::Entity(e) => {
-                    let _ = this.set(e.clone());
-                }
+                Value::Entity(e) => e.clone(),
                 _ => {
                     return Err(EvaluationError::UnboundVariable {
                         variable_name: "this".to_string(),

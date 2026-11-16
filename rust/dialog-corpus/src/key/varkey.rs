@@ -826,6 +826,11 @@ pub fn parse_key_layout(bytes: &[u8]) -> Option<KeyLayout> {
 }
 
 impl KeyLayout {
+    /// The stored value's type, as the key records it.
+    pub fn value_type(&self) -> ValueDataType {
+        self.value_type
+    }
+
     /// The key's components, borrowed from `bytes`, which must be the bytes
     /// this layout was read from.
     #[inline]

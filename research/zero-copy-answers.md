@@ -130,6 +130,11 @@ bytes (the answer's hash is in each report).
 
 ### The answer to the question
 
+The tables below are from the final interleaved sweep, before the
+regression work the journal's last entry records (an eager `this`, a
+smaller shared row, the scan's kinds decided once); that work moved the
+`dialog-perf` scenarios, not these conclusions.
+
 Copying values is not where most of a concept read's time went. On
 tonk's own issue concept (thirteen fields, ten optional), main spends
 430 K instructions and 446 allocations per row; late materialization
@@ -191,19 +196,20 @@ today.
 
 ### What is open
 
-- **`issue-detail` cold is 3× slower** with the left merge (2.4 → 8.4 ms
-  at 10×) and warm is unchanged. The plan decision is right (it folds);
-  the page cache and background replication are ruled out; the
-  likeliest cause is what the query before it leaves in a cache the
-  bench's "cold" does not release. Not settled.
-- **The perf gate would fail two scenarios**: `subscribe-repoll` +2.9%
-  instructions (mostly `this` materialized in the measured poll instead
-  of the unmeasured setup) and `read-scan` +8.4% bytes allocated (one
-  bigger shared row instead of several small allocations). Instructions
-  fall 10–17% on `query-join`, `rule-scan`, `read-scan` and
-  `query-member`. The baselines were not touched.
-- **Commands** (`command/all`) are 13–16% slower in these runs, with
-  `steady/all` up at 1× and down at 10×: not separated from noise.
+Closed since the first report (see the journal's "closing the
+regressions"): `subscribe-repoll` (now −0.5%), the commands (noise), the
+number range scans (now within 0.6%), and `issue-detail` (a fresh reader
+reads it cold in the same time on both; main's number was partly warm).
+Still open, from the full `dialog-perf` sweep:
+
+- **Bytes allocated** +1.0% to +4.3% on `number-scan`, `read-scan`,
+  `rule-ranked` and `number-range-narrow`, with 30–50% fewer allocation
+  calls: one shared 256-byte row per scanned fact in place of several
+  smaller allocations. Closing it means changing how a cached binding is
+  stored (48 bytes, padded by `Value`'s `u128`). The maintainer's call.
+- **`rule-recursive`** +1.3% instructions outside the allocator and +1.1%
+  allocation calls: laziness where every value is read. The fix is a plan
+  decision: bind in place only the variables no later premise reads.
 - A **columnar operator** (scans aligned on entity bytes, written to the
   frame with no rows) answered the eight-field read in 40% of the
   engine's time plus encoding: the floor for a read of required stored

@@ -30,7 +30,9 @@ pub(crate) enum Part {
 #[derive(Debug)]
 pub(crate) struct Scanned {
     row: CheckedRow,
-    the: OnceLock<Binding>,
+    /// Boxed: a scan seldom binds its attribute, and an inline cell costs
+    /// every row its size.
+    the: OnceLock<Box<Binding>>,
     of: OnceLock<Binding>,
     is: OnceLock<Binding>,
     claim: OnceLock<Arc<Claim>>,
@@ -48,11 +50,13 @@ impl Scanned {
         })
     }
 
-    fn cell(&self, part: Part) -> &OnceLock<Binding> {
+    /// `part`'s binding, materialized on first read.
+    fn binding(&self, part: Part) -> &Binding {
+        let make = || Binding::Present(materialize(&self.row, part));
         match part {
-            Part::The => &self.the,
-            Part::Of => &self.of,
-            Part::Is => &self.is,
+            Part::The => self.the.get_or_init(|| Box::new(make())),
+            Part::Of => self.of.get_or_init(make),
+            Part::Is => self.is.get_or_init(make),
         }
     }
 }
@@ -94,9 +98,7 @@ impl Slot {
     pub(crate) fn binding(&self) -> &Binding {
         match self {
             Slot::Bound(binding) => binding,
-            Slot::Scanned { row, part } => row
-                .cell(*part)
-                .get_or_init(|| Binding::Present(materialize(&row.row, *part))),
+            Slot::Scanned { row, part } => row.binding(*part),
         }
     }
 
@@ -217,7 +219,7 @@ enum Key {
     /// A scanned component that borrows from its key, read in place.
     Scanned(Arc<Scanned>, Part),
     /// A value's encoding.
-    Encoded(Arc<[u8]>),
+    Encoded(Vec<u8>),
 }
 
 /// The text a borrowed view holds.
@@ -238,9 +240,9 @@ impl JoinKey {
             return Some(JoinKey(Key::Scanned(Arc::clone(row), *part)));
         }
         let value = slot.binding().as_value()?;
-        Some(JoinKey(Key::Encoded(
-            dialog_corpus::encode_value_owned(value).into(),
-        )))
+        Some(JoinKey(Key::Encoded(dialog_corpus::encode_value_owned(
+            value,
+        ))))
     }
 
     /// The bytes of a scanned key, or the encoding of any other.

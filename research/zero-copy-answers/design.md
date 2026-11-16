@@ -45,9 +45,12 @@ names. `ConceptConclusion` then materializes `this`, and tonk's
   stored (no kind, or a primitive kind containing the stored type) and
   no constant value pins it; otherwise it takes main's eager path, so
   typed reads through another type's view and refinements are unchanged.
-- `ConceptConclusion::this` is a `OnceLock`: realizing a row checks that
-  `this` is bound to an entity, and builds the `Entity` (a Blake3 hash of
-  its URI for the key bytes) only when `entity()` is called.
+- `ConceptConclusion::this` stays eager. A lazy one (tried) helped only a
+  caller that never reads the entity, and moved the work into
+  subscription maintenance, which reads every row's; the answer path
+  reads `this` in place with `view` instead.
+- A scan decides its binding policy once (`Placement`): building a
+  term's kind per row cloned a range's boxed interval for every row.
 - `DIALOG_LAZY_BINDINGS=0` turns it all off: every scan takes main's
   eager path, and the engine behaves as main does. Every
   `dialog-query` test passes in both modes.

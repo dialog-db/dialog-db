@@ -708,18 +708,20 @@ impl Match {
     pub(crate) fn bind_scanned<N: AsRef<str> + VariableName>(
         &mut self,
         name: N,
-        kind: Option<Kind>,
+        kind: Option<&Kind>,
         row: &Arc<Scanned>,
         part: Part,
+        admitted: bool,
     ) -> Result<(), EvaluationError> {
         let incoming = Slot::scanned(row, part);
-        let in_place = match kind {
-            None => true,
-            Some(Kind::Primitive(primitive)) => incoming
-                .view()
-                .is_some_and(|view| primitive.contains(view.data_type())),
-            Some(_) => false,
-        };
+        let in_place = admitted
+            || match kind {
+                None => true,
+                Some(Kind::Primitive(primitive)) => incoming
+                    .view()
+                    .is_some_and(|view| primitive.contains(view.data_type())),
+                Some(_) => false,
+            };
         let settled = in_place
             && match self.find_slot(name.as_ref()) {
                 None => {
@@ -732,7 +734,7 @@ impl Match {
             return Ok(());
         }
         let value = incoming.binding().clone().content()?;
-        self.bind_variable(name, kind, value)
+        self.bind_variable(name, kind.cloned(), value)
     }
 
     /// Bind `term` to what `slot` holds, moving a scanned slot over as it
@@ -752,7 +754,7 @@ impl Match {
                     name: Some(variable),
                     ..
                 } => self
-                    .bind_scanned(variable, term.kind(), row, *part)
+                    .bind_scanned(variable, term.kind().as_ref(), row, *part, false)
                     .map(|_| true)?,
                 _ => true,
             },

@@ -311,6 +311,74 @@ of unique strings is all tokens. The fix the numbers point at: write a
 frame's text tokens as one run, decode the run once per frame into one
 JS string, and record UTF-16 offsets, so a cell is a `slice`. Not built.
 
+## 2026-11-16 — closing the regressions
+
+**Question.** Of what measured slower, what is real, and what can be
+fixed?
+
+**Method.** The full `dialog-perf` sweep (30 scenarios) under callgrind,
+main's `perf` from its worktree, compared with the gate's own
+`perf compare`; for `issue-detail`, a cold read by a member that has run
+no query (`DIALOG_FRESH_DETAIL=1` in `tonk_bench`), 3 rounds each.
+
+**Results and changes.**
+
+- *`subscribe-repoll` (+2.9%).* Subscription maintenance compares every
+  retained row by entity, so a lazy `this` was always built, in the
+  measured poll instead of the unmeasured initial query, with a
+  `OnceLock` on top. `ConceptConclusion::this` is eager again (main's
+  layout; the answer path reads `this` with `view`): −0.5%. The lazy
+  `this` had also flattered `read-scan` and `query-join`, which collect
+  conclusions and never read their entity: with it `read-scan` was −12.7%,
+  without it −4.1%, before the changes below.
+- *`read-scan` bytes (+12%, then +8.4%).* The shared row was 512 bytes,
+  carrying the whole scanned `FactView` (its 160-byte payload among it).
+  `CheckedRow` now keeps the key, the cause and where each part sits (128
+  bytes, the standing taken once by the scan), the attribute's cache is
+  boxed on demand, and `Scanned` is 256 bytes: +3.2%.
+- *`read-scan` outside the allocator (+6.7%).* The key was walked four
+  times per row and every slot's kind rechecked by decoding the value.
+  `checked` walks it once; `place` decides from the type the key records
+  (decoding only the number band); a slot whose kind is settled is not
+  rechecked: −4.6%.
+- *`number-range-*` (+1.5% to +3.0%, 8–10% more allocation calls).*
+  `place` built the scan's kinds for every row, and a range's kind clones
+  a boxed interval. The kinds are decided once per scan (`Placement`):
+  −0.2% to +0.6%.
+- *Commands.* Every commit scenario is within ±0.9% of main: the
+  `tonk_bench` command numbers were noise.
+- *`issue-detail` cold (3.5×).* A fresh member reads it cold in 7.9–8.8 ms
+  on main and 7.4–8.8 ms on the branch. Main's 1.6–1.9 ms through the
+  member that ran the views first is not cold: its earlier queries probed
+  every entity and left the pages `issue-detail` reads in caches the
+  bench's release does not drop. Not a regression.
+
+The full sweep against main now: instructions `query-join` −19.9%,
+`rule-scan` −18.0%, `query-member` −12.9%, `read-scan` −12.4%,
+`rule-ranked` −6.9%, `first-query` −4.6%, everything else within ±2%. The
+gate still flags:
+
+| scenario | measure | main | branch |
+|---|---|---|---|
+| number-scan | bytes allocated | 5,934,794 | 6,187,194 (+4.3%) |
+| read-scan | bytes allocated | 6,008,113 | 6,202,733 (+3.2%) |
+| rule-ranked | bytes allocated | 15,277,135 | 15,569,453 (+1.9%) |
+| number-range-narrow | bytes allocated | 1,431,205 | 1,445,765 (+1.0%) |
+| number-scan | instructions outside the allocator | 20,773,393 | 21,140,922 (+1.8%) |
+| rule-recursive | instructions outside the allocator | 582,854,364 | 590,409,424 (+1.3%) |
+| rule-recursive | allocation calls | 839,087 | 848,688 (+1.1%) |
+
+**Decision.** The byte rows are the trade the shared row makes: one
+256-byte allocation per scanned fact in place of several smaller ones,
+30–50% fewer allocation calls for 1–4% more bytes. A cached binding is 48
+bytes because `Value` holds a `u128` (16-byte alignment), so closing the
+last bytes means changing how a binding is stored; the maintainer's
+call. `rule-recursive` is laziness where every value is read anyway (a
+recursive rule's body joins on all of them): `Match::find` pays the slot
+and its cache, and slots are bigger to move. The fix is a decision the
+plan can make, not the engine at large: bind a scan's variable in place
+only when no later premise reads it, eagerly otherwise. Not built.
+
 ## How to reproduce
 
 ```sh
