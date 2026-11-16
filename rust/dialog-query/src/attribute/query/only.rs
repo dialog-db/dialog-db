@@ -14,7 +14,7 @@ use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
-use dialog_corpus::{Cause, DialogCorpusError, Fact, FactView, Select, memory_layer};
+use dialog_corpus::{Cause, DialogCorpusError, Fact, FactView, Select};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::pin::Pin;
@@ -45,18 +45,21 @@ fn materialize_winner(winner: FactView) -> Result<Option<Winner>, DialogCorpusEr
 fn challenged(
     source: &Term<Record>,
     candidate: &Match,
-    per_layer: bool,
+    layer: Option<&Term<Entity>>,
 ) -> Result<Selector<Constrained>, EvaluationError> {
     let claim = candidate.prove(source)?;
     let attribute = CorpusRelation::try_from(Value::from(claim.the().clone()))?;
     let selector = Selector::new().the(attribute).of(claim.of().clone());
     // A read that binds each row's layer elects within the layer: the
-    // challengers are the layer's own, the primary's for a row with no
-    // layer stamped. Any other read elects across the layers as one cell.
-    Ok(if per_layer {
-        selector.in_layer(claim.layer.clone().unwrap_or_else(memory_layer))
-    } else {
-        selector
+    // challengers are the layer's own, read from the candidate's `in`
+    // binding (the primary's for a row with no layer stamped, bound as
+    // `memory:`). Any other read elects across the layers as one cell.
+    Ok(match layer {
+        Some(term) => {
+            let layer = candidate.lookup(&Term::<Any>::from(term))?.content()?;
+            selector.in_layer(Entity::try_from(layer)?)
+        }
+        None => selector,
     })
 }
 
@@ -91,7 +94,7 @@ where
 
         let challengers = Provider::<Select<'_>>::execute(
             env,
-            challenged(selector.source(), &candidate, selector.binds_layer())?,
+            challenged(selector.source(), &candidate, selector.bound_layer())?,
         )
         .await?;
 
@@ -403,9 +406,9 @@ impl AttributeQueryOnly {
                     // premise probing the same entities only ever hints
                     // into the leaf the challenge is already fetching.
                     let source = selector.source().clone();
-                    let per_layer = selector.binds_layer();
+                    let bound_layer = selector.bound_layer().cloned();
                     let candidates = Box::pin(pipelined(candidates, env, move |candidate| {
-                        challenged(&source, candidate, per_layer).ok()
+                        challenged(&source, candidate, bound_layer.as_ref()).ok()
                     }));
                     for await candidate in candidates {
                         let candidate = candidate?;
