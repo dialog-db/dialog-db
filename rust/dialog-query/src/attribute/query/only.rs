@@ -5,6 +5,8 @@ use crate::Value;
 use crate::attribute::Relation;
 use crate::corpus::{Constrained, CorpusRelation, Selector};
 use crate::environment::Environment;
+#[cfg(feature = "trace-hydration")]
+use crate::hydration;
 use crate::query::Application;
 use crate::query::Output;
 use crate::schema::Cardinality;
@@ -29,6 +31,8 @@ type Winner = (Fact, Option<(Edition, [u8; 32])>);
 /// it. All other errors propagate.
 fn materialize_winner(winner: FactView) -> Result<Option<Winner>, DialogCorpusError> {
     let standing = winner.standing();
+    #[cfg(feature = "trace-hydration")]
+    hydration::here("fact (eager)");
     match winner.to_owned() {
         Ok(fact) => Ok(Some((fact, standing))),
         Err(DialogCorpusError::CorruptEntry(reason)) => {
@@ -316,12 +320,14 @@ impl AttributeQueryOnly {
                                     let placed = if value_constraint.is_none() {
                                         selector.place(&placement, current)?
                                     } else {
+                                        #[cfg(feature = "trace-hydration")]
+                                        hydration::here("eager: value pinned to a constant");
                                         Placed::Eager(current)
                                     };
                                     match placed {
-                                        Placed::InPlace(row, standing) => {
+                                        Placed::InPlace(row, standing, viewed) => {
                                             let mut extension = base.clone();
-                                            selector.merge_scanned(&placement, &mut extension, row, standing)?;
+                                            selector.merge_scanned(&placement, &mut extension, row, standing, viewed)?;
                                             yield extension;
                                         }
                                         Placed::Corrupt => {}
@@ -357,12 +363,14 @@ impl AttributeQueryOnly {
                         let placed = if value_constraint.is_none() {
                             selector.place(&placement, winner)?
                         } else {
+                            #[cfg(feature = "trace-hydration")]
+                            hydration::here("eager: value pinned to a constant");
                             Placed::Eager(winner)
                         };
                         match placed {
-                            Placed::InPlace(row, standing) => {
+                            Placed::InPlace(row, standing, viewed) => {
                                 let mut extension = base.clone();
-                                selector.merge_scanned(&placement, &mut extension, row, standing)?;
+                                selector.merge_scanned(&placement, &mut extension, row, standing, viewed)?;
                                 yield extension;
                             }
                             Placed::Corrupt => {}

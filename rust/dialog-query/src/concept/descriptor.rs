@@ -11,7 +11,7 @@ use crate::concept::query::ConceptQuery;
 use crate::concept::{Concept, Conclusion};
 use crate::error::TypeError;
 use crate::query::{Application, Restriction};
-use crate::selection::{Match, Selection};
+use crate::selection::{Match, Part, Scanned, Selection};
 use crate::statement::Retraction;
 use crate::term::Term;
 use crate::type_system::{ConceptRef, Primitive, Type as Kind};
@@ -650,9 +650,19 @@ impl<'a> Builder<'a> {
 /// used in the match.
 #[derive(Debug, Clone)]
 pub struct ConceptConclusion {
-    this: Entity,
+    this: This,
     terms: Parameters,
     source: Match,
+}
+
+/// A conclusion's entity: held, or the scanned row that holds it in place,
+/// whose cache builds the entity the first time it is asked for. A caller
+/// that hands rows on never builds it, and one that compares entities
+/// compares the stored URIs.
+#[derive(Debug, Clone)]
+enum This {
+    Held(Entity),
+    Scanned(Arc<Scanned>),
 }
 
 /// A conclusion is a row: its identity is the entity plus the value
@@ -693,7 +703,22 @@ impl ConceptConclusion {
 impl ConceptConclusion {
     /// Returns the entity this conclusion describes.
     pub fn entity(&self) -> &Entity {
-        &self.this
+        match &self.this {
+            This::Held(entity) => entity,
+            This::Scanned(row) => match row.binding(Part::Of) {
+                Binding::Present(Value::Entity(entity)) => entity,
+                _ => unreachable!("a scanned row's entity is an entity"),
+            },
+        }
+    }
+
+    /// The URI of the entity this conclusion describes, as the row holds
+    /// it: no entity is built to answer.
+    pub fn this_uri(&self) -> &str {
+        match &self.this {
+            This::Held(entity) => entity.as_str(),
+            This::Scanned(row) => row.of_str(),
+        }
     }
 
     /// A field's value read in place: `None` when the field is not one
@@ -757,6 +782,10 @@ impl ConceptConclusion {
 impl Conclusion for ConceptConclusion {
     fn this(&self) -> &Entity {
         self.entity()
+    }
+
+    fn this_uri(&self) -> &str {
+        ConceptConclusion::this_uri(self)
     }
 }
 
@@ -832,7 +861,7 @@ impl Application for ConceptQuery {
             source.bind(term, Value::Entity(this.clone()))?;
         }
         Ok(ConceptConclusion {
-            this,
+            this: This::Held(this),
             terms: self.terms.clone(),
             source,
         })
@@ -845,20 +874,21 @@ impl Application for ConceptQuery {
                 .ok_or_else(|| EvaluationError::UnboundVariable {
                     variable_name: "this".to_string(),
                 })?;
-        let this: Entity = match this_param {
+        let this: This = match this_param {
             Term::Variable {
                 name: Some(name), ..
-            } => match source.value_of(name) {
-                // Read by reference: a scanned `this` hands over its
-                // entity's `Arc`, built once for the row it binds.
-                Some(Value::Entity(entity)) => entity.clone(),
+            } => match source.scanned(name) {
+                // In place: the scanned row's entity, built when asked for.
+                Some((row, Part::Of)) => This::Scanned(Arc::clone(row)),
                 _ => {
                     let typed_term: Term<Entity> = Term::var(name.clone());
-                    Entity::try_from(source.lookup(&Term::from(&typed_term))?.content()?)?
+                    This::Held(Entity::try_from(
+                        source.lookup(&Term::from(&typed_term))?.content()?,
+                    )?)
                 }
             },
             Term::Constant(value) => match value {
-                Value::Entity(e) => e.clone(),
+                Value::Entity(e) => This::Held(e.clone()),
                 _ => {
                     return Err(EvaluationError::UnboundVariable {
                         variable_name: "this".to_string(),

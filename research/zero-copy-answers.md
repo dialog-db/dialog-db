@@ -196,24 +196,29 @@ today.
 
 ### What is open
 
-Closed since the first report (see the journal's "closing the
-regressions"): `subscribe-repoll` (now −0.5%), the commands (noise), the
-number range scans (now within 0.6%), and `issue-detail` (a fresh reader
-reads it cold in the same time on both; main's number was partly warm).
-Still open, from the full `dialog-perf` sweep:
+Closed since the first report (the journal's last two entries): the
+`subscribe-repoll`, number-range and `read-scan` regressions, the
+commands (noise) and `issue-detail` (a fresh reader reads it cold in the
+same time on both). A hydration audit (`trace-hydration`) found where
+values were still made for reads that did not need them and removed
+them: the list reads, the joins, the scans and the subscription polls
+now hydrate nothing from a scanned row, and tonk's JSON can be written
+from the rows in place, byte for byte, at a third to a quarter of the
+cost of `project` + `serde_json`. Still open:
 
-- **Bytes allocated** +1.0% to +4.3% on `number-scan`, `read-scan`,
-  `rule-ranked` and `number-range-narrow`, with 30–50% fewer allocation
-  calls: one shared 256-byte row per scanned fact in place of several
-  smaller allocations. Closing it means changing how a cached binding is
-  stored (48 bytes, padded by `Value`'s `u128`). The maintainer's call.
-- **`rule-recursive`** +1.3% instructions outside the allocator and +1.1%
-  allocation calls: laziness where every value is read. The fix is a plan
-  decision: bind in place only the variables no later premise reads.
-- A **columnar operator** (scans aligned on entity bytes, written to the
-  frame with no rows) answered the eight-field read in 40% of the
-  engine's time plus encoding: the floor for a read of required stored
-  fields. Not built as an operator.
+- **Hydration three designs need**: a lookup's `Selector` takes an owned
+  entity and attribute; the recursive fixpoint and the ranked election
+  keep owned rows. Removing those is a change to each design.
+- **`rule-recursive`** +1.5% instructions outside the allocator and
+  +1.9% allocation calls: laziness where every value is read. The fix is
+  a plan decision: bind in place only the variables no later premise
+  reads.
+- **Bytes**: one shared row per scanned fact and a 16-byte `this` cost
+  1–2% more bytes allocated or reallocated in a few scenarios
+  (`rule-ranked`, `number-range-narrow`, the result vectors), with
+  30–55% fewer allocation calls. The maintainer's call.
+- A **columnar operator** answered the eight-field read in 40% of the
+  engine's time plus encoding. Not built as an operator.
 - `unsafe` in `CheckedRow` (an unchecked UTF-8 read of a span validated
   once) is the maintainer's call.
 

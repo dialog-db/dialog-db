@@ -45,10 +45,16 @@ names. `ConceptConclusion` then materializes `this`, and tonk's
   stored (no kind, or a primitive kind containing the stored type) and
   no constant value pins it; otherwise it takes main's eager path, so
   typed reads through another type's view and refinements are unchanged.
-- `ConceptConclusion::this` stays eager. A lazy one (tried) helped only a
-  caller that never reads the entity, and moved the work into
-  subscription maintenance, which reads every row's; the answer path
-  reads `this` in place with `view` instead.
+- `ConceptConclusion` holds its entity, or the scanned row that holds it
+  (`This`): `entity()` builds it through the row's cache, and
+  `Conclusion::this_uri` reads the stored URI, which is what subscription
+  maintenance compares (in one pass over the retained rows). A lazy
+  `OnceLock<Entity>` was tried first: it built the entity anyway wherever
+  a caller compared rows, and grew every conclusion.
+- `Match::absent` answers from the slot, and entering a concept's scope
+  moves slots, so neither hydrates a value to pass it on.
+- A value the scan's kind reads through a view (a natural as a float) is
+  hydrated alone, into the row's value cell; the row stays in place.
 - A scan decides its binding policy once (`Placement`): building a
   term's kind per row cloned a range's boxed interval for every row.
 - `DIALOG_LAZY_BINDINGS=0` turns it all off: every scan takes main's

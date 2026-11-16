@@ -55,22 +55,17 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
 
     for (param_name, user_param) in terms.iter() {
         match user_param {
+            // The slot moves in as it is: a value the caller's row holds in
+            // place is not hydrated to enter the scope. Unbound is expected
+            // here: the user supplied a placeholder term (e.g.
+            // `Term::var("alice")` in `Query<Person> { this: ..., ... }`)
+            // that the concept query is about to bind; downstream
+            // evaluation fills it in.
             Term::Variable {
                 name: Some(name), ..
-            } => match source.get(name) {
-                Some(Binding::Present(value)) => {
-                    matched.bind_variable(param_name, None, value.clone())?;
-                }
-                Some(Binding::Absent) => {
-                    matched.bind_absent_variable(param_name)?;
-                }
-                // Unbound is expected here: the user supplied a
-                // placeholder term (e.g. `Term::var("alice")` in
-                // `Query<Person> { this: ..., ... }`) that the
-                // concept query is about to bind. Skip it:
-                // downstream evaluation fills it in.
-                None => {}
-            },
+            } => {
+                matched.bind_slot_of(&Term::<Any>::var(param_name.as_str()), source, name)?;
+            }
             Term::Constant(value) => {
                 matched.bind_variable(param_name, None, value.clone())?;
             }

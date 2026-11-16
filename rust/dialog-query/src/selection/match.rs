@@ -14,6 +14,8 @@ use crate::types::Record;
 
 use super::Selection;
 
+#[cfg(feature = "trace-hydration")]
+pub mod hydration;
 mod slot;
 pub use slot::JoinKey;
 pub(crate) use slot::Part;
@@ -364,8 +366,13 @@ impl Match {
     }
 
     /// The binding for `name` along this row's ancestry.
+    #[cfg_attr(feature = "trace-hydration", track_caller)]
     fn find(&self, name: &str) -> Option<&Binding> {
-        self.find_slot(name).map(Slot::binding)
+        // Called, not mapped: the hydration trace follows the caller.
+        match self.find_slot(name) {
+            Some(slot) => Some(slot.binding()),
+            None => None,
+        }
     }
 
     /// The slot for `name` along this row's ancestry, as stored.
@@ -375,10 +382,14 @@ impl Match {
     }
 
     /// The claim cited for `name` along this row's ancestry.
+    #[cfg_attr(feature = "trace-hydration", track_caller)]
     fn find_claim(&self, name: &str) -> Option<&Arc<Claim>> {
-        probe(&self.claims, name)
+        match probe(&self.claims, name)
             .or_else(|| self.frames().find_map(|frame| probe(&frame.claims, name)))
-            .map(Cited::claim)
+        {
+            Some(cited) => Some(cited.claim()),
+            None => None,
+        }
     }
 
     /// Whether this row cites a claim for `name`, without making it.
@@ -409,6 +420,7 @@ impl Match {
     }
 
     /// Provide evidence for the given term: look up the claim it cites.
+    #[cfg_attr(feature = "trace-hydration", track_caller)]
     pub fn prove(&self, term: &Term<Record>) -> Result<Claim, EvaluationError> {
         let key = match term {
             Term::Variable {
@@ -510,13 +522,31 @@ impl Match {
     /// it. The borrowing counterpart of [`Self::lookup`], for callers
     /// that hold a variable's name rather than a [`Term`] and need not
     /// copy the value out.
+    #[cfg_attr(feature = "trace-hydration", track_caller)]
     pub fn get(&self, name: &str) -> Option<&Binding> {
         self.find(name)
+    }
+
+    /// The scanned row and component the variable `name` is bound to in
+    /// place, if it is.
+    pub(crate) fn scanned(&self, name: &str) -> Option<(&Arc<Scanned>, Part)> {
+        match self.find_slot(name) {
+            Some(Slot::Scanned { row, part }) => Some((row, *part)),
+            _ => None,
+        }
+    }
+
+    /// Whether the variable `name` is bound to [`Binding::Absent`]: read
+    /// from the slot, so a value bound in place is not hydrated to say
+    /// it is not absent.
+    pub fn absent(&self, name: &str) -> bool {
+        matches!(self.find_slot(name), Some(Slot::Bound(Binding::Absent)))
     }
 
     /// The `Present` value bound to `name`, if any. Used by the merge
     /// join to read the join key out of a row without going through a
     /// [`Term`].
+    #[cfg_attr(feature = "trace-hydration", track_caller)]
     pub fn value_of(&self, name: &str) -> Option<&Value> {
         match self.find(name) {
             Some(Binding::Present(value)) => Some(value),
@@ -677,6 +707,7 @@ impl Match {
     /// Returns `true` iff the term is bound (Present *or* Absent)
     /// in this match. Use [`Self::is_present`] to check for
     /// `Present`-only.
+    #[cfg_attr(feature = "trace-hydration", track_caller)]
     pub fn contains(&self, term: &Term<Any>) -> bool {
         match term {
             Term::Variable {
@@ -689,6 +720,7 @@ impl Match {
 
     /// Returns `true` iff the term is bound to a `Present` value
     /// (excluding `Absent`). Constants always count as Present.
+    #[cfg_attr(feature = "trace-hydration", track_caller)]
     pub fn is_present(&self, term: &Term<Any>) -> bool {
         match term {
             Term::Variable {
@@ -789,6 +821,7 @@ impl Match {
     /// `.lookup(&term)?.content()` to convert `Absent` into an
     /// error. Callers that handle optionality (Coalesce, optional
     /// realize) pattern-match on `Binding` directly.
+    #[cfg_attr(feature = "trace-hydration", track_caller)]
     pub fn lookup(&self, term: &Term<Any>) -> Result<Binding, EvaluationError> {
         match term {
             Term::Variable {

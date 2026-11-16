@@ -379,6 +379,79 @@ and its cache, and slots are bigger to move. The fix is a decision the
 plan can make, not the engine at large: bind a scan's variable in place
 only when no later premise reads it, eagerly otherwise. Not built.
 
+## 2026-11-16 — what is hydrated, and whether it has to be
+
+**Question.** Deferring hydration moved it around (into a poll, into
+`project`). Where is a value actually hydrated, by which read, and does
+that read need an owned value?
+
+**Method.** A `trace-hydration` feature on `dialog-query` counts every
+value made out of a scanned row (a binding, a claim, an eager fact), by
+the source line whose read asked for it (`#[track_caller]` on the read
+paths). The `perf` scenarios print what their measured phase hydrated;
+`answers` reports it per phase.
+
+**Results.** Before the fixes below, per scenario:
+
+| scenario | hydrated | asked for by | needed? |
+|---|---|---|---|
+| read-scan, query-join, rule-scan | 1 entity a row | `realize`, for `ConceptConclusion::this` | no: the conclusion held an owned `Entity` |
+| query-member | 250 entities, 249 claims | a lookup's selector (`term.rs`), `challenged` | yes, by today's `Selector` (owned entity and attribute) |
+| rule-recursive | 6,000 entities, 480 values, 5,520 claims | the fixpoint's row store, `challenge` | yes, by the fixpoint's design (owned rows) |
+| rule-ranked | 2,500 entities | the ranked election's memo rows | yes, by the election's design |
+| tonk-issue engine | 0.5 facts a row | the eager path | only the value: a natural read as `float:` |
+| every list read, JSON | every field | tonk's `project` | no |
+| the absence checks | the value | `absent_blocked`, an optional lookup | no: a value bound in place is never `Absent` |
+
+**Changes.**
+
+- `Match::absent` answers from the slot; `absent_blocked` and the
+  optional lookup use it. Entering a concept's scope moves slots, as
+  leaving it already did.
+- A value the scan's kind reads through a view (a natural as a float) is
+  hydrated alone, into the row's value cell, and the row stays in place:
+  no entity, attribute or claim is built for it.
+- `ConceptConclusion` holds its entity, or the scanned row that holds it
+  (`This`); `entity()` builds it through the row's cache, and
+  `Conclusion::this_uri` reads the stored URI. Subscription maintenance
+  compared every retained row's entity per entity touched; it now takes
+  the touched rows out in one pass, by URI. The first cut compared bytes
+  through the row's slot lookup per comparison and made
+  `subscribe-repoll` 39% slower; the direct handle and the one pass make
+  it 1% faster than main.
+- `answers` writes tonk's snapshot JSON from `ConceptConclusion::view`
+  (`json_view_encode`), checked byte for byte against `project` +
+  `serde_json` every run.
+
+After: `read-scan`, `query-join`, `rule-scan`, `subscribe-repoll`,
+`read-point` and `number-scan` hydrate nothing in their measured phase;
+tonk-issue's engine hydrates 0.5 values a row (the float views). What is
+left is what an owned value is needed for today: selectors, the
+fixpoint's and the election's row stores.
+
+The JSON, per row (callgrind):
+
+| dataset | project + serde_json | JSON from views | frame |
+|---|---|---|---|
+| stuff 2,000 | 10,072 instr, 17 allocs | 2,424, 0 | 3,544, 3 |
+| issue 3,000 | 29,870, 43 | 9,503, 0 | 10,288, 4 |
+| tonk-issue 3,000 | 37,277, 60.5 | 11,806, 0 | 12,874, 4.1 |
+
+The `perf` scenarios against main: `query-join` −22.3%, `rule-scan`
+−20.0%, `read-scan` −18.9% instructions and −0.1% bytes (below main),
+`number-scan` −9.1%, `subscribe-repoll` −1.0%. The larger conclusion
+(16 bytes of `this` for 8) costs 2–7% more bytes reallocated growing
+result vectors.
+
+**Decision.** Tonk's encode cost is hydration: written from views, its
+JSON costs a third to a quarter as much, with no allocation, and the
+wire format does not change. That is a change tonk can make on its own,
+ahead of any frame. The frame's case is then the bytes (2–3.6× smaller,
+deltas 7–13×) and the receiver reading in place, not the encoding. The
+remaining hydration is a question about three designs (the selector
+API, the fixpoint's rows, the election's rows), not about the engine's
+read path.
+
 ## How to reproduce
 
 ```sh
@@ -391,6 +464,11 @@ cargo run --release -p dialog-perf --bin answers -- sweep --out-dir target/answe
 # main's build of the harness: a worktree of main with rust/dialog-answer
 # and rust/dialog-perf/src/bin/answers.rs copied in
 RUSTFLAGS="--cfg dialog_main" cargo build --release -p dialog-perf --bin answers
+
+# what each read hydrates, by the line that asked
+cargo run --release -p dialog-perf --features trace-hydration --bin perf -- run rule-recursive
+cargo run --release -p dialog-perf --features trace-hydration --bin answers -- \
+  run --dataset tonk-issue --rows 3000 --repeat 1
 
 # tonk's workload
 cargo run --release -p dialog-baseline --example tonk_dataset -- \

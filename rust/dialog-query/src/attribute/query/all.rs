@@ -5,14 +5,15 @@ use crate::attribute::query::pipelined;
 use crate::corpus::{Constrained, CorpusRelation, Selector, decode_value};
 use crate::environment::Environment;
 use crate::formula::number::Numeric;
+#[cfg(feature = "trace-hydration")]
+use crate::hydration;
 use crate::query::Application;
 use crate::query::Output;
 use crate::selection::{Match, Part, Scanned, Selection, Standing, lazy_bindings};
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::{Any, Record};
 use crate::{
-    Binding, Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value,
-    try_stream,
+    Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value, try_stream,
 };
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
@@ -34,11 +35,14 @@ pub(crate) struct Placement {
 
 /// How [`AttributeQueryAll::place`] binds a scanned row.
 pub(crate) enum Placed {
-    /// In place, checked, with the standing the scan read from it.
-    InPlace(CheckedRow, Option<(Edition, [u8; 32])>),
+    /// In place, checked, with the standing the scan read from it, and
+    /// the value as the scan's kind reads it when that is not the stored
+    /// value (a natural read as a float): the one part hydrated.
+    InPlace(CheckedRow, Option<(Edition, [u8; 32])>, Option<Value>),
     /// Eagerly, as main binds it.
     Eager(FactView),
-    /// Not at all: its stored bytes are corrupt.
+    /// Not at all: its stored bytes are corrupt, or its value is not one
+    /// the scan's kind reads.
     Corrupt,
 }
 
@@ -231,9 +235,7 @@ impl AttributeQueryAll {
     /// to have no value", produced upstream by a
     /// [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery) left-join.
     pub(crate) fn absent_blocked(&self, base: &Match) -> bool {
-        let absent = |name: Option<&str>| {
-            matches!(name.and_then(|name| base.get(name)), Some(Binding::Absent))
-        };
+        let absent = |name: Option<&str>| name.is_some_and(|name| base.absent(name));
         absent(self.the.name())
             || absent(self.of.name())
             || absent(self.is.name())
@@ -280,28 +282,54 @@ impl AttributeQueryAll {
         row: FactView,
     ) -> Result<Placed, DialogCorpusError> {
         if !placement.lazy {
+            #[cfg(feature = "trace-hydration")]
+            hydration::here("eager: lazy off or refined attribute");
             return Ok(Placed::Eager(row));
         }
-        let in_place = match &placement.is {
-            None => true,
+        // The value as the scan's kind reads it, when that differs from the
+        // stored value; `None` when the stored value is what it reads.
+        let mut viewed = None;
+        match &placement.is {
+            None => {}
             // The key records the stored type; only the number band, which
             // does not record which number wrote it, is read to tell.
-            Some(Kind::Primitive(primitive)) => match row.stored_type().map(Type::storage) {
-                Some(stored) if stored != Type::Number => primitive.contains(stored),
-                _ => row
-                    .value_view()
-                    .map_or(true, |view| primitive.contains(view.data_type())),
-            },
-            Some(_) => false,
-        };
-        if !in_place {
-            return Ok(Placed::Eager(row));
+            Some(kind @ Kind::Primitive(primitive)) => {
+                let admitted = match row.stored_type().map(Type::storage) {
+                    Some(stored) if stored != Type::Number => primitive.contains(stored),
+                    _ => row
+                        .value_view()
+                        .map_or(true, |view| primitive.contains(view.data_type())),
+                };
+                if !admitted {
+                    // A number the kind reads through its view (a natural
+                    // as a float): hydrate the value alone, read through
+                    // it, and keep the rest of the row in place. A value
+                    // the kind does not read is passed over, as `admit`
+                    // passes it over.
+                    let Ok(value) = row.value() else {
+                        #[cfg(feature = "trace-hydration")]
+                        hydration::here("eager: value does not decode");
+                        return Ok(Placed::Eager(row));
+                    };
+                    #[cfg(feature = "trace-hydration")]
+                    hydration::here("is (read through the kind's view)");
+                    match kind.view(value) {
+                        Some(value) => viewed = Some(value),
+                        None => return Ok(Placed::Corrupt),
+                    }
+                }
+            }
+            Some(_) => {
+                #[cfg(feature = "trace-hydration")]
+                hydration::here("eager: refined value kind");
+                return Ok(Placed::Eager(row));
+            }
         }
         // The standing reads the payload's versions: taken here, once, as
         // the checked row keeps only the key and the cause.
         let standing = row.standing();
         match row.checked() {
-            Ok(row) => Ok(Placed::InPlace(row, standing)),
+            Ok(row) => Ok(Placed::InPlace(row, standing, viewed)),
             Err(DialogCorpusError::CorruptEntry(reason)) => {
                 tracing::warn!(%reason, "ignoring corrupt stored row");
                 Ok(Placed::Corrupt)
@@ -319,10 +347,11 @@ impl AttributeQueryAll {
         candidate: &mut Match,
         row: CheckedRow,
         version: Option<(Edition, [u8; 32])>,
+        viewed: Option<Value>,
     ) -> Result<(), EvaluationError> {
         let cause = row.cause().cloned().unwrap_or(Cause([0; 32]));
         let standing = Standing::new(version, cause.clone());
-        let row = Scanned::new(row);
+        let row = Scanned::new(row, viewed);
         candidate.reserve(4);
         if let Some(name) = self.the.shared_name() {
             candidate.bind_scanned(
@@ -549,9 +578,9 @@ impl AttributeQueryAll {
                     // rather than failing the query.
                     let fact = fact?;
                     let fact = match selector.place(&placement, fact)? {
-                        Placed::InPlace(row, standing) => {
+                        Placed::InPlace(row, standing, viewed) => {
                             let mut extension = base.clone();
-                            selector.merge_scanned(&placement, &mut extension, row, standing)?;
+                            selector.merge_scanned(&placement, &mut extension, row, standing, viewed)?;
                             yield extension;
                             continue;
                         }
@@ -559,6 +588,8 @@ impl AttributeQueryAll {
                         Placed::Eager(fact) => fact,
                     };
                     let standing = fact.standing();
+                    #[cfg(feature = "trace-hydration")]
+                    hydration::here("fact (eager)");
                     let fact = match fact.to_owned() {
                         Ok(fact) => fact,
                         Err(DialogCorpusError::CorruptEntry(reason)) => {

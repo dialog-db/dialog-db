@@ -70,7 +70,7 @@ use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_search_tree::nodes;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
@@ -1156,15 +1156,27 @@ where
             // Over-delete every retained row of each entity, then put
             // back what it re-derived, in entity order, exactly as a
             // recompute would read.
+            // One pass over the retained rows takes out every row of a
+            // re-derived entity, each into its entity's `before`: a pass
+            // per entity read every retained row once per entity touched.
+            let touched: HashMap<&str, usize> = rederived
+                .iter()
+                .enumerate()
+                .map(|(at, (entity, _))| (entity.as_str(), at))
+                .collect();
+            let mut before: Vec<Vec<Q::Conclusion>> =
+                rederived.iter().map(|_| Vec::new()).collect();
+            let mut kept = Vec::with_capacity(self.results.len());
+            for row in self.results.drain(..) {
+                match touched.get(row.this_uri()) {
+                    Some(&at) => before[at].push(row),
+                    None => kept.push(row),
+                }
+            }
+            self.results = kept;
             let mut asserted = Vec::new();
             let mut retracted = Vec::new();
-            for (entity, after) in rederived {
-                let before: Vec<Q::Conclusion> = self
-                    .results
-                    .iter()
-                    .filter(|row| row.this() == entity)
-                    .cloned()
-                    .collect();
+            for ((_, after), before) in rederived.into_iter().zip(before) {
                 for row in &after {
                     if !before.contains(row) {
                         asserted.push(row.clone());
@@ -1175,7 +1187,6 @@ where
                         retracted.push(row.clone());
                     }
                 }
-                self.results.retain(|row| row.this() != entity);
                 self.results.extend(after);
             }
             Ok(Some(Delta {

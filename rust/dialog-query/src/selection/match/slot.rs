@@ -39,20 +39,44 @@ pub(crate) struct Scanned {
 }
 
 impl Scanned {
-    /// Shares `row`.
-    pub(crate) fn new(row: CheckedRow) -> Arc<Self> {
+    /// The scanned row's entity, as the key stores it.
+    pub(crate) fn of_str(&self) -> &str {
+        self.row.of_str()
+    }
+
+    /// Shares `row`, its value read as `viewed` when the scan's kind reads
+    /// the stored value as another (a natural as a float).
+    pub(crate) fn new(row: CheckedRow, viewed: Option<Value>) -> Arc<Self> {
+        let is = OnceLock::new();
+        if let Some(value) = viewed {
+            let _ = is.set(Binding::Present(value));
+        }
         Arc::new(Scanned {
             row,
             the: OnceLock::new(),
             of: OnceLock::new(),
-            is: OnceLock::new(),
+            is,
             claim: OnceLock::new(),
         })
     }
 
     /// `part`'s binding, materialized on first read.
-    fn binding(&self, part: Part) -> &Binding {
-        let make = || Binding::Present(materialize(&self.row, part));
+    #[cfg_attr(feature = "trace-hydration", track_caller)]
+    pub(crate) fn binding(&self, part: Part) -> &Binding {
+        #[cfg(feature = "trace-hydration")]
+        let site = std::panic::Location::caller();
+        let make = || {
+            #[cfg(feature = "trace-hydration")]
+            super::hydration::record(
+                site,
+                match part {
+                    Part::The => "the",
+                    Part::Of => "of",
+                    Part::Is => "is",
+                },
+            );
+            Binding::Present(materialize(&self.row, part))
+        };
         match part {
             Part::The => self.the.get_or_init(|| Box::new(make())),
             Part::Of => self.of.get_or_init(make),
@@ -95,6 +119,7 @@ impl Slot {
     }
 
     /// The binding, materialized on first read.
+    #[cfg_attr(feature = "trace-hydration", track_caller)]
     pub(crate) fn binding(&self) -> &Binding {
         match self {
             Slot::Bound(binding) => binding,
@@ -117,6 +142,15 @@ impl Slot {
         match self {
             Slot::Bound(Binding::Present(value)) => Some(ValueView::from(value)),
             Slot::Bound(Binding::Absent) => None,
+            // A value read through a view is what the cell holds.
+            Slot::Scanned {
+                row,
+                part: Part::Is,
+            } if row.is.get().is_some() => row
+                .is
+                .get()
+                .and_then(Binding::as_value)
+                .map(ValueView::from),
             Slot::Scanned { row, part } => Some(read(&row.row, *part)),
         }
     }
@@ -182,15 +216,23 @@ impl Cited {
     }
 
     /// The claim, made on first read.
+    #[cfg_attr(feature = "trace-hydration", track_caller)]
     pub(crate) fn claim(&self) -> &Arc<Claim> {
+        #[cfg(feature = "trace-hydration")]
+        let site = std::panic::Location::caller();
         match self {
             Cited::Claim(claim) => claim,
             Cited::Scanned(scanned) => scanned.claim.get_or_init(|| {
+                #[cfg(feature = "trace-hydration")]
+                super::hydration::record(site, "claim");
                 let row = &scanned.row;
                 Arc::new(Claim {
                     the: Relation::from(row.relation()),
                     of: row.entity(),
-                    is: row.value(),
+                    is: match scanned.is.get() {
+                        Some(Binding::Present(value)) => value.clone(),
+                        _ => row.value(),
+                    },
                     cause: row.cause().cloned().unwrap_or(Cause([0; 32])),
                 })
             }),

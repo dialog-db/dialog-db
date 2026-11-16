@@ -101,8 +101,9 @@ enum Commands {
 static DUMP: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
 /// The phases, in order, by the name of the function each runs in.
-const PHASES: [&str; 7] = [
+const PHASES: [&str; 8] = [
     "columnar",
+    "json_view_encode",
     "engine",
     "json_encode",
     "json_decode",
@@ -466,6 +467,68 @@ fn answers_phase_json_encode(conclusions: &[ConceptConclusion], terms: &Paramete
     serde_json::to_vec(&wire).expect("a frame serializes")
 }
 
+/// Tonk's snapshot JSON, written from the values the rows hold in place:
+/// nothing is hydrated into a `Value` or an `Ipld` to be serialized. The
+/// same bytes as [`answers_phase_json_encode`] (checked every run).
+#[cfg(not(dialog_main))]
+#[unsafe(no_mangle)]
+#[inline(never)]
+fn answers_phase_json_view_encode(conclusions: &[ConceptConclusion], fields: &[&str]) -> Vec<u8> {
+    use std::io::Write as _;
+    // `project` writes every term, `this` among them, in its `BTreeMap`'s
+    // order.
+    let mut sorted: Vec<&str> = fields.to_vec();
+    sorted.push("this");
+    sorted.sort_unstable();
+    let mut out = Vec::with_capacity(conclusions.len() * 256);
+    out.extend_from_slice(br#"{"kind":"snapshot","conclusions":["#);
+    for (at, conclusion) in conclusions.iter().enumerate() {
+        if at > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(br#"{"this":"#);
+        match conclusion.view("this") {
+            Some(Some(ValueView::Entity(uri))) => {
+                serde_json::to_writer(&mut out, uri.as_ref()).expect("a string writes")
+            }
+            _ => serde_json::to_writer(&mut out, conclusion.entity().as_str())
+                .expect("a string writes"),
+        }
+        out.extend_from_slice(br#","fields":{"#);
+        let mut first = true;
+        for field in &sorted {
+            let Some(Some(view)) = conclusion.view(field) else {
+                continue;
+            };
+            if !first {
+                out.push(b',');
+            }
+            first = false;
+            serde_json::to_writer(&mut out, field).expect("a string writes");
+            out.push(b':');
+            match &view {
+                ValueView::String(text) | ValueView::Entity(text) | ValueView::Symbol(text) => {
+                    serde_json::to_writer(&mut out, text.as_ref())
+                }
+                ValueView::UnsignedInt(n) => match i128::try_from(*n) {
+                    Ok(n) => serde_json::to_writer(&mut out, &n),
+                    Err(_) => serde_json::to_writer(&mut out, &n.to_string()),
+                },
+                ValueView::SignedInt(n) => serde_json::to_writer(&mut out, n),
+                ValueView::Float(n) => serde_json::to_writer(&mut out, n),
+                ValueView::Boolean(b) => serde_json::to_writer(&mut out, b),
+                ValueView::Bytes(bytes) | ValueView::Record(bytes) => {
+                    serde_json::to_writer(&mut out, &Ipld::Bytes(bytes.to_vec()))
+                }
+            }
+            .expect("a value writes");
+        }
+        let _ = out.write_all(b"}}");
+    }
+    out.extend_from_slice(b"]}");
+    out
+}
+
 #[unsafe(no_mangle)]
 #[inline(never)]
 fn answers_phase_json_decode(bytes: &[u8]) -> usize {
@@ -826,6 +889,25 @@ struct Report {
     /// Instructions per phase, from callgrind (filled by `sweep`).
     #[serde(default)]
     instructions: BTreeMap<String, u64>,
+    /// Values hydrated per phase, by the line that asked and what it
+    /// made (`trace-hydration` builds only), per row.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    hydration: BTreeMap<String, BTreeMap<String, f64>>,
+}
+
+/// What the phase just run hydrated, per row and per run of it.
+#[cfg(feature = "trace-hydration")]
+fn hydrated(rows: usize, runs: usize) -> BTreeMap<String, f64> {
+    dialog_query::hydration::take()
+        .into_iter()
+        .map(|((site, what), count)| {
+            let site = site.rsplit("rust/").next().unwrap_or(&site).to_string();
+            (
+                format!("{what} @ {site}"),
+                count as f64 / rows as f64 / runs as f64,
+            )
+        })
+        .collect()
 }
 
 /// Runs `body` once to warm up, then `repeat` times timed, counting the
@@ -874,6 +956,8 @@ fn measure(
     let query = query(&set.descriptor, &set.fields, None);
     let terms = query.terms.clone();
     let mut phases = BTreeMap::new();
+    #[allow(unused_mut)]
+    let mut hydration = BTreeMap::new();
     let mut bytes = BTreeMap::new();
 
     let (conclusions, engine) = phase(repeat, || {
@@ -886,24 +970,64 @@ fn measure(
         );
     }
     phases.insert("engine".into(), engine);
+    #[cfg(feature = "trace-hydration")]
+    hydration.insert("engine".into(), hydrated(rows, repeat.max(1) + 1));
 
+    // Before `project`: it hydrates the rows' values, and the view phase
+    // must read rows nothing hydrated.
+    #[cfg(not(dialog_main))]
+    let (viewed, view_run) = phase(repeat, || {
+        answers_phase_json_view_encode(&conclusions, &set.fields)
+    });
     let (json, encode) = phase(repeat, || answers_phase_json_encode(&conclusions, &terms));
     phases.insert("json_encode".into(), encode);
+    #[cfg(feature = "trace-hydration")]
+    // The phase reads the same conclusions every run: a value it hydrates
+    // stays hydrated, so its count is the first run's.
+    hydration.insert("json_encode".into(), hydrated(rows, 1));
+    #[cfg(not(dialog_main))]
+    {
+        if viewed != json {
+            let at = viewed
+                .iter()
+                .zip(&json)
+                .position(|(a, b)| a != b)
+                .unwrap_or(0);
+            let around = |bytes: &[u8]| {
+                String::from_utf8_lossy(&bytes[at.saturating_sub(60)..(at + 60).min(bytes.len())])
+                    .into_owned()
+            };
+            bail!(
+                "{name}: the JSON written from views differs from tonk's at byte {at}:\n views: {}\n tonk:  {}",
+                around(&viewed),
+                around(&json)
+            );
+        }
+        phases.insert("json_view_encode".into(), view_run);
+    }
     let (decoded, decode) = phase(repeat, || answers_phase_json_decode(&json));
     assert_eq!(decoded, rows);
     phases.insert("json_decode".into(), decode);
+    #[cfg(feature = "trace-hydration")]
+    hydration.insert("json_decode".into(), hydrated(rows, 1));
 
     let (frame, encode) = phase(repeat, || {
         answers_phase_frame_encode(&mut Session::default(), &columns, &conclusions)
     });
     phases.insert("frame_encode".into(), encode);
+    #[cfg(feature = "trace-hydration")]
+    hydration.insert("frame_encode".into(), hydrated(rows, 1));
     let frame: Arc<[u8]> = frame.into();
     let (_, read_all) = phase(repeat, || answers_phase_frame_read_all(frame.clone()));
     phases.insert("frame_read_all".into(), read_all);
+    #[cfg(feature = "trace-hydration")]
+    hydration.insert("frame_read_all".into(), hydrated(rows, 1));
     let (_, read_two) = phase(repeat, || {
         answers_phase_frame_read_two(frame.clone(), set.shown)
     });
     phases.insert("frame_read_two".into(), read_two);
+    #[cfg(feature = "trace-hydration")]
+    hydration.insert("frame_read_two".into(), hydrated(rows, 1));
     check_same(&json, &frame, &columns)?;
     #[cfg(not(dialog_main))]
     if !set.attributes.is_empty() {
@@ -986,6 +1110,7 @@ fn measure(
         phases,
         bytes,
         instructions: BTreeMap::new(),
+        hydration,
     })
 }
 
