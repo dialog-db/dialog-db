@@ -212,6 +212,9 @@ impl<'a> QueryLayer<'a> {
     /// The lines pinned as `views` (see [`pin`](Self::pin)), with the
     /// memory layers, owned: what one query reads.
     pub(crate) fn composite(&self, views: Vec<View<'a>>) -> Composite {
+        // Collected from the views alone, then extended: collecting the
+        // pinned views can reuse their buffer, which a chained iterator does
+        // not, so a read with no durable layer allocates nothing for it.
         let mut sources: Vec<Source> = views.into_iter().map(View::into_source).collect();
         let Some(layers) = self.layers.as_deref() else {
             return Composite {
