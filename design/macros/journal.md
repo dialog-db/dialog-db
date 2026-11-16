@@ -1122,6 +1122,9 @@ In the same conversation he settled how a pattern is written in a stored rule (`
 
 ## The queue
 
+**Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.
+
+
 **Answered 2026-11-16:** which composite is the record was left to the agent: dag-cbor for now ([synthesis.md](synthesis.md)). The order of the build is there.
 
 
