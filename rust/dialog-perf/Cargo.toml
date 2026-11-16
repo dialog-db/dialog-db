@@ -7,6 +7,10 @@ authors.workspace = true
 license.workspace = true
 publish = false
 
+# The CLI the gates run (`cargo run -p dialog-perf -- sweep`); `answers`
+# is the research harness, run with `--bin answers`.
+default-run = "perf"
+
 [features]
 trace-hydration = ["dialog-query/trace-hydration"]
 # Enable integration tests (tests with service provisioning)
