@@ -898,9 +898,14 @@ impl QueryEnv<'_> {
                         }
                     })
                     .collect();
-                let mut staged = Hidden::default().facts(self.overlay.tombstones(&manifest));
-                for layer in &self.layers {
-                    staged = staged.facts(layer.tombstones(&manifest));
+                // Only a memory layer's stream is filtered with these, so a
+                // read with none skips them.
+                let mut staged = Hidden::default();
+                if !self.memories.is_empty() {
+                    staged = staged.facts(self.overlay.tombstones(&manifest));
+                    for layer in &self.layers {
+                        staged = staged.facts(layer.tombstones(&manifest));
+                    }
                 }
                 Ok(Format {
                     manifest,
