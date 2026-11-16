@@ -41,6 +41,12 @@ What this changes for you:
   entries it did not name, as a map, and a blank rest takes them and
   binds nothing. A list pattern with no run is the list of exactly its
   items; `with_run` binds the ones after them, as a list.
+- Inside a map or a list a number matches by the number it is. A scan
+  reads a value through a type, so the natural 4, and a variable typed
+  a natural, read a stored 4.3 as 4. In a pattern `{n: 4}` does not
+  match a record that holds 4.3, and a variable typed a natural does
+  not bind there: a pattern matches only a value it builds, whichever
+  of a rule's premises runs first.
 - `Parameters::set` binds a name to a pattern, and `shape`, `pattern`,
   `slot`, `shapes`, `leaves` and `map_terms` look inside. `insert`, `get` and
   `iter` take and give terms as before: for a name that holds a map or
