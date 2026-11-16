@@ -235,11 +235,8 @@ async fn it_installs_a_rule_that_holds_a_pattern_on_a_branch() -> Result<()> {
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
 
-    let titled = Composite::map([
-        (text("title"), text("Buy milk")),
-        (text("done"), Value::Boolean(false)),
-    ])?;
-    let untitled = Composite::map([(text("done"), Value::Boolean(true))])?;
+    let titled = Composite::map([("title", text("Buy milk")), ("done", Value::Boolean(false))])?;
+    let untitled = Composite::map([("done", Value::Boolean(true))])?;
     let milk: Entity = "id:milk".parse()?;
     let chore: Entity = "id:chore".parse()?;
     let rule = heading_rule()?;
