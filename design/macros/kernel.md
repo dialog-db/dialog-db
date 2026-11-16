@@ -33,6 +33,7 @@ flowchart LR
 - **Proposed:** a pick wraps a term the same way, `(:last (:text ?x))`, so a read says everything about the attributes it reads. The alternative is #728's `(pick :last from: ?x)` beside the read.
 - A head made only of operator characters is a formula. Names start with a letter, so it cannot be a concept or a domain.
 - A write at the top level, `(assert A)` or `(retract A)` with premises after it if it has them, is a rule with that head. So is a command.
+- A line, `(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)`, is not kernel. It is the read `(xyz.todo ?i title: (:last (:text ?t)))`, and the walker writes it so: `:one` is the pick `last`, `:many` is `all`, `as:` the type. A concept written as lines is kept as its reads, the lines of one entity under one domain as one read of several fields.
 
 ## Syntax is a rule
 

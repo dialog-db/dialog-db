@@ -3,11 +3,13 @@
 ; A comment right above a form says what the form is for. One with a
 ; blank line under it, like this one, is about what follows.
 
-; Something to do, on a list.
+; Something to do, on a list. A line is one attribute: `of:` its entity,
+; `is:` its value, `as:` its type, and how many claims it holds for one
+; entity.
 (concept (todo ?t list: ?l text: ?x state: ?s)
-  (xyz.todo ?t list: (:last (:entity ?l))
-               text: (:last (:text ?x))
-               state: (:last (:entity ?s))))
+  (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
+  (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
+  (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one))
 
 ; `add` and `complete` are defined here and nowhere else: a command is
 ; whatever some rule reads.
@@ -17,8 +19,8 @@
   (add (todo ?t list: ?l text: ?x)))
 
 ; A write says every field, so one that changes the state alone writes
-; the relation, not the concept.
-(rule (assert (xyz.todo ?t state: (:last (:entity :done))))
+; the attribute, not the concept.
+(rule (assert (xyz.todo/state of: ?t is: :done as: [:open :done] cardinality: :one))
   (complete (todo ?t)))
 
 ; A rule may issue a command, which is read in the round after.

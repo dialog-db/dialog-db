@@ -6,10 +6,13 @@ The notation is designed on #728: `research/notation/design.md`, read here at `4
 
 | | the design, at R45 | built here | needs |
 |---|---|---|---|
-| a concept's body | a line an attribute, by full name: `(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)` | one call on the domain, each field in a wrapper: `(xyz.todo ?t text: (:last (:text ?x)))` | this branch |
-| which claim is read | `cardinality: :one` or `:many` on the line; picks are gone | the wrapper's pick, `:last` | this branch for `:one` and `:many`; the engine's cardinality work (#793) for the rest |
+| a concept's body | a line an attribute, by full name: `(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)` | the same since 2026-11-16, in a concept and wherever a read stands. Under it a line is the read it was: `(xyz.todo ?i title: (:last (:text ?t)))`, which is still read | done |
+| which claim is read | `cardinality: :one` or `:many` on the line; picks are gone | `:one` reads the newest and `:many` every claim, on main's picks `last` and `all`. What a write under `:one` retires is the engine's, as it was for `last` | the engine's cardinality work (#793) for what a write does |
+| a variant, `as: [:open :done]` | a type: on a read it filters, on an assert it refuses | read as `:entity`. That the value is one of the cases is not checked, either way | a type for it in the engine |
+| a sized number, `as: (:float 64)` | a type | refused: not a type | this branch |
+| a layer, `in:` on a line | a constant or a field | refused as unsupported | the layers work (#795 on) |
 | choosing among claims | an elector in the head: `(account ?a status: (top ?s))`, ordered by the line's `as:` list | nothing | #793 |
-| a variable of the body | is in the head, so a concept runs both ways | not checked | this branch |
+| a variable of the body | is in the head, so a concept runs both ways | checked, for lines as for reads | done |
 | `!` | no form carries one: `assert`, `retract` | the same since 2026-11-16; `assert!` and `retract!` are refused with the word to write | done |
 | a parameter left out of a read | matches anything | refused since 2026-11-13; open again on 2026-11-15, not built | this branch |
 | a computing fold | only in a getter: `(rule (open-count (list ?l) is: (count ?t)) …)` | nothing | this branch, over the engine's folds |

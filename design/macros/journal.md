@@ -1163,6 +1163,24 @@ Built: `kernel.rs` (`Head::Hold` by the relation), `expand.rs` (three head words
 
 Not done: a command at the top level with premises, which #728 writes with a `when`. Posted to #728: that the kernel has no word for issuing, so `(do add …)` would be a prelude rule if taken.
 
+## 2026-11-16, Building: a concept as lines
+
+**Asked.** What a line is under the walker: a new kernel read, or the read the kernel has.
+
+**Learned.**
+
+- The kernel's read is one entity and the fields named, each under a type and a pick. A line says the same of one field, so it needs nothing new below: `(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)` is `(xyz.todo ?i title: (:last (:text ?t)))`.
+- A name cannot be taken apart by a pattern, so the split of `xyz.todo/title` into its domain and its field is in the walker, not in a rule of the prelude.
+- A concept was already checked for a variable its head does not hold, since the first build (`cc2448b`, 2026-11-11), which the alignment table had as "not checked". The check asked whether the body is reads, which lines were not, so lines went past it until a concept of lines was kept as its reads.
+- Kept as a read a line, a query through a concept would report a row an attribute. Joined where one entity is read under one domain, a concept of lines reports what the same concept written as a read does.
+- The reader already refuses two parts with no label beside labelled ones, so a line with two entities never reaches the walker.
+
+**Decided.** By the agent, on #728's design: a line is surface, written by the walker as the kernel read. `:one` is `last` and `:many` is `all`. A variant is read as `:entity` and not checked. `in:` and a sized number are refused. The spelling with wrappers stays, as what the kernel is written in.
+
+Built: `line` and `lines` in `expand.rs`; the to-do example is in lines. 98 unit tests, 26 on a branch, 2 doc tests; lint clean.
+
+Not looked at: what a write under `:one` retires. It is what the engine does for the pick `last`, and it is where the cardinality work (#793) changes things.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.
