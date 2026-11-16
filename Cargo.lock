@@ -1281,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-baseline"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1306,7 +1306,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-capability"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "async-trait",
  "base58",
@@ -1334,7 +1334,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-common"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-corpus"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -1410,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-credentials"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -1438,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-csv"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-diagnose"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1480,7 +1480,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-did-web"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-effects"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "async-trait",
  "base58",
@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-encoding"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "base58",
@@ -1541,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-identity"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "async-trait",
  "dialog-capability",
@@ -1562,7 +1562,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-macros"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "blake3",
  "convert_case 0.6.0",
@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-network"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "async-trait",
  "dialog-capability",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-number"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "dialog-common",
  "ryu",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-peer"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1656,7 +1656,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-peer-iroh"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "async-trait",
  "base58",
@@ -1689,7 +1689,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-perf"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1714,7 +1714,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-query"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1755,7 +1755,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-remote-fs"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1781,7 +1781,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-remote-s3"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1822,7 +1822,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-remote-ucan"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1861,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-remote-ucan-s3"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "async-signature",
@@ -1901,7 +1901,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-repository"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1953,7 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-search-tree"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1990,7 +1990,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-soak"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-stack"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "dialog-common",
@@ -2027,7 +2027,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-storage"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2075,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-ucan"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "async-trait",
  "base58",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-ucan-core"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "arbitrary",
  "base64 0.22.1",
@@ -2139,7 +2139,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-varsig"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "dialog-common",
  "ed25519-dalek 2.2.0",
@@ -3689,7 +3689,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "merkle-reference"
-version = "0.5.0-rc.5"
+version = "0.5.0-rc.6"
 dependencies = [
  "blake3",
  "dialog-common",
