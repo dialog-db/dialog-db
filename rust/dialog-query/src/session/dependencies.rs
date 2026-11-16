@@ -248,10 +248,19 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
                     .predicate
                     .attribute_field()
                     .is_some_and(|(_, field)| field.cardinality() == Cardinality::One);
-                let polarity = if one && positive == Polarity::Positive {
+                // A concept of several fields is read through its
+                // selecting rule, which elects each field's claim: a
+                // premise deciding on one of them tests an election
+                // the concept made.
+                let several = query.predicate.attribute_field().is_none();
+                let polarity = if positive != Polarity::Positive {
+                    positive
+                } else if one {
                     Polarity::Electing {
                         decides: decides(rule, index, query),
                     }
+                } else if several && decides(rule, index, query) {
+                    Polarity::Electing { decides: true }
                 } else {
                     positive
                 };
@@ -288,11 +297,19 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
 /// own relation, of its own entity) is a rewrite. Its conclusion
 /// succeeds the value it read, and the exit ranks the cell's candidates
 /// by those successions.
+///
+/// A premise reading a concept of several fields decides when it
+/// decides on any field the concept reads one claim of: a field of
+/// cardinality one, or one that declares a selective aggregator. It
+/// has no cell of its own to rewrite.
 fn decides(rule: &DeductiveRule, index: usize, query: &ConceptQuery) -> bool {
-    let Some((name, _)) = query.predicate.attribute_field() else {
-        return false;
-    };
     let named = |term: &Term<Any>| term.name().map(str::to_string);
+    let Some((name, _)) = query.predicate.attribute_field() else {
+        return query.predicate.with().iter().any(|(name, field)| {
+            (field.aggregate().is_some() || field.cardinality() == Cardinality::One)
+                && decides_on(rule, index, query.terms.get(name))
+        });
+    };
     let this = query.terms.get("this").and_then(named);
     let node = ProgramAnalysis::node(&query.predicate);
     let rewrites = this.as_deref() == Some("this")
@@ -302,7 +319,14 @@ fn decides(rule: &DeductiveRule, index: usize, query: &ConceptQuery) -> bool {
     if rewrites {
         return false;
     }
-    let mut carried: HashSet<String> = match query.terms.get(name) {
+    decides_on(rule, index, query.terms.get(name))
+}
+
+/// Whether `rule` decides on the value `term` binds in its premise
+/// `index` (see [`decides`]).
+fn decides_on(rule: &DeductiveRule, index: usize, term: Option<&Term<Any>>) -> bool {
+    let named = |term: &Term<Any>| term.name().map(str::to_string);
+    let mut carried: HashSet<String> = match term {
         None => return false,
         Some(Term::Constant(_)) => return true,
         Some(term) => match named(term) {

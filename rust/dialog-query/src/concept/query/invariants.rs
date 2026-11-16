@@ -1593,3 +1593,62 @@ async fn a_query_naming_a_group_reads_that_groups_fold() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// "A rule deciding on a field of a concept inside its own cycle is set
+/// aside." The same decision as
+/// [`a_rule_deciding_on_a_last_value_inside_its_cycle_is_set_aside`],
+/// read through a concept of two fields: `x/label(e) := "saw-end" :-
+/// x/mark(e) = "yes", x/next(e) = n, Block(n, label: "end", next: _)`.
+/// The concept elects each field's claim, so a premise pinning its
+/// label tests that election as a read of the label alone does.
+#[dialog_common::test]
+async fn a_rule_deciding_on_a_concepts_field_inside_its_cycle_is_set_aside() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    chain_with_a_losing_label(&operator, &branch).await?;
+    let a = Value::Entity("id:a".parse()?);
+    let decides = compile(serde_json::json!({
+        "deduce": { "with": { "out": { "the": "x/label", "as": "text:" } } },
+        "when": [ next_premise(), {
+            "assert": { "with": { "mark": { "the": "x/mark", "as": "text:" } } },
+            "where": { "this": { "?": { "name": "this" } }, "mark": "yes" }
+        }, {
+            "assert": { "with": {
+                "label": { "the": "x/label", "as": "text:" },
+                "next": { "the": "x/next", "as": "entity:" }
+            }},
+            "where": {
+                "this": { "?": { "name": "next" } },
+                "label": "end",
+                "next": { "?": { "name": "after" } }
+            }
+        }, {
+            "assert": "==",
+            "where": { "this": "saw-end", "is": { "?": { "name": "out" } } }
+        }]
+    }))?;
+    let mut registry = RuleRegistry::new();
+    registry.register(carry_label()?)?;
+    registry.register(decides.clone())?;
+    let analysis = registry.analysis()?;
+    let [set_aside] = analysis.quarantined() else {
+        anyhow::bail!("one rule is set aside: {:?}", analysis.quarantined());
+    };
+    assert_eq!(set_aside.rule, decides.this());
+    assert_eq!(
+        set_aside.tested.as_ref().map(|tested| tested.absence),
+        Some(Absence::Decided)
+    );
+    let source = TestEnv::new(&branch, &operator, registry);
+    let labels = relation_under(&source, "x/label", "one").await?;
+    assert!(
+        labels.contains(&(a.clone(), Value::String("own".into()))),
+        "a reads the label the chain carries from b: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&(a, Value::String("saw-end".into()))),
+        "nothing is concluded from a label no reader of b sees: {labels:?}"
+    );
+    Ok(())
+}
