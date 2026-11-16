@@ -2,7 +2,7 @@
 
 One notation for dialog's queries, rules and transactions. Nothing is implemented yet. Everything here is agreed unless it is marked **Proposed**, and what is still open is listed at the end. Forms are spelled as Lisp while the semantics settle; the YAML spelling comes after.
 
-This is the current decision of the [notation research](../notation.md). The [journal](journal.md) has the reader rounds behind each choice, R1 to R45. The [sketches](sketches) redo tonk's `core.yaml` and `notebook.yaml` in the notation as it stood at R16, before commands, and have not been redone since.
+This is the current decision of the [notation research](../notation.md). The [journal](journal.md) has the reader rounds behind each choice, R1 to R46. The [sketches](sketches) redo tonk's `core.yaml` and `notebook.yaml` in the notation as it stood at R16, before commands, and have not been redone since.
 
 ## Model
 
@@ -209,14 +209,22 @@ Readers read the composite with no help (20 of 20 in R43 and R44). Retracting th
 
 ### Collections
 
-A domain's fields whose names start lowercase are its dictionary; those whose names start uppercase are positions, its sequence, as in dialog today. A label written as a variable reads every entry, one row per entry. This is still in the domain-call spelling, before attribute lines; how a line names a key is open.
+A collection's keys are its attribute names, as in dialog today: a notebook's `N5` is the attribute `xyz.tonk.notebook/N5`. A line over a collection leaves the key as a variable in the name, and `by:` says what a key is, `:name` for a dictionary or `:position` for a sequence:
 
 ```clj
-(xyz.tonk.element.method ?e ?name: ?source)   ; every key
-(xyz.tonk.notebook ?n ?at: ?block)            ; every position
+(concept (element-method ?e name: ?n source: ?s)
+  (xyz.tonk.element.method/?n of: ?e is: ?s as: :text cardinality: :one by: :name))
+
+(concept (notebook-entry ?b at: ?p block: ?x)
+  (xyz.tonk.notebook/?p of: ?b is: ?x as: :entity cardinality: :one by: :position))
 ```
 
-A concept over a collection gives the key a parameter of its own, and holds one collection only. An entry is a fact, so entries written on two devices merge key by key. A record value is one value: opaque to queries, and two concurrent writes of it elect one whole record. In R26, 22 of 25 readers named the variable label as the hardest thing to guess, though all 25 read it correctly.
+- `/?n` reads one row per key. All 100 readers in R46 read it that way without being told.
+- `by:` is part of the attribute's identity, as dialog's `Keyed::Dictionary` and `Keyed::Sequence` are, so it goes on the line. Without it, 18 of 20 readers took a sequence's `N1` for an opaque id (R46); with it, 20 of 20 told them apart.
+- The key is a head field, and a concept holds one collection only: two would give a row for every pair of their entries.
+- `cardinality:` applies to each entry.
+
+An entry is a fact, so entries written on two devices merge key by key. A record value is one value: opaque to queries, and two concurrent writes of it elect one whole record.
 
 ### Constraints
 
@@ -459,7 +467,7 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 - Whether `id` names a domain or a concept, so two concepts with the same labels and values do not share an entity.
 - Whether a rule that creates should only create. The `add` rule asserts `state: :open`, so adding a done to-do's list and text again reopens it; `(unless (todo ?t))` among its conditions would stop that.
 - Whether a type filters before an elector chooses or after. With two text claims, `"Buy milk"` and a newer `42`, under `as: :text`, typing first gives `"Buy milk"` and electing first gives nothing.
-- What retract takes for a keyed concept: `(retract (notebook-entry notebook:scratch))` names every entry; it likely needs the entity and the key.
+- What retract takes for a collection concept: `(retract (notebook-entry notebook:scratch))` names every entry; it likely needs the entity and the key.
 - What two concurrent blind writes on a `:one` line leave: each succeeds what was live where it landed, so both stay live for the next read to elect.
 - Optional fields and defaults. `(option ?x)` in a head read correctly once in six (R2). Proposed on the line: `optional: true`, and `default: :open`, which is `optional` with `Coalesce` on read. A default cannot be a rule on its own attribute: that is a cycle through negation.
 - Whether a query holds several calls answered jointly, and whether questions stay calls or become rules into a relation head.
