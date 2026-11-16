@@ -3492,7 +3492,10 @@ mod tests {
         let session = branch.session().perform(&operator).await?;
         let control = crate::control_layer();
         let mut fetches = session
-            .arrivals(&control, fetch_query())
+            .arrivals(
+                &control,
+                Located(fetch_query().with_layer(Term::var("where"))),
+            )
             .expect("every session has control:");
         let node: Entity = "node:1".parse()?;
         let doc: Entity = "doc:1".parse()?;
@@ -3505,9 +3508,13 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        let commands = fetches.poll(&operator).await?;
+        let located = fetches.poll(&operator).await?;
+        assert!(
+            located.iter().all(|row| row.layer == control),
+            "a row of control:"
+        );
+        let commands: Vec<dialog_query::Claim> = located.into_iter().map(|row| row.claim).collect();
         assert_eq!(subjects(&commands), vec!["cmd:1".to_string()]);
-        assert_eq!(commands[0].layer(), Some(&control), "a row of control:");
         assert!(fetches.poll(&operator).await?.is_empty(), "read once");
         assert!(
             session.layer(&control).expect("control:").is_empty(),
@@ -3530,10 +3537,13 @@ mod tests {
             "a staged chain lands nothing before it publishes"
         );
         batch.publish().perform(&operator).await?;
-        assert_eq!(
-            subjects(&fetches.poll(&operator).await?),
-            vec!["cmd:2".to_string()]
-        );
+        let commands: Vec<dialog_query::Claim> = fetches
+            .poll(&operator)
+            .await?
+            .into_iter()
+            .map(|row| row.claim)
+            .collect();
+        assert_eq!(subjects(&commands), vec!["cmd:2".to_string()]);
         assert!(fetches.poll(&operator).await?.is_empty(), "read once");
         Ok(())
     }
@@ -3613,14 +3623,15 @@ mod tests {
             .assert(priority("cmd:1", 2).at(control.clone()))
             .assert(title(&doc, "kept"))
             .assert(flag(&doc, true, &state));
-        let during: Vec<dialog_query::Claim> = transaction
+        let during: Vec<Row> = transaction
             .query()
-            .select(whole(&control))
+            .select(Located(whole(&control)))
             .perform(&operator)
             .try_vec()
             .await?;
+        assert!(during.iter().all(|row| row.layer == control));
+        let during: Vec<dialog_query::Claim> = during.into_iter().map(|row| row.claim).collect();
         assert_eq!(cells(&during), expected, "the tick's commands alone");
-        assert!(during.iter().all(|claim| claim.layer() == Some(&control)));
         transaction.commit().publish().perform(&operator).await?;
 
         let arrived = arrivals.poll(&operator).await?;
