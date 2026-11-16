@@ -222,6 +222,24 @@ impl Conjunction {
             return true;
         }
 
+        // A required scan pinned to a value or an entity admits a handful of
+        // entities: a left merge would read every optional field's whole
+        // range for them, and the fold probes each once. Decided without
+        // estimating, as it was decided before optional fields could merge:
+        // on a cold replica an estimate is a walk of the range's edges.
+        let pinned = selectors.iter().any(|(_, selector)| {
+            selector.as_ref().is_ok_and(|selector| {
+                selector.entity().is_some()
+                    || selector.value().is_some()
+                    || selector.value_prefix().is_some()
+                    || selector.value_lower().is_some()
+                    || selector.value_upper().is_some()
+            })
+        });
+        if !optional.is_empty() && pinned {
+            return false;
+        }
+
         let estimate =
             async |selector: Result<Selector<Constrained>, EvaluationError>| match selector {
                 Ok(selector) => Provider::<Estimate>::execute(env, selector)
