@@ -36,10 +36,10 @@ use crate::Error;
 use crate::diagnostic::Diagnostic;
 use crate::form::Kind;
 use crate::kernel::QUOTE;
-use crate::kernel::{Head, Rule};
+use crate::kernel::{Head, Rule, TYPES};
 use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, REST, fill, matches};
-use crate::syntax::{COMMAND, Parameters, Signature, Syntax};
+use crate::syntax::{self, COMMAND, Parameters, Signature, Syntax};
 use crate::written::{Path, Segment};
 
 /// The core forms, written in the kernel.
@@ -119,6 +119,155 @@ fn apply(name: &str, items: Vec<Syntax>) -> Syntax {
             ..Parameters::default()
         },
     )
+}
+
+/// A formula of one part, as a type and a pick are: `(:text ?x)`.
+fn wrap(word: &str, inner: Syntax) -> Result<Syntax, Error> {
+    Ok(Syntax::Application(
+        Box::new(Syntax::Constant(syntax::entity(&format!("{word}:"))?)),
+        Parameters {
+            items: vec![inner],
+            ..Parameters::default()
+        },
+    ))
+}
+
+/// The read a line is. A line is one attribute, by its full name:
+///
+/// ```clj
+/// (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
+/// (xyz.todo ?i title: (:last (:text ?t)))
+/// ```
+///
+/// `of:` is the entity and `is:` the value. `as:` is the type the value
+/// is read under. `cardinality:` says how many claims the attribute
+/// holds for one entity: `:one` reads the newest, `:many` every one.
+/// Either may be left out, and then the read says nothing of it.
+///
+/// `None` when `tree` applies no attribute.
+fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
+    let Syntax::Application(operator, operand) = tree else {
+        return Ok(None);
+    };
+    let Some((domain, field)) = (match &**operator {
+        Syntax::Reference(name) if Kind::of(name) == Kind::Attribute => name.split_once('/'),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let [entity] = operand.items.as_slice() else {
+        return Err(Error::Refused(format!(
+            "{tree} needs its entity, under `of:` or with no label, and nothing else without a label"
+        )));
+    };
+    let mut terms = operand.terms.clone();
+    let Some(mut value) = terms.remove("is") else {
+        return Err(Error::Refused(format!(
+            "{tree} says no value: a line is an attribute, `of:` its entity and `is:` its value"
+        )));
+    };
+    if let Some(kind) = terms.remove("as") {
+        let word = match &kind {
+            // A variant, `[:open :done]`: each of its cases is an entity.
+            // That the value is one of them is not checked.
+            Syntax::Tuple(cases)
+                if !cases.is_empty() && cases.iter().all(|case| case.keyword().is_some()) =>
+            {
+                "entity"
+            }
+            kind => kind
+                .keyword()
+                .filter(|word| TYPES.contains(word))
+                .ok_or_else(|| {
+                    Error::Refused(format!(
+                        "{kind} is not a type: `as:` takes one of {}, or the cases of a variant, `[:open :done]`",
+                        TYPES.map(|word| format!(":{word}")).join(" ")
+                    ))
+                })?,
+        };
+        value = wrap(word, value)?;
+    }
+    if let Some(cardinality) = terms.remove("cardinality") {
+        let pick = match cardinality.keyword() {
+            Some("one") => "last",
+            Some("many") => "all",
+            _ => {
+                return Err(Error::Refused(format!(
+                    "{cardinality} is not a cardinality: `:one` or `:many`"
+                )));
+            }
+        };
+        value = wrap(pick, value)?;
+    }
+    if terms.contains_key("in") {
+        return Err(Error::Unsupported(format!(
+            "{tree} names a layer, and Dialog-DB has no layers yet"
+        )));
+    }
+    if let Some(label) = terms.keys().next() {
+        return Err(Error::Refused(format!(
+            "{tree} says `{label}:`, which a line does not take: `of:`, `is:`, `as:` and `cardinality:`"
+        )));
+    }
+    Ok(Some(Syntax::Application(
+        Box::new(Syntax::Reference(domain.to_string())),
+        Parameters {
+            items: vec![entity.clone()],
+            terms: BTreeMap::from([(field.to_string(), value)]),
+        },
+    )))
+}
+
+/// A template that stands for reads, with every line in it as the read
+/// it is, and the lines of one entity under one domain as one read of
+/// several fields. Any other template is left as it is.
+///
+/// ```clj
+/// (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
+/// (xyz.todo/state of: ?i is: ?s as: :entity cardinality: :one)
+///
+/// (xyz.todo ?i state: (:last (:entity ?s)) title: (:last (:text ?t)))
+/// ```
+fn lines(template: Syntax) -> Result<Syntax, Error> {
+    let mut any = false;
+    let mut reads: Vec<Syntax> = Vec::new();
+    for part in members(template.clone()) {
+        let read = match line(&part)? {
+            Some(read) => {
+                any = true;
+                read
+            }
+            None if part.is_read() => part,
+            None => return Ok(template),
+        };
+        // Two blanks are two entities, so a read of a blank stays apart.
+        let fits = |earlier: &Syntax| {
+            earlier.applies() == read.applies()
+                && items(earlier) == items(&read)
+                && items(&read) != [Syntax::Blank]
+                && match (earlier.operand(), read.operand()) {
+                    (Some(earlier), Some(read)) => read
+                        .terms
+                        .keys()
+                        .all(|label| !earlier.terms.contains_key(label)),
+                    _ => false,
+                }
+        };
+        match (
+            reads.iter_mut().find(|earlier| fits(earlier)),
+            read.operand(),
+        ) {
+            (Some(Syntax::Application(_, earlier)), Some(read)) => {
+                earlier.terms.extend(read.terms.clone());
+            }
+            _ => reads.push(read),
+        }
+    }
+    Ok(match (any, reads.len()) {
+        (false, _) => template,
+        (true, 1) => reads.remove(0),
+        (true, _) => apply("all", reads),
+    })
 }
 
 /// The parts with no label of an application, or none.
@@ -526,6 +675,11 @@ impl Expander {
             },
             _ => None,
         };
+        // A concept written as lines is kept as the reads they are.
+        let answer = match answer {
+            Some(Answer::Syntax(template)) => Some(Answer::Syntax(lines(template)?)),
+            other => other,
+        };
         let Some(answer) = answer else {
             for premise in &clauses.when {
                 if let (true, Some(domain)) = (premise.is_read(), premise.applies()) {
@@ -867,6 +1021,9 @@ impl Expander {
                     .map(|member| self.application(member, position))
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(apply("all", each));
+            }
+            if let Some(read) = self.about(&tree, |_| line(&tree))? {
+                return Ok(read);
             }
             if let (Position::Head, Some(word)) = (
                 position,
@@ -1368,6 +1525,177 @@ mod tests {
                 "(query (xyz.tag ?t name: ?n) (xyz.tag ?t name: ?n) (unless (todo ?t title: _ ...)))"
             ),
             Err(Error::Ambiguous(..))
+        ));
+    }
+
+    /// A line is one attribute by its full name, and is the read of
+    /// that one field: `as:` the type it is read under, `cardinality:`
+    /// the newest claim or every claim.
+    #[test]
+    fn it_reads_a_line_as_the_read_of_one_attribute() {
+        let read = |line: &str| {
+            let rules = expanded("", &format!("(query {line})")).unwrap();
+            assert_eq!(rules.len(), 1, "{rules:?}");
+            rules[0]
+                .strip_prefix("(rule (report ")
+                .and_then(|rest| rest.split_once(") ("))
+                .map(|(head, _)| head.to_string())
+                .unwrap_or_else(|| rules[0].clone())
+        };
+        assert_eq!(
+            read("(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)"),
+            "(xyz.todo ?i title: (:last (:text ?t)))"
+        );
+        assert_eq!(
+            read("(xyz.list/task of: ?l is: ?i as: :entity cardinality: :many)"),
+            "(xyz.list ?l task: (:all (:entity ?i)))"
+        );
+        // The entity with no label, as any primary may be written.
+        assert_eq!(
+            read("(xyz.todo/title ?i is: ?t as: :text cardinality: :one)"),
+            "(xyz.todo ?i title: (:last (:text ?t)))"
+        );
+        // A part left out says nothing.
+        assert_eq!(
+            read("(xyz.todo/title of: ?i is: ?t)"),
+            "(xyz.todo ?i title: ?t)"
+        );
+        assert_eq!(
+            read("(xyz.todo/title of: ?i is: ?t cardinality: :many)"),
+            "(xyz.todo ?i title: (:all ?t))"
+        );
+        // The cases of a variant are entities.
+        assert_eq!(
+            read("(xyz.todo/state of: ?i is: ?s as: [:open :done] cardinality: :one)"),
+            "(xyz.todo ?i state: (:last (:entity ?s)))"
+        );
+        // A line stands where a read does: in a write, and in a rule.
+        assert_eq!(
+            expanded(
+                "",
+                "(assert (xyz.todo/state of: todo:1 is: :done as: :entity cardinality: :one))"
+            )
+            .unwrap(),
+            vec!["(rule (assert (xyz.todo todo:1 state: (:last (:entity :done)))))"]
+        );
+        assert_eq!(
+            expanded(
+                "",
+                "(rule (xyz.done ?i title: ?t)
+                   (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
+                   (xyz.todo/state of: ?i is: :done as: :entity cardinality: :one))"
+            )
+            .unwrap(),
+            vec![
+                "(rule (xyz.done ?i title: ?t) (xyz.todo ?i title: (:last (:text ?t))) (xyz.todo ?i state: (:last (:entity :done))))"
+            ]
+        );
+    }
+
+    /// What a line does not say as a line is refused, each with what
+    /// it is, and a layer is what Dialog-DB has not got.
+    #[test]
+    fn it_refuses_a_line_that_is_not_one() {
+        let refused = |line: &str, why: &str| {
+            let said = expanded("", &format!("(query {line})"));
+            assert!(
+                matches!(&said, Err(Error::Refused(said)) if said.contains(why)),
+                "{line}: {said:?}"
+            );
+        };
+        refused("(xyz.todo/title of: ?i)", "says no value");
+        refused("(xyz.todo/title is: ?t)", "needs its entity");
+        // Two parts with no label are refused where the text is read.
+        refused("(xyz.todo/title ?i ?j is: ?t)", "has 2 parts with no label");
+        refused("(xyz.todo/title of: ?i is: ?t as: :words)", "is not a type");
+        refused("(xyz.todo/title of: ?i is: ?t as: [])", "is not a type");
+        refused(
+            "(xyz.todo/title of: ?i is: ?t as: [:open 2])",
+            "is not a type",
+        );
+        refused(
+            "(xyz.todo/title of: ?i is: ?t cardinality: :few)",
+            "is not a cardinality",
+        );
+        refused(
+            "(xyz.todo/title of: ?i is: ?t pick: :last)",
+            "says `pick:`, which a line does not take",
+        );
+        assert!(matches!(
+            expanded("", "(query (xyz.todo/title of: ?i is: ?t in: :draft))"),
+            Err(Error::Unsupported(said)) if said.contains("layer")
+        ));
+    }
+
+    /// A concept is its lines. Kept, the lines of one entity under one
+    /// domain are one read of several fields, so a concept written as
+    /// lines is read, written and reported as one written as that read.
+    #[test]
+    fn it_keeps_a_concept_of_lines_as_the_reads_they_are() {
+        let lines = "(concept (todo ?i list: ?l title: ?t state: ?s)
+                       (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
+                       (xyz.todo/state of: ?i is: ?s as: [:open :done] cardinality: :one)
+                       (xyz.list/task of: ?l is: ?i as: :entity cardinality: :many))";
+        let reads = "(concept (todo ?i list: ?l title: ?t state: ?s)
+                       (xyz.todo ?i title: (:last (:text ?t)) state: (:last (:entity ?s)))
+                       (xyz.list ?l task: (:all (:entity ?i))))";
+        for text in [
+            "(query (todo ?i list: ?l title: ?t state: ?s))",
+            "(query (todo ?i title: ?t))",
+            r#"(assert (todo todo:1 list: list:home title: "Buy milk" state: :open))"#,
+            "(rule (xyz.open ?i title: ?t) (todo ?i title: ?t state: :open))",
+        ] {
+            let by_lines = expanded(lines, text).unwrap();
+            assert_eq!(by_lines, expanded(reads, text).unwrap(), "{text}");
+            assert!(!by_lines.is_empty());
+        }
+        assert_eq!(
+            expanded(
+                lines,
+                r#"(assert (todo todo:1 list: list:home title: "Buy milk" state: :open))"#
+            )
+            .unwrap(),
+            vec![
+                r#"(rule (assert (xyz.todo todo:1 state: (:last (:entity :open)) title: (:last (:text "Buy milk")))))"#,
+                "(rule (assert (xyz.list list:home task: (:all (:entity todo:1)))))",
+            ]
+        );
+
+        // Read from the value's side, a line gives the reverse relation.
+        assert_eq!(
+            expanded(
+                "(concept (list-item ?l todo: ?t)
+                   (xyz.list/task of: ?l is: ?t cardinality: :many))",
+                "(query (list-item list:home todo: ?t))"
+            )
+            .unwrap(),
+            vec![
+                "(rule (report (xyz.list list:home task: (:all ?t))) (xyz.list list:home task: (:all ?t)))"
+            ]
+        );
+    }
+
+    /// Every variable of a concept's body is one of its parameters,
+    /// written as lines too, and a line that is not one refuses the
+    /// concept where it is defined.
+    #[test]
+    fn it_refuses_a_concept_whose_lines_hold_a_variable_its_head_does_not() {
+        assert!(matches!(
+            expanded(
+                "(concept (todo ?i title: ?t)
+                   (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
+                   (xyz.list/task of: ?l is: ?i as: :entity cardinality: :many))",
+                "(query (todo ?i title: ?t))"
+            ),
+            Err(Error::Refused(why)) if why.contains("every variable in it is a parameter: ?l")
+        ));
+        assert!(matches!(
+            expanded(
+                "(concept (todo ?i title: ?t)
+                   (xyz.todo/title of: ?i is: ?t cardinality: :few))",
+                "(query (todo ?i title: ?t))"
+            ),
+            Err(Error::Refused(why)) if why.contains("is not a cardinality")
         ));
     }
 

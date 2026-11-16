@@ -92,6 +92,83 @@ async fn it_defines_a_concept_and_runs_a_command_through_it() -> Result<()> {
     Ok(())
 }
 
+/// A concept written as lines, an attribute a line, runs as one written
+/// as a read of several fields does: written through by a rule a
+/// command fires and read back. `:one` reads the newest claim and
+/// `:many` every claim.
+#[dialog_common::test]
+async fn it_runs_a_concept_written_as_lines() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let (_, diagnostics) = notebook
+        .submit(
+            r#"(concept (todo ?i list: ?l title: ?t state: ?s)
+                 (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
+                 (xyz.todo/state of: ?i is: ?s as: [:open :done] cardinality: :one)
+                 (xyz.todo/list of: ?i is: ?l as: :entity cardinality: :one))
+
+               (rule (assert (todo ?i list: ?l title: ?t state: :open))
+                 (add (todo ?i list: ?l title: ?t)))
+
+               (rule (assert (xyz.todo/state of: ?i is: :done as: :entity cardinality: :one))
+                 (complete (todo ?i)))"#,
+        )
+        .await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    notebook
+        .submit(
+            r#"(add (todo todo:1 list: list:home title: "Buy milk"))
+               (add (todo todo:2 list: list:home title: "Call mum"))"#,
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (todo ?i title: ?t state: ?s))").await?,
+        vec![
+            r#"(xyz.todo todo:1 state: :open title: "Buy milk")"#,
+            r#"(xyz.todo todo:2 state: :open title: "Call mum")"#,
+        ]
+    );
+
+    // A second document, so a second transaction: under `:one` the
+    // state it writes is the one read after it.
+    notebook.submit("(complete (todo todo:2))").await?;
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(query (xyz.todo/state of: ?i is: ?s as: :entity cardinality: :one))"
+        )
+        .await?,
+        vec![
+            "(xyz.todo todo:1 state: :open)",
+            "(xyz.todo todo:2 state: :done)",
+        ]
+    );
+    assert_eq!(
+        report(&mut notebook, "(query (todo ?i title: ?t state: :open))").await?,
+        vec![r#"(xyz.todo todo:1 state: :open title: "Buy milk")"#]
+    );
+
+    // Under `:many` a write adds a claim, and a read gives every one.
+    notebook
+        .submit(r#"(assert (xyz.todo/tag of: todo:1 is: "home" as: :text cardinality: :many))"#)
+        .await?;
+    notebook
+        .submit(r#"(assert (xyz.todo/tag of: todo:1 is: "shop" as: :text cardinality: :many))"#)
+        .await?;
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(query (xyz.todo/tag of: todo:1 is: ?tag as: :text cardinality: :many))"
+        )
+        .await?,
+        vec![
+            r#"(xyz.todo todo:1 tag: "home")"#,
+            r#"(xyz.todo todo:1 tag: "shop")"#,
+        ]
+    );
+    Ok(())
+}
+
 /// `increment` is defined nowhere but in the rule that reads it. The
 /// count is kept with `assert!`, so it stays.
 #[dialog_common::test]
