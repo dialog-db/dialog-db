@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A provider claims the commands whose rows satisfy its concept, and a command sees the rows of its tick
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD). Refs
+[#823](https://github.com/dialog-db/dialog-db/pull/823). Refs
 tonk-labs/tonk#1318, issues 9 and 10.
 
 A provider now claims a landed command when the command's rows satisfy
