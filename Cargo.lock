@@ -1282,6 +1282,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-answer"
+version = "0.4.0"
+dependencies = [
+ "dialog-common",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-baseline"
 version = "0.4.0"
 dependencies = [
@@ -1756,6 +1764,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "clap",
+ "dialog-answer",
  "dialog-capability",
  "dialog-common",
  "dialog-corpus",
@@ -1767,6 +1776,7 @@ dependencies = [
  "dialog-repository",
  "dialog-storage",
  "futures-util",
+ "ipld-core",
  "serde",
  "serde_json",
  "tokio",

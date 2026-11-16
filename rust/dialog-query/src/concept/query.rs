@@ -121,28 +121,26 @@ fn merge_parameters(
             continue;
         }
 
-        match result.get(param_name) {
-            Some(Binding::Present(value)) => {
-                if !took(merged.bind(user_param, value.clone()))? {
-                    return Ok(None);
-                }
+        // The slot moves over as it is: a binding a scan made in place
+        // stays in place in the caller's row.
+        match merged.bind_slot_of(user_param, result, param_name) {
+            // Unbound is expected: not every parameter survives the
+            // concept evaluation (e.g. a blank slot the rule never
+            // touched). Skip and let the user variable stay
+            // un-extended.
+            Ok(None) | Ok(Some(false)) => {}
+            Ok(Some(true)) => {
                 if let Some(name) = user_param.shared_name()
                     && let Some(standing) = result.standing_of(param_name)
                 {
                     merged.cite_variable_standing(name, standing);
                 }
             }
-            Some(Binding::Absent) => {
-                let absent = took(merged.bind_absent(user_param))?;
-                if !absent {
+            Err(error) => {
+                if !took(Err(error))? {
                     return Ok(None);
                 }
             }
-            // Unbound is expected: not every parameter survives the
-            // concept evaluation (e.g. a blank slot the rule never
-            // touched). Skip and let the user variable stay
-            // un-extended.
-            None => {}
         }
     }
     merged.adopt_citations(result);

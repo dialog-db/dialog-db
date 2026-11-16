@@ -7,7 +7,7 @@ use crate::environment::Environment;
 use crate::formula::number::Numeric;
 use crate::query::Application;
 use crate::query::Output;
-use crate::selection::{Match, Selection, Standing};
+use crate::selection::{Match, Part, Scanned, Selection, Standing, lazy_bindings};
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::{Any, Record};
 use crate::{
@@ -16,11 +16,21 @@ use crate::{
 };
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
-use dialog_corpus::{Cause, DialogCorpusError, Fact, Select};
+use dialog_corpus::{Cause, CheckedRow, DialogCorpusError, Fact, FactView, Select};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::pin::Pin;
+
+/// How [`AttributeQueryAll::place`] binds a scanned row.
+pub(crate) enum Placed {
+    /// In place, checked.
+    InPlace(CheckedRow),
+    /// Eagerly, as main binds it.
+    Eager(FactView),
+    /// Not at all: its stored bytes are corrupt.
+    Corrupt,
+}
 
 /// Base EAV scan query that yields all matching facts.
 ///
@@ -233,6 +243,77 @@ impl AttributeQueryAll {
     /// `fact` as this query's typed slots read it, or `None` when they
     /// do not admit it: a number reaches a slot of another number type
     /// through its view ([`Kind::view`]).
+    /// How a scanned row is bound: in place ([`Self::merge_scanned`]) when
+    /// lazy bindings are on and the scan's kinds admit the row as it is
+    /// stored, without reading its value through another type's view or
+    /// checking a refinement; eagerly, as main binds it, otherwise. The row
+    /// is checked once either way it is read in place, and a corrupt one
+    /// is passed over as main passes it over.
+    pub(crate) fn place(&self, row: FactView) -> Result<Placed, DialogCorpusError> {
+        if !lazy_bindings() {
+            return Ok(Placed::Eager(row));
+        }
+        let row = match row.checked() {
+            Ok(row) => row,
+            Err(DialogCorpusError::CorruptEntry(reason)) => {
+                tracing::warn!(%reason, "ignoring corrupt stored row");
+                return Ok(Placed::Corrupt);
+            }
+            Err(error) => return Err(error),
+        };
+        if let Some(kind) = self.the.kind()
+            && kind.refinement().is_some()
+        {
+            return Ok(Placed::Eager(row.into_view()));
+        }
+        let in_place = match self.is.kind() {
+            None => true,
+            Some(Kind::Primitive(primitive)) => primitive.contains(row.value_view().data_type()),
+            Some(_) => false,
+        };
+        Ok(if in_place {
+            Placed::InPlace(row)
+        } else {
+            Placed::Eager(row.into_view())
+        })
+    }
+
+    /// [`Self::merge`] for a row bound in place: its slots and its claim
+    /// share the scanned row, and nothing is materialized until something
+    /// reads it. [`Self::place`] decided the row is bound in place.
+    pub(crate) fn merge_scanned(
+        &self,
+        candidate: &mut Match,
+        row: CheckedRow,
+    ) -> Result<(), EvaluationError> {
+        let cause = row.cause().cloned().unwrap_or(Cause([0; 32]));
+        let standing = Standing::new(row.standing(), cause.clone());
+        let row = Scanned::new(row);
+        candidate.reserve(4);
+        if let Some(name) = self.the.shared_name() {
+            candidate.bind_scanned(name, self.the.binding_kind(), &row, Part::The)?;
+        }
+        if let Some(name) = self.of.shared_name() {
+            candidate.bind_scanned(name, self.of.binding_kind(), &row, Part::Of)?;
+        }
+        if let Some(name) = self.is.shared_name() {
+            candidate.bind_scanned(name, self.is.kind(), &row, Part::Is)?;
+        }
+        if let Some(name) = self.cause.shared_name() {
+            candidate.bind_variable(
+                name,
+                self.cause.binding_kind(),
+                Value::Bytes(cause.0.into()),
+            )?;
+        }
+        candidate.cite_scanned(&self.source, &row);
+        match self.is.shared_name() {
+            Some(name) => candidate.cite_variable_standing(name, standing),
+            None => candidate.cite_standing(&self.source, standing),
+        }
+        Ok(())
+    }
+
     pub(crate) fn admit(&self, mut fact: Fact) -> Option<Fact> {
         if let Some(kind) = self.is.kind() {
             fact.is = kind.view(fact.is)?;
@@ -419,6 +500,16 @@ impl AttributeQueryAll {
                     // corrupt or foreign-written tree entry: ignore it
                     // rather than failing the query.
                     let fact = fact?;
+                    let fact = match selector.place(fact)? {
+                        Placed::InPlace(row) => {
+                            let mut extension = base.clone();
+                            selector.merge_scanned(&mut extension, row)?;
+                            yield extension;
+                            continue;
+                        }
+                        Placed::Corrupt => continue,
+                        Placed::Eager(fact) => fact,
+                    };
                     let standing = fact.standing();
                     let fact = match fact.to_owned() {
                         Ok(fact) => fact,

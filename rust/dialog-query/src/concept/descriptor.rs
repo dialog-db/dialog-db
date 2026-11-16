@@ -650,7 +650,11 @@ impl<'a> Builder<'a> {
 /// used in the match.
 #[derive(Debug, Clone)]
 pub struct ConceptConclusion {
-    this: Entity,
+    /// The entity, made from the row's `this` binding when first asked
+    /// for: a row bound in place hands its fields on (an answer's encoder
+    /// reads them with [`ConceptConclusion::view`]) without ever building
+    /// it.
+    this: std::sync::OnceLock<Entity>,
     terms: Parameters,
     source: Match,
 }
@@ -664,7 +668,7 @@ pub struct ConceptConclusion {
 /// maintenance emits a retract-and-reassert of unchanged rows.
 impl PartialEq for ConceptConclusion {
     fn eq(&self, other: &Self) -> bool {
-        self.this == other.this && self.values() == other.values()
+        self.entity() == other.entity() && self.values() == other.values()
     }
 }
 
@@ -693,7 +697,36 @@ impl ConceptConclusion {
 impl ConceptConclusion {
     /// Returns the entity this conclusion describes.
     pub fn entity(&self) -> &Entity {
-        &self.this
+        self.this.get_or_init(|| {
+            let this = self.terms.get("this").expect("a realized row has a `this` term");
+            let value = match this {
+                Term::Constant(value) => value.clone(),
+                Term::Variable { name: Some(name), .. } => self
+                    .source
+                    .lookup(&Term::<Any>::var(name.clone()))
+                    .and_then(|binding| binding.content())
+                    .expect("a realized row binds `this`"),
+                Term::Variable { name: None, .. } => unreachable!("realize refuses a blank `this`"),
+            };
+            Entity::try_from(value).expect("realize checked `this` is an entity")
+        })
+    }
+
+    /// A field's value read in place: `None` when the field is not one
+    /// of the query's terms or its variable is unbound, `Some(None)` when
+    /// it is absent. Reads nothing into an owned [`Value`]: the reading
+    /// counterpart of [`Self::get`] for a caller that hands values on.
+    pub fn view(&self, field: &str) -> Option<Option<dialog_corpus::ValueView<'_>>> {
+        match self.terms.get(field)? {
+            Term::Constant(value) => Some(Some(dialog_corpus::ValueView::from(value))),
+            Term::Variable { name: Some(name), .. } => self.source.view(name),
+            Term::Variable { name: None, .. } => None,
+        }
+    }
+
+    /// The query's terms, by field.
+    pub fn terms(&self) -> &Parameters {
+        &self.terms
     }
 
     /// Look up a field value by its concept field name (e.g. "name", "age").
@@ -737,7 +770,7 @@ impl ConceptConclusion {
 
 impl Conclusion for ConceptConclusion {
     fn this(&self) -> &Entity {
-        &self.this
+        self.entity()
     }
 }
 
@@ -807,14 +840,13 @@ impl Application for ConceptQuery {
     /// by term and binding by binding, like the one this query realizes
     /// for the same facts.
     fn adopt(&self, conclusion: ConceptConclusion) -> Result<ConceptConclusion, EvaluationError> {
-        let ConceptConclusion {
-            this, mut source, ..
-        } = conclusion;
+        let this = conclusion.entity().clone();
+        let ConceptConclusion { mut source, .. } = conclusion;
         if let Some(term @ Term::Variable { name: Some(_), .. }) = self.terms.get("this") {
             source.bind(term, Value::Entity(this.clone()))?;
         }
         Ok(ConceptConclusion {
-            this,
+            this: this.into(),
             terms: self.terms.clone(),
             source,
         })
@@ -827,15 +859,28 @@ impl Application for ConceptQuery {
                 .ok_or_else(|| EvaluationError::UnboundVariable {
                     variable_name: "this".to_string(),
                 })?;
-        let entity: Entity = match this_param {
+        let this = std::sync::OnceLock::new();
+        match this_param {
             Term::Variable {
                 name: Some(name), ..
             } => {
-                let typed_term: Term<Entity> = Term::var(name.clone());
-                Entity::try_from(source.lookup(&Term::from(&typed_term))?.content()?)?
+                // A `this` bound in place is checked to be an entity and
+                // left in place; anything else is read as main reads it.
+                let in_place = matches!(
+                    source.view(name),
+                    Some(Some(dialog_corpus::ValueView::Entity(_)))
+                );
+                if !in_place {
+                    let typed_term: Term<Entity> = Term::var(name.clone());
+                    let entity =
+                        Entity::try_from(source.lookup(&Term::from(&typed_term))?.content()?)?;
+                    let _ = this.set(entity);
+                }
             }
             Term::Constant(value) => match value {
-                Value::Entity(e) => e.clone(),
+                Value::Entity(e) => {
+                    let _ = this.set(e.clone());
+                }
                 _ => {
                     return Err(EvaluationError::UnboundVariable {
                         variable_name: "this".to_string(),
@@ -849,7 +894,7 @@ impl Application for ConceptQuery {
             }
         };
         Ok(ConceptConclusion {
-            this: entity,
+            this,
             terms: self.terms.clone(),
             source,
         })

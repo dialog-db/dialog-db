@@ -22,6 +22,8 @@ dialog-common = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 anyhow = { workspace = true }
 blake3 = { workspace = true }
+dialog-answer = { workspace = true }
+ipld-core = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 dialog-corpus = { workspace = true }
 dialog-capability = { workspace = true }

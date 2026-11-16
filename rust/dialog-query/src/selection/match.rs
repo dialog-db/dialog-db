@@ -12,6 +12,19 @@ use crate::types::Record;
 
 use super::Selection;
 
+mod slot;
+pub(crate) use slot::Part;
+pub(crate) use slot::Scanned;
+use slot::{Cited, Slot};
+
+/// Whether a scan binds the rows it reads in place ([`Slot::Scanned`]),
+/// or materializes them as main does. Read once, from
+/// `DIALOG_LAZY_BINDINGS` (`0` turns it off), so one build measures both.
+pub fn lazy_bindings() -> bool {
+    static LAZY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LAZY.get_or_init(|| std::env::var("DIALOG_LAZY_BINDINGS").map_or(true, |value| value != "0"))
+}
+
 /// A row-level binding for a variable.
 ///
 /// Distinguishes [`Binding::Present`] (the variable resolved to a
@@ -128,11 +141,11 @@ pub struct Match {
     /// Held as a small vec probed linearly, not a hash map: a query
     /// binds a handful of variables, and every probe of a map paid a
     /// SipHash of the name before comparing anything.
-    bindings: Vec<(Arc<str>, Binding)>,
+    bindings: Vec<(Arc<str>, Slot)>,
     // TODO: Once Value::Record supports the RecordFormat trait proposed in
     // https://github.com/dialog-db/dialog-db/pull/221 claims can be stored
     // directly as Value::Record in bindings, eliminating this separate list.
-    claims: Vec<(Arc<str>, Arc<Claim>)>,
+    claims: Vec<(Arc<str>, Cited)>,
     /// The standing of the fact that bound each cited variable.
     standings: Vec<(Arc<str>, Standing)>,
     /// The bindings and claims this row extends, shared with every other
@@ -151,8 +164,8 @@ pub struct Match {
 /// and shared by every row derived from it after.
 #[derive(Debug, Default)]
 struct Frame {
-    bindings: Vec<(Arc<str>, Binding)>,
-    claims: Vec<(Arc<str>, Arc<Claim>)>,
+    bindings: Vec<(Arc<str>, Slot)>,
+    claims: Vec<(Arc<str>, Cited)>,
     standings: Vec<(Arc<str>, Standing)>,
     parent: Option<Arc<Frame>>,
 }
@@ -170,7 +183,7 @@ pub use dialog_corpus::Standing;
 /// same values, in any order, however their frames are split.
 impl PartialEq for Match {
     fn eq(&self, other: &Self) -> bool {
-        fn same<T: PartialEq>(left: Vec<&(Arc<str>, T)>, right: Vec<&(Arc<str>, T)>) -> bool {
+        fn same<T: PartialEq>(left: Vec<(&Arc<str>, &T)>, right: Vec<(&Arc<str>, &T)>) -> bool {
             left.len() == right.len()
                 && left.iter().all(|(name, value)| {
                     right
@@ -178,10 +191,18 @@ impl PartialEq for Match {
                         .any(|(other_name, other_value)| name == other_name && value == other_value)
                 })
         }
-        same(
-            self.all_bindings().collect(),
-            other.all_bindings().collect(),
-        ) && same(self.all_claims(), other.all_claims())
+        fn bindings(row: &Match) -> Vec<(&Arc<str>, &Binding)> {
+            row.all_bindings()
+                .map(|(name, slot)| (name, slot.binding()))
+                .collect()
+        }
+        fn claims(row: &Match) -> Vec<(&Arc<str>, &Arc<Claim>)> {
+            row.all_claims()
+                .into_iter()
+                .map(|(name, cited)| (name, cited.claim()))
+                .collect()
+        }
+        same(bindings(self), bindings(other)) && same(claims(self), claims(other))
     }
 }
 
@@ -231,7 +252,7 @@ impl Match {
     /// Every claim this row cites, its own first, then its frames'
     /// innermost first; a name cited twice along the ancestry appears
     /// twice, the first occurrence being the one the row sees.
-    fn claims(&self) -> impl Iterator<Item = &(Arc<str>, Arc<Claim>)> {
+    fn claims(&self) -> impl Iterator<Item = &(Arc<str>, Cited)> {
         self.claims
             .iter()
             .chain(self.frames().flat_map(|frame| frame.claims.iter()))
@@ -248,7 +269,7 @@ impl Match {
 
     /// Every binding of this row, its own and its frames'. A name is
     /// bound at most once along a row's ancestry, so nothing repeats.
-    fn all_bindings(&self) -> impl Iterator<Item = &(Arc<str>, Binding)> {
+    fn all_bindings(&self) -> impl Iterator<Item = &(Arc<str>, Slot)> {
         self.bindings
             .iter()
             .chain(self.frames().flat_map(|frame| frame.bindings.iter()))
@@ -257,8 +278,8 @@ impl Match {
     /// Every claim this row cites, innermost first. A name cited again
     /// replaces the earlier citation, so only a name's first occurrence
     /// counts.
-    fn all_claims(&self) -> Vec<&(Arc<str>, Arc<Claim>)> {
-        let mut claims: Vec<&(Arc<str>, Arc<Claim>)> = Vec::new();
+    fn all_claims(&self) -> Vec<&(Arc<str>, Cited)> {
+        let mut claims: Vec<&(Arc<str>, Cited)> = Vec::new();
         for entry in self
             .claims
             .iter()
@@ -306,7 +327,7 @@ impl Match {
     /// derived from, so the row it merges into stands as they do.
     pub(crate) fn adopt_citations(&mut self, other: &Match) {
         for (name, claim) in other.claims() {
-            if self.find_claim(name).is_none() {
+            if !self.cites(name) {
                 self.claims.push((name.clone(), claim.clone()));
             }
         }
@@ -341,6 +362,11 @@ impl Match {
 
     /// The binding for `name` along this row's ancestry.
     fn find(&self, name: &str) -> Option<&Binding> {
+        self.find_slot(name).map(Slot::binding)
+    }
+
+    /// The slot for `name` along this row's ancestry, as stored.
+    fn find_slot(&self, name: &str) -> Option<&Slot> {
         probe(&self.bindings, name)
             .or_else(|| self.frames().find_map(|frame| probe(&frame.bindings, name)))
     }
@@ -349,6 +375,13 @@ impl Match {
     fn find_claim(&self, name: &str) -> Option<&Arc<Claim>> {
         probe(&self.claims, name)
             .or_else(|| self.frames().find_map(|frame| probe(&frame.claims, name)))
+            .map(Cited::claim)
+    }
+
+    /// Whether this row cites a claim for `name`, without making it.
+    fn cites(&self, name: &str) -> bool {
+        probe(&self.claims, name).is_some()
+            || self.frames().any(|frame| probe(&frame.claims, name).is_some())
     }
 
     /// Place this row in a scope nested in `caller`'s: the row is
@@ -407,11 +440,25 @@ impl Match {
             name: Some(name), ..
         } = term
         {
-            let claim = Arc::new(claim);
-            match self.claims.iter_mut().find(|(held, _)| **held == **name) {
-                Some((_, slot)) => *slot = claim,
-                None => self.claims.push((name.clone(), claim)),
-            }
+            self.cite_as(name, Cited::Claim(Arc::new(claim)));
+        }
+    }
+
+    /// Cite the scanned `row` as evidence for `term`, made into a
+    /// [`Claim`] only when something proves it.
+    pub(crate) fn cite_scanned(&mut self, term: &Term<Record>, row: &Arc<Scanned>) {
+        if let Term::Variable {
+            name: Some(name), ..
+        } = term
+        {
+            self.cite_as(name, Cited::scanned(row));
+        }
+    }
+
+    fn cite_as(&mut self, name: &Arc<str>, cited: Cited) {
+        match self.claims.iter_mut().find(|(held, _)| **held == **name) {
+            Some((_, slot)) => *slot = cited,
+            None => self.claims.push((name.clone(), cited)),
         }
     }
 
@@ -431,15 +478,18 @@ impl Match {
     /// kept. Claims from `other` fill in only where `self` has none, so a
     /// row's own provenance is never overwritten by the row it joins with.
     pub fn combine(mut self, other: &Match) -> Option<Match> {
-        for (name, binding) in other.all_bindings() {
-            match self.find(name) {
-                None => self.bindings.push((name.clone(), binding.clone())),
-                Some(existing) if existing == binding => {}
+        for (name, slot) in other.all_bindings() {
+            match self.find_slot(name) {
+                None => self.bindings.push((name.clone(), slot.clone())),
+                Some(existing)
+                    if existing
+                        .agrees(slot)
+                        .unwrap_or_else(|| existing.binding() == slot.binding()) => {}
                 Some(_) => return None,
             }
         }
         for (name, claim) in other.claims() {
-            if self.find_claim(name).is_none() {
+            if !self.cites(name) {
                 self.claims.push((name.clone(), claim.clone()));
             }
         }
@@ -477,8 +527,8 @@ impl Match {
     /// merge-versus-nested-loop choice turns on.
     pub fn environment(&self) -> crate::Environment {
         let mut env = crate::Environment::new();
-        for (name, binding) in self.all_bindings() {
-            if matches!(binding, Binding::Present(_)) {
+        for (name, slot) in self.all_bindings() {
+            if slot.is_present() {
                 env.add(name.as_ref());
             }
         }
@@ -570,7 +620,7 @@ impl Match {
             }
         } else {
             self.bindings
-                .push((name.into_name(), Binding::Present(value)));
+                .push((name.into_name(), Slot::Bound(Binding::Present(value))));
             Ok(())
         }
     }
@@ -605,7 +655,8 @@ impl Match {
                 }),
             }
         } else {
-            self.bindings.push((name.into_name(), Binding::Absent));
+            self.bindings
+                .push((name.into_name(), Slot::Bound(Binding::Absent)));
             Ok(())
         }
     }
@@ -629,10 +680,85 @@ impl Match {
         match term {
             Term::Variable {
                 name: Some(key), ..
-            } => self.find(key).map(|b| b.is_present()).unwrap_or(false),
+            } => self.find_slot(key).is_some_and(Slot::is_present),
             Term::Variable { name: None, .. } => false,
             Term::Constant(_) => true,
         }
+    }
+
+    /// Bind `part` of the scanned `row` to the variable `name`, in place:
+    /// nothing is materialized until something reads the binding as a
+    /// value. Takes the eager path ([`Self::bind_variable`]) whenever the
+    /// bytes cannot settle it: a kind that reads the value through a view,
+    /// or a variable already bound to a value that has to be compared as a
+    /// value.
+    pub(crate) fn bind_scanned<N: AsRef<str> + VariableName>(
+        &mut self,
+        name: N,
+        kind: Option<Kind>,
+        row: &Arc<Scanned>,
+        part: Part,
+    ) -> Result<(), EvaluationError> {
+        let incoming = Slot::scanned(row, part);
+        let in_place = match kind {
+            None => true,
+            Some(Kind::Primitive(primitive)) => incoming
+                .view()
+                .is_some_and(|view| primitive.contains(view.data_type())),
+            Some(_) => false,
+        };
+        let settled = in_place
+            && match self.find_slot(name.as_ref()) {
+                None => {
+                    self.bindings.push((name.into_name(), incoming));
+                    return Ok(());
+                }
+                Some(existing) => existing.agrees(&incoming) == Some(true),
+            };
+        if settled {
+            return Ok(());
+        }
+        let value = incoming.binding().clone().content()?;
+        self.bind_variable(name, kind, value)
+    }
+
+    /// Bind `term` to what `slot` holds, moving a scanned slot over as it
+    /// is rather than materializing it.
+    pub(crate) fn bind_slot_of(
+        &mut self,
+        term: &Term<Any>,
+        from: &Match,
+        name: &str,
+    ) -> Result<Option<bool>, EvaluationError> {
+        let Some(slot) = from.find_slot(name) else {
+            return Ok(None);
+        };
+        Ok(Some(match slot {
+            Slot::Scanned { row, part } => match term {
+                Term::Variable {
+                    name: Some(variable),
+                    ..
+                } => self.bind_scanned(variable, term.kind(), row, *part).map(|_| true)?,
+                _ => true,
+            },
+            Slot::Bound(Binding::Present(value)) => {
+                self.bind(term, value.clone())?;
+                true
+            }
+            Slot::Bound(Binding::Absent) => {
+                self.bind_absent(term)?;
+                false
+            }
+        }))
+    }
+
+    /// The value bound to the variable `name`, read in place: `None` when
+    /// no premise touched it, `Some(None)` when it is
+    /// [`Binding::Absent`]. The reading counterpart of [`Self::get`] for
+    /// a caller that hands values on (an answer's encoder) and has no use
+    /// for an owned [`Value`].
+    pub fn view(&self, name: &str) -> Option<Option<dialog_corpus::ValueView<'_>>> {
+        self.find_slot(name).map(Slot::view)
     }
 
     /// Look up the binding for a term.

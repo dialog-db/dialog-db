@@ -101,12 +101,20 @@ impl Uri {
     /// therefore holds a valid canonical URI by construction on every path,
     /// stored reads included.
     pub fn from_stored(s: &str) -> Result<Self, IdentityError> {
+        Self::check_stored(s)?;
+        Ok(Self(s.into()))
+    }
+
+    /// Checks that `s` is what [`Self::from_stored`] would adopt, without
+    /// building the [`Uri`]: a reader that only hands the stored string on
+    /// (an answer's encoder) validates the row without allocating.
+    pub fn check_stored(s: &str) -> Result<(), IdentityError> {
         // The cheap proof first: for the common entity shapes (did:key,
         // user:, blob: — opaque-path non-special URIs) canonicality is
         // PROVEN by a single byte scan, ~free per row. Everything else
         // takes the real parse below. Same invariant either way.
         if is_provably_canonical(s) {
-            return Ok(Self(s.into()));
+            return Ok(());
         }
         let url: Url = s.parse().map_err(|error| {
             IdentityError::CorruptEntry(format!("stored entity is not a URI: {error}"))
@@ -119,7 +127,13 @@ impl Uri {
                 "stored entity is not a canonical URI rendering: {s:?}"
             )));
         }
-        Ok(Self(s.into()))
+        Ok(())
+    }
+
+    /// Adopts a stored string [`Self::check_stored`] already accepted,
+    /// without checking it again.
+    pub fn stored_unchecked(s: &str) -> Self {
+        Self(s.into())
     }
 
     /// The URI as its normalized string.

@@ -1,0 +1,60 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Answer decode</title>
+<script type="module">
+import { Dictionary } from "./frame.js";
+
+const median = (xs) => xs.sort((a, b) => a - b)[xs.length >> 1];
+
+function time(runs, body) {
+  body();
+  const out = [];
+  for (let i = 0; i < runs; i++) {
+    const start = performance.now();
+    body();
+    out.push((performance.now() - start) * 1000);
+  }
+  return { median: median(out), min: Math.min(...out), max: Math.max(...out) };
+}
+
+async function bytes(path) {
+  return new Uint8Array(await (await fetch(path)).arrayBuffer());
+}
+
+window.measure = async (name, shown, fields, runs = 30) => {
+  const json = await bytes(`data/${name}.json`);
+  const frame = await bytes(`data/${name}.frame`);
+  let sink = 0;
+  const result = {};
+  // What the page does today: decode the SSE text, JSON.parse it, and
+  // read the shown fields (before serde_wasm_bindgen copies it all again
+  // into Rust structs, which this leaves out).
+  result.json_two = time(runs, () => {
+    const parsed = JSON.parse(new TextDecoder().decode(json));
+    for (const row of parsed.conclusions) {
+      sink += String(row.fields[shown[0]]).length + String(row.fields[shown[1]]).length;
+    }
+  });
+  result.json_parse = time(runs, () => {
+    sink += JSON.parse(new TextDecoder().decode(json)).conclusions.length;
+  });
+  result.frame_two = time(runs, () => {
+    const answer = new Dictionary().accept(frame);
+    const [a, b] = shown.map((field) => answer.column(field));
+    for (let row = 0; row < answer.rows(); row++) {
+      sink += String(answer.get(row, a)).length + String(answer.get(row, b)).length;
+    }
+  });
+  result.frame_all = time(runs, () => {
+    const answer = new Dictionary().accept(frame);
+    const columns = fields.map((field) => answer.column(field));
+    for (let row = 0; row < answer.rows(); row++) {
+      for (const column of columns) sink += String(answer.get(row, column)).length;
+    }
+  });
+  result.sink = sink;
+  result.bytes = { json: json.length, frame: frame.length };
+  return result;
+};
+window.ready = true;
+</script>

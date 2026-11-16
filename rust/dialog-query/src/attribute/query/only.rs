@@ -1,4 +1,4 @@
-use super::all::AttributeQueryAll;
+use super::all::{AttributeQueryAll, Placed};
 use super::pipelined;
 use crate::Claim;
 use crate::Value;
@@ -312,21 +312,36 @@ impl AttributeQueryOnly {
                                     // (`CorruptEntry`) is a corrupt tree
                                     // entry: drop the group's yield rather
                                     // than failing the query.
-                                    match materialize_winner(current)?.and_then(
-                                        |(winner, standing)| {
-                                            selector.admit(winner).map(|winner| (winner, standing))
-                                        },
-                                    ) {
-                                        Some((winner, standing))
-                                            if value_constraint
-                                                .as_ref()
-                                                .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
-                                        {
+                                    let placed = if value_constraint.is_none() {
+                                        selector.place(current)?
+                                    } else {
+                                        Placed::Eager(current)
+                                    };
+                                    match placed {
+                                        Placed::InPlace(row) => {
                                             let mut extension = base.clone();
-                                            selector.merge(&mut extension, winner, standing)?;
+                                            selector.merge_scanned(&mut extension, row)?;
                                             yield extension;
                                         }
-                                        _ => {}
+                                        Placed::Corrupt => {}
+                                        Placed::Eager(current) => {
+                                            match materialize_winner(current)?.and_then(
+                                                |(winner, standing)| {
+                                                    selector.admit(winner).map(|winner| (winner, standing))
+                                                },
+                                            ) {
+                                                Some((winner, standing))
+                                                    if value_constraint
+                                                        .as_ref()
+                                                        .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
+                                                {
+                                                    let mut extension = base.clone();
+                                                    selector.merge(&mut extension, winner, standing)?;
+                                                    yield extension;
+                                                }
+                                                _ => {}
+                                            }
+                                        }
                                     }
                                     fact
                                 }
@@ -338,19 +353,34 @@ impl AttributeQueryOnly {
                     // Yield the final group's winner (unless its stored
                     // bytes are corrupt; see the group-close arm above).
                     if let Some(winner) = candidate.take() {
-                        match materialize_winner(winner)?.and_then(|(winner, standing)| {
-                            selector.admit(winner).map(|winner| (winner, standing))
-                        }) {
-                            Some((winner, standing))
-                                if value_constraint
-                                    .as_ref()
-                                    .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
-                            {
+                        let placed = if value_constraint.is_none() {
+                            selector.place(winner)?
+                        } else {
+                            Placed::Eager(winner)
+                        };
+                        match placed {
+                            Placed::InPlace(row) => {
                                 let mut extension = base.clone();
-                                selector.merge(&mut extension, winner, standing)?;
+                                selector.merge_scanned(&mut extension, row)?;
                                 yield extension;
                             }
-                            _ => {}
+                            Placed::Corrupt => {}
+                            Placed::Eager(winner) => {
+                                match materialize_winner(winner)?.and_then(|(winner, standing)| {
+                                    selector.admit(winner).map(|winner| (winner, standing))
+                                }) {
+                                    Some((winner, standing))
+                                        if value_constraint
+                                            .as_ref()
+                                            .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
+                                    {
+                                        let mut extension = base.clone();
+                                        selector.merge(&mut extension, winner, standing)?;
+                                        yield extension;
+                                    }
+                                    _ => {}
+                                }
+                            }
                         }
                     }
                 } else {
