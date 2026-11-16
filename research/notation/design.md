@@ -176,21 +176,25 @@ Ties fall to cause, then to the value's hash, so every order is total and every 
 - An elector returns one of its claims, so a write binds it: `(assert (account acct:1 status: :active))` writes `?s = :active` through the line, which under `:many` adds a claim. The read still gives `:suspended` while `:suspended` is held. Un-suspending is retracting it.
 - In R45 a ranking in a rule's conclusion, `([:suspended :active :registered] ?state)`, was invisible without a sentence: 0 of 20 readers kept `:suspended` after `:active` was asserted again, and 20 of 20 with one.
 
-Only electors fold in a concept. A fold that computes a value, `count`, `sum`, `avg`, binds none of what it read, so nothing could be written through it, and a concept stays two-way. Those are getters.
+Only electors fold in a concept. A fold that computes a value, `count`, `sum`, `avg`, binds none of what it read, so nothing could be written through it, and a concept stays two-way. Those conclude into a concept's domain (below).
 
-### Getters
+### Derived attributes
 
-A getter is a rule whose conclusion wraps a concept and gives a value in `is:`:
+A rule may conclude an attribute in a concept's own domain, named under the concept:
 
 ```clj
-(rule (open-count (list ?l) is: (count ?t))
+(rule (list/count-open ?l is: (count ?t))
   (list ?l)
   (todo ?t list: ?l state: :open))
 
-(open-count (list list:home) is: ?n)
+(list/count-open list:home is: ?n)
 ```
 
-It reads like a property of the concept: the open count of this list is 2. It groups by the concept's entity. A computing fold goes only in a getter's `is:`: never in a concept's head, and never on an attribute, where it could be written and read back as stored.
+- `list/count-open` is an attribute in the domain of the `list` concept: the concept's hash and the name `count-open`. It is hash-addressed like any attribute, and the name matters only inside that domain.
+- A concept's domain is concluded only. Asserting `list/count-open` is an error. A stored domain, `xyz.todo`, holds facts; a concept's domain holds what rules conclude about its entities. Which is which shows in the name.
+- **Folds conclude only into a concept's domain**, choosing or computing: `count`, `all`, a view. A stored attribute never holds a folded value, so a stored `5` can never beat a count.
+- `(list ?l)` stays in the body. It anchors the group, so a list with no open to-dos has a count of 0 rather than none: a fold over an empty group gives a value, not a missing row.
+- Everything derived about a list is found under `list/`.
 
 ### Layers
 
@@ -319,7 +323,7 @@ Two devices that `add` the same list and text make one to-do; every `jot` makes 
 A conclusion is one of:
 
 - a concept or an attribute, a deduction: it holds in this tick while the conditions do, and is never stored;
-- a getter, `(name (concept ?x) is: …)`, a deduction whose `is:` may fold;
+- an attribute in a concept's domain, `(list/count-open ?l is: …)`, a deduction whose `is:` may fold;
 - a command, which holds in this tick for other rules to read;
 - `(assert …)` or `(retract …)`, which lands after the tick.
 
@@ -341,7 +345,7 @@ In R27, readers asked to write such a pair wrote two rules, each with one conclu
 
 A condition is one of:
 
-- a call on a concept, an attribute, a getter or a command;
+- a call on a concept, an attribute or a command;
 - `(unless call)`, which holds when the call has no match;
 - a constraint: a type, an equality or a comparison;
 - a formula: `id`, `fresh`, `(dialog/position ?b after: ?lo before: ?hi is: ?at)`.
@@ -394,43 +398,40 @@ A remote call, Unison's `fork` and `await`, is a layer on top: a request sent, a
 
 ## Views
 
-**Proposed.** A view is a named template over one concept:
+**Proposed.** A view is a rule whose conclusion is markup, folded over its body:
 
 ```clj
-(view (card (list ?l name: ?name))
+(view (list/card ?l)
   [:article
     [:h2 ?name]
-    [:p (open-count (list ?l)) " open"]
-    [:ul (row (todo ?t list: ?l))]])
+    [:p ?count " open"]
+    [:ul ?row]]
+  (list ?l name: ?name)
+  (list/count-open ?l is: ?count)
+  (todo ?t list: ?l)
+  (todo/row ?t is: ?row))
 
-(view (row (todo ?t title: ?title))
-  [:li ?title])
+(view (todo/row ?t)
+  [:li ?title]
+  (todo ?t title: ?title))
 ```
 
-- The head wraps one concept application and binds its fields. It reads as a sentence: the card of a list is this.
-- The body is the template. A vector is markup, as in Hiccup; a variable fills a slot; a call in parentheses is a join, as a rule's condition is, and its inputs are bound by the head.
-- A call to a getter fills the slot with its `is:`. A call to a view renders that view for each match: `(row (todo ?t list: ?l))` renders one `[:li]` per to-do on the list. There is no `for`: anything can be many, and many repeats, as tonk's templates do today.
-- Order comes from positional dictionaries, which sort by position, or from CSS `order`. Unordered matches keep a stable order between renders, so nothing reshuffles when nothing changed.
-- A concept has as many views as names. `(card (list list:home))` renders one; `(detail (list list:home))` another.
+- The head is a derived attribute of one concept, `list/card`, and exposes only its entity. From outside it is `(list/card ?l is: ?markup)`; the slots are the body's own variables.
+- The template is a fold over the group of rows for one `?l`. A slot whose variable takes one value in the group renders once; one that takes many renders each. There is no `for`: anything can be many, and many repeats, as tonk's templates do today.
+- A vector is markup, as in Hiccup. Correlated slots, a row and its tag, need a view of their own: two slots varying in one group render their own values each, unpaired.
+- Order comes from positional dictionaries, which sort by position, or from CSS `order`. Unordered values keep a stable order between renders, so nothing reshuffles when nothing changed.
+- A concept has as many views as names: `list/card`, `list/detail`.
 
-A view is data, not a rule. It expands to today's entry in the concept's views dictionary, the head kept beside the template, so a concept has one `card`, and editing the template is a rewrite:
+A view is a derived attribute like `list/count-open`, with a template for its fold. `view` names such a rule so it can be found as one. Editing the template changes the rule's hash, as editing any rule's body does, but consumers depend on `list/card`, the concept's hash and a name, which does not change.
+
+A view whose template is a record instead of markup is a query:
 
 ```clj
-(assert (tonk.concept/view of: concept:list
-          card: {of: (list ?l name: ?name)
-                 is: [:article …]}))
+(view (list/summary ?l)
+  {name: ?name  open: ?count}
+  (list ?l name: ?name)
+  (list/count-open ?l is: ?count))
 ```
-
-The renderer binds the head for an entity, and each call in the template becomes a query against that binding.
-
-A view whose body is a record instead of markup is a query, called by name for data:
-
-```clj
-(view (summary (list ?l name: ?name))
-  {name: ?name  open: (open-count (list ?l))})
-```
-
-One form returns markup or data, called by name on a concept, with joins written as calls in its result. A join in front of the head would give one card per row, so joins go in the body, where many means a list on screen.
 
 Events and routes are as [macros](macros.md) left them, and are not redone here.
 
@@ -450,9 +451,9 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 | LogiQL: constructor predicates make entities from a key. | `id` and `fresh` in a command's rule. |
 | LogiQL: `exec` runs a block once, `addblock` installs it. | A query runs a document's rules once; a transaction installs them. |
 | Bloom: a row's fields stay together because a row is one tuple. | A command's rows are keyed by its name and content. |
-| Bloom^L: lattices merge without coordination. | Electors are merges; `last` is the one that needs a clock. Computing folds are not, and live in getters. |
-| Datomic: cardinality one replaces, many adds; aggregates live in `:find` and group by what is not aggregated. | `cardinality:` does the same for writes; electors and getters group the same way. |
-| Hiccup: markup as vectors. | A view's template, with calls for joins. |
+| Bloom^L: lattices merge without coordination. | Electors are merges; `last` is the one that needs a clock. Computing folds are not, and conclude only into a concept's domain. |
+| Datomic: cardinality one replaces, many adds; aggregates live in `:find` and group by what is not aggregated. | `cardinality:` does the same for writes; every fold, views included, groups the same way. |
+| Hiccup: markup as vectors. | A view's template, a fold over its body's rows. |
 
 ## Open
 
@@ -481,8 +482,9 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 - Whether templates name models by concept name rather than by pinned URI.
 - The sketches, which predate commands.
 - The YAML spelling.
-- A getter's conclusion, `(open-count (list ?l) is: …)`, has the shape of a command, `(rename (todo ?t) title: …)`. Only `is:` tells a reader it is computed, not issued.
-- The cardinality work (`claude/pick-strategy-rules-crdt-tvdpm7`, #793) lets any deductive rule fold and ranks a fold's value against stored claims. The notation puts electors only in concept heads and computing folds only in getters, so a folded value never competes with a stored claim. The engine and the notation have to agree on this.
+- The cardinality work (`claude/pick-strategy-rules-crdt-tvdpm7`, #793) lets any deductive rule fold and ranks a fold's value against stored claims. The notation puts electors only in concept heads and every other fold only into a concept's domain, which is concluded only, so a folded value never competes with a stored claim. The engine and the notation have to agree on this.
 - A rename under `:many` when the old value is on another layer leaves the old value beside the new one.
-- Whether the form for views and queries is called `view` or `query`.
+- Whether a view whose template is a record is still called `view`, or `query`.
+- What a fold gives for an empty group: `count` gives 0, but what an empty `all` or a view over no rows renders.
 - How a view's template binds events and names commands, now that it is Hiccup.
+- How a concept's domain is spelled when the concept's name is ambiguous: `list/` resolves by name in the document.

@@ -1001,3 +1001,19 @@ Set aside along the way: a `compute` form (another thing beside concepts), folds
 2. From R31 on, run each reader clean, in an empty directory: `claude -p --model haiku --strict-mcp-config --mcp-config '{"mcpServers":{}}' --setting-sources "" --system-prompt "You are a careful reader." --tools "" --output-format json "$(cat <variant>.txt)"`. Up to R30, rounds instead started a reader with model `haiku` as a read-only agent (no shell, no tools that reach the user's apps or devices), and tell it: "This is a reading-comprehension exercise. Use the Read tool once to read `<variant>.txt`, then do exactly what that file asks. Use no other tools, do not search the web, and read no other files. Your final reply is just the numbered answers."
 3. Start every reader of a round at once, three or more per variant, interleaving variants.
 4. Score the first answer only, by the round's criteria in its results file; keep every answer.
+
+## 2026-11-16 — Derived attributes, and views as folds
+
+**Question.** A getter, `(open-count (list ?l) is: …)`, relied on its name in a notation where heads are hash-addressed and name-agnostic, and looked like a command. Views were data beside rules that supplied their values. Is there one form for both?
+
+**Method.** Design discussion with the maintainer, no reader round.
+
+**Results.** Captured in [design](design.md):
+
+- A rule may conclude an attribute in a concept's own domain, `list/count-open`: the concept's hash and a name. A concept's domain is concluded only; asserting it is an error. Every fold, choosing or computing, concludes only there.
+- A view is such a rule whose conclusion is a template, folded over the group of rows for its entity: one value renders once, many repeat. Its head exposes only the entity, `(view (list/card ?l) [...] body…)`. A record template makes it a query.
+
+Set aside: slots as view parameters (internals leak into the head); positional view parameters (every other parameter is labeled); `(all ?row)` in a conclusion (the template's fold repeats on its own).
+
+**Decision.** The design takes these as proposed.
+
