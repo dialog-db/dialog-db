@@ -1090,6 +1090,19 @@ In the same conversation he settled how a pattern is written in a stored rule (`
 
 **Decided.** By the maintainer: open. Not built here yet: this branch has the exact reading, the refusal, and symbol keys, until #778 and #799 are merged in.
 
+## 2026-11-16, Building: the design moved, and this branch had not followed
+
+**Asked.** The maintainer relayed a note his notation thread (#728) wrote for conduct: concepts as attribute lines, `cardinality:` for picks, electors in a concept's head, getters, views.
+
+**Learned.**
+
+- #728's `research/notation/design.md` is where the notation is designed, and it says so: "everything here is agreed unless it is marked Proposed". This branch took its spellings from it as of R25. It is at R45.
+- The two have drifted both ways: [alignment.md](alignment.md). The design has what this branch lacks (attribute lines, cardinality, electors, getters, layers, views, no `!`). This branch has what the design lacks (lists, the quote, structs, `...`, macros as rules).
+- The agent asked the maintainer here for decisions on the notation's surface that he was also making there, and did not read #728 again after the first sitting. A parameter left out of a read is the plainest: the design had "matches anything" all along; here it was refused on 2026-11-13 and opened again on 2026-11-15.
+- Three threads now hold decisions of his on overlapping ground, each in its own files: the notation's design (#728), this build (#772, #773), and the record (#748, #812). He carries messages between them by hand.
+
+**Decided.** By the agent, his to overrule: the surface of the notation is #728's to say. This branch builds it, and what it settles on the way goes back there or is not settled. The order is in [alignment.md](alignment.md); nothing of it is started.
+
 ## The queue
 
 **First, 2026-11-16: which composite is the record.** #812 (from #748, the thread "record values in dialog") adds another `Composite`: a set of attribute and value pairs, a field holding several values, kept as a value type of its own, with no list. #778's is a map with text keys or a list, kept as a record. The maintainer decided both, in two threads. Put to him; a note is on #812. Held until he answers: the `match` form on #799 and this branch's keys, since a key is text in one and a relation in the other. What it means here either way: a kept syntax tree needs its parts in order, and #812 has sets.
