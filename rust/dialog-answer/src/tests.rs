@@ -44,7 +44,11 @@ fn it_sends_each_token_once_per_session() {
     snapshot.row([Some(Scalar::Entity("issue:2")), Some(Scalar::Text("open"))]);
     let snapshot = snapshot.finish();
     dictionary.accept(snapshot.clone().into()).unwrap();
-    assert_eq!(dictionary.len(), 5, "two column names, two entities, one status");
+    assert_eq!(
+        dictionary.len(),
+        5,
+        "two column names, two entities, one status"
+    );
 
     let mut delta = session.frame(Kind::Delta, &["this", "status"]);
     delta.row([Some(Scalar::Entity("issue:2")), Some(Scalar::Text("open"))]);
@@ -98,7 +102,10 @@ fn it_refuses_truncated_and_malformed_frames() {
     let bytes = frame.finish();
     let mut dictionary = Dictionary::default();
     for cut in 0..bytes.len() {
-        assert!(dictionary.accept(bytes[..cut].into()).is_err(), "cut at {cut}");
+        assert!(
+            dictionary.accept(bytes[..cut].into()).is_err(),
+            "cut at {cut}"
+        );
     }
     let mut corrupt = bytes.clone();
     // The column name's text: make it invalid UTF-8.

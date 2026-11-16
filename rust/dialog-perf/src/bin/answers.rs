@@ -44,9 +44,9 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use dialog_answer::{Cell, Dictionary, Kind, Scalar, Session};
-use dialog_corpus::{Entity, Pick, Value};
 #[cfg(not(dialog_main))]
 use dialog_corpus::ValueView;
+use dialog_corpus::{Entity, Pick, Value};
 use dialog_perf::allocator;
 use dialog_perf::env::{Env, assert_all, concept, fact, query, text};
 use dialog_query::query::Output as _;
@@ -101,7 +101,12 @@ const PHASES: [&str; 7] = [
 ];
 
 /// The variants a sweep runs: dataset, rows.
-const DATASETS: [(&str, usize); 4] = [("stuff", 2000), ("stuff", 20000), ("issue", 300), ("issue", 3000)];
+const DATASETS: [(&str, usize); 4] = [
+    ("stuff", 2000),
+    ("stuff", 20000),
+    ("issue", 300),
+    ("issue", 3000),
+];
 
 fn main() -> ExitCode {
     match run_cli() {
@@ -212,7 +217,11 @@ fn view<'a>(conclusion: &'a ConceptConclusion, field: &str) -> Option<Option<Val
 /// into an owned value, and written from that. The harness's queries name
 /// each variable after its field.
 #[cfg(dialog_main)]
-fn write_rows(frame: &mut dialog_answer::Frame<'_>, columns: &[&str], conclusions: &[ConceptConclusion]) {
+fn write_rows(
+    frame: &mut dialog_answer::Frame<'_>,
+    columns: &[&str],
+    conclusions: &[ConceptConclusion],
+) {
     for conclusion in conclusions {
         let values: Vec<Option<Option<Value>>> = columns
             .iter()
@@ -224,9 +233,11 @@ fn write_rows(frame: &mut dialog_answer::Frame<'_>, columns: &[&str], conclusion
                 Some(binding.as_value().cloned())
             })
             .collect();
-        frame.row_with(values.iter().map(|cell| {
-            cell.as_ref().map(|value| value.as_ref().map(owned_scalar))
-        }));
+        frame.row_with(
+            values
+                .iter()
+                .map(|cell| cell.as_ref().map(|value| value.as_ref().map(owned_scalar))),
+        );
     }
 }
 
@@ -247,14 +258,21 @@ fn owned_scalar(value: &Value) -> Scalar<'_> {
 
 /// Writes `conclusions` into `frame`, every column read in place.
 #[cfg(not(dialog_main))]
-fn write_rows(frame: &mut dialog_answer::Frame<'_>, columns: &[&str], conclusions: &[ConceptConclusion]) {
+fn write_rows(
+    frame: &mut dialog_answer::Frame<'_>,
+    columns: &[&str],
+    conclusions: &[ConceptConclusion],
+) {
     for conclusion in conclusions {
-        let views: Vec<Option<Option<ValueView<'_>>>> =
-            columns.iter().map(|column| view(conclusion, column)).collect();
-        frame.row_with(views.iter().map(|cell| {
-            cell.as_ref()
-                .map(|value| value.as_ref().map(scalar))
-        }));
+        let views: Vec<Option<Option<ValueView<'_>>>> = columns
+            .iter()
+            .map(|column| view(conclusion, column))
+            .collect();
+        frame.row_with(
+            views
+                .iter()
+                .map(|cell| cell.as_ref().map(|value| value.as_ref().map(scalar))),
+        );
     }
 }
 
@@ -364,7 +382,12 @@ async fn columnar(env: &Env, attributes: &[&str], columns: &[&str]) -> Result<Ve
     let mut lanes = Vec::with_capacity(attributes.len());
     for attribute in attributes {
         let selector = dialog_corpus::Selector::new().the(attribute.parse()?);
-        let stream = env.branch.claims().select(selector).perform(&env.operator).await?;
+        let stream = env
+            .branch
+            .claims()
+            .select(selector)
+            .perform(&env.operator)
+            .await?;
         let mut lane = Lane {
             stream: Box::pin(stream),
             next: None,
@@ -452,7 +475,11 @@ fn answers_phase_frame_encode(
 }
 
 /// The conclusions as a snapshot frame of `session`.
-fn snapshot_frame(session: &mut Session, columns: &[&str], conclusions: &[ConceptConclusion]) -> Vec<u8> {
+fn snapshot_frame(
+    session: &mut Session,
+    columns: &[&str],
+    conclusions: &[ConceptConclusion],
+) -> Vec<u8> {
     let mut frame = session.frame(Kind::Snapshot, columns);
     write_rows(&mut frame, columns, conclusions);
     frame.finish()
@@ -534,17 +561,59 @@ fn dataset(name: &str) -> Result<Dataset> {
                 "project": { "the": "issue/project", "as": "entity:" }
             }})),
             fields: vec![
-                "ident", "title", "status", "priority", "created", "creator", "assignee",
-                "project",
+                "ident", "title", "status", "priority", "created", "creator", "assignee", "project",
             ],
             shown: ["title", "status"],
             changed: "status",
             attributes: vec![
-                "issue/ident", "issue/title", "issue/status", "issue/priority",
-                "issue/created", "issue/creator", "issue/assignee", "issue/project",
+                "issue/ident",
+                "issue/title",
+                "issue/status",
+                "issue/priority",
+                "issue/created",
+                "issue/creator",
+                "issue/assignee",
+                "issue/project",
             ],
         },
-        other => bail!("no dataset {other:?}: stuff or issue"),
+        // tonk's own issue concept (`v2/issue`): three required fields and
+        // ten optional ones, present at the rates `seed` writes them.
+        "tonk-issue" => Dataset {
+            descriptor: concept(serde_json::json!({ "with": {
+                "ident": { "the": "bug/ident", "as": "text:" },
+                "title": { "the": "bug/title", "as": "text:" },
+                "status": { "the": "bug/status", "as": "text:" },
+                "assignee": { "the": "bug/assignee", "as": "text:", "optional": true },
+                "created": { "the": "bug/created-at", "as": "text:", "optional": true },
+                "creator": { "the": "bug/creator", "as": "entity:", "optional": true },
+                "creator-name": { "the": "bug/creator-name", "as": "text:", "optional": true },
+                "detail": { "the": "bug/detail", "as": "text:", "optional": true },
+                "due": { "the": "bug/due-date", "as": "text:", "optional": true },
+                "effort": { "the": "bug/effort", "as": "natural:", "optional": true },
+                "ordering": { "the": "bug/ordering", "as": "float:", "optional": true },
+                "priority": { "the": "bug/priority", "as": "text:", "optional": true },
+                "project": { "the": "bug/project", "as": "entity:", "optional": true }
+            }})),
+            fields: vec![
+                "ident",
+                "title",
+                "status",
+                "assignee",
+                "created",
+                "creator",
+                "creator-name",
+                "detail",
+                "due",
+                "effort",
+                "ordering",
+                "priority",
+                "project",
+            ],
+            shown: ["title", "status"],
+            changed: "status",
+            attributes: vec![],
+        },
+        other => bail!("no dataset {other:?}: stuff, issue or tonk-issue"),
     })
 }
 
@@ -559,13 +628,31 @@ fn did(seed: &str) -> Entity {
     let mut reader = stream.finalize_xof();
     let mut bytes = [0u8; 44];
     reader.fill(&mut bytes);
-    uri.extend(bytes.iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char));
+    uri.extend(
+        bytes
+            .iter()
+            .map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char),
+    );
     uri.parse().expect("a did:key URI parses")
 }
 
 const WORDS: [&str; 16] = [
-    "sync", "replica", "query", "subscription", "worker", "page", "render", "commit",
-    "branch", "merge", "token", "frame", "index", "leaf", "session", "cache",
+    "sync",
+    "replica",
+    "query",
+    "subscription",
+    "worker",
+    "page",
+    "render",
+    "commit",
+    "branch",
+    "merge",
+    "token",
+    "frame",
+    "index",
+    "leaf",
+    "session",
+    "cache",
 ];
 const STATUSES: [&str; 4] = ["todo", "doing", "review", "done"];
 
@@ -585,6 +672,87 @@ fn seed(name: &str, rows: usize, round: usize) -> Vec<dialog_corpus::Fact> {
                 ));
             }
         }
+        "tonk-issue" => {
+            let people: Vec<Entity> = (0..6).map(|n| did(&format!("person-{n}"))).collect();
+            let projects: Vec<Entity> = (0..22).map(|n| did(&format!("project-{n}"))).collect();
+            // Present on `percent` of rows, spread by a stride.
+            let on = |index: usize, salt: usize, percent: usize| {
+                (index * 37 + salt * 11) % 100 < percent
+            };
+            for index in 0..rows {
+                let this = did(&format!("bug-{index}"));
+                let title: Vec<&str> = (0..5).map(|w| WORDS[(index * 7 + w * 3) % 16]).collect();
+                facts.push(fact(&this, "bug/ident", text(format!("TONK-{index}"))));
+                facts.push(fact(&this, "bug/title", text(title.join(" "))));
+                facts.push(fact(
+                    &this,
+                    "bug/status",
+                    text(STATUSES[(index + round) % 4]),
+                ));
+                if on(index, 1, 96) {
+                    facts.push(fact(
+                        &this,
+                        "bug/assignee",
+                        text(format!("person-{}", index % 6)),
+                    ));
+                }
+                facts.push(fact(
+                    &this,
+                    "bug/created-at",
+                    text(format!("2026-10-{:02}T10:00:00Z", index % 28 + 1)),
+                ));
+                facts.push(fact(
+                    &this,
+                    "bug/creator",
+                    Value::Entity(people[index % 6].clone()),
+                ));
+                facts.push(fact(
+                    &this,
+                    "bug/creator-name",
+                    text(format!("Person {}", index % 6)),
+                ));
+                if on(index, 2, 50) {
+                    facts.push(fact(
+                        &this,
+                        "bug/detail",
+                        text(format!("{} {}", title.join(" "), title.join(" "))),
+                    ));
+                }
+                if on(index, 3, 10) {
+                    facts.push(fact(
+                        &this,
+                        "bug/due-date",
+                        text(format!("2026-12-{:02}", index % 28 + 1)),
+                    ));
+                }
+                if on(index, 4, 30) {
+                    facts.push(fact(
+                        &this,
+                        "bug/effort",
+                        Value::UnsignedInt((index % 5) as u128),
+                    ));
+                }
+                facts.push(fact(
+                    &this,
+                    "bug/ordering",
+                    Value::Float(index as f64 * 0.5),
+                ));
+                if on(index, 5, 60) {
+                    facts.push(fact(
+                        &this,
+                        "bug/priority",
+                        text(["low", "medium", "high"][index % 3]),
+                    ));
+                }
+                if on(index, 6, 39) {
+                    facts.push(fact(
+                        &this,
+                        "bug/project",
+                        Value::Entity(projects[index % 22].clone()),
+                    ));
+                }
+            }
+        }
         _ => {
             let people: Vec<Entity> = (0..20).map(|n| did(&format!("person-{n}"))).collect();
             let projects: Vec<Entity> = (0..8).map(|n| did(&format!("project-{n}"))).collect();
@@ -598,19 +766,31 @@ fn seed(name: &str, rows: usize, round: usize) -> Vec<dialog_corpus::Fact> {
                     "issue/status",
                     text(STATUSES[(index + round) % 4]),
                 ));
-                facts.push(fact(&this, "issue/priority", Value::UnsignedInt((index % 4) as u128)));
+                facts.push(fact(
+                    &this,
+                    "issue/priority",
+                    Value::UnsignedInt((index % 4) as u128),
+                ));
                 facts.push(fact(
                     &this,
                     "issue/created",
                     Value::UnsignedInt(1_760_000_000_000 + index as u128 * 61_000),
                 ));
-                facts.push(fact(&this, "issue/creator", Value::Entity(people[index % 20].clone())));
+                facts.push(fact(
+                    &this,
+                    "issue/creator",
+                    Value::Entity(people[index % 20].clone()),
+                ));
                 facts.push(fact(
                     &this,
                     "issue/assignee",
                     Value::Entity(people[(index * 3) % 20].clone()),
                 ));
-                facts.push(fact(&this, "issue/project", Value::Entity(projects[index % 8].clone())));
+                facts.push(fact(
+                    &this,
+                    "issue/project",
+                    Value::Entity(projects[index % 8].clone()),
+                ));
             }
         }
     }
@@ -653,10 +833,21 @@ fn phase<T>(repeat: usize, mut body: impl FnMut() -> T) -> (T, Phase) {
     micros.push(start.elapsed().as_secs_f64() * 1e6);
     let allocations = allocator::stop();
     micros.sort_by(f64::total_cmp);
-    (out, Phase { allocations, micros })
+    (
+        out,
+        Phase {
+            allocations,
+            micros,
+        },
+    )
 }
 
-fn measure(runtime: &tokio::runtime::Runtime, name: &str, rows: usize, repeat: usize) -> Result<Report> {
+fn measure(
+    runtime: &tokio::runtime::Runtime,
+    name: &str,
+    rows: usize,
+    repeat: usize,
+) -> Result<Report> {
     let set = dataset(name)?;
     let env = runtime.block_on(async {
         let mut env = Env::open().await?;
@@ -673,9 +864,14 @@ fn measure(runtime: &tokio::runtime::Runtime, name: &str, rows: usize, repeat: u
     let mut phases = BTreeMap::new();
     let mut bytes = BTreeMap::new();
 
-    let (conclusions, engine) = phase(repeat, || answers_phase_engine(runtime, &env, query.clone()));
+    let (conclusions, engine) = phase(repeat, || {
+        answers_phase_engine(runtime, &env, query.clone())
+    });
     if conclusions.len() != rows {
-        bail!("{name}: the query answered {} rows of {rows}", conclusions.len());
+        bail!(
+            "{name}: the query answered {} rows of {rows}",
+            conclusions.len()
+        );
     }
     phases.insert("engine".into(), engine);
 
@@ -692,11 +888,13 @@ fn measure(runtime: &tokio::runtime::Runtime, name: &str, rows: usize, repeat: u
     let frame: Arc<[u8]> = frame.into();
     let (_, read_all) = phase(repeat, || answers_phase_frame_read_all(frame.clone()));
     phases.insert("frame_read_all".into(), read_all);
-    let (_, read_two) = phase(repeat, || answers_phase_frame_read_two(frame.clone(), set.shown));
+    let (_, read_two) = phase(repeat, || {
+        answers_phase_frame_read_two(frame.clone(), set.shown)
+    });
     phases.insert("frame_read_two".into(), read_two);
     check_same(&json, &frame, &columns)?;
     #[cfg(not(dialog_main))]
-    {
+    if !set.attributes.is_empty() {
         let (columnar, run) = phase(repeat, || {
             answers_phase_columnar(runtime, &env, &set.attributes, &columns)
         });
@@ -706,6 +904,11 @@ fn measure(runtime: &tokio::runtime::Runtime, name: &str, rows: usize, repeat: u
         check_same(&json, &columnar.into(), &columns)?;
     }
     bytes.insert("json_snapshot".into(), json.len());
+    // The answer's identity: every variant of a dataset must agree on it.
+    bytes.insert(
+        "answer_hash".into(),
+        u32::from_le_bytes(blake3::hash(&json).as_bytes()[..4].try_into()?) as usize,
+    );
     bytes.insert("frame_snapshot".into(), frame.len());
 
     // A delta: every 20th row's `changed` field moves on, as a page sees
@@ -722,10 +925,10 @@ fn measure(runtime: &tokio::runtime::Runtime, name: &str, rows: usize, repeat: u
     let changed: Vec<dialog_corpus::Fact> = seed(name, rows, 1)
         .into_iter()
         .enumerate()
-        .filter(|(at, fact)| {
-            let per_row = set.fields.len();
-            (at / per_row) % 20 == 0 && fact.the.name() == set.changed
-        })
+        .filter(|(_, fact)| fact.the.name() == set.changed)
+        .enumerate()
+        .filter(|(at, _)| at % 20 == 0)
+        .map(|(_, fact)| fact)
         .map(|(_, fact)| fact)
         .collect();
     runtime.block_on(env.commit(assert_all(changed.clone(), Pick::Last)))?;
@@ -789,7 +992,11 @@ fn check_same(json: &[u8], frame: &Arc<[u8]>, columns: &[&str]) -> Result<()> {
     let answer = dictionary.accept(frame.clone())?;
     let rows = answer.section(0);
     if rows.len() != conclusions.len() {
-        bail!("the frame has {} rows, the JSON {}", rows.len(), conclusions.len());
+        bail!(
+            "the frame has {} rows, the JSON {}",
+            rows.len(),
+            conclusions.len()
+        );
     }
     for (row, conclusion) in rows.iter().zip(&conclusions) {
         for (at, column) in columns.iter().enumerate() {
@@ -827,7 +1034,10 @@ fn sweep(out_dir: PathBuf, rounds: usize) -> Result<()> {
     let mut reports: BTreeMap<String, Report> = BTreeMap::new();
     for round in 0..rounds {
         for (name, rows, lazy) in &variants {
-            let key = format!("{name}-{rows}-{}", if *lazy == "1" { "lazy" } else { "eager" });
+            let key = format!(
+                "{name}-{rows}-{}",
+                if *lazy == "1" { "lazy" } else { "eager" }
+            );
             eprintln!("round {round}: {key}");
             let output = Command::new(&binary)
                 .args(["run", "--dataset", name, "--rows", &rows.to_string()])
@@ -853,7 +1063,10 @@ fn sweep(out_dir: PathBuf, rounds: usize) -> Result<()> {
         }
     }
     for (name, rows, lazy) in &variants {
-        let key = format!("{name}-{rows}-{}", if *lazy == "1" { "lazy" } else { "eager" });
+        let key = format!(
+            "{name}-{rows}-{}",
+            if *lazy == "1" { "lazy" } else { "eager" }
+        );
         eprintln!("callgrind: {key}");
         let out = out_dir.join(format!("{key}.callgrind"));
         let status = Command::new("valgrind")
@@ -861,7 +1074,15 @@ fn sweep(out_dir: PathBuf, rounds: usize) -> Result<()> {
             .args(PHASES.map(|phase| format!("--toggle-collect=answers_phase_{phase}")))
             .arg(format!("--callgrind-out-file={}", out.display()))
             .arg(&binary)
-            .args(["run", "--dataset", name, "--rows", &rows.to_string(), "--repeat", "1"])
+            .args([
+                "run",
+                "--dataset",
+                name,
+                "--rows",
+                &rows.to_string(),
+                "--repeat",
+                "1",
+            ])
             .env("DIALOG_LAZY_BINDINGS", lazy)
             .stdout(std::process::Stdio::null())
             .status()
@@ -879,7 +1100,9 @@ fn sweep(out_dir: PathBuf, rounds: usize) -> Result<()> {
             let symbol = format!("answers_phase_{phase} ");
             let total = text
                 .lines()
-                .find(|line| line.contains(&format!(":{}", symbol.trim_end())) && line.contains(" ["))
+                .find(|line| {
+                    line.contains(&format!(":{}", symbol.trim_end())) && line.contains(" [")
+                })
                 .and_then(|line| line.split_whitespace().next())
                 .map(|count| count.replace(',', ""))
                 .and_then(|count| count.parse::<u64>().ok())

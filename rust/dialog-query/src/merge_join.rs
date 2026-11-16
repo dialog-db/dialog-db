@@ -345,6 +345,75 @@ where
     }
 }
 
+/// Left-joins `left`, sorted on a key, with each of `optional`, sorted on
+/// the same key: a left row extends into every row of an optional side that
+/// holds its key, and where a side holds none it binds that side's `absent`
+/// terms to [`Binding::Absent`](crate::Binding::Absent) and passes. The
+/// streaming form of an optional field's per-row probe: each side is read
+/// once, in order, instead of once per left row.
+///
+/// Rows come out in `left`'s order. A combination that disagrees on a
+/// shared variable is dropped, as the probe resolving the row's bindings
+/// would have found nothing that matched.
+pub(crate) fn left_merge_join<'a, L, S, K, Key>(
+    left: L,
+    optional: Vec<(S, Vec<crate::Term<crate::types::Any>>)>,
+    key: K,
+) -> impl Selection + 'a
+where
+    L: Selection + 'a,
+    S: Selection + 'a,
+    K: Fn(&Match) -> Option<Key> + ConditionalSend + ConditionalSync + 'a,
+    Key: Ord + Clone + ConditionalSend + ConditionalSync + 'a,
+{
+    try_stream! {
+        let mut sides: Vec<(Cursor<S, Key>, Vec<crate::Term<crate::types::Any>>)> = Vec::new();
+        let opened = try_join_all(optional.into_iter().map(|(side, absent)| {
+            let key = &key;
+            async move { Ok::<_, EvaluationError>((Cursor::new(side, key).await?, absent)) }
+        }))
+        .await?;
+        sides.extend(opened);
+        for await row in left {
+            let row = row?;
+            let Some(at) = key(&row) else {
+                continue;
+            };
+            let mut rows = vec![row];
+            for (cursor, absent) in sides.iter_mut() {
+                cursor.advance_to(&key, &at).await?;
+                if cursor.key.as_ref() == Some(&at) {
+                    if let [only] = cursor.run.as_slice() {
+                        rows = rows.into_iter().filter_map(|row| row.combine(only)).collect();
+                    } else {
+                        let mut next = Vec::with_capacity(rows.len() * cursor.run.len());
+                        for row in &rows {
+                            for extension in &cursor.run {
+                                if let Some(combined) = row.clone().combine(extension) {
+                                    next.push(combined);
+                                }
+                            }
+                        }
+                        rows = next;
+                    }
+                } else {
+                    for row in &mut rows {
+                        for term in absent.iter() {
+                            row.bind_absent(term)?;
+                        }
+                    }
+                }
+                if rows.is_empty() {
+                    break;
+                }
+            }
+            for row in rows {
+                yield row;
+            }
+        }
+    }
+}
+
 /// The cross product of every cursor's buffered group, folded left to right via
 /// [`Match::combine`]; combinations that disagree on a non-key variable are
 /// dropped.
@@ -363,7 +432,10 @@ where
         // partial row in place: cloning the partial for every input copied
         // the row's growing bindings once per field.
         if let [row] = cursor.run.as_slice() {
-            acc = acc.into_iter().filter_map(|partial| partial.combine(row)).collect();
+            acc = acc
+                .into_iter()
+                .filter_map(|partial| partial.combine(row))
+                .collect();
             if acc.is_empty() {
                 break;
             }
@@ -387,7 +459,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_join, multi_merge_join};
+    use super::{left_merge_join, merge_join, multi_merge_join};
     use crate::selection::{Match, Selection};
     use crate::{Term, Value};
     use futures_util::TryStreamExt;
@@ -812,5 +884,126 @@ mod tests {
              parked on its first read at once",
             peak.load(Ordering::SeqCst)
         );
+    }
+
+    /// What an optional field's per-row probe yields for `row`: every
+    /// side row holding its key extends it, and a row with none binds the
+    /// side's term Absent. The oracle the left merge must match.
+    fn probe_each(row: &Match, sides: &[(Vec<Match>, &str)]) -> Vec<Match> {
+        let mut rows = vec![row.clone()];
+        for (side, name) in sides {
+            let holding: Vec<&Match> = side.iter().filter(|other| key(other) == key(row)).collect();
+            rows = if holding.is_empty() {
+                rows.into_iter()
+                    .map(|mut row| {
+                        row.bind_absent(&Term::var(*name)).unwrap();
+                        row
+                    })
+                    .collect()
+            } else {
+                rows.iter()
+                    .flat_map(|row| {
+                        holding
+                            .iter()
+                            .filter_map(|other| row.clone().combine(other))
+                    })
+                    .collect()
+            };
+        }
+        rows
+    }
+
+    /// Each row's markers, Absent as `-1`, unbound as `None`, in order.
+    fn markers(rows: &[Match], names: &[&str]) -> Vec<Vec<Option<i64>>> {
+        rows.iter()
+            .map(|row| {
+                std::iter::once(key(row))
+                    .chain(names.iter().map(|name| match row.get(name) {
+                        Some(crate::Binding::Absent) => Some(-1),
+                        Some(crate::Binding::Present(value)) => as_int(value),
+                        None => None,
+                    }))
+                    .collect()
+            })
+            .collect()
+    }
+
+    async fn run_left(left: Vec<Match>, sides: Vec<(Vec<Match>, &str)>) -> Vec<Match> {
+        let sides = sides
+            .into_iter()
+            .map(|(rows, name)| (seed(rows), vec![Term::var(name)]))
+            .collect();
+        left_merge_join(seed(left), sides, key)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+    }
+
+    /// An entity a side lacks passes with that side's field Absent; one it
+    /// holds extends, once per row it holds; the left order is kept.
+    #[dialog_common::test]
+    async fn it_left_merges_present_absent_and_many() {
+        let left: Vec<Match> = (1..=5).map(|n| row(n, "l", n)).collect();
+        let r = vec![row(2, "r", 20), row(4, "r", 40)];
+        let s = vec![
+            row(4, "s", 41),
+            row(5, "s", 50),
+            row(5, "s", 51),
+            row(6, "s", 60),
+        ];
+        let got = run_left(left.clone(), vec![(r.clone(), "r"), (s.clone(), "s")]).await;
+        assert_eq!(
+            markers(&got, &["l", "r", "s"]),
+            vec![
+                vec![Some(1), Some(1), Some(-1), Some(-1)],
+                vec![Some(2), Some(2), Some(20), Some(-1)],
+                vec![Some(3), Some(3), Some(-1), Some(-1)],
+                vec![Some(4), Some(4), Some(40), Some(41)],
+                vec![Some(5), Some(5), Some(-1), Some(50)],
+                vec![Some(5), Some(5), Some(-1), Some(51)],
+            ]
+        );
+    }
+
+    /// Over random shapes, the left merge yields what probing every side
+    /// once per left row yields, row for row.
+    #[dialog_common::test]
+    async fn it_matches_the_per_row_probe_over_random_shapes() {
+        let mut state = 0x9e37_79b9_u64;
+        let mut next = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        for _ in 0..200 {
+            let sorted =
+                |next: &mut dyn FnMut(u64) -> u64, name: &str, count: u64, distinct: bool| {
+                    let mut keys: Vec<i64> = (0..count).map(|_| next(12) as i64).collect();
+                    keys.sort();
+                    if distinct {
+                        keys.dedup();
+                    }
+                    keys.iter()
+                        .enumerate()
+                        .map(|(at, k)| row(*k, name, *k * 100 + at as i64))
+                        .collect::<Vec<_>>()
+                };
+            let left = sorted(&mut next, "l", 8, true);
+            let r_count = next(8);
+            let r = sorted(&mut next, "r", r_count, false);
+            let s_count = next(8);
+            let s = sorted(&mut next, "s", s_count, false);
+            let sides = vec![(r, "r"), (s, "s")];
+            let expected: Vec<Match> = left
+                .iter()
+                .flat_map(|row| probe_each(row, &sides))
+                .collect();
+            let got = run_left(left, sides).await;
+            assert_eq!(
+                markers(&got, &["l", "r", "s"]),
+                markers(&expected, &["l", "r", "s"])
+            );
+        }
     }
 }

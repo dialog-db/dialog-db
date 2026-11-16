@@ -94,9 +94,7 @@ impl Frame<'_> {
         }
         let id = self.session.next;
         self.session.next += 1;
-        self.session
-            .tokens
-            .insert(probe.as_slice().into(), id);
+        self.session.tokens.insert(probe.as_slice().into(), id);
         self.tokens.push(tag as u8);
         self.tokens
             .extend_from_slice(&(bytes.len() as u32).to_le_bytes());

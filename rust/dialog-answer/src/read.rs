@@ -73,11 +73,15 @@ impl<'a> Cursor<'a> {
     }
 
     fn u16(&mut self) -> Result<u16, Error> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().expect("two bytes")))
+        Ok(u16::from_le_bytes(
+            self.take(2)?.try_into().expect("two bytes"),
+        ))
     }
 
     fn u32(&mut self) -> Result<u32, Error> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("four bytes")))
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("four bytes"),
+        ))
     }
 }
 

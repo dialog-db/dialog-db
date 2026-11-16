@@ -389,7 +389,9 @@ impl FactView {
             Backing::Scanned { spilled, .. } => {
                 let parts = self.parts()?;
                 match parts.value {
-                    ValueRef::Inline(payload) => super::decode_value_view(parts.value_type, payload),
+                    ValueRef::Inline(payload) => {
+                        super::decode_value_view(parts.value_type, payload)
+                    }
                     ValueRef::Spilled { .. } => {
                         let bytes = spilled.as_deref().ok_or_else(|| {
                             DialogCorpusError::InvalidValue(
@@ -431,7 +433,8 @@ impl FactView {
             return Ok(());
         }
         let of = self.of_str()?;
-        Uri::check_stored(&of).map_err(|error| DialogCorpusError::CorruptEntry(format!("{error}")))?;
+        Uri::check_stored(&of)
+            .map_err(|error| DialogCorpusError::CorruptEntry(format!("{error}")))?;
         super::view::check_relation(&self.the_str()?)?;
         self.value_view().map_err(as_corrupt_entry)?;
         Ok(())
@@ -448,7 +451,9 @@ impl FactView {
     /// This row's attribute, materialized alone.
     pub fn relation(&self) -> Result<Relation, DialogCorpusError> {
         match &self.backing {
-            Backing::Scanned { .. } => Relation::from_str(&self.the_str()?).map_err(as_corrupt_entry),
+            Backing::Scanned { .. } => {
+                Relation::from_str(&self.the_str()?).map_err(as_corrupt_entry)
+            }
             Backing::Owned { fact, .. } => Ok(fact.the.clone()),
         }
     }
@@ -634,7 +639,11 @@ pub struct CheckedRow {
     /// The value, when it is a scalar (read out) or text that borrows from
     /// the key; `None` when it is read from the view each time (bytes, a
     /// record, a spilled value).
-    value: Option<(ValueDataType, Option<Piece>, Option<super::ValueView<'static>>)>,
+    value: Option<(
+        ValueDataType,
+        Option<Piece>,
+        Option<super::ValueView<'static>>,
+    )>,
 }
 
 impl FactView {
@@ -729,10 +738,7 @@ impl CheckedRow {
                 super::ValueView::Symbol(Cow::Borrowed(piece.read(self.key())))
             }
             Some((_, _, Some(scalar))) => scalar.clone(),
-            _ => self
-                .view
-                .value_view()
-                .expect("a checked row's value reads"),
+            _ => self.view.value_view().expect("a checked row's value reads"),
         }
     }
 

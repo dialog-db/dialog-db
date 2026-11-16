@@ -13,9 +13,9 @@ use crate::types::Record;
 use super::Selection;
 
 mod slot;
+pub use slot::JoinKey;
 pub(crate) use slot::Part;
 pub(crate) use slot::Scanned;
-pub use slot::JoinKey;
 use slot::{Cited, Slot};
 
 /// Whether a scan binds the rows it reads in place ([`Slot::Scanned`]),
@@ -382,7 +382,9 @@ impl Match {
     /// Whether this row cites a claim for `name`, without making it.
     fn cites(&self, name: &str) -> bool {
         probe(&self.claims, name).is_some()
-            || self.frames().any(|frame| probe(&frame.claims, name).is_some())
+            || self
+                .frames()
+                .any(|frame| probe(&frame.claims, name).is_some())
     }
 
     /// Place this row in a scope nested in `caller`'s: the row is
@@ -747,7 +749,9 @@ impl Match {
                 Term::Variable {
                     name: Some(variable),
                     ..
-                } => self.bind_scanned(variable, term.kind(), row, *part).map(|_| true)?,
+                } => self
+                    .bind_scanned(variable, term.kind(), row, *part)
+                    .map(|_| true)?,
                 _ => true,
             },
             Slot::Bound(Binding::Present(value)) => {

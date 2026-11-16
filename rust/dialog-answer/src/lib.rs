@@ -105,7 +105,10 @@ impl std::fmt::Display for Error {
             Error::Magic => write!(f, "not an answer frame"),
             Error::Truncated => write!(f, "answer frame ends early"),
             Error::Sequence { expected, found } => {
-                write!(f, "answer frame's tokens start at {found}, expected {expected}")
+                write!(
+                    f,
+                    "answer frame's tokens start at {found}, expected {expected}"
+                )
             }
             Error::Unknown(id) => write!(f, "answer frame names unknown token {id}"),
             Error::Malformed(id) => write!(f, "token {id} is malformed"),

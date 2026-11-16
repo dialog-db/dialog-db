@@ -1,9 +1,12 @@
 use super::Plan;
 use crate::attribute::query::DynamicAttributeQuery;
 use crate::concept::query::ConceptQuery;
-use crate::query::Application as _;
+use crate::merge_join::left_merge_join;
+use crate::optional::OptionalAttributeQuery;
+use crate::query::Application;
 use crate::selection::{Match, Selection};
-use crate::{Environment, SortOrder, multi_merge_join};
+use crate::types::Any;
+use crate::{Environment, EvaluationError, SortOrder, Term, multi_merge_join};
 use core::pin::Pin;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
@@ -118,17 +121,33 @@ impl Conjunction {
         }
 
         let mut shared: Option<String> = None;
+        let mut required = false;
         for step in &self.steps {
             let variable = match step {
                 Plan::Scan(_, query) => match query.sort_order() {
-                    SortOrder::On(name) => name,
+                    SortOrder::On(name) => {
+                        required = true;
+                        name
+                    }
                     SortOrder::None => return None,
                 },
+                // An optional field whose scan is sorted on the same
+                // variable is left-merged: read once in order, an entity it
+                // lacks bound Absent, instead of probed once per entity.
+                Plan::OptionalScan(_, optional) if left_merge_enabled() => {
+                    match optional.query().sort_order() {
+                        SortOrder::On(name) => name,
+                        SortOrder::None => return None,
+                    }
+                }
                 // An attribute concept read with its entity free yields
                 // its rows sorted on the entity, stored and derived alike
                 // (see `ConceptQuery::evaluate`), so it merges on that
                 // variable like a scan of the attribute would.
-                Plan::Concept(_, query) => MergeInput::relation_variable(query)?,
+                Plan::Concept(_, query) => {
+                    required = true;
+                    MergeInput::relation_variable(query)?
+                }
                 _ => return None,
             };
             match &shared {
@@ -137,7 +156,9 @@ impl Conjunction {
                 Some(_) => return None,
             }
         }
-        shared
+        // Something must say which entities there are: optional fields
+        // alone only widen.
+        if required { shared } else { None }
     }
 
     /// Whether the scans are balanced enough to merge, given a row's
@@ -169,7 +190,19 @@ impl Conjunction {
             .steps
             .iter()
             .filter_map(|step| match step {
-                Plan::Scan(_, query) => Some((query, query.resolved_selector(base))),
+                Plan::Scan(_, query) => Some((query.as_ref(), query.resolved_selector(base))),
+                _ => None,
+            })
+            .collect();
+        // A left-merged optional field reads its whole range, where the
+        // fold probes it once per entity the required scans admit. A
+        // narrow optional range is cheap to read either way, so it is
+        // weighed against the required scans' size, not as one of them.
+        let optional: Vec<_> = self
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Plan::OptionalScan(_, optional) => Some(optional.query().resolved_selector(base)),
                 _ => None,
             })
             .collect();
@@ -180,7 +213,7 @@ impl Conjunction {
         // the tree to estimate each range would only confirm it -- a second
         // walk per scan, per row, on the lookups rules are made of.
         let point = selectors.iter().all(|(query, selector)| {
-            matches!(query.as_ref(), DynamicAttributeQuery::Only(_))
+            matches!(query, DynamicAttributeQuery::Only(_))
                 && selector.as_ref().is_ok_and(|selector| {
                     selector.entity().is_some() && selector.attribute().is_some()
                 })
@@ -189,6 +222,15 @@ impl Conjunction {
             return true;
         }
 
+        let estimate =
+            async |selector: Result<Selector<Constrained>, EvaluationError>| match selector {
+                Ok(selector) => Provider::<Estimate>::execute(env, selector)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(u64::MAX),
+                Err(_) => u64::MAX,
+            };
         let mut min_size = u64::MAX;
         let mut max_size = 0u64;
         for (_, selector) in selectors {
@@ -207,7 +249,15 @@ impl Conjunction {
             min_size = min_size.min(size);
             max_size = max_size.max(size);
         }
-        min_size != 0 && max_size <= min_size.saturating_mul(MERGE_COST_BALANCE as u64)
+        if min_size == 0 || max_size > min_size.saturating_mul(MERGE_COST_BALANCE as u64) {
+            return false;
+        }
+        for selector in optional {
+            if estimate(selector).await > min_size.saturating_mul(MERGE_COST_BALANCE as u64) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Evaluate a structurally merge-eligible conjunction, choosing per query
@@ -270,11 +320,20 @@ impl Conjunction {
             let scans: Vec<MergeInput> = self
                 .steps
                 .iter()
-                .map(|step| match step {
-                    Plan::Scan(_, query) => MergeInput::Scan(query.clone()),
-                    Plan::Concept(_, query) => MergeInput::Relation(query.clone()),
+                .filter_map(|step| match step {
+                    Plan::Scan(_, query) => Some(MergeInput::Scan(query.clone())),
+                    Plan::Concept(_, query) => Some(MergeInput::Relation(query.clone())),
+                    Plan::OptionalScan(..) => None,
                     // merge_variable already proved every step merges.
                     _ => unreachable!("merge eligibility guarantees every step merges"),
+                })
+                .collect();
+            let optional: Vec<OptionalAttributeQuery> = self
+                .steps
+                .iter()
+                .filter_map(|step| match step {
+                    Plan::OptionalScan(_, query) => Some((**query).clone()),
+                    _ => None,
                 })
                 .collect();
 
@@ -322,7 +381,18 @@ impl Conjunction {
                     run.push(next?);
                 }
 
-                if !balanced {
+                // An optional field merges only when the row leaves its
+                // value and cause free: a pinned or Absent-claimed value is
+                // a check of one entity's fact, which the fold makes.
+                let free = run.iter().all(|row| {
+                    optional.iter().all(|optional| {
+                        let query = optional.query();
+                        !row.contains(query.is())
+                            && !row.contains(&Term::<Any>::from(query.cause()))
+                    })
+                });
+
+                if !balanced || !free {
                     // A selective attribute is pinned: the nested-loop fold
                     // reads fewer blocks by driving from the narrow scan.
                     let run = stream::iter(run.into_iter().map(Ok));
@@ -386,9 +456,37 @@ impl Conjunction {
                     // The key reads a scanned entity in place: ordering rows
                     // by an encoding of a materialized entity built one, and
                     // hashed its URI, for every row of every input.
-                    let key = move |m: &Match| m.join_key(&variable);
+                    let key = std::sync::Arc::new(move |m: &Match| m.join_key(&variable));
+                    let key = {
+                        let key = key.clone();
+                        move |m: &Match| key(m)
+                    };
 
-                    for await row in multi_merge_join(inputs, key) {
+                    let merged: Pin<Box<dyn Selection + 'a>> = if optional.is_empty() {
+                        Box::pin(multi_merge_join(inputs, key))
+                    } else {
+                        let sides = optional
+                            .iter()
+                            .map(|optional| {
+                                let query = optional.query();
+                                let absent = vec![
+                                    query.is().clone(),
+                                    Term::<Any>::from(query.cause()),
+                                ];
+                                let side: Pin<Box<dyn Selection + 'a>> = Box::pin(
+                                    Application::evaluate(query.clone(), base.clone().seed(), env),
+                                );
+                                (side, absent)
+                            })
+                            .collect();
+                        let left_key = key.clone();
+                        Box::pin(left_merge_join(
+                            multi_merge_join(inputs, key),
+                            sides,
+                            left_key,
+                        ))
+                    };
+                    for await row in merged {
                         let row = row?;
                         // Fold the joined bindings back onto the incoming row
                         // so the caller's context (and provenance) is
@@ -1257,4 +1355,11 @@ mod tests {
         );
         Ok(())
     }
+}
+
+/// Whether optional fields are left-merged (`DIALOG_LEFT_MERGE`, on unless
+/// `0`), so one build measures both.
+fn left_merge_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("DIALOG_LEFT_MERGE").map_or(true, |value| value != "0"))
 }

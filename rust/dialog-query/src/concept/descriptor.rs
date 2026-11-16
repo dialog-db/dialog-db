@@ -698,10 +698,15 @@ impl ConceptConclusion {
     /// Returns the entity this conclusion describes.
     pub fn entity(&self) -> &Entity {
         self.this.get_or_init(|| {
-            let this = self.terms.get("this").expect("a realized row has a `this` term");
+            let this = self
+                .terms
+                .get("this")
+                .expect("a realized row has a `this` term");
             let value = match this {
                 Term::Constant(value) => value.clone(),
-                Term::Variable { name: Some(name), .. } => self
+                Term::Variable {
+                    name: Some(name), ..
+                } => self
                     .source
                     .lookup(&Term::<Any>::var(name.clone()))
                     .and_then(|binding| binding.content())
@@ -719,7 +724,9 @@ impl ConceptConclusion {
     pub fn view(&self, field: &str) -> Option<Option<dialog_corpus::ValueView<'_>>> {
         match self.terms.get(field)? {
             Term::Constant(value) => Some(Some(dialog_corpus::ValueView::from(value))),
-            Term::Variable { name: Some(name), .. } => self.source.view(name),
+            Term::Variable {
+                name: Some(name), ..
+            } => self.source.view(name),
             Term::Variable { name: None, .. } => None,
         }
     }

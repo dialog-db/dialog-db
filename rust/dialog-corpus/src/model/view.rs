@@ -6,8 +6,7 @@ use std::borrow::Cow;
 use std::str::from_utf8;
 
 use crate::{
-    DialogCorpusError, Uri, Value, ValueDataType, decode_value,
-    model::ordkey::decode_bytes_cow,
+    DialogCorpusError, Uri, Value, ValueDataType, decode_value, model::ordkey::decode_bytes_cow,
 };
 
 /// A [`Value`] borrowed from the bytes that store it: a scanned key's
@@ -167,9 +166,11 @@ pub fn spilled_value_view(
     bytes: &[u8],
 ) -> Result<ValueView<'_>, DialogCorpusError> {
     Ok(match value_type.storage() {
-        ValueDataType::String => ValueView::String(Cow::Borrowed(from_utf8(bytes).map_err(
-            |error| DialogCorpusError::InvalidValue(format!("Not a valid UTF-8 string: {error}")),
-        )?)),
+        ValueDataType::String => {
+            ValueView::String(Cow::Borrowed(from_utf8(bytes).map_err(|error| {
+                DialogCorpusError::InvalidValue(format!("Not a valid UTF-8 string: {error}"))
+            })?))
+        }
         ValueDataType::Bytes => ValueView::Bytes(Cow::Borrowed(bytes)),
         ValueDataType::Record => ValueView::Record(Cow::Borrowed(bytes)),
         // The rare spilled scalar or reference: read it as main does.
@@ -177,7 +178,9 @@ pub fn spilled_value_view(
             let value = Value::try_from((other, bytes.to_vec()))?;
             match value {
                 Value::Entity(entity) => ValueView::Entity(Cow::Owned(entity.as_str().to_owned())),
-                Value::Symbol(relation) => ValueView::Symbol(Cow::Owned(relation.as_str().to_owned())),
+                Value::Symbol(relation) => {
+                    ValueView::Symbol(Cow::Owned(relation.as_str().to_owned()))
+                }
                 Value::UnsignedInt(number) => ValueView::UnsignedInt(number),
                 Value::SignedInt(number) => ValueView::SignedInt(number),
                 Value::Float(number) => ValueView::Float(number),
@@ -193,8 +196,7 @@ pub fn spilled_value_view(
 /// What [`Relation`](crate::Relation) construction checks, on a borrowed
 /// name: no longer than a relation may be, `domain/name`, no NUL.
 pub(crate) fn check_relation(name: &str) -> Result<(), DialogCorpusError> {
-    if name.len() > crate::RELATION_LENGTH || !name.contains('/') || name.as_bytes().contains(&0)
-    {
+    if name.len() > crate::RELATION_LENGTH || !name.contains('/') || name.as_bytes().contains(&0) {
         return Err(corrupt(format!("stored relation is malformed: {name:?}")));
     }
     Ok(())
