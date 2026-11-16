@@ -156,8 +156,8 @@ impl Dictionary {
                 .checked_mul(column_count * 4)
                 .ok_or(Error::Truncated)?;
             let lanes = cursor.take(lane_bytes)?;
-            for id in lanes.chunks_exact(4) {
-                let id = u32::from_le_bytes(id.try_into().expect("four bytes"));
+            for id in lanes.as_chunks::<4>().0 {
+                let id = u32::from_le_bytes(*id);
                 if id != ABSENT && id != UNBOUND && id >= known {
                     return Err(Error::Unknown(id));
                 }

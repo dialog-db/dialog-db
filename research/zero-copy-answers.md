@@ -1,6 +1,6 @@
 # Zero-copy answers
 
-Status: Exploring. Its working material is in
+Status: Evaluating. Its working material is in
 [`zero-copy-answers/`](zero-copy-answers/): the
 [journal](zero-copy-answers/journal.md) says where the research stands,
 the [evaluation](zero-copy-answers/evaluation.md) what decides it, and
@@ -102,3 +102,121 @@ every variant runs from the same binary.
 Between those bars, the maintainer weighs the gain against the API it
 asks for: a borrowed value type the engine exposes, and a wire format
 tonk and its guests must speak.
+
+## Report (2026-11-16)
+
+Built on `worker/beautiful-newton-0d941i`; the
+[journal](zero-copy-answers/journal.md) has every run and the
+[results](zero-copy-answers/results/2026-11-16/charts.md) every number
+behind the charts. Every variant of every dataset answered with the same
+bytes (the answer's hash is in each report).
+
+### What was built
+
+1. **Late materialization** (`DIALOG_LAZY_BINDINGS`): a scan binds the
+   row it read in place, a shared, once-checked `CheckedRow`, and a value
+   is materialized at most once per row, when something reads it as a
+   `Value`. `Match::view` and `ConceptConclusion::view` read it without
+   materializing.
+2. **A join that does not materialize**: the merge join keys rows on the
+   scanned entity's bytes (`JoinKey`), and groups of one row combine in
+   place.
+3. **Left-merged optional fields** (`DIALOG_LEFT_MERGE`): an optional
+   field is read once, in entity order, beside the required scans, and
+   an entity it lacks binds Absent, where main probed it once per entity.
+4. **`dialog-answer`**: a columnar answer frame, its tokens owned by the
+   session so a delta carries only what the receiver has not seen, read
+   in place in Rust and in JS.
+
+### The answer to the question
+
+Copying values is not where most of a concept read's time went. On
+tonk's own issue concept (thirteen fields, ten optional), main spends
+430 K instructions and 446 allocations per row; late materialization
+and the byte-keyed join alone (eager, items 1–2 apart from laziness)
+take it to 193 K, lazy bindings to 163 K, and the left merge, item 3, is
+most of that: a concept with an optional field never merged, so a list
+read probed every field of every entity.
+
+![Engine instructions](zero-copy-answers/results/2026-11-16/engine-instructions.png)
+
+| engine, instructions/row | main | eager | lazy |
+|---|---|---|---|
+| stuff 2,000 | 36,146 | 35,564 | 31,282 |
+| issue 3,000 | 182,136 | 156,663 | 126,471 |
+| tonk-issue 300 | 433,246 | 212,910 | 183,333 |
+| tonk-issue 3,000 | 428,650 | 193,437 | 163,199 |
+
+Allocations per row on tonk-issue 3,000: 446, 184, 71; bytes allocated
+per row 391,557, 35,050, 33,165.
+
+From the query to a receiver holding an answer it can read, the
+eight- and thirteen-field reads clear the 2× bar; the two-field read
+does not (1.5×):
+
+![Query to receiver](zero-copy-answers/results/2026-11-16/path-instructions.png)
+
+| instructions/row | main + JSON | branch + JSON | branch + frame |
+|---|---|---|---|
+| stuff 2,000 | 55,365 | 50,990 | 35,728 |
+| issue 3,000 | 230,045 | 179,630 | 138,229 |
+| tonk-issue 300 | 492,694 | 248,311 | 198,635 |
+| tonk-issue 3,000 | 488,721 | 228,736 | 177,727 |
+
+On tonk's workload (`tonk_bench`, tonk-team at 10×, `fs` store):
+
+![tonk_bench](zero-copy-answers/results/2026-11-16/tonk-10x.png)
+
+| ms | main | branch |
+|---|---|---|
+| query v2/issue, warm | 288 | 82 |
+| query v2/issue, cold | 701 | 172 |
+| query v2/activity, warm | 486 | 106 |
+| subscription v2/issue, first | 297 | 61 |
+| subscription v2/issue, poll | 939 | 23 |
+| subscription v2/activity, poll | 1,398 | 46 |
+
+### The wire
+
+The frame is 2.1× (two short text fields) to 3.6× (eight fields)
+smaller than tonk's JSON, 3.3× on tonk's issue concept, and a delta of 5%
+of the rows 7.6× to 13× smaller on the session that sent the snapshot.
+Writing it costs 36–40% of `project` + `serde_json`; reading it back
+natively costs 3% (two fields) to 10% (every field) of `serde_json`. In a
+page (Chromium), reading two fields of a wide row is 10–18× faster than
+`JSON.parse`; reading every field is no faster than V8's native parser,
+and slower on narrow rows of unique strings (a `TextDecoder` call per
+token), before counting the `serde_wasm_bindgen` copy the page makes
+today.
+
+### What is open
+
+- **`issue-detail` cold is 3× slower** with the left merge (2.4 → 8.4 ms
+  at 10×) and warm is unchanged. The plan decision is right (it folds);
+  the page cache and background replication are ruled out; the
+  likeliest cause is what the query before it leaves in a cache the
+  bench's "cold" does not release. Not settled.
+- **The perf gate would fail two scenarios**: `subscribe-repoll` +2.9%
+  instructions (mostly `this` materialized in the measured poll instead
+  of the unmeasured setup) and `read-scan` +8.4% bytes allocated (one
+  bigger shared row instead of several small allocations). Instructions
+  fall 10–17% on `query-join`, `rule-scan`, `read-scan` and
+  `query-member`. The baselines were not touched.
+- **Commands** (`command/all`) are 13–16% slower in these runs, with
+  `steady/all` up at 1× and down at 10×: not separated from noise.
+- A **columnar operator** (scans aligned on entity bytes, written to the
+  frame with no rows) answered the eight-field read in 40% of the
+  engine's time plus encoding: the floor for a read of required stored
+  fields. Not built as an operator.
+- `unsafe` in `CheckedRow` (an unchecked UTF-8 read of a span validated
+  once) is the maintainer's call.
+
+### What to land, and in what order
+
+The left merge is the change to land first: it is most of the gain, it
+is small, and it is independent of the rest. The byte-keyed join and the
+URI table next. Late materialization pays mostly for a caller that
+hands answers on, so it belongs with the frame, after the two gate
+regressions are fixed. The frame is worth a design of its own with tonk
+(the session lives with the subscription; a JS reader should decode a
+frame's text once).

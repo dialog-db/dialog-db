@@ -1,5 +1,7 @@
 use futures_util::stream::once;
+use std::env;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::{iter, mem};
 
 use crate::Claim;
@@ -22,8 +24,8 @@ use slot::{Cited, Slot};
 /// or materializes them as main does. Read once, from
 /// `DIALOG_LAZY_BINDINGS` (`0` turns it off), so one build measures both.
 pub fn lazy_bindings() -> bool {
-    static LAZY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *LAZY.get_or_init(|| std::env::var("DIALOG_LAZY_BINDINGS").map_or(true, |value| value != "0"))
+    static LAZY: OnceLock<bool> = OnceLock::new();
+    *LAZY.get_or_init(|| env::var("DIALOG_LAZY_BINDINGS").map_or(true, |value| value != "0"))
 }
 
 /// A row-level binding for a variable.

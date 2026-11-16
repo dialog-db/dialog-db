@@ -3,6 +3,7 @@ mod named_attributes;
 pub use named_attributes::{ConceptFieldDescriptor, NamedAttributes};
 
 use std::iter;
+use std::sync::OnceLock;
 
 use crate::Binding;
 use crate::Predicate;
@@ -654,7 +655,7 @@ pub struct ConceptConclusion {
     /// for: a row bound in place hands its fields on (an answer's encoder
     /// reads them with [`ConceptConclusion::view`]) without ever building
     /// it.
-    this: std::sync::OnceLock<Entity>,
+    this: OnceLock<Entity>,
     terms: Parameters,
     source: Match,
 }
@@ -872,7 +873,7 @@ impl Application for ConceptQuery {
                 .ok_or_else(|| EvaluationError::UnboundVariable {
                     variable_name: "this".to_string(),
                 })?;
-        let this = std::sync::OnceLock::new();
+        let this = OnceLock::new();
         match this_param {
             Term::Variable {
                 name: Some(name), ..

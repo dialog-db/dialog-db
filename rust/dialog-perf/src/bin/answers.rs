@@ -367,18 +367,13 @@ impl Lane<'_> {
                 },
             };
             let mut winner = first;
-            loop {
-                match self.stream.next().await {
-                    Some(row) => {
-                        let row = row?;
-                        if row.of_bytes()? == winner.of_bytes()? {
-                            winner = winner.elect(row)?;
-                        } else {
-                            self.next = Some(row);
-                            break;
-                        }
-                    }
-                    None => break,
+            while let Some(row) = self.stream.next().await {
+                let row = row?;
+                if row.of_bytes()? == winner.of_bytes()? {
+                    winner = winner.elect(row)?;
+                } else {
+                    self.next = Some(row);
+                    break;
                 }
             }
             // A corrupt winner is passed over, as the engine passes it.

@@ -7,7 +7,7 @@
 use std::{
     borrow::Cow,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
-    str::{FromStr, from_utf8},
+    str::{FromStr, from_utf8, from_utf8_unchecked},
 };
 
 use dialog_common::ConditionalSend;
@@ -619,7 +619,7 @@ impl Piece {
                 // SAFETY: the span was taken from a `&str` validated over
                 // these same bytes when the row was checked, and a row's key
                 // bytes never change while it is held.
-                unsafe { std::str::from_utf8_unchecked(bytes) }
+                unsafe { from_utf8_unchecked(bytes) }
             }
             Piece::Owned(text) => text,
         }

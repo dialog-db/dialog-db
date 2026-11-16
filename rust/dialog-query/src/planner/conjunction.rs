@@ -14,6 +14,8 @@ use dialog_corpus::selector::Constrained;
 use dialog_corpus::{Estimate, Likelihood, Preload, PreloadRequest, Selector};
 use futures_util::{StreamExt, stream};
 use std::collections::HashSet;
+use std::env;
+use std::sync::{Arc, OnceLock};
 
 /// Largest ratio of the widest to narrowest scan range estimate that still
 /// takes the merge path. Above it, one scan is selective enough that a nested
@@ -474,7 +476,7 @@ impl Conjunction {
                     // The key reads a scanned entity in place: ordering rows
                     // by an encoding of a materialized entity built one, and
                     // hashed its URI, for every row of every input.
-                    let key = std::sync::Arc::new(move |m: &Match| m.join_key(&variable));
+                    let key = Arc::new(move |m: &Match| m.join_key(&variable));
                     let key = {
                         let key = key.clone();
                         move |m: &Match| key(m)
@@ -554,6 +556,13 @@ impl MergeInput {
             MergeInput::Relation(_) => None,
         }
     }
+}
+
+/// Whether optional fields are left-merged (`DIALOG_LEFT_MERGE`, on unless
+/// `0`), so one build measures both.
+fn left_merge_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| env::var("DIALOG_LEFT_MERGE").map_or(true, |value| value != "0"))
 }
 
 /// End-to-end regression tests for the optionality bug family: each
@@ -1373,11 +1382,4 @@ mod tests {
         );
         Ok(())
     }
-}
-
-/// Whether optional fields are left-merged (`DIALOG_LEFT_MERGE`, on unless
-/// `0`), so one build measures both.
-fn left_merge_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("DIALOG_LEFT_MERGE").map_or(true, |value| value != "0"))
 }

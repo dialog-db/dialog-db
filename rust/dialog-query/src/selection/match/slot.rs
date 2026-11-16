@@ -3,6 +3,7 @@
 //! [`Value`].
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::sync::{Arc, OnceLock};
 
 use dialog_corpus::{Cause, CheckedRow, ValueView};
@@ -257,7 +258,7 @@ impl JoinKey {
 }
 
 impl Ord for JoinKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         let ((left, left_raw), (right, right_raw)) = (self.bytes(), other.bytes());
         // A raw key's encoding is its bytes and a terminator.
         let terminated = |bytes: &'_ [u8], raw: bool| {
@@ -276,7 +277,7 @@ impl Ord for JoinKey {
 }
 
 impl PartialOrd for JoinKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }

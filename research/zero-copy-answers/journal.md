@@ -2,31 +2,21 @@
 
 ## Where things stand
 
-**Status: Exploring.** Built on this branch:
+**Status: Evaluating.** Built: late materialization
+(`DIALOG_LAZY_BINDINGS`), a merge join keyed on stored bytes, optional
+fields left-merged (`DIALOG_LEFT_MERGE`), the `dialog-answer` frame with
+Rust and JS readers, and the `answers` harness (main built from its
+worktree with `--cfg dialog_main`).
 
-- late materialization in the engine (`Match` slots that share the scanned
-  row, `CheckedRow`, `ConceptConclusion::view`), behind
-  `DIALOG_LAZY_BINDINGS` (on by default, `0` for main's eager path);
-- a merge join keyed on the scanned entity's bytes, rows combined in
-  place, and a table for the canonical-URI check (these help eager too);
-- `dialog-answer`, a binary columnar answer frame with a session token
-  dictionary, its Rust reader and a JS reader;
-- the `answers` harness (`rust/dialog-perf/src/bin/answers.rs`), which
-  measures every phase from the query to the receiver, on main (built
-  with `--cfg dialog_main`) and the branch.
+Headline, tonk's issue concept at 3,000 rows against main: engine
+instructions −62% and allocations −84% per row; query to receiver 2.75×
+fewer instructions with the frame. `tonk_bench` at 10×: warm `v2/issue`
+288 → 82 ms, subscription polls 939 → 23 ms and 1,398 → 46 ms.
 
-Headline, tonk's issue list shape at 3,000 rows, per row, against main:
-
-- engine: instructions −31%, allocations −67%;
-- wire: the frame is 3.5× smaller than tonk's JSON, a delta 13× smaller;
-  writing it costs 40% of `project` + `serde_json`, reading it back 4%
-  (every field) to 9%;
-- a columnar operator (no rows between the scan and the frame) answers
-  the same read in 40% of the time the engine and the frame encoder take.
-
-Next: wall clock on tonk's own workload (`tonk_bench`), the page side in
-Chromium, then whether the columnar read is worth building as an
-operator.
+Open: `issue-detail` cold 3× slower with the left merge, cause not
+settled; `subscribe-repoll` +2.9% and `read-scan` bytes +8.4% on the perf
+gate; commands within noise but not separated. The report is in the
+topic file.
 
 ## Datasets
 

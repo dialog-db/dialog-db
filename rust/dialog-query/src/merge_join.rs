@@ -23,6 +23,8 @@
 //! their `Ord`. This keeps the index-encoding concern in the scan layer, where
 //! it belongs, and out of the join.
 
+use crate::Term;
+use crate::types::Any;
 use std::cmp::Ordering;
 use std::pin::Pin;
 
@@ -345,6 +347,10 @@ where
     }
 }
 
+/// A left merge's optional side: its cursor, and the terms it binds
+/// Absent where it holds no row.
+type Side<S, Key> = (Cursor<S, Key>, Vec<Term<Any>>);
+
 /// Left-joins `left`, sorted on a key, with each of `optional`, sorted on
 /// the same key: a left row extends into every row of an optional side that
 /// holds its key, and where a side holds none it binds that side's `absent`
@@ -357,7 +363,7 @@ where
 /// would have found nothing that matched.
 pub(crate) fn left_merge_join<'a, L, S, K, Key>(
     left: L,
-    optional: Vec<(S, Vec<crate::Term<crate::types::Any>>)>,
+    optional: Vec<(S, Vec<Term<Any>>)>,
     key: K,
 ) -> impl Selection + 'a
 where
@@ -367,7 +373,7 @@ where
     Key: Ord + Clone + ConditionalSend + ConditionalSync + 'a,
 {
     try_stream! {
-        let mut sides: Vec<(Cursor<S, Key>, Vec<crate::Term<crate::types::Any>>)> = Vec::new();
+        let mut sides: Vec<Side<S, Key>> = Vec::new();
         let opened = try_join_all(optional.into_iter().map(|(side, absent)| {
             let key = &key;
             async move { Ok::<_, EvaluationError>((Cursor::new(side, key).await?, absent)) }
@@ -464,6 +470,7 @@ mod tests {
     use crate::{Term, Value};
     use futures_util::TryStreamExt;
     use futures_util::stream;
+    use std::iter;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -917,7 +924,7 @@ mod tests {
     fn markers(rows: &[Match], names: &[&str]) -> Vec<Vec<Option<i64>>> {
         rows.iter()
             .map(|row| {
-                std::iter::once(key(row))
+                iter::once(key(row))
                     .chain(names.iter().map(|name| match row.get(name) {
                         Some(crate::Binding::Absent) => Some(-1),
                         Some(crate::Binding::Present(value)) => as_int(value),
