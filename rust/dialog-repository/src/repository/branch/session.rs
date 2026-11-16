@@ -199,12 +199,13 @@ impl<'a> QueryLayer<'a> {
             .map(|_| None)
             .chain(self.named.iter().map(|(layer, _)| Some(layer.clone())))
             .collect();
+        // Collected from the views alone, then extended: collecting the
+        // pinned views can reuse their buffer, which a chained iterator does
+        // not, so a read with no durable layer allocates nothing for it.
+        let mut sources: Vec<Source> = views.into_iter().map(View::into_source).collect();
+        sources.extend(self.named.iter().map(|(_, source)| source.clone()));
         Composite {
-            sources: views
-                .into_iter()
-                .map(View::into_source)
-                .chain(self.named.iter().map(|(_, source)| source.clone()))
-                .collect(),
+            sources,
             memories: self
                 .memories
                 .iter()
