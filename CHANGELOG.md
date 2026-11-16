@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A stack transaction's publish reports like an invocation, so its commands reach the stack's providers
 
-[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD).
+[#821](https://github.com/dialog-db/dialog-db/pull/821).
 
 `Stack::transaction()` now returns a `StackTransaction`, the
 stack-bound counterpart of a branch `Transaction`, and its publish
