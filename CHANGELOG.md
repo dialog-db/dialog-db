@@ -14,7 +14,67 @@ says how to cut a release.
 
 ## Unreleased
 
-### An attribute is a relation, a type and a cardinality, and a ranked read is a rule
+### A concept field elects its claim, and a listed `as` ranks its values least first
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
+[`notes/aggregation.md`](./notes/aggregation.md) ("Electors").
+
+A concept field may declare an elector, which chooses one of its
+relation's claims per entity: `last` the newest, `max` the greatest
+value, `min` the least, and `top` the value listed last in the
+attribute's `as`. A listing ranks its values from least to greatest,
+left to right, so `top` is `max` under the order the listing gives a
+bounded set of values. The attribute says what a write does, the
+elector what a read returns, so a ranked field reads a cardinality-many
+attribute, whose cell keeps every claim to rank:
+
+```json
+{ "with": { "status": {
+  "the": "account/status",
+  "as": ["registered", "active", "suspended"],
+  "cardinality": "many",
+  "elect": "top"
+} } }
+```
+
+Writing `active` to an account that holds `suspended` adds a claim and
+does not displace it; un-suspending is retracting `suspended`. The
+election ranks stored and derived claims alike, and among values the
+elector holds equal it falls back on the order a cardinality-one read
+elects by.
+
+What this changes for you:
+
+- `ConceptFieldDescriptor` has `elect`, set with `electing` and read
+  with `elector` and `ranking`; `"elect": "top"` on the wire. A field
+  refuses an elector its attribute cannot be read under
+  (`TypeError::Election`): a ranked elector over cardinality one, `top`
+  over an attribute that lists no values, `max` or `min` over a type
+  with no order, or any elector on a keyed collection.
+- A concept's identity hashes each field's elector beside its
+  optionality and conformance, so a field electing `top` and one
+  electing nothing over the same attribute are two concepts, and a
+  one-field concept with an elector is not the attribute's relation.
+- `dialog_query::elector::{Elector, Ranking}` are new.
+- A listed `as` is ordered: `[registered, active, suspended]` and
+  `[suspended, active, registered]` are two types, and the first ranks
+  `suspended` greatest.
+- `top` is no longer an aggregator a rule's `reduce` spells, and
+  `ReduceSpec` and `ReduceEntry` lose `among`: a ranked read is a field
+  that elects.
+- A read of a field over stored claims elects in the scan, as a
+  cardinality-one read does. A field over a relation some rule derives
+  folds the relation's claims, which is set aside like any fold if the
+  field's concept closes a cycle through the relation.
+
+Why: a rule concluding a ranked value into a relation of its own put
+that value in competition with the relation's stored claims, so a
+status set by hand outranked the fold until a newer state arrived. A
+field that elects reads the one relation the claims are in, and a write
+through it adds to that relation. The ordering is the type's, so a
+comparison in a rule body and the election agree on it.
+
+### An attribute is a relation, a type and a cardinality, and a ranked read is an elector
 
 Refs [#793](https://github.com/dialog-db/dialog-db/issues/793) and
 [#759](https://github.com/dialog-db/dialog-db/issues/759), detail in
@@ -33,10 +93,9 @@ a write adds one: what `all` did.
 
 No attribute reads under `max`, `min` or `top` any more, and `the` names
 one relation: a list of relations, ranked, is gone. A read that ranks a
-cell's claims is a deductive rule folding them with `top`, `max` or
-`min` in its `reduce` (see the next entry). A listed `as: [a, b]` stays,
-as an enumerated type: the values the attribute holds, with no ranking
-meaning.
+cell's claims is a concept field electing with `max`, `min` or `top`
+(see the previous entry). A listed `as: [a, b]` stays, as an enumerated
+type ordered least first.
 
 An attribute or a rule body spelled with a `pick` (or `select`), or
 listing relations under `the`, is refused by name, so a definition in
@@ -70,10 +129,9 @@ What this changes for you:
 - `#[derive(Attribute)]` reads `#[cardinality(one)]` (the default) or
   `#[cardinality(many)]`. `#[pick(..)]` no longer compiles: `#[pick(last)]`
   and `#[pick(all)]` say which cardinality replaces them, and a ranking
-  pick says to write a rule.
-- A query over `{ "the": .., "pick": "max:" }` fails to parse. Write a
-  rule concluding the ranked value, `"reduce": { "top": { "apply":
-  "max", "of": .. } }`, and query its relation.
+  pick says to declare an elector.
+- A query over `{ "the": .., "pick": "max:" }` fails to parse. Read a
+  field `{ "the": .., "cardinality": "many", "elect": "max" }`.
 - `Election` elects by cardinality alone; `Election::elect_claims`,
   `ConceptRules::chain_scans` and `ConceptRules::ranks` are gone.
 - An attribute's identity hashes its relation, its cardinality, its type
@@ -96,41 +154,26 @@ Why: a pick made one attribute decide both how a relation is read and
 what a write to it retires, so the relation's contents depended on how
 each writer read it, and a ranked read forced a succeeding write. A
 cardinality says only how many claims a cell holds. How to rank them is
-a rule, which reads the relation as it is and can be changed without
-rewriting it.
+the reading concept's elector, which reads the relation as it is and
+can be changed without rewriting it.
 
-### `last` and `top` are aggregators, and a chosen value stands as the fact it was chosen from
+### `last` is an aggregator, and a chosen value stands as the fact it was chosen from
 
 Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
 [`notes/aggregation.md`](./notes/aggregation.md).
 
-A `reduce` clause takes `last` and `top` beside `min` and `max`: the
-four folds that return one of their inputs. `last` returns the newest
-input, the one bound from the fact standing greatest, which is what a
-cardinality-one read does within a cell and is now available over any
-group. `top` returns the input listed first in the entry's `among`,
-best first, an unlisted value last and the newest among equals:
-
-```json
-"reduce": { "status": {
-  "apply": "top",
-  "of": { "?": { "name": "state" } },
-  "among": ["suspended", "active"]
-} }
-```
-
-All four fall back on the order a cardinality-one read elects a cell's
-claims by: `last` is that order, and the others take the newest among
-the values they hold equal. They are how a ranked read is written now
-that attributes have none.
+A `reduce` clause takes `last` beside `min` and `max`: the folds that
+return one of their inputs. `last` returns the newest input, the one
+bound from the fact standing greatest, which is what a cardinality-one
+read does within a cell and is now available over any group. All three
+fall back on the order a cardinality-one read elects a cell's claims
+by: `last` is that order, and the others take the newest among the
+values they hold equal.
 
 What this changes for you:
 
-- `Aggregator::Last` and `Aggregator::Top` are new. `ReduceSpec` and
-  `ReduceEntry` carry `among`, the values a `top` ranks, written only
-  when it lists any; `ReduceSpec::new` and `ranking` build one, and code
-  building either by its fields names the new one.
-- A value `min`, `max`, `last` or `top` chose stands as the fact it was
+- `Aggregator::Last` is new.
+- A value `min`, `max` or `last` chose stands as the fact it was
   bound from, so it competes with a stored claim of its relation under
   cardinality one as any derived value does: the newer wins. A value
   `sum`, `count` or `avg` computed still stands below every stored
@@ -143,10 +186,9 @@ What this changes for you:
   reads no other. A grouping field bound by an earlier premise is still
   joined against every group's fold.
 
-Why: a status derived by rank over every state an account has been
-given is a rule, not a property of how the relation is stored. With the
-choosing folds in the head, the relation keeps every claim and the rule
-says how to read it.
+Why: the newest member of a group no cell holds (a department's newest
+hire) is a fold, and a cardinality-one read already elects by that
+order within a cell.
 
 ### A deductive rule may fold, and one closing a cycle through a fold is set aside
 
@@ -155,7 +197,7 @@ Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
 [`notes/attribute-heads.md`](./notes/attribute-heads.md).
 
 A deductive rule takes a `reduce` clause again: `sum`, `count`,
-`count-distinct`, `min`, `max`, `avg`, `last` and `top` over the rows
+`count-distinct`, `min`, `max`, `avg` and `last` over the rows
 of its body, grouped by the head fields it does not reduce. The head is
 an ordinary concept, so any rule, query or subscription reads a folded
 relation as it reads any other. Since
@@ -263,12 +305,15 @@ and names the rule.
   runs: it rewrites each rule whose attributes read under `last` or
   `all` (spelled, or implied by a plain attribute) into cardinality one
   or many, asserts it in format 4 under its identity now, and retracts
-  every rule fact the older release wrote for it. A rule reading an
-  attribute under `max`, `min` or `top` (including a listed `as` without
-  a pick, which read as `top`), or over a chain of relations, has no
-  rewriting with the same meaning: it is left as it is, inert, and
-  listed in `RulesUpgraded::unmapped` with why. Its author replaces it
-  with a rule folding with that aggregator. When to run the upgrade,
+  every rule fact the older release wrote for it. An attribute read
+  under `max`, `min` or `top` (including a listed `as` without a pick,
+  which read as `top`) is rewritten into a cardinality-many field
+  electing with that elector, a `top`'s list reversed, since those
+  releases ranked best first and a listing now ranks least first. A rule
+  over a chain of relations has no rewriting with the same meaning: it
+  is left as it is, inert, and listed in `RulesUpgraded::unmapped` with
+  why. Its author replaces it with a rule deriving one relation from
+  each, read by a field that elects. When to run the upgrade,
   once after a full replication or on every pull, is the embedder's
   decision, as before.
 - The upgrade also moves a `dialog.concept/transient` marker keyed by a
@@ -284,7 +329,9 @@ and names the rule.
   cardinality-one write elects the claim it succeeds, are as `last`
   left them. A write a 0.3 or 0.4 replica made under `max`, `min` or
   `top` succeeded the claim that pick elected; those claims stay as
-  written, and a read now returns the cell's newest.
+  written. A field the upgrade rewrote to elect with that pick's elector
+  reads the same claim; any other read under cardinality one returns the
+  cell's newest.
 - A rule the analysis sets aside for deciding on a cardinality-one value
   in its own cycle stays installed and is evaluated again once the cycle
   it closed is gone. Replicas on releases either side of this one can

@@ -11,8 +11,9 @@
 //! attribute spelled with a pick, so the rule is inert: no read decodes
 //! it and no read fails over it. [`Branch::upgrade_rules`] rewrites a
 //! rule whose attributes read under `last` or `all` with cardinality one
-//! or many, and leaves a rule reading under `max`, `min` or `top`, or over
-//! a chain of relations, inert and reported.
+//! or many, and one reading under `max`, `min` or `top` with a
+//! cardinality-many field electing with that elector, and leaves a rule
+//! reading over a chain of relations inert and reported.
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -302,13 +303,16 @@ async fn the_upgrade_rewrites_last_and_all_into_cardinality() -> Result<()> {
     Ok(())
 }
 
-/// A rule reading an attribute under `max`, under `top` (a listed `as`
-/// without a pick), or over a chain of relations has no cardinality that
-/// reads it the same: the upgrade leaves it as it was, inert, and
-/// reports it with why. Nothing is written for it, and a second run
-/// reports it again and commits nothing.
+/// A rule reading an attribute under `max`, or under `top` (a listed
+/// `as` without a pick), is rewritten to read a cardinality-many field
+/// electing with that elector, and reads as that release read it: the
+/// greatest salary, and the state that release listed first (it ranked
+/// best first, and the rewritten listing ranks least first). A rule over
+/// a chain of relations has no such spelling: it is left as it was,
+/// inert, and reported, and a second run reports it again and commits
+/// nothing.
 #[dialog_common::test]
-async fn the_upgrade_reports_ranked_reads_and_chains_and_leaves_them_inert() -> Result<()> {
+async fn the_upgrade_rewrites_ranked_reads_to_electors_and_reports_chains() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
@@ -324,6 +328,9 @@ async fn the_upgrade_reports_ranked_reads_and_chains_and_leaves_them_inert() -> 
         &operator,
         vec![
             ("org/salary", &alice, Value::UnsignedInt(300)),
+            ("org/salary", &alice, Value::UnsignedInt(700)),
+            ("org/salary", &alice, Value::UnsignedInt(500)),
+            ("job/state", &job, Value::String("todo".into())),
             ("job/state", &job, Value::String("done".into())),
             (
                 "user/email",
@@ -333,53 +340,33 @@ async fn the_upgrade_reports_ranked_reads_and_chains_and_leaves_them_inert() -> 
         ],
     )
     .await?;
-    let held: Vec<usize> = {
-        let mut held = Vec::new();
-        for name in names {
-            held.push(rule_facts(&branch, &operator, &stored_by_release(name)).await?);
-        }
-        held
-    };
+    let chained = rule_facts(&branch, &operator, &stored_by_release("reach_from_contact")).await?;
 
     let upgraded = upgrade(&branch, &operator).await?;
-    assert!(upgraded.reinstalled.is_empty(), "{upgraded:?}");
-    assert_eq!(upgraded.revision, None, "nothing is committed");
-    let unmapped = |name: &str| -> Vec<Unmapped> {
-        upgraded
-            .unmapped
-            .iter()
-            .find(|(of, _)| *of == stored_by_release(name))
-            .map(|(_, why)| why.clone())
-            .unwrap_or_default()
-    };
+    assert_eq!(upgraded.reinstalled.len(), 2, "{upgraded:?}");
+    assert!(upgraded.revision.is_some(), "the rewrite is committed");
     assert!(
-        matches!(unmapped("top_from_salary").as_slice(), [Unmapped::Ranked { pick, .. }] if pick == "max"),
+        matches!(
+            upgraded.unmapped.as_slice(),
+            [(of, why)] if *of == stored_by_release("reach_from_contact")
+                && matches!(why.as_slice(), [Unmapped::Chain { relations }] if relations.len() == 2)
+        ),
         "{upgraded:?}"
     );
-    assert!(
-        matches!(unmapped("flag_from_ranked_state").as_slice(), [Unmapped::Ranked { pick, .. }] if pick == "top"),
-        "{upgraded:?}"
+    assert_eq!(
+        read(&branch, &operator, "org/top", "natural:", "one", &alice).await?,
+        vec![Value::UnsignedInt(700)],
+        "`max` reads the greatest salary"
     );
-    assert!(
-        matches!(unmapped("reach_from_contact").as_slice(), [Unmapped::Chain { relations }] if relations.len() == 2),
-        "{upgraded:?}"
+    assert_eq!(
+        read(&branch, &operator, "job/flag", "text:", "one", &job).await?,
+        vec![Value::String("todo".into())],
+        "`top` reads the state that release ranked first"
     );
-    for (name, before) in names.iter().zip(held) {
-        assert_eq!(
-            rule_facts(&branch, &operator, &stored_by_release(name)).await?,
-            before,
-            "{name} is left as the release stored it"
-        );
-    }
-    assert!(
-        read(&branch, &operator, "org/top", "natural:", "one", &alice)
-            .await?
-            .is_empty()
-    );
-    assert!(
-        read(&branch, &operator, "job/flag", "text:", "one", &job)
-            .await?
-            .is_empty()
+    assert_eq!(
+        rule_facts(&branch, &operator, &stored_by_release("reach_from_contact")).await?,
+        chained,
+        "the chain is left as the release stored it"
     );
     assert!(
         read(&branch, &operator, "user/reach", "text:", "one", &alice)
@@ -388,7 +375,7 @@ async fn the_upgrade_reports_ranked_reads_and_chains_and_leaves_them_inert() -> 
     );
 
     let again = upgrade(&branch, &operator).await?;
-    assert_eq!(again.unmapped.len(), 3, "still reported: {again:?}");
+    assert_eq!(again.unmapped.len(), 1, "still reported: {again:?}");
     assert_eq!(again.revision, None);
     Ok(())
 }

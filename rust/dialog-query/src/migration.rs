@@ -20,13 +20,14 @@
 //! A rule body a 0.3 or 0.4 release stored spells each attribute under a
 //! pick, which this release refuses to read (see
 //! [`AttributeDescriptor`]). [`rewrite_body`] rewrites such a body into
-//! one this release reads with the same meaning, where there is one: a
-//! `last` attribute is cardinality one and an `all` attribute
-//! cardinality many. A read under `max`, `min` or `top`, and a chain of
-//! relations, has no such spelling: a ranked read is now a rule folding
-//! with that aggregator, which only the author can write. Such a body is
-//! reported as [`Rewritten::Unmapped`] and left inert, never read with
-//! another meaning.
+//! one this release reads with the same meaning: a `last` attribute is
+//! cardinality one and an `all` attribute cardinality many, and an
+//! attribute read under `max`, `min` or `top` (which a listed `as`
+//! without a pick implied) is a cardinality-many field electing with
+//! that elector, a `top`'s list reversed, since it ranked best first and
+//! a listing now ranks least first. A chain of relations has no such
+//! spelling: such a body is reported as [`Rewritten::Unmapped`] and left
+//! inert, never read with another meaning.
 
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Result as FmtResult};
@@ -43,6 +44,7 @@ use crate::Cardinality;
 use crate::attribute::{AttributeDescriptor, Keyed, The};
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::corpus::Value;
+use crate::elector::Elector;
 use crate::identity::{self, ATTRIBUTE, CONCEPT, field};
 
 /// The identity the earlier release gave `attribute`, as its
@@ -158,6 +160,10 @@ pub fn attribute_uri_v1(attribute: &AttributeDescriptor) -> String {
 /// concept's reference over its attributes' earlier references.
 pub fn concept_reference_v1(concept: &ConceptDescriptor) -> Reference {
     let entries = concept.with().iter().map(|(_name, field)| {
+        let attribute = match field.elector() {
+            Some(elector) => elected_reference_v1(field.descriptor(), elector),
+            None => attribute_reference_v1(field.descriptor()),
+        };
         let mut options = Vec::new();
         if field.is_optional() {
             options.push((field::OPTIONAL, field::TRUE));
@@ -165,12 +171,46 @@ pub fn concept_reference_v1(concept: &ConceptDescriptor) -> Reference {
         if let Some(target) = field.conforms() {
             options.push((field::CONFORMS, concept_reference_v1(target)));
         }
-        (
-            attribute_reference_v1(field.descriptor()),
-            ReferenceType::MAP.map(options),
-        )
+        (attribute, ReferenceType::MAP.map(options))
     });
     CONCEPT.map(entries)
+}
+
+/// The reference the release before this one gave the attribute a field
+/// electing with `elector` was migrated from: the attribute read under
+/// the pick of the elector's name, a `top`'s values listed best first as
+/// that release ranked them.
+fn elected_reference_v1(attribute: &AttributeDescriptor, elector: Elector) -> Reference {
+    let pick = match elector {
+        Elector::Last => return attribute_reference_v1(attribute),
+        Elector::Max => b"max:".as_slice(),
+        Elector::Min => b"min:".as_slice(),
+        Elector::Top => b"top:".as_slice(),
+    };
+    let mut entries = vec![
+        (
+            field::THE,
+            ReferenceType::LIST.list([SYMBOL.reference_of(attribute.the().to_string().as_bytes())]),
+        ),
+        (field::PICK, ENTITY.reference_of(pick)),
+    ];
+    if let Some(content_type) = attribute.content_type() {
+        entries.push((
+            field::AS,
+            ENTITY.reference_of(content_type.uri().as_bytes()),
+        ));
+    }
+    let mut among: Vec<&Value> = attribute.among().iter().collect();
+    if elector == Elector::Top {
+        among.reverse();
+    }
+    if !among.is_empty() {
+        entries.push((
+            field::AMONG,
+            ReferenceType::LIST.list(among.into_iter().map(Value::reference)),
+        ));
+    }
+    ATTRIBUTE.map(entries)
 }
 
 /// The identity the release before this one gave `concept`.
@@ -182,14 +222,12 @@ pub fn concept_identity_v1(concept: &ConceptDescriptor) -> Entity {
 /// this release, when it reads as anything.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unmapped {
-    /// The attribute was read under a pick that ranks its candidates:
-    /// `max`, `min`, or `top` (which a listed `as` without a pick
-    /// implied). A ranked read is now a rule folding with that
-    /// aggregator, which the migration cannot write for the author.
-    Ranked {
+    /// The attribute was read under a pick no release this one migrates
+    /// from defined.
+    Pick {
         /// The relation read.
         the: String,
-        /// The pick it was read under: `max`, `min` or `top`.
+        /// The pick it was read under.
         pick: String,
     },
     /// The attribute read a chain of relations, the first holding a
@@ -198,27 +236,14 @@ pub enum Unmapped {
         /// The relations read, best first.
         relations: Vec<String>,
     },
-    /// The attribute was read under `last` and written under
-    /// cardinality many, a spelling no release shipped: neither
-    /// cardinality reads and writes it as it was.
-    Adding {
-        /// The relation read.
-        the: String,
-    },
 }
 
 impl Display for Unmapped {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            Unmapped::Ranked { the, pick } => write!(f, "{the} is read under `{pick}`"),
+            Unmapped::Pick { the, pick } => write!(f, "{the} is read under `{pick}`"),
             Unmapped::Chain { relations } => {
                 write!(f, "a chain of relations: {}", relations.join(", "))
-            }
-            Unmapped::Adding { the } => {
-                write!(
-                    f,
-                    "{the} is read under `last` and written under cardinality many"
-                )
             }
         }
     }
@@ -230,7 +255,8 @@ pub enum Rewritten {
     /// The body spells no pick and no chain: it reads as it is.
     Unchanged,
     /// The body, every attribute's pick replaced by the cardinality it
-    /// stood for: `last` by one and `all` by many.
+    /// stood for, `last` by one and `all` by many, and a ranked pick by
+    /// cardinality many and the elector of its name.
     Rewritten(Vec<u8>),
     /// The body reads some attribute in a way no cardinality reproduces.
     /// It is left as it is, and stays inert.
@@ -239,11 +265,13 @@ pub enum Rewritten {
 
 /// A rule body the release before this one stored, in the format this
 /// release reads: each attribute it spells under `pick: last` (or
-/// `select: last`) under cardinality one, and each under `all` under
-/// cardinality many, the cardinality each pick stood for. An attribute
-/// read under `max`, `min` or `top`, or over a chain of relations, has
-/// no such cardinality, and the body is reported rather than rewritten
-/// with another meaning. `Err` when the bytes are not dag-cbor.
+/// `select: last`) under cardinality one, each under `all` under
+/// cardinality many, and each under `max`, `min` or `top` (or listed
+/// with no pick, which read as `top`) under cardinality many with the
+/// elector of the pick's name, a `top`'s listing reversed to rank least
+/// first. An attribute over a chain of relations has no such spelling,
+/// and the body is reported rather than rewritten with another meaning.
+/// `Err` when the bytes are not dag-cbor.
 pub fn rewrite_body(bytes: &[u8]) -> Result<Rewritten, String> {
     let mut body: Ipld = serde_ipld_dagcbor::from_slice(bytes)
         .map_err(|error| format!("dag-cbor decode failed: {error}"))?;
@@ -315,50 +343,74 @@ fn rewrite_attribute(map: &mut BTreeMap<String, Ipld>, unmapped: &mut Vec<Unmapp
             .collect(),
         _ => return false,
     };
-    let pick = text(map.get("pick")).or_else(|| text(map.get("select")));
-    let listed = matches!(map.get("as"), Some(Ipld::List(_)));
+    let spelled = map.get("pick").or_else(|| map.get("select")).cloned();
+    // A `top` could carry its ranking in the pick: `{"top:": [..]}`.
+    let (pick, ranking) = match &spelled {
+        Some(Ipld::Map(entry)) if entry.len() == 1 => {
+            let (name, ranking) = entry.iter().next().expect("one entry");
+            let ranking = match ranking {
+                Ipld::List(values) if !values.is_empty() => Some(values.clone()),
+                _ => None,
+            };
+            (Some(name.trim_end_matches(':').to_string()), ranking)
+        }
+        other => (text(other.as_ref()), None),
+    };
+    let listed = matches!(map.get("as"), Some(Ipld::List(values)) if !values.is_empty());
     let many = text(map.get("cardinality")).as_deref() == Some("many");
     if relations.len() > 1 {
         unmapped.push(Unmapped::Chain { relations });
         return false;
     }
-    let the = relations.into_iter().next().unwrap_or_default();
     // A single relation listed reads as the relation.
     let mut changed = false;
-    if let Some(Ipld::List(_)) = map.get("the") {
-        map.insert("the".to_string(), Ipld::String(the.clone()));
+    if let Some(Ipld::List(relations)) = map.get("the") {
+        let the = relations[0].clone();
+        map.insert("the".to_string(), the);
         changed = true;
     }
-    let cardinality = match pick.as_deref() {
+    let (cardinality, elector) = match pick.as_deref() {
         // A listed domain with no pick was read under `top`.
-        None if listed => {
-            unmapped.push(Unmapped::Ranked {
-                the,
-                pick: "top".to_string(),
-            });
-            return false;
-        }
+        None if listed => (Some("many"), Some("top")),
         // `cardinality` alone is how this release spells it.
         None => return changed,
-        Some("last") if many => {
-            unmapped.push(Unmapped::Adding { the });
-            return false;
-        }
-        Some("last") => None,
-        Some("all") => Some("many"),
+        // Read newest and written adding: what a field electing `last`
+        // over a cardinality-many attribute is.
+        Some("last") if many => (Some("many"), Some("last")),
+        Some("last") => (None, None),
+        Some("all") => (Some("many"), None),
+        // A `top` ranking nothing ranked every value alike and so read
+        // the newest.
+        Some("top") if !listed && ranking.is_none() => (Some("many"), Some("last")),
+        Some(ranked @ ("top" | "max" | "min")) => (Some("many"), Some(ranked)),
         Some(other) => {
-            unmapped.push(Unmapped::Ranked {
-                the,
+            unmapped.push(Unmapped::Pick {
+                the: relations.into_iter().next().unwrap_or_default(),
                 pick: other.to_string(),
             });
             return false;
         }
     };
+    if elector == Some("top") {
+        // That release ranked best first; a listing ranks least first.
+        let ranked = match (ranking, map.get("as")) {
+            (Some(ranking), _) => Some(ranking),
+            (None, Some(Ipld::List(values))) => Some(values.clone()),
+            (None, _) => None,
+        };
+        if let Some(mut ranked) = ranked {
+            ranked.reverse();
+            map.insert("as".to_string(), Ipld::List(ranked));
+        }
+    }
     map.remove("pick");
     map.remove("select");
     map.remove("cardinality");
     if let Some(cardinality) = cardinality {
         map.insert("cardinality".to_string(), Ipld::String(cardinality.into()));
+    }
+    if let Some(elector) = elector {
+        map.insert("elect".to_string(), Ipld::String(elector.into()));
     }
     true
 }
