@@ -14,6 +14,67 @@ says how to cut a release.
 
 ## Unreleased
 
+### A provider claims the commands whose rows satisfy its concept, and a command sees the rows of its tick
+
+[#TBD](https://github.com/dialog-db/dialog-db/pull/TBD). Refs
+tonk-labs/tonk#1318, issues 9 and 10.
+
+A provider now claims a landed command when the command's rows satisfy
+its concept, the test decoding the concept from them would pass: every
+required field of the concept has a row of the field's attribute and,
+when the field declares a type, a value of that type. Optional fields are
+not needed, and rows of other attributes do not disqualify. Every
+provider whose concept a command satisfies runs, in registration order,
+each writing its own `answered` or `failed` row. One provider can answer
+several concepts (`Provider::new(&current, handler).also(&legacy)`); it
+runs at most once per command, and its `answered` row names the first
+of its concepts the command satisfies. The rows of the `control:` entity
+itself that land in a tick are the tick's own facts (who asked, and
+whatever an embedder stamps on the loopback): they are no command, and
+each command carries them as `Command::tick`.
+
+What this changes for you:
+
+- A provider no longer claims a command because one of its rows has an
+  attribute of the provider's concept. A command that carries one shared
+  attribute (a time stamp, an email) and lacks the concept's other
+  required fields is no longer that provider's; a command no concept is
+  satisfied by is `unhandled`, where before the first provider sharing
+  an attribute ran.
+- A command whose rows satisfy several providers' concepts runs every
+  one of them, in registration order, where before only the first
+  registered ran. It gets one `dialog.command/answered` row per provider
+  that answered and one `dialog.command/failed` row per provider that
+  failed (both are now cardinality-many), and `EffectReport::answered`
+  and `EffectReport::failed` name it once per provider. A rule copying
+  `answered` should read it under `pick: all`.
+- `Provider::also(&concept)` adds a concept to a provider, and
+  `Provider::concepts()` lists them; `Provider::concept()` is the first.
+  Registering a provider writes one `dialog.provider/command` row per
+  concept no provider registered before, and replaces the first
+  registered provider that shares a concept with it.
+- `InvocationReport::commands()` and `Effect::commands()` leave out the
+  rows of the `control:` entity itself, so they are never a command,
+  never `unhandled` and never marked `dialog.command/invoked`.
+  `InvocationReport::tick()`, `Effect::tick()` and `Command::tick()`
+  return them.
+
+Why: three of tonk's command groups share an attribute
+(`dom.event/time-stamp`, `elements.email/value`, `current-target/value`),
+so the provider of the wrong one ran: CheckEmail answered
+RegisterAccount, ProfileRename renamed a profile with a space's name.
+Tonk's own registry ran every handler whose decode succeeded, once per
+handler, which is the rule now. And tonk writes the asking client as a
+row of `control:` for the tick, which no provider could read and every
+effect reported as an unhandled command.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: the rule is applied in memory when
+  an effect runs, and the lifecycle and tick rows live in `control:` for
+  one tick. Nothing is rewritten on upgrade, and an older release reads
+  what this one writes.
+
 ### A stack transaction's publish reports like an invocation, so its commands reach the stack's providers
 
 [#821](https://github.com/dialog-db/dialog-db/pull/821).

@@ -345,19 +345,42 @@ Every change in a command's life is a row of the command's entity in
 
 ```text
 <cmd>  dialog.command/invoked    <tick>          ; the tick of its dispatch it is stimulus of, from 1
-<cmd>  dialog.command/answered   <concept>       ; a provider answered it
-<cmd>  dialog.command/failed     "<reason>"      ; its provider failed
+<cmd>  dialog.command/answered   <concept>       ; a provider answered it, one row per provider
+<cmd>  dialog.command/failed     "<reason>"      ; a provider failed, one row per provider
 <cmd>  dialog.command/unhandled  true            ; no provider claims it
 <cmd>  dialog.command/progress   <value>         ; a provider's own intermediate answer
 ```
 
-A **provider** performs the commands of one concept: a function from
+A **provider** performs the commands of its concepts: a function from
 the rows of one landed command to the statements that answer it.
 [`Stack::provide`] registers one, and the first registration of a
-concept writes `session: dialog.provider/command <concept>`, so what this
-process can perform is a row any query can read. A provider claims a
-command when one of its rows has an attribute of the provider's concept.
-Of the providers claiming a command, the first one registered runs.
+concept writes `session: dialog.provider/command <concept>`, one row per
+concept, so what this process can perform is a row any query can read.
+
+A provider claims a command when the command's rows satisfy its
+concept, the same test decoding the concept from those rows would pass:
+every required field has a row of the field's attribute and, when the
+field declares a type, a value of that type (as is, or through a number
+view). Optional fields are not needed, and rows of attributes outside the
+concept do not disqualify. Sharing one attribute with a concept is not
+satisfying it, so two concepts that both carry a time stamp never claim
+each other's commands. When the concepts of several providers are each
+satisfied by one command, every one of them runs, in the order they were
+registered, and each writes its own `answered` (or `failed`) row.
+
+One provider can answer several concepts, a command's current shape and
+its legacy one: `Provider::new(&current, handler).also(&legacy)`. It
+claims a command that satisfies any of them, runs once for it however
+many it satisfies, and its `answered` row names the first in its own
+order.
+
+The rows of the `control:` entity itself are no command: they are the
+**tick**'s own facts, who asked and whatever else an embedder stamps on
+the loopback beside the commands, such as `control: tonk.session/client
+client:<id>` written `.at(control_layer())`. The report holds them apart
+([`InvocationReport::tick`]), no provider claims them, no effect marks
+them `unhandled`, and every command of the tick carries them
+([`Command::tick`]).
 
 Performing an invocation runs no provider. [`InvocationReport::effect`]
 is a separate step, which the embedder performs when it chooses: after
