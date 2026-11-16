@@ -278,24 +278,43 @@ impl FromStr for The {
 pub struct AttributeDescriptor {
     /// The relation read first.
     the: The,
-    /// The relations read after it, in rank order: a candidate from an
-    /// earlier relation outranks one from a later.
-    then: Vec<The>,
     description: String,
     content_type: Option<Type>,
-    /// The values `as` lists, best first: the domain a value is one
-    /// of, which a `top` pick ranks by.
-    among: Vec<Value>,
     /// Which of the relation's candidates the attribute picks; a `top`
     /// carries [`among`](Self::among). The cardinality is the pick's
     /// arity.
     pick: Pick,
+    /// What few attributes say: further relations, a listed domain, a
+    /// layer. Boxed, and `None` when the attribute says none of them: a
+    /// descriptor is held in every concept's field map and cloned with
+    /// it, so the common one stays small.
+    rare: Option<Box<Rare>>,
+}
+
+/// The parts of an [`AttributeDescriptor`] few attributes have.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Rare {
+    /// The relations read after the first, in rank order: a candidate
+    /// from an earlier relation outranks one from a later.
+    then: Vec<The>,
+    /// The values `as` lists, best first: the domain a value is one
+    /// of, which a `top` pick ranks by.
+    among: Vec<Value>,
     /// The layer the attribute's facts are read from and written to
     /// (`in:`): a constant layer, or a variable a concept field binds. A
     /// read with none, or with the variable unbound, reads every layer;
     /// a write with none lands in the primary. No part of the
     /// attribute's identity: one attribute's rows may lie on any layer.
     layer: Option<Term<Entity>>,
+}
+
+impl Rare {
+    /// The parts held as a descriptor holds them: `None` when there are
+    /// none.
+    fn boxed(then: Vec<The>, among: Vec<Value>, layer: Option<Term<Entity>>) -> Option<Box<Self>> {
+        let rare = Self { then, among, layer };
+        (rare != Self::default()).then(|| Box::new(rare))
+    }
 }
 
 /// The wire form of an [`AttributeDescriptor`]: `the` is one relation
@@ -424,12 +443,10 @@ impl TryFrom<Wire> for AttributeDescriptor {
         };
         let descriptor = AttributeDescriptor {
             the,
-            then,
             description: wire.description,
             content_type,
-            among,
             pick,
-            layer: wire.layer,
+            rare: Rare::boxed(then, among, wire.layer),
         };
         match descriptor.pick_error() {
             Some(reason) => Err(reason),
@@ -440,16 +457,17 @@ impl TryFrom<Wire> for AttributeDescriptor {
 
 impl From<AttributeDescriptor> for Wire {
     fn from(descriptor: AttributeDescriptor) -> Self {
-        let the = if descriptor.then.is_empty() {
+        let Rare { then, among, layer } = descriptor.rare.map(|rare| *rare).unwrap_or_default();
+        let the = if then.is_empty() {
             OneOrMany::One(descriptor.the)
         } else {
-            OneOrMany::Many(iter::once(descriptor.the).chain(descriptor.then).collect())
+            OneOrMany::Many(iter::once(descriptor.the).chain(then).collect())
         };
         let name = PickName::of(&descriptor.pick);
-        let content = if descriptor.among.is_empty() {
+        let content = if among.is_empty() {
             descriptor.content_type.map(As::Kind)
         } else {
-            Some(As::Domain(descriptor.among))
+            Some(As::Domain(among))
         };
         // The pick is written where it says more than the lists imply:
         // a ranked choice is `top` by itself, and a plain attribute is
@@ -467,7 +485,7 @@ impl From<AttributeDescriptor> for Wire {
             content,
             pick: Some(name).filter(|name| *name != implied),
             select: None,
-            layer: descriptor.layer,
+            layer,
         }
     }
 }
@@ -493,32 +511,52 @@ impl AttributeDescriptor {
     ) -> Self {
         Self {
             the,
-            then: Vec::new(),
             description: description.into(),
             content_type,
-            among: Vec::new(),
             pick: cardinality.pick(),
-            layer: None,
+            rare: None,
         }
+    }
+
+    /// The rare parts, to change: made when there are none yet. A
+    /// change that leaves none calls [`settle`](Self::settle).
+    fn rare_mut(&mut self) -> &mut Rare {
+        self.rare.get_or_insert_with(Box::default)
+    }
+
+    /// Drop the rare parts when a change left none.
+    fn settle(&mut self) {
+        if self
+            .rare
+            .as_deref()
+            .is_some_and(|rare| *rare == Rare::default())
+        {
+            self.rare = None;
+        }
+    }
+
+    /// The relations read after the first, in rank order.
+    fn then(&self) -> &[The] {
+        self.rare.as_deref().map_or(&[], |rare| &rare.then)
     }
 
     /// This descriptor reading and writing `layer` (`in:`): a constant
     /// layer, or a variable a concept field binds.
     pub fn in_layer(mut self, layer: Term<Entity>) -> Self {
-        self.layer = Some(layer);
+        self.rare_mut().layer = Some(layer);
         self
     }
 
     /// The layer the attribute reads from and writes to, when the
     /// descriptor names one. See [`in_layer`](Self::in_layer).
     pub fn layer(&self) -> Option<&Term<Entity>> {
-        self.layer.as_ref()
+        self.rare.as_deref().and_then(|rare| rare.layer.as_ref())
     }
 
     /// The layer a write through this descriptor lands in, when the
     /// descriptor names a constant one.
     pub fn constant_layer(&self) -> Option<Entity> {
-        match &self.layer {
+        match self.layer() {
             Some(Term::Constant(layer)) => Entity::try_from(layer.clone()).ok(),
             _ => None,
         }
@@ -528,7 +566,7 @@ impl AttributeDescriptor {
     /// bind it: the descriptor's constant, the caller's term for the
     /// descriptor's variable, or the variable itself.
     fn layer_term(&self, parameters: &Parameters) -> Option<Term<Entity>> {
-        let layer = self.layer.as_ref()?;
+        let layer = self.layer()?;
         let name = layer.name()?;
         Some(match parameters.get(name).cloned() {
             Some(Term::Variable {
@@ -543,8 +581,9 @@ impl AttributeDescriptor {
     /// This descriptor reading `then` after its relation, in rank
     /// order: a ranked choice by relation, read as `top`.
     pub fn with_then(mut self, then: Vec<The>) -> Self {
-        self.then = then;
-        self.pick = Pick::Top(self.among.clone());
+        self.pick = Pick::Top(self.among().to_vec());
+        self.rare_mut().then = then;
+        self.settle();
         self
     }
 
@@ -555,23 +594,24 @@ impl AttributeDescriptor {
         if matches!(self.pick, Pick::Last | Pick::Top(_)) {
             self.pick = Pick::Top(ranked.clone());
         }
-        self.among = ranked;
+        self.rare_mut().among = ranked;
+        self.settle();
         self
     }
 
     /// The values `as` lists, best first, if it lists any.
     pub fn among(&self) -> &[Value] {
-        &self.among
+        self.rare.as_deref().map_or(&[], |rare| &rare.among)
     }
 
     /// Every relation this attribute reads, the first ranked highest.
     pub fn relations(&self) -> impl Iterator<Item = &The> {
-        iter::once(&self.the).chain(self.then.iter())
+        iter::once(&self.the).chain(self.then().iter())
     }
 
     /// Whether this attribute reads several relations, ranked.
     pub fn is_chain(&self) -> bool {
-        !self.then.is_empty()
+        !self.then().is_empty()
     }
 
     /// This descriptor under `pick`. The pick is checked against the
@@ -580,9 +620,10 @@ impl AttributeDescriptor {
     /// domain; one with values lists them as the domain.
     pub fn with_pick(mut self, pick: Pick) -> Self {
         self.pick = match pick {
-            Pick::Top(ranked) if ranked.is_empty() => Pick::Top(self.among.clone()),
+            Pick::Top(ranked) if ranked.is_empty() => Pick::Top(self.among().to_vec()),
             Pick::Top(ranked) => {
-                self.among = ranked.clone();
+                self.rare_mut().among = ranked.clone();
+                self.settle();
                 Pick::Top(ranked)
             }
             pick => pick,
@@ -612,8 +653,11 @@ impl AttributeDescriptor {
     /// into.
     pub fn without_pick(mut self) -> Self {
         self.pick = Cardinality::of(&self.pick).pick();
-        self.among = Vec::new();
-        self.then = Vec::new();
+        if let Some(rare) = self.rare.as_deref_mut() {
+            rare.among = Vec::new();
+            rare.then = Vec::new();
+        }
+        self.settle();
         self
     }
 
@@ -812,7 +856,10 @@ impl AttributeDescriptor {
             Some(self.cardinality()),
         );
         Ok(
-            match self.layer_term(&parameters).or_else(|| self.layer.clone()) {
+            match self
+                .layer_term(&parameters)
+                .or_else(|| self.layer().cloned())
+            {
                 Some(layer) => query.with_layer(layer),
                 None => query,
             },
@@ -831,7 +878,7 @@ impl AttributeDescriptor {
     /// under different types or picks are two attributes.
     pub fn reference(&self) -> Reference {
         let relations = iter::once(&self.the)
-            .chain(&self.then)
+            .chain(self.then())
             .map(|the| SYMBOL.reference_of(the.to_string().as_bytes()));
         let mut entries = vec![
             (field::THE, ReferenceType::LIST.list(relations)),
@@ -843,10 +890,10 @@ impl AttributeDescriptor {
                 ENTITY.reference_of(content_type.uri().as_bytes()),
             ));
         }
-        if !self.among.is_empty() {
+        if !self.among().is_empty() {
             entries.push((
                 field::AMONG,
-                ReferenceType::LIST.list(self.among.iter().map(Value::reference)),
+                ReferenceType::LIST.list(self.among().iter().map(Value::reference)),
             ));
         }
         ATTRIBUTE.map(entries)
