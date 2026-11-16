@@ -52,6 +52,46 @@ fn unify(pattern: &Pattern, value: &Value) -> Option<Match> {
         .then_some(row)
 }
 
+/// Inside a map or a list a number matches by the number it is, and
+/// not as a scan reads one, through a type. Read that way `{n: 4}`
+/// would match a record that holds 4.3 and build one that holds 4, so
+/// a rule would hold or not by which of its premises ran first. Both
+/// were found by `property_tests`, over patterns drawn at random.
+#[dialog_common::test]
+fn it_matches_a_number_in_a_record_only_where_it_is_that_number() {
+    let constant = |value: Value| Pattern::Term(Term::Constant(value));
+    let record = map(&[("n", Value::Float(4.3)), ("m", text("x"))]);
+    let whole = map(&[("n", Value::Float(4.0)), ("m", text("x"))]);
+
+    // A constant. Alone it is matched as a scan reads: the natural 4
+    // reads 4.3 as 4.
+    let four = Pattern::Map(shape(&[
+        ("n", constant(Value::UnsignedInt(4))),
+        ("m", var("m")),
+    ]));
+    assert!(unify(&four, &record).is_none());
+    assert!(unify(&four, &whole).is_some());
+    assert!(unify(&constant(Value::UnsignedInt(4)), &Value::Float(4.3)).is_some());
+
+    // A number written two ways is one number in a record, which keeps
+    // `-0.0` as 0. The pattern builds that record, and matches it.
+    let zero =
+        Pattern::Map(shape(&[("n", constant(Value::Float(-0.0)))]).with_rest(Term::var("r")));
+    let built = zero
+        .build(&unify(&zero, &map(&[("n", Value::UnsignedInt(0))])).expect("matches"))
+        .expect("builds");
+    assert_eq!(built, map(&[("n", Value::UnsignedInt(0))]));
+
+    // A variable typed a natural binds the natural a part is, and no
+    // part it would have to read as one.
+    let natural: Term<Any> = Term::<u32>::var("n").into();
+    let typed = Pattern::Map(shape(&[("n", Pattern::Term(natural)), ("m", var("m"))]));
+    assert!(unify(&typed, &record).is_none());
+    let row = unify(&typed, &whole).expect("matches");
+    assert_eq!(row.value_of("n"), Some(&Value::UnsignedInt(4)));
+    assert_eq!(typed.build(&row), Some(whole));
+}
+
 /// A map pattern with no rest is the map of exactly its entries: it
 /// takes such a map apart, and matches no map that holds another.
 #[dialog_common::test]
