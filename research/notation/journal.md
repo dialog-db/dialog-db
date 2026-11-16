@@ -959,6 +959,22 @@ The list misreading is gone and the to-do holds. The note slipped to name matchi
 
 **Decision.** The spec takes `cardinality:`. A ranking in a conclusion needs its sentence, and its spelling is open.
 
+## 2026-11-15 — Electors, getters and views
+
+**Question.** With `pick:` gone, where do folds go, and how does a view reach a computed value without a separate query form?
+
+**Method.** Design discussion with the maintainer, no reader round.
+
+**Results.** Captured in [design](design.md):
+
+- Electors (`last`, `max`, `min`, `top`) fold only in a concept's head, each the greatest claim under a total order. A field's write binds an elector's value, so concepts stay two-way. Grouping is Datomic's: every head field not folded.
+- Computing folds (`count`, `sum`, `avg`) go only in a getter, a rule concluding `(name (concept ?x) is: …)`. Never on an attribute, where a stored write would compete with them, and never in a concept.
+- A view is a named template over one concept, in Hiccup, with calls for joins; many repeats, with no `for`. It expands to the concept's views dictionary. A view whose body is a record is a query.
+
+Set aside along the way: a `compute` form (another thing beside concepts), folds on concept fields that cannot be written (concepts must run both ways), a view as a rule (a template would change the rule's identity, and two rows give two cards), a view as a command, slot names in a template string that reach a getter with nothing on the page saying so, and `for`.
+
+**Decision.** The design takes these as proposed; R46 should test getters and views on readers.
+
 ## How to reproduce
 
 1. Take a variant's prompt from its round's results file and save it as `<variant>.txt`.
