@@ -243,12 +243,19 @@ written), how many ticks it ran, and the commands it landed on
 
 [`Stack::transaction`] is the same commit without the re-run, for a
 caller that handles a lost head itself: its publish fails with
-`PublishError::VersionMismatch` and lands nothing.
+`PublishError::VersionMismatch` and lands nothing. A publish that wins
+reports as an invocation does. `.commit().publish().perform(&env)`
+returns an [`InvocationReport`], and so does a staged chain's
+`batch.publish().perform(&env)` ([`StackBatch`]), naming the commands
+every link of the chain landed. An embedder that resolves a command
+against a head of its choosing, through a [`StackTransaction`], runs
+the stack's providers over it as an invoker does, with
+`report.effect().perform(&env)`.
 
 ```rust,no_run
 # use dialog_corpus::{Entity, Statement as _};
 # use dialog_stack::{Stack, StackEnv};
-# async fn example(stack: Stack, env: impl StackEnv) -> anyhow::Result<()> {
+# async fn example(stack: Stack, env: impl StackEnv + Clone + dialog_common::ConditionalSend) -> anyhow::Result<()> {
 let doc: Entity = "doc:1".parse()?;
 let tab: Entity = "session:tab".parse()?;
 // No layer named: the primary.
@@ -260,9 +267,21 @@ println!("published {:?} in {} ticks", report.revision(), report.ticks());
 
 // `.at(..)` names the layer.
 stack
-    .assert(dialog_query::the!("ui/selected").of(doc).is(true).at(tab))
+    .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true).at(tab))
     .perform(&env)
     .await?;
+
+// A transaction built by hand, with a command written into `control:`.
+let report = stack
+    .transaction()
+    .assert(dialog_query::the!("doc/title").of(doc.clone()).is("Final".to_string()))
+    .assert(dialog_query::the!("doc/index").of(doc).is(true).at(dialog_stack::control_layer()))
+    .commit()
+    .publish()
+    .perform(&env)
+    .await?;
+println!("landed {} commands", report.commands().len());
+report.effect().perform(&env).await?;
 # Ok(())
 # }
 ```
@@ -372,7 +391,7 @@ pub struct Fetch {
     pub node: Node,
 }
 
-# async fn example(stack: Stack, env: impl StackEnv) -> anyhow::Result<()> {
+# async fn example(stack: Stack, env: impl StackEnv + Clone + dialog_common::ConditionalSend) -> anyhow::Result<()> {
 let tab: Entity = "session:tab".parse()?;
 let fetch = <Fetch as Descriptor<ConceptDescriptor>>::descriptor();
 stack.provide(Provider::new(fetch, move |command| {
@@ -487,6 +506,71 @@ let landed = commands.next_rows().await;
 A consumer that performs one concept reads through a query instead,
 with [`Stack::arrivals`]: `Arrivals::poll` reads what has arrived, and
 `Arrivals::next` waits for the next dispatch to publish.
+
+## Subscriptions
+
+[`Stack::subscribe`] registers the stack's subscription to a query, or
+attaches to the one it holds, and returns a [`Subscriber`]: every
+reader of one query reads one evaluation, keyed by the query's
+[`QueryHash`] and its type. The evaluation is
+dialog's demand-gated [`Subscription`], the one [`Stack::subscription`]
+hands out unshared.
+
+A dispatch through the stack that published, or that wrote into a
+memory layer (`session:`, a session layer), schedules a poll; a write
+into a channel does not. A write the stack does not see, into the
+primary's session overlay among them, is scheduled with
+[`Stack::schedule_poll`]. [`Stack::settle`] polls every subscription of
+the stack once when a poll is scheduled, delivers what moved to each
+reader, and clears the mark, so a commit and a write into a memory
+layer in one request cost one evaluation, and a second `settle` does
+nothing. [`Effect::perform`] settles after its answer dispatch: an
+embedder that drives effects need not call `settle` itself.
+
+A reader's first delivery is the whole result set, as `asserted`, and
+each later one is the [`Delta`] a poll made; [`Subscriber::results`]
+reads the whole current set. The stack holds its subscriptions weakly:
+one goes when its last reader is dropped or closed.
+
+```rust,no_run
+# use dialog_corpus::Entity;
+# use dialog_query::attribute::Relation;
+# use dialog_query::{AttributeQuery, Term};
+# use dialog_stack::{Stack, StackEnv};
+# async fn example(stack: Stack, env: impl StackEnv + Clone + dialog_common::ConditionalSend) -> anyhow::Result<()> {
+/// `ui/selected` of every entity.
+fn selected() -> AttributeQuery {
+    AttributeQuery::from(
+        Term::<Relation>::from(Relation::from(
+            "ui/selected".parse::<dialog_corpus::Relation>().expect("an attribute"),
+        ))
+        .of(Term::<Entity>::var("doc"))
+        .is(Term::<bool>::var("on")),
+    )
+}
+
+// Two readers of one query share one subscription.
+let mut tab = stack.subscribe(selected());
+let mut panel = stack.subscribe(selected());
+assert_eq!(tab.hash(), panel.hash());
+
+// A dispatch schedules a poll; one settle evaluates once and delivers to both.
+stack
+    .assert(dialog_query::the!("ui/selected").of("doc:1".parse::<Entity>()?).is(true))
+    .perform(&env)
+    .await?;
+stack.settle(&env).await?;
+for delta in tab.poll() {
+    println!("+{:?} -{:?}", delta.asserted, delta.retracted);
+}
+let everything = panel.results();
+
+// A reader that waits is woken by the next settle that delivers.
+let next = tab.next().await;
+# let _ = (everything, next);
+# Ok(())
+# }
+```
 
 ## Durable layers
 

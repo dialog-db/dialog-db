@@ -84,3 +84,9 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   through machinery of its own. A node is a handle that five accessors
   read, the environment decoding once; what a replica holds is learned
   and changed by commands. Built on top of the session stack.
+- [Writers on separate branches wait on one another in the file archive](file-writers.md):
+  **Building.** One file, an extent per writer: processes on separate
+  branches write without waiting on one another, as they do on main.
+- [A commit that lost its branch's race replays even when nothing it read changed](replay-avoidance.md):
+  **Describing.** Split out of file-writers: capturing what a transaction
+  considered, so a replay is skipped when nothing it read overlaps.

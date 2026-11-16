@@ -179,6 +179,122 @@ that reported it would answer the same query differently from one
 moment to the next. As a command's answer captured by a rule, it enters
 a query as a fact of a layer the query has pinned.
 
+### A stack transaction's publish reports like an invocation, so its commands reach the stack's providers
+
+[#821](https://github.com/dialog-db/dialog-db/pull/821).
+
+`Stack::transaction()` now returns a `StackTransaction`, the
+stack-bound counterpart of a branch `Transaction`, and its publish
+returns an `InvocationReport`, the type `Invocation::perform` returns:
+the revision the publish left the primary at, the ticks its induction
+ran, and the commands it landed on `control:`, with `effect()` to run
+the stack's providers over them. That holds for the one-step
+`.commit().publish().perform(&env)` and for a staged chain:
+`.commit().perform(&env)` returns a `StackBatch`, whose next links are
+stack transactions too, and its `publish().perform(&env)` reports the
+commands of every link. A publish that loses its compare-and-swap
+still fails with `PublishError::VersionMismatch`, lands nothing and
+reports nothing; it is not re-run. `Branch::transaction()` is
+unchanged, and its publish still returns a `Revision`.
+
+What this changes for you:
+
+- A stack transaction's publish returns an `InvocationReport`, not a
+  `Revision`: `let revision = stack.transaction()...publish().perform(&env).await?`
+  becomes `let report = ...; report.revision()`, and the same for a
+  staged chain's `batch.publish()`. This is breaking for callers that
+  read the revision.
+- `Stack::transaction()` returns `StackTransaction<&Branch>`, its
+  `commit()` a `StackCommit`, its staged batch a `StackBatch` and their
+  publishes `StackPublish` and `StackBatchPublish`. They carry the
+  methods of the branch types they wrap (`assert`, `retract`,
+  `dispatch`, `integrate`, `query`, `allow_empty`, `canonicalize`,
+  `amend`, `version`, `revision`, `induced`, `shares`, `claims`,
+  `select`); a signature that named `Transaction<&Branch>` for a stack
+  transaction names `StackTransaction<&Branch>`. Their `perform` takes
+  a `StackEnv`, as `Invocation::perform` does.
+- `report.effect().perform(&env)` after a stack transaction runs the
+  providers over its commands, as after an invocation; before, a
+  command asserted through a stack transaction landed on `control:`
+  but no report named it, so no provider answered it.
+- `dialog-stack` re-exports the five new types.
+
+Why: tonk's evaluate route and its "absent branch" transact path build
+the transaction themselves, resolved against a head they chose, and
+published it with `.commit().publish()`, which answered a `Revision`
+and nothing more, so a command asserted that way was never answered by
+a provider. Only its route through `Stack::assert(..).perform(&env)`
+got a report. A stack transaction's publish now reports what it landed
+the same way, so every route runs the providers.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: the publish writes what it wrote
+  before, and the report is computed in memory from the staged chain.
+  Nothing is rewritten on upgrade, and an older release reads what this
+  one writes.
+
+### A stack shares one evaluation of a query among its readers, and delivers to them after a dispatch
+
+[#819](https://github.com/dialog-db/dialog-db/pull/819).
+
+`Stack::subscribe(query)` now registers the stack's subscription to a
+query, or attaches to the one it holds, and returns a `Subscriber`: a
+second reader of the same query reads the same evaluation instead of
+running its own. A subscription is keyed by `QueryHash`, a new hash of
+the query's canonical encoding in `dialog-query`, and its type. A
+dispatch through the stack that published or wrote into a memory layer
+schedules a poll; `Stack::settle(&env)` polls every subscription once
+when one is scheduled, delivers each reader the `Delta` the poll made,
+and clears the mark, so the writes of one request cost one
+evaluation. `Effect::perform` settles after its answer dispatch. The
+evaluation is still dialog's demand-gated `Subscription`, unchanged.
+
+What this changes for you:
+
+- `Stack::subscribe` returns a `Subscriber<Q>`, not a `Subscription<Q>`,
+  and asks `Q: Serialize`. The unshared evaluation it returned is now
+  `Stack::subscription(query)`; `Branch::subscribe` is unchanged.
+- `Subscriber` has `poll()` (the deltas delivered since the last read,
+  without waiting), `next().await` (waits for a delivery), `hash()`,
+  `results()` (the whole current set), `evaluated()`, `recomputes()`,
+  `maintenances()` and `close()`. A reader's first delivery is the whole
+  result set as `asserted`; each later one is what a poll changed, and a
+  poll that changed nothing delivers nothing.
+- `Stack::settle`, `Stack::schedule_poll`, `Stack::poll_scheduled` and
+  `Stack::subscriptions_held` are new. A write the stack does not see,
+  into `Branch::overlay()` among them, is scheduled with
+  `schedule_poll`. A sync that moved the primary, `Stack::channel`
+  creating a channel and `Stack::provide` schedule one too; a write into
+  a channel does not.
+- A subscription lives as long as a reader of it: the stack holds it
+  weakly, and it goes when its last `Subscriber` is dropped or closed.
+- `Stack::settle` and `Effect::perform` need a `Clone` environment.
+- `Effect::perform` settles the stack, with or without commands to
+  perform. A failed poll does not fail the effect: it is reported by
+  `EffectReport::unsettled()` and stays scheduled.
+- `dialog_query::QueryHash` is new: `QueryHash::of(&query)` hashes the
+  query's DAG-CBOR encoding with its fresh variables (`__<n>`) named
+  again by where they first occur, so two queries built alike hash
+  alike.
+- `dialog-stack` re-exports `Subscriber`, `Subscription`, `Delta` and
+  `QueryHash`, and `dialog-repository` re-exports `QueryHash`.
+
+Why: tonk kept this registry, the fan-out and the poll scheduling in a
+reactive layer of its own over dialog, keyed by a query hash it
+computed itself. They are generic: one evaluation per query, delivery
+to every reader, and polls scheduled by writes and drained once per
+turn belong beside the stack's channels, so an embedder keeps only its
+transport.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: subscriptions and their deliveries
+  live in memory, and the stack writes no fact for them.
+- A caller of `Stack::subscribe` that polled the returned
+  `Subscription` itself calls `Stack::subscription` instead, or moves
+  to the `Subscriber` and `Stack::settle`.
+
 ### The stack has a crate of its own, `dialog-stack`, which re-exports it from `dialog-repository`
 
 [#818](https://github.com/dialog-db/dialog-db/pull/818), argued in
@@ -1133,6 +1249,355 @@ recreate every layer from the primary's declarations when it opens.
   A batch of `Changes` that writes into a layer serializes with an `in`
   key an older release does not read; one that writes into none
   serializes as before. Nothing is rewritten.
+
+### A rule that leaves a premise's subject unnamed fires for the entity a commit wrote
+
+[#802](https://github.com/dialog-db/dialog-db/pull/802), fixes
+[#801](https://github.com/dialog-db/dialog-db/issues/801)
+
+Commit-time induction starts a rule from each row a commit changed. It
+bound the row's value to the premise's field, and the row's entity to
+the variable the premise gives `this`. A premise that gave `this` no
+variable left the entity unbound, so the premise was read at every
+entity holding the value written, and the rule fired for entities the
+commit did not touch. Such a premise is now seeded with its subject
+named, in a variable nothing else in the rule reads, so the seed binds
+the entity the row is about.
+
+What this changes for you:
+
+- **A rule whose premise names no `this` fires for fewer entities.**
+  Writing one field of one entity no longer fires the rule for every
+  entity that holds the same value in that field. A command is no
+  longer issued again for them, and a durable head under `last` no
+  longer writes its value again over what was written since. It fires
+  for what the same rule with its subject named fired for already.
+- A commit that writes one field of an entity and a commit that writes
+  two now fire such a rule for the same entities. Before, the two
+  fields together found the entity written and the one field found
+  every holder of its value.
+- A rule fired in full is not seeded and is unchanged: a rule installed
+  over existing state, one whose premise changed through a deductive
+  rule, and one enabled by a retraction under `unless` fire for every
+  match, as before.
+- Nothing stored changes shape. A rule that relied on being fired for
+  every holder of a value has to be given a premise that says so.
+
+Why: a row is a fact of one entity, and the matches it newly makes are
+those where the premise is read at that entity. Reading by value alone
+found matches the commit did not make and fired for them again.
+
+### A tree write sizes its segments before filling them
+
+When a write regroups a window of entries into segments, each segment
+is now moved out in one step at its final size, and a merged stretch
+is allocated at its final size, where both grew entry by entry. The
+trees written are the same.
+
+What this changes for you:
+
+- A commit that rewrites many entries copies far less: the perf
+  scenario that succeeds a standing claim on 500 entities retires 26%
+  fewer instructions, and its reallocations start from 50 MB in all
+  where they started from 530 MB.
+
+Why: a growing vector is copied each time it outgrows its allocation,
+and a write regroups large windows many times over.
+
+### A tree reads a node from its block or from rows a store keeps it in
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./research/single-file-format/design.md)
+
+A node's body is now read through views, `IndexView` and `SegmentView`, that
+either a block or a store's rows back. A store that keeps nodes as rows
+implements `NodeRows`, and answers the tree's `nodes::Read` with nodes
+over them (see the entry on the tree asking its environment for nodes).
+Such a node is read in place: keys compare part by part, values
+are read as archives where the store keeps them, and no block is built,
+hashed or validated. `Chronicle` is such a source.
+
+What this changes for you:
+
+- `NodeBody::Index` and `NodeBody::Segment` hold `IndexView` and
+  `SegmentView` instead of `&ArchivedIndex` and `&ArchivedSegment`;
+  `PersistentNode::as_index` and `as_segment` return the views. The views
+  have the archived types' methods. `index.novelty` is `index.buffers()`,
+  a buffer's `child` is `child()`, its `count` is `count()`, and its
+  `polarity` is `is_assert(at)`.
+- `PersistentNode::buffer` returns `Result<&Buffer, _>`: a node read from
+  rows builds its block the first time it is asked, and that can fail.
+- A segment's `keys()` returns a `KeyCursor`, which has `next_key` as
+  `StreamingLeaf` does.
+- Nothing changes for a tree read through a store that keeps blocks.
+
+Why: a store that keeps nodes compactly need not rebuild a block for every
+read. Read in place, the single-file archive's cold reads match the `fs`
+archive's, where rebuilding made them about 2× slower, and its cached nodes
+take about a third of the memory of cached blocks.
+
+### A transaction that loses its branch's race runs again over the head that won
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+`Branch::transact(|transaction| async { ... })` takes the code that builds
+a transaction instead of the transaction. Each try hands it a fresh
+transaction on the branch's head as it is then, commits what it returns,
+and publishes that compare-and-swapped against the head it read. When
+another writer moved the head first, the head that won is read and the
+code runs again: its queries read over the winner, so a write computed
+from a read is computed again, as in a software transactional memory. It
+tries as many times as a commit does (64) before returning
+`VersionMismatch`.
+
+What this changes for you:
+
+- New: `Branch::transact(build).perform(&env)`, with `allow_empty()` and
+  `canonicalize()`; `build` returns `Result<Transaction, E>` where
+  `E: From<CommitError>`, and an error from it ends the transaction with
+  nothing written.
+- Deprecated: `branch.transaction()...commit().publish().perform(&env)`.
+  It keeps failing with `CommitError::Publish(PublishError::VersionMismatch)`
+  on a lost race, as it did. Move to `Branch::transact`, which builds the
+  same transaction inside the closure.
+- `Branch::induce` runs its rules again over the head that won.
+- A `TransactionBatch` its caller staged (`.commit().perform(..)`, then
+  `.publish()`) is still refused on a lost race: its caller read what it
+  staged on. The repository's own commits (delegations, migrations) apply
+  their instructions again over the winner, as before.
+- `dialog_corpus::Instruction` is `Clone`.
+
+Why: processes writing one branch concurrently should not each catch and
+retry every commit; and retrying the instructions a transaction computed
+reapplies writes derived from reads of a head that lost, where running the
+transaction again computes them over the head that won.
+
+### A space can keep its memory cells in its file, branch heads included
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+`Chronicle` provides the memory effects (`Resolve`, `Publish`,
+`Retract`, `List`), so a `Space` can name it as its memory as well as its
+archive: `Space<Chronicle, Chronicle, ...>` keeps a space's blocks and
+its cells, branch heads among them, in one file. A cell is kept as a
+log: each update appends a record with the cell's value, in the writer's
+turn, and the cells' own index files the cell at its newest record. The record names the writer's extents that
+still hold blocks, and recovery takes it as whole only with those
+extents' frames, so a power loss can undo the last updates (synced at the
+next sync point), never leave a head naming what is gone.
+
+What this changes for you:
+
+- A `Space` whose memory is a `Chronicle` keeps no `memory` directory:
+  its cells are in `archive.dialog`.
+- A cell's edition is the BLAKE3 hash of its value, as under `fs`, so a
+  `Publish` names the same version either way, and publishing the value a
+  cell already holds succeeds whatever edition the writer expected, as on
+  every memory store.
+- A cell's update takes the writer's turn for the append of one small
+  record: an update waits while another process holds the turn, for its
+  own appends' laying out and writing. Splitting and encoding an append, folding extents in and
+  syncing are done before or after the turn, not in it.
+  A `Resolve` takes no lock, and reads the newest update another process
+  made.
+- A value of any size is kept in its record.
+- `List` walks the cells' own index, not the blocks'.
+
+Why: a space that is one file is one thing to copy, back up and keep
+consistent, and a head kept apart from the blocks it names was a second
+thing to keep in step with them. Written in place, a head could reach the
+disk before the blocks it names, which the power-loss tests showed.
+
+### Writers to one space's file do not wait on one another
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+A writer to a `Chronicle` tries the file's turn without waiting. With
+it, it appends as before. Without it, it writes its blocks whole into an
+extent of its own, space it claimed in an earlier turn, and they read back
+at once, in its process and in others. The next writer to get the turn,
+usually the same one after its commit, turns those blocks into frames and
+tokens, and the extent is freed once a sync point makes that durable. A
+process that holds the turn keeps an extent ready for itself; a process
+that opens the file with the turn free leaves one no process owns, and
+takes one back as it closes, so there is one for each process that has the
+file open. A process with none takes one of those, or one whose writer
+died, so a process that has never held the turn writes without waiting for
+it too. A writer waits for the turn only to claim an extent when there is
+none to take, or for a catalog the file has not numbered.
+
+What this changes for you:
+
+- Processes writing one space (separate branches, or the same one) no
+  longer queue behind each other's appends, as they did not on the `fs`
+  store either.
+- The writer's turn is a lock on one byte of the file rather than on the
+  whole file, on every platform.
+- `Options::extent` sets how many bytes of blocks an extent holds (1 MiB
+  by default). Each process that writes keeps one extent claimed while it
+  has the file open, and each process that has it open leaves one for
+  another; the last process to close the file retires them and cuts free
+  extents that end the file off it. One left before blocks were appended
+  stays free mid-file and is the next one claimed.
+- Claiming an extent writes its header and grows the file, without
+  writing the extent's bytes: an unused extent is a hole on file systems
+  that keep sparse files.
+- `Options::leave_extent` (on by default) is whether opening leaves an
+  extent for another process; a process that only reads can turn it off
+  and leave the file's length alone.
+- Opening the file no longer waits for another process's turn: the slot
+  it opens from was written in this boot, so there is nothing to repair.
+  After a reboot, or for a new file, opening still takes the turn.
+- A file reached by two names in one process (a hard link, a symbolic
+  link) is one handle, as a path reached two ways already was: two would
+  both hold the writer's turn.
+- A file whose making a power loss cut short opens, made again: one no
+  longer than its header, whose first bytes were never written or are the
+  format's with no durable slot. Any other file that is not an archive is
+  still refused.
+- A writer thread taking the turn just as another thread of its process
+  let it go no longer lets another process take it under it: the file's
+  lock is let go before the process's own. Two writers could append at
+  once before.
+- A block another process holds only in its extent is written again into
+  the writer's own, so a head it commits never names a block another
+  process has not yet folded into the file.
+- The file starts with a 16-byte header: `DIALOG`, the byte `0xB6` (not
+  valid UTF-8 on its own, so a file read as text fails at once), the
+  format version, 1, and zeros, reserved. A file written by an earlier
+  build of `dialog-chronicle` does not open.
+
+Why: many processes work on separate branches of one space at once, and on
+main they never wait on one another to write. A file whose every append
+took one turn made them wait, which would rule the file out wherever such
+processes run.
+
+### A space can keep its blocks in one file
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./research/single-file-format/design.md)
+
+The new `dialog-chronicle` crate adds `Chronicle`, an archive
+provider that keeps a space's blocks in one append-only file instead of a
+file per block. It answers `archive::Get`, `Put` and `Import` like the
+`fs` provider, and opens from a space's `Location` (`Resource<Location>`),
+so a `Space` can take it as its archive and keep memory, credentials and
+blobs where they were. A node of the artifact tree is kept as a frame:
+rows of ids into the file's tokens (each distinct entity, attribute, value
+and datum once, and each revision's version once, so a history record
+shares its fact's tokens), written against the node it supersedes. A frame is only
+written once it realizes to the exact block; anything else is kept whole.
+A read realizes the block. Native only.
+
+What this changes for you:
+
+- Nothing, unless you choose it: `Space<Chronicle, FileSystem,
+  FileSystem, FileSystem, FileSystem>` is a space whose blocks live in
+  `archive.dialog` in the space's directory. The tree, queries and sync
+  work through it unchanged.
+- Any number of processes can open one file. Writers take turns on a
+  lock on one byte of it, and a writer that finds the turn taken writes
+  into an extent of its own instead (see the entry on writers above);
+  readers take no lock. A file this process already has open is shared,
+  not opened twice.
+- The file is synced after an append once 64 appends have come since
+  the last sync or 2 seconds have passed, on `Chronicle::sync`, on the
+  last close, and by a sync thread once appends have waited 2 seconds
+  for a sync (`Options::sync_in_background`, on by default), so a commit
+  no other append follows is durable within about three seconds. The
+  thread is one per process, for every file it has open, and wakes once a
+  second. Dropping a handle waits for it only when that handle may be the
+  last. That is weaker than the `fs` provider, which syncs every
+  block it writes; call `Chronicle::sync` where a commit must be durable
+  before anything else happens. A power loss loses at most the appends
+  since the last sync, and never leaves the file damaged: opening goes back to the newest state
+  that is whole. The slot that state is read from is kept twice, and a
+  sync writes over the older copy, so a sync torn by power loss leaves
+  the previous copy whole.
+- Every frame is checked before it is written: one that does not realize
+  to the exact block it stands for (a node another peer wrote in another
+  layout, say) is kept whole, never written as rows that read back
+  different bytes.
+- A file shorter than its durable slot names (cut short by something
+  other than the archive, such as a copy that did not finish) does not
+  open, where it used to be filled back out with zeros and opened as an
+  older state.
+- A cell's update that names blocks still in its writer's extent names
+  their frames by a checksum, so a power loss that keeps the extent's new
+  count but loses a frame no longer leaves the cell naming a block the
+  file does not hold: an extent claimed again can still hold a whole frame
+  from its earlier claim in the same place.
+- What a sync point frees is taken up by a writer only once the durable
+  slot that frees it is on the disk, and a sync point made in the writer's
+  turn waits for one made without it, so two never write the same durable
+  copy.
+- Every write (`Put`, `Import`, the tree's `nodes::Write`, and a cell's
+  `Publish` and `Retract`) runs on tokio's blocking threads when a tokio
+  runtime runs the caller: it can wait for the writer's turn another
+  process holds and make a sync point, and holds up none of the runtime's
+  other tasks while it does. Reads (`Get`, `Resolve`, `List`, the tree's
+  node reads) answer at once from the file's mapping.
+- An append of more than 32 Ki blocks is committed in parts, so the index
+  pages one commit frees fit the slot that lists them.
+- An open of a file that has to be recovered holds up no open or close of
+  another file in the process. Two opens of one file in a process wait
+  for each other, by its path and, once it exists, by the file, so the
+  second shares the first's handle even when the first made the file.
+- An extent a process left behind when it closed or died is written into
+  again by the next writer that needs one, instead of a new one, so a
+  file opened and closed many times does not grow a dead extent each
+  time.
+- Opening reads small slots at the head of the file and nothing else.
+  The file's index is in the file, so a reader holds a few tens of KB,
+  not an index that grows with the file; its pages are written over once
+  nothing reads them. The format is still changing, and a file written
+  now may not open in the release.
+- `Options::frames = false` keeps every block whole.
+- The new `dialog-migration` crate holds migrations an application runs
+  before it opens a replica, each behind a feature of its own, and the
+  `dialog-migrate` binary that runs them. A migration is a `Step` that finds
+  its work by looking at the replica, so it is safe to run on every start:
+  `Migrations::plan` says what the steps would do, `Migrations::run` does
+  it, and an interrupted run picks up where it stopped. The `chronicle`
+  step (`chronicle::IntoChronicle`) moves every space of a replica the
+  `fs` provider wrote into the `archive.dialog` a file-archive space reads,
+  writing it under another name and renaming it once complete, or, for a
+  space that has an `archive.dialog` already, into that file through
+  `Chronicle` (so what it holds stays, and a process with it open goes on
+  using it), and then writing `archive.dialog.migrated`. A space is
+  migrated when that marker is there, not when it has an `archive.dialog`
+  (opening a `Chronicle` creates one). With `remove_source` it deletes
+  the `fs` archive after, unless a block's bytes did not match its name
+  or a file in it was not a block (`chronicle::strays`): then it fails and
+  keeps the `fs` archive. It moves blocks only: a space's cells, branch
+  heads among them, stay in its `memory` directory, so a migrated space
+  names `Chronicle` as its archive and not as its memory. It is a
+  conversion an application opts into, not an upgrade every replica
+  needs. Every block
+  reads back as the bytes it was; nodes in an older layout are kept whole.
+  `dialog-migrate [--dry-run] [--step <id>] [--remove-source] <replica>`
+  runs the steps; `--source`, `--target` and `--catalog` move one store.
+
+Why: a replica's history costs a file per block per version, which is
+most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
+`fs` archive takes about 1.2 GiB and the file 13 MiB.
+
+### Compatibility and migration
+
+- Nothing an existing space holds changes or is read differently for the
+  single-file archive: it is a new provider a space opts into. A space
+  opened with `Chronicle` does not read an `fs` archive's directory of
+  blocks, and the reverse; moving a space between the two means copying
+  its blocks with `Import`. The blocks are the same bytes in both, so an
+  older release reads any block this one stores.
+- A `Chronicle` file is format 1, the first released; one written by an
+  earlier, unreleased build of `dialog-chronicle` does not open, and is
+  moved again from the replica it came from with `dialog-migrate`. Nothing
+  else stored or synced changes: blocks, their hashes and what a replica
+  syncs are the same.
 
 ## 0.4.0 (2026-11-14)
 

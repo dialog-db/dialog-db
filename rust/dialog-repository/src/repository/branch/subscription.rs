@@ -400,7 +400,7 @@ pub struct Subscription<Q: Application> {
     /// The stack the subscription reads through, if any: its memory
     /// layers are read beside the branch, each attribute from the layer
     /// it is placed on, and each layer is observed as the branch's
-    /// session overlay is (see [`Stack::subscribe`]).
+    /// session overlay is (see [`Stack::subscription`]).
     stack: Option<Stack>,
     /// The sequence each of the stack's memory layers stood at when
     /// the retained results were evaluated, parallel to the stack's
@@ -446,9 +446,9 @@ impl Branch {
 }
 
 impl Stack {
-    /// Register a standing query over this stack: the primary and
-    /// every layer it holds, each attribute read from the layer it is
-    /// placed on. The subscription evaluates on its first
+    /// A standing query over this stack, the stack's alone: the primary
+    /// and every layer it holds, each attribute read from the layer it
+    /// is placed on. The subscription evaluates on its first
     /// [`poll`](Subscription::poll) and is incrementally gated
     /// afterwards: a commit to the primary, a share a dispatch lands in
     /// a memory layer, and a write to the primary's session overlay each
@@ -456,7 +456,12 @@ impl Stack {
     /// layer's instants like a tree change. A placement that moved
     /// re-evaluates the query, since which layer a row is read from
     /// changed.
-    pub fn subscribe<Q: Application>(&self, query: Q) -> Subscription<Q> {
+    ///
+    /// This is the evaluation itself, polled by whoever holds it. To
+    /// share one evaluation of a query among every reader of it, polled
+    /// once per [`settle`](Stack::settle) and delivered to each, use
+    /// [`Stack::subscribe`].
+    pub fn subscription<Q: Application>(&self, query: Q) -> Subscription<Q> {
         Subscription::over(self.primary().clone(), Some(self.clone()), query)
     }
 }

@@ -265,7 +265,7 @@ pub fn spans(node: &CorpusNode) -> Result<Vec<SpanSummary>, DialogCorpusError> {
             rank,
             novelty: index
                 .buffer_for(at)
-                .map(|buffer| buffer.count.to_native() as u64)
+                .map(|buffer| buffer.count() as u64)
                 .unwrap_or(0),
         });
     }

@@ -11,11 +11,13 @@ mod quarantine;
 pub(crate) use induce::induction_ignores;
 mod query;
 mod succession;
+mod transact;
 pub use batch::*;
 pub use query::{TransactionQuery, TransactionSelectQuery};
 pub(crate) use succession::ReadSettlement;
 #[cfg(test)]
 pub(crate) use succession::{settle, stored_claims};
+pub use transact::Transact;
 
 use crate::Channel;
 use crate::Commit;
@@ -42,6 +44,7 @@ use dialog_effects::memory::{self, Edition, Publish, Resolve};
 use dialog_search_tree::nodes;
 use std::slice::from_ref;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// A transaction on a line of the repository.
 ///
@@ -133,6 +136,10 @@ pub(crate) struct StackContext {
     /// sent, each named for its channel: stimulus of the first tick, read
     /// as rows of the channel, landing nowhere.
     pub(crate) received: Changes,
+    /// The stack's mark that a poll of its subscriptions is scheduled:
+    /// set by a publish that moved the primary or wrote into a memory
+    /// layer.
+    pub(crate) scheduled: Arc<AtomicBool>,
 }
 
 /// What a [`Transaction`] runs on: a `&`[`Branch`], a `&`[`Snapshot`]
@@ -564,6 +571,12 @@ impl Branch {
             + ConditionalSync
             + 'static,
     {
-        Box::pin(self.transaction().commit().publish().perform(env)).await
+        // Its rules run over the head: one that lost the race runs them
+        // again over the head that won.
+        Box::pin(
+            self.transact(|transaction| async move { Ok::<_, CommitError>(transaction) })
+                .perform(env),
+        )
+        .await
     }
 }

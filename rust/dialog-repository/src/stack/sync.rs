@@ -135,6 +135,10 @@ impl SyncStack<'_> {
             .await?;
         }
         let mut merged = Changes::new();
+        if primary.revision() != head {
+            // The pull moved the primary under the stack's subscriptions.
+            stack.schedule_poll();
+        }
         if let Some(pulled) = primary.revision()
             && primary.revision() != head
         {
