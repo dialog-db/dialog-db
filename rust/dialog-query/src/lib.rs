@@ -6,6 +6,10 @@
 //! This crate implements the core query planning and execution functionality.
 
 #![warn(missing_docs)]
+// The tests exercise the one-shot `.commit().publish().perform(..)` a
+// commit used to be, which must keep failing on a lost race as it did;
+// code outside them commits through `Branch::transact`.
+#![cfg_attr(test, allow(deprecated))]
 #![warn(clippy::absolute_paths)]
 #![warn(clippy::default_trait_access)]
 #![warn(clippy::fallible_impl_from)]
@@ -132,7 +136,7 @@ pub use formula::*;
 pub use negation::*;
 pub use optional::OptionalAttributeQuery;
 pub use parameters::*;
-pub use pattern::{ListPattern, MapPattern, Pattern, Shape};
+pub use pattern::{ListPattern, MapPattern, Pattern, PatternError, Shape};
 pub use planner::*;
 pub use predicate::*;
 pub use premise::*;

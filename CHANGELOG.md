@@ -23,14 +23,18 @@ says how to cut a release.
 A rule that held a map or a list of terms ran where it was
 built and could not be kept: format 3 of a rule body wrote a variable or
 a constant where a parameter stands and nothing else. Format 4 writes a
-pattern there too, under the word for its shape, so such a rule is
-installed, synced and read back like any other. Every rule body this
-release writes is format 4.
+pattern there too, as what it is under the one key `match`, so such a
+rule is installed, synced and read back like any other. Every rule body
+this release writes is format 4.
 
 ```
-{ "map":   [[key, pattern], …], "rest": term }
-{ "list":  [pattern, …],        "run":  term }
+{ "match": { "author": { "?": { "name": "who" } }, "...": { "?": { "name": "others" } } } }
+{ "match": [ { "?": { "name": "first" } }, { "...": { "?": { "name": "more" } } } ] }
 ```
+
+Under `match` a map is a map pattern and an array is a list pattern, at
+any depth. `...` is a key whose value takes the rest: among a map's
+entries, and as the one entry of a list's last item.
 
 What this changes for you:
 
@@ -42,6 +46,11 @@ What this changes for you:
 - `Pattern` and `Parameters` are written and read by serde wherever a
   rule or a query is, JSON included. Serializing one that held a map or
   a list was an error.
+- A map pattern cannot name the keys `?`, `...` or one ending in `:`,
+  which are how a variable, the rest and a constant are written under
+  `match`. `MapPattern::new` and `Pattern::map` return `PatternError`,
+  with `ReservedKey` for these and `Composite` for what they returned
+  before. A map that holds such a key is still matched: a rest takes it.
 - `Branch::with(&rule)` lays a rule that holds a pattern over a branch
   with its body among the facts it lays, as it does any rule. It kept
   the rule in memory beside them before.
@@ -144,15 +153,22 @@ premises, as it does for every other premise.
 [design/patterns/design-composite-bytes.md](./design/patterns/design-composite-bytes.md)
 
 A value was a scalar or a `Record`, bytes dialog did not look into. A
-`Composite` is a value made of values: a map from a value to a value
+`Composite` is a value made of values: a map from a text to a value
 that holds no key twice, or a list, nested as deep as it is written,
 as the IPLD data model has them. There is no tuple: a notation that has
-one writes it as a list. It is kept whole as a `Value::Record`: one version byte,
-`0x01`, then the dag-cbor of its parts. So a composite is a claim's
-value like any other: it is stored, keyed, compared, spilled and synced
-as the bytes it is. Its name is not a hash of those bytes. A composite
-is named by the merkle reference of its parts, a map under `map:` and
-a list under `list:`, each part by its own reference, so a later layout of the bytes moves no name.
+one writes it as a list. It is kept whole as a `Value::Record`: one
+version byte, `0x01`, then plain dag-cbor. A value dag-cbor has a kind
+for is written as that kind, a nested composite as the map or the list
+it is, and a value it has no kind for (an entity, a symbol, a whole
+number past 64 bits) as a link that holds the value: a CID hashed by
+the identity, under a codec that says the value's type. So anything
+that reads dag-cbor reads what follows the version byte, and a
+composite is a claim's value like any other: it is stored, keyed,
+compared, spilled and synced as the bytes it is. Its name is not a hash
+of those bytes. A composite is named by the merkle reference of its
+parts, a map under `map:` and a list under `list:`, each part by its
+own reference and a key as the text it is, so a later layout of the
+bytes moves no name.
 
 What this changes for you:
 
@@ -163,11 +179,16 @@ What this changes for you:
   `Err(CompositeError::UnknownVersion { version })` for a record under a
   version this release does not read.
 - One value has one byte string. A map's entries are written in one
-  order whatever order they were given in, a key given twice is refused
-  (`CompositeError::DuplicateKey`), and a number is kept under the
+  order whatever order they were given in (dag-cbor's: the shorter key
+  first), a key given twice is refused (`CompositeError::DuplicateKey`),
+  bytes that hold a composite any other way are refused
+  (`CompositeError::NotCanonical`), and a number is kept under the
   narrowest type that holds it, as a tree under the number band reads
   one back: the natural `3`, the integer `3` and the float `3.0` are
   one part, and read back as the natural `3`.
+- A link holds a value of any length. A reader built on the `cid`
+  crate's `Cid` reads one of 64 bytes at most, so it reads every symbol
+  and refuses an entity longer than that.
 - `Value::reference` of a record that holds a composite is the
   reference of its parts. Of any other record it is what it was,
   `RECORD.reference_of(bytes)`.
@@ -179,6 +200,391 @@ Why: a rule could not hold a value made of other values, and everything
 that needed one waited on the layout of a record's bytes. A name that is
 a function of the parts does not depend on that layout, and the version
 byte leaves the layout free to change.
+
+### A rule that leaves a premise's subject unnamed fires for the entity a commit wrote
+
+[#802](https://github.com/dialog-db/dialog-db/pull/802), fixes
+[#801](https://github.com/dialog-db/dialog-db/issues/801)
+
+Commit-time induction starts a rule from each row a commit changed. It
+bound the row's value to the premise's field, and the row's entity to
+the variable the premise gives `this`. A premise that gave `this` no
+variable left the entity unbound, so the premise was read at every
+entity holding the value written, and the rule fired for entities the
+commit did not touch. Such a premise is now seeded with its subject
+named, in a variable nothing else in the rule reads, so the seed binds
+the entity the row is about.
+
+What this changes for you:
+
+- **A rule whose premise names no `this` fires for fewer entities.**
+  Writing one field of one entity no longer fires the rule for every
+  entity that holds the same value in that field. A command is no
+  longer issued again for them, and a durable head under `last` no
+  longer writes its value again over what was written since. It fires
+  for what the same rule with its subject named fired for already.
+- A commit that writes one field of an entity and a commit that writes
+  two now fire such a rule for the same entities. Before, the two
+  fields together found the entity written and the one field found
+  every holder of its value.
+- A rule fired in full is not seeded and is unchanged: a rule installed
+  over existing state, one whose premise changed through a deductive
+  rule, and one enabled by a retraction under `unless` fire for every
+  match, as before.
+- Nothing stored changes shape. A rule that relied on being fired for
+  every holder of a value has to be given a premise that says so.
+
+Why: a row is a fact of one entity, and the matches it newly makes are
+those where the premise is read at that entity. Reading by value alone
+found matches the commit did not make and fired for them again.
+
+### A tree write sizes its segments before filling them
+
+When a write regroups a window of entries into segments, each segment
+is now moved out in one step at its final size, and a merged stretch
+is allocated at its final size, where both grew entry by entry. The
+trees written are the same.
+
+What this changes for you:
+
+- A commit that rewrites many entries copies far less: the perf
+  scenario that succeeds a standing claim on 500 entities retires 26%
+  fewer instructions, and its reallocations start from 50 MB in all
+  where they started from 530 MB.
+
+Why: a growing vector is copied each time it outgrows its allocation,
+and a write regroups large windows many times over.
+
+### A tree reads a node from its block or from rows a store keeps it in
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./research/single-file-format/design.md)
+
+A node's body is now read through views, `IndexView` and `SegmentView`, that
+either a block or a store's rows back. A store that keeps nodes as rows
+implements `NodeRows`, and answers the tree's `nodes::Read` with nodes
+over them (see the entry on the tree asking its environment for nodes).
+Such a node is read in place: keys compare part by part, values
+are read as archives where the store keeps them, and no block is built,
+hashed or validated. `Chronicle` is such a source.
+
+What this changes for you:
+
+- `NodeBody::Index` and `NodeBody::Segment` hold `IndexView` and
+  `SegmentView` instead of `&ArchivedIndex` and `&ArchivedSegment`;
+  `PersistentNode::as_index` and `as_segment` return the views. The views
+  have the archived types' methods. `index.novelty` is `index.buffers()`,
+  a buffer's `child` is `child()`, its `count` is `count()`, and its
+  `polarity` is `is_assert(at)`.
+- `PersistentNode::buffer` returns `Result<&Buffer, _>`: a node read from
+  rows builds its block the first time it is asked, and that can fail.
+- A segment's `keys()` returns a `KeyCursor`, which has `next_key` as
+  `StreamingLeaf` does.
+- Nothing changes for a tree read through a store that keeps blocks.
+
+Why: a store that keeps nodes compactly need not rebuild a block for every
+read. Read in place, the single-file archive's cold reads match the `fs`
+archive's, where rebuilding made them about 2× slower, and its cached nodes
+take about a third of the memory of cached blocks.
+
+### A transaction that loses its branch's race runs again over the head that won
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+`Branch::transact(|transaction| async { ... })` takes the code that builds
+a transaction instead of the transaction. Each try hands it a fresh
+transaction on the branch's head as it is then, commits what it returns,
+and publishes that compare-and-swapped against the head it read. When
+another writer moved the head first, the head that won is read and the
+code runs again: its queries read over the winner, so a write computed
+from a read is computed again, as in a software transactional memory. It
+tries as many times as a commit does (64) before returning
+`VersionMismatch`.
+
+What this changes for you:
+
+- New: `Branch::transact(build).perform(&env)`, with `allow_empty()` and
+  `canonicalize()`; `build` returns `Result<Transaction, E>` where
+  `E: From<CommitError>`, and an error from it ends the transaction with
+  nothing written.
+- Deprecated: `branch.transaction()...commit().publish().perform(&env)`.
+  It keeps failing with `CommitError::Publish(PublishError::VersionMismatch)`
+  on a lost race, as it did. Move to `Branch::transact`, which builds the
+  same transaction inside the closure.
+- `Branch::induce` runs its rules again over the head that won.
+- A `TransactionBatch` its caller staged (`.commit().perform(..)`, then
+  `.publish()`) is still refused on a lost race: its caller read what it
+  staged on. The repository's own commits (delegations, migrations) apply
+  their instructions again over the winner, as before.
+- `dialog_corpus::Instruction` is `Clone`.
+
+Why: processes writing one branch concurrently should not each catch and
+retry every commit; and retrying the instructions a transaction computed
+reapplies writes derived from reads of a head that lost, where running the
+transaction again computes them over the head that won.
+
+### A space can keep its memory cells in its file, branch heads included
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+`Chronicle` provides the memory effects (`Resolve`, `Publish`,
+`Retract`, `List`), so a `Space` can name it as its memory as well as its
+archive: `Space<Chronicle, Chronicle, ...>` keeps a space's blocks and
+its cells, branch heads among them, in one file. A cell is kept as SQLite
+keeps a commit in its write-ahead log: each update appends a record with
+the cell's value, in the writer's turn, and the cells' own index files the
+cell at its newest record. The record names the writer's extents that
+still hold blocks, and recovery takes it as whole only with those
+extents' frames, so a power loss can undo the last updates (synced at the
+next sync point, as SQLite's `synchronous=NORMAL`), never leave a head
+naming what is gone.
+
+What this changes for you:
+
+- A `Space` whose memory is a `Chronicle` keeps no `memory` directory:
+  its cells are in `archive.dialog`.
+- A cell's edition is the BLAKE3 hash of its value, as under `fs`, so a
+  `Publish` names the same version either way, and publishing the value a
+  cell already holds succeeds whatever edition the writer expected, as on
+  every memory store.
+- A cell's update takes the writer's turn for the append of one small
+  record, as a SQLite commit takes its write lock: an update waits while
+  another process holds the turn, for its own appends' laying out and
+  writing. Splitting and encoding an append, folding extents in and
+  syncing are done before or after the turn, not in it.
+  A `Resolve` takes no lock, and reads the newest update another process
+  made.
+- A value of any size is kept in its record.
+- `List` walks the cells' own index, not the blocks'.
+
+Why: a space that is one file is one thing to copy, back up and keep
+consistent, and a head kept apart from the blocks it names was a second
+thing to keep in step with them. Written in place, a head could reach the
+disk before the blocks it names, which the power-loss tests showed.
+
+### Writers to one space's file do not wait on one another
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+A writer to a `Chronicle` tries the file's turn without waiting. With
+it, it appends as before. Without it, it writes its blocks whole into an
+extent of its own, space it claimed in an earlier turn, and they read back
+at once, in its process and in others. The next writer to get the turn,
+usually the same one after its commit, turns those blocks into frames and
+tokens, and the extent is freed once a sync point makes that durable. A
+process that holds the turn keeps an extent ready for itself; a process
+that opens the file with the turn free leaves one no process owns, and
+takes one back as it closes, so there is one for each process that has the
+file open. A process with none takes one of those, or one whose writer
+died, so a process that has never held the turn writes without waiting for
+it too. A writer waits for the turn only to claim an extent when there is
+none to take, or for a catalog the file has not numbered.
+
+What this changes for you:
+
+- Processes writing one space (separate branches, or the same one) no
+  longer queue behind each other's appends, as they did not on the `fs`
+  store either.
+- The writer's turn is a lock on one byte of the file rather than on the
+  whole file, on every platform.
+- `Options::extent` sets how many bytes of blocks an extent holds (1 MiB
+  by default). Each process that writes keeps one extent claimed while it
+  has the file open, and each process that has it open leaves one for
+  another; the last process to close the file retires them and cuts free
+  extents that end the file off it. One left before blocks were appended
+  stays free mid-file and is the next one claimed.
+- Claiming an extent writes its header and grows the file, without
+  writing the extent's bytes: an unused extent is a hole on file systems
+  that keep sparse files.
+- `Options::leave_extent` (on by default) is whether opening leaves an
+  extent for another process; a process that only reads can turn it off
+  and leave the file's length alone.
+- Opening the file no longer waits for another process's turn: the slot
+  it opens from was written in this boot, so there is nothing to repair.
+  After a reboot, or for a new file, opening still takes the turn.
+- A file reached by two names in one process (a hard link, a symbolic
+  link) is one handle, as a path reached two ways already was: two would
+  both hold the writer's turn.
+- A file whose making a power loss cut short opens, made again: one no
+  longer than its header, whose first bytes were never written or are the
+  format's with no durable slot. Any other file that is not an archive is
+  still refused.
+- A writer thread taking the turn just as another thread of its process
+  let it go no longer lets another process take it under it: the file's
+  lock is let go before the process's own. Two writers could append at
+  once before.
+- A block another process holds only in its extent is written again into
+  the writer's own, so a head it commits never names a block another
+  process has not yet folded into the file.
+- The file starts with a 16-byte header: `DIALOG`, the byte `0xB6` (not
+  valid UTF-8 on its own, so a file read as text fails at once), the
+  format version, 1, and zeros, reserved. A file written by an earlier
+  build of `dialog-chronicle` does not open.
+
+Why: many processes work on separate branches of one space at once, and on
+main they never wait on one another to write. A file whose every append
+took one turn made them wait, which would rule the file out wherever such
+processes run.
+
+### A space can keep its blocks in one file
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./research/single-file-format/design.md)
+
+The new `dialog-chronicle` crate adds `Chronicle`, an archive
+provider that keeps a space's blocks in one append-only file instead of a
+file per block. It answers `archive::Get`, `Put` and `Import` like the
+`fs` provider, and opens from a space's `Location` (`Resource<Location>`),
+so a `Space` can take it as its archive and keep memory, credentials and
+blobs where they were. A node of the artifact tree is kept as a frame:
+rows of ids into the file's tokens (each distinct entity, attribute, value
+and datum once, and each revision's version once, so a history record
+shares its fact's tokens), written against the node it supersedes. A frame is only
+written once it realizes to the exact block; anything else is kept whole.
+A read realizes the block. Native only.
+
+What this changes for you:
+
+- Nothing, unless you choose it: `Space<Chronicle, FileSystem,
+  FileSystem, FileSystem, FileSystem>` is a space whose blocks live in
+  `archive.dialog` in the space's directory. The tree, queries and sync
+  work through it unchanged.
+- Any number of processes can open one file. Writers take turns on a
+  lock on one byte of it, and a writer that finds the turn taken writes
+  into an extent of its own instead (see the entry on writers above);
+  readers take no lock. A file this process already has open is shared,
+  not opened twice.
+- The file is synced after an append once 64 appends have come since
+  the last sync or 2 seconds have passed, on `Chronicle::sync`, on the
+  last close, and by a sync thread once appends have waited 2 seconds
+  for a sync (`Options::sync_in_background`, on by default), so a commit
+  no other append follows is durable within about three seconds. The
+  thread is one per process, for every file it has open, and wakes once a
+  second. Dropping a handle waits for it only when that handle may be the
+  last. That is weaker than the `fs` provider, which syncs every
+  block it writes; call `Chronicle::sync` where a commit must be durable
+  before anything else happens. A power loss loses at most the appends
+  since the last sync, and never leaves the file damaged: opening goes back to the newest state
+  that is whole. The slot that state is read from is kept twice, and a
+  sync writes over the older copy, so a sync torn by power loss leaves
+  the previous copy whole.
+- Every frame is checked before it is written: one that does not realize
+  to the exact block it stands for (a node another peer wrote in another
+  layout, say) is kept whole, never written as rows that read back
+  different bytes.
+- A file shorter than its durable slot names (cut short by something
+  other than the archive, such as a copy that did not finish) does not
+  open, where it used to be filled back out with zeros and opened as an
+  older state.
+- A cell's update that names blocks still in its writer's extent names
+  their frames by a checksum, so a power loss that keeps the extent's new
+  count but loses a frame no longer leaves the cell naming a block the
+  file does not hold: an extent claimed again can still hold a whole frame
+  from its earlier claim in the same place.
+- What a sync point frees is taken up by a writer only once the durable
+  slot that frees it is on the disk, and a sync point made in the writer's
+  turn waits for one made without it, so two never write the same durable
+  copy.
+- Every write (`Put`, `Import`, the tree's `nodes::Write`, and a cell's
+  `Publish` and `Retract`) runs on tokio's blocking threads when a tokio
+  runtime runs the caller: it can wait for the writer's turn another
+  process holds and make a sync point, and holds up none of the runtime's
+  other tasks while it does. Reads (`Get`, `Resolve`, `List`, the tree's
+  node reads) answer at once from the file's mapping.
+- An append of more than 32 Ki blocks is committed in parts, so the index
+  pages one commit frees fit the slot that lists them.
+- An open of a file that has to be recovered holds up no open or close of
+  another file in the process. Two opens of one file in a process wait
+  for each other, by its path and, once it exists, by the file, so the
+  second shares the first's handle even when the first made the file.
+- An extent a process left behind when it closed or died is written into
+  again by the next writer that needs one, instead of a new one, so a
+  file opened and closed many times does not grow a dead extent each
+  time.
+- Opening reads small slots at the head of the file and nothing else.
+  The file's index is in the file, so a reader holds a few tens of KB,
+  not an index that grows with the file; its pages are written over once
+  nothing reads them. The format is still changing, and a file written
+  now may not open in the release.
+- `Options::frames = false` keeps every block whole.
+- The new `dialog-migration` crate holds migrations an application runs
+  before it opens a replica, each behind a feature of its own, and the
+  `dialog-migrate` binary that runs them. A migration is a `Step` that finds
+  its work by looking at the replica, so it is safe to run on every start:
+  `Migrations::plan` says what the steps would do, `Migrations::run` does
+  it, and an interrupted run picks up where it stopped. The `chronicle`
+  step (`chronicle::IntoChronicle`) moves every space of a replica the
+  `fs` provider wrote into the `archive.dialog` a file-archive space reads,
+  writing it under another name and renaming it once complete, or, for a
+  space that has an `archive.dialog` already, into that file through
+  `Chronicle` (so what it holds stays, and a process with it open goes on
+  using it), and then writing `archive.dialog.migrated`. A space is
+  migrated when that marker is there, not when it has an `archive.dialog`
+  (opening a `Chronicle` creates one). With `remove_source` it deletes
+  the `fs` archive after, unless a block's bytes did not match its name
+  or a file in it was not a block (`chronicle::strays`): then it fails and
+  keeps the `fs` archive. It is a conversion an
+  application opts into, not an upgrade every replica needs. Every block
+  reads back as the bytes it was; nodes in an older layout are kept whole.
+  `dialog-migrate [--dry-run] [--step <id>] [--remove-source] <replica>`
+  runs the steps; `--source`, `--target` and `--catalog` move one store.
+
+Why: a replica's history costs a file per block per version, which is
+most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
+`fs` archive takes about 1.2 GiB and the file 13 MiB.
+
+### Compatibility and migration
+
+- **Rule bodies are format 4.** An older replica holds rule bodies in
+  format 3 or earlier. This release reads them all as before, and
+  `Branch::upgrade_rules` rewrites each in format 4. No rule changes
+  its entity: a rule that holds no pattern is the same body but for the
+  number, and a rule that holds a pattern is named by its parts, as it
+  has been since it could be built. Until an embedder runs
+  `upgrade_rules`, a rule this release writes again has both bodies
+  under its entity, which read as one rule. **An older release cannot
+  read what this one writes**: it refuses a body of a later format by
+  its number and skips the rule, a rule of plain terms too, so on a
+  space shared with a peer that has not upgraded, that peer derives
+  nothing from rules written here until it does. The release after this
+  one reads format 4 only, so run `upgrade_rules` on this one.
+- One rule changes identity between releases: a rule whose body holds a
+  record constant that is a composite is named by the composite's parts
+  here and by its bytes in an older release, so each release finds the
+  body the other stored under an entity it does not derive and leaves
+  it inert. No release before this one could write such a constant.
+- A composite is a new kind of bytes under the existing `record:` value
+  type, so nothing is rewritten on upgrade and no tree, key or wire
+  format changes. What an older replica holds under `record:` is a
+  revision's record, a bare dag-cbor map whose first byte is `0xa7`, and
+  whatever bytes an embedder stored. This release reads a record as a
+  composite only when its first byte is `0x01` and the rest is exactly
+  the bytes a composite is written in; every other record reads,
+  compares, verifies and is named as before. An older release makes of a
+  versioned record what it makes of any record: bytes it stores, syncs
+  and compares, and names by a hash of the bytes, which is not the name
+  this release gives it. It cannot look inside. A record under a later
+  version than `0x01` is carried the same way by this release and refused
+  by its number when something looks into it. An embedder runs nothing.
+  One that stored records of its own starting with a byte from `0x01` to
+  `0x17` should say so before upgrading
+  ([design/patterns/design-version-byte.md](./design/patterns/design-version-byte.md)).
+- Nothing an existing space holds changes or is read differently for the
+  single-file archive: it is a new provider a space opts into. A space
+  opened with `Chronicle` does not read an `fs` archive's directory of
+  blocks, and the reverse; moving a space between the two means copying
+  its blocks with `Import`. The blocks are the same bytes in both, so an
+  older release reads any block this one stores.
+- A `Chronicle` file is format 1, the first released; one written by an
+  earlier, unreleased build of `dialog-chronicle` does not open, and is
+  moved again from the replica it came from with `dialog-migrate`. Nothing
+  else stored or synced changes: blocks, their hashes and what a replica
+  syncs are the same.
+
+## 0.4.0 (2026-11-14)
 
 ### A prefetch hint a query took but did not finish is resumed by the next query
 
@@ -945,7 +1351,7 @@ module should not be pinned by a library that uses one call of it.
 
 ### A pull or a push that meets another revision under its own head's version is refused
 
-Fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
+[#707](https://github.com/dialog-db/dialog-db/pull/707), fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
 
 Two replicas writing with one key on one branch share an origin, since
 an origin derives from the branch and the issuer. When both build on the
@@ -1049,6 +1455,8 @@ Why: the memo speaks for heads that landed, and a context remembered
 before the publish speaks for one that may never land.
 
 ### Distinct members inserted between the same neighbours get distinct positions
+
+[#729](https://github.com/dialog-db/dialog-db/pull/729).
 
 A position's fractional tail comes from a bias derived from the member's
 identity. The bias was the first six base62 digits of the identity bytes,
@@ -1535,7 +1943,7 @@ the walk read as it went, not because its reads depended on each other.
 
 ### A reset moves a branch forward only
 
-Fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
+[#686](https://github.com/dialog-db/dialog-db/pull/686), fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
 
 `Branch::reset` now refuses a revision that does not hold the branch's
 head, and the head does not move. A reset back to an older head, or onto
@@ -2889,40 +3297,6 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
-- **Rule bodies are format 4.** An older replica holds rule bodies in
-  format 3 or earlier. This release reads them all as before, and
-  `Branch::upgrade_rules` rewrites each in format 4. No rule changes
-  its entity: a rule that holds no pattern is the same body but for the
-  number, and a rule that holds a pattern is named by its parts, as it
-  has been since it could be built. Until an embedder runs
-  `upgrade_rules`, a rule this release writes again has both bodies
-  under its entity, which read as one rule. **An older release cannot
-  read what this one writes**: it refuses a body of a later format by
-  its number and skips the rule, a rule of plain terms too, so on a
-  space shared with a peer that has not upgraded, that peer derives
-  nothing from rules written here until it does. The release after this
-  one reads format 4 only, so run `upgrade_rules` on this one.
-- One rule changes identity between releases: a rule whose body holds a
-  record constant that is a composite is named by the composite's parts
-  here and by its bytes in an older release, so each release finds the
-  body the other stored under an entity it does not derive and leaves
-  it inert. No release before this one could write such a constant.
-- A composite is a new kind of bytes under the existing `record:` value
-  type, so nothing is rewritten on upgrade and no tree, key or wire
-  format changes. What an older replica holds under `record:` is a
-  revision's record, a bare dag-cbor map whose first byte is `0xa7`, and
-  whatever bytes an embedder stored. This release reads a record as a
-  composite only when its first byte is `0x01` and the rest is exactly
-  the bytes a composite is written in; every other record reads,
-  compares, verifies and is named as before. An older release makes of a
-  versioned record what it makes of any record: bytes it stores, syncs
-  and compares, and names by a hash of the bytes, which is not the name
-  this release gives it. It cannot look inside. A record under a later
-  version than `0x01` is carried the same way by this release and refused
-  by its number when something looks into it. An embedder runs nothing.
-  One that stored records of its own starting with a byte from `0x01` to
-  `0x17` should say so before upgrading
-  ([design/patterns/design-version-byte.md](./design/patterns/design-version-byte.md)).
 - Nothing stored or synced changes for the file store's lock; only the
   lock files beside its cells do. A lock file the previous release left
   behind holds a bare PID, which this release reads as a holder: one
