@@ -1033,7 +1033,27 @@ where
                     env,
                 )
                 .with_demand(self.demand.clone());
-                let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
+                // A concept of one field that picks moves for an entity
+                // exactly when the relation it picks from does, so what
+                // a change touches is discovered over that relation, one
+                // rule nearer the facts, and the concept's own rules are
+                // not resolved. A relation its own cycle derives is left
+                // to the concept's selecting rule.
+                let picked = match concept.picked_relation() {
+                    Some(relation) => {
+                        let rules =
+                            Provider::<SelectRules>::execute(&query_env, relation.clone()).await?;
+                        rules.recursion().is_none().then_some((relation, rules))
+                    }
+                    None => None,
+                };
+                let (concept, rules) = match picked {
+                    Some(picked) => picked,
+                    None => (
+                        concept,
+                        Provider::<SelectRules>::execute(&query_env, concept.clone()).await?,
+                    ),
+                };
                 // The poll reports the rows that moved. What a rule
                 // reads of a single-valued attribute is the one claim
                 // the read elects from the cell, so a row moving can

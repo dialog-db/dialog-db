@@ -238,6 +238,21 @@ impl ConceptDescriptor {
         Some((name, field))
     }
 
+    /// The relation this concept picks one claim of per entity, when it
+    /// is a concept of one required field that picks: the attribute
+    /// concept of that field, which reads every claim. What such a
+    /// concept answers for an entity moves exactly when that relation's
+    /// claims for the entity do.
+    pub fn picked_relation(&self) -> Option<&ConceptDescriptor> {
+        let mut fields = self.with().iter();
+        let (_, field) = fields.next()?;
+        if fields.next().is_some() || field.is_optional() || field.conforms().is_some() {
+            return None;
+        }
+        field.pick()?;
+        Some(field.attribute_concept())
+    }
+
     /// The keyed-collection fields of this concept.
     pub fn collections(&self) -> impl Iterator<Item = (&str, &ConceptFieldDescriptor)> {
         self.with()

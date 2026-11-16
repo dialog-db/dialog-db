@@ -273,6 +273,12 @@ What this changes for you:
   relation is maintained per entity: a change picks again for the
   entities whose candidates it touches, and no other. Inside a
   recursion it is still recomputed.
+- A concept of one field that picks, over a relation rules derive
+  outside any cycle, is answered by gathering the relation's
+  candidates and picking among them, without a selecting rule and a
+  fold between, and a subscription over one discovers what a change
+  touches over that relation. `ConceptDescriptor::picked_relation`
+  names it.
 - `Aggregator::Last` is new and `ReduceEntry::is_selective` tells a
   picking fold from a computing one. A sum of naturals is a natural.
 

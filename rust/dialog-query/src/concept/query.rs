@@ -23,6 +23,7 @@ use crate::planner::{Disjunction, Plan};
 use crate::rule::deductive::DeductiveRule;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::{Selection, Standing};
+use crate::selective::Ranking;
 use crate::source::SelectRules;
 use crate::stream::{fork_stream, stream_select};
 use crate::type_system::Type as Kind;
@@ -507,6 +508,7 @@ impl ConceptQuery {
     where
         Env: crate::Scope<'a>,
     {
+        let picking = self.picking();
         let app = self.canonical();
         let this = app.terms.get("this").cloned();
 
@@ -516,6 +518,27 @@ impl ConceptQuery {
                 return;
             };
             let first = first?;
+
+            // A concept of one field that picks, over a relation rules
+            // derive outside any cycle: the relation's candidates are
+            // gathered as a read of it gathers them, and the pick
+            // chooses among them per entity. The selecting rule that
+            // folds the field answers the same, through a rule and a
+            // fold more.
+            if let Some((relation, ranking)) = picking {
+                let rules =
+                    Provider::<SelectRules>::execute(env, relation.predicate.clone()).await?;
+                if !rules.installed().is_empty()
+                    && rules.recursion().is_none()
+                    && rules.reducing().next().is_none()
+                {
+                    let rows = stream::iter([Ok(first)]).chain(selection);
+                    for await row in relation.relation(rules, Vec::new(), Some(ranking), rows, env) {
+                        yield row?;
+                    }
+                    return;
+                }
+            }
 
             let rules = Provider::<SelectRules>::execute(env, app.predicate.clone()).await?;
             // An attribute concept read with its entity free is a merge
@@ -668,7 +691,7 @@ impl ConceptQuery {
             // entity and one row is built per winner.
             if app.predicate.attribute_field().is_some() && !rules.installed().is_empty() {
                 let rows = stream::iter([Ok(first)]).chain(selection);
-                for await row in app.relation(rules, reduced, rows, env) {
+                for await row in app.relation(rules, reduced, None, rows, env) {
                     yield row?;
                 }
                 return;
@@ -899,6 +922,7 @@ impl ConceptQuery {
         self,
         rules: ConceptRules,
         reduced: Vec<fixpoint::Answer>,
+        ranking: Option<Ranking>,
         rows: M,
         env: &'a Env,
     ) -> impl Selection + 'a
@@ -1043,7 +1067,13 @@ impl ConceptQuery {
                     candidates.retain(|candidate| kind.reads(&candidate.value));
                 }
 
-                let survivors = elect(candidates, &election)?;
+                // A field's pick keeps one candidate per entity, chosen
+                // among all of them; a plain read keeps what the
+                // cardinality keeps.
+                let survivors = match &ranking {
+                    Some(ranking) => pick(candidates, ranking),
+                    None => elect(candidates, &election)?,
+                };
                 if independent {
                     unconditional = Some(survivors.clone());
                 }
@@ -1141,6 +1171,35 @@ impl ConceptQuery {
             },
             Err(_) => self,
         }
+    }
+
+    /// When this query reads a concept of one required field that
+    /// picks: the read of the field's relation, every claim of it, with
+    /// the caller's terms re-keyed onto the relation's operands, and
+    /// the ranking the pick chooses by.
+    fn picking(&self) -> Option<(ConceptQuery, Ranking)> {
+        let mut fields = self.predicate.with().iter();
+        let (name, field) = fields.next()?;
+        if fields.next().is_some() || field.is_optional() || field.conforms().is_some() {
+            return None;
+        }
+        let ranking = field.ranking()?;
+        let mut terms = Parameters::new();
+        for (param, term) in self.terms.iter() {
+            let param = if param == name {
+                ConceptDescriptor::VALUE.to_string()
+            } else {
+                param.clone()
+            };
+            terms.insert(param, term.clone());
+        }
+        Some((
+            ConceptQuery {
+                predicate: ConceptDescriptor::of_attribute(field),
+                terms,
+            },
+            ranking,
+        ))
     }
 
     /// This query over the canonical spelling of its concept: an
@@ -1424,6 +1483,32 @@ impl Election {
         }
         Ok(elected)
     }
+}
+
+/// The candidate each entity's pick chooses among all of its
+/// candidates, in the order the entities were first seen.
+fn pick(candidates: Vec<Candidate>, ranking: &Ranking) -> Vec<Candidate> {
+    let mut picked: Vec<Candidate> = Vec::new();
+    let mut at: HashMap<Vec<u8>, usize> = HashMap::new();
+    for candidate in candidates {
+        match at.get(&candidate.entity) {
+            Some(&index) => {
+                let incumbent = &picked[index];
+                if ranking.aggregate.prefers(
+                    &ranking.listed,
+                    (&candidate.value, candidate.standing.as_ref()),
+                    (&incumbent.value, incumbent.standing.as_ref()),
+                ) {
+                    picked[index] = candidate;
+                }
+            }
+            None => {
+                at.insert(candidate.entity.clone(), picked.len());
+                picked.push(candidate);
+            }
+        }
+    }
+    picked
 }
 
 /// The candidates that survive the attribute's election under the

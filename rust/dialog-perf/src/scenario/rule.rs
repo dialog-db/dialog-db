@@ -180,7 +180,7 @@ pub const CASES: [&str; 4] = [
 /// `status`, read under `top` over `CASES`.
 pub fn status() -> ConceptDescriptor {
     concept(serde_json::json!({ "with": {
-        "status": { "the": "account/status", "as": CASES }
+        "status": { "the": "account/status", "as": CASES, "pick": "top" }
     }}))
 }
 
