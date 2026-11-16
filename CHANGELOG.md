@@ -240,84 +240,45 @@ cardinality says only how many claims a cell holds. How to rank them is
 the reading concept field's selective aggregator, which reads the relation as it is and
 can be changed without rewriting it.
 
-### `last` is a selective aggregator of rules, and a selected value stands as the fact it was selected from
+### A ranked field over a derived relation picks among its candidates, and a cycle through one is set aside
 
 Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
 [`notes/aggregation.md`](./notes/aggregation.md).
 
-A `reduce` clause takes `last` beside `min` and `max`, the selective
-aggregators, which return one of their inputs. `last` returns the newest input, the one
-bound from the fact standing greatest, which is what a cardinality-one
-read does within a cell and is now available over any group. All three
-fall back on the order a cardinality-one read elects a cell's claims
-by: `last` is that order, and the others take the newest among the
-values they hold equal.
+A concept field with a `pick` may read a relation rules derive: it
+picks among every candidate the rules offer and every stored claim.
+The value it picks stands as the fact it was picked from, a derived
+candidate as the newest fact its derivation consumed, so `last` over a
+derived relation reads the newest derivation.
+
+A deductive rule an author writes still takes no `reduce`
+(`TypeError::ReduceInOpenRule`), as since
+[#580](https://github.com/dialog-db/dialog-db/pull/580). A computed
+value (`count`, `sum`, `avg`) is none of the claims it was computed
+from, so concluded into an attribute it would compete with the claims
+stored there; where such a value belongs is not settled.
 
 What this changes for you:
 
-- `Aggregator::Last` is new.
-- A value `min`, `max` or `last` chose stands as the fact it was
-  bound from, so it competes with a stored claim of its relation under
-  cardinality one as any derived value does: the newer wins. A value
-  `sum`, `count` or `avg` computed still stands below every stored
-  claim. `ReduceEntry::is_selective` tells the two kinds apart.
-- `min` and `max` over values that compare equal return the one bound
-  from the newest fact, where they returned the one of the smaller
-  encoding; values that also stand equal still fall to the encoding.
-- A query naming a constant for a folding rule's entity, or for a head
-  field it does not reduce, folds the groups that constant names and
-  reads no other. A grouping field bound by an earlier premise is still
-  joined against every group's fold.
+- A concept whose ranked field closes a cycle through the relation it
+  reads is not evaluated in the cycle: the rule of the cycle installed
+  last is quarantined, and `Quarantine::tested` carries
+  `Absence::Folded`. The queries touching such a cycle used to fail
+  (`AggregationThroughRecursion`), which remains for a cycle with no
+  rule to set aside.
+- `max` and `min` over values that compare equal pick the one from the
+  newest fact, where they picked the one of the smaller encoding;
+  values that also stand equal still fall to the encoding.
+- A subscription over a concept with a ranked field on a derived
+  relation is maintained per entity: a change picks again for the
+  entities whose candidates it touches, and no other. Inside a
+  recursion it is still recomputed.
+- `Aggregator::Last` is new and `ReduceEntry::is_selective` tells a
+  picking fold from a computing one. A sum of naturals is a natural.
 
-Why: the newest member of a group no cell holds (a department's newest
-hire) is a fold, and a cardinality-one read already elects by that
-order within a cell.
-
-### A deductive rule may fold, and one closing a cycle through a fold is set aside
-
-Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
-[`notes/aggregation.md`](./notes/aggregation.md) and
-[`notes/attribute-heads.md`](./notes/attribute-heads.md).
-
-A deductive rule takes a `reduce` clause again: `sum`, `count`,
-`count-distinct`, `min`, `max`, `avg` and `last` over the rows
-of its body, grouped by the head fields it does not reduce. The head is
-an ordinary concept, so any rule, query or subscription reads a folded
-relation as it reads any other. Since
-[#580](https://github.com/dialog-db/dialog-db/pull/580) every authored
-rule with a `reduce` was refused (`ReduceInOpenRule`), and nothing an
-author could write folded.
-
-A fold over a relation no cycle derives reads it in full, which is the
-stratified reading an `unless` has. A rule closing a cycle through a
-fold is quarantined, the newest rule of the cycle, as one closing it
-through `unless` is, where the queries touching such a cycle used to
-fail (`AggregationThroughRecursion`).
-
-What this changes for you:
-
-- `DeductiveRule::with_reduce`, and a rule descriptor with a `reduce`
-  block, compile. `TypeError::ReduceInOpenRule` is gone.
-- A sum of naturals is a natural, so a head field declared `natural:`
-  holds it. A sum over inputs that may be negative is still an integer.
-- A quarantine made over a fold says so: `Quarantine::tested` carries
-  `Absence::Folded`. `ProgramAnalysis::violations` and
-  `EvaluationError::AggregationThroughRecursion` remain for a cycle
-  with no rule to set aside.
-- A computed value stands below every stored claim of its relation
-  under cardinality one: a value written to the relation is read over
-  the fold.
-- A subscription over a folding rule, a rule reading one, or a concept
-  with an aggregating field is maintained per entity: a change folds
-  again the groups of the entities whose body rows it touches, and no
-  other. A fold inside a recursion is still recomputed.
-
-Why: refusing every fold to prevent the unstratified ones is what the
-first refusal of `unless` did, and it left the rule an author would
-write (a list is busy when it holds more than ten open items) with no
-home but a query whose result has to be written back as a fact, where
-two replicas can disagree about it. A derived relation is never
-stored, so it cannot diverge.
+Why: a status ranked among the cases several rules derive is the read
+tonk's library needed, and it has to answer the same on every replica
+whatever order the candidates arrive in.
 
 ### A rule deciding on a cardinality-one value inside its own cycle is set aside
 

@@ -223,7 +223,15 @@ impl DeductiveRule {
         if !rewritten {
             return Ok(None);
         }
-        compile_internal::<Self>(self.conclusion().clone(), premises).map(Some)
+        // A selecting rule folds its ranked fields; the rewritten body
+        // binds the same variables, so the folds carry over as they are.
+        let reduce: Vec<(String, ReduceSpec)> = self
+            .analysis
+            .reduce
+            .iter()
+            .map(|entry| (entry.field.clone(), ReduceSpec::from(entry)))
+            .collect();
+        compile_selective::<Self>(self.conclusion().clone(), premises, reduce).map(Some)
     }
 
     /// The checked `reduce` clause entries, in head-field order.
@@ -406,7 +414,11 @@ impl DeductiveRule {
                 (field, spec)
             })
             .collect();
-        Ok(Some(Self::with_reduce(target.clone(), premises, reduce)?))
+        Ok(Some(compile_selective::<Self>(
+            target.clone(),
+            premises,
+            reduce.into_iter().collect(),
+        )?))
     }
 
     fn describe(&self, premises: &[Premise], reduce: &[ReduceEntry]) -> DeductiveRuleDescriptor {
@@ -1694,12 +1706,11 @@ mod tests {
         );
     }
 
-    /// A deductive rule admits a `reduce` block: outside a dependency
-    /// cycle a fold reads a relation derived in full, as an `unless`
-    /// does, and a rule closing a cycle through one is quarantined by
-    /// the program analysis.
+    /// A `reduce` block is refused in a deductive rule an author
+    /// writes: a computed value concluded into an attribute would
+    /// compete with the claims stored there.
     #[dialog_common::test]
-    fn it_admits_reduce_in_a_deductive_rule() {
+    fn it_refuses_reduce_in_a_deductive_rule() {
         use crate::reduce::{Aggregator, ReduceSpec};
 
         let conclusion = ConceptDescriptor::try_from(vec![(
@@ -1723,8 +1734,8 @@ mod tests {
         )]);
         let result = DeductiveRule::with_reduce(conclusion, premises, reduce);
         assert!(
-            result.is_ok(),
-            "a deductive rule admits a reduce, got {result:?}"
+            matches!(result, Err(TypeError::ReduceInOpenRule { .. })),
+            "a deductive rule admits no reduce, got {result:?}"
         );
     }
 

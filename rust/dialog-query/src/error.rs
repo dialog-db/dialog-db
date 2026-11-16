@@ -140,6 +140,18 @@ pub enum TypeError {
         /// The offending attribute selector.
         the: String,
     },
+    /// A deductive rule carries a `reduce` block. A computed value is
+    /// none of the claims it was computed from, so concluded into an
+    /// attribute it would compete with the claims stored there; where
+    /// it belongs is not settled, and until it is a deductive rule
+    /// admits no fold. A concept field's `pick` chooses among a
+    /// relation's claims instead.
+    #[error("Rule {rule} is deductive and folds: a deductive rule admits no `reduce`")]
+    ReduceInOpenRule {
+        /// The offending rule.
+        rule: Box<Rule>,
+    },
+
     /// A concept field declares a selective aggregator its attribute
     /// cannot be read under.
     #[error("{the} cannot be read with `pick: {aggregate}`: {reason}")]

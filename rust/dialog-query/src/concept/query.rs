@@ -837,10 +837,24 @@ impl ConceptQuery {
                     _ => Vec::new(),
                 };
                 let key = (caller_id, entity_key(&this)?);
+                // A derived value stands as the newest fact its
+                // derivation consumed. It is cited on the value, so the
+                // caller's variable carries it out with the row: a read
+                // further up that picks the newest of these candidates
+                // has their standings to pick by.
+                let standing = result
+                    .standing_of(ConceptDescriptor::VALUE)
+                    .or_else(|| result.standing());
+                if result.standing_of(ConceptDescriptor::VALUE).is_none()
+                    && let Some(standing) = &standing
+                {
+                    result.cite_variable_standing(
+                        &Arc::from(ConceptDescriptor::VALUE),
+                        standing.clone(),
+                    );
+                }
                 groups.entry(key).or_default().push(Entry {
-                    standing: result
-                        .standing_of(ConceptDescriptor::VALUE)
-                        .or_else(|| result.standing()),
+                    standing,
                     value,
                     identity,
                     carrier: (result, caller),
@@ -3058,9 +3072,9 @@ mod tests {
         }
 
         /// A rule offers one candidate per employee salary under the
-        /// department's `org.dept/salary`, read under cardinality many
-        /// as every distinct value, and a rule folding that relation
-        /// with `max` or `min` derives the greatest or the least. A
+        /// department's `org.dept/salary`, and a field reading that
+        /// relation picks among them: the greatest under `max`, the
+        /// least under `min`, every distinct value under `all`. A
         /// candidate is a fact, so two employees on one salary are one
         /// value of the relation.
         #[dialog_common::test]
@@ -3103,42 +3117,20 @@ mod tests {
                     }
                 }]
             }));
-            let fold = |the: &str, apply: &str| {
-                compile(serde_json::json!({
-                    "deduce": { "with": { "n": { "the": the, "as": "natural:" } } },
-                    "when": [{
-                        "assert": { "with": {
-                            "salary": { "the": "org.dept/salary", "as": "natural:", "cardinality": "many" }
-                        }},
-                        "where": {
-                            "this": { "?": { "name": "this" } },
-                            "salary": { "?": { "name": "salary" } }
-                        }
-                    }],
-                    "reduce": { "n": { "apply": apply, "of": { "?": { "name": "salary" } } } }
-                }))
-            };
             let mut registry = RuleRegistry::new();
             registry.register(rule)?;
-            registry.register(fold("org.dept/top", "max"))?;
-            registry.register(fold("org.dept/low", "min"))?;
             let source = TestEnv::new(&branch, &operator, registry);
 
-            let read = |the: &str| -> ConceptDescriptor {
-                let cardinality = if the == "org.dept/salary" {
-                    "many"
-                } else {
-                    "one"
-                };
+            let read = |pick: &str| -> ConceptDescriptor {
                 serde_json::from_value(serde_json::json!({ "with": {
-                    "n": { "the": the, "as": "natural:", "cardinality": cardinality }
+                    "n": { "the": "org.dept/salary", "as": "natural:", "pick": pick }
                 }}))
                 .expect("a concept over the relation")
             };
             for (select, expected) in [
-                ("org.dept/top", vec![200u128]),
-                ("org.dept/low", vec![100]),
-                ("org.dept/salary", vec![100, 200]),
+                ("max", vec![200u128]),
+                ("min", vec![100]),
+                ("all", vec![100, 200]),
             ] {
                 let mut terms = Parameters::new();
                 terms.insert("this".into(), Term::var("dept"));

@@ -20,8 +20,8 @@ use crate::error::TypeError;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
-use crate::rule::compile_internal;
 use crate::rule::deductive::{DeductiveRule, Origin};
+use crate::rule::{compile_internal, compile_selective};
 use crate::term::Term;
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::Any;
@@ -135,7 +135,7 @@ impl DeductiveRule {
             let rule = if reduce.is_empty() {
                 compile_internal::<DeductiveRule>(conclusion, body)
             } else {
-                DeductiveRule::with_reduce(conclusion, body, reduce)
+                compile_selective::<DeductiveRule>(conclusion, body, reduce.into_iter().collect())
             };
             match rule {
                 Ok(rule) => {

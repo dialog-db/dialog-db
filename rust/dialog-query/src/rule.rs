@@ -177,11 +177,25 @@ pub trait Compile: Sized + Into<Rule> {
 /// analysis, plannability, and head grounding, parameterized over an
 /// optional `reduce` clause (`(field, spec)` pairs in head-field
 /// order; empty for a plain rule).
+///
+/// A deductive rule an author writes admits no `reduce`. A computed
+/// value (a count, a sum) is none of the claims it was computed from,
+/// so concluded into an attribute it would compete with the claims
+/// stored there, and nothing could be written through it. Where such a
+/// value belongs is not settled, so the clause stays out of a deductive
+/// rule until it is; a field's `pick` chooses among a relation's
+/// claims instead (see [`compile_selective`]). The check depends on the
+/// rule alone, never on the rest of the program, so no merge of rule
+/// sets is ever rejected.
 pub(crate) fn compile_rule<T: Compile>(
     conclusion: ConceptDescriptor,
     premises: Vec<Premise>,
     reduce: Vec<(String, ReduceSpec)>,
 ) -> Result<T, TypeError> {
+    if matches!(T::KIND, RuleKind::Deductive) && !reduce.is_empty() {
+        let rule = Box::new(T::in_progress(conclusion, premises).into());
+        return Err(TypeError::ReduceInOpenRule { rule });
+    }
     compile_rule_as::<T>(conclusion, premises, reduce)
 }
 

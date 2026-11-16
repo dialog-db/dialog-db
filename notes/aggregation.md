@@ -93,6 +93,11 @@ authored confusion, so it is a **hard error**, sibling of
 
 ## Selective and computing aggregators
 
+> A deductive rule an author writes takes no `reduce`
+> (`ReduceInOpenRule`): where a computed value belongs is not settled.
+> What this section says of a fold in a head holds for the picking
+> folds a concept field's `pick` runs.
+
 An aggregator is *selective* when its result is always one of its
 inputs: as an operation, `x ⊕ y ∈ {x, y}`, which makes it idempotent
 too. `min`, `max` and `last` are selective. `count`, `count-distinct`,

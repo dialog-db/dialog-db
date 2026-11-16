@@ -2891,32 +2891,18 @@ mod rule_tests {
         Ok(())
     }
 
-    /// `org/dept-top(dept) := max(salary) :- org/dept-salary(dept) =
-    /// salary`: a department's highest salary, a rule folding the
-    /// relation the salary rules derive, and the concept reading it.
-    fn dept_top() -> anyhow::Result<(DeductiveRule, ConceptDescriptor)> {
-        let rule: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-            "deduce": { "with": { "top": { "the": "org/dept-top", "as": "natural:" } } },
-            "when": [{
-                "assert": { "with": {
-                    "salary": { "the": "org/dept-salary", "as": "natural:", "cardinality": "many" }
-                }},
-                "where": {
-                    "this": { "?": { "name": "this" } },
-                    "salary": { "?": { "name": "salary" } }
-                }
-            }],
-            "reduce": { "top": { "apply": "max", "of": { "?": { "name": "salary" } } } }
-        }))?;
-        let concept: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "top": { "the": "org/dept-top", "as": "natural:" }
-        }}))?;
-        Ok((rule.compile()?, concept))
+    /// A department's highest salary: a concept whose field reads the
+    /// relation the salary rules derive, `org/dept-salary`, and picks
+    /// its greatest claim.
+    fn dept_top() -> anyhow::Result<ConceptDescriptor> {
+        Ok(serde_json::from_value(serde_json::json!({ "with": {
+            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max" }
+        }}))?)
     }
 
-    /// A committed rule derives a relation a folding rule reads: the
+    /// A committed rule derives a relation a ranked field reads: the
     /// rule stores, discovers and hydrates through the `db.rule/*`
-    /// rail, and a rule folding its relation with `max` chooses among
+    /// rail, and a field picking `max` over its relation chooses among
     /// the candidates it derives over committed facts.
     #[dialog_common::test]
     async fn it_elects_over_a_relation_a_committed_rule_derives() -> anyhow::Result<()> {
@@ -2946,7 +2932,7 @@ mod rule_tests {
                 serde_json::from_value(json).expect("descriptor parses");
             descriptor.compile().expect("rule compiles")
         };
-        let (top, dept_top) = dept_top()?;
+        let dept_top = dept_top()?;
 
         let dept: Entity = "id:dept-a".parse()?;
         let alice: Entity = "id:alice".parse()?;
@@ -2958,7 +2944,6 @@ mod rule_tests {
             .assert(the!("org/dept").of(bob.clone()).is(dept.clone()))
             .assert(the!("org/salary").of(bob.clone()).is(4u32))
             .assert(&rule)
-            .assert(&top)
             .commit()
             .publish()
             .perform(&operator)
@@ -2987,7 +2972,7 @@ mod rule_tests {
         Ok(())
     }
 
-    /// A fold reads every rule's candidates: the committed rule is found
+    /// A ranked field reads every rule's candidates: the committed rule is found
     /// first and the query's overlay rule after it, and a rule folding
     /// their relation with `max` chooses among what both derive per
     /// entity, never taking either rule alone for the whole answer.
@@ -3028,7 +3013,7 @@ mod rule_tests {
             }]
         }))?;
         let overlay = overlay.compile()?;
-        let (top, dept_top) = dept_top()?;
+        let dept_top = dept_top()?;
 
         let dept_a: Entity = "id:dept-a".parse()?;
         let dept_b: Entity = "id:dept-b".parse()?;
@@ -3042,7 +3027,6 @@ mod rule_tests {
             .assert(the!("org/salary").of(bob.clone()).is(4u32))
             .assert(the!("org/flat-total").of(dept_b.clone()).is(9u32))
             .assert(&committed)
-            .assert(&top)
             .commit()
             .publish()
             .perform(&operator)

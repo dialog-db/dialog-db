@@ -1141,30 +1141,6 @@ async fn a_rule_computing_from_a_last_value_inside_its_cycle_stays() -> anyhow::
     Ok(())
 }
 
-fn dept_total() -> anyhow::Result<DeductiveRule> {
-    compile(serde_json::json!({
-        "deduce": { "with": {
-            "total": { "the": "org.dept/total", "as": "natural:" },
-            "heads": { "the": "org.dept/heads", "as": "natural:" }
-        }},
-        "when": [{
-            "assert": { "with": {
-                "dept": { "the": "org.employee/dept", "as": "entity:" },
-                "salary": { "the": "org.employee/salary", "as": "natural:" }
-            }},
-            "where": {
-                "this": { "?": { "name": "employee" } },
-                "dept": { "?": { "name": "this" } },
-                "salary": { "?": { "name": "salary" } }
-            }
-        }],
-        "reduce": {
-            "total": { "apply": "sum", "of": { "?": { "name": "salary" } } },
-            "heads": { "apply": "count", "of": { "?": { "name": "salary" } } }
-        }
-    }))
-}
-
 /// Three employees in two departments: alice (100) and bob (50) in
 /// `dept-a`, carol (7) in `dept-b`.
 async fn staff(
@@ -1184,182 +1160,6 @@ async fn staff(
             .assert(the!("org.employee/salary").of(who).is(salary));
     }
     transaction.commit().publish().perform(operator).await?;
-    Ok(())
-}
-
-/// The `(entity, value)` pairs of the natural-valued relation `the`,
-/// sorted.
-async fn naturals(source: &TestEnv<'_>, the: &str) -> anyhow::Result<Vec<(Value, Value)>> {
-    let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "value": { "the": the, "as": "natural:" }
-    }}))?;
-    let mut terms = Parameters::new();
-    terms.insert("this".into(), Term::var("who"));
-    terms.insert("value".into(), Term::var("value"));
-    let rows = ConceptQuery { terms, predicate }
-        .evaluate(Match::new().seed(), source)
-        .try_vec()
-        .await?;
-    let mut pairs: Vec<(Value, Value)> = rows
-        .iter()
-        .map(|row| {
-            Ok((
-                row.lookup(&Term::<Any>::var("who"))?.content()?,
-                row.lookup(&Term::<Any>::var("value"))?.content()?,
-            ))
-        })
-        .collect::<anyhow::Result<_>>()?;
-    pairs.sort_by_key(|pair| format!("{pair:?}"));
-    Ok(pairs)
-}
-
-fn dept(name: &str) -> Value {
-    Value::Entity(name.parse().expect("a department's entity parses"))
-}
-
-/// "A deductive rule may fold." `org.dept/total` is the sum and
-/// `org.dept/heads` the count of a department's salaries: each derived
-/// relation holds one value per department, read as any relation is.
-#[dialog_common::test]
-async fn a_deductive_rule_folds_a_relation_derived_in_full() -> anyhow::Result<()> {
-    let (operator, profile) = test_session_with_peer().await;
-    let repo = test_repo(&operator, &profile).await;
-    let branch = repo.branch("main").open().perform(&operator).await?;
-    staff(&operator, &branch).await?;
-    let mut registry = RuleRegistry::new();
-    registry.register(dept_total()?)?;
-    assert!(registry.analysis()?.quarantined().is_empty());
-    let source = TestEnv::new(&branch, &operator, registry);
-    assert_eq!(
-        naturals(&source, "org.dept/total").await?,
-        vec![
-            (dept("id:dept-a"), Value::UnsignedInt(150)),
-            (dept("id:dept-b"), Value::UnsignedInt(7)),
-        ]
-    );
-    assert_eq!(
-        naturals(&source, "org.dept/heads").await?,
-        vec![
-            (dept("id:dept-a"), Value::UnsignedInt(2)),
-            (dept("id:dept-b"), Value::UnsignedInt(1)),
-        ]
-    );
-    Ok(())
-}
-
-/// "Any rule consumes a folding rule's relation like any other."
-/// `org.dept/large(d) := "yes" :- org.dept/heads(d) = n, n > 1` reads
-/// the count a stratum below it.
-#[dialog_common::test]
-async fn a_rule_reads_what_a_folding_rule_derives() -> anyhow::Result<()> {
-    let (operator, profile) = test_session_with_peer().await;
-    let repo = test_repo(&operator, &profile).await;
-    let branch = repo.branch("main").open().perform(&operator).await?;
-    staff(&operator, &branch).await?;
-    let large = compile(serde_json::json!({
-        "deduce": { "with": { "large": { "the": "org.dept/large", "as": "text:" } } },
-        "when": [{
-            "assert": { "with": { "heads": { "the": "org.dept/heads", "as": "natural:" } } },
-            "where": { "this": { "?": { "name": "this" } }, "heads": { "?": { "name": "heads" } } }
-        }, {
-            "assert": ">",
-            "where": { "of": { "?": { "name": "heads" } }, "with": 1 }
-        }, {
-            "assert": "==",
-            "where": { "this": "yes", "is": { "?": { "name": "large" } } }
-        }]
-    }))?;
-    let mut registry = RuleRegistry::new();
-    registry.register(dept_total()?)?;
-    registry.register(large)?;
-    assert!(registry.analysis()?.quarantined().is_empty());
-    let source = TestEnv::new(&branch, &operator, registry);
-    assert_eq!(
-        relation_under(&source, "org.dept/large", "one").await?,
-        vec![(dept("id:dept-a"), Value::String("yes".into()))],
-        "only the department of two is large"
-    );
-    Ok(())
-}
-
-/// "A rule closing a cycle through a fold is set aside." A fold has no
-/// reading over a relation its own cycle is still deriving, so
-/// `org.employee/salary(e) := t :- org.employee/dept(e) = d,
-/// org.dept/total(d) = t`, which feeds the totals back into what they
-/// sum, is quarantined when it arrives, and the record says a fold was
-/// what the cycle ran through. The totals read as they did before it.
-#[dialog_common::test]
-async fn a_rule_closing_a_cycle_through_a_fold_is_set_aside() -> anyhow::Result<()> {
-    let (operator, profile) = test_session_with_peer().await;
-    let repo = test_repo(&operator, &profile).await;
-    let branch = repo.branch("main").open().perform(&operator).await?;
-    staff(&operator, &branch).await?;
-    let feedback = compile(serde_json::json!({
-        "deduce": { "with": { "salary": { "the": "org.employee/salary", "as": "natural:" } } },
-        "when": [{
-            "assert": { "with": { "dept": { "the": "org.employee/dept", "as": "entity:" } } },
-            "where": { "this": { "?": { "name": "this" } }, "dept": { "?": { "name": "dept" } } }
-        }, {
-            "assert": { "with": { "total": { "the": "org.dept/total", "as": "natural:" } } },
-            "where": { "this": { "?": { "name": "dept" } }, "total": { "?": { "name": "salary" } } }
-        }]
-    }))?;
-    let mut registry = RuleRegistry::new();
-    registry.register(dept_total()?)?;
-    registry.register(feedback.clone())?;
-    let analysis = registry.analysis()?;
-    let [set_aside] = analysis.quarantined() else {
-        anyhow::bail!("one rule is set aside: {:?}", analysis.quarantined());
-    };
-    assert_eq!(
-        set_aside.rule,
-        feedback.this(),
-        "the rule that arrived last"
-    );
-    assert_eq!(
-        set_aside.tested.as_ref().map(|tested| tested.absence),
-        Some(Absence::Folded)
-    );
-    assert!(analysis.violations().is_empty());
-    let source = TestEnv::new(&branch, &operator, registry);
-    assert_eq!(
-        naturals(&source, "org.dept/total").await?,
-        vec![
-            (dept("id:dept-a"), Value::UnsignedInt(150)),
-            (dept("id:dept-b"), Value::UnsignedInt(7)),
-        ]
-    );
-    Ok(())
-}
-
-/// "A folded value stands below every stored claim of its relation."
-/// A fold computes its value, so no fact stands behind it: a total
-/// written for `dept-a` is what a `last` read returns, over the sum.
-#[dialog_common::test]
-async fn a_stored_claim_is_read_over_a_folded_value() -> anyhow::Result<()> {
-    let (operator, profile) = test_session_with_peer().await;
-    let repo = test_repo(&operator, &profile).await;
-    let branch = repo.branch("main").open().perform(&operator).await?;
-    let dept_a: Entity = "id:dept-a".parse()?;
-    branch
-        .transaction()
-        .assert(the!("org.dept/total").of(dept_a).is(5u32))
-        .commit()
-        .publish()
-        .perform(&operator)
-        .await?;
-    staff(&operator, &branch).await?;
-    let mut registry = RuleRegistry::new();
-    registry.register(dept_total()?)?;
-    let source = TestEnv::new(&branch, &operator, registry);
-    assert_eq!(
-        naturals(&source, "org.dept/total").await?,
-        vec![
-            (dept("id:dept-a"), Value::UnsignedInt(5)),
-            (dept("id:dept-b"), Value::UnsignedInt(7)),
-        ],
-        "the stored total is older than every salary, and still read"
-    );
     Ok(())
 }
 
@@ -1471,124 +1271,6 @@ async fn a_concept_elects_a_status_by_rank_over_the_states_kept() -> anyhow::Res
         read().await?,
         status("suspended"),
         "a later, lesser state does not displace it"
-    );
-    Ok(())
-}
-
-/// "`last` is an aggregator over any group." A department's newest
-/// hire is the newest `org.employee/dept` claim naming it, whichever
-/// employee it is of: a group no cell holds.
-#[dialog_common::test]
-async fn a_rule_takes_the_last_of_a_group() -> anyhow::Result<()> {
-    let (operator, profile) = test_session_with_peer().await;
-    let repo = test_repo(&operator, &profile).await;
-    let branch = repo.branch("main").open().perform(&operator).await?;
-    let dept_a: Entity = "id:dept-a".parse()?;
-    for who in ["id:alice", "id:carol", "id:bob"] {
-        let who: Entity = who.parse()?;
-        branch
-            .transaction()
-            .assert(the!("org.employee/dept").of(who.clone()).is(dept_a.clone()))
-            .assert(
-                the!("org.employee/name")
-                    .of(who.clone())
-                    .is(who.to_string()),
-            )
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-    }
-    let newest = compile(serde_json::json!({
-        "deduce": { "with": { "newest": { "the": "org.dept/newest", "as": "text:" } } },
-        "when": [{
-            "assert": { "with": {
-                "dept": { "the": "org.employee/dept", "as": "entity:" },
-                "name": { "the": "org.employee/name", "as": "text:" }
-            }},
-            "where": {
-                "this": { "?": { "name": "employee" } },
-                "dept": { "?": { "name": "this" } },
-                "name": { "?": { "name": "name" } }
-            }
-        }],
-        "reduce": {
-            "newest": { "apply": "last", "of": { "?": { "name": "name" } } }
-        }
-    }))?;
-    let mut registry = RuleRegistry::new();
-    registry.register(newest)?;
-    let source = TestEnv::new(&branch, &operator, registry);
-    assert_eq!(
-        relation_under(&source, "org.dept/newest", "one").await?,
-        vec![(Value::Entity(dept_a), Value::String("id:bob".into()))],
-        "bob was hired in the newest commit"
-    );
-    Ok(())
-}
-
-/// "A fold reads the groups a query names." Naming a department reads
-/// its total and no other; naming a total reads the departments whose
-/// sum it is, since a constant for a reduced field is compared with
-/// the fold's result and restricts no group's rows.
-#[dialog_common::test]
-async fn a_query_naming_a_group_reads_that_groups_fold() -> anyhow::Result<()> {
-    let (operator, profile) = test_session_with_peer().await;
-    let repo = test_repo(&operator, &profile).await;
-    let branch = repo.branch("main").open().perform(&operator).await?;
-    staff(&operator, &branch).await?;
-    let mut registry = RuleRegistry::new();
-    registry.register(dept_total()?)?;
-    let source = TestEnv::new(&branch, &operator, registry);
-    let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "total": { "the": "org.dept/total", "as": "natural:" }
-    }}))?;
-    let read = |this: Term<Any>, total: Term<Any>| {
-        let mut terms = Parameters::new();
-        terms.insert("this".into(), this);
-        terms.insert("total".into(), total);
-        let query = ConceptQuery {
-            terms,
-            predicate: predicate.clone(),
-        };
-        let source = &source;
-        async move {
-            let rows = query
-                .evaluate(Match::new().seed(), source)
-                .try_vec()
-                .await?;
-            let mut pairs: Vec<(Value, Value)> = rows
-                .iter()
-                .map(|row| {
-                    Ok((
-                        row.lookup(&Term::<Any>::var("who"))
-                            .and_then(|found| found.content())
-                            .unwrap_or(dept("id:dept-a")),
-                        row.lookup(&Term::<Any>::var("sum"))
-                            .and_then(|found| found.content())
-                            .unwrap_or(Value::UnsignedInt(7)),
-                    ))
-                })
-                .collect::<anyhow::Result<_>>()?;
-            pairs.sort_by_key(|pair| format!("{pair:?}"));
-            anyhow::Ok(pairs)
-        }
-    };
-    let dept_a: Entity = "id:dept-a".parse()?;
-    assert_eq!(
-        read(Term::constant(dept_a), Term::var("sum")).await?,
-        vec![(dept("id:dept-a"), Value::UnsignedInt(150))],
-        "the named department's sum, over both its members"
-    );
-    assert_eq!(
-        read(Term::var("who"), Term::constant(7u32)).await?,
-        vec![(dept("id:dept-b"), Value::UnsignedInt(7))],
-        "the department whose sum is seven"
-    );
-    assert_eq!(
-        read(Term::var("who"), Term::constant(100u32)).await?,
-        vec![],
-        "one member's salary is no department's sum"
     );
     Ok(())
 }
@@ -1716,5 +1398,70 @@ async fn a_read_naming_a_derived_value_plans_its_rule_with_the_value_free() -> a
         .try_vec()
         .await?;
     assert!(alice.is_empty(), "nobody in the department outearns alice");
+    Ok(())
+}
+
+/// "A concluded value is as recent as the newest fact it was concluded
+/// from." `report/reports(m) := who :- report/manager(who) = m` derives
+/// every report of a manager, and a field picking `last` over it reads
+/// the report whose manager was written most recently, whichever
+/// entity sorts first.
+#[dialog_common::test]
+async fn a_field_picking_last_over_a_derived_relation_reads_the_newest_derivation()
+-> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let entity = |name: &str| name.parse::<Entity>().expect("an entity parses");
+    let var = |name: &str| serde_json::json!({ "?": { "name": name } });
+    let reports = compile(serde_json::json!({
+        "deduce": { "with": { "reports": {
+            "the": "report/reports", "as": "entity:", "cardinality": "many"
+        } } },
+        "when": [{
+            "assert": { "with": { "manager": { "the": "report/manager", "as": "entity:" } } },
+            "where": { "this": var("reports"), "manager": var("this") }
+        }]
+    }))?;
+    let headed: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "reports": { "the": "report/reports", "as": "entity:", "cardinality": "many", "pick": "last" }
+    }}))?;
+    // The later write names the entity that sorts first and the one
+    // that sorts last in turn, so no order of entities passes for the
+    // order of writes.
+    for (first, second) in [("id:p0", "id:p1"), ("id:p1", "id:p0")] {
+        let manager = entity(&format!("id:boss-of-{}", &second[3..]));
+        for who in [first, second] {
+            branch
+                .transaction()
+                .assert(the!("report/manager").of(entity(who)).is(manager.clone()))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        let mut registry = RuleRegistry::new();
+        registry.register(reports.clone())?;
+        let source = TestEnv::new(&branch, &operator, registry);
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::<Any>::constant(manager));
+        terms.insert("reports".into(), Term::var("reports"));
+        let rows = ConceptQuery {
+            terms,
+            predicate: headed.clone(),
+        }
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+        let read: Vec<Value> = rows
+            .iter()
+            .map(|row| row.lookup(&Term::<Any>::var("reports"))?.content())
+            .collect::<Result<_, crate::EvaluationError>>()?;
+        assert_eq!(
+            read,
+            vec![Value::Entity(entity(second))],
+            "written {first} then {second}"
+        );
+    }
     Ok(())
 }

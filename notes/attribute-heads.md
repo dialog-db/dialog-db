@@ -191,21 +191,17 @@ its parent's, is what quarantine rules out; lattice-valued recursion,
 where the chosen value may feed the recursion as long as it is only
 used in ways that respect its order, could admit it later.
 
-So `unless`, optional premises and `reduce` all stay in deductive
-rules, on one argument. A fold over a relation no cycle derives reads
-that relation in full, as a negation of it does, and is stratified. A
-fold whose input its own cycle derives has no reading over a set still
-growing, and unlike a choice it cannot be deferred to the component's
-exit without giving the rules inside a different relation than the
-readers outside, so a rule closing a cycle through a fold is
-quarantined, as plainly as one closing it through `unless`. A fold was
-refused in a deductive rule outright at first (`ReduceInOpenRule`),
-which threw away every stratified fold to prevent the unstratified
-ones, the mistake the first refusal of `unless` made.
-
-A folded value is computed, so no fact stands behind it: under `last`
-it stands below every stored claim of its relation, and a write to the
-relation is read over it.
+So `unless` and optional premises stay in deductive rules. An authored
+`reduce` does not (`ReduceInOpenRule`). A computing fold (`count`,
+`sum`, `avg`) yields a value none of its inputs holds: concluded into
+an attribute it would compete with the claims stored there, and
+nothing could be written through it, so where it belongs is not
+settled. A picking fold, which returns one of its inputs, is how a
+concept field with a `pick` reads a relation rules derive. Over a
+relation no cycle derives it reads that relation in full, as a
+negation of it does, and is stratified; a concept whose ranked field
+closes a cycle through the relation it reads has a rule of the cycle
+quarantined, as plainly as one closing it through `unless`.
 
 Ordered choice, which the old `variants` desugaring expressed by
 negating earlier alternatives, is better expressed by election: give
@@ -469,12 +465,11 @@ and sees the built-in's head for it like any rule's.
 
 ### Reducing rules
 
-A deductive rule takes a `reduce` clause (see quarantine above). Its
-heads are split like any rule's, one per attribute it derives, each
-folding the shared body grouped by the head fields not reduced. A
-subscription over one is maintained per entity: a group is keyed by
-the head entity, so a change touching an entity's body rows folds that
-entity's group again and no other.
+A deductive rule an author writes refuses `reduce` (see quarantine
+above). The selecting rule the engine writes for a concept folds each
+ranked field over a derived relation with its pick, and a subscription
+over one is maintained per entity: a change touching an entity's
+candidates picks again for that entity and no other.
 
 ### Storage: `dialog.rule/derives`
 

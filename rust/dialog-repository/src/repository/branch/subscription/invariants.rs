@@ -255,20 +255,23 @@ pub struct JuniorLed(pub String);
 #[domain("report")]
 pub struct JuniorTaught(pub String);
 
-/// What [`headcount_rule`] derives (`report/reports`): how many
-/// entities name this one their manager.
+/// What [`reports_rule`] derives (`report/reports`): each entity that
+/// names this one their manager.
 #[derive(Attribute, Clone, PartialEq)]
 #[domain("report")]
-pub struct Reports(pub u32);
+#[cardinality(many)]
+pub struct Reports(pub Entity);
 
-/// A manager and how many report to them: a fold whose group is keyed
-/// by another entity than the ones whose facts it counts, so a change
-/// to one report's manager moves two managers' rows.
+/// A manager and the newest of those reporting to them: a field
+/// picking one claim of a relation a rule derives, whose claims are
+/// keyed by another entity than the ones whose facts they come from,
+/// so a change to one report's manager moves two managers' rows.
 #[derive(Concept, Debug, Clone, PartialEq)]
 pub struct Headed {
     /// The manager.
     pub this: Entity,
-    /// How many entities name them their manager.
+    /// The newest of the entities naming them their manager.
+    #[dialog(pick = last)]
     pub reports: Reports,
 }
 
@@ -650,22 +653,23 @@ fn alone_by_mentors_badge_rule() -> anyhow::Result<DeductiveRule> {
 }
 
 /// The rules every run installs with its first commit.
-/// `report/reports(this) := count(who) :- report/manager(who) = this`:
-/// a fold grouped by the manager, over the reports naming them.
-fn headcount_rule() -> anyhow::Result<DeductiveRule> {
+/// `report/reports(this) := who :- report/manager(who) = this`: every
+/// report of a manager, derived under the manager.
+fn reports_rule() -> anyhow::Result<DeductiveRule> {
     rule(serde_json::json!({
-        "deduce": { "with": { "reports": { "the": "report/reports", "as": "natural:" } } },
+        "deduce": { "with": { "reports": {
+            "the": "report/reports", "as": "entity:", "cardinality": "many"
+        } } },
         "when": [{
             "assert": { "with": { "manager": { "the": "report/manager", "as": "entity:" } } },
-            "where": { "this": var("who"), "manager": var("this") }
-        }],
-        "reduce": { "reports": { "apply": "count", "of": var("who") } }
+            "where": { "this": var("reports"), "manager": var("this") }
+        }]
     }))
 }
 
 fn installed_rules() -> anyhow::Result<Vec<DeductiveRule>> {
     let mut rules = vec![
-        headcount_rule()?,
+        reports_rule()?,
         unvouched_rule()?,
         junior_rule()?,
         junior_led_rule()?,
