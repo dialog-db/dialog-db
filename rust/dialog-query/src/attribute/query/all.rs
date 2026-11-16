@@ -1785,6 +1785,7 @@ mod tests {
 /// The layer term of a scan, held boxed and only when it is not blank,
 /// and read and written on the wire as the term itself, blank included.
 mod boxed_layer {
+    use crate::types::EntityType;
     use crate::{Entity, Term};
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::sync::LazyLock;
@@ -1800,7 +1801,7 @@ mod boxed_layer {
             Term::Variable {
                 name: None,
                 descriptor,
-            } if *descriptor == Default::default() => None,
+            } if *descriptor == EntityType::default() => None,
             _ => Some(Box::new(layer)),
         }
     }
