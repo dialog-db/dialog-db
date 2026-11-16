@@ -260,7 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         tree = edit.persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(node.buffer().expect("a sealed node has its block").clone());
         }
     }
 
