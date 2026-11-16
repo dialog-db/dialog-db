@@ -75,7 +75,7 @@ How many claims a cell of an attribute holds, spelled `cardinality`:
 - `one` (the default): a read returns the cell's newest claim, and a write succeeds that claim, so the cell holds one live claim;
 - `many`: a read returns every claim, as a set, and a write adds a claim beside the others.
 
-A read that ranks a cell's claims, the greatest, the least or the last listed, is not a property of an attribute but of the concept field that reads it: the field declares an elector, `max`, `min` or `top`, over a cardinality-many attribute (`"elect": "top"`; see [aggregation](./aggregation.md#electors)). A listed `as` ranks its values least first. In Rust a cardinality is `dialog_corpus::Cardinality`, re-exported as `dialog_query::Cardinality`.
+A read that ranks a cell's claims, the greatest, the least or the last listed, is not a property of an attribute but of the concept field that reads it: the field declares a selective aggregator, `max`, `min` or `top`, over a cardinality-many attribute (`"aggregate": "top"`; see [aggregation](./aggregation.md#selective-aggregators-on-concept-fields)). A listed `as` ranks its values least first. In Rust a cardinality is `dialog_corpus::Cardinality`, re-exported as `dialog_query::Cardinality`.
 
 The releases 0.3 and 0.4 spelled a `pick` in its place (`last`, `all`, `top`, `max`, `min`) and could list relations under `the`. This release refuses both by name; `Branch::upgrade_rules` rewrites a stored rule reading under `last` or `all` and reports one it cannot rewrite.
 

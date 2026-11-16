@@ -23,8 +23,8 @@
 //! one this release reads with the same meaning: a `last` attribute is
 //! cardinality one and an `all` attribute cardinality many, and an
 //! attribute read under `max`, `min` or `top` (which a listed `as`
-//! without a pick implied) is a cardinality-many field electing with
-//! that elector, a `top`'s list reversed, since it ranked best first and
+//! without a pick implied) is a cardinality-many field aggregating with
+//! that aggregate, a `top`'s list reversed, since it ranked best first and
 //! a listing now ranks least first. A chain of relations has no such
 //! spelling: such a body is reported as [`Rewritten::Unmapped`] and left
 //! inert, never read with another meaning.
@@ -44,8 +44,8 @@ use crate::Cardinality;
 use crate::attribute::{AttributeDescriptor, Keyed, The};
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::corpus::Value;
-use crate::elector::Elector;
 use crate::identity::{self, ATTRIBUTE, CONCEPT, field};
+use crate::selective::Selective;
 
 /// The identity the earlier release gave `attribute`, as its
 /// `the:<base58>` URI.
@@ -160,8 +160,8 @@ pub fn attribute_uri_v1(attribute: &AttributeDescriptor) -> String {
 /// concept's reference over its attributes' earlier references.
 pub fn concept_reference_v1(concept: &ConceptDescriptor) -> Reference {
     let entries = concept.with().iter().map(|(_name, field)| {
-        let attribute = match field.elector() {
-            Some(elector) => elected_reference_v1(field.descriptor(), elector),
+        let attribute = match field.aggregate() {
+            Some(aggregate) => aggregated_reference_v1(field.descriptor(), aggregate),
             None => attribute_reference_v1(field.descriptor()),
         };
         let mut options = Vec::new();
@@ -177,15 +177,15 @@ pub fn concept_reference_v1(concept: &ConceptDescriptor) -> Reference {
 }
 
 /// The reference the release before this one gave the attribute a field
-/// electing with `elector` was migrated from: the attribute read under
-/// the pick of the elector's name, a `top`'s values listed best first as
+/// aggregating with `aggregate` was migrated from: the attribute read under
+/// the pick of the aggregate's name, a `top`'s values listed best first as
 /// that release ranked them.
-fn elected_reference_v1(attribute: &AttributeDescriptor, elector: Elector) -> Reference {
-    let pick = match elector {
-        Elector::Last => return attribute_reference_v1(attribute),
-        Elector::Max => b"max:".as_slice(),
-        Elector::Min => b"min:".as_slice(),
-        Elector::Top => b"top:".as_slice(),
+fn aggregated_reference_v1(attribute: &AttributeDescriptor, aggregate: Selective) -> Reference {
+    let pick = match aggregate {
+        Selective::Last => return attribute_reference_v1(attribute),
+        Selective::Max => b"max:".as_slice(),
+        Selective::Min => b"min:".as_slice(),
+        Selective::Top => b"top:".as_slice(),
     };
     let mut entries = vec![
         (
@@ -201,7 +201,7 @@ fn elected_reference_v1(attribute: &AttributeDescriptor, elector: Elector) -> Re
         ));
     }
     let mut among: Vec<&Value> = attribute.among().iter().collect();
-    if elector == Elector::Top {
+    if aggregate == Selective::Top {
         among.reverse();
     }
     if !among.is_empty() {
@@ -256,7 +256,7 @@ pub enum Rewritten {
     Unchanged,
     /// The body, every attribute's pick replaced by the cardinality it
     /// stood for, `last` by one and `all` by many, and a ranked pick by
-    /// cardinality many and the elector of its name.
+    /// cardinality many and the aggregate of its name.
     Rewritten(Vec<u8>),
     /// The body reads some attribute in a way no cardinality reproduces.
     /// It is left as it is, and stays inert.
@@ -268,7 +268,7 @@ pub enum Rewritten {
 /// `select: last`) under cardinality one, each under `all` under
 /// cardinality many, and each under `max`, `min` or `top` (or listed
 /// with no pick, which read as `top`) under cardinality many with the
-/// elector of the pick's name, a `top`'s listing reversed to rank least
+/// aggregate of the pick's name, a `top`'s listing reversed to rank least
 /// first. An attribute over a chain of relations has no such spelling,
 /// and the body is reported rather than rewritten with another meaning.
 /// `Err` when the bytes are not dag-cbor.
@@ -369,12 +369,12 @@ fn rewrite_attribute(map: &mut BTreeMap<String, Ipld>, unmapped: &mut Vec<Unmapp
         map.insert("the".to_string(), the);
         changed = true;
     }
-    let (cardinality, elector) = match pick.as_deref() {
+    let (cardinality, aggregate) = match pick.as_deref() {
         // A listed domain with no pick was read under `top`.
         None if listed => (Some("many"), Some("top")),
         // `cardinality` alone is how this release spells it.
         None => return changed,
-        // Read newest and written adding: what a field electing `last`
+        // Read newest and written adding: what a field aggregating with `last`
         // over a cardinality-many attribute is.
         Some("last") if many => (Some("many"), Some("last")),
         Some("last") => (None, None),
@@ -391,7 +391,7 @@ fn rewrite_attribute(map: &mut BTreeMap<String, Ipld>, unmapped: &mut Vec<Unmapp
             return false;
         }
     };
-    if elector == Some("top") {
+    if aggregate == Some("top") {
         // That release ranked best first; a listing ranks least first.
         let ranked = match (ranking, map.get("as")) {
             (Some(ranking), _) => Some(ranking),
@@ -409,8 +409,8 @@ fn rewrite_attribute(map: &mut BTreeMap<String, Ipld>, unmapped: &mut Vec<Unmapp
     if let Some(cardinality) = cardinality {
         map.insert("cardinality".to_string(), Ipld::String(cardinality.into()));
     }
-    if let Some(elector) = elector {
-        map.insert("elect".to_string(), Ipld::String(elector.into()));
+    if let Some(aggregate) = aggregate {
+        map.insert("aggregate".to_string(), Ipld::String(aggregate.into()));
     }
     true
 }

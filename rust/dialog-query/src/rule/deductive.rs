@@ -28,7 +28,7 @@ use crate::rule::analyzer::AnalyzedRule;
 use crate::rule::body;
 use crate::rule::reference;
 use crate::rule::{
-    Compile, RuleKind, compile_electing, compile_internal, compile_rule, fmt_rule_schema,
+    Compile, RuleKind, compile_internal, compile_rule, compile_selective, fmt_rule_schema,
 };
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
@@ -640,10 +640,11 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
                 ),
                 (kind, _) => kind,
             };
-            // A field that elects reads every claim of the relation into
-            // a variable of its own, which the selecting rule folds into
-            // the field with the elector (see `electing_reduce`).
-            let bound = match field.elector() {
+            // A field that declares a selective aggregator reads every
+            // claim of the relation into a variable of its own, which the
+            // selecting rule folds into the field with the aggregator
+            // (see `selective_reduce`).
+            let bound = match field.aggregate() {
                 Some(_) => claim_variable(name),
                 None => name.to_string(),
             };
@@ -703,7 +704,7 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
 
         // The scan reads under the field's cardinality: the newest
         // claim under one, every claim under many; a field that
-        // declares an elector, the one claim of each cell it elects.
+        // declares an aggregate, the one claim of each cell it elects.
         let scanned = Some(field.descriptor().cardinality());
         let premise: Premise = if field.is_optional() {
             let query = OptionalAttributeQuery::new(
@@ -774,17 +775,18 @@ impl From<&ConceptDescriptor> for DeductiveRule {
     }
 }
 
-/// The variable a field that declares an elector reads its relation's
+/// The variable a field that declares a selective aggregator reads its relation's
 /// claims into when rules derive the relation: the selecting rule folds
 /// it into the field.
 fn claim_variable(field: &str) -> String {
     format!("{field}/claim")
 }
 
-/// The folds by which a selecting rule elects the fields that read a
-/// derived relation and declare an elector: each field is the claim
-/// its elector chooses among the relation's stored and derived claims.
-fn electing_reduce(
+/// The folds by which a selecting rule reads the fields that read a
+/// derived relation and declare a selective aggregator: each field is
+/// the claim its aggregator chooses among the relation's stored and
+/// derived claims.
+fn selective_reduce(
     concept: &ConceptDescriptor,
     derived: &dyn Fn(&ConceptFieldDescriptor) -> bool,
 ) -> Vec<(String, ReduceSpec)> {
@@ -796,8 +798,8 @@ fn electing_reduce(
             let ranking = field.ranking()?;
             Some((
                 name.to_string(),
-                ReduceSpec::elect(
-                    ranking.elector,
+                ReduceSpec::selective(
+                    ranking.aggregate,
                     Term::var(claim_variable(name)),
                     ranking.listed,
                 ),
@@ -816,11 +818,11 @@ impl DeductiveRule {
         concept: &ConceptDescriptor,
         derived: &dyn Fn(&ConceptFieldDescriptor) -> bool,
     ) -> Result<Self, TypeError> {
-        let reduce = electing_reduce(concept, derived);
+        let reduce = selective_reduce(concept, derived);
         if reduce.is_empty() {
             compile_internal::<Self>(concept.clone(), selecting_premises(concept, derived))
         } else {
-            compile_electing::<Self>(
+            compile_selective::<Self>(
                 concept.clone(),
                 selecting_premises(concept, derived),
                 reduce,

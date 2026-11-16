@@ -264,7 +264,7 @@ impl FromStr for The {
 /// suspended]` ranks `suspended` greatest. A read that ranks candidates
 /// (the greatest, the least, the last listed) is a concept field that
 /// elects with `max`, `min` or `top` over a cardinality-many attribute
-/// (see [`Elector`](crate::elector::Elector)). Rules derive
+/// (see [`Selective`](crate::selective::Selective)). Rules derive
 /// into relations and are found by them, so two attributes over one
 /// relation under different types or cardinalities are two attributes.
 ///
@@ -351,7 +351,8 @@ enum As {
 pub const PICK_REFUSED: &str = "an attribute no longer has a `pick`: it is written with \
      `cardinality: one` (what `last` read) or `cardinality: many` (what `all` read), and a \
      read under `max`, `min` or `top` is a concept field over a cardinality-many attribute \
-     that elects with it (`elect: top`), `top` ranking the values `as` lists least first";
+     that declares it as its selective aggregator (`aggregate: top`), `top` ranking the \
+     values `as` lists least first";
 
 /// Why an attribute listing relations under `the`, a ranked chain an
 /// earlier release read, is not read.
@@ -457,7 +458,7 @@ impl AttributeDescriptor {
     }
 
     /// This descriptor over the listed value domain: the values the
-    /// attribute holds, least first: the order a field electing with
+    /// attribute holds, least first: the order a field aggregating with
     /// `top` ranks them by.
     pub fn with_domain(mut self, values: Vec<Value>) -> Self {
         self.among = values;

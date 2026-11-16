@@ -1,16 +1,21 @@
-//! Electors: how a concept field chooses one of its relation's claims.
+//! Selective aggregators: how a concept field reads one of its
+//! relation's claims.
 //!
-//! A field's attribute says what a write does (its cardinality). Its
-//! elector says which of the cell's claims a read of the field returns.
-//! Each elector is the greatest claim under a total order, so every
-//! replica that holds the same claims elects the same one:
+//! An aggregator is *selective* when its result is always one of its
+//! inputs (`x ⊕ y ∈ {x, y}`), as `max` and `min` are; a *computing*
+//! aggregator, `count`, `sum` or `avg`, produces a value none of its
+//! inputs holds. A concept field may declare a selective aggregator to
+//! choose one claim of its cell: the attribute says what a write does
+//! (its cardinality), the aggregator which claim a read returns. Each is
+//! the greatest claim under a total order, so every replica holding the
+//! same claims reads the same one:
 //!
-//! | elector | orders by                                                    |
-//! |---------|--------------------------------------------------------------|
-//! | `last`  | standing: the newest claim                                   |
-//! | `max`   | value, greatest first, then standing                         |
-//! | `min`   | value, least first, then standing                            |
-//! | `top`   | the attribute's listed `as`, the last listed greatest, then standing |
+//! | aggregator | orders by                                                     |
+//! |------------|---------------------------------------------------------------|
+//! | `last`     | standing: the newest claim                                    |
+//! | `max`      | value, greatest first, then standing                          |
+//! | `min`      | value, least first, then standing                             |
+//! | `top`      | the attribute's listed `as`, the last listed greatest, then standing |
 //!
 //! Ties fall to standing and then to the value's hash
 //! ([`Cardinality::newer`]). `top` is `max` under the order the
@@ -28,10 +33,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Value;
 
-/// How a concept field chooses one of its relation's claims.
+/// A selective aggregator a concept field reads its claims with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Elector {
-    /// The newest claim: what a field with no elector reads under
+pub enum Selective {
+    /// The newest claim: what a field with no aggregator reads under
     /// cardinality one.
     Last,
     /// The claim holding the greatest value.
@@ -44,21 +49,21 @@ pub enum Elector {
     Top,
 }
 
-impl Elector {
-    /// The elector's name as the notation spells it.
+impl Selective {
+    /// The aggregator's name as the notation spells it.
     pub fn name(self) -> &'static str {
         match self {
-            Elector::Last => "last",
-            Elector::Max => "max",
-            Elector::Min => "min",
-            Elector::Top => "top",
+            Selective::Last => "last",
+            Selective::Max => "max",
+            Selective::Min => "min",
+            Selective::Top => "top",
         }
     }
 
-    /// Whether the elector compares values, so its claims must be of a
+    /// Whether the aggregator compares values, so its claims must be of a
     /// comparable type.
     pub fn compares(self) -> bool {
-        matches!(self, Elector::Max | Elector::Min)
+        matches!(self, Selective::Max | Selective::Min)
     }
 
     /// Whether `candidate` is elected over `incumbent`. `listed` is the
@@ -76,15 +81,15 @@ impl Elector {
         }
     }
 
-    /// How the elector orders two values before standing decides:
+    /// How the aggregator orders two values before standing decides:
     /// `Greater` when it elects `a` over `b` on value alone, `Equal` when
     /// the value does not decide (always, under `last`).
     pub fn order(self, listed: &[Value], a: &Value, b: &Value) -> Ordering {
         match self {
-            Elector::Last => Ordering::Equal,
-            Elector::Top => rank(listed, a).cmp(&rank(listed, b)),
-            Elector::Max => compare(a, b),
-            Elector::Min => compare(b, a),
+            Selective::Last => Ordering::Equal,
+            Selective::Top => rank(listed, a).cmp(&rank(listed, b)),
+            Selective::Max => compare(a, b),
+            Selective::Min => compare(b, a),
         }
     }
 
@@ -107,7 +112,7 @@ impl Elector {
     /// claim can be elected over it on value: `top`'s last listed value.
     /// Unbounded orders (`max`, `min` over numbers) and `last` have none.
     pub fn bounds(self, listed: &[Value], value: &Value) -> bool {
-        matches!(self, Elector::Top) && listed.last() == Some(value)
+        matches!(self, Selective::Top) && listed.last() == Some(value)
     }
 }
 
@@ -127,61 +132,61 @@ fn compare(a: &Value, b: &Value) -> Ordering {
         .unwrap_or_else(|| a.tiebreak().cmp(&b.tiebreak()))
 }
 
-impl Display for Elector {
+impl Display for Selective {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.name())
     }
 }
 
-impl FromStr for Elector {
+impl FromStr for Selective {
     type Err = String;
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
         match name {
-            "last" => Ok(Elector::Last),
-            "max" => Ok(Elector::Max),
-            "min" => Ok(Elector::Min),
-            "top" => Ok(Elector::Top),
+            "last" => Ok(Selective::Last),
+            "max" => Ok(Selective::Max),
+            "min" => Ok(Selective::Min),
+            "top" => Ok(Selective::Top),
             other => Err(format!(
-                "`{other}` is not an elector: one of `last`, `max`, `min` or `top`"
+                "`{other}` is not a selective aggregator: one of `last`, `max`, `min` or `top`"
             )),
         }
     }
 }
 
-impl Serialize for Elector {
+impl Serialize for Selective {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.name())
     }
 }
 
-impl<'de> Deserialize<'de> for Elector {
+impl<'de> Deserialize<'de> for Selective {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let name = String::deserialize(deserializer)?;
         name.parse().map_err(D::Error::custom)
     }
 }
 
-/// An elector with the values its attribute lists, least first: what a
+/// A selective aggregator with the values its attribute lists, least first: what a
 /// read of a cell needs to elect one of its claims.
 #[derive(Debug, Clone, Serialize)]
 pub struct Ranking {
-    /// The elector.
-    pub elector: Elector,
+    /// The aggregator.
+    pub aggregate: Selective,
     /// The attribute's listed values, least first; `top` ranks by them.
     pub listed: Vec<Value>,
 }
 
 impl Ranking {
-    /// `elector` over an attribute listing `listed`.
-    pub fn new(elector: Elector, listed: Vec<Value>) -> Self {
-        Ranking { elector, listed }
+    /// `aggregate` over an attribute listing `listed`.
+    pub fn new(aggregate: Selective, listed: Vec<Value>) -> Self {
+        Ranking { aggregate, listed }
     }
 
     /// How the ranking orders two values before standing decides (see
-    /// [`Elector::order`]).
+    /// [`Selective::order`]).
     pub fn order(&self, a: &Value, b: &Value) -> Ordering {
-        self.elector.order(&self.listed, a, b)
+        self.aggregate.order(&self.listed, a, b)
     }
 
     fn encoded(&self) -> Vec<Vec<u8>> {
@@ -194,7 +199,7 @@ impl Ranking {
 
 impl PartialEq for Ranking {
     fn eq(&self, other: &Self) -> bool {
-        self.elector == other.elector && self.encoded() == other.encoded()
+        self.aggregate == other.aggregate && self.encoded() == other.encoded()
     }
 }
 
@@ -202,7 +207,7 @@ impl Eq for Ranking {}
 
 impl Hash for Ranking {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.elector.hash(state);
+        self.aggregate.hash(state);
         self.encoded().hash(state);
     }
 }
@@ -219,7 +224,7 @@ mod tests {
     fn top_ranks_the_last_listed_greatest() {
         let listed = [text("registered"), text("active"), text("suspended")];
         let claims = [text("active"), text("suspended"), text("registered")];
-        let elected = Elector::Top.elect(&listed, claims.iter().map(|value| (value, None)));
+        let elected = Selective::Top.elect(&listed, claims.iter().map(|value| (value, None)));
         assert_eq!(elected, Some(1));
     }
 
@@ -227,7 +232,7 @@ mod tests {
     fn top_ranks_an_unlisted_value_below_every_listed_one() {
         let listed = [text("registered"), text("active")];
         let claims = [text("unknown"), text("registered")];
-        let elected = Elector::Top.elect(&listed, claims.iter().map(|value| (value, None)));
+        let elected = Selective::Top.elect(&listed, claims.iter().map(|value| (value, None)));
         assert_eq!(elected, Some(1));
     }
 
@@ -239,8 +244,8 @@ mod tests {
             Value::UnsignedInt(1),
         ];
         let contenders = || claims.iter().map(|value| (value, None));
-        assert_eq!(Elector::Max.elect(&[], contenders()), Some(1));
-        assert_eq!(Elector::Min.elect(&[], contenders()), Some(2));
+        assert_eq!(Selective::Max.elect(&[], contenders()), Some(1));
+        assert_eq!(Selective::Min.elect(&[], contenders()), Some(2));
     }
 
     #[test]
@@ -249,7 +254,7 @@ mod tests {
         let mut claims = [text("active"), text("suspended"), text("registered")];
         for _ in 0..claims.len() {
             claims.rotate_left(1);
-            let elected = Elector::Top
+            let elected = Selective::Top
                 .elect(&listed, claims.iter().map(|value| (value, None)))
                 .map(|index| claims[index].clone());
             assert_eq!(elected, Some(text("suspended")));
@@ -259,17 +264,25 @@ mod tests {
     #[test]
     fn top_is_bounded_by_its_last_listed_value() {
         let listed = [text("registered"), text("suspended")];
-        assert!(Elector::Top.bounds(&listed, &text("suspended")));
-        assert!(!Elector::Top.bounds(&listed, &text("registered")));
-        assert!(!Elector::Max.bounds(&listed, &text("suspended")));
+        assert!(Selective::Top.bounds(&listed, &text("suspended")));
+        assert!(!Selective::Top.bounds(&listed, &text("registered")));
+        assert!(!Selective::Max.bounds(&listed, &text("suspended")));
     }
 
     #[test]
     fn it_round_trips_by_name() {
-        for elector in [Elector::Last, Elector::Max, Elector::Min, Elector::Top] {
-            let encoded = serde_json::to_string(&elector).unwrap();
-            assert_eq!(serde_json::from_str::<Elector>(&encoded).unwrap(), elector);
+        for aggregate in [
+            Selective::Last,
+            Selective::Max,
+            Selective::Min,
+            Selective::Top,
+        ] {
+            let encoded = serde_json::to_string(&aggregate).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Selective>(&encoded).unwrap(),
+                aggregate
+            );
         }
-        assert!(serde_json::from_str::<Elector>("\"sum\"").is_err());
+        assert!(serde_json::from_str::<Selective>("\"sum\"").is_err());
     }
 }

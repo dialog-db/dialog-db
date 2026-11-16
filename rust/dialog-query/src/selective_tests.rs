@@ -1,6 +1,6 @@
 //! Concept fields that elect their claim, pinned as tests.
 //!
-//! A field's attribute says what a write does; its elector says which
+//! A field's attribute says what a write does; its aggregate says which
 //! of the cell's claims a read returns. An account's `status` is
 //! written under cardinality many, so every state an account was put
 //! in stays a claim, and the concept elects the greatest under the
@@ -13,11 +13,11 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use crate::attribute::{AttributeStatement, Relation};
 use crate::concept::descriptor::ConceptFieldDescriptor;
-use crate::elector::Elector;
 use crate::error::TypeError;
 use crate::query::Application as _;
 use crate::query::Output as _;
 use crate::rule::DeductiveRuleDescriptor;
+use crate::selective::Selective;
 use crate::session::RuleRegistry;
 use crate::source::test::TestEnv;
 use crate::the;
@@ -51,11 +51,11 @@ fn account(elect: &str) -> ConceptDescriptor {
                 "the": "account/status",
                 "as": states(),
                 "cardinality": "many",
-                "elect": elect
+                "aggregate": elect
             }
         }
     }))
-    .expect("an electing account is well formed")
+    .expect("an aggregating account is well formed")
 }
 
 /// A claim of `the` on `of`, added beside the others.
@@ -253,7 +253,7 @@ async fn it_elects_by_value_under_max_and_min() -> anyhow::Result<()> {
                 "the": "game/score",
                 "as": "natural:",
                 "cardinality": "many",
-                "elect": elect
+                "aggregate": elect
             } }
         }))?;
         let mut terms = Parameters::new();
@@ -275,7 +275,7 @@ async fn it_elects_by_value_under_max_and_min() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A rule deriving a status adds a candidate the elector ranks with the
+/// A rule deriving a status adds a candidate the aggregate ranks with the
 /// stored claims: an account a moderator suspends is suspended however
 /// it was activated.
 #[dialog_common::test]
@@ -336,10 +336,10 @@ async fn it_elects_among_stored_and_derived_claims() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// What a read under each elector needs of its attribute is refused
+/// What a read under each aggregate needs of its attribute is refused
 /// where the attribute lacks it.
 #[dialog_common::test]
-fn it_refuses_an_elector_its_attribute_cannot_be_read_under() {
+fn it_refuses_an_aggregator_its_attribute_cannot_be_read_under() {
     let listed = |cardinality: Cardinality| {
         serde_json::from_value::<AttributeDescriptor>(serde_json::json!({
             "the": "account/status",
@@ -349,11 +349,13 @@ fn it_refuses_an_elector_its_attribute_cannot_be_read_under() {
         .expect("a listed attribute is well formed")
     };
     let refused = |field: Result<ConceptFieldDescriptor, TypeError>| {
-        matches!(field, Err(TypeError::Election { .. }))
+        matches!(field, Err(TypeError::SelectiveAggregate { .. }))
     };
 
     assert!(
-        refused(ConceptFieldDescriptor::required(listed(Cardinality::One)).electing(Elector::Top)),
+        refused(
+            ConceptFieldDescriptor::required(listed(Cardinality::One)).aggregating(Selective::Top)
+        ),
         "a ranked field reads a cardinality-many attribute"
     );
     let unlisted = AttributeDescriptor::new(
@@ -363,7 +365,7 @@ fn it_refuses_an_elector_its_attribute_cannot_be_read_under() {
         Some(Type::String),
     );
     assert!(
-        refused(ConceptFieldDescriptor::required(unlisted).electing(Elector::Top)),
+        refused(ConceptFieldDescriptor::required(unlisted).aggregating(Selective::Top)),
         "`top` ranks by a listing"
     );
     let flags = AttributeDescriptor::new(
@@ -373,17 +375,17 @@ fn it_refuses_an_elector_its_attribute_cannot_be_read_under() {
         Some(Type::Boolean),
     );
     assert!(
-        refused(ConceptFieldDescriptor::required(flags.clone()).electing(Elector::Max)),
+        refused(ConceptFieldDescriptor::required(flags.clone()).aggregating(Selective::Max)),
         "`max` needs an order"
     );
     assert!(
         ConceptFieldDescriptor::required(flags)
-            .electing(Elector::Last)
+            .aggregating(Selective::Last)
             .is_ok()
     );
     assert!(
         ConceptFieldDescriptor::required(listed(Cardinality::Many))
-            .electing(Elector::Top)
+            .aggregating(Selective::Top)
             .is_ok()
     );
     assert!(
@@ -391,7 +393,7 @@ fn it_refuses_an_elector_its_attribute_cannot_be_read_under() {
             "with": { "status": {
                 "the": "account/status",
                 "as": states(),
-                "elect": "top"
+                "aggregate": "top"
             } }
         }))
         .is_err(),
@@ -399,11 +401,11 @@ fn it_refuses_an_elector_its_attribute_cannot_be_read_under() {
     );
 }
 
-/// The elector is part of the concept: a field electing `top` and one
-/// electing `last` over the same attribute make two concepts, and
+/// The aggregator is part of the concept: a field aggregating with `top` and one
+/// with `last` over the same attribute make two concepts, and
 /// neither is the attribute's relation.
 #[dialog_common::test]
-fn it_hashes_the_elector_into_the_concept() {
+fn it_hashes_the_aggregator_into_the_concept() {
     let top = account("top");
     let last = account("last");
     assert_ne!(top.this(), last.this());
@@ -415,7 +417,7 @@ fn it_hashes_the_elector_into_the_concept() {
             "cardinality": "many"
         });
         if let Some(elect) = elect {
-            status["elect"] = elect.into();
+            status["aggregate"] = elect.into();
         }
         serde_json::from_value(serde_json::json!({ "with": { "status": status } }))
             .expect("a one-field concept is well formed")
@@ -425,12 +427,12 @@ fn it_hashes_the_elector_into_the_concept() {
     assert_ne!(single(None).this(), single(Some("top")).this());
 }
 
-/// A field's elector round-trips through the notation.
+/// A field's aggregate round-trips through the notation.
 #[dialog_common::test]
-fn it_round_trips_an_electing_field() -> anyhow::Result<()> {
+fn it_round_trips_an_aggregating_field() -> anyhow::Result<()> {
     let concept = account("top");
     let encoded = serde_json::to_value(&concept)?;
-    assert_eq!(encoded["with"]["status"]["elect"], "top");
+    assert_eq!(encoded["with"]["status"]["aggregate"], "top");
     let decoded: ConceptDescriptor = serde_json::from_value(encoded)?;
     assert_eq!(decoded, concept);
     assert_eq!(decoded.this(), concept.this());

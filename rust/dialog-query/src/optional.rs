@@ -1,9 +1,9 @@
 use crate::attribute::Relation;
 use crate::attribute::query::DynamicAttributeQuery;
-use crate::elector::Ranking;
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::selection::{Binding, Match, Selection};
+use crate::selective::Ranking;
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::Any;
 use crate::{

@@ -4,12 +4,12 @@ use crate::Claim;
 use crate::Value;
 use crate::attribute::Relation;
 use crate::corpus::{Constrained, CorpusRelation, Selector};
-use crate::elector::{Elector, Ranking};
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
 use crate::schema::{Cardinality, estimate_cost};
 use crate::selection::{Match, Selection};
+use crate::selective::{Ranking, Selective};
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
@@ -52,7 +52,7 @@ fn elect(
     current: FactView,
     challenger: FactView,
 ) -> Result<FactView, DialogCorpusError> {
-    let Some(ranking) = ranking.filter(|ranking| ranking.elector != Elector::Last) else {
+    let Some(ranking) = ranking.filter(|ranking| ranking.aggregate != Selective::Last) else {
         return current.elect(challenger);
     };
     let (Ok(mine), Ok(theirs)) = (current.value(), challenger.value()) else {
@@ -144,9 +144,9 @@ where
 /// Wraps an [`AttributeQueryAll`] and yields one value per
 /// `(attribute, entity)` pair. Competing rows fold through
 /// [`FactView::elect`], the value layer's cardinality-one election,
-/// unless the query reads for a concept field that declares an
-/// elector: then by the elector's order of the values first (see
-/// [`Elector`]), and by that election where the values do not decide.
+/// unless the query reads for a concept field that declares a selective
+/// aggregator: then by the aggregator's order of the values first (see
+/// [`Selective`]), and by that election where the values do not decide.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct AttributeQueryOnly {
     query: AttributeQueryAll,
@@ -196,7 +196,7 @@ impl AttributeQueryOnly {
         }
     }
 
-    /// This query electing each cell's claim by `ranking` rather than
+    /// This query choosing each cell's claim by `ranking` rather than
     /// the newest.
     pub(crate) fn ranked(self, ranking: Ranking) -> Self {
         Self {

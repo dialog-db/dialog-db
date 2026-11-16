@@ -1411,7 +1411,7 @@ async fn a_concept_elects_a_status_by_rank_over_the_states_kept() -> anyhow::Res
             "the": "account/state",
             "as": ["active", "suspended"],
             "cardinality": "many",
-            "elect": "top"
+            "aggregate": "top"
         }
     }}))?;
     let read = || async {

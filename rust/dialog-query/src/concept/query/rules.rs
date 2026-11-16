@@ -275,8 +275,8 @@ impl ConceptRules {
     /// instead of piping caller bindings into the body.
     ///
     /// The selecting rule is one when a field that reads a derived
-    /// relation declares an elector: it folds the field's claims with
-    /// the elector.
+    /// relation declares a selective aggregator: it folds the field's
+    /// claims with the aggregator.
     pub fn reducing(&self) -> impl Iterator<Item = &DeductiveRule> {
         iter::once(&self.implicit)
             .chain(self.installed.iter())
@@ -331,7 +331,7 @@ impl ConceptRules {
                 .conclusion()
                 .implicit_plan(adornment, || self.implicit.plan(&scope))
         };
-        // A selecting rule that folds an electing field is computed with
+        // A selecting rule that folds an aggregating field is computed with
         // the reducing rules, so it does not join the disjunction either.
         let implicit = self.implicit.reduce().is_empty().then_some(implicit);
         let plan: Disjunction = implicit

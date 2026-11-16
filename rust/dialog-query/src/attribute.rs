@@ -53,13 +53,55 @@ pub use crate::{Predicate, Premise, Term};
 /// pub struct Tag(pub String);
 /// ```
 ///
-/// Nor does a ranking pick: a ranked read is a concept field electing
-/// with `max`, `min` or `top` over a cardinality-many attribute.
+/// Nor does a ranking pick: a ranked read is a concept field over a
+/// cardinality-many attribute that declares the selective aggregator
+/// `max`, `min` or `top`.
 ///
 /// ```compile_fail
 /// #[derive(dialog_macros::Attribute, Clone)]
 /// #[pick(max)]
 /// pub struct Grade(pub u32);
+/// ```
+///
+/// A concept field reads such an attribute with the aggregator:
+///
+/// ```no_run
+/// use dialog_query::{Attribute, Concept, Entity};
+///
+/// mod exam {
+///     /// Every grade a student was given.
+///     #[derive(dialog_macros::Attribute, Clone)]
+///     #[cardinality(many)]
+///     pub struct Grade(pub u32);
+/// }
+///
+/// /// A student and their best grade.
+/// #[derive(Concept, Clone, Debug)]
+/// pub struct Best {
+///     pub this: Entity,
+///     #[dialog(aggregate = max)]
+///     pub grade: exam::Grade,
+/// }
+/// ```
+///
+/// `top` ranks by a listed `as`, which `#[derive(Attribute)]` cannot
+/// declare, so a derived field refuses it:
+///
+/// ```compile_fail
+/// use dialog_query::{Attribute, Concept, Entity};
+///
+/// mod exam {
+///     #[derive(dialog_macros::Attribute, Clone)]
+///     #[cardinality(many)]
+///     pub struct Grade(pub u32);
+/// }
+///
+/// #[derive(Concept, Clone, Debug)]
+/// pub struct Best {
+///     pub this: Entity,
+///     #[dialog(aggregate = top)]
+///     pub grade: exam::Grade,
+/// }
 /// ```
 pub trait Attribute: Predicate + Sized {
     /// The Rust scalar type of this attribute's values.

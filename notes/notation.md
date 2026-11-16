@@ -145,7 +145,7 @@ as: "text:"
 cardinality: many
 ```
 
-A read that ranks a cell's claims, the greatest, the least or the last listed, is not a property of an attribute but of the concept field that reads it: the field declares an elector, `max`, `min` or `top`, over a cardinality-many attribute (`"elect": "top"`; see [aggregation](./aggregation.md#electors)). A listed `as` ranks its values least first.
+A read that ranks a cell's claims, the greatest, the least or the last listed, is not a property of an attribute but of the concept field that reads it: the field declares a selective aggregator, `max`, `min` or `top`, over a cardinality-many attribute (`"aggregate": "top"`; see [aggregation](./aggregation.md#selective-aggregators-on-concept-fields)). A listed `as` ranks its values least first.
 
 The releases 0.3 and 0.4 spelled a `pick` (`last:`, `all:`, `top:`, `max:`, `min:`) where an attribute now spells its cardinality, and could list relations under `the`, a ranked chain. A descriptor spelling either is refused by name, so it is never read with another meaning. `Branch::upgrade_rules` rewrites a stored rule whose attributes read under `last` or `all` (cardinality one and many), and reports one reading under `max`, `min` or `top`, or over a chain, which it leaves inert.
 

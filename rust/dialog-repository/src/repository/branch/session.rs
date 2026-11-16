@@ -4237,7 +4237,7 @@ mod rule_tests {
                 "as": cases,
                 "cardinality": "many",
                 "optional": true,
-                "elect": "top"
+                "aggregate": "top"
             }
         } });
         let replica = serde_json::json!({ "with": {

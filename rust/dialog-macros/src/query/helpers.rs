@@ -163,6 +163,9 @@ pub struct DialogFieldAttributes {
     /// `conforms = SomeConcept`: marks a concept-typed field; the
     /// path names the target concept type.
     pub conforms: Option<syn::Path>,
+    /// `aggregate = max`: the selective aggregator the field reads its
+    /// claim with: `last`, `max` or `min`.
+    pub aggregate: Option<syn::Ident>,
 }
 
 /// Parse the field-level `#[dialog(...)]` attribute.
@@ -172,8 +175,12 @@ pub struct DialogFieldAttributes {
 ///   specific string
 /// - `#[dialog(conforms = Employee)]` - concept-typed field whose
 ///   target entity must conform to the named concept
+/// - `#[dialog(aggregate = max)]` - the selective aggregator the field
+///   reads its claim with: `last`, `max` or `min`. `top` ranks by a
+///   listed `as`, which `#[derive(Attribute)]` cannot declare, so it is
+///   refused here.
 ///
-/// Both parameters may appear together.
+/// The parameters may appear together.
 pub fn parse_dialog_field_attributes(
     attrs: &[Attribute],
 ) -> Result<DialogFieldAttributes, syn::Error> {
@@ -194,9 +201,29 @@ pub fn parse_dialog_field_attributes(
                     let value = meta.value()?;
                     parsed.conforms = Some(value.parse::<syn::Path>()?);
                     Ok(())
+                } else if meta.path.is_ident("aggregate") {
+                    let value = meta.value()?;
+                    let aggregate: syn::Ident = value.parse()?;
+                    match aggregate.to_string().as_str() {
+                        "last" | "max" | "min" => {
+                            parsed.aggregate = Some(aggregate);
+                            Ok(())
+                        }
+                        "top" => Err(syn::Error::new_spanned(
+                            aggregate,
+                            "`top` ranks by the values an attribute's `as` lists, which \
+                             `#[derive(Attribute)]` cannot declare; use `max` or `min`, or \
+                             declare the concept in the notation",
+                        )),
+                        _ => Err(syn::Error::new_spanned(
+                            aggregate,
+                            "a field's selective aggregator is `last`, `max` or `min`",
+                        )),
+                    }
                 } else {
                     Err(meta.error(
-                        "unknown dialog attribute parameter; expected `rename` or `conforms`",
+                        "unknown dialog attribute parameter; expected `rename`, `conforms` \
+                         or `aggregate`",
                     ))
                 }
             })?;
@@ -209,7 +236,7 @@ pub fn parse_dialog_field_attributes(
 /// `#[cardinality(many)]` attribute into the `dialog_query::Cardinality`
 /// the attribute is read and written under. `#[pick(..)]`, the spelling
 /// of the release before, is refused with the cardinality that replaces
-/// it, and a ranking pick with the elector that does.
+/// it, and a ranking pick with the selective aggregator that does.
 pub fn parse_cardinality_attribute(attrs: &[Attribute]) -> Result<TokenStream, syn::Error> {
     for attr in attrs {
         if attr.path().is_ident("pick") {
@@ -222,7 +249,8 @@ pub fn parse_cardinality_attribute(attrs: &[Attribute]) -> Result<TokenStream, s
                 } else {
                     "an attribute is no longer read under a ranking pick: write it \
                      `#[cardinality(many)]` and read it through a concept field that elects \
-                     with `max`, `min` or `top` (`\"elect\": \"top\"`)"
+                     with the selective aggregator `max`, `min` or `top` \
+                     (`#[dialog(aggregate = max)]`)"
                         .to_string()
                 });
                 Ok(())

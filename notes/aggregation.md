@@ -91,11 +91,15 @@ authored confusion, so it is a **hard error**, sibling of
 - **Grouping keys** are compared by dag-cbor bytes of the group values (the
   fixpoint `AnswerTable` precedent; `Value` has no `Ord`).
 
-## Folds that choose
+## Selective and computing aggregators
 
-`min`, `max` and `last` return one of their inputs; `count`,
-`count-distinct`, `sum` and `avg` compute a value none of them is. The
-choosing three share the order a cardinality-one read elects a cell's
+An aggregator is *selective* when its result is always one of its
+inputs: as an operation, `x ⊕ y ∈ {x, y}`, which makes it idempotent
+too. `min`, `max` and `last` are selective. `count`, `count-distinct`,
+`sum` and `avg` are *computing* aggregators: they produce a value none
+of their inputs holds. InfluxDB draws the same line between its
+selector and aggregate functions. The selective three share the order
+a cardinality-one read elects a cell's
 claims by (`Cardinality::newer`): `last` by the standing of the fact
 each input was bound from, `min` and `max` by value, then by standing.
 A cell is one group among many: `last` in a head is a cardinality-one
@@ -114,25 +118,25 @@ so the body is evaluated with it bound, and a read naming one entity
 reads one group. A grouping field bound by an earlier premise of the
 caller is still joined against every group's fold.
 
-## Electors
+## Selective aggregators on concept fields
 
 A ranked read of a relation is not a fold a rule concludes into a
 relation of its own. It is how a concept field reads its relation: the
-field declares an elector, which chooses one claim of each entity's
-cell. The attribute says what a write does, the elector what a read
-returns.
+field declares a selective aggregator, which chooses one claim of each
+entity's cell. The attribute says what a write does, the aggregator
+what a read returns.
 
 ```json
 { "with": { "status": {
   "the": "account/status",
   "as": ["registered", "active", "suspended"],
   "cardinality": "many",
-  "elect": "top"
+  "aggregate": "top"
 } } }
 ```
 
-| elector | elects |
-|---------|--------|
+| aggregator | reads |
+|------------|-------|
 | `last`  | the newest claim |
 | `max`   | the greatest value, then the newest |
 | `min`   | the least value, then the newest |
@@ -141,20 +145,20 @@ returns.
 A listed `as` ranks its values from least to greatest, left to right,
 so `top` is `max` under the order the listing gives a bounded set: the
 last listed value is the greatest any claim can hold. A value the
-listing does not hold ranks below every listed one. Every elector is a
+listing does not hold ranks below every listed one. Every one is a
 total order, ties falling to standing and then to the value's hash, so
-every replica holding the same claims elects the same one.
+every replica holding the same claims reads the same one.
 
 Why a field and not a rule. A rule concluding the ranked value into a
 relation of its own made that value compete with the relation's stored
 claims: a status written by hand beat the fold until a newer state
 arrived, and nothing written through the concept reached the states the
-fold read. A field that elects reads the one relation the claims live
+fold read. A field with a selective aggregator reads the one relation the claims live
 in, and a write through the field adds to that relation, so there is
 nothing to compete with. The ordering is the type's, so a comparison a
 rule body makes and the election agree.
 
-A ranked elector reads a cardinality-many attribute: under one a write
+A ranking aggregator (`max`, `min`, `top`) reads a cardinality-many attribute: under one a write
 succeeds the newest claim, and the cell keeps nothing else to rank.
 Writing a lesser state adds a claim and changes nothing read;
 un-suspending is retracting `suspended`.
@@ -164,12 +168,12 @@ Evaluation. A field over stored claims elects in the scan itself
 back on the cardinality-one election, so it costs what a
 cardinality-one read costs. A field over a relation some rule derives
 is read by the concept's selecting rule, which folds the relation's
-stored and derived claims with the elector. That fold reads the whole
+stored and derived claims with the aggregator. That fold reads the whole
 relation unless the query names the entity, and like every fold it is
-an aggregating edge: a concept whose electing field closes a cycle
+an aggregating edge: a concept whose aggregating field closes a cycle
 through the relation it reads is set aside.
 
-Electors in a cycle. An elector is a lattice join, but that does not
+Selective aggregators in a cycle. A selective aggregator is a lattice join, but that does not
 make every use of its result safe inside a recursion. The join only
 rises while claims are added; a test on the elected value is safe inside
 the cycle when it is upward-closed (`status ≥ active`, or equality to
@@ -177,7 +181,7 @@ the bounded top), and not otherwise (`status = active`, `status ≠
 suspended`). Retraction lowers the join, but between evaluations, not
 within one. The engine does not distinguish upward-closed tests yet:
 cardinality-one reads that a rule decides on are set aside
-(`Absence::Decided`), and an electing field over a derived relation is
+(`Absence::Decided`), and an aggregating field over a derived relation is
 an aggregating edge. Convergence across replicas does not depend on
 this: a deterministic read of a merged set of claims converges whatever
 it is.
@@ -196,7 +200,7 @@ Future refinement, deliberately out of scope: `min`/`max` are monotone
 lattice joins and could in principle pass through recursion (Flix-style
 least-fixpoint semantics) where every use of their result is
 upward-closed; their aggregating edges could later be downgraded (see
-Electors).
+Selective aggregators on concept fields).
 `sum`/`count`/`avg` stratify regardless (not idempotent).
 
 ## Composition and storage

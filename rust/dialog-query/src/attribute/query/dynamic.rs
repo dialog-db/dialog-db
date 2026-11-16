@@ -2,13 +2,13 @@ use crate::Cardinality;
 use crate::Claim;
 use crate::attribute::Relation;
 use crate::corpus::{Constrained, CorpusRelation, Selector};
-use crate::elector::Ranking;
 use crate::environment::Environment;
 use crate::negation::Negation;
 use crate::proposition::Proposition;
 use crate::query::Output;
 use crate::query::{Application, Restriction};
 use crate::selection::{Match, Selection};
+use crate::selective::Ranking;
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Premise, Schema, Term, Value};
@@ -61,8 +61,8 @@ impl DynamicAttributeQuery {
         }
     }
 
-    /// This query electing one claim of each cell by `ranking`: the
-    /// read a concept field declaring an elector makes of its stored
+    /// This query choosing one claim of each cell by `ranking`: the
+    /// read a concept field declaring a selective aggregator makes of its stored
     /// claims.
     pub(crate) fn ranked(self, ranking: Ranking) -> Self {
         let query = match self {

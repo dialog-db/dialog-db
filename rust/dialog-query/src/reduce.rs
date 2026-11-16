@@ -96,10 +96,10 @@ use futures_util::TryStreamExt;
 use crate::Standing;
 use crate::corpus::Type as ValueType;
 use crate::corpus::Value;
-use crate::elector::Elector;
 use crate::error::{EvaluationError, TypeError};
 use crate::formula::number::Numeric;
 use crate::selection::{Binding, Match, Selection};
+use crate::selective::Selective;
 use crate::term::Term;
 use crate::try_stream;
 use crate::type_system::{Primitive, Type};
@@ -133,10 +133,10 @@ pub enum Aggregator {
     /// greatest, as a cardinality-one read elects among a cell's
     /// claims.
     Last,
-    /// The present value the elector `top` elects: the one listed last
-    /// in the attribute's `as`, which ranks values least first. Never
-    /// spelled in a rule's `reduce`: only a concept field electing with
-    /// `top` folds with it, its listing carried on the entry
+    /// The present value listed last in the attribute's `as`, which
+    /// ranks values least first. Never spelled in a rule's `reduce`:
+    /// only a concept field declaring the selective aggregator `top`
+    /// folds with it, its listing carried on the entry
     /// ([`ReduceEntry::listed`]).
     #[serde(skip_deserializing)]
     Top,
@@ -258,7 +258,7 @@ pub struct ReduceSpec {
     /// The term supplying the fold's input, one lookup per body row.
     pub of: Term<Any>,
     /// The values the field's attribute lists, least first: what a
-    /// `top` ranks by. Set only by a concept field electing with `top`.
+    /// `top` ranks by. Set only by a concept field aggregating with `top`.
     #[serde(skip)]
     pub listed: Vec<Value>,
 }
@@ -273,14 +273,15 @@ impl ReduceSpec {
         }
     }
 
-    /// The fold a concept field electing with `elector` reads its claims
+    /// The fold a concept field declaring the selective aggregator
+    /// `aggregate` reads its claims
     /// through: `of` the claims, ranked by `listed` under `top`.
-    pub fn elect(elector: Elector, of: Term<Any>, listed: Vec<Value>) -> Self {
-        let apply = match elector {
-            Elector::Last => Aggregator::Last,
-            Elector::Max => Aggregator::Max,
-            Elector::Min => Aggregator::Min,
-            Elector::Top => Aggregator::Top,
+    pub fn selective(aggregate: Selective, of: Term<Any>, listed: Vec<Value>) -> Self {
+        let apply = match aggregate {
+            Selective::Last => Aggregator::Last,
+            Selective::Max => Aggregator::Max,
+            Selective::Min => Aggregator::Min,
+            Selective::Top => Aggregator::Top,
         };
         ReduceSpec { apply, of, listed }
     }
@@ -331,10 +332,11 @@ impl ReduceEntry {
         }
     }
 
-    /// Whether the fold returns one of its inputs (`min`, `max`,
-    /// `last`) rather than computing a value none of them is. A chosen
-    /// value stands as the fact it was bound from does.
-    pub fn selects(&self) -> bool {
+    /// Whether the fold is a selective aggregator, returning one of its
+    /// inputs (`min`, `max`, `last`), rather than a computing one, whose
+    /// value none of them is. A selected value stands as the fact it was
+    /// bound from does.
+    pub fn is_selective(&self) -> bool {
         matches!(
             self.aggregator,
             Aggregator::Min | Aggregator::Max | Aggregator::Last | Aggregator::Top
@@ -523,10 +525,10 @@ fn fault(entry: &ReduceEntry, reason: impl Into<String>) -> EvaluationError {
 
 /// Fold one group's column of present inputs. `None` means the
 /// output field binds Absent (identity-less fold, no present input).
-/// A fold that chooses one of its inputs returns it with its standing;
+/// A selective fold returns it with its standing;
 /// one that computes a value returns it with none.
 fn fold_column(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>, EvaluationError> {
-    if entry.selects() {
+    if entry.is_selective() {
         return choose(entry, inputs);
     }
     let values: Vec<Value> = inputs.into_iter().map(|(value, _)| value).collect();
@@ -534,7 +536,7 @@ fn fold_column(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>,
     Ok(folded.map(|value| (value, None)))
 }
 
-/// The input a choosing fold returns: the least or the greatest value
+/// The input a selective fold returns: the least or the greatest value
 /// (`min`, `max`) or the newest (`last`). Every one falls back on the order a
 /// cardinality-one read elects a cell's claims by
 /// ([`Cardinality::newer`]): `last` is that order alone, and the others
@@ -581,17 +583,17 @@ fn choose(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>, Eval
     Ok(best)
 }
 
-/// Whether a choosing fold takes `candidate` over `incumbent`: as the
-/// elector of the same name elects (see [`Elector::prefers`]), by value
+/// Whether a selective fold takes `candidate` over `incumbent`: as the
+/// aggregate of the same name elects (see [`Selective::prefers`]), by value
 /// and then by standing.
 fn prefers(entry: &ReduceEntry, candidate: Contender<'_>, incumbent: Contender<'_>) -> bool {
-    let elector = match entry.aggregator {
-        Aggregator::Max => Elector::Max,
-        Aggregator::Min => Elector::Min,
-        Aggregator::Top => Elector::Top,
-        _ => Elector::Last,
+    let aggregate = match entry.aggregator {
+        Aggregator::Max => Selective::Max,
+        Aggregator::Min => Selective::Min,
+        Aggregator::Top => Selective::Top,
+        _ => Selective::Last,
     };
-    elector.prefers(&entry.listed, candidate, incumbent)
+    aggregate.prefers(&entry.listed, candidate, incumbent)
 }
 
 /// Fold one group's column of present values into a computed one.
@@ -608,7 +610,7 @@ fn fold_values(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>,
         Aggregator::Sum => fold_sum(entry, values).map(Some),
         Aggregator::Avg => fold_avg(entry, values),
         Aggregator::Min | Aggregator::Max | Aggregator::Last | Aggregator::Top => {
-            unreachable!("a choosing fold is folded by `choose`")
+            unreachable!("a selective fold is folded by `choose`")
         }
     }
 }

@@ -1499,7 +1499,7 @@ where
     }
     let body = rule.plan(&seed.environment()).evaluate(seed.seed(), env);
     let folded = reducer.fold(body).await?;
-    // A folded row cites a standing only for a field a choosing fold
+    // A folded row cites a standing only for a field a selective fold
     // bound, from the fact it chose.
     let chosen = |matched: &Match| {
         rule.reduce()

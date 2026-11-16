@@ -7,12 +7,12 @@ use std::fmt;
 
 use crate::attribute::Keyed;
 use crate::corpus::{CorpusTypeError, DialogCorpusError, Type, Value};
-use crate::elector::Elector;
 pub use crate::environment::Environment;
 pub use crate::proposition::Proposition;
 use crate::reduce::Aggregator;
 pub use crate::rule::Rule;
 pub use crate::rule::deductive::DeductiveRule;
+use crate::selective::Selective;
 use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
@@ -140,14 +140,14 @@ pub enum TypeError {
         /// The offending attribute selector.
         the: String,
     },
-    /// A concept field declares an elector its attribute cannot be read
-    /// under.
-    #[error("{the} cannot elect with `{elector}`: {reason}")]
-    Election {
+    /// A concept field declares a selective aggregator its attribute
+    /// cannot be read under.
+    #[error("{the} cannot be read with the selective aggregator `{aggregate}`: {reason}")]
+    SelectiveAggregate {
         /// The field's attribute selector.
         the: String,
-        /// The elector it declares.
-        elector: Elector,
+        /// The selective aggregator it declares.
+        aggregate: Selective,
         /// Why the attribute cannot be read under it.
         reason: String,
     },

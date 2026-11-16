@@ -1271,6 +1271,87 @@ mod tests {
         Ok(())
     }
 
+    // Fields read with a selective aggregator: `#[dialog(aggregate = ..)]`.
+    mod game {
+        use crate::Attribute;
+
+        /// A score a player was awarded; every one is kept.
+        #[derive(Attribute, Clone, PartialEq)]
+        #[cardinality(many)]
+        pub struct Score(pub u32);
+
+        /// A player's nickname; a write succeeds the last.
+        #[derive(Attribute, Clone, PartialEq)]
+        #[cardinality(one)]
+        pub struct Nickname(pub String);
+    }
+
+    /// A player and their best score.
+    #[derive(Concept, Debug, Clone, PartialEq)]
+    pub struct Best {
+        pub this: Entity,
+        pub nickname: game::Nickname,
+        /// The greatest of the player's scores.
+        #[dialog(aggregate = max)]
+        pub score: game::Score,
+    }
+
+    /// A player and their newest score.
+    #[derive(Concept, Debug, Clone, PartialEq)]
+    pub struct Latest {
+        pub this: Entity,
+        /// The newest of the player's scores.
+        #[dialog(aggregate = last)]
+        pub score: game::Score,
+    }
+
+    /// A ranking aggregator over a cardinality-one attribute.
+    #[derive(Concept, Debug, Clone, PartialEq)]
+    pub struct Misranked {
+        pub this: Entity,
+        #[dialog(aggregate = max)]
+        pub nickname: game::Nickname,
+    }
+
+    #[dialog_common::test]
+    fn it_tags_an_aggregating_field_in_the_descriptor() {
+        use crate::selective::Selective;
+        let field = |descriptor: &ConceptDescriptor, name: &str| {
+            descriptor
+                .with()
+                .iter()
+                .find(|(field, _)| *field == name)
+                .map(|(_, field)| field.clone())
+                .expect("the field is present")
+        };
+        let best = Best::descriptor();
+        assert_eq!(field(best, "score").aggregate(), Some(Selective::Max));
+        assert_eq!(field(best, "score").cardinality(), crate::Cardinality::Many);
+        assert_eq!(field(best, "nickname").aggregate(), None);
+        assert_eq!(
+            field(Latest::descriptor(), "score").aggregate(),
+            Some(Selective::Last)
+        );
+        assert_ne!(
+            Best::descriptor().this(),
+            Latest::descriptor().this(),
+            "the aggregator is part of the concept"
+        );
+    }
+
+    /// A ranking aggregator over a cardinality-one attribute is refused
+    /// when the descriptor is first built, naming the attribute. Native
+    /// only: a wasm test cannot catch a panic. On wasm the same refusal
+    /// is the `TypeError::SelectiveAggregate` that
+    /// `selective_tests::it_refuses_an_aggregator_its_attribute_cannot_be_read_under`
+    /// checks.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[should_panic(expected = "game/nickname cannot be read with the selective aggregator `max`")]
+    fn it_refuses_a_ranking_aggregator_over_cardinality_one() {
+        let _ = Misranked::descriptor();
+    }
+
     // Concept-typed fields: `#[dialog(conforms = C)]`.
     mod org {
         use crate::Attribute;
