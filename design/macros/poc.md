@@ -15,14 +15,14 @@ text ──read──▶ forms ──expand──▶ kernel rules ──compile�
 
 | kernel | Dialog-DB |
 |---|---|
-| `(assert! A)`, `(retract! A)`, no premise | a `ConceptStatement`, asserted or retracted |
-| `(assert A)`, no premise | a `ConceptStatement`, dispatched |
+| `(assert A)`, `(retract A)`, no premise | a `ConceptStatement`, asserted or retracted |
+| a bare head on a command's relation, no premise | a `ConceptStatement`, dispatched |
 | a bare head, with premises | a `DeductiveRule` |
-| `(assert! A)`, `(retract! A)`, with premises | an `InductiveRule` |
+| `(assert A)`, `(retract A)`, with premises | an `InductiveRule` |
 | `(report A)`, one read as its premise | a `ConceptQuery` |
 | `(report A)`, any other premises | a `DeductiveRule` laid over the branch for the query, and a `ConceptQuery` of what it derives |
 | `(xyz.todo ?t text: (:last (:text ?x)))` | a concept of one attribute, `{the: xyz.todo/text, as: text:, pick: last:}` |
-| `(assert A)`, with premises | an `InductiveRule` over a concept marked `Transient` |
+| a bare head on a command's relation, with premises | an `InductiveRule` over a concept marked `Transient` |
 | `(:id domain label: term …)` | a chain of `entity/derive`, from the domain and the sorted labels through each value |
 | `(+ ?a : ?b)` where a term stands | a `math/sum` premise and a variable for its value |
 | `(< ?a : ?b)`, `(:value ?a is: ?b)`, `(:text ?x)` | the `<`, `==` and `type` constraints |
@@ -39,7 +39,7 @@ text ──read──▶ forms ──expand──▶ kernel rules ──compile�
 - A backlink concept, read from either side and written through.
 - A concept of two reads over two domains, and `unless` over it.
 - A derived relation, a relation derived from itself, and a query of several premises whose rows keep their values together.
-- One rule with an `assert!` head and a `retract!` head.
+- One rule with an `assert` head and a `retract` head.
 - A rule that issues a command another rule reads in the round after: archiving a list completes what is on it.
 - An entity made from what a rule binds. A rule and a top-level write that say the same thing name one entity.
 - Two commands in one document that write one `last` field. The cell holds both claims and elects one by the hash of the value, the same in either order.
@@ -56,7 +56,7 @@ Each of these comes back as `Unsupported`, with the reason. None is approximated
 
 What is refused, as not allowed:
 
-- **A write that leaves a field out.** A concept written in part is not the concept: a read through it would not find what was written. A rule that changes one field writes the relation, `(assert! (xyz.todo ?t state: (:last (:entity :done))))`.
+- **A write that leaves a field out.** A concept written in part is not the concept: a read through it would not find what was written. A rule that changes one field writes the relation, `(assert (xyz.todo ?t state: (:last (:entity :done))))`.
 - **A variable in `unless` that nothing in `when` binds.** A negation binds nothing (`rust/dialog-query/src/negation.rs`); `_` says anything at all.
 
 ## What dialog gained

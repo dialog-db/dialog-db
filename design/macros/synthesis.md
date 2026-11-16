@@ -73,7 +73,7 @@ A concept is a set of attributes, a line each, and runs both ways.
 (query (todo ?t list: list:home state: :open))
 ```
 
-A rule has one conclusion. No form carries `!`: `assert` and `retract` are the two that outlast a tick.
+A rule has one conclusion. No form carries `!`: `assert` and `retract` are the two that outlast a tick. A conclusion with no word is derived, or issued for the tick when what it concludes is a command: how long a fact lasts belongs to what is called, not to the call ([design-issue.md](design-issue.md)).
 
 ## Records and lists
 
@@ -133,14 +133,14 @@ So the template is not a new kind of thing. It is a list, and the view macro kee
 - A getter's head, `(open-count (list ?l) is: …)`, has a command's shape, `(rename (todo ?t) title: …)`. #728 has it open too.
 - How a line names a key of a collection, now that lines are by attribute.
 - A read of exactly these entries has no spelling. Met already: `terms: {}` over a kept form used to say "no labelled part" and now says any.
-- `assert` without `!` is taken in this build: it is the word for what holds in this tick and is not kept (`Head::Hold`, which issues a command), where the design writes a command with no word. The design has the same thing open: an issued command and one in a premise look alike, and readers proposed `(do add …)`. Step 2 has to give that another spelling or none, as the design does (a conclusion with no word is a deduction).
+- An issued command and one in a premise look alike, on #728 too, where readers proposed `(do add …)`. The kernel has no word for issuing since 2026-11-16, so a spelling for it, if #728 takes one, is a rule in the prelude and nothing under it.
 - How a view's template binds events.
 
 ## Order of the build
 
 ```
  1  this branch on the record as rebuilt (#778): text keys, a record read open     done, 2026-11-16
- 2  assert and retract without !
+ 2  assert and retract without !                                                    done, 2026-11-16
  3  a concept as lines, with as: and cardinality:   (:one and :many on main's engine)
  4  getters
  5  the stored form of a pattern, `match` (#799), so a rule that holds a record is kept

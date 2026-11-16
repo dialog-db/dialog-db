@@ -1144,6 +1144,25 @@ In the same conversation he settled how a pattern is written in a stored rule (`
 
 Found on the way to the second step: this build's `assert` with no `!` is the word for issuing what holds in the tick (`Head::Hold`), so `assert!` cannot take its place until that has another spelling. The design leaves the same spot open. Not started.
 
+## 2026-11-16, Building: the writes without their mark
+
+The maintainer was away and asked for the build to go on without him.
+
+**Asked.** With `!` gone (#728), `assert` is the write that stays. The kernel already had `assert` with no mark: the head that holds one round, which the prelude answers for a command in a head's place. What does that head become?
+
+**Learned.**
+
+- Nobody writes the held head. In the crate, the examples and the tests it appears only in the prelude's two templates and in two tests of what they answer.
+- A rule with the head `(assert (todo ?t))`, one character from the write, marked `xyz.todo` itself as holding one round, with no diagnostic: any relation under that word was `Head::Hold`, and a held head with premises compiles to `Step::Transient` of its concept. Read off the code, not run. The mark was carrying a hazard as well as a meaning.
+- A word for the held head moves the hazard and takes a name: `issue`, `hold`, `dispatch` and `do` are each a likely command.
+- With `assert!` no longer a head word, `(assert! (todo …))` is read as a command named `assert!`: issued, kept by nothing, a warning and no refusal. Probed with `hold!`.
+
+**Decided.** By the agent, in [design-issue.md](design-issue.md): the held head has no word. A head with no word on a relation under `command.` is issued for the round; on any other it is derived. `assert` and `retract` are the kept writes, and keeping a command is refused. `assert!` and `retract!` are refused with the word to write. It rests on the maintainer's opinion on #728 that no form carries `!`, against his own of 2026-11-11 here; what he wanted then, that a count persists, holds.
+
+Built: `kernel.rs` (`Head::Hold` by the relation), `expand.rs` (three head words, a command at the top level is a rule with that head), `syntax.rs` (`COMMAND`, `is_command`), the prelude's two templates. 94 unit tests, 25 on a branch, 2 doc tests; lint clean. The stored rule's own keys, `assert!` and `retract!` in `dialog-query`, are what a replica holds and did not move.
+
+Not done: a command at the top level with premises, which #728 writes with a `when`. Posted to #728: that the kernel has no word for issuing, so `(do add …)` would be a prelude rule if taken.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

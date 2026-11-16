@@ -18,20 +18,21 @@ flowchart LR
 | Abstraction | `(rule head premise… (unless premise…))` | a rule descriptor: the first part is the head, and a rule has one; every part after it is a premise; what `(unless …)` holds must not hold |
 | Read | `(xyz.todo ?t text: ?x state: ?s)`: application of a relation, one entity and the fields named | a concept query |
 | Compute | `(:text ?x)`, `(:value ?a is: ?b)`, `(+ ?a : ?b is: ?c)`: application of a formula | a formula query or a constraint |
-| Write | `(assert! A)`, `(retract! A)` as a rule's head: what stays | the `assert!` and `retract!` heads of an inductive rule; `Instruction::Assert(fact, pick)`, `Instruction::Retract(fact)` |
-| Hold | `(assert A)` as a rule's head: holds this round and is not kept | a dispatched transient |
+| Write | `(assert A)`, `(retract A)` as a rule's head: what stays | the `assert!` and `retract!` heads of an inductive rule; `Instruction::Assert(fact, pick)`, `Instruction::Retract(fact)` |
+| Issue | a head with no word on a command's relation, `(command.add.todo …)`: holds this round and is not kept | a dispatched transient |
 | Answer | `(report A)` as a rule's head | what a query returns |
 | Syntax | `(expand pattern)` as a premise, `(syntax template)` as a head | new |
 | Together | `(all form…)` as what a template answers: several forms standing where one was written | new; a template needs it to say more than one thing. Not written in a rule, where it is refused |
 
-- `!` marks what stays. `(assert! A)` lands and is kept until retracted. `(assert A)` holds for the round, which is how a command is issued. A head with no word derives: the relation holds while the premises do.
-- This departs from #728's design as of R25, where a plain `assert` head lands and `!` only re-issues a command. Irakli, 2026-11-11: without `!` the new count does not persist.
+- No form carries `!` (#728, taken here on 2026-11-16). `(assert A)` lands and is kept until retracted; `(retract A)` takes it back.
+- How long a fact lasts belongs to its relation, not to the head that concludes it ([design-issue.md](design-issue.md)). A head with no word derives, the relation holding while the premises do, unless the relation is a command's, under `command.`: then it is issued, and holds for the round. Keeping a command is refused.
+- From 2026-11-11 to 2026-11-16 the mark told the two apart: `assert!` stayed and `assert` held a round. `assert!` and `retract!` are refused now, with the word to write: read as any name around a concept, either would be a command nothing reads.
 - An application has one part with no label. Every other part has its label; `:` alone is the label of a formula's second operand.
 - A formula's result is `is:`. An application of a formula in a term's place stands for that value: `count: (+ ?n : 1)`.
 - A type is a formula that holds for values of the type, so `(:text ?x)` can stand where `?x` would. `:value` is the type of every value, so `(:value ?a is: ?b)` is equality.
 - **Proposed:** a pick wraps a term the same way, `(:last (:text ?x))`, so a read says everything about the attributes it reads. The alternative is #728's `(pick :last from: ?x)` beside the read.
 - A head made only of operator characters is a formula. Names start with a letter, so it cannot be a concept or a domain.
-- A write at the top level, `(assert! A)`, `(retract! A)` or `(assert A)` with premises after it if it has them, is a rule with that head.
+- A write at the top level, `(assert A)` or `(retract A)` with premises after it if it has them, is a rule with that head. So is a command.
 
 ## Syntax is a rule
 
@@ -110,9 +111,9 @@ The last row is there because `unless` negates one proposition: two reads side b
 A rule has one head, as dialog's rules do (Irakli, 2026-11-13). To assert and retract on one condition, write a rule for each, or give the condition a name with a command and write a rule for each that reads it:
 
 ```clj
-(rule (assert! (xyz.todo ?t list: ?to))
+(rule (assert (xyz.todo ?t list: ?to))
   (move (xyz.todo ?t list: ?to)))
-(rule (retract! (xyz.todo ?t list: ?from))
+(rule (retract (xyz.todo ?t list: ?from))
   (move (xyz.todo ?t list: ?to))
   (xyz.todo ?t list: ?from))
 ```
@@ -156,7 +157,7 @@ Built 2026-11-13, and changed in two ways. What a form is for is said in a comme
 - What has no form of its own, such as an attribute, is described with a plain write:
 
   ```clj
-  (assert! (syntax.meta xyz.todo/text description: "What is to be done."))
+  (assert (syntax.meta xyz.todo/text description: "What is to be done."))
   ```
 
 - Finding is a query, since the descriptions are facts:
@@ -172,7 +173,7 @@ In the model that answers `?name = todo`. Any other labelled part of a rule is k
 
 ## The to-do, expanded
 
-[model/todo.clj](model/todo.clj) through the prelude, as the model printed it:
+[model/todo.clj](model/todo.clj) through the prelude, as the model printed it. The model is of 2026-11-11 and was left as it was: its writes carry `!`, and its issued head the word `assert`.
 
 ```clj
 ; (rule (assert! (todo ?t list: ?l text: ?x state: :open))

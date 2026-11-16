@@ -10,7 +10,7 @@ The notation is designed on #728: `research/notation/design.md`, read here at `4
 | which claim is read | `cardinality: :one` or `:many` on the line; picks are gone | the wrapper's pick, `:last` | this branch for `:one` and `:many`; the engine's cardinality work (#793) for the rest |
 | choosing among claims | an elector in the head: `(account ?a status: (top ?s))`, ordered by the line's `as:` list | nothing | #793 |
 | a variable of the body | is in the head, so a concept runs both ways | not checked | this branch |
-| `!` | no form carries one: `assert`, `retract` | `assert!`, `retract!`, decided here on 2026-11-12 as a departure | this branch |
+| `!` | no form carries one: `assert`, `retract` | the same since 2026-11-16; `assert!` and `retract!` are refused with the word to write | done |
 | a parameter left out of a read | matches anything | refused since 2026-11-13; open again on 2026-11-15, not built | this branch |
 | a computing fold | only in a getter: `(rule (open-count (list ?l) is: (count ?t)) …)` | nothing | this branch, over the engine's folds |
 | a layer | `in:` on a line, a constant or a field | nothing | the layers work (#795 on) |
