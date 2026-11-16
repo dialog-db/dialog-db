@@ -40,8 +40,12 @@ pub struct AttributeQueryAll {
     cause: Term<Cause>,
     /// The layer the facts are read from (`in:`): a constant reads one
     /// layer, a named variable reads every layer and binds the one each
-    /// row came from, blank reads every layer.
-    layer: Term<Entity>,
+    /// row came from, blank reads every layer. Boxed, and `None` for the
+    /// blank term every read without `in:` carries, so the common scan
+    /// stays the size it was before layers: a scan is cloned into every
+    /// plan and every evaluation's state.
+    #[serde(with = "boxed_layer")]
+    layer: Option<Box<Term<Entity>>>,
     /// Internal handle for claim storage.
     source: Term<Record>,
 }
@@ -89,34 +93,41 @@ impl AttributeQueryAll {
             of,
             is,
             cause,
-            layer: Term::blank(),
+            layer: None,
             source,
         }
     }
 
     /// This scan over `layer` (`in:`). See the field.
     pub fn with_layer(mut self, layer: Term<Entity>) -> Self {
-        self.layer = layer;
+        self.layer = boxed_layer::boxed(layer);
         self
     }
 
     /// The layer term (`in:`).
     pub fn layer(&self) -> &Term<Entity> {
-        &self.layer
+        self.layer.as_deref().unwrap_or(&boxed_layer::BLANK)
     }
 
     /// Whether this scan binds each row's layer to a named variable: a
     /// read that asks which layer a row came from, and so reads the same
     /// cell on two layers as two rows.
     pub(crate) fn binds_layer(&self) -> bool {
-        self.layer.name().is_some()
+        self.layer
+            .as_deref()
+            .is_some_and(|layer| layer.name().is_some())
     }
 
     /// Whether a row read from `layer` is one this scan reads: any row
     /// unless the scan names a constant layer the row's differs from. A
     /// row with no layer stamped is the primary's, `memory:`.
     pub(crate) fn reads_from(&self, layer: Option<&Entity>) -> bool {
-        match (&self.layer, layer) {
+        // A scan without `in:` reads every row: asked per row, so it is
+        // answered before any term is looked at.
+        let Some(wanted) = self.layer.as_deref() else {
+            return true;
+        };
+        match (wanted, layer) {
             (Term::Constant(Value::Entity(wanted)), Some(layer)) => wanted == layer,
             (Term::Constant(Value::Entity(wanted)), None) => *wanted == memory_layer(),
             (Term::Constant(_), _) => false,
@@ -207,11 +218,18 @@ impl AttributeQueryAll {
         let mut claim = Claim::from(fact);
         claim.layer = layer;
         let standing = Standing::new(version, claim.cause().clone());
-        candidate.reserve(5);
+        // A slot for each of `the`, `of`, `is` and `cause`, and one for
+        // `in` only when the scan binds it: a row's bindings are reserved
+        // per row, so a scan without `in:` reserves what it did before.
+        let binds = self
+            .layer
+            .as_deref()
+            .and_then(|term| term.shared_name().map(|name| (term, name)));
+        candidate.reserve(4 + usize::from(binds.is_some()));
         // A row with no layer stamped is the primary's.
-        if let Some(name) = self.layer.shared_name() {
+        if let Some((term, name)) = binds {
             let layer = claim.layer.clone().unwrap_or_else(memory_layer);
-            candidate.bind_variable(name, self.layer.binding_kind(), Value::Entity(layer))?;
+            candidate.bind_variable(name, term.binding_kind(), Value::Entity(layer))?;
         }
         if let Some(name) = self.the.shared_name() {
             candidate.bind_variable(name, self.the.binding_kind(), Value::from(claim.the()))?;
@@ -260,7 +278,7 @@ impl AttributeQueryAll {
             || absent(self.of.name())
             || absent(self.is.name())
             || absent(self.cause.name())
-            || absent(self.layer.name())
+            || absent(self.layer().name())
     }
 
     /// True when a fact inhabits the scan's typed slots: the value
@@ -312,7 +330,10 @@ impl AttributeQueryAll {
             Err(_) => self.is.clone(),
         };
         let cause = self.cause.resolve(source);
-        let layer = self.layer.resolve(source);
+        let layer = self
+            .layer
+            .as_deref()
+            .and_then(|layer| boxed_layer::boxed(layer.resolve(source)));
 
         Self {
             the,
@@ -419,7 +440,7 @@ impl AttributeQueryAll {
         params.insert("of".to_string(), Term::<Any>::from(&self.of));
         params.insert("is".to_string(), self.is.clone());
         params.insert("cause".to_string(), Term::<Any>::from(&self.cause));
-        params.insert("in".to_string(), Term::<Any>::from(&self.layer));
+        params.insert("in".to_string(), Term::<Any>::from(self.layer()));
         params
     }
 
@@ -682,7 +703,7 @@ impl TryFrom<&AttributeQueryAll> for Selector<Constrained> {
 
         // A constant layer constrains the scan too: with every other term
         // a variable, the scan reads the whole layer.
-        match (&from.layer, selector) {
+        match (from.layer(), selector) {
             (Term::Constant(layer), selector) => {
                 let layer = Entity::try_from(layer.clone()).map_err(|_| {
                     EvaluationError::Store("Could not convert value to Entity".to_string())
@@ -786,8 +807,8 @@ impl Display for AttributeQueryAll {
         write!(f, "of: {},", self.of)?;
         write!(f, "is: {},", self.is)?;
         write!(f, "cause: {},", self.cause)?;
-        if !self.layer.is_blank() {
-            write!(f, "in: {},", self.layer)?;
+        if !self.layer().is_blank() {
+            write!(f, "in: {},", self.layer())?;
         }
         write!(f, "}}")
     }
@@ -1837,5 +1858,42 @@ mod tests {
             is.content_type().is_none(),
             "untyped `is` term should yield unknown content_type"
         );
+    }
+}
+
+/// The layer term of a scan, held boxed and only when it is not blank,
+/// and read and written on the wire as the term itself, blank included.
+mod boxed_layer {
+    use crate::{Entity, Term};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::LazyLock;
+
+    /// The blank layer term a scan without `in:` reads as.
+    pub(super) static BLANK: LazyLock<Term<Entity>> = LazyLock::new(Term::blank);
+
+    /// `layer` as a scan holds it: `None` for the blank term.
+    /// Asked each time a scan is resolved against a row, so it matches
+    /// the blank term's shape rather than comparing with [`BLANK`].
+    pub(super) fn boxed(layer: Term<Entity>) -> Option<Box<Term<Entity>>> {
+        match &layer {
+            Term::Variable {
+                name: None,
+                descriptor,
+            } if *descriptor == Default::default() => None,
+            _ => Some(Box::new(layer)),
+        }
+    }
+
+    pub(super) fn serialize<S: Serializer>(
+        layer: &Option<Box<Term<Entity>>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        layer.as_deref().unwrap_or(&BLANK).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Box<Term<Entity>>>, D::Error> {
+        Term::<Entity>::deserialize(deserializer).map(boxed)
     }
 }
