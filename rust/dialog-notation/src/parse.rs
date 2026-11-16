@@ -133,7 +133,7 @@ mod tests {
     #[dialog_common::test]
     fn it_prints_space_and_lines_as_they_were() -> Result<(), Error> {
         back(
-            "\n\n(rule (assert! (xyz.todo ?t   list: ?to))\n\n    (move (xyz.todo ?t\n                    list: ?to)))\n\n\n",
+            "\n\n(rule (assert (xyz.todo ?t   list: ?to))\n\n    (move (xyz.todo ?t\n                    list: ?to)))\n\n\n",
         )?;
         back("(a)(b) [ 1  2 ]{ k: 1 }")
     }
@@ -152,8 +152,8 @@ mod tests {
         // `...` is a part like any other, wherever it stands, and a
         // quote is printed as it was written.
         back("(rule (syntax (all ?first   ... ?more))\n  (expand (query ?head ...)))")?;
-        back("(assert! (xyz.note note:1 tags: '(1 2   (3 4))))")?;
-        back("(assert! (xyz.note note:1 tags: (quote (1 2))))")?;
+        back("(assert (xyz.note note:1 tags: '(1 2   (3 4))))")?;
+        back("(assert (xyz.note note:1 tags: (quote (1 2))))")?;
         back("{author: ?who\n ; and whatever else\n ... ?others }")?;
         // With no mapping, it is printed after the entries.
         let trees = parse("{author: ?who\n   ... ?others}")?;

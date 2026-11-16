@@ -2,9 +2,11 @@
 //!
 //! The kernel is small: `rule`, whose first part is its head and whose
 //! other parts are its premises, `(unless …)` among them for what must
-//! not hold; the application of a relation and of a formula; `assert!`,
-//! `retract!`, `assert` and `report` as a rule's head. A rule has one
-//! head. Every other form is given its meaning by a rule about syntax:
+//! not hold; the application of a relation and of a formula; `assert`,
+//! `retract` and `report` as a rule's head. A head with no word is
+//! derived, or issued for one round when its relation is a command's.
+//! A rule has one head. Every other form is given its meaning by a rule
+//! about syntax:
 //!
 //! ```clj
 //! (rule (syntax (rule (report ?head) ?head))
@@ -37,7 +39,7 @@ use crate::kernel::QUOTE;
 use crate::kernel::{Head, Rule};
 use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, REST, fill, matches};
-use crate::syntax::{Parameters, Signature, Syntax};
+use crate::syntax::{COMMAND, Parameters, Signature, Syntax};
 use crate::written::{Path, Segment};
 
 /// The core forms, written in the kernel.
@@ -85,7 +87,25 @@ struct Choice {
 }
 
 /// The words that make a rule's head a write or an answer.
-const HEAD_WORDS: [&str; 4] = ["assert!", "retract!", "assert", "report"];
+const HEAD_WORDS: [&str; 3] = ["assert", "retract", "report"];
+
+/// What the two writes were called while a mark told what is kept from
+/// what holds one round. Unrefused, either would be read as a command
+/// of that name, issued and kept by nothing.
+const FORMER_WORDS: [(&str, &str); 2] = [("assert!", "assert"), ("retract!", "retract")];
+
+/// Refuse a write under the name it had.
+fn former(tree: &Syntax) -> Result<(), Error> {
+    match FORMER_WORDS
+        .iter()
+        .find(|(former, _)| tree.applies() == Some(former))
+    {
+        Some((former, word)) => Err(Error::Refused(format!(
+            "`{former}` is written `{word}`: no form carries `!`"
+        ))),
+        None => Ok(()),
+    }
+}
 
 /// The words whose parts are syntax, never walked into.
 const DIRECTIVES: [&str; 3] = ["expand", "syntax", "warning"];
@@ -643,7 +663,7 @@ impl Expander {
         match (operator.keyword(), &**operator) {
             (Some("command"), _) => {
                 let domain = format!(
-                    "command.{}.{}",
+                    "{COMMAND}.{}.{}",
                     name(subject?)?,
                     name(operand.terms.get("")?)?
                 );
@@ -870,7 +890,10 @@ impl Expander {
                 });
             }
             let asked = tree;
-            tree = self.about(&asked, |this| this.ask(&asked, position))?;
+            tree = self.about(&asked, |this| {
+                former(&asked)?;
+                this.ask(&asked, position)
+            })?;
         }
     }
 
@@ -899,7 +922,19 @@ impl Expander {
                         },
                     )
                 }
-                _ => self.about(&tree, |this| this.ask(&tree, Position::Head))?,
+                // A command at the top level is issued: a rule with
+                // that head and no premise.
+                (None, Some(_)) if tree.is_command() => Syntax::Application(
+                    Box::new(Syntax::Reference("rule".into())),
+                    Parameters {
+                        items: vec![tree.clone()],
+                        terms: BTreeMap::new(),
+                    },
+                ),
+                _ => self.about(&tree, |this| {
+                    former(&tree)?;
+                    this.ask(&tree, Position::Head)
+                })?,
             };
         }
         let written = Clauses::of(&tree);
@@ -1000,7 +1035,7 @@ mod tests {
     const TODO: &str = r#"
         (concept (todo ?t list: ?l text: ?x state: ?s)
           (xyz.todo ?t list: (:last (:entity ?l)) text: (:last (:text ?x)) state: (:last ?s)))
-        (rule (assert! (todo ?t list: ?l text: ?x state: :open))
+        (rule (assert (todo ?t list: ?l text: ?x state: :open))
           (add (todo ?t list: ?l text: ?x)))
     "#;
 
@@ -1071,8 +1106,8 @@ mod tests {
     fn it_refuses_a_second_head_however_it_is_written() {
         let among = expanded(
             "",
-            "(rule (assert! (xyz.todo ?t list: ?to))
-                   (retract! (xyz.todo ?t list: ?from))
+            "(rule (assert (xyz.todo ?t list: ?to))
+                   (retract (xyz.todo ?t list: ?from))
                (xyz.move ?t to: ?to from: ?from))",
         );
         assert!(
@@ -1081,12 +1116,12 @@ mod tests {
             "{among:?}"
         );
         for written in [
-            "(rule (all (assert! (xyz.todo ?t list: ?to))
-                        (retract! (xyz.todo ?t list: ?from)))
+            "(rule (all (assert (xyz.todo ?t list: ?to))
+                        (retract (xyz.todo ?t list: ?from)))
                (xyz.move ?t to: ?to from: ?from))",
-            "(rule (assert! (all (xyz.todo ?t list: ?to) (xyz.seen ?t at: ?to)))
+            "(rule (assert (all (xyz.todo ?t list: ?to) (xyz.seen ?t at: ?to)))
                (xyz.move ?t to: ?to from: ?from))",
-            "(assert! (all (xyz.todo ?t list: ?to) (xyz.seen ?t at: ?to))
+            "(assert (all (xyz.todo ?t list: ?to) (xyz.seen ?t at: ?to))
                (xyz.move ?t to: ?to from: ?from))",
         ] {
             let several = expanded("", written);
@@ -1109,15 +1144,15 @@ mod tests {
         assert_eq!(
             expanded(
                 "",
-                "(rule (assert! (xyz.todo ?t list: ?to))
+                "(rule (assert (xyz.todo ?t list: ?to))
                    (xyz.move ?t to: ?to from: ?from))
-                 (rule (retract! (xyz.todo ?t list: ?from))
+                 (rule (retract (xyz.todo ?t list: ?from))
                    (xyz.move ?t to: ?to from: ?from))",
             )
             .unwrap(),
             vec![
-                "(rule (assert! (xyz.todo ?t list: ?to)) (xyz.move ?t from: ?from to: ?to))",
-                "(rule (retract! (xyz.todo ?t list: ?from)) (xyz.move ?t from: ?from to: ?to))",
+                "(rule (assert (xyz.todo ?t list: ?to)) (xyz.move ?t from: ?from to: ?to))",
+                "(rule (retract (xyz.todo ?t list: ?from)) (xyz.move ?t from: ?from to: ?to))",
             ]
         );
     }
@@ -1131,15 +1166,15 @@ mod tests {
             "(concept (card ?c title: ?x owner: ?o)
                (xyz.card ?c title: (:last (:text ?x)))
                (xyz.owned ?c by: (:last (:entity ?o))))",
-            "(rule (assert! (card ?c title: ?x owner: ?o))
+            "(rule (assert (card ?c title: ?x owner: ?o))
                (xyz.draft ?c title: ?x by: ?o))",
         )
         .unwrap();
         assert_eq!(
             kernel,
             vec![
-                "(rule (assert! (xyz.card ?c title: (:last (:text ?x)))) (xyz.draft ?c by: ?o title: ?x))",
-                "(rule (assert! (xyz.owned ?c by: (:last (:entity ?o)))) (xyz.draft ?c by: ?o title: ?x))",
+                "(rule (assert (xyz.card ?c title: (:last (:text ?x)))) (xyz.draft ?c by: ?o title: ?x))",
+                "(rule (assert (xyz.owned ?c by: (:last (:entity ?o)))) (xyz.draft ?c by: ?o title: ?x))",
             ]
         );
     }
@@ -1163,14 +1198,14 @@ mod tests {
     #[test]
     fn it_expands_a_form_that_is_not_an_application() {
         let kernel = expanded(
-            r#"(rule (syntax (assert! (xyz.note ?n text: (:text ?x))))
+            r#"(rule (syntax (assert (xyz.note ?n text: (:text ?x))))
                  (expand [note ?n ?x]))"#,
             r#"[note note:1 "hi"]"#,
         )
         .unwrap();
         assert_eq!(
             kernel,
-            vec![r#"(rule (assert! (xyz.note note:1 text: (:text "hi"))))"#]
+            vec![r#"(rule (assert (xyz.note note:1 text: (:text "hi"))))"#]
         );
     }
 
@@ -1181,7 +1216,7 @@ mod tests {
         assert_eq!(
             kernel.iter().map(Syntax::to_string).collect::<Vec<_>>(),
             vec![
-                "(rule (assert! (xyz.todo ?t list: (:last (:entity ?l)) state: (:last :open) text: (:last (:text ?x)))) \
+                "(rule (assert (xyz.todo ?t list: (:last (:entity ?l)) state: (:last :open) text: (:last (:text ?x)))) \
                  (command.add.todo _ about: ?t list: ?l text: ?x))"
             ]
         );
@@ -1224,7 +1259,7 @@ mod tests {
         assert!(
             kernel[0]
                 .to_string()
-                .starts_with("(rule (assert (command.add.todo (:id command.add.todo about: todo:1")
+                .starts_with("(rule (command.add.todo (:id command.add.todo about: todo:1")
         );
         assert!(diagnostics.is_empty());
 
@@ -1241,7 +1276,7 @@ mod tests {
         let (_, diagnostics) = expander
             .submit(
                 "(increment (xyz.counter counter:a))
-                 (rule (assert! (xyz.counter ?c count: (+ ?n : 1)))
+                 (rule (assert (xyz.counter ?c count: (+ ?n : 1)))
                    (increment (xyz.counter ?c)) (xyz.counter ?c count: ?n))",
             )
             .unwrap();
@@ -1258,7 +1293,7 @@ mod tests {
         assert!(matches!(
             expanded(
                 TODO,
-                "(concept (todo ?t title: ?x) (xyz.note ?t title: ?x)) (assert! (todo todo:1))"
+                "(concept (todo ?t title: ?x) (xyz.note ?t title: ?x)) (assert (todo todo:1))"
             ),
             Err(Error::Ambiguous(..))
         ));
@@ -1318,13 +1353,13 @@ mod tests {
         // A write says every field, so the labels written are one
         // definition's signature.
         assert_eq!(
-            expanded(both, r#"(assert! (todo todo:1 title: "x" pinned: true))"#).unwrap(),
-            vec![r#"(rule (assert! (xyz.note todo:1 pinned: true title: "x")))"#]
+            expanded(both, r#"(assert (todo todo:1 title: "x" pinned: true))"#).unwrap(),
+            vec![r#"(rule (assert (xyz.note todo:1 pinned: true title: "x")))"#]
         );
         // A write that fits both and is neither is refused, and so is
         // the absence of what several definitions take.
         assert!(matches!(
-            expanded(both, r#"(assert! (todo todo:1 title: "x"))"#),
+            expanded(both, r#"(assert (todo todo:1 title: "x"))"#),
             Err(Error::Ambiguous(..))
         ));
         assert!(matches!(
@@ -1334,6 +1369,28 @@ mod tests {
             ),
             Err(Error::Ambiguous(..))
         ));
+    }
+
+    /// A write was `assert!` and `retract!` while a mark told what is
+    /// kept. Read as any other name around a concept, either would be a
+    /// command of that name, which nothing reads and nothing keeps, so
+    /// both are refused with the word to write.
+    #[test]
+    fn it_refuses_a_write_under_the_name_it_had() {
+        for (former, word) in [("assert!", "assert"), ("retract!", "retract")] {
+            for text in [
+                format!(r#"({former} (todo todo:1 list: list:home text: "x" state: :open))"#),
+                format!("(rule ({former} (xyz.todo ?t state: :done)) (complete (todo ?t)))"),
+            ] {
+                assert!(
+                    matches!(
+                        expanded(TODO, &text),
+                        Err(Error::Refused(why)) if why == format!("`{former}` is written `{word}`: no form carries `!`")
+                    ),
+                    "{text}"
+                );
+            }
+        }
     }
 
     /// Two definitions of one concept, which call its field by other

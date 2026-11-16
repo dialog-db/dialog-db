@@ -162,8 +162,8 @@ mod tests {
         let broken = "(concept (todo ?t text: ?x)
   (xyz.todo ?t text: (:last (:text ?x))))
 
-(rule (all (assert! (xyz.todo ?t text: ?x))
-           (retract! (xyz.draft ?t text: ?x)))
+(rule (all (assert (xyz.todo ?t text: ?x))
+           (retract (xyz.draft ?t text: ?x)))
   (xyz.draft ?t text: ?x))
 
 (query (todo ?t text: ?x))
@@ -219,7 +219,7 @@ mod tests {
         // Mended, the same document is analyzed, and its definition
         // kept.
         let mended = broken
-            .replace("(rule (all (assert! (xyz.todo ?t text: ?x))\n           (retract! (xyz.draft ?t text: ?x)))", "(rule (assert! (xyz.todo ?t text: ?x))")
+            .replace("(rule (all (assert (xyz.todo ?t text: ?x))\n           (retract (xyz.draft ?t text: ?x)))", "(rule (assert (xyz.todo ?t text: ?x))")
             .replace("\n  (frobnicate ?t))", ")");
         let analysis = analyzer.analyze(&parse(&mended)?);
         assert!(

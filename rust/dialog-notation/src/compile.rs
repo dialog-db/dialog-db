@@ -6,11 +6,11 @@
 //!
 //! | kernel | Dialog-DB |
 //! |---|---|
-//! | `(assert! A)`, `(retract! A)` with no premise | a [`ConceptStatement`], asserted or retracted |
-//! | `(assert A)` with no premise | a [`ConceptStatement`], dispatched: it holds one round |
+//! | `(assert A)`, `(retract A)` with no premise | a [`ConceptStatement`], asserted or retracted |
+//! | a bare head on a command's domain, with no premise | a [`ConceptStatement`], dispatched: it holds one round |
 //! | a bare head with premises | a [`DeductiveRule`] |
-//! | `(assert! A)`, `(retract! A)` with premises | an [`InductiveRule`] |
-//! | `(assert A)` with premises | an [`InductiveRule`] over a concept marked to hold one round |
+//! | `(assert A)`, `(retract A)` with premises | an [`InductiveRule`] |
+//! | a bare head on a command's domain, with premises | an [`InductiveRule`] over a concept marked to hold one round |
 //! | `(:id domain label: term …)` | the entity `entity/derive` makes of the domain, the labels and each value in turn |
 //! | `(report A)` with one read as its premise | a [`ConceptQuery`] |
 //! | `(report A)` with any other premises | a [`DeductiveRule`] deriving the report, and a [`ConceptQuery`] of it |
@@ -1152,7 +1152,7 @@ mod tests {
     #[test]
     fn it_compiles_a_write_with_no_premise_to_a_statement() {
         let steps =
-            steps(r#"(rule (assert! (xyz.todo todo:1 text: (:last (:text "Buy milk")) n: 3)))"#)
+            steps(r#"(rule (assert (xyz.todo todo:1 text: (:last (:text "Buy milk")) n: 3)))"#)
                 .unwrap();
         let [Step::Assert(statement)] = steps.as_slice() else {
             panic!("one assertion");
@@ -1169,12 +1169,12 @@ mod tests {
     fn it_compiles_a_head_to_a_rule_of_its_kind() {
         let premise = "(xyz.counter ?c count: (:last (:natural ?n)))";
         let asserted = steps(&format!(
-            "(rule (assert! (xyz.counter ?c count: (:last (:natural (+ ?n : 1))))) {premise})"
+            "(rule (assert (xyz.counter ?c count: (:last (:natural (+ ?n : 1))))) {premise})"
         ))
         .unwrap();
         assert!(matches!(asserted.as_slice(), [Step::Induce(_)]));
         let retracted = steps(&format!(
-            "(rule (retract! (xyz.counter ?c stale: ?n)) {premise})"
+            "(rule (retract (xyz.counter ?c stale: ?n)) {premise})"
         ))
         .unwrap();
         assert!(matches!(retracted.as_slice(), [Step::Induce(_)]));
@@ -1187,8 +1187,8 @@ mod tests {
     #[test]
     fn it_refuses_a_rule_of_several_heads() {
         let refused = steps(
-            "(rule (all (assert! (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
-                        (retract! (xyz.counter ?c stale: ?n)))
+            "(rule (all (assert (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
+                        (retract (xyz.counter ?c stale: ?n)))
                (xyz.counter ?c count: (:last (:natural ?n))))",
         );
         assert!(
@@ -1215,7 +1215,7 @@ mod tests {
     #[test]
     fn it_compiles_a_command_a_rule_issues_to_a_rule_over_a_transient_concept() {
         let steps = steps(
-            "(rule (assert (command.go.x (:id command.go.x about: ?c) about: ?c))
+            "(rule (command.go.x (:id command.go.x about: ?c) about: ?c)
                (xyz.counter ?c count: ?n))",
         )
         .unwrap();
@@ -1231,19 +1231,19 @@ mod tests {
             [Step::Assert(statement)] => statement.this.clone(),
             _ => panic!("one assertion"),
         };
-        let one = entity(r#"(rule (assert! (xyz.n (:id xyz.n a: 1 b: "x") a: 1)))"#);
+        let one = entity(r#"(rule (assert (xyz.n (:id xyz.n a: 1 b: "x") a: 1)))"#);
         assert!(one.as_str().starts_with("id:"));
         assert_eq!(
             one,
-            entity(r#"(rule (assert! (xyz.n (:id xyz.n b: "x" a: 1) a: 1)))"#)
+            entity(r#"(rule (assert (xyz.n (:id xyz.n b: "x" a: 1) a: 1)))"#)
         );
         assert_ne!(
             one,
-            entity(r#"(rule (assert! (xyz.n (:id xyz.n a: 1 b: "y") a: 1)))"#)
+            entity(r#"(rule (assert (xyz.n (:id xyz.n a: 1 b: "y") a: 1)))"#)
         );
         assert_ne!(
             one,
-            entity(r#"(rule (assert! (xyz.m (:id xyz.m a: 1 b: "x") a: 1)))"#)
+            entity(r#"(rule (assert (xyz.m (:id xyz.m a: 1 b: "x") a: 1)))"#)
         );
     }
 
@@ -1251,11 +1251,11 @@ mod tests {
     fn it_refuses_a_write_that_leaves_a_field_out() {
         // `?l.1` is how a field an expansion added and nothing binds reads.
         assert!(matches!(
-            steps("(rule (assert! (xyz.todo ?t list: ?l.1 state: :done)) (xyz.go ?t on: :yes))"),
+            steps("(rule (assert (xyz.todo ?t list: ?l.1 state: :done)) (xyz.go ?t on: :yes))"),
             Err(Error::Refused(_))
         ));
         assert!(matches!(
-            steps("(rule (assert! (xyz.todo todo:1 list: ?l.1 state: :done)))"),
+            steps("(rule (assert (xyz.todo todo:1 list: ?l.1 state: :done)))"),
             Err(Error::Refused(_))
         ));
     }

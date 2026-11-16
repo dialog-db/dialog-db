@@ -54,6 +54,17 @@ use crate::data;
 use crate::form::{Form, Kind, Mark, Part};
 use crate::written::{Note, Path, Segment, Slot, Written};
 
+/// The domain every command's relation is under: `command.add.todo` is
+/// what `(add (todo …))` issues and what a premise reads of it.
+pub const COMMAND: &str = "command";
+
+/// Whether a domain is a command's: one whose facts hold one round.
+pub fn is_command(domain: &str) -> bool {
+    domain
+        .strip_prefix(COMMAND)
+        .is_some_and(|rest| rest.starts_with('.'))
+}
+
 /// A node of the syntax tree.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Syntax {
@@ -422,6 +433,11 @@ impl Syntax {
                 .filter(|name| !name.is_empty() && !name.contains(':')),
             _ => None,
         }
+    }
+
+    /// Whether this applies a command's relation.
+    pub fn is_command(&self) -> bool {
+        self.applies().is_some_and(is_command)
     }
 
     /// Whether this applies a relation: its operator is a domain.

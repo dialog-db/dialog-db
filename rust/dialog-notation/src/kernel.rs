@@ -11,7 +11,7 @@ use dialog_corpus::Value;
 
 use crate::Error;
 use crate::pattern::REST;
-use crate::syntax::Syntax;
+use crate::syntax::{self, Syntax};
 
 /// The types a term may be read under: `(:text ?x)`.
 pub const TYPES: [&str; 8] = [
@@ -105,11 +105,13 @@ pub enum Premise {
 pub enum Head {
     /// No word: the relation holds while the premises do.
     Derive(Read),
-    /// `assert!`: the facts stay until retracted.
+    /// `assert`: the facts stay until retracted.
     Assert(Read),
-    /// `retract!`: the facts are taken back.
+    /// `retract`: the facts are taken back.
     Retract(Read),
-    /// `assert`: the facts hold for one round.
+    /// No word, on a command's relation: the facts hold for one round.
+    /// How long a fact lasts belongs to its relation, not to the head
+    /// that concludes it.
     Hold(Read),
     /// `report`: the row is part of the answer.
     Report(Read),
@@ -305,6 +307,9 @@ fn premise(node: &Syntax) -> Result<Premise, Error> {
 }
 
 fn head(node: &Syntax) -> Result<Head, Error> {
+    if node.is_command() {
+        return Ok(Head::Hold(read(node)?));
+    }
     if node.is_read() {
         return Ok(Head::Derive(read(node)?));
     }
@@ -317,10 +322,17 @@ fn head(node: &Syntax) -> Result<Head, Error> {
         Some([inner]) => read(inner)?,
         _ => return Err(Error::Refused(format!("{node} is not a kernel head"))),
     };
+    let kept = |head: fn(Read) -> Head, inner: Read| {
+        if syntax::is_command(&inner.domain) {
+            return Err(Error::Refused(format!(
+                "{node} keeps a command: a command holds one round, and is issued by a head with no word"
+            )));
+        }
+        Ok(head(inner))
+    };
     match node.applies() {
-        Some("assert!") => Ok(Head::Assert(inner)),
-        Some("retract!") => Ok(Head::Retract(inner)),
-        Some("assert") => Ok(Head::Hold(inner)),
+        Some("assert") => kept(Head::Assert, inner),
+        Some("retract") => kept(Head::Retract, inner),
         Some("report") => Ok(Head::Report(inner)),
         _ => Err(Error::Refused(format!("{node} is not a kernel head"))),
     }
@@ -411,7 +423,7 @@ mod tests {
     #[test]
     fn it_reads_a_rule_into_its_head_and_premises() {
         let form = forms(
-            "(rule (assert! (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
+            "(rule (assert (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
                (command.increment.xyz.counter _ about: ?c)
                (xyz.counter ?c count: (:last (:natural ?n))))",
         )
@@ -444,8 +456,35 @@ mod tests {
 
     #[test]
     fn it_refuses_what_is_not_kernel() {
-        let form = forms("(rule (assert! (todo ?t)))").unwrap().remove(0);
+        let form = forms("(rule (assert (todo ?t)))").unwrap().remove(0);
         assert!(matches!(Rule::parse(&form), Err(Error::Refused(_))));
+    }
+
+    /// How long a fact lasts belongs to its relation: a head with no
+    /// word is issued for one round on a command's relation and derived
+    /// on any other, and a command is never kept.
+    #[test]
+    fn it_issues_what_a_head_with_no_word_says_of_a_command() {
+        let head = |text: &str| Rule::parse(&forms(text).unwrap().remove(0)).map(|rule| rule.head);
+        assert!(matches!(
+            head("(rule (command.go.x (:id command.go.x about: ?c) about: ?c) (xyz.c ?c n: ?n))"),
+            Ok(Head::Hold(read)) if read.domain == "command.go.x"
+        ));
+        assert!(matches!(
+            head("(rule (xyz.go ?c n: ?n) (xyz.c ?c n: ?n))"),
+            Ok(Head::Derive(read)) if read.domain == "xyz.go"
+        ));
+        // A domain that only starts with the word is no command's.
+        assert!(matches!(
+            head("(rule (commander.x ?c n: ?n) (xyz.c ?c n: ?n))"),
+            Ok(Head::Derive(_))
+        ));
+        for word in ["assert", "retract"] {
+            assert!(matches!(
+                head(&format!("(rule ({word} (command.go.x ?c about: ?c)) (xyz.c ?c n: ?n))")),
+                Err(Error::Refused(why)) if why.contains("keeps a command")
+            ));
+        }
     }
 
     /// A kernel rule has one head: no head and several are both refused.
@@ -456,7 +495,7 @@ mod tests {
             matches!(Rule::parse(&none), Err(Error::Refused(why)) if why.contains("has no head"))
         );
         let several = forms(
-            "(rule (all (assert! (xyz.a ?a n: ?n)) (retract! (xyz.b ?a n: ?n))) (xyz.c ?a n: ?n))",
+            "(rule (all (assert (xyz.a ?a n: ?n)) (retract (xyz.b ?a n: ?n))) (xyz.c ?a n: ?n))",
         )
         .unwrap()
         .remove(0);

@@ -42,12 +42,12 @@
   (unless (dialog.name _ is: ?command)))
 
 ; In a head, or at the top level, it issues one, which holds one round.
-(rule (syntax (assert (?domain (:id ?domain ... ?fields) ... ?fields)))
+(rule (syntax (?domain (:id ?domain ... ?fields) ... ?fields))
   (expand (?command (?concept ... ?fields)) in: :head)
   (:command ?command : ?concept is: ?domain)
   (unless (dialog.name _ is: ?command)))
 
-(rule (syntax (assert (?domain (:id ?domain about: ?subject ... ?fields) about: ?subject ... ?fields)))
+(rule (syntax (?domain (:id ?domain about: ?subject ... ?fields) about: ?subject ... ?fields))
   (expand (?command (?concept ?subject ... ?fields)) in: :head)
   (:command ?command : ?concept is: ?domain)
   (unless (dialog.name _ is: ?command)))

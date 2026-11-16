@@ -130,7 +130,7 @@ mod tests {
 
 ; Adding a to-do
 ; opens it.
-(rule (assert! (todo ?t text: ?x done: false))
+(rule (assert (todo ?t text: ?x done: false))
   (add (todo ?t text: ?x))) ; and that is all
 
 ; What is left to do.
@@ -202,7 +202,7 @@ mod tests {
         let mut analyzer = Analyzer::new()?;
         let checked = check(
             &mut analyzer,
-            "(concept (todo ?t text: ?x)\n  (xyz.todo ?t text: (:last (:text ?x))))\n(assert! (todo todo:1 text: \"milk\"))\n(ad (todo todo:2 text: \"eggs\"))\n",
+            "(concept (todo ?t text: ?x)\n  (xyz.todo ?t text: (:last (:text ?x))))\n(assert (todo todo:1 text: \"milk\"))\n(ad (todo todo:2 text: \"eggs\"))\n",
         );
         assert_eq!(checked.refusals().count(), 0);
         let [warning] = checked.diagnostics.as_slice() else {

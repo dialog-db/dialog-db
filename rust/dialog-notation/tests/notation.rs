@@ -38,12 +38,12 @@ const TODO: &str = r#"
                    state: (:last (:entity ?s))))
 
     ; Adding a to-do opens it.
-    (rule (assert! (todo ?t list: ?l text: ?x state: :open))
+    (rule (assert (todo ?t list: ?l text: ?x state: :open))
       (add (todo ?t list: ?l text: ?x)))
 
     ; A write says every field, so one that changes the state alone
     ; writes the relation, not the concept.
-    (rule (assert! (xyz.todo ?t state: (:last (:entity :done))))
+    (rule (assert (xyz.todo ?t state: (:last (:entity :done))))
       (complete (todo ?t)))
 "#;
 
@@ -99,8 +99,8 @@ async fn it_counts_with_a_command_a_rule_defines_by_reading_it() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     let (_, diagnostics) = notebook
         .submit(
-            "(assert! (xyz.counter counter:a count: (:last (:natural 1))))
-             (rule (assert! (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
+            "(assert (xyz.counter counter:a count: (:last (:natural 1))))
+             (rule (assert (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
                (increment (xyz.counter ?c))
                (xyz.counter ?c count: (:last (:natural ?n))))",
         )
@@ -141,9 +141,9 @@ async fn it_reads_and_writes_a_backlink_through_a_concept() -> Result<()> {
         .submit(
             r#"(concept (list-item ?l todo: ?t)
                  (xyz.todo ?t list: (:last (:entity ?l))))
-               (assert! (list-item list:home todo: todo:1))
-               (assert! (list-item list:home todo: todo:2))
-               (assert! (list-item list:work todo: todo:3))"#,
+               (assert (list-item list:home todo: todo:1))
+               (assert (list-item list:home todo: todo:2))
+               (assert (list-item list:work todo: todo:3))"#,
         )
         .await?;
 
@@ -172,8 +172,8 @@ async fn it_joins_the_reads_a_concept_holds_and_negates_them_as_one() -> Result<
             r#"(concept (author ?p name: ?n email: ?e)
                  (io.person ?p name: (:text ?n))
                  (io.contact ?p email: (:text ?e)))
-               (assert! (author person:ada name: "Ada" email: "ada@example.com"))
-               (assert! (io.person person:bob name: (:text "Bob")))"#,
+               (assert (author person:ada name: "Ada" email: "ada@example.com"))
+               (assert (io.person person:bob name: (:text "Bob")))"#,
         )
         .await?;
 
@@ -215,9 +215,9 @@ async fn it_derives_a_relation_and_reports_rows_of_several_premises() -> Result<
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
-            r#"(assert! (shop.item item:tea name: (:text "Tea") price: (:natural 4)))
-               (assert! (shop.item item:pot name: (:text "Pot") price: (:natural 30)))
-               (assert! (shop.item item:cup name: (:text "Cup") price: (:natural 9)))
+            r#"(assert (shop.item item:tea name: (:text "Tea") price: (:natural 4)))
+               (assert (shop.item item:pot name: (:text "Pot") price: (:natural 30)))
+               (assert (shop.item item:cup name: (:text "Cup") price: (:natural 9)))
 
                ; What costs less than ten.
                (rule (shop.offer ?i name: ?n price: ?p)
@@ -253,7 +253,7 @@ async fn it_derives_a_relation_and_reports_rows_of_several_premises() -> Result<
 async fn it_says_where_a_warning_and_a_refusal_are() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     let (_, diagnostics) = notebook
-        .submit("(assert! (xyz.todo todo:1 text: \"x\"))\n  (ad (xyz.todo todo:1 text: \"y\"))")
+        .submit("(assert (xyz.todo todo:1 text: \"x\"))\n  (ad (xyz.todo todo:1 text: \"y\"))")
         .await?;
     let [warning] = diagnostics.as_slice() else {
         panic!("one warning: {diagnostics:?}");
@@ -303,7 +303,7 @@ async fn it_finds_a_rule_by_what_the_comment_above_it_says() -> Result<()> {
                  (< ?p : 10))
 
                ; Restocking sets the count.
-               (rule (assert! (shop.stock ?i count: (:last (:natural ?n))))
+               (rule (assert (shop.stock ?i count: (:last (:natural ?n))))
                  (restock (shop.item ?i count: ?n)))
 
                (rule (shop.dear ?i name: ?n)
@@ -337,9 +337,9 @@ async fn it_refuses_to_assert_and_retract_from_one_rule() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     let refused = notebook
         .submit(
-            r#"(assert! (xyz.todo todo:1 list: list:home))
-               (rule (all (assert! (xyz.todo ?t list: ?to))
-                          (retract! (xyz.todo ?t list: ?from)))
+            r#"(assert (xyz.todo todo:1 list: list:home))
+               (rule (all (assert (xyz.todo ?t list: ?to))
+                          (retract (xyz.todo ?t list: ?from)))
                  (move (xyz.todo ?t list: ?to))
                  (xyz.todo ?t list: ?from))"#,
         )
@@ -366,12 +366,12 @@ async fn it_asserts_and_retracts_from_two_rules_of_one_head() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
-            r#"(rule (assert! (xyz.todo ?t list: ?to))
+            r#"(rule (assert (xyz.todo ?t list: ?to))
                  (move (xyz.todo ?t list: ?to)))
-               (rule (retract! (xyz.todo ?t list: ?from))
+               (rule (retract (xyz.todo ?t list: ?from))
                  (move (xyz.todo ?t list: ?to))
                  (xyz.todo ?t list: ?from))
-               (assert! (xyz.todo todo:1 list: list:home))"#,
+               (assert (xyz.todo todo:1 list: list:home))"#,
         )
         .await?;
     notebook
@@ -401,11 +401,11 @@ async fn it_asserts_and_retracts_on_a_command_a_rule_issues() -> Result<()> {
             r#"(rule (moved (xyz.todo ?t list: ?to before: ?from))
                  (move (xyz.todo ?t list: ?to))
                  (xyz.todo ?t list: ?from))
-               (rule (assert! (xyz.todo ?t list: ?to))
+               (rule (assert (xyz.todo ?t list: ?to))
                  (moved (xyz.todo ?t list: ?to)))
-               (rule (retract! (xyz.todo ?t list: ?from))
+               (rule (retract (xyz.todo ?t list: ?from))
                  (moved (xyz.todo ?t before: ?from)))
-               (assert! (xyz.todo todo:1 list: list:home))"#,
+               (assert (xyz.todo todo:1 list: list:home))"#,
         )
         .await?;
     notebook
@@ -425,9 +425,9 @@ async fn it_derives_a_relation_from_itself() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
-            "(assert! (fam.parent person:ann child: person:bea))
-             (assert! (fam.parent person:bea child: person:cal))
-             (assert! (fam.parent person:cal child: person:dee))
+            "(assert (fam.parent person:ann child: person:bea))
+             (assert (fam.parent person:bea child: person:cal))
+             (assert (fam.parent person:cal child: person:dee))
 
              (rule (fam.ancestor ?a descendant: ?c)
                (fam.parent ?a child: ?c))
@@ -458,8 +458,8 @@ async fn it_fires_a_rule_in_the_document_that_installs_it() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     let (report, diagnostics) = notebook
         .submit(
-            "(assert! (xyz.counter counter:a count: (:last (:natural 1))))
-             (rule (assert! (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
+            "(assert (xyz.counter counter:a count: (:last (:natural 1))))
+             (rule (assert (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
                (increment (xyz.counter ?c))
                (xyz.counter ?c count: (:last (:natural ?n))))
              (increment (xyz.counter counter:a))
@@ -517,13 +517,13 @@ async fn it_derives_one_entity_from_the_same_values() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
-            r#"(rule (assert! (xyz.note (:id xyz.note text: ?x) text: (:text ?x)))
+            r#"(rule (assert (xyz.note (:id xyz.note text: ?x) text: (:text ?x)))
                  (jot (xyz.note text: ?x)))"#,
         )
         .await?;
     notebook.submit(r#"(jot (xyz.note text: "hi"))"#).await?;
     notebook
-        .submit(r#"(assert! (xyz.note (:id xyz.note text: "hi") text: (:text "hi")))"#)
+        .submit(r#"(assert (xyz.note (:id xyz.note text: "hi") text: (:text "hi")))"#)
         .await?;
     notebook.submit(r#"(jot (xyz.note text: "ho"))"#).await?;
 
@@ -573,8 +573,8 @@ async fn it_reports_through_every_definition_a_query_fits() -> Result<()> {
                  (xyz.todo ?t title: (:last (:text ?x)) done: (:last ?d)))
                (concept (todo ?t title: ?x pinned: ?p)
                  (xyz.note ?t title: (:last (:text ?x)) pinned: (:last ?p)))
-               (assert! (todo todo:1 title: "Buy milk" done: false))
-               (assert! (todo note:1 title: "Call Ada" pinned: true))"#,
+               (assert (todo todo:1 title: "Buy milk" done: false))
+               (assert (todo note:1 title: "Call Ada" pinned: true))"#,
         )
         .await?;
     assert_eq!(
@@ -685,8 +685,8 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
-            r#"(assert! (xyz.note note:1 about: {author: "Ada" tags: ["math" "engines"] pinned: true}))
-               (assert! (xyz.note note:2 about: {author: "Grace"}))"#,
+            r#"(assert (xyz.note note:1 about: {author: "Ada" tags: ["math" "engines"] pinned: true}))
+               (assert (xyz.note note:2 about: {author: "Grace"}))"#,
         )
         .await?;
 
@@ -773,7 +773,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     // A query of several premises is a rule laid over the branch for
     // the query alone, struct and all: nothing of it is stored.
     notebook
-        .submit(r#"(assert! (xyz.person person:ada name: "Ada"))"#)
+        .submit(r#"(assert (xyz.person person:ada name: "Ada"))"#)
         .await?;
     assert_eq!(
         report(
@@ -802,7 +802,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     );
     // A query of several premises reads through the held rule.
     notebook
-        .submit(r#"(assert! (xyz.person person:grace name: "Grace"))"#)
+        .submit(r#"(assert (xyz.person person:grace name: "Grace"))"#)
         .await?;
     assert_eq!(
         report(
@@ -822,7 +822,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     // refused until Dialog-DB can keep it.
     let writing = notebook
         .submit(
-            "(rule (assert! (xyz.by ?n author: ?who))
+            "(rule (assert (xyz.by ?n author: ?who))
                (xyz.note ?n about: {author: ?who}))",
         )
         .await
@@ -842,9 +842,9 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
 /// once are told apart by what is already stored.
 #[dialog_common::test]
 async fn it_tells_a_name_that_was_repointed_from_one_claimed_twice() -> Result<()> {
-    let rules = "(rule (assert! (xyz.name ?n referent: (:last (:entity concept:a))))
+    let rules = "(rule (assert (xyz.name ?n referent: (:last (:entity concept:a))))
                    (first (xyz.name ?n)))
-                 (rule (assert! (xyz.name ?n referent: (:last (:entity concept:b))))
+                 (rule (assert (xyz.name ?n referent: (:last (:entity concept:b))))
                    (second (xyz.name ?n)))";
     let first = "(first (xyz.name name:todo))";
     let second = "(second (xyz.name name:todo))";
@@ -889,8 +889,8 @@ async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()>
     notebook
         .submit(
             r#"(add (todo todo:1 list: list:home text: "Buy milk"))
-               (assert! (xyz.note text: (:text "by label") of: note:1))
-               (assert! (xyz.note note:2 text: (:text "by position")))"#,
+               (assert (xyz.note text: (:text "by label") of: note:1))
+               (assert (xyz.note note:2 text: (:text "by position")))"#,
         )
         .await?;
 
@@ -910,7 +910,7 @@ async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()>
     );
 
     let record = notebook
-        .submit(r#"(assert! (xyz.note {of: note:3 text: (:text "by record")}))"#)
+        .submit(r#"(assert (xyz.note {of: note:3 text: (:text "by record")}))"#)
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(matches!(record, Err(Ok(Error::Refused(_)))), "{record:?}");
@@ -1097,10 +1097,10 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
-            r#"(assert! (xyz.note note:1 tags: '("math" "engines" "looms")))
-               (assert! (xyz.note note:2 tags: '("math")))
-               (assert! (xyz.note note:3 tags: ["math" "engines"]))
-               (assert! (xyz.note note:4 about: {tags: '("math" {by: "Ada"})}))"#,
+            r#"(assert (xyz.note note:1 tags: '("math" "engines" "looms")))
+               (assert (xyz.note note:2 tags: '("math")))
+               (assert (xyz.note note:3 tags: ["math" "engines"]))
+               (assert (xyz.note note:4 about: {tags: '("math" {by: "Ada"})}))"#,
         )
         .await?;
     let one = r#"(xyz.note note:1 tags: ["math" "engines" "looms"])"#;
@@ -1188,7 +1188,7 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
     // quoted, a `( )` where a value stands is refused, with what to
     // write.
     notebook
-        .submit("(assert! (xyz.note note:5 tags: '(:open :done)))")
+        .submit("(assert (xyz.note note:5 tags: '(:open :done)))")
         .await?;
     assert_eq!(
         report(&mut notebook, "(query (xyz.note ?n tags: '(:open ...)))").await?,
@@ -1209,7 +1209,7 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
 async fn it_holds_a_symbol_with_no_domain_as_a_value_and_not_as_an_attribute() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
-        .submit("(assert! (xyz.form form:1 head: /todo op: /+ var: /?x))")
+        .submit("(assert (xyz.form form:1 head: /todo op: /+ var: /?x))")
         .await?;
     assert_eq!(
         report(
@@ -1221,7 +1221,7 @@ async fn it_holds_a_symbol_with_no_domain_as_a_value_and_not_as_an_attribute() -
     );
 
     let claim = notebook
-        .submit(r#"(assert! (xyz.form form:1 /text: "x"))"#)
+        .submit(r#"(assert (xyz.form form:1 /text: "x"))"#)
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(matches!(claim, Err(Ok(Error::Refused(_)))));
@@ -1240,7 +1240,7 @@ async fn it_refuses_and_says_what_is_not_supported() -> Result<()> {
 
     // A write through a concept says every field.
     let partial = notebook
-        .submit("(rule (assert! (todo ?t state: :done)) (finish (todo ?t)))")
+        .submit("(rule (assert (todo ?t state: :done)) (finish (todo ?t)))")
         .await;
     assert!(matches!(why(partial), Err(Ok(Error::Refused(_)))));
 

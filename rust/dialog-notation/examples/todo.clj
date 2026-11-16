@@ -13,12 +13,12 @@
 ; whatever some rule reads.
 
 ; Adding a to-do opens it.
-(rule (assert! (todo ?t list: ?l text: ?x state: :open))
+(rule (assert (todo ?t list: ?l text: ?x state: :open))
   (add (todo ?t list: ?l text: ?x)))
 
 ; A write says every field, so one that changes the state alone writes
 ; the relation, not the concept.
-(rule (assert! (xyz.todo ?t state: (:last (:entity :done))))
+(rule (assert (xyz.todo ?t state: (:last (:entity :done))))
   (complete (todo ?t)))
 
 ; A rule may issue a command, which is read in the round after.
