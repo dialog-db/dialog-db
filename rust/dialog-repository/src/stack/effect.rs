@@ -313,7 +313,11 @@ impl Provider {
     /// is not added again.
     pub fn also(mut self, concept: &ConceptDescriptor) -> Self {
         let shape = Shape::of(concept);
-        if !self.concepts.iter().any(|held| held.concept == shape.concept) {
+        if !self
+            .concepts
+            .iter()
+            .any(|held| held.concept == shape.concept)
+        {
             self.concepts.push(shape);
         }
         self

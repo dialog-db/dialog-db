@@ -5771,7 +5771,8 @@ mod tests {
                         name.to_string(),
                         dialog_query::AttributeDescriptor::new(
                             QueryRelation::from(
-                                the.parse::<dialog_corpus::Relation>().expect("an attribute"),
+                                the.parse::<dialog_corpus::Relation>()
+                                    .expect("an attribute"),
                             ),
                             "",
                             Cardinality::One,
@@ -5829,7 +5830,8 @@ mod tests {
         let mut changes = Changes::new();
         for (the, is) in rows {
             changes.associate(
-                the.parse::<dialog_corpus::Relation>().expect("an attribute"),
+                the.parse::<dialog_corpus::Relation>()
+                    .expect("an attribute"),
                 of.clone(),
                 is.clone(),
                 dialog_corpus::Pick::Last,
@@ -5868,19 +5870,25 @@ mod tests {
         ))?;
         let command: Entity = "cmd:1".parse()?;
         let rows = [
-            ("test.event/time-stamp", dialog_corpus::Value::UnsignedInt(7)),
+            (
+                "test.event/time-stamp",
+                dialog_corpus::Value::UnsignedInt(7),
+            ),
             (
                 "test.pause/repository",
                 dialog_corpus::Value::String("repo".into()),
             ),
         ];
-        assert!(!crate::Provider::new(&invite_concept(), |_| async { Ok(Changes::new()) })
-            .claims(&[dialog_corpus::Fact {
-                the: "test.event/time-stamp".parse()?,
-                of: command.clone(),
-                is: dialog_corpus::Value::UnsignedInt(7),
-                cause: None,
-            }]));
+        assert!(
+            !crate::Provider::new(&invite_concept(), |_| async { Ok(Changes::new()) }).claims(&[
+                dialog_corpus::Fact {
+                    the: "test.event/time-stamp".parse()?,
+                    of: command.clone(),
+                    is: dialog_corpus::Value::UnsignedInt(7),
+                    cause: None,
+                }
+            ])
+        );
 
         let report = stack
             .invoke(command_rows("cmd:1", &rows))
@@ -5930,7 +5938,10 @@ mod tests {
             .invoke(command_rows(
                 "cmd:1",
                 &[
-                    ("test.event/time-stamp", dialog_corpus::Value::UnsignedInt(7)),
+                    (
+                        "test.event/time-stamp",
+                        dialog_corpus::Value::UnsignedInt(7),
+                    ),
                     (
                         "test.invite/space",
                         dialog_corpus::Value::Entity("space:1".parse()?),
@@ -5997,12 +6008,18 @@ mod tests {
         let report = stack
             .invoke(command_rows(
                 "cmd:1",
-                &[("test.event/time-stamp", dialog_corpus::Value::UnsignedInt(7))],
+                &[(
+                    "test.event/time-stamp",
+                    dialog_corpus::Value::UnsignedInt(7),
+                )],
             ))
             .invoke(command_rows(
                 "cmd:2",
                 &[
-                    ("test.event/time-stamp", dialog_corpus::Value::UnsignedInt(7)),
+                    (
+                        "test.event/time-stamp",
+                        dialog_corpus::Value::UnsignedInt(7),
+                    ),
                     (
                         "test.pause/repository",
                         dialog_corpus::Value::Entity("repo:1".parse()?),
@@ -6063,7 +6080,10 @@ mod tests {
             .invoke(command_rows(
                 "cmd:1",
                 &[
-                    ("test.event/time-stamp", dialog_corpus::Value::UnsignedInt(7)),
+                    (
+                        "test.event/time-stamp",
+                        dialog_corpus::Value::UnsignedInt(7),
+                    ),
                     (
                         "test.invite/space",
                         dialog_corpus::Value::Entity("space:1".parse()?),
@@ -6089,7 +6109,10 @@ mod tests {
             .invoke(command_rows(
                 "cmd:2",
                 &[
-                    ("test.event/time-stamp", dialog_corpus::Value::UnsignedInt(8)),
+                    (
+                        "test.event/time-stamp",
+                        dialog_corpus::Value::UnsignedInt(8),
+                    ),
                     (
                         "test.pause/repository",
                         dialog_corpus::Value::String("repo".into()),
@@ -6190,7 +6213,10 @@ mod tests {
             .perform(&operator)
             .await?;
         assert!(report.commands().is_empty(), "the tick row is no command");
-        assert_eq!(cells_of(report.tick()), vec!["control: test.session/client"]);
+        assert_eq!(
+            cells_of(report.tick()),
+            vec!["control: test.session/client"]
+        );
         let effect = report.effect();
         assert!(effect.is_empty(), "nothing to perform");
         let revision = report.revision().clone();
