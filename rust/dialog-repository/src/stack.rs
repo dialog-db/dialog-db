@@ -855,6 +855,7 @@ mod tests {
     use dialog_query::attribute::statement::AttributeStatement;
     use dialog_query::query::Output as _;
     use dialog_query::types::Scalar;
+    use dialog_query::types::Type as ValueType;
     use dialog_query::{AttributeQuery, InductiveRule, Term};
     #[cfg(any(feature = "integration-tests", feature = "web-integration-tests"))]
     use dialog_remote_s3::helpers::S3Address;
@@ -5760,9 +5761,7 @@ mod tests {
 
     /// A concept of the named attributes `fields`, each required and of
     /// the type it names, if any.
-    fn concept_with(
-        fields: &[(&str, &str, Option<dialog_query::types::Type>)],
-    ) -> dialog_query::ConceptDescriptor {
+    fn concept_with(fields: &[(&str, &str, Option<ValueType>)]) -> dialog_query::ConceptDescriptor {
         dialog_query::ConceptDescriptor::try_from(
             fields
                 .iter()
@@ -5801,7 +5800,7 @@ mod tests {
             (
                 "repository",
                 "test.pause/repository",
-                Some(dialog_query::types::Type::String),
+                Some(ValueType::String),
             ),
         ])
     }
@@ -5812,7 +5811,7 @@ mod tests {
         concept: &dialog_query::ConceptDescriptor,
         name: &'static str,
         runs: Arc<AtomicU32>,
-        order: Arc<parking_lot::Mutex<Vec<&'static str>>>,
+        order: Arc<Mutex<Vec<&'static str>>>,
     ) -> crate::Provider {
         crate::Provider::new(concept, move |_| {
             let (runs, order) = (runs.clone(), order.clone());
@@ -5855,7 +5854,7 @@ mod tests {
         let stack = branch.stack().perform(&operator).await?;
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let (invites, pauses) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
-        let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let order = Arc::new(Mutex::new(Vec::new()));
         stack.provide(counting(
             &invite_concept(),
             "invite",
@@ -5919,7 +5918,7 @@ mod tests {
         let stack = branch.stack().perform(&operator).await?;
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let (invites, pauses) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
-        let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let order = Arc::new(Mutex::new(Vec::new()));
         stack.provide(counting(
             &pause_concept(),
             "pause",
@@ -5990,7 +5989,7 @@ mod tests {
         let stack = branch.stack().perform(&operator).await?;
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let (invites, pauses) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
-        let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let order = Arc::new(Mutex::new(Vec::new()));
         stack.provide(counting(
             &invite_concept(),
             "invite",
@@ -6063,7 +6062,7 @@ mod tests {
         let stack = branch.stack().perform(&operator).await?;
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let runs = Arc::new(AtomicU32::new(0));
-        let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let order = Arc::new(Mutex::new(Vec::new()));
         stack.provide(
             counting(&invite_concept(), "invite", runs.clone(), order.clone())
                 .also(&pause_concept()),
@@ -6145,7 +6144,7 @@ mod tests {
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let control = crate::control_layer();
         let client: Entity = "client:tab-7".parse()?;
-        let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
         let saw = seen.clone();
         stack.provide(crate::Provider::new(&fetch_concept(), move |command| {
             let saw = saw.clone();
@@ -6200,7 +6199,7 @@ mod tests {
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let control = crate::control_layer();
         let runs = Arc::new(AtomicU32::new(0));
-        let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let order = Arc::new(Mutex::new(Vec::new()));
         stack.provide(counting(&fetch_concept(), "fetch", runs.clone(), order))?;
 
         let report = stack
