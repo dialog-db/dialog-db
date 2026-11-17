@@ -35,6 +35,7 @@ use dialog_search_tree::DialogSearchTreeError;
 use dialog_search_tree::Manifest;
 use futures_util::future::try_join_all;
 use futures_util::{StreamExt, TryStreamExt as _, stream};
+use std::future::Future;
 use std::sync::OnceLock;
 use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::OnceCell;
@@ -1229,245 +1230,255 @@ impl<'a> QueryEnv<'a> {
     /// with the layer it reads, for a read that binds each row's layer
     /// ([`SelectIn`]); answered [`Bare`], the read names no layer and
     /// pays nothing for one, per stream or per row.
-    async fn select<A: Answer<'a>>(
+    ///
+    /// An `async move` block, not an `async fn`: the body of an `async
+    /// fn` holds an argument it takes by value twice, as the argument
+    /// and as the local it is moved into, and `input` is 304 bytes. The
+    /// future is boxed per scan, a scan is issued per row of a join,
+    /// and the block holds `input` once.
+    #[allow(clippy::manual_async_fn)]
+    fn select<A: Answer<'a>>(
         &self,
         input: Selector<Constrained>,
-    ) -> Result<A::Out, DialogCorpusError> {
-        if input.attribute() == Some(&*QUARANTINED) {
-            let rows = Box::pin(self.select_quarantined(input)).await?;
-            return Ok(A::rows(rows));
-        }
-        let format = self.format().await?;
-        let manifest = format.manifest.clone();
-        self.record_demand(&input, &manifest);
-        let wanted = input.layer().cloned();
-        let named = A::NAMED || wanted.is_some();
-        let mut sessions: Vec<FactStream<'a>> = Vec::new();
-        let mut staged: Vec<FactStream<'a>> = Vec::new();
-        let mut lines: Vec<FactStream<'a>> = Vec::with_capacity(self.sources.len());
-        let mut changes: Vec<FactStream<'a>> = Vec::new();
-        // The layer of every stream, by the group the stream goes in:
-        // empty unless the read names them.
-        let mut layers: Vec<(Group, Entity)> = Vec::new();
-        // The layer a stream reads, when the read asks for it, and
-        // whether the read takes the stream: every stream, unless the
-        // read names one layer.
-        let layer = |of: &dyn Fn() -> Entity| -> Option<Option<Entity>> {
-            if !named {
-                return Some(None);
+    ) -> impl Future<Output = Result<A::Out, DialogCorpusError>> + ConditionalSend + '_ {
+        async move {
+            if input.attribute() == Some(&*QUARANTINED) {
+                let rows = Box::pin(self.select_quarantined(input)).await?;
+                return Ok(A::rows(rows));
             }
-            let layer = of();
-            match &wanted {
-                Some(wanted) if *wanted != layer => None,
-                _ => Some(Some(layer)),
-            }
-        };
-
-        // The choosing writes this read meets, settled cell by cell:
-        // the line's claims they succeed, or succeed and write back, are
-        // hidden from every line, and the values the cells already held
-        // are hidden from the layers' own rows, as the commit would
-        // write nothing for them.
-        // Settled only when a staged layer has a choosing write: a read
-        // that meets none takes nothing from the settlement, and does
-        // not enter it.
-        let settled = if self.layers().iter().any(Staged::has_successions) {
-            self.settle_within(&input).await?
-        } else {
-            Vec::new()
-        };
-        let succeeded: Vec<&Fact> = settled
-            .iter()
-            .flat_map(|(_, cells)| {
-                cells
-                    .iter()
-                    .flat_map(|cell| cell.succeeded.iter().chain(cell.replaced.iter()))
-            })
-            .collect();
-        let hidden_in = |line: &Manifest| -> Arc<HashSet<SortKey>> {
-            Arc::new(succeeded.iter().map(|fact| sort_key(fact, line)).collect())
-        };
-
-        // Line streams — each filtered by tombstones from the
-        // overlay's retracts so a `tx.retract(x)` (or any user-asserted
-        // retract in `with(..)`) suppresses matching source facts, and
-        // by the line's session tombstones. Each line's stream is
-        // filtered with the tombstones keyed under its own manifest, and
-        // borrows only `self.env`.
-        for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
-            let Some(layer) = layer(&|| self.line_layer(index)) else {
-                continue;
+            let format = self.format().await?;
+            let manifest = format.manifest.clone();
+            self.record_demand(&input, &manifest);
+            let wanted = input.layer().cloned();
+            let named = A::NAMED || wanted.is_some();
+            let mut sessions: Vec<FactStream<'a>> = Vec::new();
+            let mut staged: Vec<FactStream<'a>> = Vec::new();
+            let mut lines: Vec<FactStream<'a>> = Vec::with_capacity(self.sources.len());
+            let mut changes: Vec<FactStream<'a>> = Vec::new();
+            // The layer of every stream, by the group the stream goes in:
+            // empty unless the read names them.
+            let mut layers: Vec<(Group, Entity)> = Vec::new();
+            // The layer a stream reads, when the read asks for it, and
+            // whether the read takes the stream: every stream, unless the
+            // read names one layer.
+            let layer = |of: &dyn Fn() -> Entity| -> Option<Option<Entity>> {
+                if !named {
+                    return Some(None);
+                }
+                let layer = of();
+                match &wanted {
+                    Some(wanted) if *wanted != layer => None,
+                    _ => Some(Some(layer)),
+                }
             };
-            let raw = select_from_source(source, self.env, input.clone()).await?;
-            let mut hidden = line.tombstones.within(&input);
-            if !succeeded.is_empty() {
-                hidden = hidden.facts(hidden_in(&line.manifest));
-            }
-            lines.push(filter_hidden(raw, hidden, line.manifest.clone()));
-            layers.extend(layer.map(|layer| (Group::Lines, layer)));
-        }
 
-        // Each line's session overlay, read live. Filtered by the
-        // staged retracts only: the overlay's own tombstones hide facts
-        // *beneath* it, never its own. Pushed only when it has rows,
-        // for the same reason the per-query stream is below. An
-        // overlay row is the newest fact of its cell: it stands past
-        // the edition the next commit mints, above every committed row
-        // and every staged write, so a read elects it under `last` and
-        // ranks it with the rest under any other pick, until the
-        // session takes it back.
-        // The edition the next commit mints, found only for a read that
-        // meets an overlay or staged row: it reads the first line's
-        // revision.
-        let minted = Cell::new(None);
-        let pending = || {
-            minted.get().unwrap_or_else(|| {
-                let edition = self.pending_edition();
-                minted.set(Some(edition));
-                edition
-            })
-        };
-        // Past every line's head, not only the first's: a join reads
-        // lines of different lengths, and an overlay row is newer than
-        // every committed row of every line it is read beside. Found
-        // only for a read that meets an overlay row, since it reads
-        // every line's revision.
-        // One window for every in-memory store this read meets, so the
-        // key range is built once, and not at all when they are empty.
-        let window = Window::new(&input);
-        let mut session = None;
-        let newest = || {
-            self.sources
+            // The choosing writes this read meets, settled cell by cell:
+            // the line's claims they succeed, or succeed and write back, are
+            // hidden from every line, and the values the cells already held
+            // are hidden from the layers' own rows, as the commit would
+            // write nothing for them.
+            // Settled only when a staged layer has a choosing write: a read
+            // that meets none takes nothing from the settlement, and does
+            // not enter it.
+            let settled = if self.layers().iter().any(Staged::has_successions) {
+                self.settle_within(&input).await?
+            } else {
+                Vec::new()
+            };
+            let succeeded: Vec<&Fact> = settled
                 .iter()
-                .filter_map(|source| source.revision())
-                .map(|revision| revision.edition.successor())
-                .fold(pending(), |newest, edition| newest.max(edition))
-                .successor()
-        };
-        for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
-            let Some(layer) = layer(&|| self.overlay_layer(index)) else {
-                continue;
-            };
-            let rows = source.overlay().select_within(&window, &line.manifest);
-            if rows.is_empty() {
-                continue;
-            }
-            let session = *session.get_or_insert_with(newest);
-            let rows: FactStream<'a> = Box::pin(stream::iter(
-                rows.into_iter()
-                    .map(move |fact| Ok(FactView::pending(fact, session))),
-            ));
-            sessions.push(filter_hidden(
-                rows,
-                line.staged.clone(),
-                line.manifest.clone(),
-            ));
-            layers.extend(layer.map(|layer| (Group::Sessions, layer)));
-        }
-
-        // Each memory layer, read live and filtered the same way: a
-        // layer's own tombstones hide facts beneath it, never its own. Its
-        // rows stand where a session overlay's do.
-        for (name, memory) in self.memories() {
-            let Some(layer) = layer(&|| name.clone()) else {
-                continue;
-            };
-            let rows = memory.select_within(&window, &manifest);
-            if rows.is_empty() {
-                continue;
-            }
-            let session = *session.get_or_insert_with(newest);
-            let rows: FactStream<'a> = Box::pin(stream::iter(
-                rows.into_iter()
-                    .map(move |fact| Ok(FactView::pending(fact, session))),
-            ));
-            sessions.push(filter_hidden(rows, format.staged.clone(), manifest.clone()));
-            layers.extend(layer.map(|layer| (Group::Sessions, layer)));
-        }
-
-        // Overlay stream — the per-query changes, read in the lines'
-        // format so the rows order as the tree's own. The overlay always
-        // carries facts (session metadata at minimum), but MATCHES the
-        // typical fact selector rarely: a join's inner premise probes one
-        // entity per outer binding, and pushing an empty overlay stream
-        // anyway forced the k-way merge (and its per-row sort keys) on
-        // every one of those probes. Push the overlay's materialized
-        // result only when it has rows, so the single-source common case
-        // flows through `merge_grouped`'s passthrough arm.
-        if let Some(layer) = layer(&session_layer) {
-            let overlay = self.overlay.select_within(&window, &manifest);
-            if !overlay.is_empty() {
-                changes.push(Box::pin(stream::iter(
-                    overlay.into_iter().map(|fact| Ok(fact.into())),
-                )));
-                layers.extend(layer.map(|layer| (Group::Changes, layer)));
-            }
-        }
-
-        // Staged layers — a range read each, in the lines' format, and
-        // pushed only when they have rows, for the same reason. A staged
-        // row is a write the transaction will commit, so it stands at
-        // the edition that commit mints, equal to every other write of
-        // the transaction: a read over the transaction elects as a read
-        // after the commit will.
-        for (index, store) in self.layers().iter().enumerate() {
-            let Some(layer) = layer(&|| store.layer().cloned().unwrap_or_else(memory_layer)) else {
-                continue;
-            };
-            let rows = store.select_within(&window, &manifest);
-            if rows.is_empty() {
-                continue;
-            }
-            let held: HashSet<SortKey> = settled
-                .iter()
-                .filter(|(settled_index, _)| *settled_index == index)
-                .flat_map(|(_, cells)| cells.iter())
-                .flat_map(|cell| cell.held.iter().chain(cell.succeeded.iter()))
-                .map(|fact| sort_key(fact, &manifest))
+                .flat_map(|(_, cells)| {
+                    cells
+                        .iter()
+                        .flat_map(|cell| cell.succeeded.iter().chain(cell.replaced.iter()))
+                })
                 .collect();
-            let pending = pending();
-            let rows: FactStream<'a> = Box::pin(stream::iter(
-                rows.into_iter()
-                    .map(move |fact| Ok(FactView::pending(fact, pending))),
-            ));
-            if held.is_empty() {
-                staged.push(rows);
-            } else {
-                staged.push(filter_hidden(
-                    rows,
-                    Hidden::default().facts(Arc::new(held)),
-                    manifest.clone(),
-                ));
-            }
-            layers.extend(layer.map(|layer| (Group::Staged, layer)));
-        }
-
-        // Most reads meet the lines alone, and take their streams as
-        // they are.
-        let streams: Vec<FactStream<'a>> =
-            if sessions.is_empty() && staged.is_empty() && changes.is_empty() {
-                lines
-            } else {
-                sessions
-                    .into_iter()
-                    .chain(staged)
-                    .chain(lines)
-                    .chain(changes)
-                    .collect()
+            let hidden_in = |line: &Manifest| -> Arc<HashSet<SortKey>> {
+                Arc::new(succeeded.iter().map(|fact| sort_key(fact, line)).collect())
             };
-        if !A::NAMED {
-            return Ok(A::rows(merge_grouped(streams, manifest, format.keys)));
+
+            // Line streams — each filtered by tombstones from the
+            // overlay's retracts so a `tx.retract(x)` (or any user-asserted
+            // retract in `with(..)`) suppresses matching source facts, and
+            // by the line's session tombstones. Each line's stream is
+            // filtered with the tombstones keyed under its own manifest, and
+            // borrows only `self.env`.
+            for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
+                let Some(layer) = layer(&|| self.line_layer(index)) else {
+                    continue;
+                };
+                let raw = select_from_source(source, self.env, input.clone()).await?;
+                let mut hidden = line.tombstones.within(&input);
+                if !succeeded.is_empty() {
+                    hidden = hidden.facts(hidden_in(&line.manifest));
+                }
+                lines.push(filter_hidden(raw, hidden, line.manifest.clone()));
+                layers.extend(layer.map(|layer| (Group::Lines, layer)));
+            }
+
+            // Each line's session overlay, read live. Filtered by the
+            // staged retracts only: the overlay's own tombstones hide facts
+            // *beneath* it, never its own. Pushed only when it has rows,
+            // for the same reason the per-query stream is below. An
+            // overlay row is the newest fact of its cell: it stands past
+            // the edition the next commit mints, above every committed row
+            // and every staged write, so a read elects it under `last` and
+            // ranks it with the rest under any other pick, until the
+            // session takes it back.
+            // The edition the next commit mints, found only for a read that
+            // meets an overlay or staged row: it reads the first line's
+            // revision.
+            let minted = Cell::new(None);
+            let pending = || {
+                minted.get().unwrap_or_else(|| {
+                    let edition = self.pending_edition();
+                    minted.set(Some(edition));
+                    edition
+                })
+            };
+            // Past every line's head, not only the first's: a join reads
+            // lines of different lengths, and an overlay row is newer than
+            // every committed row of every line it is read beside. Found
+            // only for a read that meets an overlay row, since it reads
+            // every line's revision.
+            // One window for every in-memory store this read meets, so the
+            // key range is built once, and not at all when they are empty.
+            let window = Window::new(&input);
+            let mut session = None;
+            let newest = || {
+                self.sources
+                    .iter()
+                    .filter_map(|source| source.revision())
+                    .map(|revision| revision.edition.successor())
+                    .fold(pending(), |newest, edition| newest.max(edition))
+                    .successor()
+            };
+            for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
+                let Some(layer) = layer(&|| self.overlay_layer(index)) else {
+                    continue;
+                };
+                let rows = source.overlay().select_within(&window, &line.manifest);
+                if rows.is_empty() {
+                    continue;
+                }
+                let session = *session.get_or_insert_with(newest);
+                let rows: FactStream<'a> = Box::pin(stream::iter(
+                    rows.into_iter()
+                        .map(move |fact| Ok(FactView::pending(fact, session))),
+                ));
+                sessions.push(filter_hidden(
+                    rows,
+                    line.staged.clone(),
+                    line.manifest.clone(),
+                ));
+                layers.extend(layer.map(|layer| (Group::Sessions, layer)));
+            }
+
+            // Each memory layer, read live and filtered the same way: a
+            // layer's own tombstones hide facts beneath it, never its own. Its
+            // rows stand where a session overlay's do.
+            for (name, memory) in self.memories() {
+                let Some(layer) = layer(&|| name.clone()) else {
+                    continue;
+                };
+                let rows = memory.select_within(&window, &manifest);
+                if rows.is_empty() {
+                    continue;
+                }
+                let session = *session.get_or_insert_with(newest);
+                let rows: FactStream<'a> = Box::pin(stream::iter(
+                    rows.into_iter()
+                        .map(move |fact| Ok(FactView::pending(fact, session))),
+                ));
+                sessions.push(filter_hidden(rows, format.staged.clone(), manifest.clone()));
+                layers.extend(layer.map(|layer| (Group::Sessions, layer)));
+            }
+
+            // Overlay stream — the per-query changes, read in the lines'
+            // format so the rows order as the tree's own. The overlay always
+            // carries facts (session metadata at minimum), but MATCHES the
+            // typical fact selector rarely: a join's inner premise probes one
+            // entity per outer binding, and pushing an empty overlay stream
+            // anyway forced the k-way merge (and its per-row sort keys) on
+            // every one of those probes. Push the overlay's materialized
+            // result only when it has rows, so the single-source common case
+            // flows through `merge_grouped`'s passthrough arm.
+            if let Some(layer) = layer(&session_layer) {
+                let overlay = self.overlay.select_within(&window, &manifest);
+                if !overlay.is_empty() {
+                    changes.push(Box::pin(stream::iter(
+                        overlay.into_iter().map(|fact| Ok(fact.into())),
+                    )));
+                    layers.extend(layer.map(|layer| (Group::Changes, layer)));
+                }
+            }
+
+            // Staged layers — a range read each, in the lines' format, and
+            // pushed only when they have rows, for the same reason. A staged
+            // row is a write the transaction will commit, so it stands at
+            // the edition that commit mints, equal to every other write of
+            // the transaction: a read over the transaction elects as a read
+            // after the commit will.
+            for (index, store) in self.layers().iter().enumerate() {
+                let Some(layer) = layer(&|| store.layer().cloned().unwrap_or_else(memory_layer))
+                else {
+                    continue;
+                };
+                let rows = store.select_within(&window, &manifest);
+                if rows.is_empty() {
+                    continue;
+                }
+                let held: HashSet<SortKey> = settled
+                    .iter()
+                    .filter(|(settled_index, _)| *settled_index == index)
+                    .flat_map(|(_, cells)| cells.iter())
+                    .flat_map(|cell| cell.held.iter().chain(cell.succeeded.iter()))
+                    .map(|fact| sort_key(fact, &manifest))
+                    .collect();
+                let pending = pending();
+                let rows: FactStream<'a> = Box::pin(stream::iter(
+                    rows.into_iter()
+                        .map(move |fact| Ok(FactView::pending(fact, pending))),
+                ));
+                if held.is_empty() {
+                    staged.push(rows);
+                } else {
+                    staged.push(filter_hidden(
+                        rows,
+                        Hidden::default().facts(Arc::new(held)),
+                        manifest.clone(),
+                    ));
+                }
+                layers.extend(layer.map(|layer| (Group::Staged, layer)));
+            }
+
+            // Most reads meet the lines alone, and take their streams as
+            // they are.
+            let streams: Vec<FactStream<'a>> =
+                if sessions.is_empty() && staged.is_empty() && changes.is_empty() {
+                    lines
+                } else {
+                    sessions
+                        .into_iter()
+                        .chain(staged)
+                        .chain(lines)
+                        .chain(changes)
+                        .collect()
+                };
+            if !A::NAMED {
+                return Ok(A::rows(merge_grouped(streams, manifest, format.keys)));
+            }
+            // The layers in the streams' order: the groups are gathered in
+            // another order than they are merged in.
+            layers.sort_by_key(|(group, _)| *group);
+            let layers = layers.into_iter().map(|(_, layer)| layer).collect();
+            Ok(A::layered(Reads {
+                streams,
+                layers,
+                manifest,
+                keys: format.keys,
+            }))
         }
-        // The layers in the streams' order: the groups are gathered in
-        // another order than they are merged in.
-        layers.sort_by_key(|(group, _)| *group);
-        let layers = layers.into_iter().map(|(_, layer)| layer).collect();
-        Ok(A::layered(Reads {
-            streams,
-            layers,
-            manifest,
-            keys: format.keys,
-        }))
     }
 }
 
