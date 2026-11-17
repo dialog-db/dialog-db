@@ -508,37 +508,31 @@ impl ConceptQuery {
     where
         Env: crate::Scope<'a>,
     {
-        let picking = self.picking();
+        // The read of a concept of one field that picks is its own boxed
+        // stream, entered through a pointer: held inline, its state would
+        // be part of every concept read's, picking or not.
+        let picking = self.predicate.picked_relation().is_some();
+        let asked = picking.then(|| self.clone());
         let app = self.canonical();
         let this = app.terms.get("this").cloned();
 
         try_stream! {
             let mut selection = selection;
+            if let Some(asked) = asked {
+                match Box::pin(asked.picked(selection, env)).await? {
+                    Picked::Answered(mut rows) => {
+                        while let Some(row) = rows.next().await {
+                            yield row?;
+                        }
+                        return;
+                    }
+                    Picked::Declined(rows) => selection = rows,
+                }
+            }
             let Some(first) = selection.next().await else {
                 return;
             };
             let first = first?;
-
-            // A concept of one field that picks, over a relation rules
-            // derive outside any cycle: the relation's candidates are
-            // gathered as a read of it gathers them, and the pick
-            // chooses among them per entity. The selecting rule that
-            // folds the field answers the same, through a rule and a
-            // fold more.
-            if let Some((relation, ranking)) = picking {
-                let rules =
-                    Provider::<SelectRules>::execute(env, relation.predicate.clone()).await?;
-                if !rules.installed().is_empty()
-                    && rules.recursion().is_none()
-                    && rules.reducing().next().is_none()
-                {
-                    let rows = stream::iter([Ok(first)]).chain(selection);
-                    for await row in relation.relation(rules, Vec::new(), Some(ranking), rows, env) {
-                        yield row?;
-                    }
-                    return;
-                }
-            }
 
             let rules = Provider::<SelectRules>::execute(env, app.predicate.clone()).await?;
             // An attribute concept read with its entity free is a merge
@@ -1173,6 +1167,39 @@ impl ConceptQuery {
         }
     }
 
+    /// The read of a concept of one field that picks, over a relation
+    /// rules derive outside any cycle: the relation's candidates are
+    /// gathered as a read of it gathers them, and the pick chooses
+    /// among them per entity. The selecting rule that folds the field
+    /// answers the same, through a rule and a fold more. Declined, the
+    /// rows are handed back for the concept's own rules to answer.
+    async fn picked<'a, Env>(
+        self,
+        selection: Pin<Box<dyn Selection + 'a>>,
+        env: &'a Env,
+    ) -> Result<Picked<'a>, EvaluationError>
+    where
+        Env: crate::Scope<'a>,
+    {
+        let Some((relation, ranking)) = self.picking() else {
+            return Ok(Picked::Declined(selection));
+        };
+        let rules = Provider::<SelectRules>::execute(env, relation.predicate.clone()).await?;
+        if rules.installed().is_empty()
+            || rules.recursion().is_some()
+            || rules.reducing().next().is_some()
+        {
+            return Ok(Picked::Declined(selection));
+        }
+        Ok(Picked::Answered(Box::pin(relation.relation(
+            rules,
+            Vec::new(),
+            Some(ranking),
+            selection,
+            env,
+        ))))
+    }
+
     /// When this query reads a concept of one required field that
     /// picks: the read of the field's relation, every claim of it, with
     /// the caller's terms re-keyed onto the relation's operands, and
@@ -1304,6 +1331,14 @@ fn merge_candidate(
         merged.cite_variable_standing(name, standing);
     }
     Ok(Some(merged))
+}
+
+/// What became of a read of a concept of one field that picks.
+enum Picked<'a> {
+    /// The relation's candidates answer it: the rows.
+    Answered(Pin<Box<dyn Selection + 'a>>),
+    /// The concept's own rules answer it: the input, as it came.
+    Declined(Pin<Box<dyn Selection + 'a>>),
 }
 
 /// One value a source offers for an attribute of an entity.
