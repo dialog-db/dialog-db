@@ -94,8 +94,10 @@ What this changes for you:
   the wire, `Attribution::layer`, and `Statement::at` are new. `Claim`
   is unchanged: the layer a row was read from is the match's `in`
   binding, bound only when the scan names `in:`. `AttributeQuery::with_layer` reads a layer by a term.
-  `Selector::in_layer` and `FactView::layer` carry the layer through a
-  store that reads several.
+  `Selector::in_layer` reads one layer of a store that reads several,
+  and `SelectIn` reads every row with the layer it came from, for a
+  scan that binds `in`; a `Select` reads the rows bare, as before, and
+  a `FactView` carries no layer.
 - `Changes` keeps writes into layers apart (`associate_in`,
   `dissociate_in`, `take_shares`, `iter_in`, `into_layer`), serialized
   under an `in` key beside `facts` and `assets`. `into_instructions`

@@ -26,12 +26,14 @@
 //!   suppress facts in the underlying branch view.
 
 use std::collections::HashSet;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use dialog_common::ConditionalSend;
 use dialog_corpus::selector::Constrained;
-use dialog_corpus::{Cause, FactStream, FactView, Selector, SortKey, sort_key};
+use dialog_corpus::{Cause, DialogCorpusError, FactStream, FactView, Selector, SortKey, sort_key};
 use dialog_search_tree::Manifest;
-use futures_util::{StreamExt, stream};
+use futures_util::{Stream, StreamExt, stream};
 
 /// Merge sorted fact streams into one stream whose order matches
 /// what a single physical probabilistic search tree containing every input would
@@ -103,10 +105,54 @@ pub(crate) fn merge_grouped<'a>(
         // the dedup pass would be pure overhead. Pass through unchanged.
         return streams.into_iter().next().expect("len == 1");
     }
+    Box::pin(merged(streams, manifest, keys, |view, _| view))
+}
 
-    let mut streams = streams;
+/// [`merge_grouped`], with each row paired with the index of the input
+/// it came from: what a read that binds each row's layer merges by,
+/// each input being one layer's rows. A claim held by more than one
+/// input comes out once, from the first input holding it.
+pub(crate) fn merge_grouped_in<'a>(
+    streams: Vec<FactStream<'a>>,
+    manifest: Manifest,
+    keys: MergeKeys,
+) -> IndexedStream<'a> {
+    if streams.is_empty() {
+        return Box::pin(stream::empty());
+    }
+    if streams.len() == 1 {
+        let rows = streams.into_iter().next().expect("len == 1");
+        return Box::pin(rows.map(|row| row.map(|view| (view, 0))));
+    }
+    Box::pin(merged(streams, manifest, keys, |view, index| (view, index)))
+}
 
-    Box::pin(async_stream::try_stream! {
+/// A boxed stream of rows, each with the index of the input it came
+/// from: what [`merge_grouped_in`] yields.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type IndexedStream<'a> =
+    Pin<Box<dyn Stream<Item = Result<(FactView, usize), DialogCorpusError>> + Send + 'a>>;
+
+/// A boxed stream of rows, each with the index of the input it came
+/// from: what [`merge_grouped_in`] yields.
+#[cfg(target_arch = "wasm32")]
+pub(crate) type IndexedStream<'a> =
+    Pin<Box<dyn Stream<Item = Result<(FactView, usize), DialogCorpusError>> + 'a>>;
+
+/// The k-way merge behind [`merge_grouped`] and [`merge_grouped_in`],
+/// over two or more inputs; `emit` makes each yielded row from the
+/// winning head and the index of the input it was read from.
+fn merged<'a, Row, Emit>(
+    mut streams: Vec<FactStream<'a>>,
+    manifest: Manifest,
+    keys: MergeKeys,
+    emit: Emit,
+) -> impl Stream<Item = Result<Row, DialogCorpusError>> + ConditionalSend + 'a
+where
+    Row: ConditionalSend + 'a,
+    Emit: Fn(FactView, usize) -> Row + ConditionalSend + 'a,
+{
+    async_stream::try_stream! {
         // One head slot per input: the stream's current front row paired
         // with its sort key, computed ONCE per row as the slot fills. The
         // minimum-head scan below compares slots by reference and the
@@ -169,10 +215,10 @@ pub(crate) fn merge_grouped<'a>(
             // Within the (the, of) run the value tail + cause identify the
             // claim, so the fingerprint needs only those.
             if seen.insert((tail, view.cause().cloned())) {
-                yield view;
+                yield emit(view, idx);
             }
         }
-    })
+    }
 }
 
 /// Where [`merge_grouped`] reads each row's [`SortKey`] from.

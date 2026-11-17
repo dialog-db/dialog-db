@@ -15,7 +15,7 @@
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::tree::CorpusNode;
-use dialog_corpus::{Estimate, Preload, Select};
+use dialog_corpus::{Estimate, Preload, Select, SelectIn};
 use dialog_effects::{archive, blob};
 use dialog_search_tree::nodes;
 
@@ -29,6 +29,7 @@ use crate::source::SelectRules;
 /// to keep.
 pub trait Scope<'a>:
     Provider<Select<'a>>
+    + Provider<SelectIn<'a>>
     + Provider<SelectRules>
     + Provider<archive::Load>
     + Provider<nodes::Read<CorpusNode>>
@@ -45,6 +46,7 @@ pub trait Scope<'a>:
 
 impl<'a, T> Scope<'a> for T where
     T: Provider<Select<'a>>
+        + Provider<SelectIn<'a>>
         + Provider<SelectRules>
         + Provider<archive::Load>
         + Provider<nodes::Read<CorpusNode>>

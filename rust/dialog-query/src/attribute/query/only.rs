@@ -14,7 +14,9 @@ use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
-use dialog_corpus::{Cause, DialogCorpusError, Fact, FactView, Select};
+use dialog_corpus::{
+    Cause, DialogCorpusError, Fact, FactView, LayerIndex, Layered, Select, SelectIn,
+};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::pin::Pin;
@@ -52,8 +54,7 @@ fn challenged(
     let selector = Selector::new().the(attribute).of(claim.of().clone());
     // A read that binds each row's layer elects within the layer: the
     // challengers are the layer's own, read from the candidate's `in`
-    // binding (the primary's for a row with no layer stamped, bound as
-    // `memory:`). Any other read elects across the layers as one cell.
+    // binding. Any other read elects across the layers as one cell.
     Ok(match layer {
         Some(term) => {
             let layer = candidate.lookup(&Term::<Any>::from(term))?.content()?;
@@ -61,6 +62,106 @@ fn challenged(
         }
         None => selector,
     })
+}
+
+/// A row the sliding window elects among: a bare row, every row then
+/// lying in the one layer the scan reads, or a row with the index of
+/// the layer it was read from, which then bounds its cell, so the same
+/// cell on two layers is two rows.
+trait Windowed: Sized {
+    /// The row.
+    fn view(&self) -> &FactView;
+
+    /// Whether `other` lies in this row's cell. Compares the raw key
+    /// bytes, so nothing materializes while the window slides within a
+    /// cell.
+    fn shares_cell(&self, other: &Self) -> Result<bool, DialogCorpusError> {
+        Ok(self.view().the_bytes()? == other.view().the_bytes()?
+            && self.view().of_bytes()? == other.view().of_bytes()?)
+    }
+
+    /// The row of the cell that stands, of this one and `challenger`.
+    fn elect(self, challenger: Self) -> Result<Self, DialogCorpusError>;
+
+    /// The row and the index of its layer, when it carries one.
+    fn into_parts(self) -> (FactView, Option<LayerIndex>);
+}
+
+impl Windowed for FactView {
+    fn view(&self) -> &FactView {
+        self
+    }
+
+    fn elect(self, challenger: Self) -> Result<Self, DialogCorpusError> {
+        FactView::elect(self, challenger)
+    }
+
+    fn into_parts(self) -> (FactView, Option<LayerIndex>) {
+        (self, None)
+    }
+}
+
+impl Windowed for (FactView, LayerIndex) {
+    fn view(&self) -> &FactView {
+        &self.0
+    }
+
+    fn shares_cell(&self, other: &Self) -> Result<bool, DialogCorpusError> {
+        Ok(self.1 == other.1 && self.0.shares_cell(&other.0)?)
+    }
+
+    fn elect(self, challenger: Self) -> Result<Self, DialogCorpusError> {
+        Ok((self.0.elect(challenger.0)?, self.1))
+    }
+
+    fn into_parts(self) -> (FactView, Option<LayerIndex>) {
+        (self.0, Some(self.1))
+    }
+}
+
+/// Slide `window` over `row`: the window holds the standing row of the
+/// current cell, and yields it when a row of another cell closes the
+/// cell. The window's row is the one elected among the cell's rows.
+fn slide<R: Windowed>(window: &mut Option<R>, row: R) -> Result<Option<R>, DialogCorpusError> {
+    Ok(match window.take() {
+        Some(current) if current.shares_cell(&row)? => {
+            *window = Some(current.elect(row)?);
+            None
+        }
+        closed => {
+            *window = Some(row);
+            closed
+        }
+    })
+}
+
+/// `base` extended by `winner`, a cell's elected row read from `layer`
+/// (`None` is the primary), when `selector` admits it and its value
+/// reads as `constraint`, the scan's constant value, if any. Only the
+/// winner pays for materialization. A winner whose stored bytes fail
+/// validation (`CorruptEntry`) is a corrupt tree entry: its cell yields
+/// nothing rather than failing the query.
+fn admitted(
+    selector: &AttributeQueryAll,
+    base: &Match,
+    winner: FactView,
+    constraint: Option<&Value>,
+    layer: Option<&Entity>,
+) -> Result<Option<Match>, EvaluationError> {
+    let Some((winner, standing)) = materialize_winner(winner)?
+        .and_then(|(winner, standing)| selector.admit(winner).map(|winner| (winner, standing)))
+    else {
+        return Ok(None);
+    };
+    // A constant value admits the winner a reader of the constant's
+    // type observes as it (see `Value::reads_as`), as the scan's own
+    // exact bound does.
+    if !constraint.is_none_or(|constraint| winner.is.reads_as(constraint)) {
+        return Ok(None);
+    }
+    let mut extension = base.clone();
+    selector.merge(&mut extension, winner, standing, layer)?;
+    Ok(Some(extension))
 }
 
 /// Winner verification.
@@ -303,10 +404,7 @@ impl AttributeQueryOnly {
                 let value_known = resolved.is().is_constant();
 
                 if entity_known || (attribute_known && !value_known) {
-                    // Sliding window path. A constant value admits the
-                    // winner a reader of the constant's type observes as
-                    // it (see `Value::reads_as`), as the scan's own exact
-                    // bound does.
+                    // Sliding window path.
                     let value_constraint = resolved.is().as_constant().cloned();
 
                     let scan = AttributeQueryAll::lookup(
@@ -316,81 +414,54 @@ impl AttributeQueryOnly {
                         resolved.cause().clone(),
                     )
                     .with_layer(resolved.layer().clone());
-                    // A read binding each row's layer elects within the
-                    // layer, so the same cell on two layers is two rows;
-                    // any other read elects across the layers as one cell.
-                    let per_layer = selector.binds_layer();
+                    let input: Selector<Constrained> = (&scan).try_into()?;
 
-                    let mut candidate: Option<FactView> = None;
-
-                    let stream = Provider::<Select<'_>>::execute(env, (&scan).try_into()?).await?;
-                    for await fact in stream {
-                        let fact = fact?;
-                        if !scan.reads_from(fact.layer()) {
-                            continue;
-                        }
-
-                        candidate = Some(match candidate.take() {
-                            Some(current) => {
-                                // Group membership compares the raw key
-                                // bytes; nothing materializes while the
-                                // window slides within a group. A cell is
-                                // a cell of one layer, so a row of another
-                                // layer closes the group.
-                                if current.the_bytes()? == fact.the_bytes()?
-                                    && current.of_bytes()? == fact.of_bytes()?
-                                    && (!per_layer || current.layer() == fact.layer())
-                                {
-                                    current.elect(fact)?
-                                } else {
-                                    // Group closed: only its winner pays
-                                    // for materialization, and only if it
-                                    // clears the value checks. A winner
-                                    // whose stored bytes fail validation
-                                    // (`CorruptEntry`) is a corrupt tree
-                                    // entry: drop the group's yield rather
-                                    // than failing the query.
-                                    let layer = current.layer().cloned();
-                                    match materialize_winner(current)?.and_then(
-                                        |(winner, standing)| {
-                                            selector.admit(winner).map(|winner| (winner, standing))
-                                        },
-                                    ) {
-                                        Some((winner, standing))
-                                            if value_constraint
-                                                .as_ref()
-                                                .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
-                                        {
-                                            let mut extension = base.clone();
-                                            selector.merge(&mut extension, winner, standing, layer)?;
-                                            yield extension;
-                                        }
-                                        _ => {}
-                                    }
-                                    fact
-                                }
-                            }
-                            None => fact,
-                        });
-                    }
-
-                    // Yield the final group's winner (unless its stored
-                    // bytes are corrupt; see the group-close arm above).
-                    if let Some(winner) = candidate.take() {
-                        let layer = winner.layer().cloned();
-                        match materialize_winner(winner)?.and_then(|(winner, standing)| {
-                            selector.admit(winner).map(|winner| (winner, standing))
-                        }) {
-                            Some((winner, standing))
-                                if value_constraint
-                                    .as_ref()
-                                    .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
-                            {
-                                let mut extension = base.clone();
-                                selector.merge(&mut extension, winner, standing, layer)?;
+                    // A read still binding each row's layer, `in` a
+                    // variable the row leaves unbound, reads each row
+                    // with where it came from and elects within the
+                    // layer. Any other read elects across the layers
+                    // as one cell, and reads its rows bare: with `in`
+                    // a constant the selector reads that layer alone.
+                    if scan.binds_layer() {
+                        let Layered { layers, rows } =
+                            Provider::<SelectIn<'_>>::execute(env, input).await?;
+                        let mut window: Option<(FactView, LayerIndex)> = None;
+                        for await row in rows {
+                            let Some(closed) = slide(&mut window, row?)? else {
+                                continue;
+                            };
+                            let (winner, at) = closed.into_parts();
+                            let layer = at.map(|at| &layers[usize::from(at)]);
+                            if let Some(extension) = admitted(&selector, &base, winner, value_constraint.as_ref(), layer)? {
                                 yield extension;
                             }
-                            _ => {}
+                        }
+                        if let Some(closed) = window.take() {
+                            let (winner, at) = closed.into_parts();
+                            let layer = at.map(|at| &layers[usize::from(at)]);
+                            if let Some(extension) = admitted(&selector, &base, winner, value_constraint.as_ref(), layer)? {
+                                yield extension;
+                            }
+                        }
+                    } else {
+                        let pinned = scan.pinned_layer();
+                        let stream = Provider::<Select<'_>>::execute(env, input).await?;
+                        let mut window: Option<FactView> = None;
+                        for await fact in stream {
+                            let Some(winner) = slide(&mut window, fact?)? else {
+                                continue;
+                            };
+                            if let Some(extension) = admitted(&selector, &base, winner, value_constraint.as_ref(), pinned)? {
+                                yield extension;
+                            }
+                        }
+                        let last = window
+                            .take()
+                            .map(|winner| admitted(&selector, &base, winner, value_constraint.as_ref(), pinned))
+                            .transpose()?
+                            .flatten();
+                        if let Some(extension) = last {
+                            yield extension;
                         }
                     }
                 } else {
