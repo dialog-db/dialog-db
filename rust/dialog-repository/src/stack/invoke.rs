@@ -22,7 +22,7 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_corpus::{Changes, Fact, Statement};
 use parking_lot::Mutex;
 
-use super::effect::Effect;
+use super::effect::{Effect, is_tick};
 use crate::placement::take_dispatched;
 use crate::{Channel, CommitError, PublishError, QueryLayer, Revision, Stack, StackEnv};
 
@@ -107,15 +107,18 @@ struct Staged {
 }
 
 /// What one [`Invocation`] did: the head it left the primary at, the
-/// ticks its dispatch ran and the commands it landed on the outside end
-/// of [`control:`](crate::CONTROL). Its [`effect`](Self::effect) runs
-/// the stack's providers over those commands, as a separate step.
+/// ticks its dispatch ran, the commands it landed on the outside end of
+/// [`control:`](crate::CONTROL) and the rows of the `control:` entity
+/// itself it landed there, the tick's own ([`tick`](Self::tick)). Its
+/// [`effect`](Self::effect) runs the stack's providers over those
+/// commands, as a separate step.
 #[derive(Clone)]
 pub struct InvocationReport {
     stack: Stack,
     revision: Revision,
     ticks: u32,
     commands: Vec<Fact>,
+    tick: Vec<Fact>,
 }
 
 impl Stack {
@@ -348,22 +351,27 @@ impl InvocationReport {
             revision,
             ticks: 0,
             commands: Vec::new(),
+            tick: Vec::new(),
         }
     }
 
     /// A report of a dispatch that published: the primary left at
-    /// `revision`, `ticks` run and `commands` landed.
+    /// `revision`, `ticks` run and `landed` on
+    /// [`control:`](crate::CONTROL), the `control:` entity's own rows
+    /// the tick's and every other row a command's.
     pub(crate) fn published(
         stack: Stack,
         revision: Revision,
         ticks: u32,
-        commands: Vec<Fact>,
+        landed: Vec<Fact>,
     ) -> Self {
+        let (tick, commands) = landed.into_iter().partition(|fact| is_tick(&fact.of));
         Self {
             stack,
             revision,
             ticks,
             commands,
+            tick,
         }
     }
 
@@ -386,9 +394,21 @@ impl InvocationReport {
     /// commands it sent and the ones its rules dispatched, what the
     /// stack's providers read. A command's lifecycle rows
     /// (`dialog.command/*`, see [`effect`](super::effect)) are no command
-    /// and are left out.
+    /// and are left out, and so are the rows of the `control:` entity
+    /// itself, which are the tick's ([`tick`](Self::tick)).
     pub fn commands(&self) -> &[Fact] {
         &self.commands
+    }
+
+    /// The rows of the [`control:`](crate::CONTROL) entity itself the
+    /// dispatch landed: the tick's own facts, who asked (`control:
+    /// tonk.session/client client:<id>`, written `.at(control_layer())`)
+    /// and whatever else an embedder stamps on the loopback. They are no
+    /// command: no provider claims them, no effect marks them
+    /// `unhandled`, and each command of the tick carries them
+    /// ([`Command::tick`](crate::Command::tick)).
+    pub fn tick(&self) -> &[Fact] {
+        &self.tick
     }
 
     /// The next step: the stack's providers over the commands this
@@ -399,7 +419,7 @@ impl InvocationReport {
         Effect::new(
             self.stack.clone(),
             self.revision.clone(),
-            self.commands.clone(),
+            self.commands.iter().chain(&self.tick).cloned().collect(),
         )
     }
 }
@@ -410,6 +430,7 @@ impl Debug for InvocationReport {
             .field("revision", &self.revision)
             .field("ticks", &self.ticks)
             .field("commands", &self.commands)
+            .field("tick", &self.tick)
             .finish()
     }
 }

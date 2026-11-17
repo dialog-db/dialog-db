@@ -854,9 +854,12 @@ mod tests {
     use dialog_query::attribute::Cardinality;
     use dialog_query::attribute::Relation as QueryRelation;
     use dialog_query::attribute::statement::AttributeStatement;
-    use dialog_query::query::Output as _;
-    use dialog_query::types::Scalar;
-    use dialog_query::{AttributeQuery, InductiveRule, Term};
+    use dialog_query::query::{Application, Output as _};
+    use dialog_query::types::Type as ValueType;
+    use dialog_query::types::{Any, Scalar};
+    use dialog_query::{
+        AttributeQuery, Conclusion, EvaluationError, InductiveRule, Match, Selection, Term,
+    };
     #[cfg(any(feature = "integration-tests", feature = "web-integration-tests"))]
     use dialog_remote_s3::helpers::S3Address;
     use dialog_storage::provider::storage::VolatileSpace;
@@ -1154,21 +1157,15 @@ mod tests {
             "a write into the overlay does not reach the stack's own layer"
         );
 
-        let claims: Vec<dialog_query::Claim> = stack
+        let claims: Vec<Row> = stack
             .query()
-            .select(selected_query().with_layer(Term::var("where")))
+            .select(Located(selected_query().with_layer(Term::var("where"))))
             .perform(&operator)
             .try_vec()
             .await?;
         let mut rows: Vec<String> = claims
             .iter()
-            .map(|claim| {
-                format!(
-                    "{} in {}",
-                    claim.of,
-                    claim.layer().map(ToString::to_string).unwrap_or_default()
-                )
-            })
+            .map(|Row { claim, layer }| format!("{} in {layer}", claim.of))
             .collect();
         rows.sort();
         assert_eq!(
@@ -2308,6 +2305,51 @@ mod tests {
         rows
     }
 
+    /// A row of a [`Located`] query: the claim and the layer it was read
+    /// from.
+    #[derive(Clone, Debug, PartialEq)]
+    struct Row {
+        claim: dialog_query::Claim,
+        layer: Entity,
+    }
+
+    impl Conclusion for Row {
+        fn this(&self) -> &Entity {
+            &self.claim.of
+        }
+    }
+
+    /// `query`'s rows, each with the layer it was read from: the
+    /// match's `in` binding, the term the query names for it. A
+    /// claim carries no layer.
+    #[derive(Clone)]
+    struct Located(AttributeQuery);
+
+    impl Application for Located {
+        type Conclusion = Row;
+
+        fn evaluate<'a, Env, M: Selection + 'a>(
+            self,
+            selection: M,
+            env: &'a Env,
+        ) -> impl Selection + 'a
+        where
+            Env: dialog_query::Scope<'a>,
+        {
+            Application::evaluate(self.0, selection, env)
+        }
+
+        fn realize(&self, input: Match) -> Result<Self::Conclusion, EvaluationError> {
+            let layer = input
+                .lookup(&Term::<Any>::from(self.0.layer()))?
+                .content()?;
+            Ok(Row {
+                claim: self.0.realize(input)?,
+                layer: Entity::try_from(layer)?,
+            })
+        }
+    }
+
     /// `ui/selected` of every entity, with the value a variable.
     pub(crate) fn selected_query() -> AttributeQuery {
         AttributeQuery::from(
@@ -2404,6 +2446,139 @@ mod tests {
         Ok(())
     }
 
+    /// `query`'s rows through `stack`, each rendered with the layer
+    /// its `in` binds, sorted.
+    async fn located(
+        stack: &Stack,
+        operator: &Operator,
+        query: AttributeQuery,
+    ) -> Result<Vec<String>> {
+        let claims: Vec<Row> = stack
+            .query()
+            .select(Located(query))
+            .perform(operator)
+            .try_vec()
+            .await?;
+        let mut rows: Vec<String> = claims
+            .iter()
+            .map(|Row { claim, layer }| format!("{:?} in {layer}", claim.is))
+            .collect();
+        rows.sort();
+        Ok(rows)
+    }
+
+    /// `ui/selected` of every entity, with the value a variable, as a
+    /// single-valued read: the cell's rows are elected among.
+    fn selected_one() -> AttributeQuery {
+        AttributeQuery::new(
+            Term::<QueryRelation>::from(QueryRelation::from(
+                "ui/selected".parse::<dialog_corpus::Relation>().unwrap(),
+            )),
+            Term::<Entity>::var("e"),
+            Term::<Any>::from(&Term::<bool>::var("v")),
+            Term::blank(),
+            Some(Cardinality::One),
+        )
+    }
+
+    /// A single-valued read with `in` a variable elects within each
+    /// layer: the same cell in two layers is two rows, each bound to
+    /// its layer. With `in` bound it elects among that layer's rows
+    /// alone.
+    #[dialog_common::test]
+    async fn it_elects_within_each_layer_a_single_valued_read_binds() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        stack
+            .transaction()
+            .assert(flag(&doc, true, &state))
+            .assert(primary_flag(&doc, false))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let rows = |query: AttributeQuery| located(&stack, &operator, query);
+        assert_eq!(
+            rows(selected_one().with_layer(Term::var("where"))).await?,
+            vec![
+                "Boolean(false) in memory:".to_string(),
+                format!("Boolean(true) in {state}")
+            ],
+            "`in` unbound elects within each layer and binds each row's"
+        );
+        assert_eq!(
+            rows(
+                selected_one()
+                    .with_layer(Term::Constant(dialog_corpus::Value::Entity(state.clone())))
+            )
+            .await?,
+            vec![format!("Boolean(true) in {state}")],
+            "`in` bound to the layer elects among its rows alone"
+        );
+        assert_eq!(
+            rows(
+                selected_one().with_layer(Term::Constant(dialog_corpus::Value::Entity(
+                    crate::memory_layer()
+                )))
+            )
+            .await?,
+            vec!["Boolean(false) in memory:".to_string()],
+            "`in` bound to the primary elects among its rows alone"
+        );
+        Ok(())
+    }
+
+    /// A read naming no `in` reads every layer as one: the rows of the
+    /// primary and of a memory layer come out together, as they did
+    /// before a row knew its layer, and the claims are the same.
+    #[dialog_common::test]
+    async fn it_reads_every_layer_as_one_without_in() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let one: Entity = "doc:1".parse()?;
+        let two: Entity = "doc:2".parse()?;
+        stack
+            .transaction()
+            .assert(flag(&one, true, &state))
+            .assert(primary_flag(&two, false))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            fresh(&stack, &operator, selected_query()).await?,
+            vec![
+                "doc:1 Boolean(true)".to_string(),
+                "doc:2 Boolean(false)".to_string()
+            ],
+            "every layer's rows, with no layer named"
+        );
+        let claims: Vec<dialog_query::Claim> = stack
+            .query()
+            .select(selected_one())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            selected(&claims),
+            vec![
+                "doc:1 Boolean(true)".to_string(),
+                "doc:2 Boolean(false)".to_string()
+            ],
+            "a single-valued read elects each cell across the layers"
+        );
+        Ok(())
+    }
+
     /// A read with `in` bound reads that layer alone; with `in` a
     /// variable it reads every layer and binds each row's. The same cell
     /// lies in two layers as two rows.
@@ -2421,34 +2596,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let rows = |query: AttributeQuery| {
-            let stack = stack.clone();
-            let operator = &operator;
-            async move {
-                let claims: Vec<dialog_query::Claim> = stack
-                    .query()
-                    .select(query)
-                    .perform(operator)
-                    .try_vec()
-                    .await?;
-                let mut rows: Vec<String> = claims
-                    .iter()
-                    .map(|claim| {
-                        // A row with no layer stamped is the primary's.
-                        format!(
-                            "{:?} in {}",
-                            claim.is,
-                            claim
-                                .layer()
-                                .map(ToString::to_string)
-                                .unwrap_or_else(|| crate::MEMORY.to_string())
-                        )
-                    })
-                    .collect();
-                rows.sort();
-                Ok::<_, anyhow::Error>(rows)
-            }
-        };
+        let rows = |query: AttributeQuery| located(&stack, &operator, query);
         assert_eq!(
             rows(
                 selected_query()
@@ -3259,7 +3407,10 @@ mod tests {
         let memory = ephemeral(&stack, &state).expect("the state layer").clone();
         let control = crate::control_layer();
         let mut fetches = stack
-            .arrivals(&control, fetch_query())
+            .arrivals(
+                &control,
+                Located(fetch_query().with_layer(Term::var("where"))),
+            )
             .expect("every stack has control:");
         assert!(
             fetches.poll(&operator).await?.is_empty(),
@@ -3291,13 +3442,13 @@ mod tests {
             held(&memory, "node/fetched", &node)?.is_empty(),
             "nothing answered yet"
         );
-        let commands = fetches.poll(&operator).await?;
-        assert_eq!(subjects(&commands), vec!["cmd:1".to_string()]);
-        assert_eq!(
-            commands[0].layer(),
-            Some(&control),
+        let located = fetches.poll(&operator).await?;
+        assert!(
+            located.iter().all(|row| row.layer == control),
             "read as a row of control:"
         );
+        let commands: Vec<dialog_query::Claim> = located.into_iter().map(|row| row.claim).collect();
+        assert_eq!(subjects(&commands), vec!["cmd:1".to_string()]);
         for command in &commands {
             stack.invoke(fetched(command)?).perform(&operator).await?;
         }
@@ -3923,14 +4074,14 @@ mod tests {
         let target: Entity = "doc:1".parse()?;
 
         let transaction = stack.transaction().dispatch(ping("cmd:1", &target));
-        let claims: Vec<dialog_query::Claim> = transaction
+        let claims: Vec<Row> = transaction
             .query()
-            .select(anywhere("cmd.ping/target"))
+            .select(Located(anywhere("cmd.ping/target")))
             .perform(&operator)
             .try_vec()
             .await?;
         assert_eq!(claims.len(), 1);
-        assert_eq!(claims[0].layer(), Some(&control), "a transaction reads it");
+        assert_eq!(claims[0].layer, control, "a transaction reads it");
 
         let before = branch.revision();
         let mut pongs = stack
@@ -4142,20 +4293,15 @@ mod tests {
         env: &Operator,
         query: AttributeQuery,
     ) -> Result<Vec<String>> {
-        let claims: Vec<dialog_query::Claim> =
-            stack.query().select(query).perform(env).try_vec().await?;
-        let mut rows: Vec<String> = claims
+        let located: Vec<Row> = stack
+            .query()
+            .select(Located(query))
+            .perform(env)
+            .try_vec()
+            .await?;
+        let mut rows: Vec<String> = located
             .iter()
-            .map(|claim| {
-                format!(
-                    "{:?} in {}",
-                    claim.is,
-                    claim
-                        .layer()
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| crate::MEMORY.to_string())
-                )
-            })
+            .map(|Row { claim, layer }| format!("{:?} in {layer}", claim.is))
             .collect();
         rows.sort();
         Ok(rows)
@@ -4795,7 +4941,7 @@ mod tests {
         let notes = declare_notes(&branch, &operator).await?;
         let stack = branch.stack().perform(&operator).await?;
         let every = || note_query().with_layer(Term::var("where"));
-        let mut subscription = stack.subscription(every());
+        let mut subscription = stack.subscription(Located(every()));
         let initial = subscription.poll(&operator).await?.expect("initial");
         assert!(initial.asserted.is_empty());
 
@@ -4811,17 +4957,11 @@ mod tests {
         let asserted: Vec<String> = delta
             .asserted
             .iter()
-            .map(|claim| {
-                format!(
-                    "{:?} in {:?}",
-                    claim.is,
-                    claim.layer().map(ToString::to_string)
-                )
-            })
+            .map(|Row { claim, layer }| format!("{:?} in {layer}", claim.is))
             .collect();
         assert_eq!(
             asserted,
-            vec!["String(\"kept\") in Some(\"memory:notes\")".to_string()]
+            vec!["String(\"kept\") in memory:notes".to_string()]
         );
         assert!(delta.retracted.is_empty());
         assert!(subscription.poll(&operator).await?.is_none());
@@ -5013,7 +5153,10 @@ mod tests {
         let stack = branch.stack().perform(&operator).await?;
         let control = crate::control_layer();
         let mut fetches = stack
-            .arrivals(&control, fetch_query())
+            .arrivals(
+                &control,
+                Located(fetch_query().with_layer(Term::var("where"))),
+            )
             .expect("every stack has control:");
         let node: Entity = "node:1".parse()?;
         let doc: Entity = "doc:1".parse()?;
@@ -5026,9 +5169,13 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        let commands = fetches.poll(&operator).await?;
+        let located = fetches.poll(&operator).await?;
+        assert!(
+            located.iter().all(|row| row.layer == control),
+            "a row of control:"
+        );
+        let commands: Vec<dialog_query::Claim> = located.into_iter().map(|row| row.claim).collect();
         assert_eq!(subjects(&commands), vec!["cmd:1".to_string()]);
-        assert_eq!(commands[0].layer(), Some(&control), "a row of control:");
         assert!(fetches.poll(&operator).await?.is_empty(), "read once");
         assert!(!waiting(&stack, &control), "nothing stays in control:");
         assert_eq!(
@@ -5048,10 +5195,13 @@ mod tests {
             "a staged chain lands nothing before it publishes"
         );
         batch.publish().perform(&operator).await?;
-        assert_eq!(
-            subjects(&fetches.poll(&operator).await?),
-            vec!["cmd:2".to_string()]
-        );
+        let commands: Vec<dialog_query::Claim> = fetches
+            .poll(&operator)
+            .await?
+            .into_iter()
+            .map(|row| row.claim)
+            .collect();
+        assert_eq!(subjects(&commands), vec!["cmd:2".to_string()]);
         assert!(fetches.poll(&operator).await?.is_empty(), "read once");
         Ok(())
     }
@@ -5131,14 +5281,15 @@ mod tests {
             .assert(priority("cmd:1", 2).at(control.clone()))
             .assert(title(&doc, "kept"))
             .assert(flag(&doc, true, &state));
-        let during: Vec<dialog_query::Claim> = transaction
+        let during: Vec<Row> = transaction
             .query()
-            .select(whole(&control))
+            .select(Located(whole(&control)))
             .perform(&operator)
             .try_vec()
             .await?;
+        assert!(during.iter().all(|row| row.layer == control));
+        let during: Vec<dialog_query::Claim> = during.into_iter().map(|row| row.claim).collect();
         assert_eq!(cells(&during), expected, "the tick's commands alone");
-        assert!(during.iter().all(|claim| claim.layer() == Some(&control)));
         transaction.commit().publish().perform(&operator).await?;
 
         let arrived = arrivals.poll(&operator).await?;
@@ -5512,7 +5663,7 @@ mod tests {
             },
             "when": [
                 {
-                    "assert": { "with": { "v": { "the": from, "as": kind, "in": "control:" } } },
+                    "assert": { "with": { "v": { "the": from, "as": kind, "pick": "all", "in": "control:" } } },
                     "where": { "this": { "?": { "name": "this" } }, "v": { "?": { "name": "v" } } }
                 }
             ]
@@ -5898,6 +6049,475 @@ mod tests {
             held(&memory, "log/unhandled", &command)?,
             vec!["Boolean(true)".to_string()]
         );
+        Ok(())
+    }
+
+    /// A concept of the named attributes `fields`, each required and of
+    /// the type it names, if any.
+    fn concept_with(fields: &[(&str, &str, Option<ValueType>)]) -> dialog_query::ConceptDescriptor {
+        dialog_query::ConceptDescriptor::try_from(
+            fields
+                .iter()
+                .map(|(name, the, kind)| {
+                    (
+                        name.to_string(),
+                        dialog_query::AttributeDescriptor::new(
+                            QueryRelation::from(
+                                the.parse::<dialog_corpus::Relation>()
+                                    .expect("an attribute"),
+                            ),
+                            "",
+                            Cardinality::One,
+                            *kind,
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .expect("a concept")
+    }
+
+    /// An invite: a stamp and the space it invites to. It shares
+    /// `test.event/time-stamp` with [`pause_concept`].
+    fn invite_concept() -> dialog_query::ConceptDescriptor {
+        concept_with(&[
+            ("stamp", "test.event/time-stamp", None),
+            ("space", "test.invite/space", None),
+        ])
+    }
+
+    /// A pause: a stamp and the repository it pauses, as text.
+    fn pause_concept() -> dialog_query::ConceptDescriptor {
+        concept_with(&[
+            ("stamp", "test.event/time-stamp", None),
+            (
+                "repository",
+                "test.pause/repository",
+                Some(ValueType::String),
+            ),
+        ])
+    }
+
+    /// A provider of `concept` counting its runs in `runs` and logging
+    /// `name` into `order` as it runs.
+    fn counting(
+        concept: &dialog_query::ConceptDescriptor,
+        name: &'static str,
+        runs: Arc<AtomicU32>,
+        order: Arc<Mutex<Vec<&'static str>>>,
+    ) -> crate::Provider {
+        crate::Provider::new(concept, move |_| {
+            let (runs, order) = (runs.clone(), order.clone());
+            async move {
+                runs.fetch_add(1, SeqCst);
+                order.lock().push(name);
+                Ok(Changes::new())
+            }
+        })
+    }
+
+    /// The rows of a command `of`: `(attribute, value)` each.
+    fn command_rows(of: &str, rows: &[(&str, dialog_corpus::Value)]) -> Changes {
+        let of: Entity = of.parse().expect("entity");
+        let mut changes = Changes::new();
+        for (the, is) in rows {
+            changes.associate(
+                the.parse::<dialog_corpus::Relation>()
+                    .expect("an attribute"),
+                of.clone(),
+                is.clone(),
+                dialog_corpus::Pick::Last,
+            );
+        }
+        changes
+    }
+
+    /// Two providers whose concepts share `test.event/time-stamp`: a
+    /// command carrying the shared attribute and the pause's other
+    /// required field is the pause's alone. The invite's provider does
+    /// not run, and the one `answered` row names the pause.
+    #[dialog_common::test]
+    async fn it_claims_a_command_by_the_concept_it_satisfies_not_a_shared_attribute() -> Result<()>
+    {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        declare_lifecycle(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        let (invites, pauses) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        let order = Arc::new(Mutex::new(Vec::new()));
+        stack.provide(counting(
+            &invite_concept(),
+            "invite",
+            invites.clone(),
+            order.clone(),
+        ))?;
+        stack.provide(counting(
+            &pause_concept(),
+            "pause",
+            pauses.clone(),
+            order.clone(),
+        ))?;
+        let command: Entity = "cmd:1".parse()?;
+        let rows = [
+            (
+                "test.event/time-stamp",
+                dialog_corpus::Value::UnsignedInt(7),
+            ),
+            (
+                "test.pause/repository",
+                dialog_corpus::Value::String("repo".into()),
+            ),
+        ];
+        assert!(
+            !crate::Provider::new(&invite_concept(), |_| async { Ok(Changes::new()) }).claims(&[
+                dialog_corpus::Fact {
+                    the: "test.event/time-stamp".parse()?,
+                    of: command.clone(),
+                    is: dialog_corpus::Value::UnsignedInt(7),
+                    cause: None,
+                }
+            ])
+        );
+
+        let report = stack
+            .invoke(command_rows("cmd:1", &rows))
+            .perform(&operator)
+            .await?;
+        let effect = report.effect().perform(&operator).await?;
+        assert_eq!(invites.load(SeqCst), 0, "the invite did not run");
+        assert_eq!(pauses.load(SeqCst), 1, "the pause ran once");
+        assert_eq!(effect.answered(), from_ref(&command));
+        assert!(effect.unhandled().is_empty() && effect.failed().is_empty());
+        assert_eq!(
+            held(&memory, "log/answered", &command)?,
+            vec![format!("Entity({})", pause_concept().this())],
+            "one answered row, naming the pause"
+        );
+        Ok(())
+    }
+
+    /// A command that satisfies two providers' concepts fully runs both,
+    /// in registration order, and each writes its own `answered` row.
+    #[dialog_common::test]
+    async fn it_runs_every_provider_whose_concept_a_command_satisfies() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        declare_lifecycle(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        let (invites, pauses) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        let order = Arc::new(Mutex::new(Vec::new()));
+        stack.provide(counting(
+            &pause_concept(),
+            "pause",
+            pauses.clone(),
+            order.clone(),
+        ))?;
+        stack.provide(counting(
+            &invite_concept(),
+            "invite",
+            invites.clone(),
+            order.clone(),
+        ))?;
+        let command: Entity = "cmd:1".parse()?;
+
+        let report = stack
+            .invoke(command_rows(
+                "cmd:1",
+                &[
+                    (
+                        "test.event/time-stamp",
+                        dialog_corpus::Value::UnsignedInt(7),
+                    ),
+                    (
+                        "test.invite/space",
+                        dialog_corpus::Value::Entity("space:1".parse()?),
+                    ),
+                    (
+                        "test.pause/repository",
+                        dialog_corpus::Value::String("repo".into()),
+                    ),
+                ],
+            ))
+            .perform(&operator)
+            .await?;
+        let effect = report.effect().perform(&operator).await?;
+        assert_eq!(
+            *order.lock(),
+            vec!["pause", "invite"],
+            "both ran, in registration order"
+        );
+        assert_eq!(invites.load(SeqCst), 1);
+        assert_eq!(pauses.load(SeqCst), 1);
+        assert_eq!(effect.answered(), &[command.clone(), command.clone()]);
+        let mut expected = vec![
+            format!("Entity({})", invite_concept().this()),
+            format!("Entity({})", pause_concept().this()),
+        ];
+        expected.sort();
+        assert_eq!(
+            held(&memory, "log/answered", &command)?,
+            expected,
+            "two answered rows, one per concept"
+        );
+        Ok(())
+    }
+
+    /// A command missing a required field of every concept is
+    /// `unhandled`, and so is one whose field's value is of another type
+    /// than the field declares: no provider runs and nothing is
+    /// answered.
+    #[dialog_common::test]
+    async fn it_leaves_a_command_missing_a_required_field_unhandled() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        declare_lifecycle(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        let (invites, pauses) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+        let order = Arc::new(Mutex::new(Vec::new()));
+        stack.provide(counting(
+            &invite_concept(),
+            "invite",
+            invites.clone(),
+            order.clone(),
+        ))?;
+        stack.provide(counting(
+            &pause_concept(),
+            "pause",
+            pauses.clone(),
+            order.clone(),
+        ))?;
+        let (stamped, mistyped): (Entity, Entity) = ("cmd:1".parse()?, "cmd:2".parse()?);
+
+        let report = stack
+            .invoke(command_rows(
+                "cmd:1",
+                &[(
+                    "test.event/time-stamp",
+                    dialog_corpus::Value::UnsignedInt(7),
+                )],
+            ))
+            .invoke(command_rows(
+                "cmd:2",
+                &[
+                    (
+                        "test.event/time-stamp",
+                        dialog_corpus::Value::UnsignedInt(7),
+                    ),
+                    (
+                        "test.pause/repository",
+                        dialog_corpus::Value::Entity("repo:1".parse()?),
+                    ),
+                ],
+            ))
+            .perform(&operator)
+            .await?;
+        let effect = report.effect().perform(&operator).await?;
+        let mut unhandled = effect.unhandled().to_vec();
+        unhandled.sort();
+        assert_eq!(unhandled, vec![stamped.clone(), mistyped.clone()]);
+        assert!(effect.answered().is_empty() && effect.failed().is_empty());
+        assert_eq!(invites.load(SeqCst), 0);
+        assert_eq!(pauses.load(SeqCst), 0);
+        for command in [&stamped, &mistyped] {
+            assert_eq!(
+                held(&memory, "log/unhandled", command)?,
+                vec!["Boolean(true)".to_string()]
+            );
+            assert!(
+                held(&memory, "log/answered", command)?.is_empty(),
+                "nothing answered"
+            );
+        }
+        Ok(())
+    }
+
+    /// One provider answering two concepts runs once for a command that
+    /// satisfies both, with one `answered` row naming the first of its
+    /// concepts; its registration writes a `dialog.provider/command` row
+    /// per concept. Two distinct providers each satisfied run twice
+    /// ([`it_runs_every_provider_whose_concept_a_command_satisfies`]).
+    #[dialog_common::test]
+    async fn it_runs_a_provider_of_several_concepts_once_per_command() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        declare_lifecycle(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        let runs = Arc::new(AtomicU32::new(0));
+        let order = Arc::new(Mutex::new(Vec::new()));
+        stack.provide(
+            counting(&invite_concept(), "invite", runs.clone(), order.clone())
+                .also(&pause_concept()),
+        )?;
+        let mut expected = vec![
+            format!("Entity({})", invite_concept().this()),
+            format!("Entity({})", pause_concept().this()),
+        ];
+        expected.sort();
+        assert_eq!(provided(&stack)?, expected, "one row per concept");
+        let command: Entity = "cmd:1".parse()?;
+
+        let report = stack
+            .invoke(command_rows(
+                "cmd:1",
+                &[
+                    (
+                        "test.event/time-stamp",
+                        dialog_corpus::Value::UnsignedInt(7),
+                    ),
+                    (
+                        "test.invite/space",
+                        dialog_corpus::Value::Entity("space:1".parse()?),
+                    ),
+                    (
+                        "test.pause/repository",
+                        dialog_corpus::Value::String("repo".into()),
+                    ),
+                ],
+            ))
+            .perform(&operator)
+            .await?;
+        let effect = report.effect().perform(&operator).await?;
+        assert_eq!(runs.load(SeqCst), 1, "the handler ran once");
+        assert_eq!(effect.answered(), from_ref(&command));
+        assert_eq!(
+            held(&memory, "log/answered", &command)?,
+            vec![format!("Entity({})", invite_concept().this())],
+            "one answered row, naming the concept matched first"
+        );
+
+        let report = stack
+            .invoke(command_rows(
+                "cmd:2",
+                &[
+                    (
+                        "test.event/time-stamp",
+                        dialog_corpus::Value::UnsignedInt(8),
+                    ),
+                    (
+                        "test.pause/repository",
+                        dialog_corpus::Value::String("repo".into()),
+                    ),
+                ],
+            ))
+            .perform(&operator)
+            .await?;
+        report.effect().perform(&operator).await?;
+        assert_eq!(runs.load(SeqCst), 2, "the legacy shape is claimed");
+        assert_eq!(
+            held(&memory, "log/answered", &"cmd:2".parse()?)?,
+            vec![format!("Entity({})", pause_concept().this())]
+        );
+        Ok(())
+    }
+
+    /// A row of the `control:` entity written beside a command is the
+    /// tick's, not a command: the report names the command alone and
+    /// the client row as its tick, the provider reads the row through
+    /// `Command::tick`, and nothing is `unhandled` or marked invoked.
+    #[dialog_common::test]
+    async fn it_hands_a_command_the_rows_of_its_tick() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        declare_lifecycle(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        let control = crate::control_layer();
+        let client: Entity = "client:tab-7".parse()?;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let saw = seen.clone();
+        stack.provide(crate::Provider::new(&fetch_concept(), move |command| {
+            let saw = saw.clone();
+            async move {
+                saw.lock().extend(command.tick().iter().cloned());
+                Ok(Changes::new())
+            }
+        }))?;
+
+        let report = stack
+            .invoke(fetch("cmd:1", &"node:1".parse()?))
+            .assert(
+                dialog_query::the!("test.session/client")
+                    .of(control.clone())
+                    .is(client.clone())
+                    .at(control.clone()),
+            )
+            .perform(&operator)
+            .await?;
+        assert_eq!(cells_of(report.commands()), vec!["cmd:1 cmd.fetch/node"]);
+        assert_eq!(
+            cells_of(report.tick()),
+            vec!["control: test.session/client"]
+        );
+        assert_eq!(
+            report.tick()[0].is,
+            dialog_corpus::Value::Entity(client.clone())
+        );
+        let effect = report.effect().perform(&operator).await?;
+        assert!(effect.unhandled().is_empty(), "the tick is no command");
+        assert_eq!(effect.answered(), &["cmd:1".parse::<Entity>()?]);
+        assert_eq!(cells_of(&seen.lock()), vec!["control: test.session/client"]);
+        assert!(
+            held(&memory, "log/invoked", &control)?.is_empty(),
+            "the tick is not marked invoked"
+        );
+        assert!(held(&memory, "log/unhandled", &control)?.is_empty());
+        Ok(())
+    }
+
+    /// A dispatch that writes only a tick row lands no command: its
+    /// report names none, its effect is empty and runs no dispatch, and
+    /// no provider runs.
+    #[dialog_common::test]
+    async fn it_runs_no_effect_for_a_tick_without_a_command() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_fetch(&branch, &operator).await?;
+        declare_lifecycle(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        let control = crate::control_layer();
+        let runs = Arc::new(AtomicU32::new(0));
+        let order = Arc::new(Mutex::new(Vec::new()));
+        stack.provide(counting(&fetch_concept(), "fetch", runs.clone(), order))?;
+
+        let report = stack
+            .assert(
+                dialog_query::the!("test.session/client")
+                    .of(control.clone())
+                    .is("client:tab-7".parse::<Entity>()?)
+                    .at(control.clone()),
+            )
+            .perform(&operator)
+            .await?;
+        assert!(report.commands().is_empty(), "the tick row is no command");
+        assert_eq!(
+            cells_of(report.tick()),
+            vec!["control: test.session/client"]
+        );
+        let effect = report.effect();
+        assert!(effect.is_empty(), "nothing to perform");
+        let revision = report.revision().clone();
+        let effect = effect.perform(&operator).await?;
+        assert_eq!(effect.invocation().ticks(), 0, "no answer dispatch ran");
+        assert_eq!(effect.invocation().revision(), &revision);
+        assert!(effect.unhandled().is_empty() && effect.answered().is_empty());
+        assert_eq!(runs.load(SeqCst), 0);
+        assert!(held(&memory, "log/unhandled", &control)?.is_empty());
         Ok(())
     }
 
