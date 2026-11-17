@@ -16,7 +16,9 @@ use crate::{
 };
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
-use dialog_corpus::{Cause, DialogCorpusError, Fact, Select, memory_layer};
+use dialog_corpus::{
+    Cause, DialogCorpusError, Fact, FactView, Layered, Select, SelectIn, memory_layer,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
@@ -123,20 +125,13 @@ impl AttributeQueryAll {
         self.layer.as_deref().filter(|layer| layer.name().is_some())
     }
 
-    /// Whether a row read from `layer` is one this scan reads: any row
-    /// unless the scan names a constant layer the row's differs from. A
-    /// row with no layer stamped is the primary's, `memory:`.
-    pub(crate) fn reads_from(&self, layer: Option<&Entity>) -> bool {
-        // A scan without `in:` reads every row: asked per row, so it is
-        // answered before any term is looked at.
-        let Some(wanted) = self.layer.as_deref() else {
-            return true;
-        };
-        match (wanted, layer) {
-            (Term::Constant(Value::Entity(wanted)), Some(layer)) => wanted == layer,
-            (Term::Constant(Value::Entity(wanted)), None) => *wanted == memory_layer(),
-            (Term::Constant(_), _) => false,
-            _ => true,
+    /// The one layer this scan reads, when it names one (`in:` a
+    /// constant): what a row read by it binds `in` to, the selector
+    /// having read that layer alone.
+    pub(crate) fn pinned_layer(&self) -> Option<&Entity> {
+        match self.layer.as_deref() {
+            Some(Term::Constant(Value::Entity(layer))) => Some(layer),
+            _ => None,
         }
     }
 
@@ -213,12 +208,16 @@ impl AttributeQueryAll {
     /// Takes the fact by value: its fields move into the cited
     /// claim, and each slot is bound by name, so a row pays for one
     /// copy of each bound value and none of the terms' names.
+    ///
+    /// `layer` is where the row was read from, `None` for the primary.
+    /// It is bound, and so cloned, only by a scan naming `in` with a
+    /// variable; any other scan never looks at it.
     pub(crate) fn merge(
         &self,
         candidate: &mut Match,
         fact: Fact,
         version: Option<(Edition, [u8; 32])>,
-        layer: Option<Entity>,
+        layer: Option<&Entity>,
     ) -> Result<(), EvaluationError> {
         let claim = Claim::from(fact);
         let standing = Standing::new(version, claim.cause().clone());
@@ -230,10 +229,9 @@ impl AttributeQueryAll {
             .as_deref()
             .and_then(|term| term.shared_name().map(|name| (term, name)));
         candidate.reserve(4 + usize::from(binds.is_some()));
-        // The layer a row was read from lives only in this binding: a
-        // row with no layer stamped is the primary's.
+        // The layer a row was read from lives only in this binding.
         if let Some((term, name)) = binds {
-            let layer = layer.unwrap_or_else(memory_layer);
+            let layer = layer.cloned().unwrap_or_else(memory_layer);
             candidate.bind_variable(name, term.binding_kind(), Value::Entity(layer))?;
         }
         if let Some(name) = self.the.shared_name() {
@@ -493,40 +491,69 @@ impl AttributeQueryAll {
                 }
 
                 let selection = selector.resolve(&base);
+                let input: Selector<Constrained> = (&selection).try_into()?;
 
-                let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;
-                for await fact in stream {
-                    // Every admitted row becomes a binding, so each one
-                    // materializes exactly once here — the merge and
-                    // tombstone layers upstream never did. A row whose
-                    // stored bytes fail validation (`CorruptEntry`) is a
-                    // corrupt or foreign-written tree entry: ignore it
-                    // rather than failing the query.
-                    let fact = fact?;
-                    let standing = fact.standing();
-                    let layer = fact.layer().cloned();
-                    if !selection.reads_from(layer.as_ref()) {
-                        continue;
-                    }
-                    let fact = match fact.to_owned() {
-                        Ok(fact) => fact,
-                        Err(DialogCorpusError::CorruptEntry(reason)) => {
-                            tracing::warn!(%reason, "ignoring corrupt stored row");
-                            continue;
+                // A scan still binding each row's layer, `in` a variable
+                // the row leaves unbound, reads each row with where it
+                // came from. Any other scan reads its rows bare, and
+                // pays nothing for the layer: with `in` a constant the
+                // selector reads that layer alone, so every row is its.
+                if selection.binds_layer() {
+                    let Layered { layers, rows } =
+                        Provider::<SelectIn<'_>>::execute(env, input).await?;
+                    for await row in rows {
+                        let (fact, at) = row?;
+                        let layer = &layers[usize::from(at)];
+                        if let Some(extension) = selector.extend(&base, fact, Some(layer))? {
+                            yield extension;
                         }
-                        Err(error) => Err(error)?,
-                    };
-                    // Typed `is`/`the` slots filter facts falling
-                    // outside their kinds.
-                    let Some(fact) = selector.admit(fact) else {
-                        continue;
-                    };
-                    let mut extension = base.clone();
-                    selector.merge(&mut extension, fact, standing, layer)?;
-                    yield extension;
+                    }
+                } else {
+                    let pinned = selection.pinned_layer();
+                    let stream = Provider::<Select<'_>>::execute(env, input).await?;
+                    for await fact in stream {
+                        if let Some(extension) = selector.extend(&base, fact?, pinned)? {
+                            yield extension;
+                        }
+                    }
                 }
             }
         })
+    }
+
+    /// `base` extended by the row `fact`, read from `layer` (`None` is
+    /// the primary); `None` for a row the scan does not admit.
+    ///
+    /// Every admitted row becomes a binding, so each one materializes
+    /// exactly once here: the merge and tombstone layers upstream never
+    /// did. A row whose stored bytes fail validation (`CorruptEntry`)
+    /// is a corrupt or foreign-written tree entry: ignored rather than
+    /// failing the query. Inlined, as it was before it was written once
+    /// for both kinds of row: called per row, with the row moved in.
+    #[inline(always)]
+    fn extend(
+        &self,
+        base: &Match,
+        fact: FactView,
+        layer: Option<&Entity>,
+    ) -> Result<Option<Match>, EvaluationError> {
+        let standing = fact.standing();
+        let fact = match fact.to_owned() {
+            Ok(fact) => fact,
+            Err(DialogCorpusError::CorruptEntry(reason)) => {
+                tracing::warn!(%reason, "ignoring corrupt stored row");
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        // Typed `is`/`the` slots filter facts falling outside their
+        // kinds.
+        let Some(fact) = self.admit(fact) else {
+            return Ok(None);
+        };
+        let mut extension = base.clone();
+        self.merge(&mut extension, fact, standing, layer)?;
+        Ok(Some(extension))
     }
 
     /// Execute this query, returning a stream of claims.
