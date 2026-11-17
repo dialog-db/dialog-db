@@ -802,9 +802,18 @@ mod tests {
     /// key, its layout, its payload and the spilled block, and nothing
     /// else. The layer a row was read from travels beside it, not in
     /// it (see [`Layered`](crate::Layered)).
+    ///
+    /// The row holds pointers (the key handle, the datum, the spilled
+    /// block), so its size follows the pointer width: 256 bytes where a
+    /// pointer is 8 bytes, 192 where it is 4 (wasm32). The same test
+    /// pins both; the expected value is chosen by the target.
     #[dialog_common::test]
     fn a_row_is_256_bytes() {
-        assert_eq!(size_of::<FactView>(), 256);
+        #[cfg(target_pointer_width = "64")]
+        let expected = 256;
+        #[cfg(target_pointer_width = "32")]
+        let expected = 192;
+        assert_eq!(size_of::<FactView>(), expected);
     }
 
     #[dialog_common::test]
