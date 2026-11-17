@@ -164,6 +164,7 @@ let
       "dialog-storage"
       "dialog-remote-ucan"
       "dialog-repository"
+      "dialog-stack"
       "dialog-query"
       "dialog-peer"
     ]

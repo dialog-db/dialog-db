@@ -68,6 +68,13 @@ impl OptionalAttributeQuery {
         &self.query
     }
 
+    /// This left-join over `layer` (`in:`).
+    pub fn with_layer(self, layer: Term<Entity>) -> Self {
+        Self {
+            query: self.query.with_layer(layer),
+        }
+    }
+
     /// Unwrap into the scalar lookup, dropping the left-join. The
     /// planner uses this to demote an optional lookup whose value variable was
     /// narrowed to non-optional by rule inference: when a sibling
@@ -202,6 +209,8 @@ impl OptionalAttributeQuery {
                     fallback.bind_absent(&is_term)?;
                     let cause_term: Term<Any> = Term::<Any>::from(selector.query.cause());
                     fallback.bind_absent(&cause_term)?;
+                    let layer_term: Term<Any> = Term::<Any>::from(selector.query.layer());
+                    fallback.bind_absent(&layer_term)?;
                     yield fallback;
                 }
             }

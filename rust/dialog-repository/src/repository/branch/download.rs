@@ -106,6 +106,10 @@ pub struct DownloadBranch<'a> {
     branch: &'a Branch,
     from: Option<Upstream>,
     revision: Option<Revision>,
+    /// Another tree to download than the revision's, and the tree of it
+    /// the replica holds, in place of its head's: a durable layer's tree
+    /// a revision points at (see [`tree`](Self::tree)).
+    pointed: Option<(TreeReference, Option<TreeReference>)>,
     extent: Download,
 }
 
@@ -121,6 +125,7 @@ impl Branch {
             branch: self,
             from: None,
             revision: None,
+            pointed: None,
             extent,
         }
     }
@@ -139,8 +144,19 @@ impl<'a> DownloadBranch<'a> {
             branch,
             from: Some(from),
             revision: Some(revision),
+            pointed: None,
             extent,
         }
+    }
+
+    /// Download `tree` instead of the revision's: a durable layer's tree
+    /// the revision points at, which is no branch's head. `held` is the
+    /// tree of the layer the replica holds, what
+    /// [`Download::QueriedRanges`] walks it in step with; with none held
+    /// it brings nothing, as for a branch with no head.
+    pub(crate) fn tree(mut self, tree: TreeReference, held: Option<TreeReference>) -> Self {
+        self.pointed = Some((tree, held));
+        self
     }
 
     /// Download `revision` instead of the branch's current head: how a
@@ -180,10 +196,17 @@ impl<'a> DownloadBranch<'a> {
             Download::Operational => Some(operational_scope()),
             Download::Ranges(scope) => Some(scope),
             Download::QueriedRanges => {
-                let (Some(held), Some(revision)) = (branch.revision(), self.revision) else {
+                let (held, target) = match self.pointed {
+                    Some((tree, held)) => (held, Some(tree)),
+                    None => (
+                        branch.revision().map(|held| held.tree),
+                        self.revision.map(|revision| revision.tree),
+                    ),
+                };
+                let (Some(held), Some(target)) = (held, target) else {
                     return Ok(());
                 };
-                if held.tree == revision.tree {
+                if held == target {
                     return Ok(());
                 }
                 // The revision may come from an upstream the branch does
@@ -197,16 +220,21 @@ impl<'a> DownloadBranch<'a> {
                 let catalog = branch.archive().index();
                 let at =
                     |tree: &TreeReference| Index::at(catalog.clone(), NodeHash::from(*tree.hash()));
-                at(&revision.tree)
-                    .follow(&at(&held.tree), env)
+                at(&target)
+                    .follow(&at(&held), env)
                     .await
                     .map_err(DownloadError::Tree)?;
                 return Ok(());
             }
         };
-        let Some(revision) = self.revision.or_else(|| branch.revision()) else {
+        let Some(mut revision) = self.revision.or_else(|| branch.revision()) else {
             return Ok(());
         };
+        // A pointed tree is walked from its own root: the walk reads
+        // nothing of the revision but its tree.
+        if let Some((tree, _)) = self.pointed {
+            revision.tree = tree;
+        }
         let fallback = match self.from {
             Some(upstream) => upstream.fallback(),
             None => branch.fallback(),
