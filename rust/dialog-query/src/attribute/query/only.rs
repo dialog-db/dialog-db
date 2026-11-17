@@ -176,6 +176,52 @@ fn admitted(
     Ok(Some(extension))
 }
 
+/// `base` extended by the winner of each cell of `input`, each row read
+/// with its layer and the cell bounded by it: the sliding window of a
+/// read binding each row's layer, `in` a variable, which elects within
+/// the layer. `constraint` is the scan's constant value, if any.
+///
+/// A stream of its own, boxed by the caller, so that the layers, the
+/// window and the row with its index are this stream's state and not
+/// the plain read's: `evaluate`'s generator is built per scan and holds
+/// its locals for every row of its input, and a generator holds every
+/// branch's locals at once, so the layered read's sat in the plain
+/// read's state, which pays for them though it never takes this branch.
+/// Held through a box, they cost it a pointer.
+fn elect_layered<'a, 'b, Env>(
+    env: &'a Env,
+    selector: &'b AttributeQueryAll,
+    base: &'b Match,
+    input: Selector<Constrained>,
+    constraint: Option<&'b Value>,
+) -> impl Selection + 'b
+where
+    Env: crate::Scope<'a>,
+    'a: 'b,
+{
+    try_stream! {
+        let Layered { layers, rows } = Provider::<SelectIn<'_>>::execute(env, input).await?;
+        let mut window: Option<(FactView, LayerIndex)> = None;
+        for await row in rows {
+            let Some(closed) = slide(&mut window, row?)? else {
+                continue;
+            };
+            let (winner, at) = closed.into_parts();
+            let layer = at.map(|at| &layers[usize::from(at)]);
+            if let Some(extension) = admitted(selector, base, winner, constraint, layer)? {
+                yield extension;
+            }
+        }
+        if let Some(closed) = window.take() {
+            let (winner, at) = closed.into_parts();
+            let layer = at.map(|at| &layers[usize::from(at)]);
+            if let Some(extension) = admitted(selector, base, winner, constraint, layer)? {
+                yield extension;
+            }
+        }
+    }
+}
+
 /// Winner verification.
 ///
 /// When the entity is unknown, results from the base scan (VAE or AEV) are
@@ -431,29 +477,21 @@ impl AttributeQueryOnly {
                     // A read still binding each row's layer, `in` a
                     // variable the row leaves unbound, reads each row
                     // with where it came from and elects within the
-                    // layer. Any other read elects across the layers
-                    // as one cell, and reads its rows bare: with `in`
-                    // a constant the selector reads that layer alone.
+                    // layer, in a stream of its own (see
+                    // `elect_layered`). Any other read elects across
+                    // the layers as one cell, and reads its rows bare:
+                    // with `in` a constant the selector reads that
+                    // layer alone.
                     if scan.binds_layer() {
-                        let Layered { layers, rows } =
-                            Provider::<SelectIn<'_>>::execute(env, input).await?;
-                        let mut window: Option<(FactView, LayerIndex)> = None;
-                        for await row in rows {
-                            let Some(closed) = slide(&mut window, row?)? else {
-                                continue;
-                            };
-                            let (winner, at) = closed.into_parts();
-                            let layer = at.map(|at| &layers[usize::from(at)]);
-                            if let Some(extension) = admitted(&selector, &base, winner, value_constraint.as_ref(), layer)? {
-                                yield extension;
-                            }
-                        }
-                        if let Some(closed) = window.take() {
-                            let (winner, at) = closed.into_parts();
-                            let layer = at.map(|at| &layers[usize::from(at)]);
-                            if let Some(extension) = admitted(&selector, &base, winner, value_constraint.as_ref(), layer)? {
-                                yield extension;
-                            }
+                        let layered = Box::pin(elect_layered(
+                            env,
+                            &selector,
+                            &base,
+                            input,
+                            value_constraint.as_ref(),
+                        ));
+                        for await extension in layered {
+                            yield extension?;
                         }
                     } else {
                         let pinned = scan.pinned_layer();
