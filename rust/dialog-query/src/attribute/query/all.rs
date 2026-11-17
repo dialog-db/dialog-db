@@ -495,18 +495,15 @@ impl AttributeQueryAll {
 
                 // A scan still binding each row's layer, `in` a variable
                 // the row leaves unbound, reads each row with where it
-                // came from. Any other scan reads its rows bare, and
-                // pays nothing for the layer: with `in` a constant the
-                // selector reads that layer alone, so every row is its.
+                // came from, in a stream of its own (see
+                // `extend_layered`). Any other scan reads its rows bare,
+                // and pays nothing for the layer: with `in` a constant
+                // the selector reads that layer alone, so every row is
+                // its.
                 if selection.binds_layer() {
-                    let Layered { layers, rows } =
-                        Provider::<SelectIn<'_>>::execute(env, input).await?;
-                    for await row in rows {
-                        let (fact, at) = row?;
-                        let layer = &layers[usize::from(at)];
-                        if let Some(extension) = selector.extend(&base, fact, Some(layer))? {
-                            yield extension;
-                        }
+                    let layered = Box::pin(selector.extend_layered(env, &base, input));
+                    for await extension in layered {
+                        yield extension?;
                     }
                 } else {
                     let pinned = selection.pinned_layer();
@@ -519,6 +516,38 @@ impl AttributeQueryAll {
                 }
             }
         })
+    }
+
+    /// `base` extended by each row of `input`, read with its layer: the
+    /// read of a scan binding each row's layer, `in` a variable.
+    ///
+    /// A stream of its own, boxed by the caller, so that the layers and
+    /// the row with its index are this stream's state and not the
+    /// plain read's: `evaluate`'s generator is built per scan and holds
+    /// its locals for every row of its input, and a generator holds
+    /// every branch's locals at once, so the layered read's sat in the
+    /// plain read's state, which pays for them though it never takes
+    /// this branch. Held through a box, they cost it a pointer.
+    fn extend_layered<'a, 'b, Env>(
+        &'b self,
+        env: &'a Env,
+        base: &'b Match,
+        input: Selector<Constrained>,
+    ) -> impl Selection + 'b
+    where
+        Env: crate::Scope<'a>,
+        'a: 'b,
+    {
+        try_stream! {
+            let Layered { layers, rows } = Provider::<SelectIn<'_>>::execute(env, input).await?;
+            for await row in rows {
+                let (fact, at) = row?;
+                let layer = &layers[usize::from(at)];
+                if let Some(extension) = self.extend(base, fact, Some(layer))? {
+                    yield extension;
+                }
+            }
+        }
     }
 
     /// `base` extended by the row `fact`, read from `layer` (`None` is
