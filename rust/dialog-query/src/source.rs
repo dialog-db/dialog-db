@@ -24,7 +24,9 @@ pub(crate) mod test {
     use dialog_capability::Resume;
     use dialog_corpus::selector::Constrained;
     use dialog_corpus::tree::CorpusNode;
-    use dialog_corpus::{DialogCorpusError, FactStream, Layered, Select, SelectIn, Selector};
+    use dialog_corpus::{
+        DialogCorpusError, FactStream, Layered, Select, SelectIn, Selector, memory_layer,
+    };
     use dialog_effects::archive::{self, ArchiveError};
     use dialog_effects::blob;
     use dialog_peer::Peer as DialogOperator;
@@ -79,12 +81,19 @@ pub(crate) mod test {
         }
     }
 
+    /// A branch holds one layer, the primary (`memory:`): a read naming
+    /// another layer (`in:` a constant) reads that layer alone, and the
+    /// branch holds no row of it.
     #[dialog_capability::provider]
     impl<'a> Provider<Select<'a>> for TestEnv<'a> {
         async fn execute(
             &self,
             input: Selector<Constrained>,
         ) -> Result<FactStream<'a>, DialogCorpusError> {
+            if input.layer().is_some_and(|layer| *layer != memory_layer()) {
+                let empty: FactStream<'a> = Box::pin(futures_util::stream::empty());
+                return Ok(empty);
+            }
             let stream = self
                 .branch
                 .claims()
