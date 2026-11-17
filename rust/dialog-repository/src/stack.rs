@@ -2430,6 +2430,139 @@ mod tests {
         Ok(())
     }
 
+    /// `query`'s rows through `stack`, each rendered with the layer
+    /// its `in` binds, sorted.
+    async fn located(
+        stack: &Stack,
+        operator: &Operator,
+        query: AttributeQuery,
+    ) -> Result<Vec<String>> {
+        let claims: Vec<Row> = stack
+            .query()
+            .select(Located(query))
+            .perform(operator)
+            .try_vec()
+            .await?;
+        let mut rows: Vec<String> = claims
+            .iter()
+            .map(|Row { claim, layer }| format!("{:?} in {layer}", claim.is))
+            .collect();
+        rows.sort();
+        Ok(rows)
+    }
+
+    /// `ui/selected` of every entity, with the value a variable, as a
+    /// single-valued read: the cell's rows are elected among.
+    fn selected_one() -> AttributeQuery {
+        AttributeQuery::new(
+            Term::<QueryRelation>::from(QueryRelation::from(
+                "ui/selected".parse::<dialog_corpus::Relation>().unwrap(),
+            )),
+            Term::<Entity>::var("e"),
+            Term::<Any>::from(&Term::<bool>::var("v")),
+            Term::blank(),
+            Some(Cardinality::One),
+        )
+    }
+
+    /// A single-valued read with `in` a variable elects within each
+    /// layer: the same cell in two layers is two rows, each bound to
+    /// its layer. With `in` bound it elects among that layer's rows
+    /// alone.
+    #[dialog_common::test]
+    async fn it_elects_within_each_layer_a_single_valued_read_binds() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        stack
+            .transaction()
+            .assert(flag(&doc, true, &state))
+            .assert(primary_flag(&doc, false))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let rows = |query: AttributeQuery| located(&stack, &operator, query);
+        assert_eq!(
+            rows(selected_one().with_layer(Term::var("where"))).await?,
+            vec![
+                "Boolean(false) in memory:".to_string(),
+                format!("Boolean(true) in {state}")
+            ],
+            "`in` unbound elects within each layer and binds each row's"
+        );
+        assert_eq!(
+            rows(
+                selected_one()
+                    .with_layer(Term::Constant(dialog_corpus::Value::Entity(state.clone())))
+            )
+            .await?,
+            vec![format!("Boolean(true) in {state}")],
+            "`in` bound to the layer elects among its rows alone"
+        );
+        assert_eq!(
+            rows(
+                selected_one().with_layer(Term::Constant(dialog_corpus::Value::Entity(
+                    crate::memory_layer()
+                )))
+            )
+            .await?,
+            vec!["Boolean(false) in memory:".to_string()],
+            "`in` bound to the primary elects among its rows alone"
+        );
+        Ok(())
+    }
+
+    /// A read naming no `in` reads every layer as one: the rows of the
+    /// primary and of a memory layer come out together, as they did
+    /// before a row knew its layer, and the claims are the same.
+    #[dialog_common::test]
+    async fn it_reads_every_layer_as_one_without_in() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_state(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let one: Entity = "doc:1".parse()?;
+        let two: Entity = "doc:2".parse()?;
+        stack
+            .transaction()
+            .assert(flag(&one, true, &state))
+            .assert(primary_flag(&two, false))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            fresh(&stack, &operator, selected_query()).await?,
+            vec![
+                "doc:1 Boolean(true)".to_string(),
+                "doc:2 Boolean(false)".to_string()
+            ],
+            "every layer's rows, with no layer named"
+        );
+        let claims: Vec<dialog_query::Claim> = stack
+            .query()
+            .select(selected_one())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            selected(&claims),
+            vec![
+                "doc:1 Boolean(true)".to_string(),
+                "doc:2 Boolean(false)".to_string()
+            ],
+            "a single-valued read elects each cell across the layers"
+        );
+        Ok(())
+    }
+
     /// A read with `in` bound reads that layer alone; with `in` a
     /// variable it reads every layer and binds each row's. The same cell
     /// lies in two layers as two rows.
@@ -2447,24 +2580,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let rows = |query: AttributeQuery| {
-            let stack = stack.clone();
-            let operator = &operator;
-            async move {
-                let claims: Vec<Row> = stack
-                    .query()
-                    .select(Located(query))
-                    .perform(operator)
-                    .try_vec()
-                    .await?;
-                let mut rows: Vec<String> = claims
-                    .iter()
-                    .map(|Row { claim, layer }| format!("{:?} in {layer}", claim.is))
-                    .collect();
-                rows.sort();
-                Ok::<_, anyhow::Error>(rows)
-            }
-        };
+        let rows = |query: AttributeQuery| located(&stack, &operator, query);
         assert_eq!(
             rows(
                 selected_query()
