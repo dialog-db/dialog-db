@@ -3002,6 +3002,47 @@ mod tests {
         Ok(tree)
     }
 
+    /// The tree [`build_with_manifest`] builds, from one edit persisted
+    /// once. A canonical tree's shape does not depend on its history, so
+    /// the root is the same; persisting once skips writing a path of nodes
+    /// per key, which no test reads.
+    async fn build_at_once(
+        keys: impl IntoIterator<Item = (u32, Vec<u8>)>,
+        manifest: Manifest,
+        storage: &mut CountingBackend,
+    ) -> Result<TestTree> {
+        let mut edit =
+            crate::TransientTree::empty_with_manifest(crate::helpers::test_catalog(), manifest);
+        for (key, value) in keys {
+            edit = edit.insert(key.to_le_bytes(), value, storage).await?;
+        }
+        let mut delta = Delta::zero();
+        let tree = edit.persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
+        }
+        Ok(tree)
+    }
+
+    /// Every entry of `tree`, streamed from `storage`. Reading them all
+    /// reads every node the tree reaches, so it also fails when `storage`
+    /// is missing any of its blocks.
+    async fn entries(
+        tree: &TestTree,
+        storage: &CountingBackend,
+    ) -> Result<Vec<([u8; 4], Vec<u8>)>> {
+        let stream = tree.stream(storage);
+        futures_util::pin_mut!(stream);
+        Ok(stream
+            .map_ok(|entry| (entry.key, entry.value))
+            .try_collect()
+            .await?)
+    }
+
     async fn collect_scoped_changes(
         source: &TestTree,
         target: &TestTree,
@@ -7719,7 +7760,7 @@ mod tests {
                 move |index: u32| -> u32 { if rotated { index.rotate_left(8) } else { index } };
             let base_size = 100 + next() % 3_000;
             let keyspace = base_size + 300;
-            let base = build_with_manifest(
+            let base = build_at_once(
                 (0..base_size).map(|i| (key(i), vec![(i % 251) as u8])),
                 manifest,
                 &mut storage,
@@ -7842,7 +7883,7 @@ mod tests {
 
             let mut expected = BTreeMap::new();
             let mut reverse = BTreeMap::new();
-            let mut target_values = Vec::new();
+            let mut target_entries = Vec::new();
             for &at in &universe {
                 let at = at.to_le_bytes();
                 let before = source.get(&at, &storage).await?;
@@ -7863,8 +7904,13 @@ mod tests {
                         },
                     );
                 }
-                target_values.push((at, after));
+                if let Some(value) = after {
+                    target_entries.push((at, value));
+                }
             }
+            // In byte order, as a stream yields them: the keys are
+            // little-endian, so the universe's order is not theirs.
+            target_entries.sort();
 
             let changes = collect_changes(&source, &target, &storage).await?;
             assert_eq!(
@@ -7953,13 +7999,11 @@ mod tests {
                 remote.store(node?.buffer()?.clone());
             }
             let restored = TestTree::at(crate::helpers::test_catalog(), target.root().clone());
-            for (at, value) in &target_values {
-                assert_eq!(
-                    &restored.get(at, &remote).await?,
-                    value,
-                    "seed {seed}: the source's blocks and the novel nodes must hold the target"
-                );
-            }
+            assert_eq!(
+                entries(&restored, &remote).await?,
+                target_entries,
+                "seed {seed}: the source's blocks and the novel nodes must hold the target"
+            );
 
             // Novelty as a partial replica's push computes it: the source side
             // holds a random half of its blocks, and absence bounds the walk.
@@ -8003,13 +8047,11 @@ mod tests {
             while let Some(node) = nodes.next().await {
                 remote.store(node?.buffer()?.clone());
             }
-            for (at, value) in &target_values {
-                assert_eq!(
-                    &restored.get(at, &remote).await?,
-                    value,
-                    "seed {seed}: under the boundary policy the novel nodes must still hold the target"
-                );
-            }
+            assert_eq!(
+                entries(&restored, &remote).await?,
+                target_entries,
+                "seed {seed}: under the boundary policy the novel nodes must still hold the target"
+            );
         }
         let (routed, shifted, winners_only) = prune_census::take();
         eprintln!(
