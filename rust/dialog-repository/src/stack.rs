@@ -2357,15 +2357,15 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
-        session
+        stack
             .transact(flag(&doc, true, &state))
             .assert(primary_flag(&doc, false))
             .perform(&operator)
             .await?;
 
-        let rows = |query: AttributeQuery| located(&session, &operator, query);
+        let rows = |query: AttributeQuery| located(&stack, &operator, query);
         assert_eq!(
             rows(selected_one().with_layer(Term::var("where"))).await?,
             vec![
@@ -2405,24 +2405,24 @@ mod tests {
         let repo = test_repo(&operator, &peer).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let state = declare_state(&branch, &operator).await?;
-        let session = branch.session().perform(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
         let one: Entity = "doc:1".parse()?;
         let two: Entity = "doc:2".parse()?;
-        session
+        stack
             .transact(flag(&one, true, &state))
             .assert(primary_flag(&two, false))
             .perform(&operator)
             .await?;
 
         assert_eq!(
-            fresh(&session, &operator, selected_query()).await?,
+            fresh(&stack, &operator, selected_query()).await?,
             vec![
                 "doc:1 Boolean(true)".to_string(),
                 "doc:2 Boolean(false)".to_string()
             ],
             "every layer's rows, with no layer named"
         );
-        let claims: Vec<dialog_query::Claim> = session
+        let claims: Vec<dialog_query::Claim> = stack
             .query()
             .select(selected_one())
             .perform(&operator)
