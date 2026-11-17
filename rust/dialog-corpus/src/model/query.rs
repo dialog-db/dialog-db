@@ -1,12 +1,12 @@
 use dialog_capability::Command;
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt as _};
 use std::collections::{HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::selector::Constrained;
-use crate::{DialogCorpusError, FactView, Selector};
+use crate::{DialogCorpusError, Entity, FactView, Selector, memory_layer};
 
 /// A boxed stream of fact query results, as borrowed-access
 /// [`FactView`]s: read fields off each row, or call
@@ -32,6 +32,62 @@ pub struct Select<'a> {
 impl<'a> Command for Select<'a> {
     type Input = Selector<Constrained>;
     type Output = Result<FactStream<'a>, DialogCorpusError>;
+}
+
+/// Where a row of a read over layers was read from: an index into the
+/// layers the read names ([`Layered::layers`]).
+pub type LayerIndex = u16;
+
+/// A boxed stream of the rows of a read over layers, each with the
+/// index of the layer it was read from.
+#[cfg(not(target_arch = "wasm32"))]
+pub type LayeredStream<'a> =
+    Pin<Box<dyn Stream<Item = Result<(FactView, LayerIndex), DialogCorpusError>> + Send + 'a>>;
+
+/// A boxed stream of the rows of a read over layers, each with the
+/// index of the layer it was read from.
+#[cfg(target_arch = "wasm32")]
+pub type LayeredStream<'a> =
+    Pin<Box<dyn Stream<Item = Result<(FactView, LayerIndex), DialogCorpusError>> + 'a>>;
+
+/// What a read over layers yields ([`SelectIn`]): the layers it read,
+/// and its rows, each with the index of the layer it was read from.
+/// A row carries the index, two bytes beside it, and the layer's
+/// entity is looked up only by a reader that binds it.
+pub struct Layered<'a> {
+    /// The layers read, by the index a row carries. The primary is
+    /// [`memory:`](crate::MEMORY).
+    pub layers: Vec<Entity>,
+    /// The rows, in the order a [`Select`] of the same selector yields
+    /// them.
+    pub rows: LayeredStream<'a>,
+}
+
+impl<'a> Layered<'a> {
+    /// `rows` as read from the primary alone: what a source holding one
+    /// layer yields.
+    pub fn primary(rows: FactStream<'a>) -> Self {
+        Self {
+            layers: vec![memory_layer()],
+            rows: Box::pin(rows.map(|row| row.map(|view| (view, 0)))),
+        }
+    }
+}
+
+/// Command for selecting facts from a source, with the layer each row
+/// was read from.
+///
+/// [`Select`] reads the same rows bare: a reader that never asks where
+/// a row came from takes that, and pays nothing for the layer. This is
+/// for a read that binds each row's layer (a descriptor's `in:` named
+/// by a variable).
+pub struct SelectIn<'a> {
+    _borrow: PhantomData<&'a ()>,
+}
+
+impl<'a> Command for SelectIn<'a> {
+    type Input = Selector<Constrained>;
+    type Output = Result<Layered<'a>, DialogCorpusError>;
 }
 
 /// How confident the requester is that a preloaded range will be read.
