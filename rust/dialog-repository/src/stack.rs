@@ -2394,8 +2394,11 @@ mod tests {
         let stack = branch.stack().perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
         stack
-            .transact(flag(&doc, true, &state))
+            .transaction()
+            .assert(flag(&doc, true, &state))
             .assert(primary_flag(&doc, false))
+            .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
@@ -2443,8 +2446,11 @@ mod tests {
         let one: Entity = "doc:1".parse()?;
         let two: Entity = "doc:2".parse()?;
         stack
-            .transact(flag(&one, true, &state))
+            .transaction()
+            .assert(flag(&one, true, &state))
             .assert(primary_flag(&two, false))
+            .commit()
+            .publish()
             .perform(&operator)
             .await?;
 
