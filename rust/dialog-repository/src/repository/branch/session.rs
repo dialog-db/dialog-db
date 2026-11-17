@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::iter::once;
 
 use dialog_capability::{Capability, Fork, Provider, Resume, Subject};
-use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Held, Holds};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync, Held, Holds};
 use dialog_corpus::history::Edition;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::CorpusNode;
@@ -866,6 +866,7 @@ impl<'a> QueryEnv<'a> {
 
     /// Record a selector's demanded range under `manifest`, when
     /// recording is on.
+    #[inline(always)]
     fn record_demand(&self, selector: &Selector<Constrained>, manifest: &Manifest) {
         if let Some(demand) = &self.demand {
             demand.record(selector, manifest);
@@ -1009,7 +1010,6 @@ pub(crate) async fn select_from_source<'a>(
     Ok(select.execute_boxed(reads).await?)
 }
 
-#[dialog_capability::provider]
 // Deliberately implemented for the *same* lifetime on both sides
 // (`QueryEnv<'a>: Provider<Select<'a>>`), never a decoupled pair
 // (`impl<'a, 's> ... where 'a: 's`). Auto-trait (`Send`) checking of
@@ -1023,41 +1023,99 @@ pub(crate) async fn select_from_source<'a>(
 // `&QueryEnv<'a>` to `&QueryEnv<'s>` implicitly — the strict impl
 // is what forces region inference to unify the two into one
 // variable.
+//
+// Written out, not through `#[dialog_capability::provider]`: the
+// answer is the one future [`QueryEnv::select`] makes, and not a
+// future awaiting or wrapping it. A scan is issued per row of a join,
+// and a future awaited in another, or wrapped by one, is built apart
+// and moved into it, its whole state copied, every time.
 impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
-    async fn execute(
+    fn execute(
         &self,
         input: Selector<Constrained>,
-    ) -> Result<FactStream<'a>, DialogCorpusError> {
-        if input.attribute() == Some(&*QUARANTINED) {
-            return Box::pin(self.select_quarantined(input)).await;
-        }
-        let Reads {
-            streams,
-            manifest,
-            keys,
-            ..
-        } = self.reads(input, false).await?;
-        Ok(merge_grouped(streams, manifest, keys))
+    ) -> Resume<'_, Result<FactStream<'a>, DialogCorpusError>> {
+        Resume::later(self.select::<Bare>(input))
     }
 }
 
-#[dialog_capability::provider]
-// The same lifetime on both sides, as `Provider<Select<'a>>` above.
+// The same lifetime on both sides, and written out, as
+// `Provider<Select<'a>>` above.
 impl<'a> Provider<SelectIn<'a>> for QueryEnv<'a> {
-    async fn execute(
+    fn execute(
         &self,
         input: Selector<Constrained>,
-    ) -> Result<Layered<'a>, DialogCorpusError> {
-        if input.attribute() == Some(&*QUARANTINED) {
-            let rows = Box::pin(self.select_quarantined(input)).await?;
-            return Ok(Layered::primary(rows));
-        }
+    ) -> Resume<'_, Result<Layered<'a>, DialogCorpusError>> {
+        Resume::later(self.select::<Named>(input))
+    }
+}
+
+/// How [`QueryEnv::select`] answers: with the rows bare, or each with
+/// its layer. A type, not a flag, so each provider's future is the
+/// read's own, and a read that names no layer never holds the layers.
+trait Answer<'a>: ConditionalSend + 'static {
+    /// Whether each stream's layer is named, for the rows to carry.
+    const NAMED: bool;
+    /// What the read answers with.
+    type Out: ConditionalSend;
+    /// The answer, from the rows bare: every read when the layers are
+    /// not named, and the quarantined rows, read apart, in any case.
+    fn rows(rows: FactStream<'a>) -> Self::Out;
+    /// The answer, from the streams with their layers.
+    fn layered(reads: Reads<'a>) -> Self::Out;
+}
+
+/// The rows bare: a [`Select`].
+struct Bare;
+
+impl<'a> Answer<'a> for Bare {
+    const NAMED: bool = false;
+    type Out = FactStream<'a>;
+
+    fn rows(rows: FactStream<'a>) -> Self::Out {
+        rows
+    }
+
+    fn layered(reads: Reads<'a>) -> Self::Out {
+        merge_grouped(reads.streams, reads.manifest, reads.keys)
+    }
+}
+
+/// Each row with its layer: a [`SelectIn`].
+struct Named;
+
+impl<'a> Answer<'a> for Named {
+    const NAMED: bool = true;
+    type Out = Layered<'a>;
+
+    fn rows(rows: FactStream<'a>) -> Self::Out {
+        Layered::primary(rows)
+    }
+
+    fn layered(reads: Reads<'a>) -> Self::Out {
+        reads.layered()
+    }
+}
+
+/// The streams a read that names its layers merges, in precedence
+/// order (see [`QueryEnv::select`]), with the layer each is read from,
+/// under the lines' format.
+struct Reads<'a> {
+    streams: Vec<FactStream<'a>>,
+    layers: Vec<Entity>,
+    manifest: Manifest,
+    keys: MergeKeys,
+}
+
+impl<'a> Reads<'a> {
+    /// The streams merged, each row with the index of its layer among
+    /// the layers read (see [`Layered`]).
+    fn layered(self) -> Layered<'a> {
         let Reads {
             streams,
             layers,
             manifest,
             keys,
-        } = self.reads(input, true).await?;
+        } = self;
         // Each stream's layer, as the index of its first stream: the
         // merge tells the streams apart, and a row carries the index
         // of its layer.
@@ -1076,50 +1134,47 @@ impl<'a> Provider<SelectIn<'a>> for QueryEnv<'a> {
             .map(|at| LayerIndex::try_from(at).expect("a read has fewer layers than u16::MAX"))
             .collect();
         let rows = merge_grouped_in(streams, manifest, keys);
-        Ok(Layered {
+        Layered {
             layers: named,
             rows: Box::pin(rows.map(move |row| row.map(|(view, index)| (view, stamps[index])))),
-        })
+        }
     }
 }
 
-/// The streams a read merges, in precedence order (see
-/// [`QueryEnv::reads`]), with the layer each is read from when the
-/// read asks (one per stream, else none), under the lines' format.
-struct Reads<'a> {
-    streams: Vec<FactStream<'a>>,
-    layers: Vec<Entity>,
-    manifest: Manifest,
-    keys: MergeKeys,
-}
-
 impl<'a> QueryEnv<'a> {
-    /// The streams a read of `input` merges, by precedence, newest
-    /// standing first: the session overlays, the staged writes, the
-    /// lines, and the per-query changes, which stand at no version. One
-    /// fact can reach the merge from more than one stream (a value the
-    /// line holds that the session overlay or a staged write holds
-    /// too), and the merge keeps the first stream's row of such a fact.
+    /// A read of `input`: the quarantined rows read apart, or the
+    /// streams the read merges, by precedence, newest standing first:
+    /// the session overlays, the staged writes, the lines, and the
+    /// per-query changes, which stand at no version. One fact can reach
+    /// the merge from more than one stream (a value the line holds that
+    /// the session overlay or a staged write holds too), and the merge
+    /// keeps the first stream's row of such a fact.
     ///
     /// A read naming one layer (`in:` bound, [`Selector::layer`]) takes
-    /// that layer's streams alone. With `named`, each stream comes with
-    /// the layer it reads, for a read that binds each row's layer
-    /// ([`SelectIn`]); any other read names no layer and pays nothing
-    /// for one, per stream or per row.
-    async fn reads(
+    /// that layer's streams alone. Answered [`Named`], each stream comes
+    /// with the layer it reads, for a read that binds each row's layer
+    /// ([`SelectIn`]); answered [`Bare`], the read names no layer and
+    /// pays nothing for one, per stream or per row.
+    async fn select<A: Answer<'a>>(
         &self,
         input: Selector<Constrained>,
-        named: bool,
-    ) -> Result<Reads<'a>, DialogCorpusError> {
+    ) -> Result<A::Out, DialogCorpusError> {
+        if input.attribute() == Some(&*QUARANTINED) {
+            let rows = Box::pin(self.select_quarantined(input)).await?;
+            return Ok(A::rows(rows));
+        }
         let format = self.format().await?;
         let manifest = format.manifest.clone();
         self.record_demand(&input, &manifest);
         let wanted = input.layer().cloned();
-        let named = named || wanted.is_some();
-        let mut sessions = Streams::default();
-        let mut staged = Streams::default();
-        let mut lines = Streams::with_capacity(self.sources.len());
-        let mut changes = Streams::default();
+        let named = A::NAMED || wanted.is_some();
+        let mut sessions: Vec<FactStream<'a>> = Vec::new();
+        let mut staged: Vec<FactStream<'a>> = Vec::new();
+        let mut lines: Vec<FactStream<'a>> = Vec::with_capacity(self.sources.len());
+        let mut changes: Vec<FactStream<'a>> = Vec::new();
+        // The layer of every stream, by the group the stream goes in:
+        // empty unless the read names them.
+        let mut layers: Vec<(Group, Entity)> = Vec::new();
         // The layer a stream reads, when the read asks for it, and
         // whether the read takes the stream: every stream, unless the
         // read names one layer.
@@ -1139,7 +1194,14 @@ impl<'a> QueryEnv<'a> {
         // hidden from every line, and the values the cells already held
         // are hidden from the layers' own rows, as the commit would
         // write nothing for them.
-        let settled = self.settle_within(&input).await?;
+        // Settled only when a staged layer has a choosing write: a read
+        // that meets none takes nothing from the settlement, and does
+        // not enter it.
+        let settled = if self.layers().iter().any(Staged::has_successions) {
+            self.settle_within(&input).await?
+        } else {
+            Vec::new()
+        };
         let succeeded: Vec<&Fact> = settled
             .iter()
             .flat_map(|(_, cells)| {
@@ -1167,7 +1229,8 @@ impl<'a> QueryEnv<'a> {
             if !succeeded.is_empty() {
                 hidden = hidden.facts(hidden_in(&line.manifest));
             }
-            lines.push(filter_hidden(raw, hidden, line.manifest.clone()), layer);
+            lines.push(filter_hidden(raw, hidden, line.manifest.clone()));
+            layers.extend(layer.map(|layer| (Group::Lines, layer)));
         }
 
         // Each line's session overlay, read live. Filtered by the
@@ -1220,10 +1283,12 @@ impl<'a> QueryEnv<'a> {
                 rows.into_iter()
                     .map(move |fact| Ok(FactView::pending(fact, session))),
             ));
-            sessions.push(
-                filter_hidden(rows, line.staged.clone(), line.manifest.clone()),
-                layer,
-            );
+            sessions.push(filter_hidden(
+                rows,
+                line.staged.clone(),
+                line.manifest.clone(),
+            ));
+            layers.extend(layer.map(|layer| (Group::Sessions, layer)));
         }
 
         // Each memory layer, read live and filtered the same way: a
@@ -1242,10 +1307,8 @@ impl<'a> QueryEnv<'a> {
                 rows.into_iter()
                     .map(move |fact| Ok(FactView::pending(fact, session))),
             ));
-            sessions.push(
-                filter_hidden(rows, format.staged.clone(), manifest.clone()),
-                layer,
-            );
+            sessions.push(filter_hidden(rows, format.staged.clone(), manifest.clone()));
+            layers.extend(layer.map(|layer| (Group::Sessions, layer)));
         }
 
         // Overlay stream — the per-query changes, read in the lines'
@@ -1260,12 +1323,10 @@ impl<'a> QueryEnv<'a> {
         if let Some(layer) = layer(&session_layer) {
             let overlay = self.overlay.select_within(&window, &manifest);
             if !overlay.is_empty() {
-                changes.push(
-                    Box::pin(stream::iter(
-                        overlay.into_iter().map(|fact| Ok(fact.into())),
-                    )),
-                    layer,
-                );
+                changes.push(Box::pin(stream::iter(
+                    overlay.into_iter().map(|fact| Ok(fact.into())),
+                )));
+                layers.extend(layer.map(|layer| (Group::Changes, layer)));
             }
         }
 
@@ -1296,68 +1357,53 @@ impl<'a> QueryEnv<'a> {
                     .map(move |fact| Ok(FactView::pending(fact, pending))),
             ));
             if held.is_empty() {
-                staged.push(rows, layer);
+                staged.push(rows);
             } else {
-                staged.push(
-                    filter_hidden(
-                        rows,
-                        Hidden::default().facts(Arc::new(held)),
-                        manifest.clone(),
-                    ),
-                    layer,
-                );
+                staged.push(filter_hidden(
+                    rows,
+                    Hidden::default().facts(Arc::new(held)),
+                    manifest.clone(),
+                ));
             }
+            layers.extend(layer.map(|layer| (Group::Staged, layer)));
         }
 
         // Most reads meet the lines alone, and take their streams as
         // they are.
-        let Streams { streams, layers } =
+        let streams: Vec<FactStream<'a>> =
             if sessions.is_empty() && staged.is_empty() && changes.is_empty() {
                 lines
             } else {
-                sessions.chain(staged).chain(lines).chain(changes)
+                sessions
+                    .into_iter()
+                    .chain(staged)
+                    .chain(lines)
+                    .chain(changes)
+                    .collect()
             };
-        Ok(Reads {
+        if !A::NAMED {
+            return Ok(A::rows(merge_grouped(streams, manifest, format.keys)));
+        }
+        // The layers in the streams' order: the groups are gathered in
+        // another order than they are merged in.
+        layers.sort_by_key(|(group, _)| *group);
+        let layers = layers.into_iter().map(|(_, layer)| layer).collect();
+        Ok(A::layered(Reads {
             streams,
             layers,
             manifest,
             keys: format.keys,
-        })
+        }))
     }
 }
 
-/// Streams a read merges, each with the layer it reads when the read
-/// asks for it (see [`QueryEnv::reads`]).
-#[derive(Default)]
-struct Streams<'a> {
-    streams: Vec<FactStream<'a>>,
-    layers: Vec<Entity>,
-}
-
-impl<'a> Streams<'a> {
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            streams: Vec::with_capacity(capacity),
-            layers: Vec::new(),
-        }
-    }
-
-    fn push(&mut self, stream: FactStream<'a>, layer: Option<Entity>) {
-        self.streams.push(stream);
-        if let Some(layer) = layer {
-            self.layers.push(layer);
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.streams.is_empty()
-    }
-
-    fn chain(mut self, other: Self) -> Self {
-        self.streams.extend(other.streams);
-        self.layers.extend(other.layers);
-        self
-    }
+/// The groups a read's streams go into the merge by, in that order.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Group {
+    Sessions,
+    Staged,
+    Lines,
+    Changes,
 }
 
 // A range-size estimate for the planner's merge-versus-fold choice:

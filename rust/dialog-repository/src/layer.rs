@@ -90,6 +90,7 @@ use futures_util::{Stream, StreamExt, stream};
 /// formats. Each input stays grouped by `(the, of)` whatever its format, so
 /// runs still merge whole; only the order of values within a run may differ
 /// from a single tree's.
+#[inline]
 pub(crate) fn merge_grouped<'a>(
     streams: Vec<FactStream<'a>>,
     manifest: Manifest,

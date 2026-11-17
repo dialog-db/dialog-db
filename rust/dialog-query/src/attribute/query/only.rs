@@ -75,6 +75,7 @@ trait Windowed: Sized {
     /// Whether `other` lies in this row's cell. Compares the raw key
     /// bytes, so nothing materializes while the window slides within a
     /// cell.
+    #[inline(always)]
     fn shares_cell(&self, other: &Self) -> Result<bool, DialogCorpusError> {
         Ok(self.view().the_bytes()? == other.view().the_bytes()?
             && self.view().of_bytes()? == other.view().of_bytes()?)
@@ -88,32 +89,39 @@ trait Windowed: Sized {
 }
 
 impl Windowed for FactView {
+    #[inline(always)]
     fn view(&self) -> &FactView {
         self
     }
 
+    #[inline(always)]
     fn elect(self, challenger: Self) -> Result<Self, DialogCorpusError> {
         FactView::elect(self, challenger)
     }
 
+    #[inline(always)]
     fn into_parts(self) -> (FactView, Option<LayerIndex>) {
         (self, None)
     }
 }
 
 impl Windowed for (FactView, LayerIndex) {
+    #[inline(always)]
     fn view(&self) -> &FactView {
         &self.0
     }
 
+    #[inline(always)]
     fn shares_cell(&self, other: &Self) -> Result<bool, DialogCorpusError> {
         Ok(self.1 == other.1 && self.0.shares_cell(&other.0)?)
     }
 
+    #[inline(always)]
     fn elect(self, challenger: Self) -> Result<Self, DialogCorpusError> {
         Ok((self.0.elect(challenger.0)?, self.1))
     }
 
+    #[inline(always)]
     fn into_parts(self) -> (FactView, Option<LayerIndex>) {
         (self.0, Some(self.1))
     }
@@ -122,17 +130,18 @@ impl Windowed for (FactView, LayerIndex) {
 /// Slide `window` over `row`: the window holds the standing row of the
 /// current cell, and yields it when a row of another cell closes the
 /// cell. The window's row is the one elected among the cell's rows.
+/// Inlined, as the window was before it was written once for both
+/// kinds of row: called per row, with the row moved in.
+#[inline(always)]
 fn slide<R: Windowed>(window: &mut Option<R>, row: R) -> Result<Option<R>, DialogCorpusError> {
-    Ok(match window.take() {
-        Some(current) if current.shares_cell(&row)? => {
-            *window = Some(current.elect(row)?);
-            None
-        }
-        closed => {
-            *window = Some(row);
-            closed
-        }
-    })
+    if let Some(current) = window
+        && current.shares_cell(&row)?
+    {
+        let current = window.take().expect("the window holds the cell's row");
+        *window = Some(current.elect(row)?);
+        return Ok(None);
+    }
+    Ok(window.replace(row))
 }
 
 /// `base` extended by `winner`, a cell's elected row read from `layer`
@@ -140,7 +149,10 @@ fn slide<R: Windowed>(window: &mut Option<R>, row: R) -> Result<Option<R>, Dialo
 /// reads as `constraint`, the scan's constant value, if any. Only the
 /// winner pays for materialization. A winner whose stored bytes fail
 /// validation (`CorruptEntry`) is a corrupt tree entry: its cell yields
-/// nothing rather than failing the query.
+/// nothing rather than failing the query. Inlined, as it was before it
+/// was written once for every yield: called per cell, with the winner
+/// moved in.
+#[inline(always)]
 fn admitted(
     selector: &AttributeQueryAll,
     base: &Match,

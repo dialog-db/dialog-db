@@ -528,7 +528,9 @@ impl AttributeQueryAll {
     /// exactly once here: the merge and tombstone layers upstream never
     /// did. A row whose stored bytes fail validation (`CorruptEntry`)
     /// is a corrupt or foreign-written tree entry: ignored rather than
-    /// failing the query.
+    /// failing the query. Inlined, as it was before it was written once
+    /// for both kinds of row: called per row, with the row moved in.
+    #[inline(always)]
     fn extend(
         &self,
         base: &Match,
