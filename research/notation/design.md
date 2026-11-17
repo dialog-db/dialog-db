@@ -95,11 +95,11 @@ In a question or a premise, a parameter left out matches anything. In an `assert
 A document is a set of top-level forms evaluated as one run. The order of its forms does not matter. A top-level form is one of:
 
 - a question, `(query …)`;
-- a command, such as `(add (todo list: list:home text: "Buy milk"))` or `(assert (xyz.todo/state of: todo:9c1e is: :done))`;
+- a write, such as `(assert (todo/add list: list:home text: "Buy milk"))` or `(assert (xyz.todo/state of: todo:9c1e is: :done))`;
 - a `rule`;
 - a `concept`.
 
-A command at the top level is ground, or has a `when` that binds its variables (see [Writes succeed what they read](#writes-succeed-what-they-read)). A bare call, with variables or without, is not a top-level form.
+A write at the top level is ground, or has a `when` that binds its variables (see [Writes succeed what they read](#writes-succeed-what-they-read)). A bare call, with variables or without, is not a top-level form.
 
 A document is submitted in one of two ways:
 
@@ -136,7 +136,7 @@ A concept is a set of attributes that runs both ways (see [Model](#model)). Read
 A line is one attribute: its full name, `of:` the entity, `is:` the value, then `as:` its type, `cardinality:` and `in:` its layer. The entity may be written without `of:`, as any primary may, but concepts spell it out.
 
 - A line names the claims it reads. In R40, a type and pick given on a line of their own, keyed by the variable, `(?l as: :entity policy: :last)`, read as the concept field's policy for 17 of 20 readers, though `?l` was the entity of `xyz.list/task` and had no claims of its own. Keyed by the attribute, 20 of 20 read it right (R41).
-- Every variable in a concept's body appears in its head. That is what lets every concept be read and written, as an updatable view in SQL maps each column back to one base column. A join through a variable the head does not name belongs in a rule.
+- Every variable in a concept's body appears in its head, except an entity the head does not name, one that appears only as `of:` (see [Commands](#commands)). That is what lets every concept be read and written, as an updatable view in SQL maps each column back to one base column. A join through a variable the head does not name belongs in a rule.
 - Attributes belong to the domain, not to a concept, so concepts share them: a `note` over `xyz.todo/title` is every to-do. A concept may not contain itself.
 
 Readers agree that a concept runs both ways: 39 of 40 in R32 said so of their own accord.
@@ -266,21 +266,25 @@ An attribute's identity is its domain, its name, its type and its cardinality: t
 
 ## Commands
 
-Everything that changes anything is a command, written around a concept or a domain:
+A command is a concept whose head names no entity, with its lines on a control layer:
 
 ```clj
-(add (todo list: list:home text: "Buy milk"))
+(concept (todo/add list: ?l text: ?x)
+  (tonk.todo.add/list of: ?c is: ?l as: :entity in: :control)
+  (tonk.todo.add/text of: ?c is: ?x as: :text in: :control))
+
+(assert (todo/add list: list:home text: "Buy milk"))
 ```
 
-- A command's facts are not the concept's facts. They are tagged with the command's name, so `(query (todo …))` never sees them, and they are never carried, stored or synced: rules see them in the tick they are issued, and then they are gone. The `add` above keeps nothing; what lands is what its rules assert. In R25 all 20 readers, shown no documentation, took `add` to write the to-do itself, so this has to be said.
-- A command needs no declaration, and its labels are its own. Each is an attribute derived from the concept, the command's name and the label, as `list/count-open` is from `list`, so `(add (todo list: list:home text: "Buy milk"))` needs no `list` or `text` on `todo`: the concept anchors the names. The rules that read a command decide what it takes, with or without the concept's entity, as in `(remind (todo todo:9c1e))`, and the types its fields read as. Issuing one with a parameter no rule reads is a compile error, and so is a field two rules read as different types.
-- A command's attributes hold for the tick it is issued in and are never stored, like everything derived in a concept's domain. A name a rule concludes with a fold cannot be issued.
-- A command wraps exactly one concept or domain, one deep: its subject. It may add labels of its own beside it, as in `(rename (todo ?t) title: ?new)`.
-- A command's rows are keyed by its name and everything it passes, so identical commands in one tick are one. A command that must count twice in a tick, such as an increment, carries a field that tells them apart.
+- An entity the head does not name, one that appears only as `of:`, is derived when the concept is asserted, from the claims about to be written, attributes and values together. Identical commands in one tick are one. A command that must count twice in a tick, such as an increment, carries a field that tells them apart.
+- Content identity is only for these. In R17 and R18 an entity derived from every field made a to-do with a changed state a new to-do, and readers tripped on it until it was removed (R19). A command's fields never change, so that cannot happen. A head that names an entity is always given it.
+- A control layer keeps nothing past the tick. What is asserted on it holds in this tick, for rules to read, and is gone after: that is a command's lifetime. The `todo/add` above keeps nothing; what lands is what its rules assert. In R25 all 20 readers, shown no documentation, took `add` to write the to-do itself, so this has to be said.
+- A command has attributes of its own, `tonk.todo.add/text`, not the concept's. Sharing them would make issuing it write claims the concept reads, and on a layer that outlives the tick, the command would outlive it too.
+- A command is declared, so its attributes have names and types, and the issuer and the rules that read it agree on them by name, as for any concept, without resolving another concept first.
 
 ### `assert` and `retract`
 
-The two commands that come with the language, and the only ones that change a concept:
+The two writes, and the only forms that change anything:
 
 | form | does |
 |---|---|
@@ -289,7 +293,7 @@ The two commands that come with the language, and the only ones that change a co
 | `(retract (todo todo:9c1e))` | retracts every field of the concept on that entity |
 | `(retract (xyz.todo/text of: todo:9c1e is: "Buy milk"))` | retracts just that value |
 
-What is asserted holds in this tick and lands after it. What is retracted stops holding now and is gone after it. Every other command changes a concept only through rules that issue `assert` or `retract`.
+What is asserted holds in this tick and lands after it, for as long as its layer keeps it. What is retracted stops holding now and is gone after it. A command changes a concept only through rules that issue `assert` or `retract`.
 
 Leaving a parameter out of an assert through a concept is an error, not "keep what is there", because it is more often a mistake than a choice. A change to some fields goes through their attributes, with a `when` (below). An entity is an identity over time, never partial; what can be partial is what is known about it.
 
@@ -297,7 +301,7 @@ Leaving a parameter out of an assert through a concept is an error, not "keep wh
 
 An assert succeeds the claims its body read for the same entity and field. If it read none, it adds. This is dialog's `cause`: an assertion with one succeeds the claim it names, and one without is additive.
 
-Any top-level command may take a `when`. It runs once, in this document, and is never installed, unlike a top-level `rule` in a transaction:
+Any top-level write may take a `when`. It runs once, in this document, and is never installed, unlike a top-level `rule` in a transaction:
 
 ```clj
 ; replace: read the newest, succeed it
@@ -312,9 +316,9 @@ Any top-level command may take a `when`. It runs once, in this document, and is 
 
 A `:one` line replaces; a `:many` line adds; a write with no read of that field appends. An assert through a concept reads first: it reads the concept's lines on the entity, and succeeds what it read on its `:one` lines, so `(assert (todo todo:9c1e …))` replaces each `:one` field.
 
-Every variable in a command with a `when` is bound by it; a command without one is ground.
+Every variable in a write with a `when` is bound by it; a write without one is ground.
 
-There is no content identity: `assert` never derives an entity. In R17 and R18 an entity derived from every field made a changed state a new to-do, and readers tripped on it until it was removed (R19, 0 of 15).
+An assert through a concept whose head names an entity never derives it. In R17 and R18 an entity derived from every field made a changed state a new to-do, and readers tripped on it until it was removed (R19, 0 of 15). Only a command's entity is derived (see [Commands](#commands)).
 
 ## Creating things
 
@@ -325,15 +329,15 @@ Nothing gets an entity by itself. A new thing is made by a command whose rule co
 
 ```clj
 (rule (assert (todo ?t list: ?l text: ?x state: :open))
-  (add (todo list: ?l text: ?x))
+  (todo/add list: ?l text: ?x)
   (id ?t list: ?l text: ?x))
 
 (rule (assert (note ?n text: ?x))
-  (jot (note text: ?x))
+  (note/jot text: ?x)
   (fresh ?n))
 ```
 
-Two devices that `add` the same list and text make one to-do; every `jot` makes a new note. The schema's author owns how things are created, so every agent that creates through `add` agrees on identity. In R25, 19 of 20 readers could not tell from the code alone whether `id` mints, derives or looks up, so the spec says it.
+Two devices that `todo/add` the same list and text make one to-do; every `note/jot` makes a new note. The schema's author owns how things are created, so every agent that creates through `add` agrees on identity. In R25, 19 of 20 readers could not tell from the code alone whether `id` mints, derives or looks up, so the spec says it.
 
 ## Rules
 
@@ -344,20 +348,20 @@ A conclusion is one of:
 - a concept or an attribute, a deduction: it holds in this tick while the conditions do, and is never stored;
 - an attribute in a concept's domain, `(list/count-open ?l …)`, a deduction whose value may fold;
 - a command, which holds in this tick for other rules to read;
-- `(assert …)` or `(retract …)`, which lands after the tick.
+- `(assert …)` or `(retract …)`, which lands after the tick. A rule that asserts a command issues it for the next tick, where it holds for that tick only.
 
 A rule has one conclusion. Where one event should do several things, a rule concludes a command of its own, and a rule per effect reads it:
 
 ```clj
-(rule (update-title (todo ?t) old: ?old new: ?new)
-  (rename (todo ?t) title: ?new)
+(rule (todo/update-title todo: ?t old: ?old new: ?new)
+  (todo/rename todo: ?t title: ?new)
   (xyz.todo/title of: ?t is: ?old))
 
 (rule (retract (xyz.todo/title of: ?t is: ?old))
-  (update-title (todo ?t) old: ?old))
+  (todo/update-title todo: ?t old: ?old))
 
 (rule (assert (xyz.todo/title of: ?t is: ?new))
-  (update-title (todo ?t) new: ?new))
+  (todo/update-title todo: ?t new: ?new))
 ```
 
 In R27, readers asked to write such a pair wrote two rules, each with one conclusion, and none put two conclusions in one.
@@ -475,8 +479,7 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 
 - Under whose authority an installed rule writes: the transaction that installed it, or the one that set it off. Dialog's induction today runs as the operator committing.
 - What a retract hides in its own tick when a rule also derives the fact, and what an assert and a retract of one fact in one tick do.
-- A command in a premise and an issued command look alike: `(add (todo list: ?l text: ?x))` matches as a rule's condition and issues at the top. Readers proposed `(do add …)`.
-- What drives a tick. Dialog runs induction inside one commit and fails it after 16 rounds. With `!` gone, how a command is re-issued in a later tick or carried to a later transaction or a clock, and how the prelude spells persistence.
+- What drives a tick. Dialog runs induction inside one commit and fails it after 16 rounds. A rule that asserts a command re-issues it in the next tick; how one is carried to a later transaction or a clock, and how the prelude spells persistence, are open.
 - Whether a top-level command keeps `when`, now that rules have none.
 - A stored value on a derived concept outlives its derivation. Renaming a to-do that a rule derives from an issue stores a title; once the issue closes and the to-do is no longer derived, the stored title is still read through the attribute. Whether a rename of a derived concept should write somewhere else, or only hold while the derivation does.
 - Every reader round so far used `haiku`. Whether larger models read attribute lines and rules differently is untested.

@@ -1027,3 +1027,15 @@ Set aside: slots as view parameters (internals leak into the head); positional v
 
 **Decision.** Folds stay pure: no rows, no match. A zero is a rule over a domain with `unless`. A variant is the relation of its cases, so the domain exists. Defaults stay on reads of single values.
 
+## 2026-11-17 — Commands are concepts with no entity
+
+**Question.** With concepts written as attribute lines, commands borrowed their attribute names from the concept they wrapped, `(add (todo …))`. Issuer and observer then had to resolve that concept to the same hash to match, and a command's fields had no declared type or layer.
+
+**Method.** Design discussion with the maintainer, no reader round.
+
+**Results.** Captured in [design](design.md). A command is a concept whose head names no entity, its lines on a control layer, `(concept (todo/add list: ?l text: ?x) (tonk.todo.add/list of: ?c is: ?l …) …)`, issued by `(assert (todo/add …))`. An entity that appears only as `of:` and not in the head is derived on assert from the claims, so identical commands in one tick are one. A control layer keeps nothing past the tick, which is a command's lifetime. A command has attributes of its own; sharing the concept's would leak into its reads.
+
+Set aside: deriving names from the wrapped concept (coordination between layers); a concept anchor passed as `of:` (the same, flat); a `?.` variable for the derived entity (a special case where a general rule works); a `!` marking a next-tick write (`assert` from a rule already does it); a concept as a map of field to attribute (it cannot express a reverse link, `xyz.list/task of: ?l is: ?i`); deriving the entity of a concept whose head names one (R17 to R19).
+
+**Decision.** The design takes it as proposed.
+
