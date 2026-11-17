@@ -18,14 +18,24 @@
 //! the prefix bytes as one component. This mirrors the
 //! `key_parts`/`separator_parts` split tonk's inspector proved out.
 
+use base58::ToBase58 as _;
 use dialog_corpus::inspect::{key_components, separator_components};
 
-use crate::Formula;
 use crate::formula::Input;
+use crate::{Entity, Formula};
 
 /// Raw byte payload (`Value::Bytes`) in a form the `Formula` derive
 /// can parse in field position (the macro trips on angle brackets).
 type Bytes = Vec<u8>;
+
+/// The entity of the component at `at` of the key or separator `of`:
+/// `part:<base58(blake3(of))>/<at>`. The same bytes name the same parts
+/// wherever they occur, and a rule can derive one row per part on it.
+fn part(of: &[u8], at: usize) -> Entity {
+    format!("part:{}/{at}", blake3::hash(of).as_bytes().to_base58())
+        .parse()
+        .expect("a part URI formed from a hash and a position is a valid entity")
+}
 
 /// Decompose a full, variable-length index key into components: one
 /// row per component, in the key's own sort order.
@@ -33,6 +43,9 @@ type Bytes = Vec<u8>;
 pub struct KeyPart {
     /// The raw key bytes — a `tree/entry` row's `key`.
     pub of: Bytes,
+    /// The component's own entity: the key and its position in it.
+    #[output]
+    pub part: Entity,
     /// Position of the component within the key, from 0.
     #[output]
     pub at: u64,
@@ -57,6 +70,7 @@ impl KeyPart {
             .into_iter()
             .enumerate()
             .map(|(at, component)| KeyPart {
+                part: part(&input.of, at),
                 of: input.of.clone(),
                 at: at as u64,
                 kind: component.kind.into(),
@@ -74,6 +88,9 @@ pub struct SeparatorPart {
     /// The raw separator bytes — a `tree/span` row's `separator` or
     /// `until`. Empty is an open bound (−∞ / +∞).
     pub of: Bytes,
+    /// The component's own entity: the separator and its position in it.
+    #[output]
+    pub part: Entity,
     /// Position of the component within the separator, from 0.
     #[output]
     pub at: u64,
@@ -96,6 +113,7 @@ impl SeparatorPart {
             .into_iter()
             .enumerate()
             .map(|(at, component)| SeparatorPart {
+                part: part(&input.of, at),
                 of: input.of.clone(),
                 at: at as u64,
                 kind: component.kind.into(),
@@ -110,6 +128,8 @@ impl SeparatorPart {
 mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use std::collections::BTreeSet;
 
     use dialog_corpus::{Entity, EntityKey, Fact, KeyType as _, Value};
     use dialog_search_tree::Manifest;
@@ -166,6 +186,34 @@ mod tests {
         assert_eq!(rows.len(), 1, "one opaque row: {rows:?}");
         assert_eq!(rows[0].kind, "opaque");
         assert_eq!(rows[0].bytes, vec![0xEE, 1, 2, 3]);
+    }
+
+    /// Each component is an entity of its own: the same bytes name the
+    /// same parts, distinct positions distinct ones, and other bytes
+    /// other parts, so a rule can derive one row per component.
+    #[dialog_common::test]
+    fn it_names_each_component() {
+        let key = entity_key(&fact());
+        let rows = parts(key.clone());
+        let names: Vec<Entity> = rows.iter().map(|row| row.part.clone()).collect();
+        let distinct: BTreeSet<&Entity> = names.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            names.len(),
+            "one entity per position: {names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .all(|name| name.to_string().starts_with("part:"))
+        );
+        let again: Vec<Entity> = parts(key).iter().map(|row| row.part.clone()).collect();
+        assert_eq!(names, again, "the same bytes name the same parts");
+        let other: Vec<Entity> = parts(entity_key(&fact()))
+            .iter()
+            .map(|row| row.part.clone())
+            .collect();
+        assert_ne!(names[0], other[0], "other bytes name other parts");
     }
 
     fn separator_parts(bytes: Vec<u8>) -> Vec<SeparatorPart> {

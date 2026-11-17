@@ -88,6 +88,10 @@ tree/value  a spilled value's bytes, by its asset: entity
 
 What this changes for you:
 
+- `dialog/key-part` and `dialog/separator-part` yield `part`, each
+  component's own entity (`part:<base58(blake3(key))>/<at>`), so a rule
+  can derive one row per component. A query asking either formula
+  names `part` among its terms too.
 - `tree/key`, `tree/blob` and `tree/manifest` are gone, with
   `TreeKeyQuery`, `TreeBlobQuery` and `TreeManifestQuery`. A key and its
   rank, and a blob record's fields, are slots of `tree/entry`; the
