@@ -1,41 +1,40 @@
 //! Memory cells in the file: a branch's head, and every other cell a space
 //! keeps.
 //!
-//! A cell is kept as SQLite keeps a commit in its write-ahead log: every
-//! update appends a record of the [cell](Kind::Cell) kind holding the
-//! cell's name and its value (or that it was retracted), and the cells' own
-//! index (a tree like the blocks', rooted in the slot) files the name, by a
-//! key from it, at the newest such record. The slot that names the record
-//! is written after it, so whatever a power loss keeps, recovery returns to
-//! a slot whose every record since the durable slot is whole: a value in
-//! the file's log is there with every block the log holds before it. As in
-//! SQLite with `synchronous=NORMAL`, an update is made durable by the next
+//! A cell is kept as a log: every update appends a record of the
+//! [cell](Kind::Cell) kind holding the cell's name and its value (or that
+//! it was retracted), and the cells' own index (a tree like the blocks',
+//! rooted in the slot) files the name, by a key from it, at the newest such
+//! record. The slot that names the record is written after it, so whatever
+//! a power loss keeps, recovery returns to a slot whose every record since
+//! the durable slot is whole: a value in the file's log is there with every
+//! block the log holds before it. An update is made durable by the next
 //! sync point, not by one of its own; a power loss can undo the last
 //! updates, never leave one naming what is gone.
 //!
-//! Unlike SQLite, a writer's blocks need not be in the log before the
-//! value: they may still be in this process's extents, written without the
-//! turn. The record names them instead: each of this process's extents
-//! that holds blocks, by its record, epoch, how many bytes of frames it
-//! held and their checksum. A record is whole only if every extent it
-//! names that the slot still lists in that epoch holds those frames, by
-//! their checksum (one the slot no longer lists, or lists claimed again,
-//! was folded into the log before the slot). The checksum, and not only
-//! the frames' own, tells a frame this claim wrote from one an earlier
-//! claim of the extent left in the same place: a power loss can keep the
-//! extent's new count and lose a frame written under it. So a cell's update holds the writer's turn for the append of
-//! one small record, never for folding blocks in.
+//! A writer's blocks need not be in the log before the value: they may
+//! still be in this process's extents, written without the turn. The record
+//! names them instead: each of this process's extents that holds blocks, by
+//! its record, epoch, how many bytes of frames it held and their checksum.
+//! A record is whole only if every extent it names that the slot still
+//! lists in that epoch holds those frames, by their checksum (one the slot
+//! no longer lists, or lists claimed again, was folded into the log before
+//! the slot). The checksum, and not only the frames' own, tells a frame
+//! this claim wrote from one an earlier claim of the extent left in the
+//! same place: a power loss can keep the extent's new count and lose a
+//! frame written under it. So a cell's update holds the writer's turn for
+//! the append of one small record, never for folding blocks in.
 //!
 //! Readers take no lock: a read looks again at the slots when the file
-//! grew, as a SQLite reader looks for a newer commit when it starts.
+//! grew.
 //!
 //! The record's body: a byte of padding and the padding, so what follows
 //! starts on an [`ALIGN`] boundary (the index names the record by where
-//! that is); the name's length (u16) and the name (the memory space, a
-//! zero byte, the cell); a byte, 1 when a value follows and 0 when the
-//! cell was retracted; the value's length (u32) and the value; then how
-//! many extents it names (u16), each its record, epoch and bytes of frames
-//! (u64 each) and their checksum (u32).
+//! that is); the name's length (u16) and the name (the memory space, a zero
+//! byte, the cell); a byte, 1 when a value follows and 0 when the cell was
+//! retracted; the value's length (u32) and the value; then how many extents
+//! it names (u16), each its record, epoch and bytes of frames (u64 each)
+//! and their checksum (u32).
 
 use std::io;
 

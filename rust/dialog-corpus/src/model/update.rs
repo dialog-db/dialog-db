@@ -292,6 +292,15 @@ pub trait Update {
     /// Retract that the `attribute` of `entity` is `value`.
     fn dissociate(&mut self, the: Relation, of: Entity, is: Value);
 
+    /// [`associate`](Self::associate), into `layer`: a write whose
+    /// descriptor names the layer it lands in (`in:`), where a plain
+    /// write lands in the primary. A batch keeps such writes apart, by
+    /// layer, for the commit to route (see [`Changes::take_shares`]).
+    fn associate_in(&mut self, layer: Entity, the: Relation, of: Entity, is: Value, policy: Pick);
+
+    /// [`dissociate`](Self::dissociate), from `layer`.
+    fn dissociate_in(&mut self, layer: Entity, the: Relation, of: Entity, is: Value);
+
     /// Store `asset` when this batch commits.
     ///
     /// The commit writes the asset's bytes through the blob store and
@@ -336,6 +345,38 @@ pub trait Statement: Sized {
 
     /// Retract this statement from an update target.
     fn retract(self, update: &mut impl Update);
+
+    /// This statement written into `layer`: every fact it writes lands
+    /// there, where it would land in the primary. A statement whose own
+    /// descriptors name a layer keeps it; only the facts bound for the
+    /// primary move.
+    fn at(self, layer: Entity) -> At<Self> {
+        At {
+            statement: self,
+            layer,
+        }
+    }
+}
+
+/// A [`Statement`] written into one layer. See [`Statement::at`].
+#[derive(Debug, Clone)]
+pub struct At<S> {
+    statement: S,
+    layer: Entity,
+}
+
+impl<S: Statement> Statement for At<S> {
+    fn assert(self, update: &mut impl Update) {
+        let mut changes = Changes::new();
+        self.statement.assert(&mut changes);
+        changes.into_layer(self.layer).assert(update);
+    }
+
+    fn retract(self, update: &mut impl Update) {
+        let mut changes = Changes::new();
+        self.statement.retract(&mut changes);
+        changes.into_layer(self.layer).assert(update);
+    }
 }
 
 /// The facts of a [`Changes`] batch, by entity and attribute.
@@ -373,6 +414,9 @@ impl AssetChange {
 pub struct Changes {
     facts: Facts,
     assets: BTreeMap<Blake3Hash, AssetChange>,
+    /// The writes whose descriptor names a layer (`in:`), by layer. A
+    /// write with no layer named is in `facts`, bound for the primary.
+    layers: BTreeMap<Entity, Facts>,
 }
 
 /// [`ChangesWithAssets`] borrowed from a batch, for encoding without
@@ -380,7 +424,10 @@ pub struct Changes {
 #[derive(Serialize)]
 struct ChangesWithAssetsRef<'a> {
     facts: &'a Facts,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     assets: Vec<&'a AssetChange>,
+    #[serde(rename = "in", skip_serializing_if = "BTreeMap::is_empty")]
+    layers: &'a BTreeMap<Entity, Facts>,
 }
 
 /// The serialized shape of a [`Changes`] batch that changes no asset.
@@ -393,12 +440,13 @@ impl Serialize for Changes {
     where
         S: Serializer,
     {
-        if self.assets.is_empty() {
+        if self.assets.is_empty() && self.layers.is_empty() {
             FactsOnly(&self.facts).serialize(serializer)
         } else {
             ChangesWithAssetsRef {
                 facts: &self.facts,
                 assets: self.assets.values().collect(),
+                layers: &self.layers,
             }
             .serialize(serializer)
         }
@@ -414,9 +462,9 @@ impl<'de> Deserialize<'de> for Changes {
     }
 }
 
-/// Reads either shape of a [`Changes`] batch from its first key: `facts`
-/// or `assets` begin the shape that changes assets, and an entity begins
-/// the fact nesting alone. Neither of those keys is an entity. Reading the
+/// Reads either shape of a [`Changes`] batch from its first key: `facts`,
+/// `assets` or `in` begin the shape that changes assets or writes into
+/// layers, and an entity begins the fact nesting alone. Neither of those keys is an entity. Reading the
 /// map in place, not through an untagged enum, keeps every value's
 /// encoding in the format's own hands; an untagged enum buffers it, and
 /// the buffer cannot hold a 128-bit integer.
@@ -434,7 +482,7 @@ impl<'de> de::Visitor<'de> for ChangesVisitor {
         let Some(first) = map.next_key::<String>()? else {
             return Ok(changes);
         };
-        if first == "facts" || first == "assets" {
+        if first == "facts" || first == "assets" || first == "in" {
             let mut key = Some(first);
             while let Some(name) = key {
                 match name.as_str() {
@@ -444,7 +492,10 @@ impl<'de> de::Visitor<'de> for ChangesVisitor {
                             changes.change_asset(change);
                         }
                     }
-                    other => return Err(de::Error::unknown_field(other, &["facts", "assets"])),
+                    "in" => changes.layers = map.next_value()?,
+                    other => {
+                        return Err(de::Error::unknown_field(other, &["facts", "assets", "in"]));
+                    }
                 }
                 key = map.next_key()?;
             }
@@ -479,7 +530,69 @@ impl Changes {
 
     /// Whether the batch records no fact changes and changes no asset.
     pub fn is_empty(&self) -> bool {
-        self.facts.is_empty() && self.assets.is_empty()
+        self.facts.is_empty() && self.assets.is_empty() && self.layers.is_empty()
+    }
+
+    /// Whether the batch writes into any layer (`in:`).
+    pub fn has_shares(&self) -> bool {
+        !self.layers.is_empty()
+    }
+
+    /// Take the writes into layers out of the batch, each layer's as a
+    /// batch of its own with no layer named, in layer order. What stays
+    /// is bound for the primary. The commit routes each share to its
+    /// layer.
+    pub fn take_shares(&mut self) -> Vec<(Entity, Changes)> {
+        take(&mut self.layers)
+            .into_iter()
+            .map(|(layer, facts)| {
+                (
+                    layer,
+                    Changes {
+                        facts,
+                        assets: BTreeMap::new(),
+                        layers: BTreeMap::new(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// This batch with every write bound for the primary moved into
+    /// `layer`; the writes already into layers, and the asset changes,
+    /// stay as they are.
+    pub fn into_layer(mut self, layer: Entity) -> Self {
+        let facts = take(&mut self.facts);
+        if facts.is_empty() {
+            return self;
+        }
+        let share = self.layers.entry(layer).or_default();
+        for (entity, attributes) in facts {
+            for (attribute, changes) in attributes {
+                share
+                    .entry(entity.clone())
+                    .or_default()
+                    .entry(attribute)
+                    .or_default()
+                    .extend(changes);
+            }
+        }
+        self
+    }
+
+    /// Borrowing iterator over every write into a layer, as `(layer,
+    /// entity, attribute, change)`. [`iter`](Self::iter) walks the
+    /// writes bound for the primary.
+    pub fn iter_in(&self) -> impl Iterator<Item = (&Entity, &Entity, &Relation, &Change)> {
+        self.layers.iter().flat_map(|(layer, facts)| {
+            facts.iter().flat_map(move |(entity, attrs)| {
+                attrs.iter().flat_map(move |(attribute, changes)| {
+                    changes
+                        .iter()
+                        .map(move |change| (layer, entity, attribute, change))
+                })
+            })
+        })
     }
 
     /// Whether the batch changes any asset.
@@ -552,9 +665,14 @@ impl Changes {
     /// session overlay needs to garbage-collect per-client facts
     /// without growing.
     pub fn retain_entities<F: FnMut(&Entity) -> bool>(&mut self, mut keep: F) -> bool {
-        let before = self.facts.len();
+        let before = self.facts.len() + self.layers.values().map(HashMap::len).sum::<usize>();
         self.facts.retain(|entity, _| keep(entity));
-        self.facts.len() != before
+        for facts in self.layers.values_mut() {
+            facts.retain(|entity, _| keep(entity));
+        }
+        self.layers.retain(|_, facts| !facts.is_empty());
+        let after = self.facts.len() + self.layers.values().map(HashMap::len).sum::<usize>();
+        after != before
     }
 
     /// Apply every change in `other` after the ones already recorded, with
@@ -579,10 +697,34 @@ impl Changes {
                 }
             }
         }
+        for (layer, facts) in other.layers {
+            for (entity, attributes) in facts {
+                for (attribute, changes) in attributes {
+                    for change in changes {
+                        match change {
+                            Change::Assert(value, policy) => self.associate_in(
+                                layer.clone(),
+                                attribute.clone(),
+                                entity.clone(),
+                                value,
+                                policy,
+                            ),
+                            Change::Retract(value) => self.dissociate_in(
+                                layer.clone(),
+                                attribute.clone(),
+                                entity.clone(),
+                                value,
+                            ),
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Borrowing iterator over every recorded `(entity, attribute,
-    /// change)` triple. Use this when you need to inspect the batch
+    /// change)` triple bound for the primary; [`iter_in`](Self::iter_in)
+    /// walks the writes into layers. Use this when you need to inspect the batch
     /// without consuming it — e.g. to extract tombstones from
     /// retracts without cloning the whole structure.
     pub fn iter(&self) -> impl Iterator<Item = (&Entity, &Relation, &Change)> {
@@ -628,6 +770,31 @@ impl Changes {
         changes
     }
 
+    /// Take out every cell whose attribute `selects` accepts, each with its
+    /// changes as recorded, in order, and return them as a batch of their
+    /// own. Asset changes stay. A batch none of whose attributes is
+    /// selected is left as it is, and nothing is allocated for it.
+    pub fn take_cells<F: FnMut(&Relation) -> bool>(&mut self, mut selects: F) -> Changes {
+        let mut taken = Changes::new();
+        self.facts.retain(|entity, attributes| {
+            let mut moved: Option<HashMap<Relation, Vec<Change>>> = None;
+            attributes.retain(|attribute, changes| {
+                if !selects(attribute) {
+                    return true;
+                }
+                moved
+                    .get_or_insert_with(HashMap::new)
+                    .insert(attribute.clone(), take(changes));
+                false
+            });
+            if let Some(moved) = moved {
+                taken.facts.insert(entity.clone(), moved);
+            }
+            !attributes.is_empty()
+        });
+        taken
+    }
+
     /// Record `changes` for one cell, after whatever the cell holds, in
     /// the order given.
     pub fn put_cell(&mut self, the: Relation, of: Entity, changes: Vec<Change>) {
@@ -658,6 +825,10 @@ impl Changes {
     /// accumulated: handed the same facts in another order it wrote
     /// another set of intermediate nodes. In a fixed order, two commits
     /// of the same facts write the same blocks.
+    ///
+    /// Only the writes bound for the primary are among them: a batch's
+    /// writes into layers are taken first
+    /// ([`take_shares`](Self::take_shares)).
     pub fn into_instructions(self) -> Vec<Instruction> {
         let mut instructions = Vec::new();
         for (entity, attributes) in self.facts {
@@ -693,32 +864,60 @@ impl Changes {
     }
 }
 
+/// Record an assertion of `is` under `policy` in `cell`.
+fn associate_cell(cell: &mut Vec<Change>, is: Value, policy: Pick) {
+    // A write under `last` succeeds the cell's newest claim. The
+    // writes of one batch stand at one edition, so the batch's own
+    // earlier `last` write is that claim only when it is the cell's
+    // latest change and no other assertion of the cell came before
+    // it: then it would be retracted the moment it landed, and this
+    // write succeeds what it succeeded, so it takes its place. With
+    // another assertion of the cell in the batch the two claims
+    // stand equal and either may be the one elected, so every write
+    // stays, in order, and is replayed as written. Every other
+    // pick elects by value, where the earlier write may stand.
+    if policy == Pick::Last
+        && let Some((Change::Assert(_, Pick::Last), before)) = cell.split_last()
+        && before
+            .iter()
+            .all(|change| matches!(change, Change::Retract(_)))
+    {
+        cell.pop();
+    }
+    cell.push(Change::Assert(is, policy));
+}
+
 impl Update for Changes {
     fn associate(&mut self, the: Relation, of: Entity, is: Value, policy: Pick) {
         let cell = self.facts.entry(of).or_default().entry(the).or_default();
-        // A write under `last` succeeds the cell's newest claim. The
-        // writes of one batch stand at one edition, so the batch's own
-        // earlier `last` write is that claim only when it is the cell's
-        // latest change and no other assertion of the cell came before
-        // it: then it would be retracted the moment it landed, and this
-        // write succeeds what it succeeded, so it takes its place. With
-        // another assertion of the cell in the batch the two claims
-        // stand equal and either may be the one elected, so every write
-        // stays, in order, and is replayed as written. Every other
-        // pick elects by value, where the earlier write may stand.
-        if policy == Pick::Last
-            && let Some((Change::Assert(_, Pick::Last), before)) = cell.split_last()
-            && before
-                .iter()
-                .all(|change| matches!(change, Change::Retract(_)))
-        {
-            cell.pop();
-        }
-        cell.push(Change::Assert(is, policy));
+        associate_cell(cell, is, policy);
     }
 
     fn dissociate(&mut self, the: Relation, of: Entity, is: Value) {
         self.facts
+            .entry(of)
+            .or_default()
+            .entry(the)
+            .or_default()
+            .push(Change::Retract(is));
+    }
+
+    fn associate_in(&mut self, layer: Entity, the: Relation, of: Entity, is: Value, policy: Pick) {
+        let cell = self
+            .layers
+            .entry(layer)
+            .or_default()
+            .entry(of)
+            .or_default()
+            .entry(the)
+            .or_default();
+        associate_cell(cell, is, policy);
+    }
+
+    fn dissociate_in(&mut self, layer: Entity, the: Relation, of: Entity, is: Value) {
+        self.layers
+            .entry(layer)
+            .or_default()
             .entry(of)
             .or_default()
             .entry(the)
@@ -899,6 +1098,29 @@ impl Statement for Changes {
                 }
             }
         }
+        for (layer, facts) in self.layers {
+            for (entity, attributes) in facts {
+                for (attribute, changes) in attributes {
+                    for change in changes {
+                        match change {
+                            Change::Assert(value, policy) => update.associate_in(
+                                layer.clone(),
+                                attribute.clone(),
+                                entity.clone(),
+                                value,
+                                policy,
+                            ),
+                            Change::Retract(value) => update.dissociate_in(
+                                layer.clone(),
+                                attribute.clone(),
+                                entity.clone(),
+                                value,
+                            ),
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn retract(mut self, update: &mut impl Update) {
@@ -911,6 +1133,18 @@ impl Statement for Changes {
         // Inverse: asserts become retracts; existing retracts become
         // appends. Symmetric so `c.assert(t); c.retract(t);` round-trips
         // when `t` is a fresh target.
+        for (layer, share) in self.take_shares() {
+            for instruction in share.into_instructions() {
+                match instruction {
+                    Instruction::Assert(a, _) => {
+                        update.dissociate_in(layer.clone(), a.the, a.of, a.is)
+                    }
+                    Instruction::Retract(a) => {
+                        update.associate_in(layer.clone(), a.the, a.of, a.is, Pick::All)
+                    }
+                }
+            }
+        }
         for instruction in self.into_instructions() {
             match instruction {
                 Instruction::Assert(a, _) => update.dissociate(a.the, a.of, a.is),
