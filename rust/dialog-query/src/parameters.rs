@@ -1,5 +1,7 @@
+use crate::pattern::{Pattern, Shape};
 use crate::term::Term;
 use crate::types::Any;
+use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -8,8 +10,19 @@ use std::sync::Arc;
 ///
 /// Every premise type (relation, concept, formula, constraint) exposes its
 /// inputs and outputs as named parameters. A `Parameters` instance binds
-/// each parameter name to a [`Term<Any>`]: either a concrete constant
-/// or a named variable that will be resolved during query evaluation.
+/// each parameter name to a [`Pattern`]: a leaf, which is a
+/// [`Term<Any>`] (a concrete constant or a named variable that will be
+/// resolved during query evaluation), or a map or a list of
+/// patterns.
+///
+/// A premise reads a term in each of its slots, and [`get`](Self::get)
+/// and [`iter`](Self::iter) give it one whatever the parameter holds: a
+/// leaf as it is, and for a map or a list the variable that
+/// stands for the whole value (its *whole*, see [`Shape`]). The premise
+/// is run with that variable and the pattern is applied around it, so a
+/// premise that knows nothing of patterns keeps working. Whatever asks
+/// which variables a premise binds or needs reads
+/// [`shape`](Self::shape) and looks inside.
 ///
 /// During planning, the [`Schema`](crate::Schema) is consulted to determine
 /// which parameters are required vs optional, and the planner uses this
@@ -25,17 +38,79 @@ use std::sync::Arc;
 /// yields carry the same parameters, and the evaluator clones them per
 /// row, so a clone is a reference count and the map is copied only when
 /// a holder writes to it.
-pub struct Parameters(Arc<BTreeMap<String, Term<Any>>>);
+pub struct Parameters(Arc<Held>);
+
+/// What parameters hold: under each name the term a premise reads
+/// there, and beside them the patterns of the names that hold a map or
+/// a list.
+///
+/// The shapes are kept apart so that parameters that hold terms alone,
+/// which is nearly all of them, are the map of terms they were before a
+/// parameter could hold a pattern: the same entries, read by the same
+/// lookups, with nothing beside them but a place for the shapes, which
+/// is empty, allocates nothing and is dropped by a comparison.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct Held {
+    /// Under each name a leaf, or the whole of the shape held there.
+    terms: BTreeMap<String, Term<Any>>,
+    /// The map or list each name holds, for the names that hold
+    /// one, in name order; `None` when no name holds one. Every name
+    /// here is also in `terms`.
+    shapes: Option<Box<Shapes>>,
+}
+
+/// The patterns of the names that hold one, in name order.
+type Shapes = Vec<(String, Arc<Pattern>)>;
+
+impl Held {
+    /// The patterns held, in name order.
+    fn shapes(&self) -> &[(String, Arc<Pattern>)] {
+        match &self.shapes {
+            Some(shapes) => shapes,
+            None => &[],
+        }
+    }
+
+    /// Stops `name` holding a pattern. Parameters that hold none, which
+    /// every insert of a term into parameters of terms meets, answer by
+    /// one test where they are written.
+    #[inline]
+    fn forget(&mut self, name: &str) {
+        if self.shapes.is_some() {
+            self.forget_shape(name);
+        }
+    }
+
+    fn forget_shape(&mut self, name: &str) {
+        if let Some(shapes) = &mut self.shapes {
+            shapes.retain(|(other, _)| other != name);
+            if shapes.is_empty() {
+                self.shapes = None;
+            }
+        }
+    }
+}
 
 impl Serialize for Parameters {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.as_ref().serialize(serializer)
+        if let Some((name, pattern)) = self.shapes().next() {
+            return Err(S::Error::custom(format!(
+                "the parameter `{name}` holds the pattern {pattern}, which has no wire form: \
+                 only a variable or a constant is written"
+            )));
+        }
+        self.0.terms.serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for Parameters {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        BTreeMap::deserialize(deserializer).map(|map| Parameters(Arc::new(map)))
+        BTreeMap::deserialize(deserializer).map(|terms| {
+            Parameters(Arc::new(Held {
+                terms,
+                shapes: None,
+            }))
+        })
     }
 }
 
@@ -44,9 +119,38 @@ impl Parameters {
     pub fn new() -> Self {
         Self::default()
     }
-    /// Returns the parameter associated with the given name, if has one.
+
+    /// Returns the term a premise reads under the given name, if it has
+    /// one: the leaf the parameter holds, or the variable standing for
+    /// the whole value where it holds a map or a list.
     pub fn get(&self, name: &str) -> Option<&Term<Any>> {
-        self.0.get(name)
+        self.0.terms.get(name)
+    }
+
+    /// Returns the pattern the given name is bound to, if it has one. A
+    /// leaf is the pattern of its term.
+    pub fn pattern(&self, name: &str) -> Option<Pattern> {
+        match self.shape(name) {
+            Some(shape) => Some(shape.clone()),
+            None => self.get(name).cloned().map(Pattern::Term),
+        }
+    }
+
+    /// Returns what the given name is bound to: the term a premise
+    /// reads there, and the map or list pattern it stands for
+    /// when the parameter holds one.
+    pub fn slot(&self, name: &str) -> Option<(&Term<Any>, Option<&Pattern>)> {
+        self.get(name).map(|term| (term, self.shape(name)))
+    }
+
+    /// Returns the map or list pattern the given name is bound
+    /// to, when it is bound to one.
+    pub fn shape(&self, name: &str) -> Option<&Pattern> {
+        self.0
+            .shapes()
+            .iter()
+            .find(|(other, _)| other == name)
+            .map(|(_, shape)| shape.as_ref())
     }
 
     /// Inserts a new parameter binding for the given name.
@@ -55,28 +159,201 @@ impl Parameters {
     /// Accepts anything convertible to [`Term<Any>`], including `Term<T>`
     /// for any `T: Scalar`.
     pub fn insert(&mut self, name: String, param: Term<Any>) {
-        Arc::make_mut(&mut self.0).insert(name, param);
+        let held = Arc::make_mut(&mut self.0);
+        held.forget(&name);
+        held.terms.insert(name, param);
     }
 
-    /// Removes the parameter binding for the given name, returning it
-    /// when there was one.
+    /// Binds the given name to a pattern, overwriting what it was bound
+    /// to. A pattern that holds no variable is the value it builds, and
+    /// is bound as that constant.
+    pub fn set(&mut self, name: String, pattern: impl Into<Pattern>) {
+        match pattern.into() {
+            Pattern::Term(term) => self.insert(name, term),
+            pattern => match pattern.as_value() {
+                Some(value) => self.insert(name, Term::Constant(value)),
+                None => {
+                    let held = Arc::make_mut(&mut self.0);
+                    held.terms.insert(name.clone(), Shape::whole_of(&pattern));
+                    held.forget(&name);
+                    let shapes = held.shapes.get_or_insert_default();
+                    let at = shapes.partition_point(|(other, _)| *other < name);
+                    shapes.insert(at, (name, Arc::new(pattern)));
+                }
+            },
+        }
+    }
+
+    /// Removes the parameter binding for the given name, returning the
+    /// term a premise read there when there was one.
     pub fn remove(&mut self, name: &str) -> Option<Term<Any>> {
-        Arc::make_mut(&mut self.0).remove(name)
+        let held = Arc::make_mut(&mut self.0);
+        held.forget(name);
+        held.terms.remove(name)
     }
 
     /// Checks if a parameter binding exists for the given name.
     pub fn contains(&self, name: &str) -> bool {
-        self.0.contains_key(name)
+        self.0.terms.contains_key(name)
     }
 
-    /// Returns an iterator over all name-parameter pairs in this binding set.
+    /// Returns an iterator over all name-term pairs in this binding
+    /// set: under each name the term a premise reads there (see
+    /// [`get`](Self::get)).
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Term<Any>)> {
-        self.0.iter()
+        self.0.terms.iter()
     }
 
     /// Returns an iterator over the parameter names in this binding set.
     pub fn keys(&self) -> impl Iterator<Item = &String> {
-        self.0.keys()
+        self.0.terms.keys()
+    }
+
+    /// Returns an iterator over the parameters that hold a map
+    /// or a list, with the pattern each holds.
+    pub fn shapes(&self) -> impl Iterator<Item = (&String, &Pattern)> {
+        self.0
+            .shapes()
+            .iter()
+            .map(|(name, shape)| (name, shape.as_ref()))
+    }
+
+    /// Whether any parameter holds a map or a list.
+    pub fn has_shapes(&self) -> bool {
+        self.0.shapes.is_some()
+    }
+
+    /// Every leaf these parameters hold: the terms of the leaf
+    /// parameters, and the terms inside each map and list. The
+    /// wholes are not among them.
+    pub fn leaves(&self) -> impl Iterator<Item = &Term<Any>> {
+        self.0.terms.iter().flat_map(|(name, term)| {
+            let (inside, leaf) = match self.shape(name) {
+                Some(shape) => (shape.terms(), None),
+                None => (Vec::new(), Some(term)),
+            };
+            inside.into_iter().chain(leaf)
+        })
+    }
+
+    /// Every leaf these parameters hold, each under an address: a leaf
+    /// parameter under its name, and a leaf inside a map
+    /// or a list under the parameter's name and its place in the pattern as
+    /// written. Renaming variables moves no address.
+    pub fn addressed(&self) -> Vec<(String, &Term<Any>)> {
+        let mut leaves = Vec::with_capacity(self.0.terms.len());
+        for (name, term) in self.0.terms.iter() {
+            match self.shape(name) {
+                Some(shape) => leaves.extend(
+                    shape
+                        .terms()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(place, term)| (format!("{name}.{place}"), term)),
+                ),
+                None => leaves.push((name.clone(), term)),
+            }
+        }
+        leaves
+    }
+
+    /// These parameters with every leaf replaced by what `f` gives for
+    /// it, inside a map or a list too. A whole follows the
+    /// pattern it stands for.
+    pub fn map_terms(&self, f: impl Fn(&Term<Any>) -> Term<Any>) -> Parameters {
+        let mut mapped = Parameters::new();
+        for (name, term) in self.0.terms.iter() {
+            match self.shape(name) {
+                Some(shape) => mapped.set(name.clone(), shape.map_terms(&f)),
+                None => mapped.insert(name.clone(), f(term)),
+            }
+        }
+        mapped
+    }
+
+    /// These parameters as a premise is run with them, every one a
+    /// leaf, and the shapes to apply around the premise: for each map
+    /// or list, the variable now standing in its slot and the
+    /// pattern. See [`Shape`].
+    pub fn lowered(&self) -> (Parameters, Vec<Shape>) {
+        self.lowered_with(Shape::of)
+    }
+
+    /// [`lowered`](Self::lowered), with the whole of a pattern that
+    /// holds a blank told apart by what `number` gives: a conjunction
+    /// numbers the patterns its premises hold, so its plan does not
+    /// depend on what else the process ran.
+    pub(crate) fn lowered_by(&self, mut number: impl FnMut() -> u64) -> (Parameters, Vec<Shape>) {
+        self.lowered_with(|pattern| Shape::numbered(pattern, &mut number))
+    }
+
+    fn lowered_with(
+        &self,
+        mut shape: impl FnMut(Arc<Pattern>) -> Shape,
+    ) -> (Parameters, Vec<Shape>) {
+        let mut shapes = Vec::with_capacity(self.0.shapes().len());
+        let mut terms = self.0.terms.clone();
+        for (name, pattern) in self.0.shapes() {
+            let shape = shape(pattern.clone());
+            terms.insert(name.clone(), shape.whole.clone());
+            shapes.push(shape);
+        }
+        let lowered = Parameters(Arc::new(Held {
+            terms,
+            shapes: None,
+        }));
+        (lowered, shapes)
+    }
+
+    /// These parameters as a premise is run with them, every one a
+    /// leaf: under each name the term [`get`](Self::get) answers, the
+    /// whole where the name holds a map or a list. Parameters
+    /// that hold terms alone are shared, not copied.
+    pub fn plain(&self) -> Parameters {
+        if self.0.shapes.is_none() {
+            return self.clone();
+        }
+        Parameters(Arc::new(Held {
+            terms: self.0.terms.clone(),
+            shapes: None,
+        }))
+    }
+
+    /// These parameters for one run of a premise by itself, and their
+    /// shapes: the whole of a pattern that holds a blank is told apart
+    /// from every other run's (see [`Shape::of`]), and each name goes on
+    /// holding its pattern.
+    pub(crate) fn told_apart(&self) -> (Parameters, Vec<Shape>) {
+        let mut shapes = Vec::with_capacity(self.0.shapes().len());
+        let mut terms = self.0.terms.clone();
+        for (name, pattern) in self.0.shapes() {
+            let shape = Shape::of(pattern.clone());
+            terms.insert(name.clone(), shape.whole.clone());
+            shapes.push(shape);
+        }
+        let told = Parameters(Arc::new(Held {
+            terms,
+            shapes: self.0.shapes.clone(),
+        }));
+        (told, shapes)
+    }
+
+    /// These parameters under other names: each bound under what `key`
+    /// gives for its name, holding what it held.
+    pub fn rekeyed(&self, key: impl Fn(&str) -> String) -> Parameters {
+        let mut rekeyed = Held::default();
+        for (name, term) in self.0.terms.iter() {
+            rekeyed.terms.insert(key(name), term.clone());
+        }
+        if let Some(shapes) = &self.0.shapes {
+            let mut shapes: Shapes = shapes
+                .iter()
+                .map(|(name, shape)| (key(name), shape.clone()))
+                .collect();
+            shapes.sort_by(|a, b| a.0.cmp(&b.0));
+            rekeyed.shapes = Some(Box::new(shapes));
+        }
+        Parameters(Arc::new(rekeyed))
     }
 }
 

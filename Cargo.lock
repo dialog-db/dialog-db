@@ -1426,6 +1426,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "futures-util",
  "getrandom 0.2.16",
+ "ipld-core",
  "leb128",
  "memchr",
  "merkle-reference",

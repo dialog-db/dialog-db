@@ -18,6 +18,7 @@ pub use equality::Equality;
 pub use starts_with::StartsWith;
 pub use type_of::TypeOf;
 
+use crate::pattern::Pattern;
 use crate::selection::Selection;
 use crate::types::Any;
 use crate::{Environment, Parameters, Schema, Term};
@@ -121,7 +122,15 @@ impl Constraint {
         };
         match self {
             Constraint::Equality(_) => {
-                Constraint::Equality(Equality::new(slot("this"), slot("is")))
+                // A side may be a map or a list of terms, which
+                // no single term stands for.
+                let side = |name: &str| {
+                    terms
+                        .pattern(name)
+                        .or_else(|| current.pattern(name))
+                        .unwrap_or_else(|| Pattern::Term(Term::blank()))
+                };
+                Constraint::Equality(Equality::between(side("this"), side("is")))
             }
             Constraint::Coalesce(_) => {
                 Constraint::Coalesce(Coalesce::new(slot("source"), slot("fallback"), slot("is")))
