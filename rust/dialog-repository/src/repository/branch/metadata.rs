@@ -12,9 +12,8 @@
 //! `branch.query()` is evaluated against — see
 //! [`QueryLayer::metadata`](super::session::QueryLayer::metadata).
 
-use base58::ToBase58;
 use dialog_capability::{Capability, Did};
-use dialog_corpus::{Statement, Update};
+use dialog_corpus::{Entity, Statement, Update};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 
 use crate::schema::Branch as BranchConcept;
@@ -102,10 +101,11 @@ impl Branch {
         let replica = Replica::new(profile.clone(), self.of().clone());
         let branch = BranchConcept::new(&replica, self.name());
         let revision = revision.map(|revision| {
-            let tree_bytes: &[u8] = revision.tree.hash();
+            let tree = Entity::from_node(revision.tree.hash())
+                .expect("a node entity formed from a 32-byte hash is always valid");
             BranchRevision {
                 this: branch.this.clone(),
-                tree: Tree(ToBase58::to_base58(tree_bytes)),
+                tree: Tree(tree),
                 edition: Edition(u128::from(revision.edition.value())),
                 revision: RevisionEntity(revision.entity()),
             }

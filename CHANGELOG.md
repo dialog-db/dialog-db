@@ -14,6 +14,185 @@ says how to cut a release.
 
 ## Unreleased
 
+### A revision is named by `revision:`, not by a `did:key:`
+
+A revision's entity was `did:key:z6Mk<base58(hash)>`: the shape of a key
+DID around a blake3 hash of the revision's version. It read as a
+principal and was none, and nothing could tell a revision from a branch,
+a replica or an operator by its name.
+
+It is now `revision:<base58(hash)>`, over the same hash
+(`Version::entity`, `Revision::entity`). A commit writes the revision's
+signed record under that entity, `dialog.branch/revision` carries it, and
+the built-in `Revision`, `RevisionParent` and `RevisionAncestor` concepts
+yield it for `this`, `parent` and `ancestor`.
+
+What this changes for you:
+
+- A revision entity you read from a query starts with `revision:`. Code
+  that told revisions apart by parsing `did:key:z6Mk` has to change; an
+  entity compared whole needs nothing.
+- `Version::entity_did` is `Version::entity_uri`. `Version::legacy_entity`
+  and `Version::legacy_entity_uri` give the name a revision had before,
+  and `Version::legacy_of` turns the current name into it.
+- A new formula, `dialog/revision-slot`, takes a revision entity as `of`
+  and yields as `is` each entity its record may be stored under: the
+  entity itself, then its older name.
+- A fact your space wrote about a revision under its older name (a
+  comment on a commit, say) still names the older entity, and no longer
+  joins the `this` of `Revision`. Join through `dialog/revision-slot`,
+  or rewrite those facts.
+
+Why: an entity's scheme is what a reader, a rule and a view have to tell
+kinds of thing apart, and a node (`node:`) and an asset (`asset:`)
+already say what they are. A name shaped like a key invites treating it
+as one.
+
+#### Compatibility and migration
+
+- A replica written by an older release holds each revision's record
+  under `did:key:z6Mk…`. Nothing is rewritten on upgrade: this release
+  reads a record under either name (the history reader, the built-in
+  revision concepts and a stack's durable layers all do) and writes new
+  ones under `revision:`, so one tree can hold both. An embedder runs
+  nothing.
+- A durable layer's pointer, the `dialog.branch/revision` of
+  `memory:<name>` stored in the primary's tree, names its revision by
+  the name the release that wrote it used. This release follows a
+  pointer an older release wrote, by either name, and opens the layer;
+  the layer's next move points the primary at the new revision by its
+  `revision:` name and retires the older claim, as any move does.
+- An older release cannot find a record written under `revision:`, so
+  it cannot read the history of what this release committed, nor follow
+  a durable layer's pointer this release wrote. Upgrade every replica of
+  a space before any of them commits with this release.
+
+### A tree node is a handle, and five resolvers read it
+
+Argued in [design/tree-exploration.md](./design/tree-exploration.md).
+
+The seven `tree/*` resolvers each loaded a node's block and decoded one
+part of it, so a query asking three things of one node decoded it three
+times. A segment's entries were split across three of them (`tree/key`,
+`tree/entry`, `tree/blob`) and paired by position. A node was named by
+the base58 string of its hash, which is not an entity, so a rule could
+not derive a concept whose rows were nodes.
+
+A node is now opaque to a query, which holds its handle: the entity
+`node:<base58(hash)>` (`Entity::from_node`, `Entity::node_hash`).
+`dialog.branch/tree` carries the root's handle and `tree/span` yields
+each child's. A resolver takes the handle as `of`, asks the environment
+for the decoded node (`nodes::Read`, as the tree's own reads do), and
+yields one part of it. The environment decodes a node once and keeps it.
+
+```text
+tree/node   what the node is, and the format it was written under
+tree/span   an index node's children, with what the node holds about each
+tree/entry  a segment node's entries, each whole
+tree/block  the node's block as stored
+tree/value  a spilled value's bytes, by its asset: entity
+```
+
+What this changes for you:
+
+- `dialog/key-part` and `dialog/separator-part` yield `part`, each
+  component's own entity (`part:<base58(blake3(key))>/<at>`), so a rule
+  can derive one row per component. A query asking either formula
+  names `part` among its terms too.
+- `tree/key`, `tree/blob` and `tree/manifest` are gone, with
+  `TreeKeyQuery`, `TreeBlobQuery` and `TreeManifestQuery`. A key and its
+  rank, and a blob record's fields, are slots of `tree/entry`; the
+  manifest's fields are slots of `tree/node`. `tree/block` is new.
+- `of` is an entity: a `node:` for every resolver but `tree/value`,
+  which takes an `asset:`. A base58 string or raw bytes, which `of`
+  used to take, match nothing.
+- `dialog.branch/tree` is an entity (`branch::Tree(Entity)`), not text.
+  A concept that reads it declares the field as an entity; the hash is
+  `tree.0.node_hash()`.
+- `tree/span` yields `node` as a `node:` entity, and a new slot `span`:
+  the span's own entity, `span:<base58(node)>/<position>`. `tree/entry`
+  yields `entry`, `entry:<base58(node)>/<position>`. A rule deriving a
+  concept of spans or of entries has an entity for each row.
+- `tree/entry` yields `spill` and `blob` as `asset:` entities. A slot
+  that does not apply to a row is absent: `spill` when the value is
+  inline (it was an empty string), `origin` and `edition` when the
+  write was unversioned (they were empty and 0), the blob slots on any
+  entry that is no blob record, and the claim slots on one that is.
+- Slot names are kebab-case: `max-separator`, `inline-n`,
+  `spill-prefix`, `max-segment`, `frame-ceiling-factor`,
+  `anchor-selector`. `fanout_n` is `fanout-exponent`. `tree/node` also
+  yields `entry-overhead`, `key-overhead` and `link-overhead`, which no
+  resolver did.
+- `RESOLVER_COST` is 50,000, from 200. Where a rule's body has a fact
+  that decides whether a node is read, the planner now asks the fact
+  first, whether or not the caller gave the node.
+- `dialog_corpus::inspect` has a reading of each part that takes a
+  decoded node (`summary`, `spans`, `keys`, `entries`, `blob_records`,
+  `manifest`) beside the `inspect_*` functions that take bytes.
+- A resolver still requires its handle. A rule whose body is a resolver
+  alone is refused at install as before; a rule that names its nodes by
+  a fact installs, and reads those nodes and no others.
+
+Why: a query should be able to read everything a node holds without the
+embedder decoding blocks for it, and the reading and decoding of a node
+belong to the environment, which already does both for the tree. A
+handle that is an entity is what a rule needs to make a node, a span or
+an entry the subject of a concept.
+
+#### Compatibility and migration
+
+- Nothing stored changes. A branch's `dialog.branch/tree` is derived
+  when a query runs and never written; it now reads as a `node:`
+  entity. A durable layer's pointer does write `dialog.branch/tree`, of
+  `memory:<name>` in the primary's tree, and still writes it as the
+  tree's base58 text, so the same attribute reads as an entity of a
+  branch and as text of a layer: a rule reading a layer's pointer reads
+  text. Resolver rows are read off blocks. An older release reads
+  everything this one writes. A rule stored on a branch that uses `tree/key`,
+  `tree/blob` or `tree/manifest`, a snake_case manifest slot, or a
+  base58 string as `of`, or that reads `dialog.branch/tree` as text, no
+  longer compiles or no longer matches, and has to be re-authored.
+
+### A stack learns what its replica holds of a tree by command
+
+Argued in [design/tree-exploration.md](./design/tree-exploration.md).
+Built on the stack's providers
+([#816](https://github.com/dialog-db/dialog-db/pull/816)).
+
+A tree resolver fetches a node the replica lacks, so that what a query
+answers does not depend on what happened to be local. That left a
+consumer no way to know, before it asked, whether asking for a node
+would fetch it.
+
+`dialog_repository::holdings` has two commands for that and the
+providers that answer them (`holdings::provide(&stack, env)`):
+
+- `dialog.node.probe/node`, the node to ask about, is answered with
+  `dialog.node.probed/node` and `dialog.node.probed/local`: whether the
+  replica holds the node, with nothing fetched.
+- `dialog.node.fetch/node`, the node to bring local, is answered with
+  `dialog.node.fetched/node` and `dialog.node.fetched/local`: whether
+  the replica holds it, having tried.
+
+What this changes for you:
+
+- `holdings::{provide, providers, probe, fetch}` and the attribute names
+  beside them are new. A stack they are not registered with reports
+  these commands as unhandled, like any command no provider claims.
+- An answer is written into `control:`, so it is a command for one tick
+  and nothing keeps it. A space keeps it with a rule, and where the
+  rule's attribute is placed is where it is kept: on a layer of the
+  session it is read and subscribed to through the stack, never
+  committed or synced, and gone with the session. A space with no such
+  rule gets nothing.
+- A command whose value is not a `node:` entity, and a read that fails,
+  fail the command: it gets a `dialog.command/failed` row with the
+  reason.
+
+Why: whether a block is held changes with no commit, so a query step
+that reported it would answer the same query differently from one
+moment to the next. As a command's answer captured by a rule, it enters
+a query as a fact of a layer the query has pinned.
 ### A provider claims the commands whose rows satisfy its concept, and a command sees the rows of its tick
 
 [#823](https://github.com/dialog-db/dialog-db/pull/823). Refs
