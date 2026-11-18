@@ -686,3 +686,155 @@ async fn it_maintains_a_nested_view_as_a_view_of_its_own() -> Result<()> {
     assert!(host.mounted.is_empty());
     Ok(())
 }
+
+/// Every view of documents read in order as one, described.
+fn views_of(texts: &[&str]) -> Result<Vec<View>> {
+    let parsed = dialog_notation::parse_document(&texts.join("\n\n"));
+    let mut expander = dialog_notation::Expander::new()?;
+    let (kernel, _) = expander.check(parsed.trees);
+    Ok(kernel
+        .iter()
+        .filter(|tree| tree.applies() == Some("view"))
+        .filter_map(|tree| View::describe(tree).ok())
+        .collect())
+}
+
+/// A plan, said in a line a view: each layer, the element that takes
+/// it, why each condition is there, its row and whether its query
+/// compiles; each element told apart by a key; and what surprised the
+/// rule.
+fn summary(plan: &Plan) -> String {
+    let tag = |at: usize| match &plan.elements[at].placed {
+        dialog_notation::Placed::Element(tag) => tag.clone(),
+        dialog_notation::Placed::View(nested) => format!("{{:view :{}}}", nested.view),
+    };
+    let layers: Vec<String> = plan
+        .layers
+        .iter()
+        .enumerate()
+        .map(|(index, layer)| {
+            let whys: Vec<String> = layer
+                .conditions
+                .iter()
+                .map(|condition| format!("{:?}", condition.why))
+                .collect();
+            let compiles = match plan.query(index, None) {
+                Ok(_) => "compiles".to_string(),
+                Err(error) => format!("refused: {error}"),
+            };
+            format!(
+                "{} [{}] row {} {compiles}",
+                tag(layer.element),
+                whys.join(" "),
+                layer.row.join(" ")
+            )
+        })
+        .collect();
+    let keys: Vec<String> = plan
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, place)| !place.key.is_empty())
+        .map(|(at, place)| format!("{} by {}", tag(at), place.key.join(" ")))
+        .collect();
+    let cases: Vec<String> = plan
+        .cases
+        .iter()
+        .map(|case| match case {
+            dialog_notation::Case::Shared {
+                condition,
+                at,
+                below,
+            } => format!(
+                "shared {} at {} below {}",
+                condition.applies().unwrap_or_default(),
+                tag(*at),
+                below
+                    .iter()
+                    .map(|at| tag(*at))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            dialog_notation::Case::Unneeded { condition } => {
+                format!("unneeded {}", condition.applies().unwrap_or_default())
+            }
+            dialog_notation::Case::Unbound {
+                element,
+                variable,
+                event,
+            } => format!("unbound ?{variable} at {} event {event}", tag(*element)),
+            dialog_notation::Case::Unjoined { layer, variable } => {
+                format!("unjoined ?{variable} in layer {layer}")
+            }
+        })
+        .collect();
+    format!(
+        "{} :{} | {} | {} | {}",
+        plan.concept,
+        plan.name,
+        layers.join(" ; "),
+        keys.join(", "),
+        cases.join(", ")
+    )
+}
+
+/// The layering of every view of tonk's notebook and table, read after
+/// core as tonk reads a component: every condition lands on an element
+/// and every layer's query compiles. What the rule says of them, pinned:
+/// the notebook's `:ui` gives the whole of its one condition to the
+/// element that shows the title, its rows one a block; a `:directory`
+/// view's root is one an instance, where tonk renders one index holding
+/// a row an instance; the index route's site is shared at the root by
+/// the two children that show its branch; and the table's name, which no
+/// element shows, is the root's.
+#[dialog_common::test]
+async fn it_lays_out_every_view_of_the_sketches() -> Result<()> {
+    let notebook: Vec<String> = views_of(&[
+        include_str!("../sketches/core.clj"),
+        include_str!("../sketches/notebook.clj"),
+    ])?
+    .iter()
+    .map(|view| Ok(summary(&Plan::of(view)?)))
+    .collect::<Result<_>>()?;
+    assert_eq!(
+        notebook,
+        [
+            "notebook :ui | notebook-save [Instance] row n compiles ; tonk-notebook \
+             [Binds(\"title\")] row n title k b compiles | notebook-save by n, span by k b | ",
+            "notebook :directory | div [Instance] row n compiles ; span [Binds(\"title\")] row n \
+             title compiles | div by n | ",
+            "notebook/block :directory | div [Instance] row b compiles ; div [Binds(\"n\")] row b \
+             n s compiles | div by b | ",
+            "notebook/index-route :ui | tonk-notebook-index [Instance Shared(\"branch\")] row site \
+             branch repo compiles | tonk-notebook-index by site | shared xyz.tonk.site at \
+             tonk-notebook-index below notebook-save {:view :directory}",
+            "notebook/route :ui | div [Instance] row site compiles ; {:view :ui} \
+             [Binds(\"branch\")] row site entity branch repo compiles | div by site | ",
+        ]
+    );
+    let table: Vec<String> = views_of(&[
+        include_str!("../sketches/core.clj"),
+        include_str!("../sketches/table.clj"),
+    ])?
+    .iter()
+    .map(|view| Ok(summary(&Plan::of(view)?)))
+    .collect::<Result<_>>()?;
+    assert_eq!(
+        table,
+        [
+            "table/sheet :directory | div [Instance] row s compiles ; div [Binds(\"name\")] row s \
+             table name order compiles | div by s | ",
+            "table/cell :directory | div [Instance] row c compiles ; div [Binds(\"at\")] row c \
+             sheet at content compiles | div by c | ",
+            "table/column :directory | div [Instance] row k compiles ; div [Binds(\"at\")] row k \
+             sheet at width compiles | div by k | ",
+            "table/row :directory | div [Instance] row r compiles ; div [Binds(\"at\")] row r \
+             sheet at height compiles | div by r | ",
+            "table :ui | tonk-table [Instance Unneeded] row t compiles | tonk-table by t | \
+             unneeded xyz.tonk.table",
+            "table :directory | div [Instance Unneeded] row t compiles | div by t | unneeded \
+             xyz.tonk.table",
+        ]
+    );
+    Ok(())
+}
