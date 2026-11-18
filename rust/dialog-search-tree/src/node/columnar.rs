@@ -233,8 +233,6 @@ enum ColumnReader<'a> {
         values: Vec<&'a [u8]>,
         indices: &'a [u8],
         position: usize,
-        /// The value the reader last advanced to.
-        current: &'a [u8],
     },
 }
 
@@ -260,7 +258,6 @@ impl<'a> ColumnReader<'a> {
                 values: resolve_dictionary(table, table_ends)?,
                 indices,
                 position: 0,
-                current: &[],
             },
             _ => {
                 return Err(malformed(
@@ -270,41 +267,47 @@ impl<'a> ColumnReader<'a> {
         })
     }
 
-    /// Moves to the next entry's component, which [`current`](Self::current)
-    /// then returns. The arena cursor front-decodes in place, reused across
-    /// entries.
-    fn advance(&mut self) -> Result<(), DialogSearchTreeError> {
+    /// Appends the next entry's component bytes onto `out`. One append per
+    /// component; the only reconstruction cost is the arena cursor's in-place
+    /// front-decode, reused across entries.
+    fn append_next(&mut self, out: &mut Vec<u8>) -> Result<(), DialogSearchTreeError> {
         match self {
-            ColumnReader::Arena { cursor } => cursor.advance()?,
+            ColumnReader::Arena { cursor } => {
+                cursor.advance()?;
+                out.extend_from_slice(cursor.key());
+            }
             ColumnReader::Dictionary {
                 values,
                 indices,
                 position,
-                current,
             } => {
                 let (index, next) = read_varint(indices, *position)?;
                 *position = next;
-                *current = values
+                let value = values
                     .get(index as usize)
                     .ok_or_else(|| malformed("Dictionary index out of range"))?;
+                out.extend_from_slice(value);
             }
         }
         Ok(())
     }
 
-    /// Appends the next entry's component bytes onto `out`: one append per
-    /// component, the arena cursor front-decoding in place.
-    fn append_next(&mut self, out: &mut Vec<u8>) -> Result<(), DialogSearchTreeError> {
-        self.advance()?;
-        out.extend_from_slice(self.current());
-        Ok(())
-    }
-
-    /// The component bytes of the entry the reader last advanced to.
-    fn current(&self) -> &[u8] {
+    /// The length of the component the next [`append_next`](Self::append_next)
+    /// appends, read without moving.
+    fn next_len(&self) -> Result<usize, DialogSearchTreeError> {
         match self {
-            ColumnReader::Arena { cursor } => cursor.key(),
-            ColumnReader::Dictionary { current, .. } => current,
+            ColumnReader::Arena { cursor } => cursor.next_len(),
+            ColumnReader::Dictionary {
+                values,
+                indices,
+                position,
+            } => {
+                let (index, _) = read_varint(indices, *position)?;
+                values
+                    .get(index as usize)
+                    .map(|value| value.len())
+                    .ok_or_else(|| malformed("Dictionary index out of range"))
+            }
         }
     }
 }
@@ -362,25 +365,17 @@ impl<'a> StreamingLeaf<'a> {
         let at = self.index;
         self.key_buf.clear();
         if self.key_buf.capacity() == 0 {
-            // The leaf's first key is sized before it is filled, so the
-            // empty buffer is allocated once at its length rather than
-            // grown component by component. Later keys reuse it.
-            for reader in &mut self.readers {
-                reader.advance()?;
-            }
-            let length = self
-                .readers
-                .iter()
-                .map(|reader| reader.current().len())
-                .sum();
-            self.key_buf.reserve(length);
+            // The leaf's first key: sized before it is filled, so the
+            // buffer is allocated once at its length rather than grown a
+            // component at a time. Every later key reuses it.
+            let mut length = 0;
             for reader in &self.readers {
-                self.key_buf.extend_from_slice(reader.current());
+                length += reader.next_len()?;
             }
-        } else {
-            for reader in &mut self.readers {
-                reader.append_next(&mut self.key_buf)?;
-            }
+            self.key_buf.reserve_exact(length);
+        }
+        for reader in &mut self.readers {
+            reader.append_next(&mut self.key_buf)?;
         }
         self.index += 1;
         Ok(Some((at, &self.key_buf)))

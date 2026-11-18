@@ -185,6 +185,14 @@ impl<'a> KeyCursor<'a> {
         Ok(())
     }
 
+    /// The length of the key the next [`advance`](Self::advance) decodes,
+    /// read without decoding it.
+    pub fn next_len(&self) -> Result<usize, DialogSearchTreeError> {
+        let (shared, at) = read_varint(self.stream, self.position)?;
+        let (suffix_length, _) = read_varint(self.stream, at)?;
+        Ok(self.prefix_length + shared as usize + suffix_length as usize)
+    }
+
     /// The current full key. Valid only after a successful
     /// [`advance`](Self::advance).
     pub fn key(&self) -> &[u8] {
