@@ -11,7 +11,7 @@ use dialog_corpus::Value;
 
 use crate::Error;
 use crate::pattern::REST;
-use crate::syntax::{self, Syntax};
+use crate::syntax::Syntax;
 
 /// The types a term may be read under: `(:text ?x)`.
 pub const TYPES: [&str; 8] = [
@@ -20,6 +20,14 @@ pub const TYPES: [&str; 8] = [
 
 /// The picks a term may be read under: `(:last ?x)`.
 pub const PICKS: [&str; 4] = ["last", "all", "max", "min"];
+
+/// The layers a term may be read on: `(:control ?x)`. A claim on the
+/// control layer holds for the tick it is asserted in and is gone after
+/// it, which is a command's lifetime. Dialog-DB has no other layer yet.
+pub const LAYERS: [&str; 1] = ["control"];
+
+/// The layer a command's claims are on.
+pub const CONTROL: &str = "control";
 
 /// The folds a term may be: `(count ?t)`. Each makes one value of the
 /// many a variable is bound to, a group at a time.
@@ -71,6 +79,8 @@ pub struct Field {
     pub kind: Option<String>,
     /// The pick, when the term was written under one.
     pub pick: Option<String>,
+    /// The layer, when the term was written on one.
+    pub layer: Option<String>,
 }
 
 /// An application of a relation: one entity and the fields named.
@@ -122,9 +132,9 @@ pub enum Head {
     Assert(Read),
     /// `retract`: the facts are taken back.
     Retract(Read),
-    /// No word, on a command's relation: the facts hold for one round.
-    /// How long a fact lasts belongs to its relation, not to the head
-    /// that concludes it.
+    /// `assert` of claims on the control layer, which is issuing a
+    /// command: the facts hold for the next tick and for that tick only.
+    /// How long a fact lasts belongs to its layer, not to the word.
     Hold(Read),
     /// `report`: the row is part of the answer.
     Report(Read),
@@ -249,11 +259,13 @@ fn formula(node: &Syntax) -> Result<Formula, Error> {
     })
 }
 
-/// A field's term, with the type and pick it was written under taken
-/// off: `(:last (:text ?x))` is `?x`, text, last.
+/// A field's term, with the type, pick and layer it was written under
+/// taken off: `(:control (:last (:text ?x)))` is `?x`, text, last, on
+/// the control layer.
 fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
     let mut kind = None;
     let mut pick = None;
+    let mut layer = None;
     while let Syntax::Application(operator, operand) = node {
         let (Some(word), [inner], true) = (
             operator.keyword(),
@@ -266,6 +278,8 @@ fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
             kind = Some(word.to_string());
         } else if PICKS.contains(&word) {
             pick = Some(word.to_string());
+        } else if LAYERS.contains(&word) {
+            layer = Some(word.to_string());
         } else {
             break;
         }
@@ -281,6 +295,7 @@ fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
         term: term(node)?,
         kind,
         pick,
+        layer,
     })
 }
 
@@ -336,12 +351,32 @@ fn premise(node: &Syntax) -> Result<Premise, Error> {
     }
 }
 
-fn head(node: &Syntax) -> Result<Head, Error> {
-    if node.is_command() {
-        return Ok(Head::Hold(read(node)?));
+/// Whether a read's claims are a command's: every field on the control
+/// layer. Some on it and some not is a write the design does not say
+/// the meaning of.
+fn control(node: &Syntax, read: &Read) -> Result<bool, Error> {
+    let on = read
+        .fields
+        .iter()
+        .filter(|field| field.layer.as_deref() == Some(CONTROL))
+        .count();
+    match on {
+        0 => Ok(false),
+        all if all == read.fields.len() => Ok(true),
+        _ => Err(Error::Unsupported(format!(
+            "{node} holds claims on the control layer beside stored ones: what such a \
+             command is, and what it keeps, is not decided"
+        ))),
     }
+}
+
+fn head(node: &Syntax) -> Result<Head, Error> {
     if node.is_read() {
-        return Ok(Head::Derive(read(node)?));
+        // A command concluded with no word is a deduction: it holds in
+        // this tick while the premises do, for other rules to read.
+        let read = read(node)?;
+        control(node, &read)?;
+        return Ok(Head::Derive(read));
     }
     if node.applies() == Some("all") {
         return Err(Error::Refused(format!(
@@ -352,20 +387,33 @@ fn head(node: &Syntax) -> Result<Head, Error> {
         Some([inner]) => read(inner)?,
         _ => return Err(Error::Refused(format!("{node} is not a kernel head"))),
     };
-    let kept = |head: fn(Read) -> Head, inner: Read| {
-        if syntax::is_command(&inner.domain) {
-            return Err(Error::Refused(format!(
-                "{node} keeps a command: a command holds one round, and is issued by a head with no word"
-            )));
-        }
-        Ok(head(inner))
-    };
-    match node.applies() {
-        Some("assert") => kept(Head::Assert, inner),
-        Some("retract") => kept(Head::Retract, inner),
-        Some("report") => Ok(Head::Report(inner)),
+    let command = control(node, &inner)?;
+    match (node.applies(), command) {
+        (Some("assert"), true) => Ok(Head::Hold(inner)),
+        (Some("assert"), false) => Ok(Head::Assert(inner)),
+        (Some("retract"), true) => Err(Error::Unsupported(format!(
+            "{node} retracts a command: what that means is not decided, since a command \
+             holds for one tick and nothing keeps it"
+        ))),
+        (Some("retract"), false) => Ok(Head::Retract(inner)),
+        (Some("report"), _) => Ok(Head::Report(inner)),
         _ => Err(Error::Refused(format!("{node} is not a kernel head"))),
     }
+}
+
+/// The entity a command's claims derive when they are concluded of an
+/// entity nothing names: `(:id domain label: term …)` over the claims
+/// about to be written. Identical commands in one tick are one.
+fn derived(read: &Read) -> Term {
+    Term::Formula(Box::new(Formula {
+        name: "id".into(),
+        subject: Some(Term::Symbol(read.domain.clone())),
+        labelled: read
+            .fields
+            .iter()
+            .map(|field| (field.label.clone(), field.term.clone()))
+            .collect(),
+    }))
 }
 
 impl Rule {
@@ -399,6 +447,19 @@ impl Rule {
             } else {
                 rule.when.push(premise(part)?);
             }
+        }
+        // A command's head names no entity. Issued or deduced, its
+        // entity is derived from what it says.
+        let bound = rule.bound();
+        if let Head::Hold(read) | Head::Derive(read) = &mut rule.head
+            && read.fields.iter().all(|field| field.layer.is_some())
+            && match &read.entity {
+                Term::Variable(name) => !bound.contains(name),
+                Term::Blank => true,
+                _ => false,
+            }
+        {
+            read.entity = derived(read);
         }
         Ok(rule)
     }
@@ -455,7 +516,7 @@ mod tests {
     fn it_reads_a_rule_into_its_head_and_premises() {
         let form = forms(
             "(rule (assert (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
-               (command.increment.xyz.counter _ about: ?c)
+               (xyz.counter.increment _ counter: (:control ?c))
                (xyz.counter ?c count: (:last (:natural ?n))))",
         )
         .unwrap()
@@ -491,30 +552,60 @@ mod tests {
         assert!(matches!(Rule::parse(&form), Err(Error::Refused(_))));
     }
 
-    /// How long a fact lasts belongs to its relation: a head with no
-    /// word is issued for one round on a command's relation and derived
-    /// on any other, and a command is never kept.
+    /// How long a fact lasts belongs to its layer: `assert` of claims
+    /// on the control layer issues a command, and the same head with no
+    /// word deduces one. Either way an entity nothing names is derived
+    /// from what the command says. A domain's name says nothing of it.
     #[test]
-    fn it_issues_what_a_head_with_no_word_says_of_a_command() {
+    fn it_issues_what_an_assert_on_the_control_layer_says() {
         let head = |text: &str| Rule::parse(&forms(text).unwrap().remove(0)).map(|rule| rule.head);
+        let derived = |read: &Read| {
+            matches!(&read.entity, Term::Formula(formula)
+                if formula.name == "id"
+                    && formula.subject == Some(Term::Symbol(read.domain.clone()))
+                    && formula.labelled == vec![("n".to_string(), Term::Variable("n".into()))])
+        };
         assert!(matches!(
-            head("(rule (command.go.x (:id command.go.x about: ?c) about: ?c) (xyz.c ?c n: ?n))"),
-            Ok(Head::Hold(read)) if read.domain == "command.go.x"
+            head("(rule (assert (xyz.go ?c n: (:control ?n))) (xyz.c ?d n: ?n))"),
+            Ok(Head::Hold(read)) if read.domain == "xyz.go" && derived(&read)
         ));
         assert!(matches!(
-            head("(rule (xyz.go ?c n: ?n) (xyz.c ?c n: ?n))"),
-            Ok(Head::Derive(read)) if read.domain == "xyz.go"
+            head("(rule (xyz.go _ n: (:control ?n)) (xyz.c ?d n: ?n))"),
+            Ok(Head::Derive(read)) if derived(&read)
         ));
-        // A domain that only starts with the word is no command's.
+        // An entity a premise binds is the one concluded.
         assert!(matches!(
-            head("(rule (commander.x ?c n: ?n) (xyz.c ?c n: ?n))"),
+            head("(rule (xyz.go ?d n: (:control ?n)) (xyz.c ?d n: ?n))"),
+            Ok(Head::Derive(read)) if read.entity == Term::Variable("d".into())
+        ));
+        assert!(matches!(
+            head("(rule (assert (xyz.go ?c n: ?n)) (xyz.c ?c n: ?n))"),
+            Ok(Head::Assert(read)) if read.entity == Term::Variable("c".into())
+        ));
+        assert!(matches!(
+            head("(rule (command.go.x ?c n: ?n) (xyz.c ?c n: ?n))"),
             Ok(Head::Derive(_))
         ));
-        for word in ["assert", "retract"] {
-            assert!(matches!(
-                head(&format!("(rule ({word} (command.go.x ?c about: ?c)) (xyz.c ?c n: ?n))")),
-                Err(Error::Refused(why)) if why.contains("keeps a command")
-            ));
+    }
+
+    /// What retracting a command means, and what a write of control
+    /// claims beside stored ones is, are not decided: both are said to
+    /// be unsupported.
+    #[test]
+    fn it_refuses_what_is_not_decided_of_a_command() {
+        let head = |text: &str| Rule::parse(&forms(text).unwrap().remove(0)).map(|rule| rule.head);
+        assert!(matches!(
+            head("(rule (retract (xyz.go ?c n: (:control ?n))) (xyz.c ?c n: ?n))"),
+            Err(Error::Unsupported(why)) if why.contains("retracts a command")
+        ));
+        for text in [
+            "(rule (assert (xyz.go ?c n: (:control ?n) m: ?n)) (xyz.c ?c n: ?n))",
+            "(rule (xyz.go ?c n: (:control ?n) m: ?n) (xyz.c ?c n: ?n))",
+        ] {
+            assert!(
+                matches!(head(text), Err(Error::Unsupported(why)) if why.contains("beside stored ones")),
+                "{text}"
+            );
         }
     }
 

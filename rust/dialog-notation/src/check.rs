@@ -128,10 +128,15 @@ mod tests {
 (concept (todo ?t text: ?x done: ?d)
   (xyz.todo ?t text: (:last (:text ?x)) done: (:last ?d)))
 
+; Adding a to-do.
+(concept (todo/add todo: ?t text: ?x)
+  (xyz.todo.add/todo of: ?c is: ?t in: :control)
+  (xyz.todo.add/text of: ?c is: ?x in: :control))
+
 ; Adding a to-do
 ; opens it.
 (rule (assert (todo ?t text: ?x done: false))
-  (add (todo ?t text: ?x))) ; and that is all
+  (todo/add todo: ?t text: ?x)) ; and that is all
 
 ; What is left to do.
 (rule (xyz.pending ?t text: ?x)
@@ -202,14 +207,14 @@ mod tests {
         let mut analyzer = Analyzer::new()?;
         let checked = check(
             &mut analyzer,
-            "(concept (todo ?t text: ?x)\n  (xyz.todo ?t text: (:last (:text ?x))))\n(assert (todo todo:1 text: \"milk\"))\n(ad (todo todo:2 text: \"eggs\"))\n",
+            "(concept (todo ?t text: ?x)\n  (xyz.todo ?t text: (:last (:text ?x))))\n(concept (todo/add text: ?x)\n  (xyz.todo.add/text of: ?c is: ?x in: :control))\n(assert (todo todo:1 text: \"milk\"))\n(assert (todo/add text: \"eggs\"))\n",
         );
         assert_eq!(checked.refusals().count(), 0);
         let [warning] = checked.diagnostics.as_slice() else {
             panic!("one warning: {:?}", checked.diagnostics);
         };
         assert_eq!(warning.severity(), Severity::Warning);
-        assert_eq!(started(warning), (3, 0));
+        assert_eq!(started(warning), (5, 8));
         assert!(matches!(checked.steps.first(), Some(Step::Assert(_))));
         assert!(checked.steps.len() > 1);
         Ok(())

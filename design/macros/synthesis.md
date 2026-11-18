@@ -73,7 +73,7 @@ A concept is a set of attributes, a line each, and runs both ways.
 (query (todo ?t list: list:home state: :open))
 ```
 
-A rule has one conclusion. No form carries `!`: `assert` and `retract` are the two that outlast a tick. A conclusion with no word is derived, or issued for the tick when what it concludes is a command: how long a fact lasts belongs to what is called, not to the call ([design-issue.md](design-issue.md)).
+A rule has one conclusion. No form carries `!`: `assert` and `retract` are the two that outlast a tick. A conclusion with no word is derived, a command's included; `assert` of a command, its claims on the control layer, issues it for the next tick. How long a fact lasts belongs to its layer, not to the call.
 
 ## Records and lists
 

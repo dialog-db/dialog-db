@@ -11,29 +11,44 @@
   (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
   (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one))
 
-; `add` and `complete` are defined here and nowhere else: a command is
-; whatever some rule reads.
+; A command is a concept whose head names no entity, its lines on the
+; control layer. Asserted, it holds for the next tick and that tick
+; only; its entity is derived from what it says.
+
+; Adding a to-do, to a list.
+(concept (todo/add todo: ?t list: ?l text: ?x)
+  (xyz.todo.add/todo of: ?c is: ?t as: :entity in: :control)
+  (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
+  (xyz.todo.add/text of: ?c is: ?x as: :text in: :control))
+
+; Completing one.
+(concept (todo/complete todo: ?t)
+  (xyz.todo.complete/todo of: ?c is: ?t as: :entity in: :control))
+
+; Archiving a list.
+(concept (list/archive list: ?l)
+  (xyz.list.archive/list of: ?c is: ?l as: :entity in: :control))
 
 ; Adding a to-do opens it.
 (rule (assert (todo ?t list: ?l text: ?x state: :open))
-  (add (todo ?t list: ?l text: ?x)))
+  (todo/add todo: ?t list: ?l text: ?x))
 
 ; A write says every field, so one that changes the state alone writes
 ; the attribute, not the concept.
 (rule (assert (xyz.todo/state of: ?t is: :done as: [:open :done] cardinality: :one))
-  (complete (todo ?t)))
+  (todo/complete todo: ?t))
 
-; A rule may issue a command, which is read in the round after.
+; A rule may issue a command, which is read in the tick after.
 
 ; Archiving a list completes what is on it.
-(rule (complete (todo ?t))
-  (archive (xyz.list ?l))
+(rule (assert (todo/complete todo: ?t))
+  (list/archive list: ?l)
   (todo ?t list: ?l ...))
 
 ; What is left to do, derived and never stored.
 (rule (xyz.pending ?t text: ?x)
   (todo ?t text: ?x state: :open ...))
 
-(add (todo todo:1 list: list:home text: "Buy milk"))
-(add (todo todo:2 list: list:home text: "Call mum"))
-(add (todo todo:3 list: list:work text: "Ship it"))
+(assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))
+(assert (todo/add todo: todo:2 list: list:home text: "Call mum"))
+(assert (todo/add todo: todo:3 list: list:work text: "Ship it"))

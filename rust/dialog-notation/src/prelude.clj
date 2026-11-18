@@ -25,37 +25,21 @@
                 (expand (?name ?this ... ?fields))))
   (expand (concept (?name ?this ... ?fields) ?first ?second ... ?more)))
 
-; A command is an application around an application, whose head names
-; nothing. Its rows live in a domain of its own, and say what the
-; command is about under `about:`. The part with no label is `of:`,
-; the row itself, so that name is taken.
-
-; In a premise it reads the command's rows.
-(rule (syntax (?domain _ ... ?fields))
-  (expand (?command (?concept ... ?fields)) in: :premise)
-  (:command ?command : ?concept is: ?domain)
-  (unless (dialog.name _ is: ?command)))
-
-(rule (syntax (?domain _ about: ?subject ... ?fields))
-  (expand (?command (?concept ?subject ... ?fields)) in: :premise)
-  (:command ?command : ?concept is: ?domain)
-  (unless (dialog.name _ is: ?command)))
-
-; In a head, or at the top level, it issues one, which holds one round.
-(rule (syntax (?domain (:id ?domain ... ?fields) ... ?fields))
-  (expand (?command (?concept ... ?fields)) in: :head)
-  (:command ?command : ?concept is: ?domain)
-  (unless (dialog.name _ is: ?command)))
-
-(rule (syntax (?domain (:id ?domain about: ?subject ... ?fields) about: ?subject ... ?fields))
-  (expand (?command (?concept ?subject ... ?fields)) in: :head)
-  (:command ?command : ?concept is: ?domain)
-  (unless (dialog.name _ is: ?command)))
+; A concept whose head names no entity is a command: its lines are on
+; the control layer, and the entity they are of is derived from what is
+; asserted. Asserted, it holds for the next tick and that tick only.
+; Read, it is read as any concept is.
+(rule (syntax (rule (syntax ?body)
+                (expand (?name ... ?fields))))
+  (expand (concept (?name ... ?fields) ?body)))
+(rule (syntax (rule (syntax (all ?first ?second ... ?more))
+                (expand (?name ... ?fields))))
+  (expand (concept (?name ... ?fields) ?first ?second ... ?more)))
 
 ; A getter is a value of a concept that a rule computes: a name around
 ; the concept's entity, and `is:` the value. It is derived and never
 ; stored, in a relation of its own, and is read as it is concluded.
-; Only `is:` tells it from a command, so it has to be written. A getter
+; `is:` is what makes the words a getter, so it has to be written. A getter
 ; whose value is a fold, `(count ?t)`, is read and not yet run: Dialog-DB
 ; refuses a fold in a rule that derives.
 (rule (syntax (?domain ?subject is: ?value))
@@ -64,15 +48,9 @@
   (:getter ?getter : ?concept is: ?domain)
   (unless (dialog.name _ is: ?getter)))
 
-; A rule may say something about a form without refusing it.
+; A rule may say something about a form without refusing it: a
+; command issued or deduced that no rule reads.
 (rule (warning "no rule reads this command")
-  (expand (?command (?concept ... ?fields)) in: :head)
-  (:command ?command : ?concept is: ?domain)
-  (unless (dialog.name _ is: ?command)
-          (dialog.rule _ on: ?domain)))
-
-(rule (warning "no rule reads this command")
-  (expand (?command (?concept ?subject ... ?fields)) in: :head)
-  (:command ?command : ?concept is: ?domain)
-  (unless (dialog.name _ is: ?command)
-          (dialog.rule _ on: ?domain)))
+  (expand (?name ... _) in: :head)
+  (:command ?name is: ?domain)
+  (unless (dialog.rule _ on: ?domain)))

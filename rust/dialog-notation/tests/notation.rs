@@ -3,7 +3,7 @@
 //! Each test opens a repository, submits documents, and reads the
 //! report back. Nothing here stands in for Dialog-DB: a concept
 //! application is a concept query, a rule is a rule the branch stores
-//! and fires, and a command is a dispatched transient.
+//! and fires, and a command asserted is a dispatched transient.
 //!
 //! Each test is the one writer of its branch, so it publishes with the
 //! call that fails when a commit loses a race, which is deprecated for
@@ -37,14 +37,23 @@ const TODO: &str = r#"
                    text: (:last (:text ?x))
                    state: (:last (:entity ?s))))
 
+    ; Adding a to-do, and completing one: commands, a concept each
+    ; whose head names no entity, its lines on the control layer.
+    (concept (todo/add todo: ?t list: ?l text: ?x)
+      (xyz.todo.add/todo of: ?c is: ?t as: :entity in: :control)
+      (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
+      (xyz.todo.add/text of: ?c is: ?x as: :text in: :control))
+    (concept (todo/complete todo: ?t)
+      (xyz.todo.complete/todo of: ?c is: ?t as: :entity in: :control))
+
     ; Adding a to-do opens it.
     (rule (assert (todo ?t list: ?l text: ?x state: :open))
-      (add (todo ?t list: ?l text: ?x)))
+      (todo/add todo: ?t list: ?l text: ?x))
 
     ; A write says every field, so one that changes the state alone
     ; writes the relation, not the concept.
     (rule (assert (xyz.todo ?t state: (:last (:entity :done))))
-      (complete (todo ?t)))
+      (todo/complete todo: ?t))
 "#;
 
 /// A concept is defined, written through by a rule a command fires, and
@@ -57,9 +66,9 @@ async fn it_defines_a_concept_and_runs_a_command_through_it() -> Result<()> {
 
     notebook
         .submit(
-            r#"(add (todo todo:1 list: list:home text: "Buy milk"))
-               (add (todo todo:2 list: list:home text: "Call mum"))
-               (add (todo todo:3 list: list:work text: "Ship it"))"#,
+            r#"(assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))
+               (assert (todo/add todo: todo:2 list: list:home text: "Call mum"))
+               (assert (todo/add todo: todo:3 list: list:work text: "Ship it"))"#,
         )
         .await?;
 
@@ -72,7 +81,9 @@ async fn it_defines_a_concept_and_runs_a_command_through_it() -> Result<()> {
         ]
     );
 
-    notebook.submit("(complete (todo todo:2))").await?;
+    notebook
+        .submit("(assert (todo/complete todo: todo:2))")
+        .await?;
     assert_eq!(
         report(
             &mut notebook,
@@ -83,9 +94,10 @@ async fn it_defines_a_concept_and_runs_a_command_through_it() -> Result<()> {
         "a row lists its fields by label: a tree keeps no order of them"
     );
 
-    // The command held for one round and is not on the branch.
+    // The command held for one round and is not on the branch: read
+    // as any concept is, it has no rows.
     assert!(
-        report(&mut notebook, "(query (command.add.todo ?c about: ?t))")
+        report(&mut notebook, "(query (todo/add todo: ?t text: ?x ...))")
             .await?
             .is_empty()
     );
@@ -106,19 +118,26 @@ async fn it_runs_a_concept_written_as_lines() -> Result<()> {
                  (xyz.todo/state of: ?i is: ?s as: [:open :done] cardinality: :one)
                  (xyz.todo/list of: ?i is: ?l as: :entity cardinality: :one))
 
+               (concept (todo/add todo: ?i list: ?l title: ?t)
+                 (xyz.todo.add/todo of: ?c is: ?i as: :entity in: :control)
+                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
+                 (xyz.todo.add/title of: ?c is: ?t as: :text in: :control))
+               (concept (todo/complete todo: ?i)
+                 (xyz.todo.complete/todo of: ?c is: ?i as: :entity in: :control))
+
                (rule (assert (todo ?i list: ?l title: ?t state: :open))
-                 (add (todo ?i list: ?l title: ?t)))
+                 (todo/add todo: ?i list: ?l title: ?t))
 
                (rule (assert (xyz.todo/state of: ?i is: :done as: :entity cardinality: :one))
-                 (complete (todo ?i)))"#,
+                 (todo/complete todo: ?i))"#,
         )
         .await?;
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
     notebook
         .submit(
-            r#"(add (todo todo:1 list: list:home title: "Buy milk"))
-               (add (todo todo:2 list: list:home title: "Call mum"))"#,
+            r#"(assert (todo/add todo: todo:1 list: list:home title: "Buy milk"))
+               (assert (todo/add todo: todo:2 list: list:home title: "Call mum"))"#,
         )
         .await?;
     assert_eq!(
@@ -131,7 +150,9 @@ async fn it_runs_a_concept_written_as_lines() -> Result<()> {
 
     // A second document, so a second transaction: under `:one` the
     // state it writes is the one read after it.
-    notebook.submit("(complete (todo todo:2))").await?;
+    notebook
+        .submit("(assert (todo/complete todo: todo:2))")
+        .await?;
     assert_eq!(
         report(
             &mut notebook,
@@ -217,38 +238,57 @@ async fn it_says_a_getter_is_not_supported_yet() -> Result<()> {
     Ok(())
 }
 
-/// `increment` is defined nowhere but in the rule that reads it. The
-/// count is kept with `assert!`, so it stays.
+const COUNTER: &str = "
+    (concept (counter/increment counter: ?n)
+      (xyz.counter.increment/counter of: ?c is: ?n as: :entity in: :control))
+    (rule (assert (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
+      (counter/increment counter: ?c)
+      (xyz.counter ?c count: (:last (:natural ?n))))";
+
+/// `counter/increment` is declared, and asserted it is issued: the rule
+/// that reads it fires, and the count it asserts stays.
 #[dialog_common::test]
-async fn it_counts_with_a_command_a_rule_defines_by_reading_it() -> Result<()> {
+async fn it_counts_with_a_command_a_rule_reads() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     let (_, diagnostics) = notebook
-        .submit(
+        .submit(&format!(
             "(assert (xyz.counter counter:a count: (:last (:natural 1))))
-             (rule (assert (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
-               (increment (xyz.counter ?c))
-               (xyz.counter ?c count: (:last (:natural ?n))))",
-        )
+             {COUNTER}"
+        ))
         .await?;
-    assert!(diagnostics.is_empty());
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
     notebook
-        .submit("(increment (xyz.counter counter:a))")
+        .submit("(assert (counter/increment counter: counter:a))")
         .await?;
     notebook
-        .submit("(increment (xyz.counter counter:a))")
+        .submit("(assert (counter/increment counter: counter:a))")
         .await?;
     assert_eq!(
         report(&mut notebook, "(query (xyz.counter ?c count: (:last ?n)))").await?,
         vec!["(xyz.counter counter:a count: 3)"]
     );
 
-    // A command no rule reads is issued all the same, and said so.
+    // A command declared and read by no rule is issued all the same,
+    // and said so.
     let (_, diagnostics) = notebook
-        .submit("(incremnt (xyz.counter counter:a))")
+        .submit(
+            "(concept (counter/reset counter: ?n)
+               (xyz.counter.reset/counter of: ?c is: ?n as: :entity in: :control))
+             (assert (counter/reset counter: counter:a))",
+        )
         .await?;
-    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     assert_eq!(diagnostics[0].message, "no rule reads this command");
+    // One misspelled is no command, and nothing is written.
+    let misspelled = notebook
+        .submit("(assert (counter/incremnt counter: counter:a))")
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&misspelled, Err(Ok(Error::Refused(why))) if why.contains("no concept is declared")),
+        "{misspelled:?}"
+    );
     assert_eq!(
         report(&mut notebook, "(query (xyz.counter ?c count: (:last ?n)))").await?,
         vec!["(xyz.counter counter:a count: 3)"]
@@ -377,15 +417,21 @@ async fn it_derives_a_relation_and_reports_rows_of_several_premises() -> Result<
 #[dialog_common::test]
 async fn it_says_where_a_warning_and_a_refusal_are() -> Result<()> {
     let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            "(concept (todo/snooze todo: ?t)
+               (xyz.todo.snooze/todo of: ?c is: ?t as: :entity in: :control))",
+        )
+        .await?;
     let (_, diagnostics) = notebook
-        .submit("(assert (xyz.todo todo:1 text: \"x\"))\n  (ad (xyz.todo todo:1 text: \"y\"))")
+        .submit("(assert (xyz.todo todo:1 text: \"x\"))\n  (assert (todo/snooze todo: todo:1))")
         .await?;
     let [warning] = diagnostics.as_slice() else {
         panic!("one warning: {diagnostics:?}");
     };
     let span = warning.span.expect("the warning has a place");
-    assert_eq!((span.start.line, span.start.column), (1, 2));
-    assert_eq!((span.end.line, span.end.column), (1, 34));
+    assert_eq!((span.start.line, span.start.column), (1, 10));
+    assert_eq!((span.end.line, span.end.column), (1, 36));
 
     let refused = notebook
         .submit("\n\n  (query (xyz.a ?a n: ?n) (xyz.a ?a n: ?n) (:like ?n : \"x\"))")
@@ -427,9 +473,13 @@ async fn it_finds_a_rule_by_what_the_comment_above_it_says() -> Result<()> {
                  (shop.item ?i name: (:text ?n) price: (:natural ?p))
                  (< ?p : 10))
 
+               (concept (shop/restock item: ?i count: ?n)
+                 (shop.restock/item of: ?c is: ?i as: :entity in: :control)
+                 (shop.restock/count of: ?c is: ?n as: :natural in: :control))
+
                ; Restocking sets the count.
                (rule (assert (shop.stock ?i count: (:last (:natural ?n))))
-                 (restock (shop.item ?i count: ?n)))
+                 (shop/restock item: ?i count: ?n))
 
                (rule (shop.dear ?i name: ?n)
                  (shop.item ?i name: (:text ?n) price: (:natural ?p))
@@ -465,7 +515,7 @@ async fn it_refuses_to_assert_and_retract_from_one_rule() -> Result<()> {
             r#"(assert (xyz.todo todo:1 list: list:home))
                (rule (all (assert (xyz.todo ?t list: ?to))
                           (retract (xyz.todo ?t list: ?from)))
-                 (move (xyz.todo ?t list: ?to))
+                 (xyz.move ?t to: ?to)
                  (xyz.todo ?t list: ?from))"#,
         )
         .await
@@ -481,8 +531,13 @@ async fn it_refuses_to_assert_and_retract_from_one_rule() -> Result<()> {
     Ok(())
 }
 
+const MOVE: &str = "
+    (concept (todo/move todo: ?t list: ?to)
+      (xyz.todo.move/todo of: ?c is: ?t as: :entity in: :control)
+      (xyz.todo.move/list of: ?c is: ?to as: :entity in: :control))";
+
 /// Moving a to-do writes where it is and takes back where it was: two
-/// rules of one head, each with the premises it needs. A round reads
+/// rules of one head, each with the premises it needs. A tick reads
 /// one state, so both see where the to-do was. A to-do on no list is
 /// still put on one, since the write does not wait on what only the
 /// retraction needs.
@@ -490,20 +545,21 @@ async fn it_refuses_to_assert_and_retract_from_one_rule() -> Result<()> {
 async fn it_asserts_and_retracts_from_two_rules_of_one_head() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
-        .submit(
-            r#"(rule (assert (xyz.todo ?t list: ?to))
-                 (move (xyz.todo ?t list: ?to)))
-               (rule (retract (xyz.todo ?t list: ?from))
-                 (move (xyz.todo ?t list: ?to))
-                 (xyz.todo ?t list: ?from))
-               (assert (xyz.todo todo:1 list: list:home))"#,
-        )
+        .submit(&format!(
+            "{MOVE}
+             (rule (assert (xyz.todo ?t list: ?to))
+               (todo/move todo: ?t list: ?to))
+             (rule (retract (xyz.todo ?t list: ?from))
+               (todo/move todo: ?t list: ?to)
+               (xyz.todo ?t list: ?from))
+             (assert (xyz.todo todo:1 list: list:home))"
+        ))
         .await?;
     notebook
-        .submit("(move (xyz.todo todo:1 list: list:work))")
+        .submit("(assert (todo/move todo: todo:1 list: list:work))")
         .await?;
     notebook
-        .submit("(move (xyz.todo todo:2 list: list:work))")
+        .submit("(assert (todo/move todo: todo:2 list: list:work))")
         .await?;
     assert_eq!(
         report(&mut notebook, "(query (xyz.todo ?t list: ?l))").await?,
@@ -515,30 +571,41 @@ async fn it_asserts_and_retracts_from_two_rules_of_one_head() -> Result<()> {
     Ok(())
 }
 
-/// The same move with its condition given a name: one rule issues a
-/// command that carries what the condition bound, and two rules of one
-/// head read it a round later, in the same commit.
+/// The same move with its condition given a name: one rule deduces a
+/// command that carries what the condition bound, which holds in the
+/// tick while the condition does, and two rules of one head read it.
+/// Nothing stores the deduced command.
 #[dialog_common::test]
-async fn it_asserts_and_retracts_on_a_command_a_rule_issues() -> Result<()> {
+async fn it_asserts_and_retracts_on_a_command_a_rule_deduces() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
-        .submit(
-            r#"(rule (moved (xyz.todo ?t list: ?to before: ?from))
-                 (move (xyz.todo ?t list: ?to))
-                 (xyz.todo ?t list: ?from))
-               (rule (assert (xyz.todo ?t list: ?to))
-                 (moved (xyz.todo ?t list: ?to)))
-               (rule (retract (xyz.todo ?t list: ?from))
-                 (moved (xyz.todo ?t before: ?from)))
-               (assert (xyz.todo todo:1 list: list:home))"#,
-        )
+        .submit(&format!(
+            "{MOVE}
+             (concept (todo/moved todo: ?t to: ?to from: ?from)
+               (xyz.todo.moved/todo of: ?c is: ?t as: :entity in: :control)
+               (xyz.todo.moved/to of: ?c is: ?to as: :entity in: :control)
+               (xyz.todo.moved/from of: ?c is: ?from as: :entity in: :control))
+             (rule (todo/moved todo: ?t to: ?to from: ?from)
+               (todo/move todo: ?t list: ?to)
+               (xyz.todo ?t list: ?from))
+             (rule (assert (xyz.todo ?t list: ?to))
+               (todo/moved todo: ?t to: ?to ...))
+             (rule (retract (xyz.todo ?t list: ?from))
+               (todo/moved todo: ?t from: ?from ...))
+             (assert (xyz.todo todo:1 list: list:home))"
+        ))
         .await?;
     notebook
-        .submit("(move (xyz.todo todo:1 list: list:work))")
+        .submit("(assert (todo/move todo: todo:1 list: list:work))")
         .await?;
     assert_eq!(
         report(&mut notebook, "(query (xyz.todo ?t list: ?l))").await?,
         vec!["(xyz.todo todo:1 list: list:work)"]
+    );
+    assert!(
+        report(&mut notebook, "(query (todo/moved todo: ?t ...))")
+            .await?
+            .is_empty()
     );
     Ok(())
 }
@@ -582,55 +649,54 @@ async fn it_derives_a_relation_from_itself() -> Result<()> {
 async fn it_fires_a_rule_in_the_document_that_installs_it() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     let (report, diagnostics) = notebook
-        .submit(
+        .submit(&format!(
             "(assert (xyz.counter counter:a count: (:last (:natural 1))))
-             (rule (assert (xyz.counter ?c count: (:last (:natural (+ ?n : 1)))))
-               (increment (xyz.counter ?c))
-               (xyz.counter ?c count: (:last (:natural ?n))))
-             (increment (xyz.counter counter:a))
-             (query (xyz.counter ?c count: (:last ?n)))",
-        )
+             {COUNTER}
+             (assert (counter/increment counter: counter:a))
+             (query (xyz.counter ?c count: (:last ?n)))"
+        ))
         .await?;
     assert!(diagnostics.is_empty());
     assert_eq!(report, vec!["(xyz.counter counter:a count: 2)"]);
     Ok(())
 }
 
-/// A rule issues a command, which another rule reads in the round
-/// after: archiving a list completes what is on it.
+/// A rule asserts a command, which issues it, and another rule reads
+/// it in the tick after: archiving a list completes what is on it.
 #[dialog_common::test]
 async fn it_lets_a_rule_issue_a_command_another_rule_reads() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     let (_, diagnostics) = notebook
         .submit(&format!(
             "{TODO}
-             (rule (complete (todo ?t))
-               (archive (xyz.list ?l))
+             (concept (list/archive list: ?l)
+               (xyz.list.archive/list of: ?c is: ?l as: :entity in: :control))
+             (rule (assert (todo/complete todo: ?t))
+               (list/archive list: ?l)
                (todo ?t list: ?l ...))"
         ))
         .await?;
     assert!(diagnostics.is_empty());
     notebook
         .submit(
-            r#"(add (todo todo:1 list: list:home text: "Buy milk"))
-               (add (todo todo:2 list: list:home text: "Call mum"))
-               (add (todo todo:3 list: list:work text: "Ship it"))"#,
+            r#"(assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))
+               (assert (todo/add todo: todo:2 list: list:home text: "Call mum"))
+               (assert (todo/add todo: todo:3 list: list:work text: "Ship it"))"#,
         )
         .await?;
 
-    notebook.submit("(archive (xyz.list list:home))").await?;
+    notebook
+        .submit("(assert (list/archive list: list:home))")
+        .await?;
     assert_eq!(
         report(&mut notebook, "(query (todo ?t text: ?x state: :open ...))").await?,
         vec![r#"(xyz.todo todo:3 state: :open text: "Ship it")"#]
     );
     // Neither command is on the branch.
     assert!(
-        report(
-            &mut notebook,
-            "(query (command.complete.todo ?c about: ?t))"
-        )
-        .await?
-        .is_empty()
+        report(&mut notebook, "(query (todo/complete todo: ?t))")
+            .await?
+            .is_empty()
     );
     Ok(())
 }
@@ -642,15 +708,17 @@ async fn it_derives_one_entity_from_the_same_values() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
-            r#"(rule (assert (xyz.note (:id xyz.note text: ?x) text: (:text ?x)))
-                 (jot (xyz.note text: ?x)))"#,
+            r#"(concept (note/jot text: ?x)
+                 (xyz.note.jot/text of: ?c is: ?x as: :text in: :control))
+               (rule (assert (xyz.note (:id xyz.note text: ?x) text: (:text ?x)))
+                 (note/jot text: ?x))"#,
         )
         .await?;
-    notebook.submit(r#"(jot (xyz.note text: "hi"))"#).await?;
+    notebook.submit(r#"(assert (note/jot text: "hi"))"#).await?;
     notebook
         .submit(r#"(assert (xyz.note (:id xyz.note text: "hi") text: (:text "hi")))"#)
         .await?;
-    notebook.submit(r#"(jot (xyz.note text: "ho"))"#).await?;
+    notebook.submit(r#"(assert (note/jot text: "ho"))"#).await?;
 
     let notes = report(&mut notebook, "(query (xyz.note ?n text: ?x))").await?;
     assert_eq!(notes.len(), 2, "{notes:?}");
@@ -658,13 +726,13 @@ async fn it_derives_one_entity_from_the_same_values() -> Result<()> {
     Ok(())
 }
 
-/// Two commands in one document share a round, so what they write to
+/// Two commands in one document share a tick, so what they write to
 /// one `last` field is concurrent. The field elects one, and which one
 /// does not depend on the order the commands were written in.
 #[dialog_common::test]
 async fn it_elects_one_of_two_writes_of_one_round_whatever_their_order() -> Result<()> {
-    let add = r#"(add (todo todo:1 list: list:home text: "Buy milk"))"#;
-    let complete = "(complete (todo todo:1))";
+    let add = r#"(assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))"#;
+    let complete = "(assert (todo/complete todo: todo:1))";
     let mut elected = Vec::new();
     for document in [[add, complete], [complete, add]] {
         let mut notebook = Notebook::open().await?;
@@ -980,12 +1048,16 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
 /// once are told apart by what is already stored.
 #[dialog_common::test]
 async fn it_tells_a_name_that_was_repointed_from_one_claimed_twice() -> Result<()> {
-    let rules = "(rule (assert (xyz.name ?n referent: (:last (:entity concept:a))))
-                   (first (xyz.name ?n)))
+    let rules = "(concept (name/first name: ?n)
+                   (xyz.name.first/name of: ?c is: ?n as: :entity in: :control))
+                 (concept (name/second name: ?n)
+                   (xyz.name.second/name of: ?c is: ?n as: :entity in: :control))
+                 (rule (assert (xyz.name ?n referent: (:last (:entity concept:a))))
+                   (name/first name: ?n))
                  (rule (assert (xyz.name ?n referent: (:last (:entity concept:b))))
-                   (second (xyz.name ?n)))";
-    let first = "(first (xyz.name name:todo))";
-    let second = "(second (xyz.name name:todo))";
+                   (name/second name: ?n))";
+    let first = "(assert (name/first name: name:todo))";
+    let second = "(assert (name/second name: name:todo))";
     let every = "(query (xyz.name ?n referent: ?r))";
 
     let mut repointed = Notebook::open().await?;
@@ -1026,7 +1098,7 @@ async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()>
     notebook.submit(TODO).await?;
     notebook
         .submit(
-            r#"(add (todo todo:1 list: list:home text: "Buy milk"))
+            r#"(assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))
                (assert (xyz.note text: (:text "by label") of: note:1))
                (assert (xyz.note note:2 text: (:text "by position")))"#,
         )
@@ -1378,7 +1450,7 @@ async fn it_refuses_and_says_what_is_not_supported() -> Result<()> {
 
     // A write through a concept says every field.
     let partial = notebook
-        .submit("(rule (assert (todo ?t state: :done)) (finish (todo ?t)))")
+        .submit("(rule (assert (todo ?t state: :done)) (todo/complete todo: ?t))")
         .await;
     assert!(matches!(why(partial), Err(Ok(Error::Refused(_)))));
 
@@ -1401,5 +1473,22 @@ async fn it_refuses_and_says_what_is_not_supported() -> Result<()> {
         )
         .await;
     assert!(matches!(why(formula), Err(Ok(Error::Unsupported(_)))));
+
+    // What retracting a command means is not decided, and nothing of
+    // the document that says it is written.
+    let retracted = notebook
+        .submit(
+            r#"(assert (xyz.todo todo:9 text: (:text "kept")))
+               (retract (todo/add todo: todo:1 list: list:home text: "Buy milk"))"#,
+        )
+        .await;
+    assert!(
+        matches!(why(retracted), Err(Ok(Error::Unsupported(said))) if said.contains("retracts a command"))
+    );
+    assert!(
+        report(&mut notebook, "(query (xyz.todo todo:9 text: ?x))")
+            .await?
+            .is_empty()
+    );
     Ok(())
 }

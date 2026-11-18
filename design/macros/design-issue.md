@@ -1,5 +1,7 @@
 # How a head says it is issued
 
+Overtaken 2026-11-18. The design on #728 (`0b394c5`) issues a command with `assert`, its claims on a control layer, and a command concluded with no word is a deduction. The build follows it ([journal](journal.md), 2026-11-18). What is below is what was decided on 2026-11-16.
+
 **Decision:** what the kernel writes for a head that holds one round, now that `assert` is the write that stays.
 
 **For:** no form carries `!` (#728, R45). Until 2026-11-16 the kernel told three heads apart by word: `assert!` stays, `assert` holds a round, no word derives. Take the mark away and `assert` has two meanings.

@@ -19,22 +19,22 @@ flowchart LR
 | Read | `(xyz.todo ?t text: ?x state: ?s)`: application of a relation, one entity and the fields named | a concept query |
 | Compute | `(:text ?x)`, `(:value ?a is: ?b)`, `(+ ?a : ?b is: ?c)`: application of a formula | a formula query or a constraint |
 | Write | `(assert A)`, `(retract A)` as a rule's head: what stays | the `assert!` and `retract!` heads of an inductive rule; `Instruction::Assert(fact, pick)`, `Instruction::Retract(fact)` |
-| Issue | a head with no word on a command's relation, `(command.add.todo …)`: holds this round and is not kept | a dispatched transient |
+| Issue | `(assert A)` where every field of `A` is on the control layer, `(xyz.todo.add ?c text: (:control ?x))`: holds the next tick and that tick only | a dispatched transient |
 | Answer | `(report A)` as a rule's head | what a query returns |
 | Syntax | `(expand pattern)` as a premise, `(syntax template)` as a head | new |
 | Together | `(all form…)` as what a template answers: several forms standing where one was written | new; a template needs it to say more than one thing. Not written in a rule, where it is refused |
 
 - No form carries `!` (#728, taken here on 2026-11-16). `(assert A)` lands and is kept until retracted; `(retract A)` takes it back.
-- How long a fact lasts belongs to its relation, not to the head that concludes it ([design-issue.md](design-issue.md)). A head with no word derives, the relation holding while the premises do, unless the relation is a command's, under `command.`: then it is issued, and holds for the round. Keeping a command is refused.
-- From 2026-11-11 to 2026-11-16 the mark told the two apart: `assert!` stayed and `assert` held a round. `assert!` and `retract!` are refused now, with the word to write: read as any name around a concept, either would be a command nothing reads.
+- How long a fact lasts belongs to its layer, not to the word that concludes it. A head with no word derives, the relation holding while the premises do, a command's included. `assert` of claims on the control layer, `(:control …)`, issues them: they hold for the next tick and that tick only. Retracting a command is not decided and is unsupported, and so is a head with control claims beside stored ones. A command's head names no entity: when no premise binds it, the kernel derives it, `(:id domain label: term …)` over the fields. From 2026-11-16 to 2026-11-18 it was the other way round, by the relation's domain under `command.` ([design-issue.md](design-issue.md)); the design at #728 overtook it.
+- From 2026-11-11 to 2026-11-16 the mark told the two apart: `assert!` stayed and `assert` held a round. `assert!` and `retract!` are refused now, with the word to write.
 - An application has one part with no label. Every other part has its label; `:` alone is the label of a formula's second operand.
 - A formula's result is `is:`. An application of a formula in a term's place stands for that value: `count: (+ ?n : 1)`.
 - A type is a formula that holds for values of the type, so `(:text ?x)` can stand where `?x` would. `:value` is the type of every value, so `(:value ?a is: ?b)` is equality.
 - **Proposed:** a pick wraps a term the same way, `(:last (:text ?x))`, so a read says everything about the attributes it reads. The alternative is #728's `(pick :last from: ?x)` beside the read.
 - A head made only of operator characters is a formula. Names start with a letter, so it cannot be a concept or a domain.
-- A write at the top level, `(assert A)` or `(retract A)` with premises after it if it has them, is a rule with that head. So is a command.
+- A write at the top level, `(assert A)` or `(retract A)` with premises after it if it has them, is a rule with that head. A call alone at the top level is refused: the top level takes `query`, `assert`, `retract`, `rule` and `concept`.
 - A fold, `(count ?t)`, is a term the kernel reads: `count`, `count-distinct`, `sum`, `min`, `max`, `avg`, as the engine's `reduce` has them. It stands in a field of a head that derives and nowhere else. Nothing runs it yet: the engine refuses a fold in a rule that derives, and compiling says so.
-- A line, `(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)`, is not kernel. It is the read `(xyz.todo ?i title: (:last (:text ?t)))`, and the walker writes it so: `:one` is the pick `last`, `:many` is `all`, `as:` the type. A concept written as lines is kept as its reads, the lines of one entity under one domain as one read of several fields.
+- A line, `(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)`, is not kernel. It is the read `(xyz.todo ?i title: (:last (:text ?t)))`, and the walker writes it so: `:one` is the pick `last`, `:many` is `all`, `as:` the type, `in: :control` the layer. Any other layer is unsupported. A concept written as lines is kept as its reads, the lines of one entity under one domain as one read of several fields.
 
 ## Syntax is a rule
 
@@ -122,23 +122,23 @@ A rule has one head, as dialog's rules do (Irakli, 2026-11-13). To assert and re
 
 `(all h1 h2)` in the head's place is refused, and so is a write after the first part; both refusals say to write a rule for each. It can be added later without changing what is written today.
 
-A command is an application around an application whose head names nothing. In a premise it reads the command's rows:
+A command is a concept whose head names no entity, its lines on the control layer. The prelude defines it as it defines any concept, by a pattern with no primary:
 
 ```clj
-(rule (syntax (?domain _ about: ?subject ... ?fields))
-  (expand (?command (?concept ?subject ... ?fields)) in: :premise)
-  (:command ?command : ?concept is: ?domain)
-  (unless (dialog.name _ is: ?command)))
+(rule (syntax (rule (syntax ?body)
+                (expand (?name ... ?fields))))
+  (expand (concept (?name ... ?fields) ?body)))
 ```
+
+A concept with a primary is taken by the rule that names `?this`, which leaves less to `...`. The walker checks the rest: every line `in: :control`, and one variable that is no parameter and stands only as what the lines are of. A concept that is one of these and not the other is unsupported.
 
 A rule may also say something about a form without refusing it:
 
 ```clj
 (rule (warning "no rule reads this command")
-  (expand (?command (?concept ?subject ... ?fields)) in: :head)
-  (:command ?command : ?concept is: ?domain)
-  (unless (dialog.name _ is: ?command)
-          (dialog.rule _ on: ?domain)))
+  (expand (?name ... _) in: :head)
+  (:command ?name is: ?domain)
+  (unless (dialog.rule _ on: ?domain)))
 ```
 
 ## Describing things
@@ -238,7 +238,7 @@ Found:
 6. **Refusals give the wrong reason.** A parameter the concept does not have is reported as an unknown form. With diagnostics as something a rule derives, a rule that knows why can say so.
 7. **A report's rows are named by the fields**, since the head expands too. Showing them as written needs the call site kept, as the source map would. Decided 2026-11-11: a query reports the relations queried.
 8. **A macro is a rule, so its identity is the rule's.** Whether dialog's canonical spelling of a rule extends to the syntax inside `expand` and `syntax` is not looked at.
-9. **A command is defined by the rules that read it, so a misspelled one is issued and nothing happens.** That is worth a warning, never a refusal (Irakli, 2026-11-11). Dialog keeps the index the warning rule reads, as `dialog.rule/on` for inductive rules and `dialog.rule/reads` for deductive ones. It already reports without refusing in two places: a rule that closes a cycle through an absence test is quarantined and listed, and a fact outside its placement is a divergence. Diagnostics would be the one relation all three are read from, and what a language server asks for.
+9. **A command is defined by the rules that read it, so a misspelled one is issued and nothing happens.** Overtaken 2026-11-18: a command is declared (#728), so a misspelled one is no command. A declared one that no rule reads still gets the warning. That is worth a warning, never a refusal (Irakli, 2026-11-11). Dialog keeps the index the warning rule reads, as `dialog.rule/on` for inductive rules and `dialog.rule/reads` for deductive ones. It already reports without refusing in two places: a rule that closes a cycle through an absence test is quarantined and listed, and a fact outside its placement is a divergence. Diagnostics would be the one relation all three are read from, and what a language server asks for.
 10. **A template that writes syntax with a variable of its own needs an escape**, as Racket's `(... ...)` is for a literal ellipsis: an unbound variable in the outer template is renamed, so it cannot be meant for the inner one. No core form needs it.
 11. **A description follows the entity, so a changed definition starts without one.** A new body is a new rule and a new entity. Whether the description is carried over, or belongs to the name, is not decided.
 12. **Withdrawn.** An earlier draft let a concept's body hold a check, which filtered a read and guarded a write. A concept has to map both ways (Irakli, 2026-11-11), so a check does not belong in one. #728's design still lists comparison among the constraints a concept body may hold.

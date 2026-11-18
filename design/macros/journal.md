@@ -1217,6 +1217,32 @@ On labels: paired by place, a keyword label cannot be told from a keyword value 
 
 **Decided.** Not decided: how a label is spelled. It rests on two open hypotheses, both the agent's. The order the gaps are closed in is the alignment table's, commands first, and none of the first four depends on how a label is spelled.
 
+## 2026-11-18, Building: a command is a declared concept on a control layer
+
+**Asked.** Gaps 1 and 2 of [alignment.md](alignment.md), together: a command declared as a concept whose head names no entity, its lines `in: :control`, issued with `assert`; with no word, a command in a head is a deduction. The old form, `(add (todo …))` under `command.`, goes.
+
+**Learned.**
+
+- The entity derived from content and the one-tick lifetime were there, as `:id` and `Head::Hold`. What moved is what tells a command apart. The kernel now reads a layer off a field as it reads a type and a pick: a line `in: :control` is the field `(:control …)`. `assert` of a read whose every field is on the control layer is `Head::Hold`; the same read with no word is `Head::Derive`. The domain's name says nothing.
+- A command's head names no entity, so its expansion holds a variable of its own there. Where no premise binds it, in a write and in a deduction alike, the kernel puts `(:id domain label: term …)` over the fields in its place. Identical commands in a tick are one, as before.
+- A name with a `/` reads as an attribute. A declared concept's name wins, so `todo/add` is the command where it is declared and an attribute anywhere else. A misspelled command is therefore no command: it is refused as an attribute with no entity, and the refusal says no concept is declared under the name. Finding 9 of [kernel.md](kernel.md), a misspelling as a warning, is overtaken by commands being declared.
+- A query of a command expands its head and its premise at two sites, which name the entity two ways. The report takes the entity the premise read.
+- A document is still expanded top to bottom: a command used above its declaration in the same document is read as an attribute and refused (`it_finds_a_rule_by_what_the_comment_above_it_says` moved its declaration up). The design says the order of a document's forms does not matter.
+- `(id ?t list: ?l text: ?x)` as a premise is not built, so the examples carry the to-do's entity in a `todo:` field of the command.
+- A command a rule deduces runs end to end: two rules of one head read it in the tick, and it is not stored (`it_asserts_and_retracts_on_a_command_a_rule_deduces`).
+
+Not decided by the design, and refused as unsupported, each pinned by a test:
+
+- a concept whose head names no entity and whose lines are not on the control layer;
+- a concept that mixes control lines with stored ones, and a head that concludes both;
+- a concept that names its entity and holds control lines;
+- a command whose lines are about more than one entity it does not name;
+- retracting a command.
+
+**Decided.** By the agent, each an opinion in [claims.md](claims.md): a declared command that no rule reads is issued with the warning the old form had. A call alone at the top level is refused, a command's included. A command's lines are in one domain, since this build derives its entity from one domain's claims; more than one is unsupported, which is a limit of the build and not a question of the design. A layer other than `:control` stays unsupported.
+
+Built: `kernel.rs` (`LAYERS`, `Field::layer`, the head by layer, the derived entity), `expand.rs` (`in: :control`, the command checked where it is declared, a declared name before an attribute, the top level), `compile.rs` (the reported entity), the prelude's concept with no primary and its warning, the examples and every test. 105 unit tests, 27 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

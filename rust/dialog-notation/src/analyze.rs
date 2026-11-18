@@ -93,10 +93,10 @@ mod tests {
     /// analyzed tree says which tree it came of.
     #[dialog_common::test]
     fn it_says_where_the_form_a_warning_is_about_is() -> Result<(), Error> {
-        let text = "(concept (todo ?t text: ?x)
-  (xyz.todo ?t text: (:last (:text ?x))))
+        let text = "(concept (todo/add text: ?x)
+  (xyz.todo.add/text of: ?c is: ?x in: :control))
 
-(rule (ad (todo ?t text: ?x))
+(rule (assert (todo/add text: ?x))
   (xyz.draft ?t text: ?x))
 ";
         let (trees, written) = parse_written(text)?;
@@ -105,14 +105,20 @@ mod tests {
             panic!("one warning: {:?}", analysis.diagnostics);
         };
         assert_eq!(warning.message, "no rule reads this command");
-        assert_eq!(warning.path, vec![Segment::Item(1), Segment::Item(0)]);
+        assert_eq!(
+            warning.path,
+            vec![Segment::Item(1), Segment::Item(0), Segment::Item(0)]
+        );
         assert_eq!(
             written.span(&warning.path),
             Some(Span {
-                start: Point { line: 3, column: 6 },
+                start: Point {
+                    line: 3,
+                    column: 14
+                },
                 end: Point {
                     line: 3,
-                    column: 29
+                    column: 33
                 },
             })
         );

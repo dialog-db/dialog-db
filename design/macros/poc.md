@@ -16,13 +16,13 @@ text ──read──▶ forms ──expand──▶ kernel rules ──compile�
 | kernel | Dialog-DB |
 |---|---|
 | `(assert A)`, `(retract A)`, no premise | a `ConceptStatement`, asserted or retracted |
-| a bare head on a command's relation, no premise | a `ConceptStatement`, dispatched |
+| `(assert A)`, `A` on the control layer, no premise | a `ConceptStatement`, dispatched: a command |
 | a bare head, with premises | a `DeductiveRule` |
 | `(assert A)`, `(retract A)`, with premises | an `InductiveRule` |
 | `(report A)`, one read as its premise | a `ConceptQuery` |
 | `(report A)`, any other premises | a `DeductiveRule` laid over the branch for the query, and a `ConceptQuery` of what it derives |
 | `(xyz.todo ?t text: (:last (:text ?x)))` | a concept of one attribute, `{the: xyz.todo/text, as: text:, pick: last:}` |
-| a bare head on a command's relation, with premises | an `InductiveRule` over a concept marked `Transient` |
+| `(assert A)`, `A` on the control layer, with premises | an `InductiveRule` over a concept marked `Transient` |
 | `(:id domain label: term …)` | a chain of `entity/derive`, from the domain and the sorted labels through each value |
 | `(+ ?a : ?b)` where a term stands | a `math/sum` premise and a variable for its value |
 | `(< ?a : ?b)`, `(:value ?a is: ?b)`, `(:text ?x)` | the `<`, `==` and `type` constraints |
@@ -32,15 +32,16 @@ text ──read──▶ forms ──expand──▶ kernel rules ──compile�
 `tests/notation.rs` submits documents to a branch of a real repository. Each document is one transaction.
 
 - A concept defined, written through by a rule, and read back through itself.
-- A command issued at the top level. It is a dispatched transient: the rule reading it fires and the command is not on the branch afterwards.
-- `increment`, defined nowhere but in the rule that reads it. A misspelling of it is a warning and nothing else.
+- A command declared, `(concept (todo/add todo: ?t list: ?l text: ?x) (xyz.todo.add/todo of: ?c is: ?t in: :control) …)`, and issued at the top level with `assert`. It is a dispatched transient: the rule reading it fires and the command is not on the branch afterwards.
+- `counter/increment`, declared and read by one rule. A declared command no rule reads is issued with a warning; a misspelled one is no command and is refused.
+- A command a rule deduces, with no word: it holds in the tick and two rules of one head read it.
 - `cargo run -p dialog-notation --example notebook -- file.clj …` runs documents on a repository kept in memory and prints the report and the warnings.
 - A rule and the command it reads in one document. The rule fires in the transaction that installs it, so finding 4 of [kernel.md](kernel.md) does not arise.
 - A backlink concept, read from either side and written through.
 - A concept of two reads over two domains, and `unless` over it.
 - A derived relation, a relation derived from itself, and a query of several premises whose rows keep their values together.
 - One rule with an `assert` head and a `retract` head.
-- A rule that issues a command another rule reads in the round after: archiving a list completes what is on it.
+- A rule that asserts a command, issuing it, and another rule that reads it in the tick after: archiving a list completes what is on it.
 - An entity made from what a rule binds. A rule and a top-level write that say the same thing name one entity.
 - Two commands in one document that write one `last` field. The cell holds both claims and elects one by the hash of the value, the same in either order.
 
@@ -87,6 +88,6 @@ What the crate does in place of Dialog-DB, and should not in the end:
 3. **The pick is part of what is read.** `(xyz.counter ?c count: ?n)` reads every count ever written and `count: (:last ?n)` the current one. With no pick written the crate reads all, since a relation is a set. A concept hides this; a bare read does not.
 4. **A command is its content.** Its entity is the hash of what it says, so issuing the same command twice in one document issues it once.
 5. **Negation is narrower than the notation.** Every "cannot run yet" above is about `unless`.
-6. **A document is one round, not a sequence.** `(add (todo todo:2 …))` and `(complete (todo todo:2))` in one document both fire against the same view, in either order. The state then holds `:open` and `:done` as two claims, and `(:last …)` elects one as it does between any concurrent claims (#752). Written in two documents, the second follows the first. `examples/todo.clj` and `examples/done.clj` are split for this reason.
+6. **A document is one round, not a sequence.** `(assert (todo/add todo: todo:2 …))` and `(assert (todo/complete todo: todo:2))` in one document both fire against the same view, in either order. The state then holds `:open` and `:done` as two claims, and `(:last …)` elects one as it does between any concurrent claims (#752). Written in two documents, the second follows the first. `examples/todo.clj` and `examples/done.clj` are split for this reason.
 
 Not measured: what expansion and a per-query rule cost. The claim that this is as fast as today is still open.

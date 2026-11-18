@@ -7,11 +7,11 @@
 //! | kernel | Dialog-DB |
 //! |---|---|
 //! | `(assert A)`, `(retract A)` with no premise | a [`ConceptStatement`], asserted or retracted |
-//! | a bare head on a command's domain, with no premise | a [`ConceptStatement`], dispatched: it holds one round |
+//! | `(assert A)` of claims on the control layer, with no premise | a [`ConceptStatement`], dispatched: a command, which holds one round |
 //! | a bare head with premises | a [`DeductiveRule`] |
 //! | a bare head with premises, a field of it a fold, `(count ?t)` | nothing yet: Dialog-DB refuses a fold in a rule that derives |
 //! | `(assert A)`, `(retract A)` with premises | an [`InductiveRule`] |
-//! | a bare head on a command's domain, with premises | an [`InductiveRule`] over a concept marked to hold one round |
+//! | `(assert A)` of claims on the control layer, with premises | an [`InductiveRule`] over a concept marked to hold one round |
 //! | `(:id domain label: term …)` | the entity `entity/derive` makes of the domain, the labels and each value in turn |
 //! | `(report A)` with one read as its premise | a [`ConceptQuery`] |
 //! | `(report A)` with any other premises | a [`DeductiveRule`] deriving the report, and a [`ConceptQuery`] of it |
@@ -223,6 +223,7 @@ pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
                 term: Term::Text(description.clone()),
                 kind: Some("text".into()),
                 pick: Some("last".into()),
+                layer: None,
             }],
         })?));
     }
@@ -1018,6 +1019,21 @@ fn induce(rule: &Rule, read: &Read, head: &str) -> Result<InductiveRule, Error> 
 /// variable the head holds, and that relation is what is selected.
 fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
     let bound = rule.bound();
+    // A read of a command names no entity, so where it is reported each
+    // side of the query has an entity of its expansion's own. The row
+    // says the entity the premise of the same relation read.
+    let mut read = read.clone();
+    if let Term::Variable(name) = &read.entity
+        && name.contains('.')
+        && !bound.contains(name)
+        && let Some(entity) = rule.when.iter().find_map(|premise| match premise {
+            Premise::Read(premise) if premise.domain == read.domain => Some(premise.entity.clone()),
+            _ => None,
+        })
+    {
+        read.entity = entity;
+    }
+    let read = &read;
     let fields = read.named(&bound);
     for term in fields.iter().map(|field| &field.term).chain([&read.entity]) {
         if let Term::Variable(name) = term
@@ -1128,6 +1144,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                     term: field.term.clone(),
                     kind: None,
                     pick: None,
+                    layer: None,
                 });
                 Slot::Bound(column)
             }
@@ -1141,6 +1158,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
             term: Term::Symbol("true".into()),
             kind: None,
             pick: None,
+            layer: None,
         });
     }
     scope.body(rule)?;
@@ -1238,17 +1256,38 @@ mod tests {
         ));
     }
 
+    /// An assert of claims on the control layer issues a command: a
+    /// rule over a concept marked to hold one round. Its entity is
+    /// derived from what it says.
     #[test]
     fn it_compiles_a_command_a_rule_issues_to_a_rule_over_a_transient_concept() {
         let steps = steps(
-            "(rule (command.go.x (:id command.go.x about: ?c) about: ?c)
-               (xyz.counter ?c count: ?n))",
+            "(rule (assert (xyz.go ?c counter: (:control ?d)))
+               (xyz.counter ?d count: ?n))",
         )
         .unwrap();
         let [Step::Transient(concept), Step::Induce(rule)] = steps.as_slice() else {
             panic!("a transient concept and the rule that concludes it");
         };
         assert_eq!(*concept, rule.conclusion().this());
+
+        // At the top level, a dispatched statement under the entity
+        // its content derives, the same whatever the order it is said in.
+        let issued = |text: &str| match compile(&parse(text).unwrap().remove(0)).unwrap().as_slice()
+        {
+            [Step::Issue(statement)] => statement.this.clone(),
+            _ => panic!("one command issued"),
+        };
+        let one = issued(r#"(rule (assert (xyz.go ?c a: (:control 1) b: (:control "x"))))"#);
+        assert!(one.as_str().starts_with("id:"));
+        assert_eq!(
+            one,
+            issued(r#"(rule (assert (xyz.go ?d b: (:control "x") a: (:control 1))))"#)
+        );
+        assert_ne!(
+            one,
+            issued(r#"(rule (assert (xyz.go ?c a: (:control 2) b: (:control "x"))))"#)
+        );
     }
 
     /// A fold is read, and nothing runs it yet. In a head that derives

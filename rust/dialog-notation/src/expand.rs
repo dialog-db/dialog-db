@@ -4,8 +4,8 @@
 //! other parts are its premises, `(unless …)` among them for what must
 //! not hold; the application of a relation and of a formula; `assert`,
 //! `retract` and `report` as a rule's head. A head with no word is
-//! derived, or issued for one round when its relation is a command's.
-//! A rule has one head. Every other form is given its meaning by a rule
+//! derived. `assert` of claims on the control layer, a command's, issues
+//! them for one tick. A rule has one head. Every other form is given its meaning by a rule
 //! about syntax:
 //!
 //! ```clj
@@ -36,10 +36,10 @@ use crate::Error;
 use crate::diagnostic::Diagnostic;
 use crate::form::Kind;
 use crate::kernel::QUOTE;
-use crate::kernel::{Head, Rule, TYPES};
+use crate::kernel::{CONTROL, Head, Rule, TYPES};
 use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, REST, fill, matches};
-use crate::syntax::{self, COMMAND, GETTER, Parameters, Signature, Syntax};
+use crate::syntax::{self, GETTER, Parameters, Signature, Syntax};
 use crate::written::{Path, Segment};
 
 /// The core forms, written in the kernel.
@@ -90,8 +90,8 @@ struct Choice {
 const HEAD_WORDS: [&str; 3] = ["assert", "retract", "report"];
 
 /// What the two writes were called while a mark told what is kept from
-/// what holds one round. Unrefused, either would be read as a command
-/// of that name, issued and kept by nothing.
+/// what holds one round. Unrefused, either would be read as a name that
+/// nothing gives a meaning, and said to be unknown.
 const FORMER_WORDS: [(&str, &str); 2] = [("assert!", "assert"), ("retract!", "retract")];
 
 /// Refuse a write under the name it had.
@@ -142,7 +142,8 @@ fn wrap(word: &str, inner: Syntax) -> Result<Syntax, Error> {
 /// `of:` is the entity and `is:` the value. `as:` is the type the value
 /// is read under. `cardinality:` says how many claims the attribute
 /// holds for one entity: `:one` reads the newest, `:many` every one.
-/// Either may be left out, and then the read says nothing of it.
+/// Either may be left out, and then the read says nothing of it. `in:`
+/// is the layer, and the one taken is a command's, `:control`.
 ///
 /// `None` when `tree` applies no attribute.
 fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
@@ -157,7 +158,8 @@ fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
     };
     let [entity] = operand.items.as_slice() else {
         return Err(Error::Refused(format!(
-            "{tree} needs its entity, under `of:` or with no label, and nothing else without a label"
+            "{tree} needs its entity, under `of:` or with no label, and nothing else without a \
+             label: it is read as an attribute, since no concept is declared under its name"
         )));
     };
     let mut terms = operand.terms.clone();
@@ -199,10 +201,14 @@ fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
         };
         value = wrap(pick, value)?;
     }
-    if terms.contains_key("in") {
-        return Err(Error::Unsupported(format!(
-            "{tree} names a layer, and Dialog-DB has no layers yet"
-        )));
+    if let Some(layer) = terms.remove("in") {
+        if layer.keyword() != Some(CONTROL) {
+            return Err(Error::Unsupported(format!(
+                "{tree} names the layer {layer}, and Dialog-DB has no layers yet: the one \
+                 taken is a command's, `:control`"
+            )));
+        }
+        value = wrap(CONTROL, value)?;
     }
     if let Some(label) = terms.keys().next() {
         return Err(Error::Refused(format!(
@@ -273,6 +279,20 @@ fn lines(template: Syntax) -> Result<Syntax, Error> {
 /// The parts with no label of an application, or none.
 fn items(tree: &Syntax) -> &[Syntax] {
     tree.operand().map_or(&[], |operand| &operand.items)
+}
+
+/// Whether a term is read on the control layer: `(:control …)`.
+fn controlled(term: &Syntax) -> bool {
+    matches!(term, Syntax::Application(operator, _) if operator.keyword() == Some(CONTROL))
+}
+
+/// Whether a read is of claims on the control layer: every labelled
+/// part of it `(:control …)`.
+fn on_control(tree: &Syntax) -> bool {
+    tree.is_read()
+        && tree.operand().is_some_and(|operand| {
+            !operand.terms.is_empty() && operand.terms.values().all(controlled)
+        })
 }
 
 /// The parts of a kernel rule.
@@ -516,6 +536,11 @@ pub struct Expander {
     syntax: Vec<Definition>,
     /// The names some rule about syntax is for.
     names: BTreeSet<String>,
+    /// The names of the concepts declared. A name declared wins over
+    /// reading it as an attribute: `todo/add`.
+    concepts: BTreeSet<String>,
+    /// The commands declared, each the domain its claims are in.
+    commands: BTreeMap<String, String>,
     /// The domains some installed rule reads.
     reads: BTreeSet<String>,
     /// Every form the rules were asked about since the last report,
@@ -732,8 +757,21 @@ impl Expander {
             }
             _ => None,
         };
-        if signature.is_some() {
-            self.syntax.retain(|rule| rule.signature != signature);
+        if let Some(declared) = &signature {
+            self.syntax
+                .retain(|rule| rule.signature.as_ref() != Some(declared));
+            self.concepts.insert(declared.name.clone());
+            match &answer {
+                Answer::Syntax(template) if items(&pattern).is_empty() && on_control(template) => {
+                    self.commands.insert(
+                        declared.name.clone(),
+                        template.applies().unwrap_or_default().to_string(),
+                    );
+                }
+                _ => {
+                    self.commands.remove(&declared.name);
+                }
+            }
         }
         self.syntax.push(Definition {
             answer,
@@ -750,6 +788,12 @@ impl Expander {
     /// reads and nothing else, since a check has no inverse, and every
     /// variable in them is one of its parameters, since a write must
     /// know every value. The reads may be of several entities.
+    ///
+    /// A command is a concept whose head names no entity and whose lines
+    /// are all on the control layer. Its entity is the one variable that
+    /// is no parameter, and stands only as what its lines are of. What a
+    /// concept that is one of these and not the other is, the design
+    /// does not say, and it is refused as unsupported.
     fn check_concept(pattern: &Syntax, template: &Syntax) -> Result<(), Error> {
         let said = members(template.clone());
         if !said.iter().any(Syntax::is_read)
@@ -762,16 +806,75 @@ impl Expander {
                 "a concept maps both ways, and a check has no inverse: {check}"
             )));
         }
+        let controls = said.iter().filter(|tree| on_control(tree)).count();
+        let touched = said
+            .iter()
+            .filter(|tree| {
+                tree.operand()
+                    .is_some_and(|operand| operand.terms.values().any(controlled))
+            })
+            .count();
+        let command = match (items(pattern).is_empty(), touched) {
+            (false, 0) => false,
+            (true, _) if controls == said.len() => true,
+            (false, _) => {
+                return Err(Error::Unsupported(format!(
+                    "{pattern} names its entity and holds lines on the control layer: what such \
+                     a concept is is not decided, a command's head names no entity"
+                )));
+            }
+            (true, 0) => {
+                return Err(Error::Unsupported(format!(
+                    "{pattern} names no entity and its lines are not on the control layer: \
+                     what such a concept is is not decided, a command's lines are `in: :control`"
+                )));
+            }
+            (true, _) => {
+                return Err(Error::Unsupported(format!(
+                    "{pattern} names no entity and mixes lines on the control layer with \
+                     stored ones: what such a concept is is not decided"
+                )));
+            }
+        };
         let mut given = Vec::new();
         pattern.variables(&mut given);
-        let mut used = Vec::new();
-        said.iter().for_each(|tree| tree.variables(&mut used));
-        match used.iter().find(|name| !given.contains(name)) {
-            Some(own) => Err(Error::Refused(format!(
-                "a concept maps both ways, so every variable in it is a parameter: ?{own}"
-            ))),
-            None => Ok(()),
+        // What a line is of, apart from what it says of it.
+        let mut valued = Vec::new();
+        for tree in &said {
+            if let Some(operand) = tree.operand() {
+                operand
+                    .terms
+                    .values()
+                    .for_each(|term| term.variables(&mut valued));
+            }
         }
+        let mut entities = Vec::new();
+        said.iter()
+            .flat_map(|tree| items(tree).first())
+            .for_each(|entity| entity.variables(&mut entities));
+        let own: BTreeSet<&String> = entities
+            .iter()
+            .chain(&valued)
+            .filter(|name| !given.contains(name))
+            .collect();
+        if let Some(own) = own.iter().find(|name| !command || valued.contains(name)) {
+            return Err(Error::Refused(format!(
+                "a concept maps both ways, so every variable in it is a parameter: ?{own}"
+            )));
+        }
+        if command && own.len() > 1 {
+            return Err(Error::Unsupported(format!(
+                "{pattern} holds lines about more than one entity it does not name: what such a \
+                 command is is not decided"
+            )));
+        }
+        if command && said.len() > 1 {
+            return Err(Error::Unsupported(format!(
+                "{pattern} holds lines of more than one domain: this build derives a command's \
+                 entity from the claims of one domain"
+            )));
+        }
+        Ok(())
     }
 
     /// The bindings under which a rule about syntax applies to `tree`.
@@ -795,6 +898,8 @@ impl Expander {
 
     /// Whether a premise of a rule about syntax holds, and what it binds.
     /// Such a premise applies one of a few formulas over names, asks
+    /// which domain a declared command is in, `(:command ?name is: ?domain)`,
+    /// asks
     /// whether the form said a part, `(:said ?value)`, or
     /// reads what this walker knows: the names syntax is defined for,
     /// `(dialog.name _ is: ?name)`, and the domains installed rules
@@ -815,8 +920,26 @@ impl Expander {
             return None;
         };
         let subject = operand.items.first();
+        // `is:` bound to `domain`, or holding it already.
+        let is = |domain: String| {
+            let Syntax::Variable(is) = operand.terms.get("is")? else {
+                return None;
+            };
+            let domain = Binding::One(Syntax::Reference(domain));
+            let mut bindings = bindings.clone();
+            match bindings.get(is) {
+                Some(bound) if *bound == domain => {}
+                Some(_) => return None,
+                None => {
+                    bindings.insert(is.clone(), domain);
+                }
+            }
+            Some(bindings)
+        };
         match (operator.keyword(), &**operator) {
-            (Some(word @ (COMMAND | GETTER)), _) => {
+            // A command declared, and the domain its claims are in.
+            (Some("command"), _) => is(self.commands.get(&name(subject?)?)?.clone()),
+            (Some(word @ GETTER), _) => {
                 let domain = format!(
                     "{word}.{}.{}",
                     name(subject?)?,
@@ -1026,7 +1149,12 @@ impl Expander {
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(apply("all", each));
             }
-            if let Some(read) = self.about(&tree, |_| line(&tree))? {
+            // A concept declared under a name that holds a `/` is the
+            // concept, not an attribute.
+            let declared = word
+                .as_deref()
+                .is_some_and(|word| self.concepts.contains(word));
+            if !declared && let Some(read) = self.about(&tree, |_| line(&tree))? {
                 return Ok(read);
             }
             if let (Position::Head, Some(word)) = (
@@ -1064,7 +1192,24 @@ impl Expander {
     /// several, as a concept of several reads does, is a rule each, with
     /// the premises again.
     fn top(&mut self, mut tree: Syntax) -> Result<Vec<Syntax>, Error> {
+        let written = tree.clone();
         while tree.applies() != Some("rule") {
+            // A call stands in a rule, a query or a write. Alone at the
+            // top level it says nothing to do.
+            if tree.is_read()
+                || tree.is_formula()
+                || tree.applies() == Some("all")
+                || tree
+                    .applies()
+                    .is_some_and(|word| Kind::of(word) == Kind::Attribute)
+            {
+                return self.about(&written, |_| {
+                    Err(Error::Refused(format!(
+                        "{written} is a call, and a call is not a top-level form: the top level \
+                         takes (query …), (assert …), (retract …), (rule …) and (concept …)"
+                    )))
+                });
+            }
             tree = match (
                 tree.applies().filter(|word| HEAD_WORDS.contains(word)),
                 tree.operand(),
@@ -1083,15 +1228,6 @@ impl Expander {
                         },
                     )
                 }
-                // A command at the top level is issued: a rule with
-                // that head and no premise.
-                (None, Some(_)) if tree.is_command() => Syntax::Application(
-                    Box::new(Syntax::Reference("rule".into())),
-                    Parameters {
-                        items: vec![tree.clone()],
-                        terms: BTreeMap::new(),
-                    },
-                ),
                 _ => self.about(&tree, |this| {
                     former(&tree)?;
                     this.ask(&tree, Position::Head)
@@ -1196,8 +1332,12 @@ mod tests {
     const TODO: &str = r#"
         (concept (todo ?t list: ?l text: ?x state: ?s)
           (xyz.todo ?t list: (:last (:entity ?l)) text: (:last (:text ?x)) state: (:last ?s)))
+        (concept (todo/add todo: ?t list: ?l text: ?x)
+          (xyz.todo.add/todo of: ?c is: ?t in: :control)
+          (xyz.todo.add/list of: ?c is: ?l in: :control)
+          (xyz.todo.add/text of: ?c is: ?x in: :control))
         (rule (assert (todo ?t list: ?l text: ?x state: :open))
-          (add (todo ?t list: ?l text: ?x)))
+          (todo/add todo: ?t list: ?l text: ?x))
     "#;
 
     fn expanded(setup: &str, text: &str) -> Result<Vec<String>, Error> {
@@ -1374,12 +1514,20 @@ mod tests {
     fn it_expands_a_concept_where_it_is_read_and_where_it_is_written() {
         let mut expander = Expander::new().unwrap();
         let (kernel, diagnostics) = expander.submit(TODO).unwrap();
-        assert_eq!(
-            kernel.iter().map(Syntax::to_string).collect::<Vec<_>>(),
-            vec![
+        let [rule] = kernel.as_slice() else {
+            panic!("one rule: {kernel:?}");
+        };
+        let rule = rule.to_string();
+        assert!(
+            rule.starts_with(
                 "(rule (assert (xyz.todo ?t list: (:last (:entity ?l)) state: (:last :open) text: (:last (:text ?x)))) \
-                 (command.add.todo _ about: ?t list: ?l text: ?x))"
-            ]
+                 (xyz.todo.add ?c."
+            ),
+            "{rule}"
+        );
+        assert!(
+            rule.ends_with(" list: (:control ?l) text: (:control ?x) todo: (:control ?t)))"),
+            "{rule}"
         );
         assert!(diagnostics.is_empty());
     }
@@ -1409,26 +1557,51 @@ mod tests {
         assert_ne!(own(head), own(&rule.when[0]));
     }
 
+    /// A command is issued by asserting it: at the top level, a rule
+    /// with that head and no premise. Its head names no entity, so the
+    /// kernel rule holds one of the expansion's own, which the kernel
+    /// derives from what the command says. One declared that no rule
+    /// reads is issued all the same, and said so.
     #[test]
     fn it_issues_a_command_and_warns_when_nothing_reads_it() {
         let mut expander = Expander::new().unwrap();
         expander.submit(TODO).unwrap();
         let (kernel, diagnostics) = expander
-            .submit(r#"(add (todo todo:1 list: list:home text: "Buy milk"))"#)
+            .submit(r#"(assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))"#)
             .unwrap();
         assert_eq!(kernel.len(), 1);
         assert!(
             kernel[0]
                 .to_string()
-                .starts_with("(rule (command.add.todo (:id command.add.todo about: todo:1")
+                .starts_with("(rule (assert (xyz.todo.add ?c."),
+            "{kernel:?}"
         );
         assert!(diagnostics.is_empty());
 
         let (_, diagnostics) = expander
-            .submit("(ad (todo todo:1 list: list:home text: \"x\"))")
+            .submit(
+                r#"(concept (todo/snooze todo: ?t)
+                     (xyz.todo.snooze/todo of: ?c is: ?t in: :control))
+                   (assert (todo/snooze todo: todo:1))"#,
+            )
             .unwrap();
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].message, "no rule reads this command");
+        assert_eq!(
+            diagnostics[0]
+                .form
+                .as_ref()
+                .map(Syntax::to_string)
+                .as_deref(),
+            Some("(todo/snooze todo: todo:1)")
+        );
+
+        // A command is declared, so one misspelled is no command: a name
+        // with a `/` that no concept is declared under is an attribute.
+        assert!(matches!(
+            expander.submit(r#"(assert (todo/ad todo: todo:1 list: list:home text: "x"))"#),
+            Err(Error::Refused(why)) if why.contains("no concept is declared under its name")
+        ));
     }
 
     #[test]
@@ -1436,12 +1609,119 @@ mod tests {
         let mut expander = Expander::new().unwrap();
         let (_, diagnostics) = expander
             .submit(
-                "(increment (xyz.counter counter:a))
+                "(concept (counter/increment counter: ?n)
+                   (xyz.counter.increment/counter of: ?c is: ?n in: :control))
+                 (assert (counter/increment counter: counter:a))
                  (rule (assert (xyz.counter ?c count: (+ ?n : 1)))
-                   (increment (xyz.counter ?c)) (xyz.counter ?c count: ?n))",
+                   (counter/increment counter: ?c) (xyz.counter ?c count: ?n))",
             )
             .unwrap();
-        assert!(diagnostics.is_empty());
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    /// A command is a concept, so a premise reads it as one, by any of
+    /// its fields, and a rule with it as its head and no word deduces
+    /// it, holding while the premises do.
+    #[test]
+    fn it_reads_and_deduces_a_command_as_a_concept() {
+        let premise = expanded(
+            TODO,
+            "(rule (xyz.added ?t text: ?x) (todo/add todo: ?t text: ?x))",
+        )
+        .unwrap();
+        assert_eq!(premise.len(), 1);
+        assert!(
+            premise[0].starts_with("(rule (xyz.added ?t text: ?x) (xyz.todo.add ?c.")
+                && premise[0].ends_with(" text: (:control ?x) todo: (:control ?t)))"),
+            "{premise:?}"
+        );
+        let deduced = expanded(
+            TODO,
+            r#"(rule (todo/add todo: ?t list: list:home text: ?x) (xyz.draft ?t text: ?x))"#,
+        )
+        .unwrap();
+        assert!(
+            deduced[0].starts_with("(rule (xyz.todo.add ?c."),
+            "{deduced:?}"
+        );
+        let kernel = Rule::parse(&parse(&deduced[0]).unwrap().remove(0)).unwrap();
+        assert!(matches!(&kernel.head, Head::Derive(read)
+            if matches!(&read.entity, crate::kernel::Term::Formula(id) if id.name == "id")));
+    }
+
+    /// A call alone at the top level says nothing to do, a command's
+    /// included: the top level takes a question, a write, a rule and a
+    /// concept.
+    #[test]
+    fn it_refuses_a_call_at_the_top_level() {
+        for text in [
+            r#"(todo/add todo: todo:1 list: list:home text: "x")"#,
+            r#"(todo todo:1 list: list:home text: "x" state: :open)"#,
+            r#"(xyz.todo todo:1 text: "x")"#,
+            r#"(xyz.todo/text of: todo:1 is: "x")"#,
+        ] {
+            assert!(
+                matches!(expanded(TODO, text), Err(Error::Refused(why))
+                    if why.contains("a call is not a top-level form")),
+                "{text}"
+            );
+        }
+    }
+
+    /// A command's head names no entity, and its lines are on the
+    /// control layer. A concept that is one and not the other, and one
+    /// whose lines are about several entities it does not name, are
+    /// what the design does not decide, and are unsupported. A layer
+    /// other than `:control` is unsupported, since Dialog-DB has none.
+    #[test]
+    fn it_refuses_what_is_not_decided_of_a_command() {
+        for (text, why) in [
+            (
+                "(concept (todo/x text: ?x) (xyz.todo/text of: ?c is: ?x))",
+                "its lines are not on the control layer",
+            ),
+            (
+                "(concept (todo/x text: ?x n: ?n)
+                   (xyz.todo.x/text of: ?c is: ?x in: :control)
+                   (xyz.todo.x/n of: ?c is: ?n))",
+                "mixes lines on the control layer with stored ones",
+            ),
+            (
+                "(concept (todo/x ?t text: ?x) (xyz.todo.x/text of: ?t is: ?x in: :control))",
+                "names its entity and holds lines on the control layer",
+            ),
+            (
+                "(concept (todo/x text: ?x n: ?n)
+                   (xyz.todo.x/text of: ?c is: ?x in: :control)
+                   (xyz.todo.x/n of: ?d is: ?n in: :control))",
+                "about more than one entity",
+            ),
+            (
+                "(concept (todo/x text: ?x n: ?n)
+                   (xyz.todo.x/text of: ?c is: ?x in: :control)
+                   (xyz.todo.y/n of: ?c is: ?n in: :control))",
+                "more than one domain",
+            ),
+            (
+                "(concept (todo/x text: ?x) (xyz.todo.x/text of: ?c is: ?x in: :draft))",
+                "no layers yet",
+            ),
+        ] {
+            assert!(
+                matches!(expanded("", text), Err(Error::Unsupported(said)) if said.contains(why)),
+                "{text}: {:?}",
+                expanded("", text)
+            );
+        }
+        // A variable of a command's that is no parameter and stands as
+        // a value is refused as any concept's is.
+        assert!(matches!(
+            expanded(
+                "",
+                "(concept (todo/x text: ?x) (xyz.todo.x/text of: ?c is: ?y in: :control))"
+            ),
+            Err(Error::Refused(why)) if why.contains("every variable in it is a parameter")
+        ));
     }
 
     #[test]
@@ -1704,9 +1984,7 @@ mod tests {
     }
 
     /// A getter is a name around a concept's entity and `is:` a value.
-    /// Concluded and read it is one relation, of the getter's own. Only
-    /// `is:` tells it from a command, so with `is:` left out the same
-    /// words are a command.
+    /// Concluded and read it is one relation, of the getter's own.
     #[test]
     fn it_reads_a_getter_as_a_relation_of_its_own() {
         let lists = "(concept (list ?l name: ?n)
@@ -1734,26 +2012,17 @@ mod tests {
                 "(rule (report (getter.open-count.list list:home is: ?n)) (getter.open-count.list list:home is: ?n))"
             ]
         );
-        // With no `is:` it is a command, issued where it is a head.
-        let issued = expanded(lists, "(open-count (list list:home))").unwrap();
-        assert!(
-            issued[0].starts_with(
-                "(rule (command.open-count.list (:id command.open-count.list about: list:home"
-            ),
-            "{issued:?}"
-        );
     }
 
     /// A write was `assert!` and `retract!` while a mark told what is
-    /// kept. Read as any other name around a concept, either would be a
-    /// command of that name, which nothing reads and nothing keeps, so
-    /// both are refused with the word to write.
+    /// kept. Either is refused with the word to write, not said to be
+    /// unknown.
     #[test]
     fn it_refuses_a_write_under_the_name_it_had() {
         for (former, word) in [("assert!", "assert"), ("retract!", "retract")] {
             for text in [
                 format!(r#"({former} (todo todo:1 list: list:home text: "x" state: :open))"#),
-                format!("(rule ({former} (xyz.todo ?t state: :done)) (complete (todo ?t)))"),
+                format!("(rule ({former} (xyz.todo ?t state: :done)) (todo/add todo: ?t))"),
             ] {
                 assert!(
                     matches!(
