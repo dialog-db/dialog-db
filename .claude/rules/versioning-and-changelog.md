@@ -34,10 +34,20 @@ that breaks either one is a minor bump; anything else is a patch.
 
 ## When a dependent needs a change before it is released
 
-Do not point the dependent (tonk) at a pull request's branch: a rewritten
-or deleted branch strands its lockfile. Tag the branch's head as a
-pre-release (`v<next>-rc.<n>`, see `RELEASING.md`) and pin the dependent
-to that tag, with `version` beside `tag` so Cargo refuses a mismatch.
+Tags, pre-release tags included, are cut on `main` only, never on an
+arbitrary commit. Never run `scripts/release.sh prepare` or add a
+`chore(release)` commit on a pull request's branch.
+
+Until the change is on `main`, the dependent (tonk) may pin the exact
+revision of the pull request's head (`rev = "<sha>"` beside `git`), never
+the branch name: a branch is rewritten or deleted, a revision stays
+reachable while the pull request is open. Such a pin lives only on the
+dependent's own pull request branch, with the revision and the branch
+named in that pull request's body; the dependent's `main` takes tagged
+releases only, so the pull request cannot merge until the change is on
+dialog's `main` and tagged there (a release or a pre-release, see
+`RELEASING.md`), and the pin has moved to the tag with `version` beside
+`tag` so Cargo refuses a mismatch.
 
 ## Cutting a release
 

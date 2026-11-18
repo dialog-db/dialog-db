@@ -6,6 +6,7 @@
 use crate::{Fact, Pick};
 
 /// The instruction variants a commit applies to the fact indexes.
+#[derive(Clone)]
 pub enum Instruction {
     /// Add this [`Fact`] to the indexes under a pick: the pick
     /// its attribute is read under. Under [`Pick::All`] the write is

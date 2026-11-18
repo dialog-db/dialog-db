@@ -13,6 +13,9 @@
 //!   no rule.
 //! - `with_rule`: the query carries the last link of the chain in its
 //!   own overlay (`.with(rule)`) instead of finding it committed.
+// Exercises the one-shot `.commit().publish().perform(..)`, which keeps
+// failing on a lost race as it did; nothing here races.
+#![allow(deprecated)]
 use std::time::{Duration, Instant};
 
 use criterion::{Criterion, criterion_group, criterion_main};
