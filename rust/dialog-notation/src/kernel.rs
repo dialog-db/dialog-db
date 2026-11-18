@@ -451,12 +451,6 @@ fn head(node: &Syntax) -> Result<Head, Error> {
             "{node} retracts a command: what that means is not decided, since a command \
              holds for one tick and nothing keeps it"
         ))),
-        (Some("retract"), _) if inner.fields.iter().any(|field| field.key.is_some()) => {
-            Err(Error::Unsupported(format!(
-                "{node} retracts from a collection: what a retract of a collection takes, \
-                 every entry or the entity and the key, is not decided"
-            )))
-        }
         (Some("retract"), false) => Ok(Head::Retract(inner)),
         (Some("report"), _) => Ok(Head::Report(inner)),
         _ => Err(Error::Refused(format!("{node} is not a kernel head"))),
@@ -709,22 +703,6 @@ mod tests {
             assert!(
                 matches!(Rule::parse(&form), Err(Error::Refused(why)) if why.contains("folds one thing")),
                 "{unread}"
-            );
-        }
-    }
-
-    /// What a retract of a collection takes is not decided, so one is
-    /// unsupported, whatever it names.
-    #[test]
-    fn it_refuses_a_retract_from_a_collection() {
-        for text in [
-            r#"(rule (retract (xyz.n notebook:1 entry: (:entry block:a key: "N1" by: :position))))"#,
-            "(rule (retract (xyz.n ?b entry: (:entry ?x key: ?p by: :position))) (xyz.c ?b at: ?p))",
-        ] {
-            let rule = Rule::parse(&forms(text).unwrap().remove(0));
-            assert!(
-                matches!(&rule, Err(Error::Unsupported(why)) if why.contains("retracts from a collection")),
-                "{text}: {rule:?}"
             );
         }
     }

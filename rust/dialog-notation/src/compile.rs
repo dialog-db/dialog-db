@@ -352,7 +352,7 @@ pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
             view.concept, view.name
         )));
     }
-    let rule = Rule::parse(form)?;
+    let rule = retracted(Rule::parse(form)?, form)?;
     if rule.once {
         return Ok(vec![once(&rule, form)?]);
     }
@@ -1274,6 +1274,52 @@ impl Scope {
     }
 }
 
+/// A retract as the design decides it.
+///
+/// - Through a concept by its entity alone, `(retract (todo todo:1))`,
+///   it "retracts every field of the concept on that entity": the rule
+///   reads the fields on the entity and retracts what it read. At the
+///   top level that read is a `when`, run once.
+/// - Of one entry of a collection with the entity, the key and the value
+///   written, it retracts that entry, as a retract of one attribute's
+///   value retracts just that value (the managing agent's reading).
+///   One that leaves out the key or the value is not decided.
+///
+/// A retract that names some fields of a concept and not others is a
+/// write that leaves fields out, refused as one.
+fn retracted(mut rule: Rule, form: &Syntax) -> Result<Rule, Error> {
+    let Head::Retract(read) = &rule.head else {
+        return Ok(rule);
+    };
+    let bound = rule.bound();
+    let unnamed = |term: &Term| match term {
+        Term::Variable(name) => name.contains('.') && !bound.contains(name),
+        Term::Blank => true,
+        _ => false,
+    };
+    if let Some(field) = read.fields.iter().find(|field| {
+        field
+            .key
+            .as_ref()
+            .is_some_and(|(key, _)| unnamed(key) || unnamed(&field.term))
+    }) {
+        return Err(Error::Unsupported(format!(
+            "{form} retracts from {} and leaves out the key or the value of the entry: what \
+             such a retract of a collection takes is not decided",
+            field.attribute
+        )));
+    }
+    let collection = read.fields.iter().any(|field| field.key.is_some());
+    if !collection && !unnamed(&read.entity) && read.named(&bound).is_empty() {
+        let every = read.clone();
+        if rule.when.is_empty() && rule.unless.is_empty() {
+            rule.once = true;
+        }
+        rule.when.push(Premise::Read(every));
+    }
+    Ok(rule)
+}
+
 /// A Dialog-DB rule concluding `read` when the premises of `rule` hold.
 fn concluding(rule: &Rule, read: &Read, head: &str) -> Result<(Json, Vec<Proposition>), Error> {
     whole(read, &rule.bound())?;
@@ -1671,6 +1717,59 @@ mod tests {
                 "{written}"
             );
         }
+    }
+
+    /// A retract of a collection that leaves out its entry's key or its
+    /// value is not decided. One that writes the entity, the key and the
+    /// value compiles, at the top level and in a rule.
+    #[test]
+    fn it_refuses_a_retract_from_a_collection_that_leaves_out_its_key_or_value() {
+        for text in [
+            "(rule (retract (xyz.n ?b entry: (:entry ?x.1 key: ?p by: :position))) (xyz.c ?b at: ?p))",
+            "(rule (retract (xyz.n ?b entry: (:entry ?x key: ?p.1 by: :position))) (xyz.c ?b on: ?x))",
+        ] {
+            assert!(
+                matches!(steps(text), Err(Error::Unsupported(why)) if why.contains("leaves out the key or the value")),
+                "{text}"
+            );
+        }
+        assert!(matches!(
+            steps(r#"(rule (retract (xyz.n notebook:1 entry: (:entry block:a key: "N1" by: :position))))"#)
+                .unwrap()
+                .as_slice(),
+            [Step::Retract(_)]
+        ));
+        assert!(matches!(
+            steps("(rule (retract (xyz.n ?b entry: (:entry ?x key: ?p by: :position))) (xyz.c ?b at: ?p on: ?x))")
+                .unwrap()
+                .as_slice(),
+            [Step::Induce(_)]
+        ));
+    }
+
+    /// A retract through a concept by its entity alone reads every field
+    /// of it and retracts what it read: in a rule, among the premises;
+    /// at the top level, as a write that runs once.
+    #[test]
+    fn it_retracts_every_field_of_a_concept_named_by_its_entity() {
+        assert!(matches!(
+            steps("(rule (retract (xyz.block ?b source: ?s.1 notebook: ?n.1)) (xyz.remove ?c subject: ?b))")
+                .unwrap()
+                .as_slice(),
+            [Step::Induce(_)]
+        ));
+        assert!(matches!(
+            steps("(rule (retract (xyz.block block:1 source: ?s.1 notebook: ?n.1)))")
+                .unwrap()
+                .as_slice(),
+            [Step::Write(_)]
+        ));
+        // Some fields named and not others is a write that leaves fields
+        // out.
+        assert!(matches!(
+            steps(r#"(rule (retract (xyz.block block:1 source: "x" notebook: ?n.1)))"#),
+            Err(Error::Refused(why)) if why.contains("a write says every field")
+        ));
     }
 
     #[test]

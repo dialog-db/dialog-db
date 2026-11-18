@@ -22,7 +22,7 @@ Two of the eight meet the same wall: 3 and 8 are folds in a rule that derives, w
 
 ## What tonk's documents need, in the order they need it
 
-Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), from 2026-11-18. The bar is [sketches/notebook.clj](sketches/notebook.clj), measured by `cargo run -p dialog-notation --example bar` and pinned in `it_measures_how_far_the_notebook_gets`: of 56 forms, 56 read, 34 expand and 32 compile before step J; 43 and 41 once a line of one entry takes `by:`; 45 and 41 after K; 47 and 43 after L; 48 and 43 after N.
+Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), from 2026-11-18. The bar is [sketches/notebook.clj](sketches/notebook.clj), measured by `cargo run -p dialog-notation --example bar` and pinned in `it_measures_how_far_the_notebook_gets`: of 56 forms, 56 read, 34 expand and 32 compile before step J; 43 and 41 once a line of one entry takes `by:`; 45 and 41 after K; 47 and 43 after L; 48 and 43 after N; 48 and 47 after Q.
 
 | | the design now | built here | gap |
 |---|---|---|---|
@@ -36,6 +36,7 @@ Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), 
 | M. a command's own entity | not said | built 2026-11-18, the managing agent's opinion: `of: ?c` in a premise that reads a command binds the entity its content derived | in a head or at the top level `of:` on a command is unknown. The notebook sketch uses `id` instead, which names another entity |
 | N. a view | proposed: `(view concept name template condition…)`, events inline as `:on/<type>` | built 2026-11-18 to a description, `View::describe`, checked for unbound variables, undeclared commands, an event's fields and nested views that name no view. Dialog-DB refuses it (#830) | unsupported: a valueless attribute, an attribute of several parts, a nested view by `:model` or `:with` or of no entity. No renderer, no lowering to tonk |
 | P. a declaration as data | not said: what a back end reads | built 2026-11-18: `Checked::declarations`, each concept and command with its description, its lines as written and the descriptor a read of it compiles to, and each view | a concept a macro declares is not listed |
+| Q. retracts | `(retract (todo todo:9c1e))` retracts every field on the entity; `(retract (xyz.todo/text of: todo:9c1e is: "Buy milk"))` just that value | built 2026-11-18: by the entity alone, at the top level and in a rule; one entry of a collection with its key and value written (the managing agent's reading) | a retract naming some fields of a concept and not others is refused as a partial write; a retract of a collection leaving out the key or the value is unsupported |
 
 
 What the build does today, against what tonk's YAML does, both found by [tonk-claims-diff.md](tonk-claims-diff.md) and the maintainer's to decide:

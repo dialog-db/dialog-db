@@ -1450,6 +1450,19 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** By the agent: declarations are given when analysis passes, even if compiling does not. 118 unit tests, 40 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: the retracts the design decides
+
+**Asked.** Step Q. (1) `(retract (notebook/block ?b))`, a retract through a concept by its entity alone, which the design's table says "retracts every field of the concept on that entity", in a rule's head and at the top level. (2) A retract of one entry of a collection with the entity, the key and the value written, which retracts that entry, as `(retract (xyz.todo/text of: todo:9c1e is: "Buy milk"))` "retracts just that value": the managing agent's reading.
+
+**Learned.**
+
+- A retract by the entity alone names no field, so every field of the expansion is a variable of its own. The compiler reads the fields on the entity and retracts what it read: the head's read is added to the premises. At the top level the read is a `when`, run once (step I). Under `:one` it reads the newest claim and retracts that one.
+- The design says nothing of a retract through a concept that names some fields and not others. It stays refused, as a write that leaves fields out.
+- A retract of an entry with its key and value written compiles to what an assert of it does, with `retract!`: a ground one to a statement under the entry's attribute, one in a rule to an inductive rule whose head binds the entry's key. On a branch the entry goes and its neighbours stay, and the notebook's placement rule takes every other entry of its block out.
+- A retract of a collection that leaves out the key or the value is unsupported, not decided. The refusal moved from the kernel, which cannot tell a field left out from one a premise binds, to the compiler, which can.
+
+**Decided.** The managing agent's reading of (2), built. The bar moves from 43 compiled to 47, of 56: the notebook's three retracts of an entry and its retract of a block by its entity compile. 119 unit tests, 41 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

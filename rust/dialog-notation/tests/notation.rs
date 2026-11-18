@@ -300,12 +300,22 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
         .submit(r#"(assert (notebook-entry notebook:1 at: "first" block: block:d))"#)
         .await;
     assert!(matches!(why(shape), Err(Ok(Error::Refused(said))) if said.contains("the key")),);
-    let retracted = notebook
+    // A retract of one entry, its entity, key and value written,
+    // retracts that entry, and its neighbours stay. One that leaves out
+    // the key or the value is not decided.
+    for undecided in [
+        "(retract (notebook-entry notebook:1 block: block:b))",
+        "(retract (notebook-entry notebook:1))",
+    ] {
+        let refused = notebook.submit(undecided).await;
+        assert!(
+            matches!(why(refused), Err(Ok(Error::Unsupported(said))) if said.contains("leaves out the key or the value")),
+            "{undecided}"
+        );
+    }
+    notebook
         .submit(r#"(retract (notebook-entry notebook:1 at: "N1" block: block:a))"#)
-        .await;
-    assert!(
-        matches!(why(retracted), Err(Ok(Error::Unsupported(said))) if said.contains("retracts from a collection"))
-    );
+        .await?;
     assert_eq!(
         report(
             &mut notebook,
@@ -313,9 +323,38 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
         )
         .await?,
         vec![
-            "(xyz.tonk.notebook notebook:1 N1: block:a)",
             "(xyz.tonk.notebook notebook:1 N2: block:b)",
             "(xyz.tonk.notebook notebook:1 N3: block:c)",
+        ]
+    );
+    // And in a rule: a placement takes every other entry of its block
+    // out, as the notebook's rule does.
+    notebook
+        .submit(
+            r#"(concept (block/place subject: ?b notebook: ?n key: ?k)
+                 (xyz.block.place/subject of: ?c is: ?b as: :entity in: :control)
+                 (xyz.block.place/notebook of: ?c is: ?n as: :entity in: :control)
+                 (xyz.block.place/key of: ?c is: ?k as: :text in: :control))
+               (rule (assert (notebook-entry ?n at: ?k block: ?b))
+                 (block/place subject: ?b notebook: ?n key: ?k))
+               (rule (retract (notebook-entry ?n at: ?old block: ?b))
+                 (block/place subject: ?b notebook: ?n key: ?k)
+                 (notebook-entry ?n at: ?old block: ?b)
+                 (!= ?old is: ?k))"#,
+        )
+        .await?;
+    notebook
+        .submit(r#"(assert (block/place subject: block:b notebook: notebook:1 key: "N4"))"#)
+        .await?;
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(query (notebook-entry notebook:1 at: ?p block: ?x))"
+        )
+        .await?,
+        vec![
+            "(xyz.tonk.notebook notebook:1 N3: block:c)",
+            "(xyz.tonk.notebook notebook:1 N4: block:b)",
         ]
     );
     Ok(())
@@ -768,6 +807,52 @@ async fn it_gives_what_a_document_declares_as_data() -> Result<()> {
     assert_eq!(note.lines[0].cardinality, None);
     assert_eq!(description.as_deref(), Some("One note, as a row."));
     assert_eq!(view.name, "row");
+    Ok(())
+}
+
+/// A retract through a concept by its entity alone retracts every field
+/// of the concept on that entity, at the top level and in a rule, and
+/// another entity's fields stay. One that names some fields and not
+/// others is refused as a write that leaves fields out.
+#[dialog_common::test]
+async fn it_retracts_every_field_of_a_concept_named_by_its_entity() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(concept (notebook/block ?b notebook: ?n source: ?s)
+                 (xyz.block/notebook of: ?b is: ?n as: :entity cardinality: :one)
+                 (xyz.block/source of: ?b is: ?s as: :text cardinality: :one))
+               (concept (block/remove subject: ?b)
+                 (xyz.block.remove/subject of: ?c is: ?b as: :entity in: :control))
+               (rule (retract (notebook/block ?b))
+                 (block/remove subject: ?b))
+               (assert (notebook/block block:1 notebook: notebook:1 source: "one"))
+               (assert (notebook/block block:2 notebook: notebook:1 source: "two"))
+               (assert (notebook/block block:3 notebook: notebook:1 source: "three"))"#,
+        )
+        .await?;
+    notebook
+        .submit("(retract (notebook/block block:1))")
+        .await?;
+    notebook
+        .submit("(assert (block/remove subject: block:2))")
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.block ?b notebook: ?n))").await?,
+        vec!["(xyz.block block:3 notebook: notebook:1)"]
+    );
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.block ?b source: ?s))").await?,
+        vec![r#"(xyz.block block:3 source: "three")"#]
+    );
+    let partial = notebook
+        .submit(r#"(retract (notebook/block block:3 source: "three"))"#)
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&partial, Err(Ok(Error::Refused(why))) if why.contains("a write says every field")),
+        "{partial:?}"
+    );
     Ok(())
 }
 
@@ -2241,7 +2326,7 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
             measured.expanded,
             measured.compiled
         ),
-        (56, 56, 48, 43),
+        (56, 56, 48, 47),
         "{groups:#?}"
     );
     Ok(())
