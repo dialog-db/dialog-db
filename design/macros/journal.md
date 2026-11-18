@@ -1423,6 +1423,20 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** The managing agent's opinion, built. 116 unit tests, 38 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: a view, to a description
+
+**Asked.** Step N: `(view concept :name template condition…)`, events inline as `:on/<type>`, as the design proposes and the sketch writes. Read it, expand it to a kernel form that is a plain description, check it, and give the description to another back end as data. Dialog-DB refuses it, pointing at #830. No renderer.
+
+**Learned.**
+
+- The kernel form is `(view premise… concept: todo name: :row entity: ?t template: […])`: the conditions expanded as a rule's premises are, and the rest beside them unchanged. `View::describe` reads it into `View`, `Node`, `Element`, `Attribute`, `Event`, `Input` and `Nested`, exported from the crate. Nothing in it is a Dialog-DB rule.
+- What the walker checks, as the design says: the conditions apply the view's concept once, and that application's entity is the one rendered; every variable of the template, events included, is one a condition binds; every event posts a declared command with every field of it and no other; every nested view names a view of the document or of one before it.
+- Unsupported, as the design leaves them open: a valueless attribute, `:hidden true` (the design has no boolean term); an attribute built of several parts, `:href ["/notebook/" ?n]`; a nested view by anything but its name and entity, `:model`, `:with`; a nested view of no entity.
+- The design's own example nests a view as the map right after the tag, `[:ul {view: :row of: ?t}]`, where Hiccup puts an element's attributes. The description reads a map there as attributes unless it has a `:view` key, so an element has no attribute named `view`.
+- No event of the sketch needs a flag: none prevents a default or stops propagation (as [tonk-port.md](tonk-port.md) counts it), so none is read and none was needed.
+
+**Decided.** By the agent: a map with a `:view` key is a nested view wherever it stands. The bar moves to 48 expanded, 43 compiled: one of the notebook's five views, `notebook/block :directory`, expands, and stops at Dialog-DB; the other four stop at what is unsupported in their templates. 118 unit tests, 39 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

@@ -625,6 +625,50 @@ async fn it_reads_the_entity_of_the_command_that_fired() -> Result<()> {
     Ok(())
 }
 
+/// A view is a description for a back end that renders it, and the
+/// Dialog-DB back end refuses it, pointing at #830: nothing of a
+/// document that holds one is written. The description is read from
+/// the analyzed tree.
+#[dialog_common::test]
+async fn it_refuses_a_view_on_a_branch_and_describes_it() -> Result<()> {
+    let document = r#"(concept (todo ?t title: ?title)
+                        (xyz.todo/title of: ?t is: ?title as: :text cardinality: :one))
+                      (assert (todo todo:1 title: "Buy milk"))
+                      (view todo :row [:li ?title] (todo ?t title: ?title))"#;
+    let mut notebook = Notebook::open().await?;
+    let refused = notebook
+        .submit(document)
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&refused, Err(Ok(Error::Unsupported(why))) if why.contains("#830")),
+        "{refused:?}"
+    );
+    assert!(
+        report(&mut notebook, "(query (xyz.todo ?t title: ?x))")
+            .await?
+            .is_empty()
+    );
+    let analysis = dialog_notation::Analyzer::new()?.analyze(&dialog_notation::parse(document)?);
+    let view = analysis
+        .analyzed
+        .iter()
+        .find(|tree| tree.applies() == Some("view"))
+        .map(dialog_notation::View::describe)
+        .transpose()?
+        .expect("a view");
+    assert_eq!(
+        view.template,
+        dialog_notation::Node::Element(dialog_notation::Element {
+            tag: "li".into(),
+            attributes: Vec::new(),
+            events: Vec::new(),
+            children: vec![dialog_notation::Node::Variable("title".into())],
+        })
+    );
+    Ok(())
+}
+
 /// A concept written as lines, an attribute a line, runs as one written
 /// as a read of several fields does: written through by a rule a
 /// command fires and read back. `:one` reads the newest claim and
@@ -2095,7 +2139,7 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
             measured.expanded,
             measured.compiled
         ),
-        (56, 56, 47, 43),
+        (56, 56, 48, 43),
         "{groups:#?}"
     );
     Ok(())

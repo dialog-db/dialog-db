@@ -341,6 +341,17 @@ pub const DESCRIBED: &str = "syntax.meta";
 /// Compile an analyzed tree: the third phase, from a rule of the
 /// kernel to what Dialog-DB runs.
 pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
+    // A view is a description for a back end that renders it. Dialog-DB
+    // has no form for one: as designed it is a rule that folds into its
+    // value, and where a computed value lives is #830's question.
+    if form.applies() == Some("view") {
+        let view = crate::view::View::describe(form)?;
+        return Err(Error::Unsupported(format!(
+            "the view {} :{} is a description, read by `View::describe`; Dialog-DB has no form \
+             for a view, which as designed is a rule that folds into its value (#830)",
+            view.concept, view.name
+        )));
+    }
     let rule = Rule::parse(form)?;
     if rule.once {
         return Ok(vec![once(&rule, form)?]);

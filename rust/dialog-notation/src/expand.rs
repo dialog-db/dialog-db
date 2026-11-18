@@ -649,6 +649,9 @@ pub struct Expander {
     /// How many rules about syntax have been kept, ever: what tells a
     /// pass over a document that it declared something.
     declared: usize,
+    /// The names of the views declared, in this document and the ones
+    /// before it.
+    views: BTreeSet<String>,
     /// The domains some installed rule reads.
     reads: BTreeSet<String>,
     /// Every form the rules were asked about since the last report,
@@ -724,6 +727,14 @@ impl Expander {
             .filter(|at| declares(&trees[*at]))
             .chain((0..trees.len()).filter(|at| !declares(&trees[*at])))
             .collect();
+        // The views a template may nest, wherever in the document they are.
+        for tree in &trees {
+            if let (Some("view"), [_, name, ..]) = (tree.applies(), items(tree))
+                && let Some(name) = name.keyword()
+            {
+                self.views.insert(name.to_string());
+            }
+        }
         let mut done: BTreeMap<usize, Vec<Syntax>> = BTreeMap::new();
         let mut refused: BTreeMap<usize, Diagnostic> = BTreeMap::new();
         // A form a macro expands to may declare a name too. Whatever
@@ -1397,6 +1408,152 @@ impl Expander {
         }
     }
 
+    /// `(view concept :name template condition…)`, as the kernel form
+    /// that describes it: its conditions expanded to premises, and the
+    /// concept, the name, the entity and the template beside them.
+    ///
+    /// The conditions apply the view's concept once, and that
+    /// application's entity is the one rendered. Every variable of the
+    /// template is one a condition binds; every event posts a declared
+    /// command with every field of it and no other; every nested view
+    /// names a view. What the design leaves open in a template, the
+    /// description refuses as unsupported.
+    fn view(&mut self, tree: &Syntax) -> Result<Syntax, Error> {
+        let [concept, name, template, conditions @ ..] = items(tree) else {
+            return Err(Error::Refused(format!(
+                "{tree}: a view is `(view concept :name template condition…)`"
+            )));
+        };
+        let Syntax::Reference(concept_name) = concept else {
+            return Err(Error::Refused(format!("{concept} is not a concept's name")));
+        };
+        if !self.concepts.contains(concept_name) {
+            return Err(Error::Unknown(concept.to_string()));
+        }
+        if name.keyword().is_none() {
+            return Err(Error::Refused(format!(
+                "{name}: a view's name is a keyword, `:row`"
+            )));
+        }
+        let applications: Vec<&Syntax> = conditions
+            .iter()
+            .filter(|condition| condition.applies() == Some(concept_name.as_str()))
+            .collect();
+        let entity = match applications.as_slice() {
+            [one] => match items(one).first() {
+                Some(entity @ Syntax::Variable(_)) => entity.clone(),
+                _ => {
+                    return Err(Error::Refused(format!(
+                        "{one}: the application of the view's concept binds the entity rendered \
+                         to a variable"
+                    )));
+                }
+            },
+            _ => {
+                return Err(Error::Refused(format!(
+                    "{tree}: the conditions apply the view's concept {concept_name} once, and that \
+                     application's entity is the one rendered; they apply it {} times",
+                    applications.len()
+                )));
+            }
+        };
+        // The conditions expand as a rule's premises do.
+        let mut parts = vec![apply("view.rendered", vec![entity.clone()])];
+        parts.extend(conditions.iter().cloned());
+        let rules = self.top(Syntax::Application(
+            Box::new(Syntax::Reference("rule".into())),
+            Parameters {
+                items: parts,
+                ..Parameters::default()
+            },
+        ))?;
+        let [rule] = rules.as_slice() else {
+            return Err(Error::Unsupported(format!(
+                "{tree}: its conditions read through several definitions, and a view of several \
+                 is not decided"
+            )));
+        };
+        let clauses = Clauses::of(rule);
+        let mut premises = clauses.when.clone();
+        if !clauses.unless.is_empty() {
+            premises.push(apply("unless", clauses.unless.clone()));
+        }
+        let described = Syntax::Application(
+            Box::new(Syntax::Reference("view".into())),
+            Parameters {
+                items: premises,
+                terms: BTreeMap::from([
+                    ("concept".into(), concept.clone()),
+                    ("name".into(), name.clone()),
+                    ("entity".into(), entity),
+                    ("template".into(), template.clone()),
+                ]),
+            },
+        );
+        let view = crate::view::View::describe(&described)?;
+        let mut bound = Vec::new();
+        clauses
+            .when
+            .iter()
+            .for_each(|premise| premise.variables(&mut bound));
+        if let Some(variable) = view
+            .variables()
+            .into_iter()
+            .find(|variable| !bound.iter().any(|bound| bound == variable))
+        {
+            return Err(Error::Refused(format!(
+                "the view {concept_name} :{} holds ?{variable}, which no condition binds",
+                view.name
+            )));
+        }
+        for event in view.events() {
+            if !self.commands.contains_key(&event.command) {
+                return Err(Error::Refused(format!(
+                    ":on/{} posts {}, which is no command declared",
+                    event.kind, event.command
+                )));
+            }
+            let declared = self.syntax.iter().find_map(|rule| {
+                rule.signature
+                    .as_ref()
+                    .filter(|signature| signature.name == event.command)
+            });
+            let given: BTreeSet<String> = event
+                .fields
+                .iter()
+                .map(|(label, _)| label.clone())
+                .collect();
+            if let Some(declared) = declared
+                && declared.parameters != given
+            {
+                return Err(Error::Refused(format!(
+                    ":on/{} posts {} with {}: an event gives every field of its command and no \
+                     other, {}",
+                    event.kind,
+                    event.command,
+                    given.iter().cloned().collect::<Vec<_>>().join(" "),
+                    declared
+                        .parameters
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )));
+            }
+        }
+        if let Some(nested) = view
+            .nested()
+            .into_iter()
+            .find(|nested| !self.views.contains(&nested.view))
+        {
+            return Err(Error::Refused(format!(
+                "{{:view :{} :of ?{}}} names no view declared",
+                nested.view, nested.of
+            )));
+        }
+        Ok(described)
+    }
+
     /// `(id ?t list: ?l text: ?x)` and `(fresh ?n)`, the formulas a new
     /// thing is made by, as the kernel premise they are, or `None` for
     /// any other premise.
@@ -1476,6 +1633,9 @@ impl Expander {
     /// several, as a concept of several reads does, is a rule each, with
     /// the premises again.
     fn top(&mut self, mut tree: Syntax) -> Result<Vec<Syntax>, Error> {
+        if tree.applies() == Some("view") {
+            return self.view(&tree).map(|view| vec![view]);
+        }
         let written = tree.clone();
         while tree.applies() != Some("rule") {
             // A call stands in a rule, a query or a write. Alone at the
@@ -1739,6 +1899,164 @@ mod tests {
             assert!(
                 matches!(expanded("", text), Err(Error::Refused(why)) if why.contains("a write at the top level is ground")),
                 "{text}"
+            );
+        }
+    }
+
+    const VIEWS: &str = r#"
+        (concept (todo ?t title: ?title done: ?done)
+          (xyz.todo/title of: ?t is: ?title as: :text cardinality: :one)
+          (xyz.todo/done of: ?t is: ?done cardinality: :one))
+        (concept (todo/toggle todo: ?t checked: ?c)
+          (xyz.todo.toggle/todo of: ?x is: ?t as: :entity in: :control)
+          (xyz.todo.toggle/checked of: ?x is: ?c in: :control))
+    "#;
+
+    fn view(text: &str) -> Result<crate::view::View, Error> {
+        let kernel = expanded(VIEWS, text)?;
+        let tree = parse(&kernel[0])?.remove(0);
+        crate::view::View::describe(&tree)
+    }
+
+    /// A view expands to a description: its conditions as premises, and
+    /// its concept, name, entity and template beside them, events inline
+    /// with the command each posts and what fills its fields.
+    #[test]
+    fn it_describes_a_view() {
+        use crate::view::{Attribute, Input, Node};
+        let described = view(
+            r#"(view todo :row
+                 [:li
+                   [:input {:type "checkbox"
+                            :checked ?done
+                            :on/change (todo/toggle todo: ?t checked: .currentTarget.checked)}]
+                   [:span ?title]
+                   {:view :row :of ?t}]
+                 (todo ?t title: ?title done: ?done))"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                described.concept.as_str(),
+                described.name.as_str(),
+                described.entity.as_str()
+            ),
+            ("todo", "row", "t")
+        );
+        assert_eq!(described.conditions.len(), 1);
+        assert!(
+            described.conditions[0]
+                .to_string()
+                .starts_with("(xyz.todo ?t ")
+        );
+        let Node::Element(li) = &described.template else {
+            panic!("an element");
+        };
+        assert_eq!(li.tag, "li");
+        let Node::Element(input) = &li.children[0] else {
+            panic!("an element");
+        };
+        assert_eq!(
+            input.attributes,
+            vec![
+                ("type".to_string(), Attribute::Text("checkbox".into())),
+                ("checked".to_string(), Attribute::Variable("done".into())),
+            ]
+        );
+        assert_eq!(input.events[0].kind, "change");
+        assert_eq!(input.events[0].command, "todo/toggle");
+        assert_eq!(
+            input.events[0].fields,
+            vec![
+                (
+                    "checked".to_string(),
+                    Input::Path(vec!["currentTarget".into(), "checked".into()])
+                ),
+                ("todo".to_string(), Input::Variable("t".into())),
+            ]
+        );
+        assert_eq!(
+            li.children[1],
+            Node::Element(crate::view::Element {
+                tag: "span".into(),
+                attributes: Vec::new(),
+                events: Vec::new(),
+                children: vec![Node::Variable("title".into())],
+            })
+        );
+        assert_eq!(described.nested()[0].view, "row");
+        // The Dialog-DB back end has no form for it.
+        let kernel = expanded(
+            VIEWS,
+            "(view todo :row [:li ?title] (todo ?t title: ?title))",
+        )
+        .unwrap();
+        assert!(matches!(
+            crate::compile(&parse(&kernel[0]).unwrap().remove(0)),
+            Err(Error::Unsupported(why)) if why.contains("#830")
+        ));
+    }
+
+    /// What a view's template may not say is refused where the view is
+    /// analyzed, and what the design leaves open in a template is
+    /// unsupported: a valueless attribute, an attribute of several parts,
+    /// a nested view by anything but its name and entity, or of no entity.
+    #[test]
+    fn it_refuses_a_view_that_does_not_hold_together() {
+        for (text, why) in [
+            (
+                "(view todo :row [:li ?other] (todo ?t title: ?title))",
+                "holds ?other, which no condition binds",
+            ),
+            (
+                "(view todo :row [:li {:on/click (todo/frob todo: ?t)}] (todo ?t title: ?title))",
+                "which is no command declared",
+            ),
+            (
+                "(view todo :row [:li {:on/click (todo/toggle todo: ?t)}] (todo ?t title: ?title))",
+                "gives every field of its command and no other",
+            ),
+            (
+                "(view todo :row [:li {:view :card :of ?t}] (todo ?t title: ?title))",
+                "names no view declared",
+            ),
+            (
+                "(view todo :row [:li ?title] (xyz.other ?t title: ?title))",
+                "apply it 0 times",
+            ),
+            (
+                "(view todo :row [:li ?title] (todo ?t title: ?title) (todo ?u title: ?title))",
+                "apply it 2 times",
+            ),
+        ] {
+            assert!(
+                matches!(expanded(VIEWS, text), Err(Error::Refused(said)) if said.contains(why)),
+                "{text}: {:?}",
+                expanded(VIEWS, text)
+            );
+        }
+        for (text, why) in [
+            (
+                "(view todo :row [:li {:hidden true}] (todo ?t title: ?title))",
+                "a valueless attribute",
+            ),
+            (
+                r#"(view todo :row [:a {:href ["/todo/" ?t]}] (todo ?t title: ?title))"#,
+                "an attribute built of several parts",
+            ),
+            (
+                "(view todo :row [:li {:view :row :model todo}] (todo ?t title: ?title))",
+                "a nested view by `:model` is not decided",
+            ),
+            (
+                "(view todo :row [:li {:view :row}] (todo ?t title: ?title))",
+                "a nested view of no entity",
+            ),
+        ] {
+            assert!(
+                matches!(expanded(VIEWS, text), Err(Error::Unsupported(said)) if said.contains(why)),
+                "{text}: {:?}",
+                expanded(VIEWS, text)
             );
         }
     }

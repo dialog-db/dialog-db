@@ -22,7 +22,7 @@ Two of the eight meet the same wall: 3 and 8 are folds in a rule that derives, w
 
 ## What tonk's documents need, in the order they need it
 
-Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), from 2026-11-18. The bar is [sketches/notebook.clj](sketches/notebook.clj), measured by `cargo run -p dialog-notation --example bar` and pinned in `it_measures_how_far_the_notebook_gets`: of 56 forms, 56 read, 34 expand and 32 compile before step J; 43 and 41 once a line of one entry takes `by:`; 45 and 41 after K; 47 and 43 after L.
+Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), from 2026-11-18. The bar is [sketches/notebook.clj](sketches/notebook.clj), measured by `cargo run -p dialog-notation --example bar` and pinned in `it_measures_how_far_the_notebook_gets`: of 56 forms, 56 read, 34 expand and 32 compile before step J; 43 and 41 once a line of one entry takes `by:`; 45 and 41 after K; 47 and 43 after L; 48 and 43 after N.
 
 | | the design now | built here | gap |
 |---|---|---|---|
@@ -34,6 +34,7 @@ Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), 
 | K. equality | constraints `(== ?a is: ?b)`, `(!= ?a is: ?b)` | built 2026-11-18 as premises: `==` is Dialog-DB's equality, `!=` the absence of it | `!=` inside `unless` is unsupported. Neither checks an assert |
 | L. `dialog/position` | `(dialog/position ?b after: ?lo before: ?hi is: ?at)` among a rule's formulas | built 2026-11-18, to dialog-query's formula of that name | none known |
 | M. a command's own entity | not said | built 2026-11-18, the managing agent's opinion: `of: ?c` in a premise that reads a command binds the entity its content derived | in a head or at the top level `of:` on a command is unknown. The notebook sketch uses `id` instead, which names another entity |
+| N. a view | proposed: `(view concept name template condition…)`, events inline as `:on/<type>` | built 2026-11-18 to a description, `View::describe`, checked for unbound variables, undeclared commands, an event's fields and nested views that name no view. Dialog-DB refuses it (#830) | unsupported: a valueless attribute, an attribute of several parts, a nested view by `:model` or `:with` or of no entity. No renderer, no lowering to tonk |
 
 
 ## What the design says and the build does not do yet

@@ -63,6 +63,7 @@ pub mod parse;
 pub mod pattern;
 pub mod print;
 pub mod syntax;
+pub mod view;
 pub mod written;
 
 pub use analyze::{Analysis, Analyzer};
@@ -74,6 +75,7 @@ pub use form::{Form, Part, read};
 pub use parse::{Parsed, parse, parse_document, parse_written};
 pub use print::print;
 pub use syntax::{Parameters, Signature, Syntax};
+pub use view::{Attribute, Element, Event, Input, Nested, Node, View};
 pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};
 
 /// Why a document was not read, expanded or compiled.
