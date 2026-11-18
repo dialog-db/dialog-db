@@ -348,19 +348,35 @@ where
 }
 
 /// A left merge's optional side: its cursor, and the terms it binds
-/// Absent where it holds no row.
+/// Absent where it holds no row, its value first.
 type Side<S, Key> = (Cursor<S, Key>, Vec<Term<Any>>);
 
 /// Left-joins `left`, sorted on a key, with each of `optional`, sorted on
-/// the same key: a left row extends into every row of an optional side that
-/// holds its key, and where a side holds none it binds that side's `absent`
-/// terms to [`Binding::Absent`](crate::Binding::Absent) and passes. The
-/// streaming form of an optional field's per-row probe: each side is read
-/// once, in order, instead of once per left row.
+/// the same key. The streaming form of an optional field's per-row probe
+/// (`OptionalAttributeQuery::evaluate`): each side is read once, in order,
+/// instead of once per left row, and a row comes out as the probe would
+/// yield it.
 ///
-/// Rows come out in `left`'s order. A combination that disagrees on a
-/// shared variable is dropped, as the probe resolving the row's bindings
-/// would have found nothing that matched.
+/// A left row extends into every row of a side that holds its key; a
+/// combination that disagrees on a shared variable is dropped, as the
+/// probe, resolving the row's bindings, would have read nothing that
+/// matched it.
+///
+/// Where a side holds no row for the key, what happens depends on the
+/// side's value, the first of its `absent` terms, in the row:
+///
+/// - already Absent (an earlier field claimed it): the row passes
+///   unchanged, as the probe passes a row whose value is claimed absent
+///   and finds no fact;
+/// - already Present (pinned, as by an earlier field sharing the
+///   variable): the row is dropped, as a pinned value no fact matches is
+///   a mismatch and not absence;
+/// - otherwise: every `absent` term is bound
+///   [`Binding::Absent`](crate::Binding::Absent), as the probe's fallback
+///   binds them, and the row passes. Binding Absent over a term already
+///   Present is an error there as it is in the probe.
+///
+/// Rows come out in `left`'s order.
 pub(crate) fn left_merge_join<'a, L, S, K, Key>(
     left: L,
     optional: Vec<(S, Vec<Term<Any>>)>,
@@ -403,11 +419,25 @@ where
                         rows = next;
                     }
                 } else {
-                    for row in &mut rows {
+                    let mut kept = Vec::with_capacity(rows.len());
+                    for mut row in rows {
+                        let value = absent.first();
+                        let claimed = value
+                            .and_then(Term::name)
+                            .is_some_and(|name| row.absent(name));
+                        if claimed {
+                            kept.push(row);
+                            continue;
+                        }
+                        if value.is_some_and(|value| row.is_present(value)) {
+                            continue;
+                        }
                         for term in absent.iter() {
                             row.bind_absent(term)?;
                         }
+                        kept.push(row);
                     }
+                    rows = kept;
                 }
                 if rows.is_empty() {
                     break;

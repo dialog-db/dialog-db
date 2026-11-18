@@ -399,13 +399,14 @@ impl Conjunction {
                 }
 
                 // An optional field merges only when the row leaves its
-                // value and cause free: a pinned or Absent-claimed value is
-                // a check of one entity's fact, which the fold makes.
+                // value, cause and layer free: a pinned or Absent-claimed
+                // one is a check of one entity's fact, which the fold makes.
                 let free = run.iter().all(|row| {
                     optional.iter().all(|optional| {
                         let query = optional.query();
                         !row.contains(query.is())
                             && !row.contains(&Term::<Any>::from(query.cause()))
+                            && !row.contains(&Term::<Any>::from(query.layer()))
                     })
                 });
 
@@ -486,9 +487,13 @@ impl Conjunction {
                             .iter()
                             .map(|optional| {
                                 let query = optional.query();
+                                // The terms the probe's fallback binds
+                                // Absent, the value first (see
+                                // `left_merge_join`).
                                 let absent = vec![
                                     query.is().clone(),
                                     Term::<Any>::from(query.cause()),
+                                    Term::<Any>::from(query.layer()),
                                 ];
                                 let side: Pin<Box<dyn Selection + 'a>> = Box::pin(
                                     Application::evaluate(query.clone(), base.clone().seed(), env),
