@@ -292,6 +292,14 @@ impl<'a> ColumnReader<'a> {
         Ok(())
     }
 
+    /// Appends the next entry's component bytes onto `out`: one append per
+    /// component, the arena cursor front-decoding in place.
+    fn append_next(&mut self, out: &mut Vec<u8>) -> Result<(), DialogSearchTreeError> {
+        self.advance()?;
+        out.extend_from_slice(self.current());
+        Ok(())
+    }
+
     /// The component bytes of the entry the reader last advanced to.
     fn current(&self) -> &[u8] {
         match self {
@@ -352,21 +360,27 @@ impl<'a> StreamingLeaf<'a> {
             return Ok(None);
         }
         let at = self.index;
-        for reader in &mut self.readers {
-            reader.advance()?;
-        }
-        // Sized before it is filled: the buffer grows at most once per key
-        // that outgrows every key before it, whatever order the leaf holds
-        // its keys in, not once per component.
-        let length = self
-            .readers
-            .iter()
-            .map(|reader| reader.current().len())
-            .sum();
         self.key_buf.clear();
-        self.key_buf.reserve(length);
-        for reader in &self.readers {
-            self.key_buf.extend_from_slice(reader.current());
+        if self.key_buf.capacity() == 0 {
+            // The leaf's first key is sized before it is filled, so the
+            // empty buffer is allocated once at its length rather than
+            // grown component by component. Later keys reuse it.
+            for reader in &mut self.readers {
+                reader.advance()?;
+            }
+            let length = self
+                .readers
+                .iter()
+                .map(|reader| reader.current().len())
+                .sum();
+            self.key_buf.reserve(length);
+            for reader in &self.readers {
+                self.key_buf.extend_from_slice(reader.current());
+            }
+        } else {
+            for reader in &mut self.readers {
+                reader.append_next(&mut self.key_buf)?;
+            }
         }
         self.index += 1;
         Ok(Some((at, &self.key_buf)))
