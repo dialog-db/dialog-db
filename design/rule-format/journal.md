@@ -81,3 +81,15 @@ The maintainer was away and asked for the build to go on without him.
 **Decided.** By the agent, each until he says otherwise: the three keys are refused always; a list that ends in a map of a rest and has no run says `{ "...": [] }` after it. Nothing of the maintainer's form moved.
 
 #799 writes `match`. A rule's entity does not move by any of this: it is named by its parts, and the names of the parts (`rest`, `run`) are not the words of the stored form.
+
+## 2026-11-16, Reviewing: the stored form over patterns drawn at random
+
+**Asked.** Is every pattern read back as it was written, in a stored body's dag-cbor and as JSON?
+
+**Method.** `it_reads_back_every_pattern_drawn_as_it_was_written` on #799: 3,000 patterns from a fixed sequence, to three deep, constants of every type, variables typed and not.
+
+**Results.** One. A stored body holds integers of at most 64 bits and finite floats, and a rule that holds another constant is refused where it is made (`encodable_constants`, on main), so that a rule that compiles always stores. The check read a premise's terms and not the leaves inside its patterns. A rule with `{n: 18446744073709551616}` in it compiled, and writing its body failed, where format 4 took out the refusal that used to stand in the way.
+
+**Decided.** Nothing of the form. A constant inside a map or a list is held to what a constant alone is: `TypeError::UnencodableConstant`, pinned by `it_refuses_a_constant_inside_a_pattern_that_no_stored_body_carries`.
+
+The dag-cbor suite of `dialog-query` was not run whole after this last change, only the pattern tests; CI runs it.
