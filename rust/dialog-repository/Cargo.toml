@@ -87,6 +87,10 @@ wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
+# For the record values spike (`examples/record_spike.rs`) only.
+dialog-number = { workspace = true }
+memchr = { workspace = true }
+merkle-reference = { workspace = true }
 reqwest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = [
@@ -97,6 +101,11 @@ tokio = { workspace = true, features = [
     "rt",
     "rt-multi-thread",
 ] }
+
+# Measurement code for research/record-values.md, not part of the crate.
+[[example]]
+name = "record_spike"
+required-features = ["helpers"]
 
 [[bench]]
 name = "delegation_prove"
