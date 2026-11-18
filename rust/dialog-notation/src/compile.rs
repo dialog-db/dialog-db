@@ -867,12 +867,37 @@ impl Scope {
 
     fn body(&mut self, rule: &Rule) -> Result<(), Error> {
         self.bound = rule.bound();
+        // `(!= ?a is: ?b)` is the absence of `(== ?a is: ?b)`: Dialog-DB
+        // has equality as a constraint, and negates a proposition.
+        let unequal = |premise: &Premise| match premise {
+            Premise::Formula(formula) if formula.name == "!=" => Some(Formula {
+                name: "==".into(),
+                ..formula.clone()
+            }),
+            _ => None,
+        };
         for premise in &rule.when {
+            if unequal(premise).is_some() {
+                continue;
+            }
             let compiled = self.premise(premise)?;
             self.when.push(compiled);
         }
         self.negated = true;
+        for premise in &rule.when {
+            if let Some(equal) = unequal(premise) {
+                let compiled = self.formula(&equal, None)?;
+                self.unless.push(compiled);
+            }
+        }
         for premise in &rule.unless {
+            if unequal(premise).is_some() {
+                return Err(Error::Unsupported(
+                    "`!=` inside what must not hold: it is the absence of `==` already, and \
+                     Dialog-DB negates one proposition"
+                        .into(),
+                ));
+            }
             let compiled = self.premise(premise)?;
             self.unless.push(compiled);
         }
@@ -1070,7 +1095,7 @@ impl Scope {
                     .pop()
                     .ok_or_else(|| Error::Refused("(:id …) derived nothing".into()))
             }
-            "value" if result.is_none() => {
+            "value" | "==" if result.is_none() => {
                 let this = self.term(subject()?, None)?;
                 let is = self.term(formula.at("is").ok_or_else(|| missing("`is:` part"))?, None)?;
                 Ok(json!({ "assert": "==", "where": { "this": this, "is": is } }))
@@ -1080,8 +1105,8 @@ impl Scope {
                 Ok(json!({ "assert": "type", "where": { "of": of, "is": format!("{kind}:") } }))
             }
             _ => Err(Error::Unsupported(format!(
-                "the formula {name}: this proof of concept knows + - * / < <= > >= :value \
-                 and the types"
+                "the formula {name}: this proof of concept knows + - * / < <= > >= == != \
+                 :value, dialog/position and the types"
             ))),
         }
     }

@@ -473,6 +473,47 @@ async fn it_reads_a_concept_with_a_parameter_left_out() -> Result<()> {
     Ok(())
 }
 
+/// Equality and inequality stand as premises, `(== ?a is: ?b)` and
+/// `(!= ?a is: ?b)`, as the design spells them. `!=` is the absence of
+/// `==`.
+#[dialog_common::test]
+async fn it_compares_with_equality_and_inequality() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(assert (xyz.pair pair:1 left: "a" right: "a"))
+               (assert (xyz.pair pair:2 left: "a" right: "b"))
+               (rule (xyz.same ?p left: ?l)
+                 (xyz.pair ?p left: ?l right: ?r)
+                 (== ?l is: ?r))
+               (rule (xyz.other ?p left: ?l)
+                 (xyz.pair ?p left: ?l right: ?r)
+                 (!= ?l is: ?r))"#,
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.same ?p left: ?l))").await?,
+        vec![r#"(xyz.same pair:1 left: "a")"#]
+    );
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.other ?p left: ?l))").await?,
+        vec![r#"(xyz.other pair:2 left: "a")"#]
+    );
+    let twice = notebook
+        .submit(
+            "(query (xyz.pair ?p left: ?l)
+               (xyz.pair ?p left: ?l right: ?r)
+               (unless (!= ?l is: ?r)))",
+        )
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&twice, Err(Ok(Error::Unsupported(why))) if why.contains("`!=` inside what must not hold")),
+        "{twice:?}"
+    );
+    Ok(())
+}
+
 /// A concept written as lines, an attribute a line, runs as one written
 /// as a read of several fields does: written through by a rule a
 /// command fires and read back. `:one` reads the newest claim and
@@ -1943,7 +1984,7 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
             measured.expanded,
             measured.compiled
         ),
-        (56, 56, 43, 41),
+        (56, 56, 45, 41),
         "{groups:#?}"
     );
     Ok(())

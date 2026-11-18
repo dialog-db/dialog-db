@@ -59,7 +59,7 @@ pub enum Kind {
 }
 
 /// The characters an operator is made of.
-const OPERATOR: &str = "+-*/<>=";
+const OPERATOR: &str = "+-*/<>=!";
 
 impl Kind {
     /// The kind of thing the symbol `name` names.

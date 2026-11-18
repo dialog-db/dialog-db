@@ -1386,6 +1386,18 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** Nothing. Pinned on a branch, `it_reads_a_concept_with_a_parameter_left_out`. The bar does not move: no form of the notebook stopped on it. 116 unit tests, 35 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: equality and inequality as premises
+
+**Asked.** Step K: `(== ?a is: ?b)` and `(!= ?a is: ?b)` as premises.
+
+**Learned.**
+
+- The design spells both, among its constraints: "equality: `(== ?a is: ?b)`, `(!= ?a is: ?b)`". So the spelling is the design's. `==` was the build's `:value` under another name; `!` was no operator character, so `!=` read as a name nothing defined. It is one now.
+- Dialog-DB has equality as a constraint and no inequality (`Constraint` in `rust/dialog-query/src/constraint.rs`). It negates a proposition, and a constraint is one, so `!=` compiles to the absence of `==`, as tonk's YAML writes it (`unless: ==`). `!=` inside `unless` would be a negation of a negation, and is unsupported.
+- A constraint binds nothing on a read and refuses on an assert, the design says. As a premise here it filters; neither is installed as a check on writes.
+
+**Decided.** Nothing: the design gives the spelling. The bar moves to 45 expanded, 41 compiled: the notebook's two `!=` rules expand, and stop at the retract of a collection entry, which is not decided. 116 unit tests, 36 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.
