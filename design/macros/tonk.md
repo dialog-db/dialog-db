@@ -31,7 +31,7 @@ tonk at `c006b50` (2026-11-17), `rust/tonk-core/assets/library/*.yaml`, top-leve
 | `core.yaml` | 2996 | 48 concepts, 29 views, 12 commands, 9 rules, 8 events, 4 elements |
 | `profile.yaml` | 7750 | 59 concepts, 33 commands, 25 views, 18 rules, 16 elements, 14 events, 13 routes |
 
-13 crates in tonk depend on `tonk-notation`, the analyzer, the evaluator, the language server, the display and the template among them. tonk pins dialog at `v0.5.0-rc.6`, which this stack has merged.
+12 crates in tonk depend on `tonk-notation`, the analyzer, the evaluator, the language server, the display and the template among them. tonk pins dialog at `v0.5.0-rc.6`, which this stack has merged. How a document becomes running state there, and the four places a second front end could hand over, are in [tonk-integration.md](tonk-integration.md). `notebook.yaml` is written in the notation in [sketches/notebook.clj](sketches/notebook.clj), and what that found is counted in [tonk-port.md](tonk-port.md).
 
 ## The four forms the build does not have
 
@@ -57,6 +57,16 @@ Read in tonk's library on 2026-11-18, after the maintainer's answers: an event s
 So an event can go, once a binding can say it prevents the default: 9 of 38 need it and are not a `submit`.
 
 **A view** is an entry in a concept's dictionary: a name and a template of HTML text with `{field}` slots, rendered by tonk's own renderer. It is the one form of the four that is a form.
+
+## What the port changed
+
+Read on 2026-11-18, from the two notes above.
+
+- The notebook folds nothing. So a fold in a rule that derives (#830) is not between the notebook and a proof of concept. It is between the design's `view` and dialog.
+- tonk's display reads a view from the branch as HTML text under `xyz.tonk.view/<facet>` with a compiled `bindings` record, finds a concept by name through `db.name/referent`, and reads its descriptor from `db.meta/source`. `dialog-notation` writes none of these. So a proof of concept in tonk needs a back end that does, whatever a `view` compiles to for dialog alone.
+- That separates two things the question "what does a view compile to" had as one: the form and its meaning, which are the design's, and what a back end lowers it to. For tonk as it renders today the lowering is HTML text and bindings; for dialog alone it is a rule that folds.
+- The order the notebook asks the build for: collections (15 of its 53 forms), `id` as a premise (7), views with inline events (5), a parameter left out of a read (4), then `dialog/position`, `!=` and a write with `when` (2 each).
+- 24 of the 53 forms hit something the design does not spell, in 15 kinds, 10 of them not in the design's Open list. They are the maintainer's, one at a time.
 
 ## Not decided
 
