@@ -14,6 +14,41 @@ says how to cut a release.
 
 ## Unreleased
 
+### An index node's buffered operations are its entries, and a separator reads as the key it is
+
+An index node buffers writes headed for its children (`novelty`), and
+`tree/entry` gave no rows for an index, so a query could count them but
+not read them. A separator was split into its tag and one `prefix` part
+of lossy text, which for a history separator was the origin's raw bytes,
+and a forced seam's separator, the last key before the seam padded with
+zero bytes past the separator bound, read as a key whose value was the
+padding.
+
+What this changes for you:
+
+- `tree/entry` of an index node yields one row per operation it
+  buffers, with a new slot `span` naming the span the operation rides,
+  as `tree/span` names it. `span` is absent on a segment's entry. `at`
+  counts the node's buffered operations; `rank` is absent on them.
+- `dialog_corpus::inspect::entries` returns an index node's buffered
+  operations, and `EntrySummary` has a new field `span: Option<u64>`.
+- `dialog/separator-part` reads a separator field by field as far as it
+  reaches, as `dialog/key-part` reads a key: `entity`, `attribute`,
+  `vtype` and `value` parts in the ordering's order, the value-type byte
+  on its own, and a Bytes or Record value as hex. A history or coverage
+  separator yields its `origin` (hex) and `edition`. The `prefix` part is
+  gone.
+- A separator that is a whole key reads as that key. A forced seam's
+  separator reads as the key before the seam and a part of kind
+  `padding`.
+
+Why: an inspector shows what a node holds, and the operations an index
+buffers and where its boundaries fall are part of that.
+
+#### Compatibility and migration
+
+- Nothing stored changes: both read blocks as they are.
+
 ### A revision is named by `revision:`, not by a `did:key:`
 
 A revision's entity was `did:key:z6Mk<base58(hash)>`: the shape of a key
@@ -129,15 +164,6 @@ What this changes for you:
 - `dialog_corpus::inspect` has a reading of each part that takes a
   decoded node (`summary`, `spans`, `keys`, `entries`, `blob_records`,
   `manifest`) beside the `inspect_*` functions that take bytes.
-- `tree/entry` of an index node yields the operations it buffers, one
-  row each, with a new slot `span` naming the span the operation rides
-  (absent on a segment's entry). It yielded no rows for an index.
-- `dialog/separator-part` reads a separator field by field as far as it
-  reaches, as `dialog/key-part` reads a key: `entity`, `attribute`,
-  `vtype` and `value` parts in the ordering's order, and a history or
-  coverage separator's `origin` (hex) and `edition`. It yielded the tag
-  and one `prefix` part of the rest as lossy text, which for a history
-  separator was the origin's raw bytes.
 - A resolver still requires its handle. A rule whose body is a resolver
   alone is refused at install as before; a rule that names its nodes by
   a fact installs, and reads those nodes and no others.
