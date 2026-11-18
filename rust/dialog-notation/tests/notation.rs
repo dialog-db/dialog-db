@@ -23,6 +23,9 @@ use serde_json::json;
 mod session;
 use session::Notebook;
 
+#[path = "../examples/notebook/bar.rs"]
+mod bar;
+
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -1848,6 +1851,36 @@ async fn it_refuses_and_says_what_is_not_supported() -> Result<()> {
         report(&mut notebook, "(query (xyz.todo todo:9 text: ?x))")
             .await?
             .is_empty()
+    );
+    Ok(())
+}
+
+/// How far tonk's notebook, written in the notation as designed, gets:
+/// every form read, and how many expand and compile. A step that moves
+/// these numbers moves them here on purpose.
+#[dialog_common::test]
+async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
+    let measured = bar::Bar::of(include_str!("../../../design/macros/sketches/notebook.clj"))?;
+    let groups: Vec<String> = measured
+        .groups()
+        .iter()
+        .map(|(said, stops)| {
+            let forms: Vec<String> = stops
+                .iter()
+                .map(|stop| format!("{:?}", stop.form))
+                .collect();
+            format!("{} {said} {}", stops.len(), forms.join(" "))
+        })
+        .collect();
+    assert_eq!(
+        (
+            measured.forms,
+            measured.read,
+            measured.expanded,
+            measured.compiled
+        ),
+        (56, 56, 34, 32),
+        "{groups:#?}"
     );
     Ok(())
 }

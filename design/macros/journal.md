@@ -1347,6 +1347,25 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** By the agent: premises after a top-level write with no `when` are refused, where they made an installed rule before. 116 unit tests, 33 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: a bar for the notebook
+
+**Asked.** Step O: measure each step by tonk's notebook. [sketches/notebook.clj](sketches/notebook.clj) is `notebook.yaml` in the notation as designed. For each top-level form, how far it gets: read, expanded, compiled, and the first error of each that stops.
+
+**Learned.**
+
+- The sketch has 56 top-level forms: the YAML's 53, with the element's entries written one attribute each. All 56 are read. 34 expand and 32 compile, on a walker that knows only the prelude.
+- What stops them, grouped by what it says (`cargo run -p dialog-notation --example bar`):
+  - 9: an element's entries written by attribute with `by: :name` and the key in the name, `(xyz.tonk.element.method/connected of: … by: :name)`. The build took `by:` only with the key a variable. The design puts `by:` on the line as part of the attribute's identity, so a constant key with it is a line the build should read.
+  - 5: `view`.
+  - 2: `!=`. 2: `dialog/position`, read as an attribute line.
+  - 2: `route`, 1: `intent`. Both are core.yaml's concepts, which the sketch reads and does not declare.
+  - 1: `id` binding an entity that is no head's entity, `?b` of an entry of `notebook/blocks`: the command's own entity, step M.
+  - 1: a retract of an entry of a collection, not decided.
+  - 1: `(retract (notebook/block ?b))`, a retract through a concept by its entity alone. The design's table says it retracts every field on the entity; the build refuses it as a write that leaves fields out. Not in this batch.
+- The bar measures the three phases with no branch. What a branch refuses on commit it does not see.
+
+**Decided.** Nothing. The numbers are pinned in `it_measures_how_far_the_notebook_gets`, so a step that moves them says so.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.
