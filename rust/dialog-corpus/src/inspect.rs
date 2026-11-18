@@ -636,9 +636,40 @@ pub fn key_components(bytes: &[u8]) -> Vec<KeyComponent> {
 /// The field the cut falls in is reported as far as it goes. The empty
 /// separator is the leftmost span's boundary and yields the `min`
 /// marker.
+///
+/// A separator that is itself a whole key, or a forced seam's separator
+/// (the last key before the seam padded with zero bytes past the bound),
+/// reads as that key, the padding as a part of kind `padding`.
 pub fn separator_components(bytes: &[u8]) -> Vec<KeyComponent> {
     if bytes.is_empty() {
         return vec![KeyComponent::new("min", "⊥ start".into(), Vec::new())];
+    }
+    // A forced seam's separator is the last key before the seam, padded
+    // with zero bytes past the separator bound (`frame_separator`): the
+    // key reads as a key, and the padding says what it is.
+    // Asked first: a value that runs to the end of its key, as a string's
+    // does, would take the zeros in. A real key seldom ends in a run of
+    // zero bytes this long; a padded one is taken to the bound.
+    // A key may end in zero bytes of its own (a string's terminator), so
+    // the shortest whole key the zeros leave is the one padded.
+    let zeros = bytes.iter().rev().take_while(|byte| **byte == 0).count();
+    if zeros >= FORCED_PADDING {
+        let start = bytes.len() - zeros;
+        let end = (start..=start + KEY_ZEROS.min(zeros)).find(|end| whole_key(&bytes[..*end]));
+        if let Some(end) = end {
+            let mut parts = key_components(&bytes[..end]);
+            let padding = bytes.len() - end;
+            parts.push(KeyComponent::new(
+                "padding",
+                format!("+{padding} zero bytes: a forced seam after this key"),
+                bytes[end..].to_vec(),
+            ));
+            return parts;
+        }
+    }
+    // A separator that is a whole key reads as one.
+    if whole_key(bytes) {
+        return key_components(bytes);
     }
     let tag = bytes[0];
     let mut out = vec![KeyComponent::new("index", tag_name(tag).into(), vec![tag])];
@@ -697,6 +728,22 @@ pub fn separator_components(bytes: &[u8]) -> Vec<KeyComponent> {
         _ => out.push(KeyComponent::new("opaque", hex(prefix), prefix.to_vec())),
     }
     out
+}
+
+/// The fewest trailing zero bytes read as a forced seam's padding.
+const FORCED_PADDING: usize = 8;
+
+/// The most zero bytes a key ends in of its own.
+const KEY_ZEROS: usize = 4;
+
+/// Whether `bytes` is exactly one whole key, not a prefix of one.
+fn whole_key(bytes: &[u8]) -> bool {
+    match bytes.first() {
+        None => false,
+        Some(&BLOB_KEY_TAG) => bytes.len() == 33,
+        Some(&CONTEXT_KEY_TAG) => bytes.len() == CONTEXT_KEY_LENGTH,
+        Some(_) => varkey::parse_key_layout(bytes).is_some(),
+    }
 }
 
 /// A fact's fields in the entity ordering.
@@ -913,6 +960,29 @@ mod tests {
         assert_eq!(separator[1].text, "String");
         assert_eq!(separator[2].text, "Alice");
         assert_eq!(separator[3].text, "test/na");
+    }
+
+    /// A separator that is a whole key reads as that key. A forced seam's
+    /// separator, the last key before the seam padded with zero bytes
+    /// past the bound, reads as that key and its padding, never as the
+    /// zeros of a value or a field.
+    #[dialog_common::test]
+    fn it_reads_a_forced_seams_separator_as_the_key_before_it() {
+        let key = fact_key("left");
+        let whole = separator_components(&key);
+        assert_eq!(whole, key_components(&key), "a whole key reads as one");
+
+        let mut padded = key.clone();
+        padded.resize(513, 0);
+        let parts = separator_components(&padded);
+        let kinds: Vec<&str> = parts.iter().map(|part| part.kind).collect();
+        assert_eq!(
+            kinds,
+            vec!["index", "entity", "attribute", "vtype", "value", "padding"],
+            "{parts:?}"
+        );
+        assert_eq!(parts[2].text, "test/name");
+        assert_eq!(parts[5].bytes.len(), 513 - key.len());
     }
 
     /// A history separator names its version rather than reading the
