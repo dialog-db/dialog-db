@@ -1,11 +1,13 @@
 # Zero-copy answers
 
-Status: Evaluating. Its working material is in
-[`zero-copy-answers/`](zero-copy-answers/): the
-[journal](zero-copy-answers/journal.md) says where the research stands,
-the [evaluation](zero-copy-answers/evaluation.md) what decides it, and
-the [design](zero-copy-answers/design.md) what the prototype does. See the
-[research index](README.md) for what the statuses mean.
+Status: Evaluating. The [journal](zero-copy-answers/journal.md) says
+where the research stands. The tools and raw runs are on the
+`research-data` branch, under
+[`research/zero-copy-answers/`](https://github.com/dialog-db/dialog-db/blob/research-data/research/zero-copy-answers): the
+[evaluation](https://github.com/dialog-db/dialog-db/blob/research-data/research/zero-copy-answers/evaluation.md) (the axes), the
+[design](https://github.com/dialog-db/dialog-db/blob/research-data/research/zero-copy-answers/design.md) (what the prototype did), the harness, the page
+bench and every report. See the [research index](README.md) for what the
+statuses mean.
 
 ## Idea
 
@@ -108,7 +110,7 @@ tonk and its guests must speak.
 
 Built on `worker/beautiful-newton-0d941i`; the
 [journal](zero-copy-answers/journal.md) has every run and the
-[results](zero-copy-answers/results/2026-11-16/charts.md) every number
+[results](https://github.com/dialog-db/dialog-db/blob/research-data/research/zero-copy-answers/results/2026-11-16/charts.md) (on `research-data`) every number
 behind the charts. Every variant of every dataset answered with the same
 bytes (the answer's hash is in each report).
 
@@ -128,8 +130,9 @@ bytes (the answer's hash is in each report).
 4. **`dialog-answer`**: a columnar answer frame, its tokens owned by the
    session so a delta carries only what the receiver has not seen, read
    in place in Rust and in JS. Nothing calls it, so it is reviewed in a
-   pull request of its own, with the harness phases and the page bench
-   that measure it; the numbers below were taken with it.
+   pull request of its own
+   ([#831](https://github.com/dialog-db/dialog-db/pull/831)); the
+   numbers below were taken with it.
 
 ### The answer to the question
 
@@ -146,7 +149,7 @@ take it to 193 K, lazy bindings to 163 K, and the left merge, item 3, is
 most of that: a concept with an optional field never merged, so a list
 read probed every field of every entity.
 
-![Engine instructions](zero-copy-answers/results/2026-11-16/engine-instructions.png)
+![Engine instructions](https://github.com/dialog-db/dialog-db/raw/research-data/research/zero-copy-answers/results/2026-11-16/engine-instructions.png)
 
 | engine, instructions/row | main | eager | lazy |
 |---|---|---|---|
@@ -162,7 +165,7 @@ From the query to a receiver holding an answer it can read, the
 eight- and thirteen-field reads clear the 2× bar; the two-field read
 does not (1.5×):
 
-![Query to receiver](zero-copy-answers/results/2026-11-16/path-instructions.png)
+![Query to receiver](https://github.com/dialog-db/dialog-db/raw/research-data/research/zero-copy-answers/results/2026-11-16/path-instructions.png)
 
 | instructions/row | main + JSON | branch + JSON | branch + frame |
 |---|---|---|---|
@@ -173,7 +176,7 @@ does not (1.5×):
 
 On tonk's workload (`tonk_bench`, tonk-team at 10×, `fs` store):
 
-![tonk_bench](zero-copy-answers/results/2026-11-16/tonk-10x.png)
+![tonk_bench](https://github.com/dialog-db/dialog-db/raw/research-data/research/zero-copy-answers/results/2026-11-16/tonk-10x.png)
 
 | ms | main | branch |
 |---|---|---|

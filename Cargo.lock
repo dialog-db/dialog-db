@@ -1767,7 +1767,6 @@ dependencies = [
  "dialog-repository",
  "dialog-storage",
  "futures-util",
- "ipld-core",
  "serde",
  "serde_json",
  "tokio",

@@ -23,8 +23,8 @@ topic file.
 
 Generated from fixed seeds by the `answers` harness, nothing on disk:
 `stuff` at 2,000 and 20,000 rows (two text fields), `issue` at 300 and
-3,000 (eight fields, 56-byte `did:key` entities). See
-[evaluation.md](evaluation.md). `tonk_bench` replays tonk-team-shaped
+3,000 (eight fields, 56-byte `did:key` entities). See the
+[evaluation](https://github.com/dialog-db/dialog-db/blob/research-data/research/zero-copy-answers/evaluation.md) (on `research-data`). `tonk_bench` replays tonk-team-shaped
 datasets generated from the checked-in schema
 (`rust/dialog-baseline/fixtures/tonk-team-schema.jsonl`): `tonk-1x.jsonl`
 (dataset `40f769d902274835`) and `tonk-10x.jsonl` (`8aaf9d973a0a1ba6`).
@@ -519,18 +519,31 @@ its variant keeps the `lazy` label so its reports compare with the ones
 recorded on 2026-11-16. Reproducing the eager column needs a build of
 this branch from before the switches were removed.
 
-## 2026-11-18 — the frame moves to its own pull request
+## 2026-11-18 — the frame and the tools move off this branch
 
-Nothing calls `dialog-answer`, so it is reviewed apart from the engine
-change: the crate, the harness's frame and columnar phases, the delta it
-encoded both ways, and the page bench (`bench/frame.js`, `bench.html`,
-`run.mjs`). The numbers recorded on 2026-11-16 were taken with them, and
-reproducing the frame's columns needs that pull request. The `answers`
-harness here runs the engine and tonk's JSON phases.
+Nothing calls `dialog-answer`, so the crate is reviewed apart from the
+engine change, in [#831](https://github.com/dialog-db/dialog-db/pull/831).
+
+The tools and raw runs moved to the `research-data` branch, as the
+research index keeps them off `main`:
+[`research/zero-copy-answers/`](https://github.com/dialog-db/dialog-db/blob/research-data/research/zero-copy-answers) there holds the `answers` harness
+with every phase (the frame's and the columnar lower bound's included),
+the page bench and its JS reader (`bench/frame.js`, `bench.html`,
+`run.mjs`), `charts.py`, the design and evaluation as they stood, and
+the 2026-11-16 reports and charts. This branch keeps the report and this
+journal. The entries above name those files as they were then.
 
 ## How to reproduce
 
+The harness is on `research-data`; it needs this branch's engine and
+#831's crate:
+
 ```sh
+git fetch origin research-data
+git worktree add ../research-data research-data
+cp ../research-data/research/zero-copy-answers/harness/answers.rs rust/dialog-perf/src/bin/
+# then add dialog-answer and ipld-core to dialog-perf's dependencies
+
 # the answers harness, one store
 cargo run --release -p dialog-perf --bin answers -- run --dataset issue --rows 3000
 

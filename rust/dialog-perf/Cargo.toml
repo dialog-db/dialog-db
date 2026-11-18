@@ -7,10 +7,6 @@ authors.workspace = true
 license.workspace = true
 publish = false
 
-# The CLI the gates run (`cargo run -p dialog-perf -- sweep`); `answers`
-# is the research harness, run with `--bin answers`.
-default-run = "perf"
-
 [features]
 trace-hydration = ["dialog-query/trace-hydration"]
 # Enable integration tests (tests with service provisioning)
@@ -27,7 +23,6 @@ dialog-common = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 anyhow = { workspace = true }
 blake3 = { workspace = true }
-ipld-core = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 dialog-corpus = { workspace = true }
 dialog-capability = { workspace = true }
@@ -47,4 +42,4 @@ tracing-subscriber = { workspace = true }
 
 [lints.rust]
 # This cfg is used by the dialog_common::test proc macro for wasm inner tests
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)", "cfg(dialog_main)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }
