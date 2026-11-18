@@ -108,6 +108,11 @@ mod number_tests;
 #[cfg(test)]
 mod typed_read_tests;
 
+/// Scans binding rows in place against binding them eagerly, pinned as
+/// tests.
+#[cfg(test)]
+mod lazy_rows_tests;
+
 mod sort_order;
 pub use sort_order::*;
 
