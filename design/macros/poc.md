@@ -19,6 +19,7 @@ text ──read──▶ forms ──expand──▶ kernel rules ──compile�
 | `(assert A)`, `A` on the control layer, no premise | a `ConceptStatement`, dispatched: a command |
 | a bare head, with premises | a `DeductiveRule` |
 | `(assert A)`, `(retract A)`, with premises | an `InductiveRule` |
+| `(assert A)`, `(retract A)` with premises and `once: true`, a top-level write with a `when` | a query of the premises, and each match's write made in the transaction: nothing installed |
 | `(report A)`, one read as its premise | a `ConceptQuery` |
 | `(report A)`, any other premises | a `DeductiveRule` laid over the branch for the query, and a `ConceptQuery` of what it derives |
 | `(xyz.todo ?t text: (:last (:text ?x)))` | a concept of one attribute, `{the: xyz.todo/text, as: text:, pick: last:}` |
@@ -49,6 +50,8 @@ text ──read──▶ forms ──expand──▶ kernel rules ──compile�
 - An attribute in a concept's domain, `(todo/home ?t ?n)`, derived by a rule and read under the one name. One that folds, `(list/count-open ?l (count ?t))`, is refused as unsupported, and a write of one is refused.
 - A collection of each kind, `by: :position` and `by: :name`: read a row a key, one entry asserted by its key, rules that read and write entries, two entries' keys compared.
 - A rule that makes an entity with `id`, the same one `(:id …)` names.
+- A text over lines, kept and read back as written.
+- A top-level write with a `when`, run once over what it matches and never installed.
 - A struct as a field's value, kept and read back, and taken apart by a pattern in a query. This is on the patterns work (#778), merged into this branch.
 
 ## What Dialog-DB cannot run yet

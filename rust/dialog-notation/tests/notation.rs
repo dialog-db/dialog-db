@@ -326,6 +326,86 @@ async fn it_keeps_a_text_that_spans_lines() -> Result<()> {
     Ok(())
 }
 
+/// A write at the top level with a `when` runs once, over what the
+/// `when` matches as the branch stood, and is never installed: a to-do
+/// added after it is not touched. Under `:one` the write succeeds the
+/// claim the cell holds, as any `last` write on main does.
+#[dialog_common::test]
+async fn it_writes_once_what_a_when_matches() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(concept (todo ?t text: ?x state: ?s)
+                 (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
+                 (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one))
+               (assert (todo todo:1 text: "Call mom" state: :open))
+               (assert (todo todo:2 text: "Buy milk" state: :open))"#,
+        )
+        .await?;
+    notebook
+        .submit(
+            r#"(assert (xyz.todo/state of: ?t is: :done as: :entity cardinality: :one)
+                 (when (todo ?t text: "Call mom" ...)))"#,
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (todo ?t text: ?x state: ?s))").await?,
+        vec![
+            r#"(xyz.todo todo:1 state: :done text: "Call mom")"#,
+            r#"(xyz.todo todo:2 state: :open text: "Buy milk")"#,
+        ]
+    );
+    // Every claim the cell holds: the write succeeded the one it read.
+    let claims = report(&mut notebook, "(query (xyz.todo todo:1 state: ?s))").await?;
+    assert_eq!(claims, vec!["(xyz.todo todo:1 state: :done)"]);
+
+    // Never installed: a to-do the `when` would match, added later, is
+    // left as it is.
+    notebook
+        .submit(r#"(assert (todo todo:3 text: "Call mom" state: :open))"#)
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (todo todo:3 state: ?s ...))").await?,
+        vec!["(xyz.todo todo:3 state: :open)"]
+    );
+
+    // A retract with a `when`, of what it matched.
+    notebook
+        .submit(
+            r#"(retract (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
+                 (when (todo ?t text: ?x state: :done)))"#,
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (todo ?t text: ?x ...))").await?,
+        vec![
+            r#"(xyz.todo todo:2 text: "Buy milk")"#,
+            r#"(xyz.todo todo:3 text: "Call mom")"#,
+        ]
+    );
+
+    let why = |result: Result<(Vec<String>, Vec<dialog_notation::Diagnostic>)>| {
+        result.map_err(|error| error.downcast::<Error>())
+    };
+    let unbound = notebook
+        .submit(r#"(assert (xyz.todo/tag ?t ?g) (when (todo ?t text: "Buy milk" ...)))"#)
+        .await;
+    assert!(
+        matches!(why(unbound), Err(Ok(Error::Refused(said))) if said.contains("is bound by it, and ?g is not"))
+    );
+    let command = notebook
+        .submit(
+            r#"(concept (todo/ping todo: ?t)
+                 (xyz.todo.ping/todo of: ?c is: ?t as: :entity in: :control))
+               (assert (todo/ping todo: ?t) (when (todo ?t text: "Buy milk" ...)))"#,
+        )
+        .await;
+    assert!(
+        matches!(why(command), Err(Ok(Error::Unsupported(said))) if said.contains("whether a command at the top level keeps"))
+    );
+    Ok(())
+}
+
 /// A concept written as lines, an attribute a line, runs as one written
 /// as a read of several fields does: written through by a rule a
 /// command fires and read back. `:one` reads the newest claim and

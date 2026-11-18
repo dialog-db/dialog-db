@@ -64,6 +64,30 @@ impl Notebook {
         let mut queries = Vec::new();
         {
             for step in checked.steps {
+                // A write with a `when` runs once: each match of the
+                // `when`, as the branch stood, makes it. Nothing of it
+                // is installed.
+                if let Step::Write(write) = &step {
+                    let mut layer = self.branch.query();
+                    if let Some(rule) = &write.query.rule {
+                        layer = layer.with(rule.clone());
+                    }
+                    let rows: Vec<ConceptConclusion> = layer
+                        .select(write.query.select.clone())
+                        .perform(&self.operator)
+                        .try_vec()
+                        .await?;
+                    for row in &rows {
+                        let statement = write.statement(row)?;
+                        transaction = if write.retract {
+                            transaction.retract(statement)
+                        } else {
+                            transaction.assert(statement)
+                        };
+                        writes = true;
+                    }
+                    continue;
+                }
                 transaction = match step {
                     Step::Assert(statement) => transaction.assert(statement),
                     Step::Retract(statement) => transaction.retract(statement),
@@ -77,6 +101,7 @@ impl Notebook {
                         queries.push(query);
                         continue;
                     }
+                    Step::Write(_) => continue,
                 };
                 writes = true;
             }

@@ -57,6 +57,164 @@ pub enum Step {
     Transient(Entity),
     /// A query to run.
     Query(Box<Query>),
+    /// A write to make once, of every match of its `when`: a write at
+    /// the top level, never installed.
+    Write(Box<Write>),
+}
+
+/// A write at the top level with a `when`: what its `when` matches, and
+/// the write each match makes.
+#[derive(Debug, Clone)]
+pub struct Write {
+    /// What the `when` matches, as a query whose row is every variable
+    /// the write holds.
+    pub query: Query,
+    /// Whether the write retracts.
+    pub retract: bool,
+    head: Read,
+}
+
+impl Write {
+    /// The facts one match writes: the head with each variable as the
+    /// match bound it.
+    pub fn statement(&self, conclusion: &ConceptConclusion) -> Result<ConceptStatement, Error> {
+        let row = self.query.row(conclusion)?;
+        let mut values: BTreeMap<String, Term> = BTreeMap::new();
+        if let (Term::Variable(name), Some([entity, ..])) = (
+            &self.head.entity,
+            row.operand().map(|operand| operand.items.as_slice()),
+        ) {
+            values.insert(name.clone(), crate::kernel::term(entity)?);
+        }
+        for (label, value) in row.operand().into_iter().flat_map(|operand| &operand.terms) {
+            values.insert(label.clone(), crate::kernel::term(value)?);
+        }
+        fn bound(term: &Term, values: &BTreeMap<String, Term>) -> Result<Term, Error> {
+            Ok(match term {
+                Term::Variable(name) => values.get(name).cloned().ok_or_else(|| {
+                    Error::Refused(format!("a match of the `when` binds no ?{name}"))
+                })?,
+                Term::Formula(formula) => Term::Formula(Box::new(Formula {
+                    name: formula.name.clone(),
+                    subject: formula
+                        .subject
+                        .as_ref()
+                        .map(|subject| bound(subject, values))
+                        .transpose()?,
+                    labelled: formula
+                        .labelled
+                        .iter()
+                        .map(|(label, part)| Ok((label.clone(), bound(part, values)?)))
+                        .collect::<Result<_, Error>>()?,
+                })),
+                other => other.clone(),
+            })
+        }
+        let mut head = self.head.clone();
+        head.entity = bound(&head.entity, &values)?;
+        for field in &mut head.fields {
+            field.term = bound(&field.term, &values)?;
+            if let Some((key, _)) = &mut field.key {
+                *key = bound(key, &values)?;
+            }
+        }
+        statement(&head)
+    }
+}
+
+/// Every variable a term holds, in a formula too.
+fn variables(term: &Term, into: &mut Vec<String>) {
+    match term {
+        Term::Variable(name) if !into.contains(name) => into.push(name.clone()),
+        Term::Formula(formula) => {
+            formula
+                .subject
+                .iter()
+                .for_each(|subject| variables(subject, into));
+            formula
+                .labelled
+                .iter()
+                .for_each(|(_, part)| variables(part, into));
+        }
+        Term::Struct(form) => {
+            let mut inside = Vec::new();
+            form.variables(&mut inside);
+            for name in inside {
+                if !into.contains(&name) {
+                    into.push(name);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A write at the top level with a `when`. It runs once: what the `when`
+/// matches is a query, and each match makes the write.
+fn once(rule: &Rule, form: &Syntax) -> Result<Step, Error> {
+    let (read, retract) = match &rule.head {
+        Head::Assert(read) => (read, false),
+        Head::Retract(read) => (read, true),
+        Head::Hold(_) => {
+            return Err(Error::Unsupported(format!(
+                "{form} issues a command with a `when`: whether a command at the top level keeps \
+                 `when` is not decided"
+            )));
+        }
+        _ => {
+            return Err(Error::Refused(format!(
+                "{form} is not a write, and only a write takes a `when`"
+            )));
+        }
+    };
+    let bound = rule.bound();
+    let mut held = Vec::new();
+    variables(&read.entity, &mut held);
+    for field in &read.fields {
+        variables(&field.term, &mut held);
+        if let Some((key, _)) = &field.key {
+            variables(key, &mut held);
+        }
+    }
+    if let Some(name) = held.iter().find(|name| !bound.contains(*name)) {
+        return Err(Error::Refused(format!(
+            "every variable in a write with a `when` is bound by it, and ?{name} is not"
+        )));
+    }
+    whole(read, &bound)?;
+    let entity = match &read.entity {
+        Term::Variable(_) => read.entity.clone(),
+        _ => Term::Entity("once:write".into()),
+    };
+    let fields = held
+        .iter()
+        .filter(|name| entity != Term::Variable((*name).clone()))
+        .map(|name| Field {
+            label: name.clone(),
+            attribute: format!("once.write/{name}"),
+            term: Term::Variable(name.clone()),
+            kind: None,
+            pick: None,
+            layer: None,
+            key: None,
+        })
+        .collect();
+    let row = Read {
+        domain: "once.write".into(),
+        entity,
+        fields,
+    };
+    let site = form.reference()?.to_string();
+    let Step::Query(query) = report(rule, &row, &site)? else {
+        return Err(Error::Refused(format!(
+            "{form} matches nothing a query can say"
+        )));
+    };
+    Ok(Step::Write(Box::new(Write {
+        query: *query,
+        retract,
+        head: read.clone(),
+    })))
 }
 
 /// Where a part of a reported row comes from.
@@ -184,6 +342,9 @@ pub const DESCRIBED: &str = "syntax.meta";
 /// kernel to what Dialog-DB runs.
 pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
     let rule = Rule::parse(form)?;
+    if rule.once {
+        return Ok(vec![once(&rule, form)?]);
+    }
     if rule.when.is_empty() {
         if !rule.unless.is_empty() {
             return Err(Error::Refused(format!(

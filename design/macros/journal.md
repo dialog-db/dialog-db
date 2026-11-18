@@ -1333,6 +1333,20 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** The managing agent's choice, built. By the agent: an escape other than `\" \\ \n \t \r` is refused rather than kept as written. 115 unit tests, 32 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: a write at the top level with `when`
+
+**Asked.** Step I: "Writes succeed what they read". `(assert (xyz.todo/state of: ?t is: :done) (when (todo ?t text: "Call mom")))` runs once in its document and is never installed; every variable is bound by the `when`; without one a write is ground. For `assert` and `retract`.
+
+**Learned.**
+
+- A write at the top level with premises after it was a rule with that head, installed. The design has no such form: a top-level write is ground or has a `when`. So premises with no `when` are refused now, naming both forms to write, and a `when` makes a kernel rule that says `once: true`.
+- Dialog-DB has no way to run a rule once without installing it. So a write that runs once compiles to a query and a template: a query whose row is every variable the write holds, and the write, which each match fills and makes. The notebook runs the query over the branch as it stood before the transaction and adds each write to it (`Step::Write`).
+- What it reads is therefore the branch before the document, not "the facts as they stood when the tick began, plus whatever is asserted or deduced in it": a `when` does not see what its own document asserts, nor the rules it installs. Not built: reading the transaction as it is being made.
+- Under `:one`, the write succeeds the claim the cell holds, which is what main does for any `last` write (`Attribution::pick`): after it, every claim of the to-do's state is `:done` alone. It does not use the claim the `when` read: the succession is the cell's, whatever was read. Under `:many` a write adds.
+- A command with a `when` would be the design's open "Whether a top-level command keeps `when`", and is unsupported.
+
+**Decided.** By the agent: premises after a top-level write with no `when` are refused, where they made an installed rule before. 116 unit tests, 33 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

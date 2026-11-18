@@ -198,6 +198,9 @@ impl Read {
 pub struct Rule {
     /// What the rule says it is for.
     pub description: Option<String>,
+    /// Whether it runs once, in its document, and is never installed:
+    /// a write at the top level with a `when`.
+    pub once: bool,
     /// Its head.
     pub head: Head,
     /// What must hold.
@@ -210,7 +213,7 @@ pub struct Rule {
 /// quoted `( )` is a list.
 pub const QUOTE: &str = "quote";
 
-fn term(node: &Syntax) -> Result<Term, Error> {
+pub(crate) fn term(node: &Syntax) -> Result<Term, Error> {
     Ok(match node {
         Syntax::Variable(name) => Term::Variable(name.clone()),
         Syntax::Blank => Term::Blank,
@@ -492,8 +495,13 @@ impl Rule {
         let Some((first, premises)) = operand.items.split_first() else {
             return Err(Error::Refused(format!("{node} has no head")));
         };
+        let once = matches!(
+            operand.terms.get("once"),
+            Some(Syntax::Constant(Value::Boolean(true)))
+        );
         let mut rule = Rule {
             description,
+            once,
             head: head(first)?,
             when: Vec::new(),
             unless: Vec::new(),
