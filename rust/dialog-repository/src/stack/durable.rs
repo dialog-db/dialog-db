@@ -220,7 +220,10 @@ pub(crate) async fn revision_of(
             continue;
         };
         let version = record.version();
-        if !version.entities().contains(&pointed.revision) || record.verify(&version).is_err() {
+        let named = version.entity() == pointed.revision
+            || Version::legacy_of(&pointed.revision)
+                .is_some_and(|legacy| legacy == version.legacy_entity());
+        if !named || record.verify(&version).is_err() {
             continue;
         }
         let issuer: Did = record.issuer.parse().map_err(|_| {

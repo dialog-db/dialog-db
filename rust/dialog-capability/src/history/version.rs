@@ -156,12 +156,6 @@ impl Version {
             .expect("a did:key URI formed from a 32-byte hash is always a valid entity")
     }
 
-    /// The entities a record of this revision may be stored under: the
-    /// one it is written at, then the one an older release wrote it at.
-    pub fn entities(&self) -> [Entity; 2] {
-        [self.entity(), self.legacy_entity()]
-    }
-
     /// The entity an older release named a revision by, given the one it
     /// is named by now; `None` for an entity that names no revision.
     pub fn legacy_of(entity: &Entity) -> Option<Entity> {

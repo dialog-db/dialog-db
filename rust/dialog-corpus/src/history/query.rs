@@ -279,16 +279,17 @@ where
         // named `revision:` holds the record under the older name, so
         // that one is read when the current one has nothing.
         let the = Relation::from_str(REVISION_ATTRIBUTE)?;
-        let mut candidates = Vec::new();
-        for of in version.entities() {
+        let mut candidates = self
+            .tree
+            .clone()
+            .select_record(self.store.clone(), &version.entity(), &the)
+            .await?;
+        if candidates.is_empty() {
             candidates = self
                 .tree
                 .clone()
-                .select_record(self.store.clone(), &of, &the)
+                .select_record(self.store.clone(), &version.legacy_entity(), &the)
                 .await?;
-            if !candidates.is_empty() {
-                break;
-            }
         }
         // Tree blocks may have arrived from an untrusted peer; a record
         // only counts if it vouches for itself — issuer signature valid,
