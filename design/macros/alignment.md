@@ -47,7 +47,7 @@ Each of these was decided in this branch's sittings (`journal.md`) and is in no 
 | `'( )` | a quoted list, the same list |
 | `{ }` | a struct: a value, and with a variable in it a pattern, open where it is read |
 | `...` | `... p` takes what is not named; in a head it captures, in a body it spreads. The design's prelude writes `… ?params`, proposed |
-| a call | `(todo ?t list: ?l)` is sugar for `(todo {of: ?t list: ?l})` |
+| a call | `(todo ?t list: ?l)` is sugar for `(todo {:of ?t :list ?l})`, the maintainer's on 2026-11-18. A struct's keys are keywords; `{of: ?t}` is refused with the spelling to write |
 | a macro | a rule: `(expand …)`; of the rules that apply, the one that leaves least to `...` wins |
 | the reader | gives `...` no meaning; `'x` is `(quote x)` |
 | a comment | right above a form it describes the form |

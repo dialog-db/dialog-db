@@ -935,8 +935,8 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
-            r#"(assert (xyz.note note:1 about: {author: "Ada" tags: ["math" "engines"] pinned: true}))
-               (assert (xyz.note note:2 about: {author: "Grace"}))"#,
+            r#"(assert (xyz.note note:1 about: {:author "Ada" :tags ["math" "engines"] :pinned true}))
+               (assert (xyz.note note:2 about: {:author "Grace"}))"#,
         )
         .await?;
 
@@ -944,19 +944,19 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(
         report(&mut notebook, "(query (xyz.note ?n about: ?about))").await?,
         vec![
-            r#"(xyz.note note:1 about: {author: "Ada" pinned: true tags: ["math" "engines"]})"#,
-            r#"(xyz.note note:2 about: {author: "Grace"})"#,
+            r#"(xyz.note note:1 about: {:author "Ada" :pinned true :tags ["math" "engines"]})"#,
+            r#"(xyz.note note:2 about: {:author "Grace"})"#,
         ]
     );
     // Taken apart. A struct that is read is open: it is any record that
     // holds what it says, so both notes have an author, and the row
     // says the whole record that was there.
     let both = vec![
-        r#"(xyz.note note:1 about: {author: "Ada" pinned: true tags: ["math" "engines"]})"#,
-        r#"(xyz.note note:2 about: {author: "Grace"})"#,
+        r#"(xyz.note note:1 about: {:author "Ada" :pinned true :tags ["math" "engines"]})"#,
+        r#"(xyz.note note:2 about: {:author "Grace"})"#,
     ];
     assert_eq!(
-        report(&mut notebook, "(query (xyz.note ?n about: {author: ?who}))").await?,
+        report(&mut notebook, "(query (xyz.note ?n about: {:author ?who}))").await?,
         both
     );
     // A trailing `...` says the same, and so does a struct with no
@@ -964,7 +964,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.note ?n about: {author: ?who ...}))"
+            "(query (xyz.note ?n about: {:author ?who ...}))"
         )
         .await?,
         both
@@ -972,7 +972,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            r#"(query (xyz.note ?n about: {author: "Ada"}))"#
+            r#"(query (xyz.note ?n about: {:author "Ada"}))"#
         )
         .await?,
         both[..1]
@@ -980,22 +980,22 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            r#"(query (xyz.note ?n about: {author: ?who tags: [?first ?second] pinned: true}))"#
+            r#"(query (xyz.note ?n about: {:author ?who :tags [?first ?second] :pinned true}))"#
         )
         .await?,
-        vec![r#"(xyz.note note:1 about: {author: "Ada" pinned: true tags: ["math" "engines"]})"#]
+        vec![r#"(xyz.note note:1 about: {:author "Ada" :pinned true :tags ["math" "engines"]})"#]
     );
     // With a rest it is a map of at least its entries, and the rest is
     // the others, as a struct: both notes have an author.
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.note ?n about: {author: ?who ... ?others}))"
+            "(query (xyz.note ?n about: {:author ?who ... ?others}))"
         )
         .await?,
         vec![
-            r#"(xyz.note note:1 about: {author: "Ada" pinned: true tags: ["math" "engines"]})"#,
-            r#"(xyz.note note:2 about: {author: "Grace"})"#,
+            r#"(xyz.note note:1 about: {:author "Ada" :pinned true :tags ["math" "engines"]})"#,
+            r#"(xyz.note note:2 about: {:author "Grace"})"#,
         ]
     );
     // A blank takes what is there and binds nothing; the row still says
@@ -1003,17 +1003,17 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.note ?n about: {author: _ tags: [?first _] pinned: _}))"
+            "(query (xyz.note ?n about: {:author _ :tags [?first _] :pinned _}))"
         )
         .await?,
-        vec![r#"(xyz.note note:1 about: {author: "Ada" pinned: true tags: ["math" "engines"]})"#]
+        vec![r#"(xyz.note note:1 about: {:author "Ada" :pinned true :tags ["math" "engines"]})"#]
     );
     // A struct of constants is read in whatever order it is written
     // in.
     assert_eq!(
         report(
             &mut notebook,
-            r#"(query (xyz.note ?n about: {pinned: true tags: ["math" "engines"] author: "Ada"}))"#
+            r#"(query (xyz.note ?n about: {:pinned true :tags ["math" "engines"] :author "Ada"}))"#
         )
         .await?
         .len(),
@@ -1029,7 +1029,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
         report(
             &mut notebook,
             "(query (xyz.person ?p name: ?who)
-               (xyz.note ?n about: {author: ?who tags: _ pinned: _})
+               (xyz.note ?n about: {:author ?who :tags _ :pinned _})
                (xyz.person ?p name: ?who))",
         )
         .await?,
@@ -1040,7 +1040,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     // (format 4 of a stored rule writes a pattern), and the branch
     // derives from it.
     notebook
-        .submit("(rule (xyz.by ?n author: ?who) (xyz.note ?n about: {author: ?who}))")
+        .submit("(rule (xyz.by ?n author: ?who) (xyz.note ?n about: {:author ?who}))")
         .await?;
     assert_eq!(
         report(&mut notebook, "(query (xyz.by ?n author: ?who))").await?,
@@ -1073,7 +1073,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     notebook
         .submit(
             "(rule (assert (xyz.signed ?n by: (:last (:text ?who))))
-               (xyz.note ?n about: {author: ?who}))",
+               (xyz.note ?n about: {:author ?who}))",
         )
         .await?;
     assert_eq!(
@@ -1084,7 +1084,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
         ]
     );
     notebook
-        .submit(r#"(assert (xyz.note note:3 about: {author: "Hedy" pinned: false}))"#)
+        .submit(r#"(assert (xyz.note note:3 about: {:author "Hedy" :pinned false}))"#)
         .await?;
     assert_eq!(
         report(&mut notebook, "(query (xyz.signed ?n by: ?who))").await?,
@@ -1177,7 +1177,7 @@ async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()>
     );
 
     let record = notebook
-        .submit(r#"(assert (xyz.note {of: note:3 text: (:text "by record")}))"#)
+        .submit(r#"(assert (xyz.note {:of note:3 :text (:text "by record")}))"#)
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(matches!(record, Err(Ok(Error::Refused(_)))), "{record:?}");
@@ -1278,19 +1278,19 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     // `/todo`. The tuple that starts with `todo` applies nothing.
     let mut applies = report(
         &mut notebook,
-        "(query (syntax.form ?f is: {type: :application
-                                     operator: {type: :reference name: /todo}
-                                     operand: _}))",
+        "(query (syntax.form ?f is: {:type :application
+                                     :operator {:type :reference :name /todo}
+                                     :operand _}))",
     )
     .await?;
     applies.sort();
     let mut expected = vec![
         format!(
-            "(syntax.form {} is: {{operand: {{items: [{{name: \"t\" type: :variable}}] terms: {{}} type: :parameters}} operator: {{name: /todo type: :reference}} type: :application}})",
+            "(syntax.form {} is: {{:operand {{:items [{{:name \"t\" :type :variable}}] :terms {{}} :type :parameters}} :operator {{:name /todo :type :reference}} :type :application}})",
             entities[0]
         ),
         format!(
-            "(syntax.form {} is: {{operand: {{items: [{{name: \"t\" type: :variable}}] terms: {{state: {{type: :constant value: :open}}}} type: :parameters}} operator: {{name: /todo type: :reference}} type: :application}})",
+            "(syntax.form {} is: {{:operand {{:items [{{:name \"t\" :type :variable}}] :terms {{:state {{:type :constant :value :open}}}} :type :parameters}} :operator {{:name /todo :type :reference}} :type :application}})",
             entities[1]
         ),
     ];
@@ -1303,9 +1303,9 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     // part": a read has no way to say a record holds nothing more.
     let bare = report(
         &mut notebook,
-        "(query (syntax.form ?f is: {type: :application
-                                     operator: {type: :reference name: ?name}
-                                     operand: {type: :parameters items: ?items terms: {}}}))",
+        "(query (syntax.form ?f is: {:type :application
+                                     :operator {:type :reference :name ?name}
+                                     :operand {:type :parameters :items ?items :terms {}}}))",
     )
     .await?;
     assert_eq!(bare.len(), 3, "{bare:?}");
@@ -1317,7 +1317,7 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     // one of its own.
     let tuples = report(
         &mut notebook,
-        "(query (syntax.form ?f is: {type: :tuple items: ?items}))",
+        "(query (syntax.form ?f is: {:type :tuple :items ?items}))",
     )
     .await?;
     assert_eq!(tuples.len(), 1, "{tuples:?}");
@@ -1327,7 +1327,7 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     // form that applies a name, whatever else its nodes hold.
     let named = report(
         &mut notebook,
-        "(query (syntax.form ?f is: {operator: {name: ?name ... ?reference} ... ?node}))",
+        "(query (syntax.form ?f is: {:operator {:name ?name ... ?reference} ... ?node}))",
     )
     .await?;
     assert_eq!(named.len(), 3, "{named:?}");
@@ -1335,8 +1335,8 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     // The parts of a node are a list, which `'( )` and `[ ]` both take
     // apart: the kept tuple of two parts.
     for pair in [
-        "(query (syntax.form ?f is: {type: :tuple items: '(_ _)}))",
-        "(query (syntax.form ?f is: {type: :tuple items: [_ _]}))",
+        "(query (syntax.form ?f is: {:type :tuple :items '(_ _)}))",
+        "(query (syntax.form ?f is: {:type :tuple :items [_ _]}))",
     ] {
         let pairs = report(&mut notebook, pair).await?;
         assert_eq!(pairs.len(), 1, "{pair}: {pairs:?}");
@@ -1345,7 +1345,7 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     // And by a run: every application whose first part is a variable.
     let first = report(
         &mut notebook,
-        "(query (syntax.form ?f is: {operand: {items: '({type: :variable name: ?variable} ... ?more)
+        "(query (syntax.form ?f is: {:operand {:items '({:type :variable :name ?variable} ... ?more)
                                                ... ?parameters}
                                      ... ?node}))",
     )
@@ -1367,7 +1367,7 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
             r#"(assert (xyz.note note:1 tags: '("math" "engines" "looms")))
                (assert (xyz.note note:2 tags: '("math")))
                (assert (xyz.note note:3 tags: ["math" "engines"]))
-               (assert (xyz.note note:4 about: {tags: '("math" {by: "Ada"})}))"#,
+               (assert (xyz.note note:4 about: {:tags '("math" {:by "Ada"})}))"#,
         )
         .await?;
     let one = r#"(xyz.note note:1 tags: ["math" "engines" "looms"])"#;
@@ -1436,10 +1436,10 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.note ?n about: {tags: '(_ {by: ?who})}))"
+            "(query (xyz.note ?n about: {:tags '(_ {:by ?who})}))"
         )
         .await?,
-        vec![r#"(xyz.note note:4 about: {tags: ["math" {by: "Ada"}]})"#]
+        vec![r#"(xyz.note note:4 about: {:tags ["math" {:by "Ada"}]})"#]
     );
 
     // A list has no labelled part.

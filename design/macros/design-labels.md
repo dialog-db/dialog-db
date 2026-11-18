@@ -3,7 +3,7 @@
 **Decision:** how a call says which parameter a value is for.
 **For:** one notation a reader reads right cold, and one reader for it (#728).
 
-Raised by the maintainer on 2026-11-18: "instead of my special labels we should just use keyword based labeling". Not decided.
+Raised by the maintainer on 2026-11-18: "instead of my special labels we should just use keyword based labeling". Decided by him the same day: "I think we should just treat (foo ?bar baz: ?beep) as sugar for (foo {:of ?bar :baz ?beep})". That is the fourth column, keywords in a map only, with a call read as sugar for the struct. Its yellow cell, one spelling in a map and another in a call, is answered by the sugar: a call's label is the struct's key. Built 2026-11-18 ([journal](journal.md)).
 
 Today a token that ends in a colon is a label and one that starts with a colon is a keyword, a value. The design says why the keyword has its colon in front: "`:done` is `done:`, with the colon in front so it is not read as a label."
 

@@ -1270,6 +1270,16 @@ Built: `kernel.rs` (`LAYERS`, `Field::layer`, the head by layer, the derived ent
 
 Built: `derived` and the resolution order in `expand.rs`, `DERIVED` and `is_derived` in `syntax.rs`, the write refused in `kernel.rs`; the getter's rule out of the prelude. 107 unit tests, 28 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Designing: a struct's keys are keywords
+
+**Asked.** The maintainer: "I think we should just treat (foo ?bar baz: ?beep) as sugar for (foo {:of ?bar :baz ?beep})".
+
+**Learned.** The red cell of [design-labels.md](design-labels.md): paired by place, `(view todo :row …)` gives the template the label `row`. He agreed, and kept the colon label in calls. A call was already read as a struct, so only the struct's spelling moves: the reader takes a key written `:list` as the name `list`, as it took `list:`, and the printer writes it so. A text key, `{"N1" …}`, and `... ?rest` are what they were.
+
+**Decided.** By him: the fourth column, keywords in a map only, a call sugar for the struct. By the managing agent: the old spelling inside a struct, `{of: ?t}`, is refused with the spelling to write, not read as well, and so is a bare name as a key. Not decided: what a key is, a name or an entity. A keyword is an entity in the design (`:done` is `done:`), and dialog-query's `MapPattern::new` refuses a key that ends in `:` (`PatternError::ReservedKey`), so taking a key as the keyword's entity would change what a stored map holds. It stays the name.
+
+Built: the reader's `{` and `former_key` in `form.rs`, the two printers, every test text. 108 unit tests, 28 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

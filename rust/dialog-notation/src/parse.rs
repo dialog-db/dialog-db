@@ -117,7 +117,7 @@ mod tests {
     #[dialog_common::test]
     fn it_prints_a_token_as_it_was_spelled() -> Result<(), Error> {
         back(r#"(xyz.item item:1 n: 007 price: 1.50 text: "a\nb \"c\"" at: -0)"#)?;
-        back("{name \"Ada\" age: 36 :open true [1 2] ?x}")?;
+        back("{:name \"Ada\" :age 36 :open true [1 2] ?x}")?;
         let (_, written) = parse_written("(xyz.item item:1 n: 007 m: 7)")?;
         let spelling = |label: &str| {
             written
@@ -135,31 +135,31 @@ mod tests {
         back(
             "\n\n(rule (assert (xyz.todo ?t   list: ?to))\n\n    (move (xyz.todo ?t\n                    list: ?to)))\n\n\n",
         )?;
-        back("(a)(b) [ 1  2 ]{ k: 1 }")
+        back("(a)(b) [ 1  2 ]{ :k 1 }")
     }
 
     /// The rest of a struct is printed where it was written, with the
     /// comment above it.
     #[dialog_common::test]
     fn it_prints_the_rest_of_a_struct_where_it_was_written() -> Result<(), Error> {
-        back("(query (xyz.note ?n about: {author: ?who   ... ?others}))")?;
+        back("(query (xyz.note ?n about: {:author ?who   ... ?others}))")?;
         back("{... ?all}")?;
         // A key the struct ends on is printed as it was written, with
         // no value.
-        back("(query (xyz.note ?n about: {author: ?who ...}))")?;
-        back("{author: ?who\n  ... }")?;
-        back("{pinned:}")?;
+        back("(query (xyz.note ?n about: {:author ?who ...}))")?;
+        back("{:author ?who\n  ... }")?;
+        back("{:pinned}")?;
         // `...` is a part like any other, wherever it stands, and a
         // quote is printed as it was written.
         back("(rule (syntax (all ?first   ... ?more))\n  (expand (query ?head ...)))")?;
         back("(assert (xyz.note note:1 tags: '(1 2   (3 4))))")?;
         back("(assert (xyz.note note:1 tags: (quote (1 2))))")?;
-        back("{author: ?who\n ; and whatever else\n ... ?others }")?;
+        back("{:author ?who\n ; and whatever else\n ... ?others }")?;
         // With no mapping, it is printed after the entries.
-        let trees = parse("{author: ?who\n   ... ?others}")?;
+        let trees = parse("{:author ?who\n   ... ?others}")?;
         assert_eq!(
             print(&trees, &Written::default()),
-            "{author: ?who ... ?others}"
+            "{:author ?who ... ?others}"
         );
         Ok(())
     }

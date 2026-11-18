@@ -552,7 +552,7 @@ impl Syntax {
     pub fn spelled(&self, key: bool) -> String {
         match (key, self.form()) {
             (true, form) if form.label().is_some() => {
-                format!("{}:", form.label().unwrap_or_default())
+                format!(":{}", form.label().unwrap_or_default())
             }
             (_, form) => form.to_string(),
         }
@@ -892,7 +892,7 @@ mod tests {
         assert_eq!(form, reference("(xyz.todo text: ?x ?t list: ?l)")?);
         assert_eq!(form, reference("(xyz.todo text: ?x of: ?t list: ?l)")?);
         assert_ne!(form, reference("(xyz.todo ?t list: ?l text: ?y)")?);
-        assert_eq!(reference("{a: 1 b: 2}")?, reference("{b: 2 a: 1}")?);
+        assert_eq!(reference("{:a 1 :b 2}")?, reference("{:b 2 :a 1}")?);
         assert_eq!(reference("(f 1.50)")?, reference("(f 1.5)")?);
         // A parenthesis applies and a bracket does not.
         assert_ne!(reference("(f a b)")?, reference("[f a b]")?);
@@ -931,7 +931,7 @@ mod tests {
     /// what it is passed to.
     #[test]
     fn it_passes_a_struct_as_a_part() -> Result<(), Error> {
-        let Syntax::Application(_, operand) = one("(expand {note: ?n})") else {
+        let Syntax::Application(_, operand) = one("(expand {:note ?n})") else {
             panic!("an application");
         };
         assert!(operand.terms.is_empty());
@@ -943,7 +943,7 @@ mod tests {
             )])]
         );
         assert_ne!(
-            one("(expand {note: ?n})").reference()?,
+            one("(expand {:note ?n})").reference()?,
             one("(expand note: ?n)").reference()?
         );
         Ok(())
@@ -979,7 +979,7 @@ mod tests {
         );
         // In a struct it is a key, and what follows it the value.
         assert_eq!(
-            one("{author: ?who ... ?others}"),
+            one("{:author ?who ... ?others}"),
             Syntax::Map(vec![
                 (
                     Syntax::Reference("author".into()),
@@ -991,7 +991,7 @@ mod tests {
                 ),
             ])
         );
-        let kept = one("{author: ?who ... ?others}");
+        let kept = one("{:author ?who ... ?others}");
         assert_eq!(
             Syntax::try_from(&kept.value()?)?.reference()?,
             kept.reference()?
@@ -1004,7 +1004,7 @@ mod tests {
     fn it_reads_a_quote_as_an_application_of_quote() {
         assert_eq!(one("'(1 2 3)"), one("(quote (1 2 3))"));
         assert_eq!(one("'(1 2 3)").applies(), Some("quote"));
-        assert_eq!(one("{tags: '(1 (2 3))}").to_string(), "{tags: '(1 (2 3))}");
+        assert_eq!(one("{:tags '(1 (2 3))}").to_string(), "{:tags '(1 (2 3))}");
     }
 
     #[test]
@@ -1039,7 +1039,7 @@ mod tests {
 
     #[test]
     fn it_refuses_a_key_twice_where_the_tree_becomes_data() {
-        assert!(matches!(one("{a: 1 a: 2}").value(), Err(Error::Refused(_))));
+        assert!(matches!(one("{:a 1 :a 2}").value(), Err(Error::Refused(_))));
     }
 
     /// Two definitions over the same attributes, with other names for
@@ -1110,7 +1110,7 @@ mod tests {
     /// back as `2`.
     #[test]
     fn it_keeps_a_tree_as_a_composite_value() -> Result<(), Error> {
-        let tree = one(r#"(f ?x 2.0 {a: [1 "b"]} label: _ ... ?rest)"#);
+        let tree = one(r#"(f ?x 2.0 {:a [1 "b"]} label: _ ... ?rest)"#);
         let kept = tree.value()?;
         assert!(matches!(
             kept.composite(),
@@ -1119,7 +1119,7 @@ mod tests {
         let back = Syntax::try_from(&kept)?;
         assert_eq!(
             back.to_string(),
-            r#"(f ?x 2 {a: [1 "b"]} ... ?rest label: _)"#
+            r#"(f ?x 2 {:a [1 "b"]} ... ?rest label: _)"#
         );
         assert_eq!(back.value()?, kept);
         assert_eq!(back.reference()?, tree.reference()?);

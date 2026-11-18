@@ -28,7 +28,7 @@ pub enum Form {
     Number(String),
     /// `[a b]`.
     Vector(Vec<Form>),
-    /// `{key value}` and `{label: value}`: entries in the order written.
+    /// `{key value}` and `{:label value}`: entries in the order written.
     Map(Vec<(Form, Form)>),
     /// `(head part...)`.
     Application(Box<Form>, Vec<Part>),
@@ -85,11 +85,12 @@ impl Form {
     }
 
     /// The label a map's key is written as, where it can be one: the
-    /// name of a symbol that is not an entity or an operator.
+    /// name of a symbol that is not an entity or an operator. In a map
+    /// it is spelled as a keyword, `:author`.
     pub fn label(&self) -> Option<&str> {
         match (self, self.kind()) {
             // `...` is a key like any other, and never written as a
-            // label: `{author: ?who ... ?others}`.
+            // label: `{:author ?who ... ?others}`.
             (Form::Symbol(name), Some(Kind::Name | Kind::Domain | Kind::Attribute))
                 if name != "..." =>
             {
@@ -434,6 +435,15 @@ fn tokens(text: &str) -> (Vec<Token>, Tail, Option<Misread>) {
     )
 }
 
+/// What a struct's key spelled as a label, `list:`, or as a bare name,
+/// `list`, is refused with: the spelling to write.
+fn former_key(name: &str) -> Error {
+    Error::Read(format!(
+        "a struct's key is written as a keyword, `:{name}`, and not `{name}:` or `{name}`: \
+         `{{:of ?t :{name} ?x}}`"
+    ))
+}
+
 /// Whether a token is a label: it ends with `:` and is not all colons
 /// past the first, so `text:` and `:` are labels and `::` is not.
 fn label(token: &str) -> Option<&str> {
@@ -512,10 +522,20 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
                 if next.text == "}" {
                     break;
                 }
-                let key = match label(&next.text) {
-                    Some("") => {
+                // A struct's key is a name spelled as a keyword,
+                // `{:of ?t :list ?l}`: a call's labels are its keys, and
+                // `(todo ?t list: ?l)` is sugar for that struct.
+                let named = match (label(&next.text), next.text.strip_prefix(':')) {
+                    (Some(name), _) if !name.is_empty() => {
+                        return Err((former_key(name), next.span));
+                    }
+                    (Some(_), _) | (None, Some("")) => {
                         return Err((Error::Read("a map key with no name".into()), next.span));
                     }
+                    (None, Some(name)) => Some(name),
+                    (None, None) => None,
+                };
+                let key = match named {
                     Some(name) => {
                         *at += 1;
                         mark.parts.push(Mark {
@@ -528,13 +548,17 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
                         Form::symbol(name)
                     }
                     None => {
+                        let start = next.span;
                         let (key, inside) = form(tokens, at)?;
+                        if let Some(name) = key.label() {
+                            return Err((former_key(name), start));
+                        }
                         mark.parts.push(inside);
                         key
                     }
                 };
                 // A key the struct ends on has `_` for its value:
-                // `{author: ?who ...}` is `{author: ?who ... _}`.
+                // `{:author ?who ...}` is `{:author ?who ... _}`.
                 let closes = tokens.get(*at).ok_or_else(ended)?;
                 if closes.text == "}" {
                     mark.parts.push(Mark {
@@ -644,7 +668,7 @@ impl Display for Form {
                         write!(f, " ")?;
                     }
                     match key.label() {
-                        Some(label) => write!(f, "{label}: {value}")?,
+                        Some(label) => write!(f, ":{label} {value}")?,
                         None => write!(f, "{key} {value}")?,
                     }
                 }
@@ -726,7 +750,7 @@ mod tests {
     /// parts of what it is passed to.
     #[test]
     fn it_reads_a_struct_as_the_part_it_is() {
-        let form = &read("(expand {note: ?n})").unwrap()[0];
+        let form = &read("(expand {:note ?n})").unwrap()[0];
         let Form::Map(entries) = form.bare()[0] else {
             panic!("a struct");
         };
@@ -735,17 +759,49 @@ mod tests {
         assert_ne!(form, &read("(expand note: ?n)").unwrap()[0]);
     }
 
+    /// A struct's key that is a name is spelled as a keyword, and is the
+    /// name: `{:of ?t :list ?l}` is what `(todo ?t list: ?l)` is sugar
+    /// for. Any other key is the form it is.
     #[test]
-    fn it_reads_a_map_by_label_or_by_pair() {
-        let text = r#"{name: "Ada" xyz.person/age: 36 :open true [1 2] ?x}"#;
+    fn it_reads_a_map_by_keyword_or_by_pair() {
+        let text = r#"{:name "Ada" :xyz.person/age 36 "N1" true [1 2] ?x}"#;
         let forms = read(text).unwrap();
         let Form::Map(entries) = &forms[0] else {
             panic!("a map");
         };
         assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].0, Form::symbol("name"));
-        assert_eq!(entries[2].0, Form::Keyword("open".into()));
+        assert_eq!(entries[1].0, Form::symbol("xyz.person/age"));
+        assert_eq!(entries[2].0, Form::Text("N1".into()));
         assert_eq!(forms[0].to_string(), text);
+    }
+
+    /// The spelling a struct's key had, `list:`, and a bare name, are
+    /// refused with the spelling to write, and so is a keyword with no
+    /// name.
+    #[test]
+    fn it_refuses_a_structs_key_spelled_as_a_label() {
+        for (text, name) in [
+            ("{of: ?t list: ?l}", "of"),
+            ("{:of ?t list: ?l}", "list"),
+            ("{pinned}", "pinned"),
+            ("(xyz.note ?n about: {author: ?who})", "author"),
+        ] {
+            assert!(
+                matches!(read(text), Err(Error::Read(why))
+                    if why.contains(&format!("is written as a keyword, `:{name}`"))),
+                "{text}: {:?}",
+                read(text)
+            );
+        }
+        assert!(matches!(read("{: 1}"), Err(Error::Read(why)) if why.contains("no name")));
+        // A rest stays what it was.
+        let rest = read("{:of ?t ... ?rest}").unwrap();
+        let Form::Map(entries) = &rest[0] else {
+            panic!("a map");
+        };
+        assert_eq!(entries[1].0, Form::symbol("..."));
+        assert_eq!(rest[0].to_string(), "{:of ?t ... ?rest}");
     }
 
     /// The reader gives `...` no meaning: it is a symbol, a part among
@@ -753,7 +809,7 @@ mod tests {
     #[test]
     fn it_reads_three_dots_as_a_symbol() {
         let forms =
-            read("(query ?head ... ?more) {author: ?who ... ?others} (todo ?t ...)").unwrap();
+            read("(query ?head ... ?more) {:author ?who ... ?others} (todo ?t ...)").unwrap();
         assert_eq!(
             forms[0].bare(),
             vec![
@@ -772,7 +828,7 @@ mod tests {
             forms.iter().map(Form::to_string).collect::<Vec<_>>(),
             vec![
                 "(query ?head ... ?more)",
-                "{author: ?who ... ?others}",
+                "{:author ?who ... ?others}",
                 "(todo ?t ...)"
             ]
         );
@@ -782,9 +838,9 @@ mod tests {
     #[test]
     fn it_reads_a_key_a_struct_ends_on_as_a_key_of_a_blank() {
         for (short, long) in [
-            ("{author: ?who ...}", "{author: ?who ... _}"),
-            ("{author: ?who pinned:}", "{author: ?who pinned: _}"),
-            ("{pinned}", "{pinned: _}"),
+            ("{:author ?who ...}", "{:author ?who ... _}"),
+            ("{:author ?who :pinned}", "{:author ?who :pinned _}"),
+            ("{:pinned}", "{:pinned _}"),
         ] {
             assert_eq!(read(short).unwrap(), read(long).unwrap(), "{short}");
             assert_eq!(read(short).unwrap()[0].to_string(), long);
@@ -804,7 +860,7 @@ mod tests {
     fn it_skips_comments_and_refuses_what_does_not_close() {
         assert_eq!(read("; nothing\n(a) ; more").unwrap().len(), 1);
         assert!(read("(a (b)").is_err());
-        assert!(read("{a: 1").is_err());
+        assert!(read("{:a 1").is_err());
         assert!(read(")").is_err());
     }
 }
