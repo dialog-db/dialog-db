@@ -1489,6 +1489,14 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** The managing agent's three readings, built. The bar: the notebook alone 52 expanded and 47 compiled, of 56; with core 59 and 54, of 60. 120 unit tests, 41 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: a fourth number, described
+
+**Asked.** Step T: count a view that reaches `View::describe` as described, though Dialog-DB's compiler refuses it, and pin four numbers.
+
+**Learned.** A view is described during expansion, so a view that expands is one that describes, and the count is the views among the kernel trees that `View::describe` reads. Before step S one view was described, `notebook/block :directory`; after it all five.
+
+**Decided.** Nothing. The bar, read / expanded / compiled / described: the notebook alone 56 / 52 / 47 / 5, of 56; with core 60 / 59 / 54 / 5, of 60. 120 unit tests, 41 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

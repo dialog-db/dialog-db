@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use dialog_notation::{Error, Expander, Segment, compile, parse_document};
+use dialog_notation::{Error, Expander, Segment, View, compile, parse_document};
 
 /// Where a form stopped, and why.
 #[derive(Debug, Clone)]
@@ -28,6 +28,9 @@ pub struct Bar {
     pub expanded: usize,
     /// The expanded forms every kernel rule of which compiled.
     pub compiled: usize,
+    /// The views that reach a description, `View::describe`, whatever
+    /// Dialog-DB's compiler says of them.
+    pub described: usize,
     /// The first error of each form that stopped.
     pub stops: Vec<Stop>,
 }
@@ -76,6 +79,9 @@ impl Bar {
         for (rule, at) in kernel.iter().zip(origin) {
             if stopped.contains_key(&at) {
                 continue;
+            }
+            if rule.applies() == Some("view") && View::describe(rule).is_ok() {
+                bar.described += 1;
             }
             if let Err(error) = compile(rule) {
                 stopped.insert(

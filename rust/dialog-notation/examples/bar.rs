@@ -31,8 +31,8 @@ fn main() -> Result<()> {
     let bar = bar::Bar::of_all(&texts.iter().map(String::as_str).collect::<Vec<_>>())?;
     let path = paths.join(" + ");
     println!(
-        "; {path}: {} forms, {} read, {} expanded, {} compiled",
-        bar.forms, bar.read, bar.expanded, bar.compiled
+        "; {path}: {} forms, {} read, {} expanded, {} compiled, {} described",
+        bar.forms, bar.read, bar.expanded, bar.compiled, bar.described
     );
     for (said, stops) in bar.groups() {
         let forms: Vec<String> = stops

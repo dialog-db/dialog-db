@@ -2303,7 +2303,8 @@ async fn it_refuses_and_says_what_is_not_supported() -> Result<()> {
 }
 
 /// How far tonk's notebook, written in the notation as designed, gets:
-/// every form read, and how many expand and compile. A step that moves
+/// every form read, how many expand and compile, and how many views reach
+/// a description, which Dialog-DB's compiler refuses. A step that moves
 /// these numbers moves them here on purpose.
 #[dialog_common::test]
 async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
@@ -2324,9 +2325,10 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
             measured.forms,
             measured.read,
             measured.expanded,
-            measured.compiled
+            measured.compiled,
+            measured.described
         ),
-        (56, 56, 52, 47),
+        (56, 56, 52, 47, 5),
         "{groups:#?}"
     );
     // With core in front, as tonk reads a component, the concepts the
@@ -2336,8 +2338,14 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
         include_str!("../../../design/macros/sketches/notebook.clj"),
     ])?;
     assert_eq!(
-        (joined.forms, joined.read, joined.expanded, joined.compiled),
-        (60, 60, 59, 54)
+        (
+            joined.forms,
+            joined.read,
+            joined.expanded,
+            joined.compiled,
+            joined.described
+        ),
+        (60, 60, 59, 54, 5)
     );
     Ok(())
 }
