@@ -153,5 +153,5 @@ In the notation, the same:
 
 A nested view stays a call, `(view concept :name …)`, as decided earlier today.
 
-What tonk's rule does not say, since a tonk view is over one concept: a view whose conditions read a second entity (`(todo ?t list: ?l)` beside `(list ?l name: ?name)`). The layered reading of the prototype is one answer; a call is another. Not decided.
+A view whose conditions read a second entity (`(todo ?t list: ?l)` beside `(list ?l name: ?name)`) is not something tonk's rule covers, since a tonk view is over one concept. The maintainer, 2026-11-18: "yaml always uses tonk-display" there. So a second entity is a nested view, a call, and a view's own conditions are about its own entity. The layered reading of the prototype is not needed for it.
 
