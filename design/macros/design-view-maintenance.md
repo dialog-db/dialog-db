@@ -44,7 +44,17 @@ No fold is in it. A view needs nothing of Dialog-DB that a subscription does not
 
 ## What a getter is then
 
-A fold with a name. A view's element reads it in its conditions, and those are a subscription, one of the places Dialog-DB already lets a fold stand. So the getter that a view shows does not need a fold in a rule that derives. What still does is a getter read by a rule that derives, which stays #830's.
+A fold with a name. This section first said a view's element could read one in its conditions because those are a subscription, "one of the places Dialog-DB already lets a fold stand". That was wrong, corrected on 2026-11-18 from a reading of the code (#830, `design/named-fold/design-no-domain.md`): no query, subscription or inductive rule can state a fold. Every fold goes through `DeductiveRule::with_reduce`, and that is the one refused. The notes' "closed places" are places a fold would not be refused, not places one can be written.
+
+So a view that shows a count needs one of two things of Dialog-DB, and neither is there:
+
+```
+ a query that folds          one new kind of query, folding over an inner one     a getter is read in a view, a query, a rule that writes; not in a rule that derives
+ a relation only rules       a reserved name answered from the rules and never    a getter is read anywhere; a fold is admitted into those heads only
+ conclude                    from the store, as dialog.rule/quarantined is
+```
+
+A view with no count in it needs neither.
 
 ## Open
 
