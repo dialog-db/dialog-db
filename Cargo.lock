@@ -1282,6 +1282,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-answer"
+version = "0.5.0-rc.7"
+dependencies = [
+ "dialog-common",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-baseline"
 version = "0.5.0-rc.7"
 dependencies = [
