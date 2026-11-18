@@ -98,6 +98,14 @@ mod tests {
         Ok(())
     }
 
+    /// A text that spans lines is printed as it was written, and so is
+    /// what follows it.
+    #[dialog_common::test]
+    fn it_prints_a_text_that_spans_lines_as_it_was_written() -> Result<(), Error> {
+        back("(assert (xyz.el el:1 source: \"one\n  \\\"two\\\" \\\\ three\n\"\n  name: \"x\"))")?;
+        back("(assert (xyz.el el:1 source: \"one\ntwo\")) ; after\n(query (xyz.el ?e source: ?s))")
+    }
+
     #[dialog_common::test]
     fn it_prints_the_prelude_and_the_examples_as_they_were_written() -> Result<(), Error> {
         back(include_str!("prelude.clj"))?;

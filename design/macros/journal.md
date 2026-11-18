@@ -1322,6 +1322,17 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** By the agent: a key is written as text, `at: "N1"`. The concept's check refuses a key that is no head field and a second collection, as the design says. 113 unit tests, 31 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: a text that spans lines
+
+**Asked.** Step H: tonk's documents hold view templates and method bodies as long texts. The design lists open how a text spans lines or holds `"`. The managing agent chose, as an opinion the maintainer can overturn: a text spans lines as written, newlines kept, `\"` a quote and `\\` a backslash, as a Clojure string. No triple quotes, no indentation taken off, no file included.
+
+**Learned.**
+
+- The reader already took a text over lines, newlines kept, and `\"`, `\\` and `\n`. The printer already wrote a backslash and a quote escaped and a newline as it is, so what it prints reads back to the same text, and a document printed from its mapping is the text written.
+- One thing was not so: any other escape lost its backslash, `"\d"` read as `d`. A method's JavaScript holds such escapes, so a backslash would have gone missing without a word. That is refused now, saying to write `\\`. `\t` and `\r` are taken, as Clojure takes them.
+
+**Decided.** The managing agent's choice, built. By the agent: an escape other than `\" \\ \n \t \r` is refused rather than kept as written. 115 unit tests, 32 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

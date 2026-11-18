@@ -302,6 +302,30 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
     Ok(())
 }
 
+/// A text that spans lines is kept and read back as written, newlines,
+/// quotes and backslashes in it: a method's source, as tonk's elements
+/// hold them.
+#[dialog_common::test]
+async fn it_keeps_a_text_that_spans_lines() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(assert (xyz.el el:1 source: "render() {
+  return `<p class=\"a\">\\n</p>`;
+}"))"#,
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.el ?e source: ?s))").await?,
+        vec![
+            r#"(xyz.el el:1 source: "render() {
+  return `<p class=\"a\">\\n</p>`;
+}")"#
+        ]
+    );
+    Ok(())
+}
+
 /// A concept written as lines, an attribute a line, runs as one written
 /// as a read of several fields does: written through by a rule a
 /// command fires and read back. `:one` reads the newest claim and

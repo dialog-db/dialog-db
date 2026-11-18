@@ -373,6 +373,10 @@ fn tokens(text: &str) -> (Vec<Token>, Tail, Option<Misread>) {
                 take(&mut chars, &mut here);
                 next.to_string()
             }
+            // A text may span lines, as written: its newlines are kept.
+            // `\"` is a quote and `\\` a backslash, as in a Clojure
+            // string, and `\n`, `\t` and `\r` are what they are there.
+            // Any other escape is refused, so a backslash is never lost.
             '"' => {
                 take(&mut chars, &mut here);
                 let mut literal = String::from('"');
@@ -383,11 +387,36 @@ fn tokens(text: &str) -> (Vec<Token>, Tail, Option<Misread>) {
                             ended = true;
                             break;
                         }
-                        '\\' => match take(&mut chars, &mut here) {
-                            Some('n') => literal.push('\n'),
-                            Some(escaped) => literal.push(escaped),
-                            None => break,
-                        },
+                        '\\' => {
+                            let at = here;
+                            match take(&mut chars, &mut here) {
+                                Some('n') => literal.push('\n'),
+                                Some('t') => literal.push('\t'),
+                                Some('r') => literal.push('\r'),
+                                Some(escaped @ ('"' | '\\')) => literal.push(escaped),
+                                Some(other) => {
+                                    let unknown = (
+                                        Error::Read(format!(
+                                            "`\\{other}` is no escape a text takes: a backslash \
+                                             is written `\\\\`, a quote `\\\"`"
+                                        )),
+                                        Span {
+                                            start: at,
+                                            end: here,
+                                        },
+                                    );
+                                    return (
+                                        tokens,
+                                        Tail {
+                                            comments,
+                                            end: here,
+                                        },
+                                        Some(unknown),
+                                    );
+                                }
+                                None => break,
+                            }
+                        }
                         c => literal.push(c),
                     }
                 }
@@ -845,6 +874,27 @@ mod tests {
             assert_eq!(read(short).unwrap(), read(long).unwrap(), "{short}");
             assert_eq!(read(short).unwrap()[0].to_string(), long);
         }
+    }
+
+    /// A text spans lines as written, its newlines kept, and holds a
+    /// quote as `\"` and a backslash as `\\`. What it prints as reads
+    /// back as the same text. Any other escape is refused.
+    #[test]
+    fn it_reads_a_text_that_spans_lines() {
+        let source =
+            "(xyz.el el:1 source: \"render() {\n  return `<p class=\\\"a\\\">${\\\\n}</p>`;\n}\")";
+        let forms = read(source).unwrap();
+        let text = "render() {\n  return `<p class=\"a\">${\\n}</p>`;\n}";
+        assert_eq!(forms[0].at("source"), Some(&Form::Text(text.into())));
+        assert_eq!(read(&forms[0].to_string()).unwrap(), forms);
+        assert_eq!(
+            read(r#""a\tb\nc""#).unwrap(),
+            vec![Form::Text("a\tb\nc".into())]
+        );
+        assert!(matches!(
+            read(r#""\d+""#),
+            Err(Error::Read(why)) if why.contains("no escape a text takes")
+        ));
     }
 
     /// `'x` is `(quote x)` to the reader, a list like any other.
