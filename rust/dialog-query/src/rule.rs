@@ -461,7 +461,9 @@ fn encodable_constants(
     };
     listed(conclusion)?;
     for premise in premises {
-        for (_, term) in premise.parameters().iter() {
+        // A constant inside a map or a list is written as one alone
+        // is, so it is held to the same.
+        for term in premise.parameters().leaves() {
             if let Term::Constant(value) = term {
                 refuse(value)?;
             }

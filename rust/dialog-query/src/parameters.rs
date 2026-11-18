@@ -1,7 +1,6 @@
 use crate::pattern::{Pattern, Shape};
 use crate::term::Term;
 use crate::types::Any;
-use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -91,26 +90,33 @@ impl Held {
     }
 }
 
+/// Each name with what it holds: a term as a term is written, and a
+/// map or a list of terms as a [`Pattern`] is.
 impl Serialize for Parameters {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if let Some((name, pattern)) = self.shapes().next() {
-            return Err(S::Error::custom(format!(
-                "the parameter `{name}` holds the pattern {pattern}, which has no wire form: \
-                 only a variable or a constant is written"
-            )));
+        if !self.has_shapes() {
+            return self.0.terms.serialize(serializer);
         }
-        self.0.terms.serialize(serializer)
+        use serde::ser::SerializeMap;
+        let mut written = serializer.serialize_map(Some(self.0.terms.len()))?;
+        for (name, term) in &self.0.terms {
+            match self.shape(name) {
+                Some(pattern) => written.serialize_entry(name, pattern)?,
+                None => written.serialize_entry(name, term)?,
+            }
+        }
+        written.end()
     }
 }
 
 impl<'de> Deserialize<'de> for Parameters {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        BTreeMap::deserialize(deserializer).map(|terms| {
-            Parameters(Arc::new(Held {
-                terms,
-                shapes: None,
-            }))
-        })
+        let written = BTreeMap::<String, Pattern>::deserialize(deserializer)?;
+        let mut parameters = Parameters::new();
+        for (name, pattern) in written {
+            parameters.set(name, pattern);
+        }
+        Ok(parameters)
     }
 }
 
