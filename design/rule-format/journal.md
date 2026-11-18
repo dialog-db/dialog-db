@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | The approach is decided: format 4 writes a pattern, a release writes it always and reads the earlier ones for one release cycle, with `Branch::upgrade_rules` as the migration. Patterns are the one addition: a rule has one head, records ask nothing, a rule about syntax is not stored. A pattern is named by its parts already, so no name moves. | **Building**, on `feat/rule-format-4` over the patterns build. |
-| **Agenda** | The maintainer's word on the two choices the build of `match` made without him ([the form of a pattern](design-pattern-form.md#as-built-2026-11-16)). What one entity holds once two releases have each written its body. | The build, its changelog entry with the compatibility note, and the notation storing a rule that holds a struct. |
+| **Agenda** | Whether an earlier release still reads a rule once one entity holds a body in its format and one in a later format: read in the code, it depends on which the scan gives first. Who runs the migration, and when, once a release reads no earlier format. The maintainer's word on the two choices the build of `match` made without him ([the form of a pattern](design-pattern-form.md#as-built-2026-11-16)). | A test of the first on the build. Then the change to what is read, and the migration's two modes. |
 
 ## Candidate problems
 
@@ -93,3 +93,27 @@ The maintainer was away and asked for the build to go on without him.
 **Decided.** Nothing of the form. A constant inside a map or a list is held to what a constant alone is: `TypeError::UnencodableConstant`, pinned by `it_refuses_a_constant_inside_a_pattern_that_no_stored_body_carries`.
 
 The dag-cbor suite of `dialog-query` was not run whole after this last change, only the pattern tests; CI runs it.
+
+## 2026-11-18, Building: a release reads its own format only
+
+**Asked.** tonk was pointed at this stack and compiled with no change, and the note on it said an rc.6 tonk refuses a format 4 body. The maintainer, of what the two releases should do with each other's rules: "I think it would be better if old versions ignore 4th format entirely and new one ignored the old one. We should also expose optional migration that did the 3-4 format translation without deleting old ones and we could also have a flag to do migrate and delete old forms."
+
+**Learned.** Three parts, and where the code stands on each, read and not run:
+
+```
+                               today                                      asked
+ an earlier release, format 4   decode refuses it by name, and every       ignored
+                                caller takes that as no rule: skipped,
+                                silently (rc.6, four call sites)
+ this release, format 3 down    read and run, every one                    ignored
+ the migration                  Branch::upgrade_rules retracts the body    writes format 4 beside it;
+                                by its bytes and asserts the rule again    a flag retracts the earlier one
+```
+
+So the first part holds already, the second is a change to what a read does, and the third turns the migration that exists into the flagged mode and adds the one that keeps.
+
+The second has a precedent in this code, for identities: a rule stored under the hash of its bytes is inert until `upgrade_rules` moves it, "there is no permanent compatibility path, which no read would otherwise stop paying for", and when to run it is the embedder's decision. What it costs is the same: after the release changes, a space's rules derive nothing until some replica that may write runs the migration.
+
+The third meets the open item on the agenda, what one entity holds once two releases have each written its body. A rule with no pattern has one identity in both formats, and a body is asserted with `Pick::All`, so after a migration that keeps, one entity holds two `dialog.rule/source` claims. In rc.6 the read marks an entity as seen before it decodes the body it was given, so if the scan gives the format 4 body first, the rule is dropped though its format 3 body is there. rc.6 is released and cannot be changed.
+
+**Decided.** The direction is the maintainer's, 2026-11-18: a release reads the format it writes and no other; the migration translates and keeps, and deletes on a flag. It reverses part of the decision of 2026-11-13, which had a release read the earlier formats for one cycle. Not built. It rests on one open hypothesis in the [ledger](claims.md): that keeping the earlier body keeps the earlier release working, which is what keeping is for.
