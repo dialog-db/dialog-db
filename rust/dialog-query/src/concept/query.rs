@@ -1670,6 +1670,34 @@ mod tests {
             .expect("parses");
             assert_eq!(operands.terms.get("member/key"), Some(&Term::var("k")));
         }
+
+        /// An entry whose key and value are both blank writes as `{}`,
+        /// neither half said, and reads back as that entry, not as a
+        /// constant.
+        #[dialog_common::test]
+        fn it_reads_back_an_entry_whose_key_and_value_are_blank() {
+            let query: ConceptQuery = serde_json::from_value(serde_json::json!({
+                "assert": ordered(),
+                "where": {
+                    "this": {"?": {"name": "list"}},
+                    "member": {"?": {}},
+                    "member/key": {"?": {}}
+                }
+            }))
+            .expect("parses");
+            let written = serde_json::to_value(&query).expect("serializes");
+            assert_eq!(written["where"]["member"], serde_json::json!({}));
+            assert_eq!(
+                serde_json::from_value::<ConceptQuery>(written).map_err(|e| e.to_string()),
+                Ok(query.clone())
+            );
+
+            let bytes = serde_ipld_dagcbor::to_vec(&query).expect("encodes");
+            assert_eq!(
+                serde_ipld_dagcbor::from_slice::<ConceptQuery>(&bytes).map_err(|e| e.to_string()),
+                Ok(query)
+            );
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
