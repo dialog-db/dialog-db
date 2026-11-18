@@ -1649,20 +1649,16 @@ mod tests {
     /// A deductive rule admits a `reduce` block: outside a dependency
     /// cycle a fold reads a relation derived in full, as an `unless`
     /// does, and a rule closing a cycle through one is quarantined by
-    /// the program analysis. The head is an integer: a sum over an
-    /// untyped input may be negative, which a natural head refuses.
+    /// the program analysis. The head is untyped: a sum over an untyped
+    /// input may be negative or fractional, which a natural or an
+    /// integer head refuses.
     #[dialog_common::test]
     fn it_admits_reduce_in_a_deductive_rule() {
         use crate::reduce::{Aggregator, ReduceSpec};
 
         let conclusion = ConceptDescriptor::try_from(vec![(
             "total",
-            AttributeDescriptor::new(
-                the!("org/total"),
-                "",
-                Cardinality::One,
-                Some(Type::SignedInt),
-            ),
+            AttributeDescriptor::new(the!("org/total"), "", Cardinality::One, None),
         )])
         .unwrap();
         let premises = vec![

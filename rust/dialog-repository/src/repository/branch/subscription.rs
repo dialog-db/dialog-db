@@ -3187,7 +3187,8 @@ mod tests {
     /// storable as a durable rule.
     fn dept_total_rule() -> dialog_query::DeductiveRule {
         use concepts::{DeptTotal, Staffed};
-        let clause = std::collections::BTreeMap::from([(
+        use std::collections::BTreeMap;
+        let clause = BTreeMap::from([(
             "total".to_string(),
             dialog_query::ReduceSpec {
                 apply: dialog_query::Aggregator::Sum,
@@ -3300,7 +3301,10 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        let delta = subscription.poll(&operator).await?.expect("a group emptied");
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("a group emptied");
         assert_eq!(totals(&delta.retracted), vec![(dept_b.clone(), 70)]);
         assert!(delta.asserted.is_empty(), "an empty group has no row");
         assert_eq!(totals(subscription.results()), vec![(dept_a.clone(), 100)]);
@@ -3367,7 +3371,10 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        let delta = subscription.poll(&operator).await?.expect("a row added below");
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("a row added below");
         assert_eq!(
             delta.retracted,
             vec![DeptReported {

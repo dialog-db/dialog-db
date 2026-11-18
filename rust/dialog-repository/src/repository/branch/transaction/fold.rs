@@ -80,7 +80,11 @@ async fn staff(branch: &Branch, operator: &Operator) -> Result<()> {
         let who: Entity = who.parse()?;
         let dept: Entity = dept.parse()?;
         transaction = transaction
-            .assert(dialog_query::the!("org.employee/dept").of(who.clone()).is(dept))
+            .assert(
+                dialog_query::the!("org.employee/dept")
+                    .of(who.clone())
+                    .is(dept),
+            )
             .assert(dialog_query::the!("org.employee/salary").of(who).is(salary));
     }
     transaction.commit().publish().perform(operator).await?;
@@ -106,8 +110,9 @@ async fn pairs(branch: &Branch, operator: &Operator, the: &str) -> Result<Vec<(E
         .map(|row| {
             // A sum narrows to the narrowest integer holding it, so a
             // positive total reads as a natural.
-            let value = match row.get::<Value>("value")? {
-                Value::SignedInt(n) => n,
+            let read = row.source().lookup(&Term::<Any>::var("value"))?.content()?;
+            let value = match read {
+                Value::SignedInt(n) => i64::try_from(n)?,
                 Value::UnsignedInt(n) => i64::try_from(n)?,
                 other => anyhow::bail!("an integer: {other:?}"),
             };
@@ -129,7 +134,11 @@ fn totals() -> Vec<(Entity, i64)> {
 
 /// What the payroll stores.
 fn salaries() -> Vec<(Entity, i64)> {
-    vec![(at("id:alice"), 100), (at("id:bob"), 50), (at("id:carol"), 7)]
+    vec![
+        (at("id:alice"), 100),
+        (at("id:bob"), 50),
+        (at("id:carol"), 7),
+    ]
 }
 
 /// The rules `branch` sets aside, read as `dialog.rule/quarantined`.
@@ -151,6 +160,17 @@ async fn quarantined(branch: &Branch, operator: &Operator) -> Result<Vec<Entity>
         .collect::<Result<_, _>>()?;
     rules.sort();
     Ok(rules)
+}
+
+/// The identity of the head of `rule` deriving `the`: what the analysis
+/// sets aside when it sets aside that part of a rule of several heads.
+fn head(rule: &DeductiveRule, the: &str) -> Result<Entity> {
+    let heads = rule.heads()?;
+    let head = heads
+        .iter()
+        .find(|head| head.field.the().to_string() == the)
+        .ok_or_else(|| anyhow::anyhow!("a head derives {the}"))?;
+    Ok(head.rule.this())
 }
 
 /// Commits `rules` on `branch` in one transaction, in the order given.
@@ -213,13 +233,15 @@ async fn it_installs_a_folding_rule_that_syncs_as_facts() -> Result<()> {
     };
     let decoded = DeductiveRule::decode(body).map_err(anyhow::Error::msg)?;
     assert_eq!(decoded.this(), fold.this());
-    let mut reduced: Vec<&str> = decoded
+    // The stored body is the canonical spelling, whose head fields are
+    // renamed by structure, so the folds are told apart by aggregator.
+    let mut reduced: Vec<String> = decoded
         .reduce()
         .iter()
-        .map(|entry| entry.field.as_str())
+        .map(|entry| format!("{:?}", entry.aggregator))
         .collect();
     reduced.sort();
-    assert_eq!(reduced, vec!["heads", "total"]);
+    assert_eq!(reduced, vec!["Count", "Sum"]);
     assert_eq!(pairs(&b, &operator, "org.dept/total").await?, totals());
     assert_eq!(quarantined(&b, &operator).await?, Vec::<Entity>::new());
     Ok(())
@@ -259,7 +281,10 @@ async fn it_sets_aside_the_feedback_committed_after_the_fold() -> Result<()> {
 }
 
 /// The feedback, then in a later commit the fold: the fold is the rule
-/// installed last, so it is set aside and nothing derives a total.
+/// installed last, so it is set aside and nothing derives a total. What
+/// is set aside is the fold's `org.dept/total` head, under the head's
+/// own identity, not the installed rule's: its `org.dept/heads` head
+/// closes no cycle and still counts.
 #[dialog_common::test]
 async fn it_sets_aside_the_fold_committed_after_the_feedback() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -269,7 +294,11 @@ async fn it_sets_aside_the_fold_committed_after_the_feedback() -> Result<()> {
     let fold = fold()?;
     install(&branch, &operator, &[&feedback()?]).await?;
     install(&branch, &operator, &[&fold]).await?;
-    assert_eq!(quarantined(&branch, &operator).await?, vec![fold.this()]);
+    assert_eq!(
+        quarantined(&branch, &operator).await?,
+        vec![head(&fold, "org.dept/total")?]
+    );
+    assert_ne!(head(&fold, "org.dept/total")?, fold.this());
     assert_eq!(
         pairs(&branch, &operator, "org.dept/total").await?,
         Vec::<(Entity, i64)>::new()
@@ -345,7 +374,7 @@ async fn it_sets_aside_the_same_rule_whichever_order_replicas_merge() -> Result<
     }
     assert_eq!(set_aside.len(), 1, "one rule is set aside: {set_aside:?}");
     assert!(
-        set_aside == vec![fold.this()] || set_aside == vec![feedback.this()],
+        set_aside == vec![head(&fold, "org.dept/total")?] || set_aside == vec![feedback.this()],
         "a rule of the cycle: {set_aside:?}"
     );
     assert_eq!(salary, salaries(), "nothing derives a salary either way");

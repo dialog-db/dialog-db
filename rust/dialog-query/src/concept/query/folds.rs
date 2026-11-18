@@ -356,9 +356,17 @@ async fn it_gives_readers_inside_and_outside_a_cycle_the_same_fold() -> anyhow::
         totals(),
         "the reader inside the cycle"
     );
+    // The same numbers, typed as the head of the rule that read them:
+    // a fold's output is narrowed per group (a natural here) and kept
+    // so through the fixpoint, while a plain rule outside the cycle
+    // binds it to its own `integer:` head. The same holds with no
+    // cycle at all (`it_reads_a_fold_from_another_rules_premise`).
     assert_eq!(
         pairs(&source, "org.dept/report", "integer:").await?,
-        totals(),
+        vec![
+            (at("id:dept-a"), Value::SignedInt(150)),
+            (at("id:dept-b"), Value::SignedInt(7)),
+        ],
         "the reader outside the cycle"
     );
     Ok(())
@@ -381,9 +389,11 @@ async fn it_folds_over_a_relation_a_cycle_derives_below_it() -> anyhow::Result<(
         transaction = transaction.assert(the!("org.unit/parent").of(unit).is(parent));
     }
     transaction.commit().publish().perform(&operator).await?;
-    let within = |field: &str| serde_json::json!({ "with": {
-        field: { "the": "org.unit/within", "as": "entity:", "pick": "all" }
-    }});
+    let within = |field: &str| {
+        serde_json::json!({ "with": {
+            field: { "the": "org.unit/within", "as": "entity:", "pick": "all" }
+        }})
+    };
     let step = compile(serde_json::json!({
         "deduce": within("within"),
         "when": [{
