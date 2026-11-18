@@ -42,7 +42,8 @@
 //! - `tree/node`: what the node is, and the format it was written under.
 //! - `tree/span`: an index node's children, with what the node holds
 //!   about each.
-//! - `tree/entry`: a segment node's entries, each whole.
+//! - `tree/entry`: a segment node's entries, each whole, or the
+//!   operations an index node buffers, each naming its span.
 //! - `tree/block`: the node's block as stored.
 //! - `tree/value`: a spilled value's bytes. Its handle is an `asset:`
 //!   entity, since a spilled value lives in the blob store, as every
@@ -236,10 +237,13 @@ accessor! {
 accessor! {
     /// The `tree/entry` resolver: one row per entry of a segment node,
     /// whole — its key, its state and claim, the value it spilled, and
-    /// the blob record it is when it is one. No rows for an index.
-    TreeEntryQuery, TREE_ENTRY_CELLS, of: "The segment node, as its `node:` entity.";
+    /// the blob record it is when it is one. For an index node, one row
+    /// per operation it buffers, naming the span it rides: writes headed
+    /// for a subtree that are not written down in it yet.
+    TreeEntryQuery, TREE_ENTRY_CELLS, of: "The node, as its `node:` entity.";
     entry => "entry": Entity, "The entry's own entity: this node and the entry's position in it.";
-    at => "at": UnsignedInt, "Position within the segment.";
+    at => "at": UnsignedInt, "Position within the segment, or among the index node's buffered operations.";
+    span => "span": Entity, "The span a buffered operation rides, as `tree/span` names it. Absent on a segment's entry.";
     key => "key": Bytes, "The entry's index key.";
     rank => "rank": UnsignedInt, "The key's leaf-coin rank: what decides whether a boundary forms after it.";
     state => "state": String, "`\"asserted\"` for a stored datum, `\"removed\"` for a tombstone.";
@@ -409,8 +413,8 @@ impl ResolverQuery {
     /// environment for the node ([`nodes::Read`], [`anywhere`] the scope
     /// reads), and project one output row per result. A node the
     /// environment cannot reach, a segment asked for spans, an index
-    /// asked for entries, and a handle that names no node all yield zero
-    /// rows.
+    /// with nothing buffered asked for entries, and a handle that names
+    /// no node all yield zero rows.
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         env: &'a Env,
@@ -555,6 +559,13 @@ impl ResolverQuery {
                             Some(Value::Entity(placed("entry", reference, entry.at)?)),
                         ),
                         (&query.at, unsigned(entry.at)),
+                        (
+                            &query.span,
+                            match entry.span {
+                                Some(at) => Some(Value::Entity(placed("span", reference, at)?)),
+                                None => None,
+                            },
+                        ),
                         (
                             &query.rank,
                             ranks
