@@ -267,26 +267,41 @@ enum Key {
     Encoded(Vec<u8>),
 }
 
-/// The text a borrowed view holds, when its bytes and a terminator are
-/// its encoding: the encoding escapes each zero byte (0x00 0xFF), so text
-/// holding one is compared by its encoding instead.
-fn raw<'a>(view: &ValueView<'a>) -> Option<&'a str> {
+/// The text a borrowed view holds.
+fn borrowed<'a>(view: &ValueView<'a>) -> Option<&'a str> {
     match view {
         ValueView::Entity(Cow::Borrowed(text))
         | ValueView::String(Cow::Borrowed(text))
-        | ValueView::Symbol(Cow::Borrowed(text))
-            if !text.as_bytes().contains(&0) =>
-        {
-            Some(text)
-        }
+        | ValueView::Symbol(Cow::Borrowed(text)) => Some(text),
         _ => None,
+    }
+}
+
+/// Whether a scanned view is compared by its raw bytes: a borrowed text
+/// whose bytes and a terminator are its encoding. The encoding escapes a
+/// zero byte (0x00 0xFF), so text holding one is compared by its encoding
+/// instead. Only a string can hold one: a scanned entity is a canonical
+/// URI (`Uri::check_stored`) and a symbol a relation name
+/// (`check_relation`), and both are refused with one. Decided once, when
+/// the key is made, not on every comparison.
+fn raw(view: &ValueView<'_>) -> bool {
+    match view {
+        ValueView::String(Cow::Borrowed(text)) => !text.as_bytes().contains(&0),
+        ValueView::Entity(Cow::Borrowed(text)) | ValueView::Symbol(Cow::Borrowed(text)) => {
+            debug_assert!(
+                !text.as_bytes().contains(&0),
+                "a validated name holds no zero byte"
+            );
+            true
+        }
+        _ => false,
     }
 }
 
 impl JoinKey {
     pub(crate) fn of(slot: &Slot) -> Option<JoinKey> {
         if let Slot::Scanned { row, part } = slot
-            && raw(&read(&row.row, *part)).is_some()
+            && raw(&read(&row.row, *part))
         {
             return Some(JoinKey(Key::Scanned(Arc::clone(row), *part)));
         }
@@ -300,8 +315,8 @@ impl JoinKey {
     fn bytes(&self) -> (&[u8], bool) {
         match &self.0 {
             Key::Scanned(row, part) => (
-                raw(&read(&row.row, *part))
-                    .expect("a scanned join key is read raw")
+                borrowed(&read(&row.row, *part))
+                    .expect("a scanned join key borrows")
                     .as_bytes(),
                 true,
             ),
