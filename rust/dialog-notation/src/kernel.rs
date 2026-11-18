@@ -391,7 +391,7 @@ pub(crate) fn read(node: &Syntax) -> Result<Read, Error> {
     })
 }
 
-fn premise(node: &Syntax) -> Result<Premise, Error> {
+pub(crate) fn premise(node: &Syntax) -> Result<Premise, Error> {
     if node.is_read() {
         Ok(Premise::Read(read(node)?))
     } else if node.is_formula() {

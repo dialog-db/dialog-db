@@ -24,6 +24,8 @@ use dialog_corpus::Value;
 use crate::Error;
 use crate::syntax::Syntax;
 
+pub mod plan;
+
 /// A view: the concept it renders, its name, the variable that is the
 /// entity rendered, its template and its conditions.
 #[derive(Clone, Debug, PartialEq)]
@@ -39,6 +41,10 @@ pub struct View {
     /// The conditions, as kernel premises. `(unless …)` stands among
     /// them as it does in a rule.
     pub conditions: Vec<Syntax>,
+    /// What makes the entity rendered an instance of the concept: the
+    /// concept applied to it alone, as kernel premises. Empty where the
+    /// kernel form says none.
+    pub instance: Vec<Syntax>,
 }
 
 /// A part of a template.
@@ -167,12 +173,22 @@ impl View {
             Syntax::Variable(name) => name.clone(),
             other => return Err(refused(format!("{other} is not the variable of an entity"))),
         };
+        let instance = match operand.terms.get("instance") {
+            Some(Syntax::Tuple(premises)) => premises.clone(),
+            Some(other) => {
+                return Err(refused(format!(
+                    "{other} is not the premises that make an entity an instance"
+                )));
+            }
+            None => Vec::new(),
+        };
         Ok(View {
             concept,
             name,
             entity,
             template: node(at("template")?)?,
             conditions: operand.items.clone(),
+            instance,
         })
     }
 

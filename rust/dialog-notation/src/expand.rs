@@ -1546,6 +1546,24 @@ impl Expander {
         if !clauses.unless.is_empty() {
             premises.push(apply("unless", clauses.unless.clone()));
         }
+        // What makes the entity rendered an instance of the concept: the
+        // concept applied to it alone, every field left out and so still
+        // required. A back end that keeps the view's root while this
+        // holds needs it apart from the conditions.
+        let instance = self.top(Syntax::Application(
+            Box::new(Syntax::Reference("rule".into())),
+            Parameters {
+                items: vec![
+                    apply("view.rendered", vec![entity.clone()]),
+                    apply(concept_name, vec![entity.clone()]),
+                ],
+                ..Parameters::default()
+            },
+        ))?;
+        let instance = match instance.as_slice() {
+            [rule] => Clauses::of(rule).when,
+            _ => Vec::new(),
+        };
         let described = Syntax::Application(
             Box::new(Syntax::Reference("view".into())),
             Parameters {
@@ -1555,6 +1573,7 @@ impl Expander {
                     ("name".into(), name.clone()),
                     ("entity".into(), entity),
                     ("template".into(), template.clone()),
+                    ("instance".into(), Syntax::Tuple(instance)),
                 ]),
             },
         );

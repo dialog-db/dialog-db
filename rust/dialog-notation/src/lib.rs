@@ -77,6 +77,7 @@ pub use form::{Form, Part, read};
 pub use parse::{Parsed, parse, parse_document, parse_written};
 pub use print::print;
 pub use syntax::{Parameters, Signature, Syntax};
+pub use view::plan::{Case, Condition, Layer, Place, Placed, Plan, Why};
 pub use view::{Attribute, Element, Event, Input, Nested, Node, Piece, View};
 pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};
 

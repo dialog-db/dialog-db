@@ -245,6 +245,28 @@ pub struct Query {
 }
 
 impl Query {
+    /// A match, as each field the query reports, by its label, and the
+    /// value it was bound to. A field that is an entry of a collection
+    /// is said under its label, not its key.
+    pub fn values(&self, conclusion: &ConceptConclusion) -> Result<BTreeMap<String, Value>, Error> {
+        let value = |slot: &Slot| match slot {
+            Slot::Is(Syntax::Constant(value)) => Ok(value.clone()),
+            Slot::Is(other) => Err(Error::Refused(format!("{other} is not a value"))),
+            Slot::Bound(name) => conclusion
+                .source()
+                .lookup(&Variable::<Any>::var(name.as_str()))
+                .and_then(|binding| binding.content())
+                .map_err(|error| Error::Refused(format!("a match binds no {name}: {error}"))),
+            Slot::Built(pattern) => pattern
+                .build(conclusion.source())
+                .ok_or_else(|| Error::Refused("a match leaves a part of a struct unbound".into())),
+        };
+        self.fields
+            .iter()
+            .map(|(label, _, slot)| Ok((label.clone(), value(slot)?)))
+            .collect()
+    }
+
     /// A match, as the head the query reports with its variables
     /// replaced by what they were bound to.
     pub fn row(&self, conclusion: &ConceptConclusion) -> Result<Syntax, Error> {
