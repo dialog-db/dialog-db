@@ -664,30 +664,36 @@ async fn it_reads_the_entity_of_the_command_that_fired() -> Result<()> {
     Ok(())
 }
 
-/// A view is a description for a back end that renders it, and the
-/// Dialog-DB back end refuses it, pointing at #830: nothing of a
-/// document that holds one is written. The description is read from
-/// the analyzed tree.
+/// A view compiles to its plan, which nothing writes: a document that
+/// holds one is written, its view left to whoever renders it. The
+/// description is read from the analyzed tree.
 #[dialog_common::test]
-async fn it_refuses_a_view_on_a_branch_and_describes_it() -> Result<()> {
+async fn it_compiles_a_view_to_its_plan_and_describes_it() -> Result<()> {
     let document = r#"(concept (todo ?t title: ?title)
                         (xyz.todo/title of: ?t is: ?title as: :text cardinality: :one))
                       (assert (todo todo:1 title: "Buy milk"))
                       (view todo :row [:li ?title] (todo ?t title: ?title))"#;
     let mut notebook = Notebook::open().await?;
-    let refused = notebook
-        .submit(document)
-        .await
-        .map_err(|error| error.downcast::<Error>());
-    assert!(
-        matches!(&refused, Err(Ok(Error::Unsupported(why))) if why.contains("#830")),
-        "{refused:?}"
+    let (_, diagnostics) = notebook.submit(document).await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.todo ?t title: ?x))").await?,
+        vec![r#"(xyz.todo todo:1 title: "Buy milk")"#]
     );
-    assert!(
-        report(&mut notebook, "(query (xyz.todo ?t title: ?x))")
-            .await?
-            .is_empty()
-    );
+    let checked = dialog_notation::check(&mut dialog_notation::Analyzer::new()?, document);
+    let plans: Vec<&dialog_notation::Plan> = checked
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            dialog_notation::Step::View(plan) => Some(&**plan),
+            _ => None,
+        })
+        .collect();
+    let [plan] = plans.as_slice() else {
+        panic!("one view: {:?}", checked.steps);
+    };
+    assert_eq!((plan.concept.as_str(), plan.name.as_str()), ("todo", "row"));
+    assert_eq!(plan.layers.len(), 1);
     let analysis = dialog_notation::Analyzer::new()?.analyze(&dialog_notation::parse(document)?);
     let view = analysis
         .analyzed
@@ -2304,8 +2310,9 @@ async fn it_refuses_and_says_what_is_not_supported() -> Result<()> {
 
 /// How far tonk's notebook, written in the notation as designed, gets:
 /// every form read, how many expand and compile, and how many views reach
-/// a description, which Dialog-DB's compiler refuses. A step that moves
-/// these numbers moves them here on purpose.
+/// a description. A view compiles to its plan when every layer's query
+/// does, and each of the notebook's does. A step that moves these numbers
+/// moves them here on purpose.
 #[dialog_common::test]
 async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
     let measured = bar::Bar::of(include_str!("../sketches/notebook.clj"))?;
@@ -2328,7 +2335,7 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
             measured.compiled,
             measured.described
         ),
-        (56, 56, 53, 48, 5),
+        (56, 56, 53, 53, 5),
         "{groups:#?}"
     );
     // With core in front, as tonk reads a component, the concepts the
@@ -2345,14 +2352,15 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
             joined.compiled,
             joined.described
         ),
-        (60, 60, 60, 55, 5)
+        (60, 60, 60, 60, 5)
     );
     Ok(())
 }
 
 /// How far tonk's table gets, read after core as tonk reads a component:
-/// a second document, against a build fitted to the notebook. A step that
-/// moves these numbers moves them here on purpose.
+/// a second document, against a build fitted to the notebook. Its six
+/// views compile to their plans. A step that moves these numbers moves
+/// them here on purpose.
 #[dialog_common::test]
 async fn it_measures_how_far_the_table_gets() -> Result<()> {
     let measured = bar::Bar::of_all(&[
@@ -2378,14 +2386,14 @@ async fn it_measures_how_far_the_table_gets() -> Result<()> {
             measured.compiled,
             measured.described
         ),
-        (54, 54, 54, 48, 6),
+        (54, 54, 54, 54, 6),
         "{groups:#?}"
     );
     Ok(())
 }
 
-/// The table's own forms, its views left out, since a document holding a
-/// view is refused whole (#830).
+/// The table's own forms, its views left out: what is run on a branch
+/// is the rules, and nothing of a view is written.
 fn the_table_without_its_views() -> Result<String> {
     let forms = dialog_notation::read(include_str!("../sketches/table.clj"))?;
     Ok(forms

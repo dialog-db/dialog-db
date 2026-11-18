@@ -102,6 +102,9 @@ impl Notebook {
                         continue;
                     }
                     Step::Write(_) => continue,
+                    // A view is maintained where it is rendered, from its
+                    // layers' queries: nothing of it is written.
+                    Step::View(_) => continue,
                 };
                 writes = true;
             }

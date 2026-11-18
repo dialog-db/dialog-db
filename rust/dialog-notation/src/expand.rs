@@ -2079,16 +2079,19 @@ mod tests {
         );
         assert_eq!(described.nested()[0].view, "row");
         assert_eq!(described.nested()[0].of.as_deref(), Some("t"));
-        // The Dialog-DB back end has no form for it.
+        // The Dialog-DB back end gives it as its plan: one layer, the
+        // item's, told apart by the to-do.
         let kernel = expanded(
             VIEWS,
             "(view todo :row [:li ?title] (todo ?t title: ?title))",
         )
         .unwrap();
-        assert!(matches!(
-            crate::compile(&parse(&kernel[0]).unwrap().remove(0)),
-            Err(Error::Unsupported(why)) if why.contains("#830")
-        ));
+        let steps = crate::compile(&parse(&kernel[0]).unwrap().remove(0)).unwrap();
+        let [crate::compile::Step::View(plan)] = steps.as_slice() else {
+            panic!("a view's plan: {steps:?}");
+        };
+        assert_eq!(plan.layers.len(), 1);
+        assert_eq!(plan.elements[0].key, ["t"]);
     }
 
     /// What a view's template may not say is refused where the view is

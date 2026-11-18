@@ -16,6 +16,7 @@
 //! | `(report A)` with one read as its premise | a [`ConceptQuery`] |
 //! | `(report A)` with any other premises | a [`DeductiveRule`] deriving the report, and a [`ConceptQuery`] of it |
 //! | `description: "…"` on a rule Dialog-DB keeps | a [`ConceptStatement`] asserting `syntax.meta/description` of the rule's entity |
+//! | `(view …)` | a [`Plan`](crate::Plan): its layers, each a query of its own, that a back end maintains it by; nothing written |
 //!
 //! A kernel rule has one head, as a Dialog-DB rule has. What Dialog-DB
 //! has no counterpart for comes back as [`Error::Unsupported`], never as
@@ -60,6 +61,9 @@ pub enum Step {
     /// A write to make once, of every match of its `when`: a write at
     /// the top level, never installed.
     Write(Box<Write>),
+    /// A view: the plan a back end maintains it by, every layer's query
+    /// compiled. Nothing of it is written to a branch.
+    View(Box<crate::view::plan::Plan>),
 }
 
 /// A write at the top level with a `when`: what its `when` matches, and
@@ -363,16 +367,27 @@ pub const DESCRIBED: &str = "syntax.meta";
 /// Compile an analyzed tree: the third phase, from a rule of the
 /// kernel to what Dialog-DB runs.
 pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
-    // A view is a description for a back end that renders it. Dialog-DB
-    // has no form for one: as designed it is a rule that folds into its
-    // value, and where a computed value lives is #830's question.
+    // A view is not a rule. It is laid out in layers, each a query of
+    // its own, and maintained where it is rendered: nothing of it is
+    // folded, and nothing of it is written. It compiles when every
+    // layer's query does.
     if form.applies() == Some("view") {
         let view = crate::view::View::describe(form)?;
-        return Err(Error::Unsupported(format!(
-            "the view {} :{} is a description, read by `View::describe`; Dialog-DB has no form \
-             for a view, which as designed is a rule that folds into its value (#830)",
-            view.concept, view.name
-        )));
+        let plan = crate::view::plan::Plan::of(&view)?;
+        for layer in 0..plan.layers.len() {
+            let said = |why: String| {
+                format!(
+                    "the view {} :{}, layer {layer}: {why}",
+                    view.concept, view.name
+                )
+            };
+            plan.query(layer, None).map_err(|error| match error {
+                Error::Refused(why) => Error::Refused(said(why)),
+                Error::Unsupported(why) => Error::Unsupported(said(why)),
+                other => other,
+            })?;
+        }
+        return Ok(vec![Step::View(Box::new(plan))]);
     }
     let rule = retracted(Rule::parse(form)?, form)?;
     if rule.once {

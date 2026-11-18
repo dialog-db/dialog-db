@@ -14,10 +14,15 @@
 //! [`View::describe`] reads that form into data. Nothing in it is a
 //! Dialog-DB rule: the conditions are kernel premises, and the
 //! template is elements, attributes, text, variables, events and
-//! nested views. A back end lowers it to whatever it renders. The
-//! Dialog-DB back end, [`compile`](crate::compile()), refuses it: as
-//! designed a view is a rule that folds into its value, which is the
-//! question of #830.
+//! nested views. A back end lowers it to whatever it renders.
+//!
+//! [`plan`] lays it out in layers: each element of the template that
+//! holds variables takes the conditions that bind them, given what the
+//! elements above it bound, and each layer is a query of its own.
+//! [`tree`] keeps the instances of the elements from the rows of those
+//! queries as they come and go, and says each change as patches. No
+//! value is folded. The Dialog-DB back end,
+//! [`compile`](crate::compile()), gives a view as its plan.
 
 use dialog_corpus::Value;
 
