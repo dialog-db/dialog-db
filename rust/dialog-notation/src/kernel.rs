@@ -349,7 +349,7 @@ fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
     })
 }
 
-fn read(node: &Syntax) -> Result<Read, Error> {
+pub(crate) fn read(node: &Syntax) -> Result<Read, Error> {
     let (Some(domain), Some(operand), true) = (node.applies(), node.operand(), node.is_read())
     else {
         return Err(Error::Refused(format!("{node} applies no relation")));

@@ -1513,6 +1513,14 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** Nothing beyond the sketch. The bar, read / expanded / compiled / described: before, the notebook alone 56 / 52 / 47 / 5, of 56, with core 60 / 59 / 54 / 5, of 60; after, 56 / 53 / 48 / 5 and 60 / 60 / 55 / 5. With core every form expands, and what does not compile is the five views.
 
+## 2026-11-18, Building: what a back end reads, form by form
+
+**Asked.** Step W, additive to what `Checked` gives a back end: each line's label and attribute descriptor, the form each declaration and step came of, and a way to check a document form by form, so that one refused form does not empty the rest. The tonk test reimplemented the loop and copied `described` to get this.
+
+**Learned.** A line's descriptor is what `attribute` in `compile.rs` writes for the kernel field the line reads as, which is the descriptor a concept's read holds under that field's label. A line's label is the head's label whose variable is the line's value; a key's is the head's label whose variable is the key. The expander already keeps every form it can expand when another is refused, and says the way to the refused one; only `Analyzer::analyze` and `check` threw that away. Dialog-DB's `AttributeDescriptor` has no setter for a description, so a line's descriptor carries none; that is dialog-query's to add.
+
+**Decided.** Built, all additive. `Line::label`, `Line::descriptor` and `Key::label`; `Checked::declaration_forms` and `Checked::step_forms`, parallel to `declarations` and `steps`, so `Declaration` keeps its shape; `check_forms` beside `check`, with `Analyzer::analyze_forms` under it. Through `check_forms` every step and analyzed tree carries its description, so a back end has no need of `described`. `check` is as it was, and fills the two new vectors too. The bar is unchanged: 56 / 53 / 48 / 5 and 60 / 60 / 55 / 5.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

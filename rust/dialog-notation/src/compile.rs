@@ -704,6 +704,12 @@ fn collection(field: &Field) -> Option<(&str, &'static str)> {
     ))
 }
 
+/// The descriptor of the attribute a field reads or writes, as Dialog-DB
+/// reads it.
+pub(crate) fn descriptor(field: &Field) -> Result<AttributeDescriptor, Error> {
+    serde_json::from_value(attribute(field)).map_err(|error| refused("the attribute", error))
+}
+
 /// The attribute a field reads or writes. With no pick written the
 /// field holds every value: it is a relation, and a relation is a set.
 /// A field that is every entry of a collection reads the collection.

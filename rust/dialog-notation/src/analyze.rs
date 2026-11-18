@@ -80,6 +80,20 @@ impl Analyzer {
         self.expander = trial;
         analysis
     }
+
+    /// Analyze `trees` form by form. A form that is refused gives no
+    /// analyzed tree, and every other form gives its own; each refusal
+    /// says the way to the form it is about. What the forms define is
+    /// kept, so the analyzer is not left as it was when a form is
+    /// refused, as it is by [`analyze`](Self::analyze).
+    pub fn analyze_forms(&mut self, trees: &[Syntax]) -> Analysis {
+        let (analyzed, diagnostics) = self.expander.check(trees.to_vec());
+        Analysis {
+            analyzed,
+            origin: self.expander.origin().to_vec(),
+            diagnostics,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -68,7 +68,7 @@ pub mod view;
 pub mod written;
 
 pub use analyze::{Analysis, Analyzer};
-pub use check::{Checked, check};
+pub use check::{Checked, check, check_forms};
 pub use compile::{Query, Step, Write, compile};
 pub use declare::{Concept, Declaration, Key, Line};
 pub use diagnostic::{Diagnostic, Severity};

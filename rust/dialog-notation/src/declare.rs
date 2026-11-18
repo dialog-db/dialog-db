@@ -6,7 +6,7 @@
 //! above each, and the Dialog-DB descriptor a read of it compiles to;
 //! and each view, as [`View`] describes it.
 
-use dialog_query::ConceptDescriptor;
+use dialog_query::{AttributeDescriptor, ConceptDescriptor};
 
 use crate::analyze::Analyzer;
 use crate::compile::{Step, compile};
@@ -70,6 +70,13 @@ pub struct Line {
     pub key: Option<Key>,
     /// What the comment right above the line says.
     pub description: Option<String>,
+    /// The label the concept's head gives the line's value, `title` for
+    /// `(todo ?t title: ?x)` over `(xyz.todo/title of: ?t is: ?x)`: the
+    /// name a field goes by. None where the value is no head field.
+    pub label: Option<String>,
+    /// The attribute descriptor the line compiles to, as Dialog-DB reads
+    /// it.
+    pub descriptor: Option<AttributeDescriptor>,
 }
 
 /// The key of a line over a collection.
@@ -79,6 +86,9 @@ pub struct Key {
     pub term: Syntax,
     /// What a key is, `by:`: `name` or `position`.
     pub by: String,
+    /// The label the concept's head gives the key, where it is a head
+    /// field.
+    pub label: Option<String>,
 }
 
 /// What the comments right above the node at `path` say.
@@ -119,6 +129,7 @@ fn lines(part: &Syntax, description: Option<String>) -> Vec<Line> {
                     None => Syntax::Constant(dialog_corpus::Value::String(field.to_string())),
                 },
                 by,
+                label: None,
             }
         });
         return vec![Line {
@@ -130,6 +141,8 @@ fn lines(part: &Syntax, description: Option<String>) -> Vec<Line> {
             layer: keyword(operand.terms.get("in")),
             key,
             description,
+            label: None,
+            descriptor: None,
         }];
     }
     // A read, `(xyz.todo ?t title: (:last (:text ?x)))`: a line a field,
@@ -152,6 +165,8 @@ fn lines(part: &Syntax, description: Option<String>) -> Vec<Line> {
                 layer: None,
                 key: None,
                 description: description.clone(),
+                label: None,
+                descriptor: None,
             };
             let mut node = term;
             while let Syntax::Application(operator, Parameters { items, terms }) = node {
@@ -198,16 +213,43 @@ pub(crate) fn concept(
         Some(Syntax::Variable(variable)) => Some(variable.clone()),
         _ => None,
     };
-    let lines: Vec<Line> = body
+    let mut lines: Vec<Line> = body
         .iter()
         .enumerate()
         .flat_map(|(index, part)| {
-            lines(
+            let mut lines = lines(
                 part,
                 said(written, &[Segment::Item(at), Segment::Item(index + 1)]),
-            )
+            );
+            // The descriptor each line compiles to: the kernel read the
+            // part is, a field a line.
+            let read = match crate::expand::line(part) {
+                Ok(Some(read)) => Some(read),
+                Ok(None) if part.is_read() => Some(part.clone()),
+                _ => None,
+            };
+            if let Some(read) = read.and_then(|read| crate::kernel::read(&read).ok())
+                && read.fields.len() == lines.len()
+            {
+                for (line, field) in lines.iter_mut().zip(&read.fields) {
+                    line.descriptor = crate::compile::descriptor(field).ok();
+                }
+            }
+            lines
         })
         .collect();
+    // The label the head gives each line's value and key.
+    let labelled = |term: &Syntax| {
+        head_operand.terms.iter().find_map(|(label, field)| {
+            (field == term && matches!(term, Syntax::Variable(_))).then(|| label.clone())
+        })
+    };
+    for line in &mut lines {
+        line.label = labelled(&line.is);
+        if let Some(key) = &mut line.key {
+            key.label = labelled(&key.term);
+        }
+    }
     let command = entity.is_none()
         && !lines.is_empty()
         && lines

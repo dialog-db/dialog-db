@@ -159,7 +159,7 @@ fn wrap(word: &str, inner: Syntax) -> Result<Syntax, Error> {
 /// is the layer, and the one taken is a command's, `:control`.
 ///
 /// `None` when `tree` applies no attribute.
-fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
+pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
     let Syntax::Application(operator, operand) = tree else {
         return Ok(None);
     };

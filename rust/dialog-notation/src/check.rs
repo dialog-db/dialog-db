@@ -7,6 +7,8 @@
 
 use crate::Syntax;
 use crate::analyze::Analyzer;
+use std::collections::BTreeSet;
+
 use crate::compile::{Step, compile};
 use crate::declare::{self, Declaration};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -24,11 +26,16 @@ pub struct Checked {
     /// What the analyzed trees compile to, in the order written.
     /// Nothing when any part of the document is refused.
     pub steps: Vec<Step>,
+    /// For each of `steps`, the top-level form it came of, counted from
+    /// 0 among the forms read.
+    pub step_forms: Vec<usize>,
     /// What the document declares, in the order written: its concepts
     /// and commands, and its views. Given whenever analysis refused
     /// nothing, whatever Dialog-DB's compiler refuses, so a back end
     /// that renders a view still reads it.
     pub declarations: Vec<Declaration>,
+    /// For each of `declarations`, the top-level form it came of.
+    pub declaration_forms: Vec<usize>,
     /// What the trees of the document leave out of its text.
     pub written: Written,
     /// Everything there is to say about the document, each with where
@@ -43,6 +50,54 @@ impl Checked {
             .iter()
             .filter(|diagnostic| diagnostic.severity() == Severity::Error)
     }
+
+    fn of(parsed: crate::parse::Parsed) -> (Checked, Vec<Syntax>) {
+        (
+            Checked {
+                analyzed: Vec::new(),
+                steps: Vec::new(),
+                step_forms: Vec::new(),
+                declarations: Vec::new(),
+                declaration_forms: Vec::new(),
+                written: parsed.written,
+                diagnostics: parsed.diagnostics,
+            },
+            parsed.trees,
+        )
+    }
+
+    /// The declarations of the forms `trees` analyzed to, a form in
+    /// `refused` left out.
+    fn declare(
+        &mut self,
+        trees: &[Syntax],
+        analysis: &crate::analyze::Analysis,
+        analyzer: &Analyzer,
+        refused: &BTreeSet<usize>,
+    ) {
+        let mut declared: Vec<(usize, Declaration)> = Vec::new();
+        for (at, tree) in trees.iter().enumerate() {
+            if tree.applies() == Some("concept")
+                && !refused.contains(&at)
+                && let Some(concept) = declare::concept(tree, at, &self.written, analyzer)
+            {
+                declared.push((at, Declaration::Concept(concept)));
+            }
+        }
+        for (analyzed, origin) in analysis.analyzed.iter().zip(&analysis.origin) {
+            if analyzed.applies() == Some("view")
+                && !refused.contains(origin)
+                && let Some(view) = declare::view(analyzed, *origin, &self.written)
+            {
+                declared.push((*origin, view));
+            }
+        }
+        declared.sort_by_key(|(at, _)| *at);
+        for (at, declaration) in declared {
+            self.declaration_forms.push(at);
+            self.declarations.push(declaration);
+        }
+    }
 }
 
 /// Parse, analyze and compile `text`, with the definitions `analyzer`
@@ -51,53 +106,35 @@ impl Checked {
 /// A later phase runs when the one before it refused nothing, so a
 /// refusal is not followed by the refusals it causes downstream. A
 /// document with a refusal in it is refused whole: it compiles to
-/// nothing, and `analyzer` keeps none of its definitions.
+/// nothing, and `analyzer` keeps none of its definitions. To check it
+/// form by form, see [`check_forms`].
 pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
-    let parsed = parse_document(text);
-    let mut checked = Checked {
-        analyzed: Vec::new(),
-        steps: Vec::new(),
-        declarations: Vec::new(),
-        written: parsed.written,
-        diagnostics: parsed.diagnostics,
-    };
+    let (mut checked, trees) = Checked::of(parse_document(text));
     if checked.refusals().next().is_some() {
         return checked;
     }
     let mut trial = analyzer.clone();
-    let analysis = trial.analyze(&parsed.trees);
-    checked.diagnostics = analysis.diagnostics;
+    let analysis = trial.analyze(&trees);
+    checked.diagnostics = analysis.diagnostics.clone();
     if checked.refusals().next().is_none() {
-        let mut declared: Vec<(usize, Declaration)> = Vec::new();
-        for (at, tree) in parsed.trees.iter().enumerate() {
-            if tree.applies() == Some("concept")
-                && let Some(concept) = declare::concept(tree, at, &checked.written, &trial)
-            {
-                declared.push((at, Declaration::Concept(concept)));
-            }
-        }
-        for (analyzed, origin) in analysis.analyzed.iter().zip(&analysis.origin) {
-            if analyzed.applies() == Some("view")
-                && let Some(view) = declare::view(analyzed, *origin, &checked.written)
-            {
-                declared.push((*origin, view));
-            }
-        }
-        declared.sort_by_key(|(at, _)| *at);
-        checked.declarations = declared.into_iter().map(|(_, declared)| declared).collect();
+        checked.declare(&trees, &analysis, &trial, &BTreeSet::new());
     }
     let mut steps = Vec::new();
-    let mut trees = Vec::new();
-    for (analyzed, origin) in analysis.analyzed.iter().zip(&analysis.origin) {
-        let analyzed = described(analyzed, &checked.written, *origin);
-        let compiled = compile(&analyzed);
-        trees.push(analyzed);
+    let mut forms = Vec::new();
+    let mut analyzed = Vec::new();
+    for (tree, origin) in analysis.analyzed.iter().zip(&analysis.origin) {
+        let tree = described(tree, &checked.written, *origin);
+        let compiled = compile(&tree);
+        analyzed.push(tree);
         match compiled {
-            Ok(compiled) => steps.extend(compiled),
+            Ok(compiled) => {
+                forms.extend(std::iter::repeat_n(*origin, compiled.len()));
+                steps.extend(compiled);
+            }
             // What the compiler refuses is said of the tree the rule
             // came of: nothing yet says which part of it.
             Err(error) => checked.diagnostics.push(Diagnostic::refused(
-                parsed.trees.get(*origin).cloned(),
+                trees.get(*origin).cloned(),
                 vec![Segment::Item(*origin)],
                 error,
             )),
@@ -107,9 +144,67 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
         diagnostic.span = diagnostic.place(&checked.written);
     }
     if checked.refusals().next().is_none() {
-        checked.analyzed = trees;
+        checked.analyzed = analyzed;
         checked.steps = steps;
+        checked.step_forms = forms;
         *analyzer = trial;
+    }
+    checked
+}
+
+/// Parse, analyze and compile `text` form by form, with the definitions
+/// `analyzer` has been given. A form that is refused, by whichever
+/// phase, gives no tree, no step and no declaration, and every other
+/// form gives its own; each refusal says which form it is about, by its
+/// way and its place in the text. `analyzer` keeps the definitions of
+/// the forms that were not refused.
+///
+/// A form the reader cannot read is no form: the forms after it are
+/// counted from where it would have been.
+pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
+    let (mut checked, trees) = Checked::of(parse_document(text));
+    let analysis = analyzer.analyze_forms(&trees);
+    checked
+        .diagnostics
+        .extend(analysis.diagnostics.iter().cloned());
+    let mut refused: BTreeSet<usize> = analysis
+        .refusals()
+        .filter_map(|refusal| match refusal.path.first() {
+            Some(Segment::Item(at)) => Some(*at),
+            _ => None,
+        })
+        .collect();
+    checked.declare(&trees, &analysis, analyzer, &refused);
+    let mut compiled: Vec<(usize, Syntax, Vec<Step>)> = Vec::new();
+    for (tree, origin) in analysis.analyzed.iter().zip(&analysis.origin) {
+        if refused.contains(origin) {
+            continue;
+        }
+        let tree = described(tree, &checked.written, *origin);
+        match compile(&tree) {
+            Ok(steps) => compiled.push((*origin, tree, steps)),
+            Err(error) => {
+                refused.insert(*origin);
+                checked.diagnostics.push(Diagnostic::refused(
+                    trees.get(*origin).cloned(),
+                    vec![Segment::Item(*origin)],
+                    error,
+                ));
+            }
+        }
+    }
+    for (origin, tree, steps) in compiled {
+        if refused.contains(&origin) {
+            continue;
+        }
+        checked.analyzed.push(tree);
+        checked
+            .step_forms
+            .extend(std::iter::repeat_n(origin, steps.len()));
+        checked.steps.extend(steps);
+    }
+    for diagnostic in &mut checked.diagnostics {
+        diagnostic.span = diagnostic.place(&checked.written);
     }
     checked
 }
@@ -358,6 +453,140 @@ mod tests {
                 .and_then(|refused| refused.refusal.as_ref()),
             Some(Error::Unknown(_))
         ));
+        Ok(())
+    }
+
+    const LIST: &str = "(concept (todo ?t text: ?x list: ?l)
+  (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
+  (xyz.todo ?t list: (:last ?l)))
+
+(concept (list ?l at: ?k item: ?i)
+  (xyz.list/?k of: ?l is: ?i by: :position))
+";
+
+    /// The `the:` of a line's descriptor, as Dialog-DB writes it.
+    fn the(line: &crate::declare::Line) -> serde_json::Value {
+        let descriptor = line.descriptor.as_ref().expect("a descriptor");
+        serde_json::to_value(descriptor).expect("a descriptor writes")["the"].clone()
+    }
+
+    /// A line gives the label its value goes by in the concept's head,
+    /// and the attribute descriptor it compiles to, a line written as a
+    /// read's field and one over a collection alike.
+    #[dialog_common::test]
+    fn it_gives_each_line_its_label_and_its_descriptor() -> Result<(), Error> {
+        let checked = check(&mut Analyzer::new()?, LIST);
+        assert_eq!(checked.diagnostics, Vec::new());
+        let [Declaration::Concept(todo), Declaration::Concept(list)] =
+            checked.declarations.as_slice()
+        else {
+            panic!("two concepts: {:?}", checked.declarations);
+        };
+        let labels: Vec<Option<&str>> = todo
+            .lines
+            .iter()
+            .map(|line| line.label.as_deref())
+            .collect();
+        assert_eq!(labels, vec![Some("text"), Some("list")]);
+        assert_eq!(the(&todo.lines[0]), serde_json::json!("xyz.todo/text"));
+        assert_eq!(the(&todo.lines[1]), serde_json::json!("xyz.todo/list"));
+        let [entries] = list.lines.as_slice() else {
+            panic!("one line: {:?}", list.lines);
+        };
+        assert_eq!(entries.label.as_deref(), Some("item"));
+        assert_eq!(
+            entries.key.as_ref().and_then(|key| key.label.as_deref()),
+            Some("at")
+        );
+        assert_eq!(the(entries)["domain"], serde_json::json!("xyz.list"));
+        Ok(())
+    }
+
+    /// Each declaration and each step says the top-level form it came
+    /// of, counted from 0.
+    #[dialog_common::test]
+    fn it_says_which_form_each_declaration_and_step_came_of() -> Result<(), Error> {
+        let text = format!(
+            "{LIST}
+(assert (todo todo:1 text: \"milk\" list: list:1))
+
+; What is on a list.
+(rule (xyz.listed ?t text: ?x) (todo ?t text: ?x list: ?l))
+"
+        );
+        let checked = check(&mut Analyzer::new()?, &text);
+        assert_eq!(checked.refusals().count(), 0);
+        assert_eq!(checked.declaration_forms, vec![0, 1]);
+        assert_eq!(checked.step_forms.len(), checked.steps.len());
+        assert!(matches!(checked.steps.first(), Some(Step::Assert(_))));
+        assert_eq!(checked.step_forms.first(), Some(&2));
+        // The rule, and the description kept of it.
+        assert!(checked.step_forms[1..].iter().all(|at| *at == 3));
+        assert!(checked.step_forms.len() > 2);
+        Ok(())
+    }
+
+    /// Checked form by form, a document with a refused form still gives
+    /// what its other forms declare and compile to, and the refusal says
+    /// which form it is, by its way and its place. `check` refuses the
+    /// same document whole.
+    #[dialog_common::test]
+    fn it_checks_a_document_form_by_form() -> Result<(), Error> {
+        let text = format!(
+            "{LIST}
+(rule (xyz.lost ?t) (nowhere ?t))
+
+; What is on a list.
+(rule (xyz.listed ?t text: ?x) (todo ?t text: ?x list: ?l))
+"
+        );
+        let whole = check(&mut Analyzer::new()?, &text);
+        assert!(whole.refusals().count() > 0);
+        assert!(whole.steps.is_empty());
+
+        let mut analyzer = Analyzer::new()?;
+        let checked = check_forms(&mut analyzer, &text);
+        let [refusal] = checked.refusals().collect::<Vec<_>>()[..] else {
+            panic!("one refusal: {:?}", checked.diagnostics);
+        };
+        assert!(matches!(refusal.refusal, Some(Error::Unknown(_))));
+        assert_eq!(refusal.path.first(), Some(&Segment::Item(2)));
+        assert_eq!(started(refusal).0, 7);
+        assert_eq!(checked.declaration_forms, vec![0, 1]);
+        assert!(!checked.steps.is_empty());
+        assert!(checked.step_forms.iter().all(|at| *at == 3));
+        // The steps carry the rule's description, as `check` gives it.
+        assert!(
+            checked
+                .steps
+                .iter()
+                .any(|step| matches!(step, Step::Assert(_)))
+        );
+        assert_eq!(checked.analyzed.len(), 1);
+        // The analyzer keeps what the other forms defined.
+        let after = check(&mut analyzer, "(query (todo ?t text: ?x list: ?l))");
+        assert_eq!(after.refusals().count(), 0);
+        Ok(())
+    }
+
+    /// A form the compiler refuses drops only its own steps; what it
+    /// declares is still given.
+    #[dialog_common::test]
+    fn it_keeps_the_other_forms_of_a_document_the_compiler_refuses_a_form_of() -> Result<(), Error>
+    {
+        let text = "(concept (item ?i n: ?n) (xyz.a ?i n: ?n))
+(query (xyz.a ?a n: ?n) (xyz.a ?a n: ?n) (:like ?n : \"x\"))
+(assert (item item:1 n: 1))
+";
+        let checked = check_forms(&mut Analyzer::new()?, text);
+        let [refusal] = checked.refusals().collect::<Vec<_>>()[..] else {
+            panic!("one refusal: {:?}", checked.diagnostics);
+        };
+        assert!(matches!(refusal.refusal, Some(Error::Unsupported(_))));
+        assert_eq!(refusal.path, vec![Segment::Item(1)]);
+        assert_eq!(checked.declaration_forms, vec![0]);
+        assert_eq!(checked.step_forms, vec![2]);
+        assert!(matches!(checked.steps.as_slice(), [Step::Assert(_)]));
         Ok(())
     }
 }
