@@ -54,9 +54,18 @@ use crate::data;
 use crate::form::{Form, Kind, Mark, Part};
 use crate::written::{Note, Path, Segment, Slot, Written};
 
-/// The domain every getter's relation is under: `getter.open-count.list`
-/// is what `(open-count (list ?l) is: ?n)` derives and reads.
-pub const GETTER: &str = "getter";
+/// The domain every derived attribute's relation is under:
+/// `concept.list.count-open` is what `(list/count-open ?l ?n)` derives
+/// and reads. A concept's domain is concluded only.
+pub const DERIVED: &str = "concept";
+
+/// Whether a domain is a concept's own, which rules conclude and nothing
+/// writes.
+pub fn is_derived(domain: &str) -> bool {
+    domain
+        .strip_prefix(DERIVED)
+        .is_some_and(|rest| rest.starts_with('.'))
+}
 
 /// A node of the syntax tree.
 #[derive(Clone, Debug, PartialEq)]

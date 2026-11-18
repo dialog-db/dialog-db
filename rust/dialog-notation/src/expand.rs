@@ -39,7 +39,7 @@ use crate::kernel::QUOTE;
 use crate::kernel::{CONTROL, Head, Rule, TYPES};
 use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, REST, fill, matches};
-use crate::syntax::{self, GETTER, Parameters, Signature, Syntax};
+use crate::syntax::{self, DERIVED, Parameters, Signature, Syntax};
 use crate::written::{Path, Segment};
 
 /// The core forms, written in the kernel.
@@ -230,6 +230,46 @@ fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
             terms: BTreeMap::from([(field.to_string(), value)]),
         },
     )))
+}
+
+/// The read a derived attribute is: one named under a declared concept,
+/// `list/count-open`, in that concept's own domain. It is a relation of
+/// its own, named by the concept's name and the attribute's, since the
+/// build has no hash of a concept to name it by:
+///
+/// ```clj
+/// (list/count-open ?l (count ?t))
+/// (concept.list.count-open ?l is: (count ?t))
+///
+/// (list/count ?l status: ?s count: (count ?t))
+/// (concept.list.count ?l count: (count ?t) status: ?s)
+/// ```
+///
+/// Its two terms unlabeled are the entity and the value, under `is:`.
+/// With labels, it is the fields they name.
+fn derived(tree: &Syntax, concept: &str, name: &str) -> Result<Syntax, Error> {
+    let operand = tree.operand().cloned().unwrap_or_default();
+    let (entity, terms) = match (operand.items.as_slice(), operand.terms.is_empty()) {
+        ([entity, value], true) => (
+            entity.clone(),
+            BTreeMap::from([("is".into(), value.clone())]),
+        ),
+        ([entity], false) => (entity.clone(), operand.terms),
+        _ => {
+            return Err(Error::Refused(format!(
+                "{tree} needs its entity and a value, or its entity and labelled fields: it \
+                 is read as an attribute in the domain of the concept `{concept}`, since no \
+                 concept is declared under its name"
+            )));
+        }
+    };
+    Ok(Syntax::Application(
+        Box::new(Syntax::Reference(format!("{DERIVED}.{concept}.{name}"))),
+        Parameters {
+            items: vec![entity],
+            terms,
+        },
+    ))
 }
 
 /// A template that stands for reads, with every line in it as the read
@@ -907,9 +947,7 @@ impl Expander {
     /// Whether a premise of a rule about syntax holds, and what it binds.
     /// Such a premise applies one of a few formulas over names, asks
     /// which domain a declared command is in, `(:command ?name is: ?domain)`,
-    /// asks
-    /// whether the form said a part, `(:said ?value)`, or
-    /// reads what this walker knows: the names syntax is defined for,
+    /// or reads what this walker knows: the names syntax is defined for,
     /// `(dialog.name _ is: ?name)`, and the domains installed rules
     /// read, `(dialog.rule _ on: ?domain)`.
     fn holds(&self, premise: &Syntax, bindings: Bindings) -> Option<Bindings> {
@@ -947,32 +985,9 @@ impl Expander {
         match (operator.keyword(), &**operator) {
             // A command declared, and the domain its claims are in.
             (Some("command"), _) => is(self.commands.get(&name(subject?)?)?.clone()),
-            (Some(word @ GETTER), _) => {
-                let domain = format!(
-                    "{word}.{}.{}",
-                    name(subject?)?,
-                    name(operand.terms.get("")?)?
-                );
-                let Syntax::Variable(is) = operand.terms.get("is")? else {
-                    return None;
-                };
-                let domain = Binding::One(Syntax::Reference(domain));
-                let mut bindings = bindings.clone();
-                match bindings.get(is) {
-                    Some(bound) if *bound == domain => {}
-                    Some(_) => return None,
-                    None => {
-                        bindings.insert(is.clone(), domain);
-                    }
-                }
-                Some(bindings)
-            }
             (Some("domain"), _) => {
                 (Kind::of(&name(subject?)?) == Kind::Domain).then_some(bindings.clone())
             }
-            // The form said the part: a labelled part a form leaves out
-            // leaves the pattern's variable for it unbound.
-            (Some("said"), _) => value(subject?).map(|_| bindings.clone()),
             (Some("name"), _) => {
                 (Kind::of(&name(subject?)?) == Kind::Name).then_some(bindings.clone())
             }
@@ -1162,6 +1177,18 @@ impl Expander {
             let declared = word
                 .as_deref()
                 .is_some_and(|word| self.concepts.contains(word));
+            // An attribute named under a declared concept is one a rule
+            // concludes about that concept's entities: `list/count-open`.
+            if !declared
+                && let Some((concept, name)) = word.as_deref().and_then(|word| {
+                    (Kind::of(word) == Kind::Attribute)
+                        .then(|| word.split_once('/'))
+                        .flatten()
+                })
+                && self.concepts.contains(concept)
+            {
+                return self.about(&tree, |_| derived(&tree, concept, name));
+            }
             if !declared && let Some(read) = self.about(&tree, |_| line(&tree))? {
                 return Ok(read);
             }
@@ -2031,10 +2058,13 @@ mod tests {
         ));
     }
 
-    /// A getter is a name around a concept's entity and `is:` a value.
-    /// Concluded and read it is one relation, of the getter's own.
+    /// An attribute named under a declared concept is in that concept's
+    /// domain: a relation of its own, concluded and read under the one
+    /// name. Unlabeled it is the entity and a value under `is:`; with
+    /// labels, the fields they name. A concept's own name, `todo/add`
+    /// declared, is the concept and not an attribute of `todo`.
     #[test]
-    fn it_reads_a_getter_as_a_relation_of_its_own() {
+    fn it_reads_a_derived_attribute_in_its_concepts_domain() {
         let lists = "(concept (list ?l name: ?n)
                        (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))
                      (concept (todo ?t list: ?l state: ?s)
@@ -2042,7 +2072,7 @@ mod tests {
                        (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one))";
         let concluded = expanded(
             lists,
-            "(rule (open-count (list ?l) is: (count ?t))
+            "(rule (list/count-open ?l (count ?t))
                (list ?l)
                (todo ?t list: ?l state: :open))",
         )
@@ -2050,16 +2080,52 @@ mod tests {
         assert_eq!(concluded.len(), 1);
         assert!(
             concluded[0].starts_with(
-                "(rule (getter.open-count.list ?l is: (count ?t)) (xyz.list ?l name: "
+                "(rule (concept.list.count-open ?l is: (count ?t)) (xyz.list ?l name: "
             ),
             "{concluded:?}"
         );
         assert_eq!(
-            expanded(lists, "(query (open-count (list list:home) is: ?n))").unwrap(),
+            expanded(lists, "(query (list/count-open list:home ?n))").unwrap(),
             vec![
-                "(rule (report (getter.open-count.list list:home is: ?n)) (getter.open-count.list list:home is: ?n))"
+                "(rule (report (concept.list.count-open list:home is: ?n)) (concept.list.count-open list:home is: ?n))"
             ]
         );
+        let labelled = expanded(
+            lists,
+            "(rule (list/count ?l status: ?s count: (count ?t))
+               (todo ?t list: ?l state: ?s))",
+        )
+        .unwrap();
+        assert!(
+            labelled[0].starts_with("(rule (concept.list.count ?l count: (count ?t) status: ?s) "),
+            "{labelled:?}"
+        );
+        // Under no declared concept, the same spelling is an attribute.
+        assert_eq!(
+            expanded(lists, "(query (xyz.shelf/count-open shelf:a ?n))").unwrap(),
+            vec![
+                "(rule (report (xyz.shelf shelf:a count-open: ?n)) (xyz.shelf shelf:a count-open: ?n))"
+            ]
+        );
+        // A declared name wins over an attribute of the concept before
+        // its `/`.
+        let command = expanded(
+            &format!(
+                "{lists}
+                 (concept (list/archive list: ?l)
+                   (xyz.list.archive/list of: ?c is: ?l in: :control))"
+            ),
+            "(query (list/archive list: ?l))",
+        )
+        .unwrap();
+        assert!(
+            command[0].starts_with("(rule (report (xyz.list.archive "),
+            "{command:?}"
+        );
+        assert!(matches!(
+            expanded(lists, "(query (list/count-open list:home))"),
+            Err(Error::Refused(why)) if why.contains("needs its entity and a value")
+        ));
     }
 
     /// A write was `assert!` and `retract!` while a mark told what is

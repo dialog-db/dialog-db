@@ -36,18 +36,6 @@
                 (expand (?name ... ?fields))))
   (expand (concept (?name ... ?fields) ?first ?second ... ?more)))
 
-; A getter is a value of a concept that a rule computes: a name around
-; the concept's entity, and `is:` the value. It is derived and never
-; stored, in a relation of its own, and is read as it is concluded.
-; `is:` is what makes the words a getter, so it has to be written. A getter
-; whose value is a fold, `(count ?t)`, is read and not yet run: Dialog-DB
-; refuses a fold in a rule that derives.
-(rule (syntax (?domain ?subject is: ?value))
-  (expand (?getter (?concept ?subject) is: ?value))
-  (:said ?value)
-  (:getter ?getter : ?concept is: ?domain)
-  (unless (dialog.name _ is: ?getter)))
-
 ; A rule may say something about a form without refusing it: a
 ; command issued or deduced that no rule reads.
 (rule (warning "no rule reads this command")

@@ -10,14 +10,14 @@ Read at `45b0fdd1` on 2026-11-16, and again at `31929a6f` on 2026-11-18. Eight c
 |---|---|---|---|
 | 1. a command | a concept whose head names no entity, declared, with attributes of its own on a control layer: `(concept (todo/add list: ?l text: ?x) (tonk.todo.add/list of: ?c is: ?l as: :entity in: :control) …)`. Its entity is derived from what is written | built 2026-11-18, as the design has it. The kernel tells a command by its fields on the control layer, `(:control …)`, and derives the entity a head does not name with `:id`. A misspelled command is no command | its lines in one domain only, as this build derives the entity from one domain's claims. Unsupported, as not decided: a concept with no entity whose lines are not all `in: :control`, one that mixes the two, one that names its entity and holds control lines, one about two entities it does not name |
 | 2. issuing one | `(assert (todo/add …))`, at the top and in a rule's head, lands for the next tick and holds that tick only. A command in a head with no word is a deduction: it holds in this tick | built 2026-11-18: `assert` issues, at the top and in a head; no word deduces, read by other rules in the tick and never stored. A call alone at the top level is refused | retracting a command is not decided, and unsupported. `(id ?t …)` as a premise is not built |
-| 3. a derived attribute | a rule concludes an attribute in a concept's own domain: `(rule (list/count-open ?l (count ?t)) …)`, read `(list/count-open list:home ?n)`. Concluded only: asserting it is an error. The getter is gone | the getter: `(open-count (list ?l) is: …)`, in `getter.open-count.list` | the spelling and the refusal of an assert. One that folds still waits on the engine (below) |
+| 3. a derived attribute | a rule concludes an attribute in a concept's own domain: `(rule (list/count-open ?l (count ?t)) …)`, read `(list/count-open list:home ?n)`. Concluded only: asserting it is an error. The getter is gone | built 2026-11-18: a name under a declared concept, `list/count-open`, is a relation of its own, `concept.list.count-open`, unlabeled under `is:` or with the fields its labels name. One that folds nothing runs. A write of one is refused. The getter, `:getter` and `:said` are gone | one that folds still waits on the engine (below). The relation is named by the concept's name, not its hash: the build has no hash of a concept. A concept's name read two ways (`list` declared twice) is not looked at |
 | 4. an attribute's two terms | unlabeled, the entity then the value: `(xyz.todo/title ?t "Buy milk")`. `of:` and `is:` are the labeled spelling | built 2026-11-18, in a premise, a head, a line and a write | with `as:`, `cardinality:` or `in:` the terms are labelled: the reader refuses two parts with no label beside a labelled one |
 | 5. a variant | the relation of its cases: `(todo/state ?s)` ranges over `open:` and `done:` | read as `:entity`, cases unchecked | this branch for the relation; a type for it in the engine |
 | 6. a collection | the key a variable in the attribute's name, `by: :name` or `:position`: `(xyz.tonk.notebook/?p of: ?b is: ?x … by: :position)` | nothing | dialog's `Keyed`; not looked at yet |
 | 7. a write with `when` | any top-level write may take one; it runs once and is not installed | nothing | this branch |
 | 8. a view | proposed: `(view concept name template condition…)`, a deductive rule concluding `view` with the template folded into its value; events inline as `:on/<type>` | nothing | a fold in a rule that derives, a markup value, a renderer |
 
-Three of the eight meet the same wall: 3 and 8 are folds in a rule that derives, which main still refuses (`ReduceInOpenRule`), and the design's own Open list says the engine and the notation have to agree (#793, now #827). The contradiction below stands, with the getter's name changed.
+Three of the eight meet the same wall: 3 and 8 are folds in a rule that derives, which main still refuses (`ReduceInOpenRule`), and the design's own Open list says the engine and the notation have to agree (#793, now #827). The contradiction below stands, with the getter now a derived attribute.
 
 
 ## What the design says and the build does not do yet
@@ -33,7 +33,7 @@ Three of the eight meet the same wall: 3 and 8 are folds in a rule that derives,
 | a variable of the body | is in the head, so a concept runs both ways | checked, for lines as for reads | done |
 | `!` | no form carries one: `assert`, `retract` | the same since 2026-11-16; `assert!` and `retract!` are refused with the word to write | done |
 | a parameter left out of a read | matches anything | refused since 2026-11-13; open again on 2026-11-15, not built | this branch |
-| a getter | a rule whose conclusion wraps a concept and gives a value in `is:`: `(rule (open-count (list ?l) is: (count ?t)) …)`, read as `(open-count (list list:home) is: ?n)` | read and expanded since 2026-11-16, to a relation of its own, `getter.open-count.list`. One that folds nothing runs. One that folds is refused as unsupported | a decision: the engine refuses a fold in a rule that derives (below) |
+| a derived attribute | a rule concludes an attribute in a concept's own domain: `(rule (list/count-open ?l (count ?t)) …)`, read as `(list/count-open list:home ?n)`. It replaced the getter | built 2026-11-18, to a relation of its own, `concept.list.count-open`. One that folds nothing runs. One that folds is refused as unsupported | a decision: the engine refuses a fold in a rule that derives (below) |
 | a layer | `in:` on a line, a constant or a field | nothing | the layers work (#795 on) |
 | a view | proposed: a template in Hiccup over one concept, kept as data | nothing | after the above |
 
@@ -54,20 +54,20 @@ Each of these was decided in this branch's sittings (`journal.md`) and is in no 
 
 ## Two things that cannot both be true
 
-The design's getter is a rule that derives a fold, installed, and read wherever a read stands. The engine has the fold (`reduce`, `notes/aggregation.md`) and refuses it in a rule that derives (`ReduceInOpenRule`, argued in `notes/attribute-heads.md`):
+The design's derived attribute, as its getter was, is a rule that derives a fold, installed, and read wherever a read stands. The engine has the fold (`reduce`, `notes/aggregation.md`) and refuses it in a rule that derives (`ReduceInOpenRule`, argued in `notes/attribute-heads.md`):
 
 > `reduce` does not: a fold has no reading over a set still growing, and unlike a choice it cannot be deferred to the component's exit without giving the rules inside a different relation than the readers outside. A fold belongs to the closed places, a query, a subscription, an inductive rule.
 
 ```
- a getter, as designed            (rule (open-count (list ?l) is: (count ?t)) …)      installed; any rule may read it
+ a derived attribute, designed    (rule (list/count-open ?l (count ?t)) …)            installed; any rule may read it
  a fold, as the engine has it     refused in a rule that derives                      admitted in a query, a subscription, a rule that writes
 ```
 
 Both are the maintainer's. Which gives is his. What each way would mean for the notation, as columns and not as a recommendation:
 
-| | a getter stays a rule | a getter is a name for its body |
+| | a derived attribute stays a rule | a derived attribute is a name for its body |
 |---|---|---|
-| what `(rule (open-count …) …)` is | a rule that derives, which the engine has to admit with a fold, outside a cycle at least | not installed: where it is read, its premises and its fold stand in its place |
+| what `(rule (list/count-open …) …)` is | a rule that derives, which the engine has to admit with a fold, outside a cycle at least | not installed: where it is read, its premises and its fold stand in its place |
 | where it may be read | anywhere a read stands | where the engine admits a fold: a query, a view, a rule that writes |
 | read in a rule that derives | allowed, so a fold feeds a derivation | refused, with the engine's reason |
 | what the engine needs | a fold in a rule that derives, stratified as `unless` is | a fold a query or a subscription can state, which main does not expose as a way to ask yet |

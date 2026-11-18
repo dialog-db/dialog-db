@@ -1297,10 +1297,10 @@ mod tests {
     fn it_says_a_fold_in_a_head_that_derives_is_not_supported() {
         assert!(matches!(
             steps(
-                "(rule (getter.open-count.list ?l is: (count ?t))
+                "(rule (concept.list.count-open ?l is: (count ?t))
                    (xyz.todo ?t list: ?l))"
             ),
-            Err(Error::Unsupported(said)) if said.contains("getter.open-count.list/is is a fold")
+            Err(Error::Unsupported(said)) if said.contains("concept.list.count-open/is is a fold")
         ));
         for written in [
             "(rule (assert (xyz.list ?l open: (count ?t))) (xyz.todo ?t list: ?l))",

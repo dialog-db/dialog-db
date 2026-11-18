@@ -130,8 +130,8 @@ So the template is not a new kind of thing. It is a list, and the view macro kee
 
 ## Open
 
-- A getter's head, `(open-count (list ?l) is: …)`, has a command's shape, `(rename (todo ?t) title: …)`. #728 has it open too. In the build only `is:` written tells them apart: with it the words are a getter, without it a command.
-- A getter that folds cannot run: the engine refuses a fold in a rule that derives, and the design has a getter be one ([alignment.md](alignment.md#two-things-that-cannot-both-be-true)). The maintainer's to say which gives.
+- Answered 2026-11-18 by #728: the getter is gone for an attribute in a concept's domain, `(list/count-open ?l ?n)`, and a command is a declared concept, so the two no longer share a shape.
+- A derived attribute that folds cannot run: the engine refuses a fold in a rule that derives, and the design has a getter be one ([alignment.md](alignment.md#two-things-that-cannot-both-be-true)). The maintainer's to say which gives.
 - How a line names a key of a collection, now that lines are by attribute.
 - A read of exactly these entries has no spelling. Met already: `terms: {}` over a kept form used to say "no labelled part" and now says any.
 - An issued command and one in a premise look alike, on #728 too, where readers proposed `(do add …)`. The kernel has no word for issuing since 2026-11-16, so a spelling for it, if #728 takes one, is a rule in the prelude and nothing under it.
@@ -143,7 +143,7 @@ So the template is not a new kind of thing. It is a list, and the view macro kee
  1  this branch on the record as rebuilt (#778): text keys, a record read open     done, 2026-11-16
  2  assert and retract without !                                                    done, 2026-11-16
  3  a concept as lines, with as: and cardinality:   (:one and :many on main's engine)  done, 2026-11-16
- 4  getters                                                                         read and expanded, 2026-11-16; one that folds waits on the engine
+ 4  getters, derived attributes since 2026-11-18                                     read and expanded; one that folds waits on the engine
  5  the stored form of a pattern, `match` (#799), so a rule that holds a record is kept   done, 2026-11-16, before 4
  6  view as a macro that keeps its tree
  7  folds in a head, and in:, as #793 and the layers land

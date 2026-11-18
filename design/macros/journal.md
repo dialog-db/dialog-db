@@ -1254,6 +1254,22 @@ Built: `kernel.rs` (`LAYERS`, `Field::layer`, the head by layer, the derived ent
 
 **Decided.** Nothing new. Built in `expand.rs`; pinned by `it_reads_an_attribute_of_two_unlabeled_terms_as_of_and_is` and, on a branch, `it_reads_and_writes_an_attribute_by_its_two_terms_unlabeled`. 106 unit tests, 28 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: a derived attribute replaces the getter
+
+**Asked.** Gap 3: `(rule (list/count-open ?l (count ?t)) …)`, read `(list/count-open list:home ?n)`, an attribute in the domain of the concept `list`, concluded only. The getter goes.
+
+**Learned.**
+
+- The design names the relation by the concept's hash and the name. The expander has no hash of a concept: a concept is a rule about syntax, named by its signature, and its identity as a set of attributes exists only in the compiler. So the relation is named by the concept's name: `concept.list.count-open`. Unlabeled, its value is under `is:`; with labels, `(list/count ?l status: ?s count: (count ?t))`, it is the fields the labels name.
+- A name with a `/` now resolves three ways, in order: a concept declared under it (`todo/add`), an attribute in the domain of a concept declared under what is before the `/` (`list/count-open`), an attribute (`xyz.todo/title`). A misspelled command under a declared concept's name is read as a derived attribute and refused for having no entity, which the refusal says.
+- Writes of the concept's domain are refused in the kernel, by the domain's prefix, so a kernel rule written by hand is refused too.
+- A fold in such a head is the engine's refusal, as it was for the getter. One that folds nothing runs on a branch.
+- `:getter` and `:said` had nothing else to serve, and went with the getter's rule.
+
+**Decided.** By the agent: retracting a derived attribute is refused as asserting one is; the design names only the assert. The relation's name, from the concept's name. Both opinions in [claims.md](claims.md). Not looked at: a concept's name declared twice under other signatures, which the design lists as open.
+
+Built: `derived` and the resolution order in `expand.rs`, `DERIVED` and `is_derived` in `syntax.rs`, the write refused in `kernel.rs`; the getter's rule out of the prelude. 107 unit tests, 28 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

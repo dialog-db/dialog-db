@@ -11,7 +11,7 @@ use dialog_corpus::Value;
 
 use crate::Error;
 use crate::pattern::REST;
-use crate::syntax::Syntax;
+use crate::syntax::{self, Syntax};
 
 /// The types a term may be read under: `(:text ?x)`.
 pub const TYPES: [&str; 8] = [
@@ -387,6 +387,12 @@ fn head(node: &Syntax) -> Result<Head, Error> {
         Some([inner]) => read(inner)?,
         _ => return Err(Error::Refused(format!("{node} is not a kernel head"))),
     };
+    if matches!(node.applies(), Some("assert" | "retract")) && syntax::is_derived(&inner.domain) {
+        return Err(Error::Refused(format!(
+            "{node} writes an attribute in a concept's domain, which rules conclude and nothing \
+             writes: derive it with a rule, `(rule (list/count-open ?l ?n) …)`"
+        )));
+    }
     let command = control(node, &inner)?;
     match (node.applies(), command) {
         (Some("assert"), true) => Ok(Head::Hold(inner)),
@@ -614,7 +620,7 @@ mod tests {
     #[test]
     fn it_reads_a_fold_where_a_term_stands() {
         let form = forms(
-            "(rule (getter.open-count.list ?l is: (count ?t))
+            "(rule (concept.list.count-open ?l is: (count ?t))
                (xyz.todo ?t list: ?l))",
         )
         .unwrap()
@@ -632,7 +638,7 @@ mod tests {
         );
         for unread in ["(count)", "(count ?t ?u)", "(count ?t by: ?l)"] {
             let form = forms(&format!(
-                "(rule (getter.open-count.list ?l is: {unread}) (xyz.todo ?t list: ?l))"
+                "(rule (concept.list.count-open ?l is: {unread}) (xyz.todo ?t list: ?l))"
             ))
             .unwrap()
             .remove(0);
@@ -641,6 +647,32 @@ mod tests {
                 "{unread}"
             );
         }
+    }
+
+    /// A concept's domain is concluded only: a rule derives what is in
+    /// it, and a write of it, asserted or retracted, is refused.
+    #[test]
+    fn it_refuses_a_write_in_a_concepts_domain() {
+        let head = |text: &str| Rule::parse(&forms(text).unwrap().remove(0)).map(|rule| rule.head);
+        for text in [
+            "(rule (assert (concept.list.count-open list:home is: 3)))",
+            "(rule (assert (concept.list.count-open ?l is: ?n)) (xyz.n ?l n: ?n))",
+            "(rule (retract (concept.list.count-open ?l is: ?n)) (xyz.n ?l n: ?n))",
+        ] {
+            assert!(
+                matches!(head(text), Err(Error::Refused(why)) if why.contains("rules conclude and nothing writes")),
+                "{text}"
+            );
+        }
+        assert!(matches!(
+            head("(rule (concept.list.count-open ?l is: ?n) (xyz.n ?l n: ?n))"),
+            Ok(Head::Derive(_))
+        ));
+        // A domain that only starts with the word is no concept's.
+        assert!(matches!(
+            head("(rule (assert (concepts.x ?l is: ?n)) (xyz.n ?l n: ?n))"),
+            Ok(Head::Assert(_))
+        ));
     }
 
     /// A kernel rule has one head: no head and several are both refused.

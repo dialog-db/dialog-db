@@ -190,12 +190,13 @@ async fn it_runs_a_concept_written_as_lines() -> Result<()> {
     Ok(())
 }
 
-/// A getter is a value a rule computes of a concept: here, how many of
-/// a list's to-dos are open. It is read and expanded, and not run:
-/// Dialog-DB refuses a fold in a rule that derives, and the document is
-/// refused with that said.
+/// A derived attribute is one a rule concludes in a concept's own
+/// domain: here, how many of a list's to-dos are open. One that folds
+/// is read and expanded, and not run: Dialog-DB refuses a fold in a
+/// rule that derives, and the document is refused with that said.
+/// One that folds nothing runs, and a write of one is refused.
 #[dialog_common::test]
-async fn it_says_a_getter_is_not_supported_yet() -> Result<()> {
+async fn it_derives_an_attribute_in_a_concepts_domain() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook
         .submit(
@@ -206,24 +207,24 @@ async fn it_says_a_getter_is_not_supported_yet() -> Result<()> {
                  (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one))"#,
         )
         .await?;
-    let getter = notebook
+    let folded = notebook
         .submit(
-            "(rule (open-count (list ?l) is: (count ?t))
+            "(rule (list/count-open ?l (count ?t))
                (list ?l)
                (todo ?t list: ?l state: :open))",
         )
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(
-        matches!(&getter, Err(Ok(Error::Unsupported(said))) if said.contains("is a fold in a rule that derives")),
-        "{getter:?}"
+        matches!(&folded, Err(Ok(Error::Unsupported(said))) if said.contains("is a fold in a rule that derives")),
+        "{folded:?}"
     );
 
-    // A getter that folds nothing is a derived relation like any other,
+    // One that folds nothing is a derived relation like any other,
     // concluded and read under the one name.
     notebook
         .submit(
-            r#"(rule (home (todo ?t) is: ?n)
+            r#"(rule (todo/home ?t ?n)
                  (todo ?t list: ?l)
                  (list ?l name: ?n))
 
@@ -232,8 +233,35 @@ async fn it_says_a_getter_is_not_supported_yet() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (home (todo ?t) is: ?n))").await?,
-        vec![r#"(getter.home.todo todo:1 is: "Home")"#]
+        report(&mut notebook, "(query (todo/home ?t ?n))").await?,
+        vec![r#"(concept.todo.home todo:1 is: "Home")"#]
+    );
+    assert_eq!(
+        report(&mut notebook, "(query (todo/home todo:1 is: ?n))").await?,
+        vec![r#"(concept.todo.home todo:1 is: "Home")"#]
+    );
+
+    // A concept's domain is concluded only, and nothing of a document
+    // that writes it is written.
+    let written = notebook
+        .submit(
+            r#"(assert (list list:work name: "Work"))
+               (assert (todo/home todo:1 "Away"))"#,
+        )
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&written, Err(Ok(Error::Refused(why))) if why.contains("rules conclude and nothing writes")),
+        "{written:?}"
+    );
+    assert!(
+        report(&mut notebook, "(query (list ?l name: \"Work\"))")
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        report(&mut notebook, "(query (todo/home ?t ?n))").await?,
+        vec![r#"(concept.todo.home todo:1 is: "Home")"#]
     );
     Ok(())
 }
