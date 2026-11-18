@@ -493,7 +493,7 @@ pub struct Stats {
 /// is not a tree node, or does not rebuild from its frame, is kept whole. A
 /// read of a frame realizes the block through the tree's own encoder.
 ///
-/// The file is a magic number, four slots, then records: tokens, frames
+/// The file is a 16-byte header, four slots, then records: tokens, frames
 /// (blocks kept whole among them), and pages of the file's index, a tree
 /// whose root is in the slot. Every append writes its records past the end
 /// and its index pages, then the older of two rolling slots; opening reads
@@ -503,7 +503,7 @@ pub struct Stats {
 ///
 /// Only the index's pages are written over, once no root reaches them,
 /// and only after a **sync point** has made that safe: the file synced,
-/// the third, durable slot written and synced. A sync point follows an
+/// the older of the two durable slots written and synced. A sync point follows an
 /// append every 64 appends, every 2,048 freed pages or every 2 seconds,
 /// and [`Chronicle::sync`] makes one. A power loss loses at most what
 /// came after the last: opening in a later boot checks what was written

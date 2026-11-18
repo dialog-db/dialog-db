@@ -833,8 +833,7 @@ fn hold_turn(path: &Path) -> anyhow::Result<std::fs::File> {
 }
 
 /// Two processes commit to two branches of one repository at once. A
-/// head is updated in the file's writer's turn, as SQLite commits under its
-/// write lock, so while a third process holds the turn their commits wait;
+/// head is updated in the file's writer's turn, so while a third process holds the turn their commits wait;
 /// once it lets go both go on, taking turns with each other only to append
 /// each head. Every commit of each lands on its own branch.
 ///
