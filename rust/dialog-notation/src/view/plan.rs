@@ -718,11 +718,16 @@ impl Plan {
         let head = Syntax::Application(
             Box::new(Syntax::Reference("view.layer".into())),
             Parameters {
+                terms: if row.is_empty() {
+                    // A read names a field: a row of the entity alone
+                    // says it under its own variable's name.
+                    std::collections::BTreeMap::from([(self.entity.clone(), subject.clone())])
+                } else {
+                    row.iter()
+                        .map(|name| ((*name).clone(), Syntax::Variable((*name).clone())))
+                        .collect()
+                },
                 items: vec![subject],
-                terms: row
-                    .iter()
-                    .map(|name| ((*name).clone(), Syntax::Variable((*name).clone())))
-                    .collect(),
             },
         );
         let mut items = vec![Syntax::Application(
