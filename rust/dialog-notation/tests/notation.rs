@@ -245,6 +245,35 @@ const COUNTER: &str = "
       (counter/increment counter: ?c)
       (xyz.counter ?c count: (:last (:natural ?n))))";
 
+/// An attribute takes its two terms unlabeled, the entity and then the
+/// value: in a write, in a rule's head and premises, and in a query,
+/// where it reads as `of:` and `is:` do.
+#[dialog_common::test]
+async fn it_reads_and_writes_an_attribute_by_its_two_terms_unlabeled() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(assert (xyz.todo/title todo:1 "Buy milk"))
+               (assert (xyz.todo/state todo:1 :open))
+               (assert (xyz.todo/title todo:2 "Call mum"))
+               (assert (xyz.todo/state todo:2 :done))
+               (rule (xyz.open/title ?t ?x)
+                 (xyz.todo/title ?t ?x)
+                 (xyz.todo/state ?t :open))"#,
+        )
+        .await?;
+    let open = vec![r#"(xyz.open todo:1 title: "Buy milk")"#];
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.open/title ?t ?x))").await?,
+        open
+    );
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.open/title of: ?t is: ?x))").await?,
+        open
+    );
+    Ok(())
+}
+
 /// `counter/increment` is declared, and asserted it is issued: the rule
 /// that reads it fires, and the count it asserts stays.
 #[dialog_common::test]

@@ -270,3 +270,4 @@
 | a declared command that no rule reads is issued with a warning | opinion | the agent's, 2026-11-18, keeping what the old form said | decides in the build until the maintainer says otherwise |
 | a call alone at the top level is refused, a command's included | opinion | the agent's, 2026-11-18, on #728: "A bare call, with variables or without, is not a top-level form" | decides in the build; the design says it is not a form, and not what refusing it says |
 | a command's lines are in one domain | opinion | the agent's, 2026-11-18: the build derives the entity from one domain's claims | a limit of the build; several domains are unsupported |
+| an attribute with two parts that have no label reads them as the entity and then the value | fact | `line` in `rust/dialog-notation/src/expand.rs`; `it_reads_an_attribute_of_two_unlabeled_terms_as_of_and_is` | holds; beside `as:` or `cardinality:` the reader refuses two unlabeled parts, so those lines stay labelled |

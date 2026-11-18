@@ -1243,6 +1243,17 @@ Not decided by the design, and refused as unsupported, each pinned by a test:
 
 Built: `kernel.rs` (`LAYERS`, `Field::layer`, the head by layer, the derived entity), `expand.rs` (`in: :control`, the command checked where it is declared, a declared name before an attribute, the top level), `compile.rs` (the reported entity), the prelude's concept with no primary and its warning, the examples and every test. 105 unit tests, 27 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: an attribute's two terms unlabeled
+
+**Asked.** Gap 4: `(xyz.todo/title ?t "Buy milk")` is `(xyz.todo/title of: ?t is: "Buy milk")`, wherever an attribute stands.
+
+**Learned.**
+
+- One place reads an attribute, the walker's `line`, so the spelling is one match there: two parts with no label are the entity and the value. A premise, a head, a line of a concept and a write all pass through it.
+- The reader already refuses two parts with no label beside a labelled one, so `(xyz.todo/title ?t "x" as: :text)` is refused before the walker sees it. With `as:`, `cardinality:` or `in:`, the terms are labelled.
+
+**Decided.** Nothing new. Built in `expand.rs`; pinned by `it_reads_an_attribute_of_two_unlabeled_terms_as_of_and_is` and, on a branch, `it_reads_and_writes_an_attribute_by_its_two_terms_unlabeled`. 106 unit tests, 28 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

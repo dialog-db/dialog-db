@@ -139,7 +139,8 @@ fn wrap(word: &str, inner: Syntax) -> Result<Syntax, Error> {
 /// (xyz.todo ?i title: (:last (:text ?t)))
 /// ```
 ///
-/// `of:` is the entity and `is:` the value. `as:` is the type the value
+/// `of:` is the entity and `is:` the value; unlabeled, the two are the
+/// entity and then the value, `(xyz.todo/title ?i ?t)`. `as:` is the type the value
 /// is read under. `cardinality:` says how many claims the attribute
 /// holds for one entity: `:one` reads the newest, `:many` every one.
 /// Either may be left out, and then the read says nothing of it. `in:`
@@ -156,17 +157,24 @@ fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
     }) else {
         return Ok(None);
     };
-    let [entity] = operand.items.as_slice() else {
-        return Err(Error::Refused(format!(
-            "{tree} needs its entity, under `of:` or with no label, and nothing else without a \
-             label: it is read as an attribute, since no concept is declared under its name"
-        )));
-    };
     let mut terms = operand.terms.clone();
-    let Some(mut value) = terms.remove("is") else {
-        return Err(Error::Refused(format!(
-            "{tree} says no value: a line is an attribute, `of:` its entity and `is:` its value"
-        )));
+    let (entity, mut value) = match (operand.items.as_slice(), terms.remove("is")) {
+        ([entity], Some(value)) => (entity, value),
+        // Unlabeled, an attribute's two terms are the entity and then
+        // the value, as Datomic writes `[?e :attr ?v]`.
+        ([entity, value], None) => (entity, value.clone()),
+        ([_], None) => {
+            return Err(Error::Refused(format!(
+                "{tree} says no value: a line is an attribute, its entity and its value, \
+                 unlabeled or as `of:` and `is:`"
+            )));
+        }
+        _ => {
+            return Err(Error::Refused(format!(
+                "{tree} needs its entity, under `of:` or with no label, and nothing else without a \
+                 label: it is read as an attribute, since no concept is declared under its name"
+            )));
+        }
     };
     if let Some(kind) = terms.remove("as") {
         let word = match &kind {
@@ -1839,6 +1847,12 @@ mod tests {
             read("(xyz.todo/title ?i is: ?t as: :text cardinality: :one)"),
             "(xyz.todo ?i title: (:last (:text ?t)))"
         );
+        // Unlabeled, the entity and then the value.
+        assert_eq!(read("(xyz.todo/title ?i ?t)"), "(xyz.todo ?i title: ?t)");
+        assert_eq!(
+            read(r#"(xyz.todo/title ?i "Buy milk")"#),
+            r#"(xyz.todo ?i title: "Buy milk")"#
+        );
         // A part left out says nothing.
         assert_eq!(
             read("(xyz.todo/title of: ?i is: ?t)"),
@@ -1888,6 +1902,12 @@ mod tests {
             );
         };
         refused("(xyz.todo/title of: ?i)", "says no value");
+        refused("(xyz.todo/title ?i ?t ?u)", "needs its entity");
+        // Beside a type, the two terms are labelled.
+        refused(
+            "(xyz.todo/title ?i ?t as: :text)",
+            "has 2 parts with no label",
+        );
         refused("(xyz.todo/title is: ?t)", "needs its entity");
         // Two parts with no label are refused where the text is read.
         refused("(xyz.todo/title ?i ?j is: ?t)", "has 2 parts with no label");
@@ -1957,6 +1977,34 @@ mod tests {
                 "(rule (report (xyz.list list:home task: (:all ?t))) (xyz.list list:home task: (:all ?t)))"
             ]
         );
+    }
+
+    /// An attribute's two terms unlabeled are the same as `of:` and
+    /// `is:`, in a premise, a head, a line of a concept and a write.
+    #[test]
+    fn it_reads_an_attribute_of_two_unlabeled_terms_as_of_and_is() {
+        for (unlabeled, labelled) in [
+            (
+                "(query (xyz.todo/title ?t ?x))",
+                "(query (xyz.todo/title of: ?t is: ?x))",
+            ),
+            (
+                "(rule (xyz.done/title ?t ?x) (xyz.todo/title ?t ?x) (xyz.todo/state ?t :done))",
+                "(rule (xyz.done/title of: ?t is: ?x) (xyz.todo/title of: ?t is: ?x) (xyz.todo/state of: ?t is: :done))",
+            ),
+            (
+                r#"(assert (xyz.todo/title todo:1 "Buy milk"))"#,
+                r#"(assert (xyz.todo/title of: todo:1 is: "Buy milk"))"#,
+            ),
+            (
+                "(concept (titled ?t title: ?x) (xyz.todo/title ?t ?x)) (query (titled ?t title: ?x))",
+                "(concept (titled ?t title: ?x) (xyz.todo/title of: ?t is: ?x)) (query (titled ?t title: ?x))",
+            ),
+        ] {
+            let read = expanded("", unlabeled).unwrap();
+            assert!(!read.is_empty());
+            assert_eq!(read, expanded("", labelled).unwrap(), "{unlabeled}");
+        }
     }
 
     /// Every variable of a concept's body is one of its parameters,

@@ -34,7 +34,7 @@ flowchart LR
 - A head made only of operator characters is a formula. Names start with a letter, so it cannot be a concept or a domain.
 - A write at the top level, `(assert A)` or `(retract A)` with premises after it if it has them, is a rule with that head. A call alone at the top level is refused: the top level takes `query`, `assert`, `retract`, `rule` and `concept`.
 - A fold, `(count ?t)`, is a term the kernel reads: `count`, `count-distinct`, `sum`, `min`, `max`, `avg`, as the engine's `reduce` has them. It stands in a field of a head that derives and nowhere else. Nothing runs it yet: the engine refuses a fold in a rule that derives, and compiling says so.
-- A line, `(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)`, is not kernel. It is the read `(xyz.todo ?i title: (:last (:text ?t)))`, and the walker writes it so: `:one` is the pick `last`, `:many` is `all`, `as:` the type, `in: :control` the layer. Any other layer is unsupported. A concept written as lines is kept as its reads, the lines of one entity under one domain as one read of several fields.
+- A line, `(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)`, is not kernel. It is the read `(xyz.todo ?i title: (:last (:text ?t)))`, and the walker writes it so: `:one` is the pick `last`, `:many` is `all`, `as:` the type, `in: :control` the layer. Any other layer is unsupported. `(xyz.todo/title ?i ?t)`, the two terms unlabeled, is the same line. A concept written as lines is kept as its reads, the lines of one entity under one domain as one read of several fields.
 
 ## Syntax is a rule
 
