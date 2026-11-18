@@ -33,6 +33,7 @@ Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), 
 | I. a write with `when` | any top-level write may take one; it runs once and is not installed; every variable is bound by it | built 2026-11-18 for `assert` and `retract`: a query of the `when` over the branch before the document, each match making the write. Under `:one` the write succeeds the cell's claim, as main's `last` does | the `when` does not see the document's own writes or rules. A command with a `when` is unsupported, not decided. Premises after a top-level write with no `when` are refused |
 | K. equality | constraints `(== ?a is: ?b)`, `(!= ?a is: ?b)` | built 2026-11-18 as premises: `==` is Dialog-DB's equality, `!=` the absence of it | `!=` inside `unless` is unsupported. Neither checks an assert |
 | L. `dialog/position` | `(dialog/position ?b after: ?lo before: ?hi is: ?at)` among a rule's formulas | built 2026-11-18, to dialog-query's formula of that name | none known |
+| M. a command's own entity | not said | built 2026-11-18, the managing agent's opinion: `of: ?c` in a premise that reads a command binds the entity its content derived | in a head or at the top level `of:` on a command is unknown. The notebook sketch uses `id` instead, which names another entity |
 
 
 ## What the design says and the build does not do yet

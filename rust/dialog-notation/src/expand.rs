@@ -77,6 +77,9 @@ struct Definition {
     /// What the rule defines, where it defines a concept: a name
     /// applied with labels, standing for reads and nothing else.
     signature: Option<Signature>,
+    /// The command whose entity this definition reads, where it is the
+    /// one a command's declaration adds for `of:` in a premise.
+    entity_of: Option<String>,
 }
 
 /// One form that several definitions take, and which of them stands
@@ -905,8 +908,10 @@ impl Expander {
             _ => None,
         };
         if let Some(declared) = &signature {
-            self.syntax
-                .retain(|rule| rule.signature.as_ref() != Some(declared));
+            self.syntax.retain(|rule| {
+                rule.signature.as_ref() != Some(declared)
+                    && rule.entity_of.as_ref() != Some(&declared.name)
+            });
             self.concepts.insert(declared.name.clone());
             match &answer {
                 Answer::Syntax(template) if items(&pattern).is_empty() && on_control(template) => {
@@ -921,6 +926,38 @@ impl Expander {
             }
         }
         self.declared += 1;
+        // A premise that reads a command may name its entity, `of: ?c`,
+        // and so bind the entity the command's content derived: the
+        // command's own variable for its entity is what `of:` fills.
+        // Only a premise: an entity is derived when a command is
+        // asserted, and never given.
+        let read = match (&signature, &answer) {
+            (Some(declared), Answer::Syntax(template))
+                if self.commands.contains_key(&declared.name) =>
+            {
+                match (items(template).first(), &pattern) {
+                    (Some(own @ Syntax::Variable(_)), Syntax::Application(operator, operand)) => {
+                        Some(Definition {
+                            answer: answer.clone(),
+                            pattern: Syntax::Application(
+                                operator.clone(),
+                                Parameters {
+                                    items: vec![own.clone()],
+                                    terms: operand.terms.clone(),
+                                },
+                            ),
+                            position: Some(Position::Premise),
+                            when: when.clone(),
+                            unless: clauses.unless.clone(),
+                            signature: None,
+                            entity_of: Some(declared.name.clone()),
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
         self.syntax.push(Definition {
             answer,
             pattern,
@@ -928,7 +965,9 @@ impl Expander {
             when,
             unless: clauses.unless,
             signature,
+            entity_of: None,
         });
+        self.syntax.extend(read);
         Ok(None)
     }
 

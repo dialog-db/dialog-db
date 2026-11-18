@@ -579,6 +579,52 @@ async fn it_places_an_entry_between_two_with_dialog_position() -> Result<()> {
     Ok(())
 }
 
+/// A rule reads a command's own entity with `of:` in the premise that
+/// reads the command: the entity its content derived, here the entity
+/// of the to-do it makes. Asserting a command with `of:` gives it no
+/// entity: the definition is for a premise only.
+#[dialog_common::test]
+async fn it_reads_the_entity_of_the_command_that_fired() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(concept (todo ?t list: ?l text: ?x)
+                 (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
+                 (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one))
+               (concept (todo/add list: ?l text: ?x)
+                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
+                 (xyz.todo.add/text of: ?c is: ?x as: :text in: :control))
+               (rule (assert (todo ?c list: ?l text: ?x))
+                 (todo/add of: ?c list: ?l text: ?x))"#,
+        )
+        .await?;
+    notebook
+        .submit(r#"(assert (todo/add list: list:home text: "Buy milk"))"#)
+        .await?;
+    let todos = report(&mut notebook, "(query (todo ?t text: ?x))").await?;
+    assert_eq!(todos.len(), 1, "{todos:?}");
+    // The command's entity is what its content derives.
+    notebook
+        .submit(
+            r#"(assert (xyz.todo (:id xyz.todo.add list: list:home text: "Buy milk") tag: (:text "made")))"#,
+        )
+        .await?;
+    let tagged = report(&mut notebook, "(query (xyz.todo ?t tag: ?g))").await?;
+    let entity = |row: &str| row.split_whitespace().nth(1).map(str::to_string);
+    assert_eq!(
+        entity(&tagged[0]),
+        entity(&todos[0]),
+        "{tagged:?} {todos:?}"
+    );
+
+    let given = notebook
+        .submit(r#"(assert (todo/add of: todo:9 list: list:home text: "x"))"#)
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(matches!(&given, Err(Ok(Error::Unknown(_)))), "{given:?}");
+    Ok(())
+}
+
 /// A concept written as lines, an attribute a line, runs as one written
 /// as a read of several fields does: written through by a rule a
 /// command fires and read back. `:one` reads the newest claim and
