@@ -14,8 +14,7 @@ use dialog_corpus::selector::Constrained;
 use dialog_corpus::{Estimate, Likelihood, Preload, PreloadRequest, Selector};
 use futures_util::{StreamExt, stream};
 use std::collections::HashSet;
-use std::env;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 /// Largest ratio of the widest to narrowest scan range estimate that still
 /// takes the merge path. Above it, one scan is selective enough that a nested
@@ -136,12 +135,10 @@ impl Conjunction {
                 // An optional field whose scan is sorted on the same
                 // variable is left-merged: read once in order, an entity it
                 // lacks bound Absent, instead of probed once per entity.
-                Plan::OptionalScan(_, optional) if left_merge_enabled() => {
-                    match optional.query().sort_order() {
-                        SortOrder::On(name) => name,
-                        SortOrder::None => return None,
-                    }
-                }
+                Plan::OptionalScan(_, optional) => match optional.query().sort_order() {
+                    SortOrder::On(name) => name,
+                    SortOrder::None => return None,
+                },
                 // An attribute concept read with its entity free yields
                 // its rows sorted on the entity, stored and derived alike
                 // (see `ConceptQuery::evaluate`), so it merges on that
@@ -556,13 +553,6 @@ impl MergeInput {
             MergeInput::Relation(_) => None,
         }
     }
-}
-
-/// Whether optional fields are left-merged (`DIALOG_LEFT_MERGE`, on unless
-/// `0`), so one build measures both.
-fn left_merge_enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| env::var("DIALOG_LEFT_MERGE").map_or(true, |value| value != "0"))
 }
 
 /// End-to-end regression tests for the optionality bug family: each

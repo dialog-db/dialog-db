@@ -9,7 +9,7 @@ use crate::formula::number::Numeric;
 use crate::hydration;
 use crate::query::Application;
 use crate::query::Output;
-use crate::selection::{Match, Part, Scanned, Selection, Standing, lazy_bindings};
+use crate::selection::{Match, Part, Scanned, Selection, Standing};
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::{Any, Record};
 use crate::{
@@ -27,7 +27,10 @@ use std::pin::Pin;
 
 /// A scan's binding policy ([`AttributeQueryAll::placement`]).
 pub(crate) struct Placement {
-    lazy: bool,
+    /// Whether rows may be bound in place: not when the attribute is
+    /// refined, as a refinement is checked against the materialized
+    /// attribute.
+    in_place: bool,
     the: Option<Kind>,
     of: Option<Kind>,
     is: Option<Kind>,
@@ -321,11 +324,10 @@ impl AttributeQueryAll {
         let the = self.the.binding_kind();
         let of = self.of.binding_kind();
         Placement {
-            lazy: lazy_bindings()
-                && !self
-                    .the
-                    .kind()
-                    .is_some_and(|kind| kind.refinement().is_some()),
+            in_place: !self
+                .the
+                .kind()
+                .is_some_and(|kind| kind.refinement().is_some()),
             the_admitted: admits(&the, Type::Symbol),
             of_admitted: admits(&of, Type::Entity),
             the,
@@ -335,7 +337,7 @@ impl AttributeQueryAll {
     }
 
     /// How a scanned row is bound: in place ([`Self::merge_scanned`]) when
-    /// lazy bindings are on and the scan's kinds admit the row as it is
+    /// the scan's kinds admit the row as it is
     /// stored, without reading its value through another type's view or
     /// checking a refinement; eagerly, as main binds it, otherwise. A row
     /// bound in place is checked once, and a corrupt one is passed over as
@@ -346,9 +348,9 @@ impl AttributeQueryAll {
         base: &Match,
         row: FactView,
     ) -> Result<Placed, DialogCorpusError> {
-        if !placement.lazy || base.binds_eagerly() {
+        if !placement.in_place || base.binds_eagerly() {
             #[cfg(feature = "trace-hydration")]
-            hydration::here("eager: lazy off or refined attribute");
+            hydration::here("eager: refined attribute or eager rows");
             return Ok(Placed::Eager(row));
         }
         // The value as the scan's kind reads it, when that differs from the

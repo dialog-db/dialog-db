@@ -2,11 +2,12 @@
 
 ## Where things stand
 
-**Status: Evaluating.** Built: late materialization
-(`DIALOG_LAZY_BINDINGS`), a merge join keyed on stored bytes, optional
-fields left-merged (`DIALOG_LEFT_MERGE`), the `dialog-answer` frame with
-Rust and JS readers, and the `answers` harness (main built from its
-worktree with `--cfg dialog_main`).
+**Status: Evaluating.** Built: late materialization, a merge join keyed
+on stored bytes, optional fields left-merged, the `dialog-answer` frame
+with Rust and JS readers, and the `answers` harness (main built from its
+worktree with `--cfg dialog_main`). The two settings the measurements
+were taken with (`DIALOG_LAZY_BINDINGS`, `DIALOG_LEFT_MERGE`) are
+removed; see 2026-11-18.
 
 Headline, tonk's issue concept at 3,000 rows against main: engine
 instructions −62% and allocations −84% per row; query to receiver 2.75×
@@ -499,6 +500,25 @@ more reallocated growing result vectors of the larger conclusion.
 store is the next place hydration could go, if a recursive rule's rows
 held references and compared bytes; not now.
 
+## 2026-11-18 — the switches are removed
+
+`DIALOG_LAZY_BINDINGS` and `DIALOG_LEFT_MERGE` let one build measure
+the branch against itself with each change off. Every number above that
+compares eager and lazy, or probed and merged optional fields, was taken
+with them. With the measurements taken they cost more than they gave: a
+process-wide setting read from the environment by a library, read once,
+so a test could not turn it off, and a second path through every scan
+that CI never ran.
+
+Both are removed. A scan binds in place whenever its kinds allow it
+(the eager path remains for a refined attribute, a value pinned to a
+constant or read through a refined kind, and the rows of a recursive
+rule), and an optional field sorted on the merge variable is always
+left-merged. The `answers` harness now runs this build against main's;
+its variant keeps the `lazy` label so its reports compare with the ones
+recorded on 2026-11-16. Reproducing the eager column needs a build of
+this branch from before the switches were removed.
+
 ## How to reproduce
 
 ```sh
@@ -520,6 +540,6 @@ cargo run --release -p dialog-perf --features trace-hydration --bin answers -- \
 # tonk's workload
 cargo run --release -p dialog-baseline --example tonk_dataset -- \
   generate rust/dialog-baseline/fixtures/tonk-team-schema.jsonl 1 tonk-1x.jsonl
-DIALOG_LAZY_BINDINGS=1 cargo run --release -p dialog-baseline --example tonk_bench -- \
+cargo run --release -p dialog-baseline --example tonk_bench -- \
   tonk-1x.jsonl fs path/to/scratch
 ```

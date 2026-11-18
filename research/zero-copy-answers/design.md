@@ -57,9 +57,12 @@ names. `ConceptConclusion` then materializes `this`, and tonk's
   hydrated alone, into the row's value cell; the row stays in place.
 - A scan decides its binding policy once (`Placement`): building a
   term's kind per row cloned a range's boxed interval for every row.
-- `DIALOG_LAZY_BINDINGS=0` turns it all off: every scan takes main's
-  eager path, and the engine behaves as main does. Every
-  `dialog-query` test passes in both modes.
+- `DIALOG_LAZY_BINDINGS=0` turned it all off: every scan took main's
+  eager path, and the engine behaved as main does. Every
+  `dialog-query` test passed in both modes. The switch, and
+  `DIALOG_LEFT_MERGE` beside it, were removed once the measurements
+  were taken (see the journal's 2026-11-18 entry): a scan binds in place
+  whenever its kinds allow it.
 
 ### What it does not change
 

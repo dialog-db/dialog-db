@@ -1,5 +1,4 @@
 use futures_util::stream::once;
-use std::env;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::{iter, mem};
@@ -21,14 +20,6 @@ pub use slot::JoinKey;
 pub(crate) use slot::Part;
 pub(crate) use slot::Scanned;
 use slot::{Cited, Slot};
-
-/// Whether a scan binds the rows it reads in place ([`Slot::Scanned`]),
-/// or materializes them as main does. Read once, from
-/// `DIALOG_LAZY_BINDINGS` (`0` turns it off), so one build measures both.
-pub fn lazy_bindings() -> bool {
-    static LAZY: OnceLock<bool> = OnceLock::new();
-    *LAZY.get_or_init(|| env::var("DIALOG_LAZY_BINDINGS").map_or(true, |value| value != "0"))
-}
 
 /// A row-level binding for a variable.
 ///

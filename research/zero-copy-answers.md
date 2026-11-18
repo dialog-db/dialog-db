@@ -76,8 +76,9 @@ to read.
   after it;
 - **branch, lazy bindings, frame:** both.
 
-Lazy bindings are a setting of one build (`DIALOG_LAZY_BINDINGS`), so
-every variant runs from the same binary.
+Lazy bindings were a setting of one build (`DIALOG_LAZY_BINDINGS`), so
+every variant ran from the same binary. The setting was removed once the
+measurements were taken (the journal's 2026-11-18 entry).
 
 ## Success
 

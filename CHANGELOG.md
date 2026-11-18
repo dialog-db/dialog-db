@@ -42,8 +42,6 @@ What this changes for you:
 - **`dialog-answer`**, a new crate with no dependencies: a query's answer
   as a columnar binary frame whose values a session sends once, read in
   place. Nothing uses it yet.
-- `DIALOG_LAZY_BINDINGS=0` and `DIALOG_LEFT_MERGE=0` turn the two changes
-  off, for measuring them.
 - Nothing stored or synced changes.
 
 Why: copying values was most of a concept read's cost after the scan,

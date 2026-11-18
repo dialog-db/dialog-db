@@ -18,8 +18,7 @@
 //! each phase's instructions apart, and the counting allocator counts each
 //! phase's allocations:
 //!
-//! - `engine`: the query, to `Vec<ConceptConclusion>` (lazy or eager
-//!   bindings, by `DIALOG_LAZY_BINDINGS`);
+//! - `engine`: the query, to `Vec<ConceptConclusion>`;
 //! - `json_encode`: tonk's wire path, `project` into `Conclusion { this:
 //!   String, fields: BTreeMap<String, Ipld> }` and `serde_json` of a
 //!   snapshot frame;
@@ -1114,9 +1113,11 @@ fn measure(
     })
 }
 
+/// Whether this build binds scanned rows in place: the branch always
+/// does, main never did.
 #[cfg(not(dialog_main))]
 fn lazy() -> bool {
-    dialog_query::lazy_bindings()
+    true
 }
 
 #[cfg(dialog_main)]
@@ -1169,22 +1170,20 @@ fn check_same(json: &[u8], frame: &Arc<[u8]>, columns: &[&str]) -> Result<()> {
 fn sweep(out_dir: PathBuf, rounds: usize, main: Option<PathBuf>) -> Result<()> {
     std::fs::create_dir_all(&out_dir)?;
     let branch = std::env::current_exe()?;
-    // (dataset, rows, binding mode, or "main" for main's build)
+    // (dataset, rows, "main" for main's build or "lazy" for this one's).
+    // This build's variant keeps the label it had when an eager mode of
+    // the same build stood beside it, so its reports compare with the
+    // ones recorded then.
     let variants: Vec<(&str, usize, &str)> = DATASETS
         .iter()
         .flat_map(|(name, rows)| {
-            let mut modes = vec![(*name, *rows, "0"), (*name, *rows, "1")];
+            let mut modes = vec![(*name, *rows, "lazy")];
             if main.is_some() {
                 modes.insert(0, (*name, *rows, "main"));
             }
             modes
         })
         .collect();
-    let label = |lazy: &str| match lazy {
-        "main" => "main",
-        "1" => "lazy",
-        _ => "eager",
-    };
     let binary = |lazy: &str| -> PathBuf {
         match (lazy, &main) {
             ("main", Some(main)) => main.clone(),
@@ -1194,11 +1193,10 @@ fn sweep(out_dir: PathBuf, rounds: usize, main: Option<PathBuf>) -> Result<()> {
     let mut reports: BTreeMap<String, Report> = BTreeMap::new();
     for round in 0..rounds {
         for (name, rows, lazy) in &variants {
-            let key = format!("{name}-{rows}-{}", label(lazy));
+            let key = format!("{name}-{rows}-{lazy}");
             eprintln!("round {round}: {key}");
             let output = Command::new(binary(lazy))
                 .args(["run", "--dataset", name, "--rows", &rows.to_string()])
-                .env("DIALOG_LAZY_BINDINGS", lazy)
                 .output()?;
             if !output.status.success() {
                 bail!("{key}: {}", String::from_utf8_lossy(&output.stderr));
@@ -1220,7 +1218,7 @@ fn sweep(out_dir: PathBuf, rounds: usize, main: Option<PathBuf>) -> Result<()> {
         }
     }
     for (name, rows, lazy) in &variants {
-        let key = format!("{name}-{rows}-{}", label(lazy));
+        let key = format!("{name}-{rows}-{lazy}");
         eprintln!("callgrind: {key}");
         let out = out_dir.join(format!("{key}.callgrind"));
         let status = Command::new("valgrind")
@@ -1237,7 +1235,6 @@ fn sweep(out_dir: PathBuf, rounds: usize, main: Option<PathBuf>) -> Result<()> {
                 "--repeat",
                 "1",
             ])
-            .env("DIALOG_LAZY_BINDINGS", lazy)
             .stdout(std::process::Stdio::null())
             .status()
             .context("valgrind")?;
