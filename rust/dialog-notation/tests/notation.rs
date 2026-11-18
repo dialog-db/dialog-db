@@ -2329,5 +2329,15 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
         (56, 56, 48, 47),
         "{groups:#?}"
     );
+    // With core in front, as tonk reads a component, the concepts the
+    // notebook takes from core are declared.
+    let joined = bar::Bar::of_all(&[
+        include_str!("../../../design/macros/sketches/core.clj"),
+        include_str!("../../../design/macros/sketches/notebook.clj"),
+    ])?;
+    assert_eq!(
+        (joined.forms, joined.read, joined.expanded, joined.compiled),
+        (60, 60, 55, 54)
+    );
     Ok(())
 }

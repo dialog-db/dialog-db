@@ -33,6 +33,12 @@ pub struct Bar {
 }
 
 impl Bar {
+    /// Measure several documents read in order as one, as tonk reads a
+    /// component joined with core.
+    pub fn of_all(texts: &[&str]) -> Result<Bar, Error> {
+        Bar::of(&texts.join("\n\n"))
+    }
+
     /// Measure `text`, one document, on a walker that knows only the
     /// prelude.
     pub fn of(text: &str) -> Result<Bar, Error> {

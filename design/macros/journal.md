@@ -1463,6 +1463,19 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** The managing agent's reading of (2), built. The bar moves from 43 compiled to 47, of 56: the notebook's three retracts of an entry and its retract of a block by its entity compile. 119 unit tests, 41 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: the notebook read with core
+
+**Asked.** Step R: three forms of the notebook stopped on `route` and `intent`, which tonk's `core.yaml` declares, and tonk reads a component joined with core. Write the concepts of core the notebook uses in the notation, and have the bar read several documents in order as one.
+
+**Learned.**
+
+- The notebook uses four of core's concepts: `site`, `route`, `intent/expression` and `intent`. [sketches/core.clj](sketches/core.clj) holds them, from `core.yaml` at tonk `c006b50`, each line `cardinality: :one` since core's fields give no pick and tonk reads the newest.
+- What has no spelling, as `; GAP:` comments: a concept pinned to an entity (`this: tonk:site`, `this: tonk:route`), an optional field (`maybe: selection`, on `site` and on `intent/expression`), and a layer core names only in prose ("Session facts").
+- With core in front, the forms that stopped on `route` and `intent` expand and compile: the two route asserts with `when (id …)` and the palette's retitle rule. None stops on anything new.
+- The bar reads several files, joined in order (`cargo run -p dialog-notation --example bar -- core.clj notebook.clj`, the two sketches by default).
+
+**Decided.** Nothing. The bar of core and the notebook: 60 forms, 60 read, 55 expanded, 54 compiled, pinned beside the notebook's own. 119 unit tests, 41 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.
