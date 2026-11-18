@@ -1,0 +1,54 @@
+# A view is a template over rows, not a value
+
+**Decision:** what a view is, so that a change repaints the smallest part of it.
+**For:** the design has a view be a rule that folds its template into one markup value. A folded value is opaque: when a fact changes the whole value is made again. And a fold in a rule that derives is what Dialog-DB refuses (#830).
+
+The maintainer, spoken on 2026-11-18 and put down here in substance: a view is not a concept. A concept competes with stored values and a view does not have to. Queries and getters are the same separate kind of thing: they derive, and what they derive is not stored, so nothing competes with it. They could be something with no domain, which is why it cannot be stored. And a view should not be made whole again at every change: it is maintained, as tonk maintains its views.
+
+What follows is the agent's reading of that, a hypothesis to prototype, not a decision.
+
+## Three things with no domain
+
+```
+ a query     (query head premise…)                     asked once, or subscribed to
+ a getter    (rule (list/count-open ?l (count ?t)) …)  a query with a name, read where a query may stand
+ a view      (view concept :name template condition…)  a template and the queries that fill it
+```
+
+A claim is an attribute, an entity and a value, and an attribute has a domain. A name with no domain has no claim that could hold it: nothing asserts it, no merge brings it, no read of it looks at the store. What is stored is the definition, as a rule's body is. What it derives never is.
+
+## A view
+
+A template is a tree of elements. A view's conditions are not one query whose rows are folded into the tree. Each element that holds variables has the conditions that bind them, given what the elements above it bound:
+
+```
+ (view list :card
+   [:article [:h2 ?name] [:ul [:li ?title]]]
+   (list ?l name: ?name)
+   (todo ?t list: ?l title: ?title))
+
+ element      holds      its conditions                       an instance of it
+ article      ?l         the view's concept on its entity     one, while the list is one
+ ├ h2         ?name      (list ?l name: ?name)                one a name
+ └ ul                                                         one, while the article is
+   └ li       ?title     (todo ?t list: ?l title: ?title)     one a title; none when the list is empty
+```
+
+- An element has one instance for each distinct combination of the variables it holds, under one instance of its parent. An element that holds none has one instance while its parent has.
+- A condition belongs to the highest element that needs a variable it binds. A condition no element needs belongs to the root: the view is there only while it holds.
+- So a list with no to-dos keeps its card. One query over both conditions would have no row, and no card.
+- Each element's conditions are a subscription. A row that comes or goes is an instance that comes or goes, and nothing else in the tree is touched. A renamed list is one text in one `h2`.
+- A nested view is a reference with its own subscriptions, as the design has it.
+
+No fold is in it. A view needs nothing of Dialog-DB that a subscription does not already give.
+
+## What a getter is then
+
+A fold with a name. A view's element reads it in its conditions, and those are a subscription, one of the places Dialog-DB already lets a fold stand. So the getter that a view shows does not need a fold in a rule that derives. What still does is a getter read by a rule that derives, which stays #830's.
+
+## Open
+
+- An instance with no row behind it: whether the root is there for an entity that is no instance of the concept.
+- The order of instances.
+- What is stored for a view, so another replica's renderer finds it.
+- Whether "the highest element that needs it" is the rule an author expects, or a condition is written where it applies.

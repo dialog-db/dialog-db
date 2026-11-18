@@ -1574,3 +1574,11 @@ In order. One is asked, answered and written down before the next.
 
 **Decided.** Not decided. Four approaches are in [design-view-context.md](design-view-context.md). The agent's hypothesis is in the ledger: for a view of a named concept the nested reference can default to that concept. What it leaves is the one view of any model, and whether a space ever replaces it.
 
+## 2026-11-18, Designing: a view is maintained, and is no concept
+
+**Asked.** What a view is, with the fold in a rule that derives still refused (#830). The maintainer, spoken: a view is not a concept, and need not compete with stored values as a concept does; queries and getters are that same separate kind; they derive and are not stored; they could be something with no domain. The more important part to him: a view is not generated whole at every change, it is maintained, as tonk's are. He asked for a prototype.
+
+**Learned.** The design's view (a rule that folds a template into a markup value) braids two things: what a view shows, and how it is kept up to date. A folded value can only be made again. Read as a template whose elements each have their own conditions, a view has no fold in it, and its upkeep is a subscription an element. That also answers something the design's one query does not: a list with no to-dos has no row, so it would have no card.
+
+**Decided.** The direction is the maintainer's. The definition in [design-view-maintenance.md](design-view-maintenance.md) is the agent's, a hypothesis. A prototype in this crate will say. The fold spike of this morning is beside the point for views.
+
