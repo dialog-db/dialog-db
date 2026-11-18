@@ -334,6 +334,11 @@ impl TryFrom<String> for Uri {
     type Error = IdentityError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
+        // A provably canonical string is its own rendering, as in
+        // `from_str`; owned, it becomes the URI without being copied.
+        if is_provably_canonical(&value) {
+            return Ok(Uri(value.into_boxed_str()));
+        }
         value.parse()
     }
 }

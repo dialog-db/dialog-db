@@ -79,6 +79,11 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   until it seals; as many commits it writes the same nodes again and
   again. The objective is confirmed; its bounds (how large, on what
   machine, within what memory and time) are not yet stated.
+- [A consumer that can only query cannot draw a branch's search tree](tree-exploration.md):
+  **Building.** The one embedder that shows the tree reads blocks
+  through machinery of its own. A node is a handle that five accessors
+  read, the environment decoding once; what a replica holds is learned
+  and changed by commands. Built on top of the session stack.
 - [Writers on separate branches wait on one another in the file archive](file-writers.md):
   **Building.** One file, an extent per writer: processes on separate
   branches write without waiting on one another, as they do on main.

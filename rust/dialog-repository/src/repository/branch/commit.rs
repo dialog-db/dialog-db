@@ -990,7 +990,14 @@ where
         // The entries are appended to the batch's still open buffered tree:
         // they ride the same buffered write as the data, so the record costs
         // a buffer append instead of a second canonical spine-to-leaf edit.
+        #[cfg(not(test))]
         let mut entries = record.entries(batch.manifest())?;
+        #[cfg(test)]
+        let mut entries = if legacy::writing() {
+            record.legacy_entries(batch.manifest())?
+        } else {
+            record.entries(batch.manifest())?
+        };
         // The context region's changed entries ride with the record.
         entries.entries.extend(region);
         // The caller's machinery entries (blob-index tombstones) ride the same
@@ -1026,6 +1033,38 @@ where
             record,
             context,
         })))
+    }
+}
+
+/// A test's way to commit as a release before the `revision:` scheme
+/// did: with the revision's record under its older name.
+#[cfg(test)]
+pub(crate) mod legacy {
+    use std::cell::Cell;
+
+    thread_local! {
+        static WRITING: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Whether this thread's commits write a record under the older name.
+    pub(crate) fn writing() -> bool {
+        WRITING.with(Cell::get)
+    }
+
+    /// Commits on this thread write records under the older name until
+    /// the guard is dropped.
+    pub(crate) fn write() -> Writing {
+        WRITING.with(|writing| writing.set(true));
+        Writing
+    }
+
+    /// Ends [`write`] when dropped.
+    pub(crate) struct Writing;
+
+    impl Drop for Writing {
+        fn drop(&mut self) {
+            WRITING.with(|writing| writing.set(false));
+        }
     }
 }
 
