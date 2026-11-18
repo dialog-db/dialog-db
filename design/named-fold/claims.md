@@ -1,0 +1,14 @@
+# Claims
+
+| claim | kind | backing | status |
+|---|---|---|---|
+| a deductive rule with a `reduce` clause is refused when it is compiled | fact | `open_rule_error` in `rust/dialog-query/src/rule.rs`; the test in `rust/dialog-query/src/rule/deductive.rs` that matches `TypeError::ReduceInOpenRule` | holds on main at `54b1fc4` |
+| the refusal is there so that a merge of rule sets never fails a query | fact | `notes/attribute-heads.md`: "which the author sees at once and a merge never does"; the doc comment on `open_rule_error`: "so no merge of rule sets is ever rejected" | holds |
+| the dependency analysis already knows a fold: an edge from a reducing rule is `Polarity::Aggregating`, and one inside a cycle is an `AggregationViolation` that fails the evaluation with `AggregationThroughRecursion` | fact | `rust/dialog-query/src/session/dependencies.rs` | holds on main |
+| an absence test inside a cycle quarantines one rule of the cycle and the program evaluates | fact | the same file, `ProgramAnalysis::quarantined` | holds on main |
+| a reducing rule's rows are folded when a concept is read | fact | `reduce_rows` in `rust/dialog-query/src/concept/query.rs` | holds on main; no authored rule reaches it since the refusal |
+| the notation's derived attribute and its `view` are deductive rules that fold | fact | #728, `research/notation/design.md` at `31929a6`: "Derived attributes", and "What it expands to" under Views | holds |
+| #827 leaves the refusal as it is | fact | the body of #827: "A deductive rule still takes no authored `reduce`, as on main" | holds at the time of writing |
+| a fold can be admitted in a deductive rule by making a cycle through it a quarantine, and lifting the refusal | hypothesis | the agent's, 2026-11-18. Confirmed by a spike on dialog-query in which: the existing reducing-rule tests pass with authored rules; two rules that are each sound and close a cycle through a fold when merged leave one quarantined and the query answering; two replicas that merge them in either order quarantine the same rule. Refuted if the rule to quarantine cannot be chosen alike on every replica, or if a reader inside the cycle sees a different relation than one outside | open; a spike is planned |
+| a subscription over a concept a fold concludes gives the right rows as facts change | hypothesis | the agent's. `notes/aggregation.md` lists incremental maintenance as later work. Confirmed or refuted by a subscription test over a reducing concept: add a row, remove a row, empty a group | open; not run |
+| a derived value should be a rule that folds, read anywhere, and not a stored claim | opinion | Irakli, #728: "A stored attribute never holds a folded value, so a stored `5` can never beat a count"; and on 2026-11-18, of a view compiled to the design or to what tonk renders today: "seems like design would be a right approach" | decides against the last column |
