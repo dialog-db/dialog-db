@@ -62,3 +62,12 @@ A view with no count in it needs neither.
 - The order of instances.
 - What is stored for a view, so another replica's renderer finds it.
 - Whether "the highest element that needs it" is the rule an author expects, or a condition is written where it applies.
+
+## As built
+
+Built 2026-11-18 in `rust/dialog-notation`: `Plan::of` (`src/view/plan.rs`), `Maintainer` and `render` (`src/view/tree.rs`), run on a branch in `tests/view.rs`. What differs from the above:
+
+- An instance is told apart by what the values its element holds are fields of, not by the values. `[:li ?title]` has one item a to-do, so two to-dos of one title are two items and a retitle is one text. Read literally, the rule above merges them.
+- The entity rendered is bound above the root, and the root takes the concept applied to it alone. Without that, every condition binds `?l` and goes to the root.
+- Siblings that both need a condition share it at their common ancestor. A join on a variable no element holds is pulled into the element whose condition it ties, or is a filter where its variables are bound.
+- A layer of several reads compiles to a rule and a query of it. `Branch::subscribe` takes no rule, so the rule is put in the branch's session overlay.
