@@ -1565,3 +1565,12 @@ In order. One is asked, answered and written down before the next.
 5. Review of #777 and the open questions of #778.
 6. The agent's choices standing until said otherwise: the blank-line rule for comments; a refused document keeps no definition; a rest stands after a struct's entries; `(all …)` or a spread in a template.
 7. Housekeeping: #776 and the several-heads part of #779 after one head a rule; the Perf gate on #788; the sweep output under `/home/claude/heads/target`; the branch `wip/patterns-step-2`.
+
+## 2026-11-18, Designing: what a view takes from where it is rendered
+
+**Asked.** Porting `table.yaml` found one kind of gap the notebook had not: `model={dom.host/model}`, a template value read off the host element. The maintainer: "I think this is a wart we need to consider alternatives for."
+
+**Learned.** tonk's library reads the host five times, and the one spelling carries two things: the model that was asked for (four), and the branch being read (one). The first is there because an instance does not say what model it is of; the second because an element that builds a URL inherits nothing. And a designed view is a rule, which has no host to read, so the question is not how to spell the read but where what it carried comes from.
+
+**Decided.** Not decided. Four approaches are in [design-view-context.md](design-view-context.md). The agent's hypothesis is in the ledger: for a view of a named concept the nested reference can default to that concept. What it leaves is the one view of any model, and whether a space ever replaces it.
+
