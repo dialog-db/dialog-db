@@ -43,10 +43,11 @@
 //! which every replica sees the same, so replicas with the same history
 //! quarantine the same rules, and a quarantine lifts by itself once a
 //! rule of the cycle is retracted.
-//! An aggregating edge inside a component remains a violation: a fold
-//! has no deterministic reading over a set still growing. A deductive
-//! rule refuses `reduce` at compile time, so the violation is
-//! unreachable for authored rules and kept for the structure.
+//! An aggregating edge inside a component is an absence test like any
+//! other, as plain as an `unless`: a fold has no reading over a set
+//! still growing, so a rule of the cycle is quarantined by the same
+//! choice. One left over in a cycle with no rule to set aside is a
+//! violation.
 //!
 //! Callers consume the analysis three ways:
 //!
@@ -58,8 +59,9 @@
 //! - [`RuleRegistry::acquire`](super::rule_registry::RuleRegistry::acquire)
 //!   runs the targeted [`ProgramAnalysis::check`] over the queried
 //!   concept's dependency closure, so a recursive region of the
-//!   program is evaluated by the fixpoint and an aggregating one
-//!   fails the queries that touch it (and only those).
+//!   program is evaluated by the fixpoint and an aggregating one no
+//!   quarantine could break fails the queries that touch it (and only
+//!   those).
 
 use crate::Entity;
 use crate::Pick;
@@ -78,10 +80,9 @@ use std::iter;
 /// Polarity of a dependency edge: whether the rule body references
 /// the concept positively (an ordinary premise), under `unless`,
 /// set-widened, or from a *reducing* rule whose fold must read the
-/// complete relation, or under a choosing pick. A negative, optional
-/// or electing edge inside a dependency cycle is an absence test the
-/// analysis quarantines a rule over; an aggregating one is a
-/// stratification violation.
+/// complete relation, or under a choosing pick. A negative, optional,
+/// aggregating or ranked electing edge inside a dependency cycle is an
+/// absence test the analysis quarantines a rule over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Polarity {
     /// The body asserts the concept.
@@ -110,21 +111,26 @@ pub enum Polarity {
 
 impl Polarity {
     /// Whether the edge tests for something's absence inside a cycle: a
-    /// negation, an optional read or a ranked election. A `last` read is
-    /// not: inside its cycle it reads every candidate, and its readers
-    /// elect the newest once the cycle is derived in full.
+    /// negation, an optional read, a fold or a ranked election. A
+    /// `last` read is not: inside its cycle it reads every candidate,
+    /// and its readers elect the newest once the cycle is derived in
+    /// full. A fold reads its input's complete relation, as a negation
+    /// of it does, and has no reading over a set still growing.
     fn tests_absence(self) -> bool {
         matches!(
             self,
-            Polarity::Negative | Polarity::Optional | Polarity::Electing { ranked: true }
+            Polarity::Negative
+                | Polarity::Optional
+                | Polarity::Aggregating
+                | Polarity::Electing { ranked: true }
         )
     }
 
-    /// How plainly the edge tests for absence: an `unless` or an
-    /// optional read most, a ranked election next.
+    /// How plainly the edge tests for absence: an `unless`, an
+    /// optional read or a fold most, a ranked election next.
     fn strength(self) -> u8 {
         match self {
-            Polarity::Negative | Polarity::Optional => 2,
+            Polarity::Negative | Polarity::Optional | Polarity::Aggregating => 2,
             Polarity::Electing { ranked: true } => 1,
             _ => 0,
         }
@@ -144,7 +150,7 @@ pub enum Absence {
 }
 
 /// A rule the analysis set aside: it closed a cycle through an absence
-/// test or an election, which has no stratified meaning, so evaluation
+/// test, an election or a fold, which has no stratified meaning, so evaluation
 /// leaves it out until a rule of the cycle is retracted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Quarantine {

@@ -41,8 +41,9 @@
 //! elects, so the rewrite wins over what it read, and a cycle of
 //! rewrites, which no rank can order, is elected among as concurrent
 //! candidates.
-//! A fold inside a component has no reading at all and stays refused
-//! ([`ProgramAnalysis::check`]).
+//! A fold inside a component has no reading at all: the analysis
+//! quarantines a rule of its cycle as it does for an `unless`, and one
+//! no quarantine could break fails ([`ProgramAnalysis::check`]).
 //!
 //! Goal-directed (magic-set) filtering of the component's answer
 //! space is future work: this evaluator computes the component's
@@ -1026,7 +1027,7 @@ where
     // the folded inputs are complete before the fixpoint begins. (A
     // reducing rule *with* an in-component occurrence never reaches
     // evaluation: that occurrence is an aggregating edge inside its
-    // own component, rejected by [`ProgramAnalysis::check`].)
+    // own component, which the analysis quarantines a rule over.)
     for member in members.values() {
         for split in &member.rules {
             if !split.occurrences.is_empty() {

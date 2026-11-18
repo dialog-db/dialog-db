@@ -3063,6 +3063,36 @@ mod tests {
         #[domain("payroll")]
         pub struct ReportTotal(pub u32);
 
+        /// A department's total salary (`payroll/total`), a folded
+        /// conclusion field.
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("payroll")]
+        pub struct Total(pub i64);
+
+        /// A reader's projection of a folded total
+        /// (`payroll/reported`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("payroll")]
+        pub struct Reported(pub i64);
+
+        /// A rule's reading of [`DeptTotal`].
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct DeptReported {
+            /// The department entity.
+            pub this: Entity,
+            /// The total read.
+            pub total: Reported,
+        }
+
+        /// A department's folded total: `this` is the department.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct DeptTotal {
+            /// The department entity.
+            pub this: Entity,
+            /// Sum of the members' salaries.
+            pub total: Total,
+        }
+
         /// An employee with a department and salary — the base
         /// relation the reducing rules fold.
         #[derive(Concept, Debug, Clone, PartialEq)]
@@ -3150,6 +3180,209 @@ mod tests {
                 predicate: target.clone(),
             },
         ))
+    }
+
+    /// The reducing rule `DeptTotal { total: sum(?salary) }` over
+    /// [`concepts::Staffed`], grouped by the department entity,
+    /// storable as a durable rule.
+    fn dept_total_rule() -> dialog_query::DeductiveRule {
+        use concepts::{DeptTotal, Staffed};
+        let clause = std::collections::BTreeMap::from([(
+            "total".to_string(),
+            dialog_query::ReduceSpec {
+                apply: dialog_query::Aggregator::Sum,
+                of: Term::<Any>::var("salary"),
+            },
+        )]);
+        dialog_query::DeductiveRule::with_reduce(
+            DeptTotal::descriptor().clone(),
+            vec![concept_premise(
+                Staffed::descriptor(),
+                &[("this", "employee"), ("dept", "this"), ("salary", "salary")],
+            )],
+            clause,
+        )
+        .expect("a deductive rule may fold")
+    }
+
+    /// Folded rows as comparable `(department, total)` pairs, sorted.
+    fn totals(rows: &[concepts::DeptTotal]) -> Vec<(Entity, i64)> {
+        let mut pairs: Vec<(Entity, i64)> = rows
+            .iter()
+            .map(|row| (row.this.clone(), row.total.0))
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
+    /// A subscription over a concept a fold concludes, as facts change:
+    /// a row added to a group retracts the group's old total and
+    /// asserts the new one; a row for a new group asserts that group's
+    /// total alone; a row removed from a group moves its total down;
+    /// the last row of a group removed retracts the group's total and
+    /// asserts nothing. Every delta comes from re-deriving the whole
+    /// query, never from per-entity maintenance.
+    #[dialog_common::test]
+    async fn it_updates_a_subscription_over_a_fold_as_its_groups_change() -> anyhow::Result<()> {
+        use concepts::{Dept, DeptTotal, Salary, Staffed, Total};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let dept_a: Entity = "id:dept-a".parse()?;
+        let dept_b: Entity = "id:dept-b".parse()?;
+        let staffed = |who: &Entity, dept: &Entity, salary: u32| Staffed {
+            this: who.clone(),
+            dept: Dept(dept.clone()),
+            salary: Salary(salary),
+        };
+        let (alice, bob, carol) = (Entity::new()?, Entity::new()?, Entity::new()?);
+
+        with_rule(branch.transaction(), &dept_total_rule())
+            .assert(staffed(&alice, &dept_a, 100))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(Query::<DeptTotal>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(totals(&initial.asserted), vec![(dept_a.clone(), 100)]);
+        assert!(initial.retracted.is_empty());
+
+        // A row added to a group.
+        branch
+            .transaction()
+            .assert(staffed(&bob, &dept_a, 50))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("a row added");
+        assert_eq!(totals(&delta.retracted), vec![(dept_a.clone(), 100)]);
+        assert_eq!(totals(&delta.asserted), vec![(dept_a.clone(), 150)]);
+
+        // A row for a new group.
+        branch
+            .transaction()
+            .assert(staffed(&carol, &dept_b, 70))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("a new group");
+        assert!(delta.retracted.is_empty(), "dept-a's total is unchanged");
+        assert_eq!(totals(&delta.asserted), vec![(dept_b.clone(), 70)]);
+        assert!(subscription.results().contains(&DeptTotal {
+            this: dept_a.clone(),
+            total: Total(150),
+        }));
+
+        // A row removed from a group.
+        branch
+            .transaction()
+            .retract(staffed(&bob, &dept_a, 50))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("a row removed");
+        assert_eq!(totals(&delta.retracted), vec![(dept_a.clone(), 150)]);
+        assert_eq!(totals(&delta.asserted), vec![(dept_a.clone(), 100)]);
+
+        // A group emptied.
+        branch
+            .transaction()
+            .retract(staffed(&carol, &dept_b, 70))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("a group emptied");
+        assert_eq!(totals(&delta.retracted), vec![(dept_b.clone(), 70)]);
+        assert!(delta.asserted.is_empty(), "an empty group has no row");
+        assert_eq!(totals(subscription.results()), vec![(dept_a.clone(), 100)]);
+
+        assert_eq!(
+            (subscription.recomputes(), subscription.maintenances()),
+            (5, 0),
+            "every poll re-derived the whole query"
+        );
+        Ok(())
+    }
+
+    /// A subscription over a rule reading a fold's conclusion, two
+    /// strata above the stored rows: a row added below moves the
+    /// reader's row.
+    #[dialog_common::test]
+    async fn it_updates_a_subscription_over_a_reader_of_a_fold() -> anyhow::Result<()> {
+        use concepts::{Dept, DeptReported, DeptTotal, Reported, Salary, Staffed};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let dept_a: Entity = "id:dept-a".parse()?;
+        let (alice, bob) = (Entity::new()?, Entity::new()?);
+        let reader = concept_rule(
+            DeptReported::descriptor(),
+            vec![concept_premise(
+                DeptTotal::descriptor(),
+                &[("this", "this"), ("total", "total")],
+            )],
+        );
+        let tx = with_rule(branch.transaction(), &dept_total_rule());
+        with_rule(tx, &reader)
+            .assert(Staffed {
+                this: alice.clone(),
+                dept: Dept(dept_a.clone()),
+                salary: Salary(100),
+            })
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(Query::<DeptReported>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            initial.asserted,
+            vec![DeptReported {
+                this: dept_a.clone(),
+                total: Reported(100),
+            }]
+        );
+
+        branch
+            .transaction()
+            .assert(Staffed {
+                this: bob.clone(),
+                dept: Dept(dept_a.clone()),
+                salary: Salary(50),
+            })
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("a row added below");
+        assert_eq!(
+            delta.retracted,
+            vec![DeptReported {
+                this: dept_a.clone(),
+                total: Reported(100),
+            }]
+        );
+        assert_eq!(
+            delta.asserted,
+            vec![DeptReported {
+                this: dept_a.clone(),
+                total: Reported(150),
+            }]
+        );
+        Ok(())
     }
 
     /// Piece 1: a derived `Query<C>` subscription over an

@@ -1,4 +1,6 @@
 mod batch;
+#[cfg(test)]
+mod fold;
 mod induce;
 #[cfg(test)]
 mod invariants;

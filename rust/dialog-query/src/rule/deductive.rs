@@ -1646,12 +1646,13 @@ mod tests {
         );
     }
 
-    /// A `reduce` block is refused in a deductive rule: a fold
-    /// withdraws its previous result when a fact arrives and has no
-    /// reading inside a dependency cycle. The attribute's `pick`
-    /// chooses among the candidates instead.
+    /// A deductive rule admits a `reduce` block: outside a dependency
+    /// cycle a fold reads a relation derived in full, as an `unless`
+    /// does, and a rule closing a cycle through one is quarantined by
+    /// the program analysis. The head is an integer: a sum over an
+    /// untyped input may be negative, which a natural head refuses.
     #[dialog_common::test]
-    fn it_refuses_reduce_in_a_deductive_rule() {
+    fn it_admits_reduce_in_a_deductive_rule() {
         use crate::reduce::{Aggregator, ReduceSpec};
 
         let conclusion = ConceptDescriptor::try_from(vec![(
@@ -1660,7 +1661,7 @@ mod tests {
                 the!("org/total"),
                 "",
                 Cardinality::One,
-                Some(Type::UnsignedInt),
+                Some(Type::SignedInt),
             ),
         )])
         .unwrap();
@@ -1681,11 +1682,11 @@ mod tests {
                 of: Term::var("salary"),
             },
         )]);
-        let result = DeductiveRule::with_reduce(conclusion, premises, reduce);
-        assert!(
-            matches!(result, Err(TypeError::ReduceInOpenRule { .. })),
-            "a deductive rule admits no reduce, got {result:?}"
-        );
+        let rule = DeductiveRule::with_reduce(conclusion, premises, reduce)
+            .expect("a deductive rule admits a reduce");
+        assert_eq!(rule.reduce().len(), 1);
+        assert_eq!(rule.reduce()[0].field, "total");
+        assert!(rule.reducer().is_some());
     }
 
     /// A concept-typed field conjoins the target concept as a
