@@ -1619,3 +1619,13 @@ The agent had pressed the layered rule as the answer. It keeps the card, and it 
 **Learned.** The call form needed one change to the reader, which refused two parts with no label beside labels; a view's call names its concept and its view first. tonk's rule, built as `Plan::repeating` from its code: with the marker the index stands empty and repeats its links; without it the whole template repeats, which is what tonk's own notebook directory does. Tags are cloned at the span in both readings, by the concept's cardinality, and moving the title changes nothing. A task with no tag is no task at all. Of the eleven restated views, ten repeat the element tonk's planner repeats; `table :directory` does not, as a call has no attribute to carry a marker. Two faults surfaced and were fixed in the build: a query of several reads crossed a row's values when its head was the list, and entries sorted by block, not position. One was sidestepped and is not understood: a rule with a blank and a bound read of one collection does not hydrate.
 
 **Decided.** The maintainer's: tonk's rule is the default and the layered plan stays beside it. Open and his: a view over a second entity, and whether a call may carry a marker.
+
+## 2026-11-18, Building: the rule that did not hydrate
+
+**Asked.** Why a rule that compiled and stored could not be read back (`an empty map names no type`), and at which layer.
+
+**Learned.** The fault is dialog-query's, not the notation's, and the ledger's first account of it was wrong on one point: one read is enough, two reads of the collection are not needed. A collection entry leaves a blank half out when written, so an entry with both halves blank is written `{}`; the reader only took an object holding `the` or `is` for an entry, and read `{}` as a constant. The same lines are on `main`. The fix (`8261ebd`) is on the read side, one condition, so no rule's bytes or identity change and bodies already stored become readable. Writing the blank out instead was set aside: it changes the bytes of these rules and leaves stored ones unreadable.
+
+Two things it turned up and did not settle. The view plan's sidestep cannot come out: with the fix the rules load, and without the sidestep every block is paired with every key, which is a different fault, not looked into. And a rule built through dialog-query's own API with a collection field and no key seems to change identity across a decode, the bytes the same; a hypothesis in the ledger, since only a probe saw it.
+
+**Decided.** The managing agent's: the read-side fix stays on #773 until the maintainer says which pull request below it should carry it. Not decided, the maintainer's: the identity of a missing key against a blank one, since either fix changes identities.
