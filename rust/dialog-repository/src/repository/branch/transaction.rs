@@ -19,16 +19,20 @@ pub(crate) use succession::ReadSettlement;
 pub(crate) use succession::{settle, stored_claims};
 pub use transact::Transact;
 
+use crate::Channel;
 use crate::Commit;
+use crate::placement::{Observed, control_layer};
 use crate::repository::branch::asset::store_assets;
-use crate::repository::branch::session::shared_metadata;
+use crate::repository::branch::session::{Composite, shared_metadata};
 use crate::repository::source::{Live, View};
 use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
-use crate::{Branch, CommitError, PublishError, RemoteSite, Revision, Snapshot, Staged};
+pub(crate) use crate::stack::durable::DurableLayer;
+use crate::stack::durable::{Durables, Pinned};
+use crate::{Branch, CommitError, Ephemeral, PublishError, RemoteSite, Revision, Snapshot, Staged};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::tree::CorpusNode;
-use dialog_corpus::{Changes, Statement};
+use dialog_corpus::{Changes, Entity, Statement};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -39,6 +43,8 @@ use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{self, Edition, Publish, Resolve};
 use dialog_search_tree::nodes;
 use std::slice::from_ref;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// A transaction on a line of the repository.
 ///
@@ -90,6 +96,50 @@ pub struct Transaction<L: Line> {
     /// [`Staged`]); exported to a [`Changes`] batch once, at commit.
     changes: Staged,
     transients: Staged,
+    /// The stack this transaction commits through, if one: its layers,
+    /// which its reads and its induction see, and which take the writes
+    /// named for them.
+    stack: Option<StackContext>,
+}
+
+/// What a transaction through a [`Stack`](crate::Stack) carries: the
+/// composite its reads and its induction see, the memory layers that
+/// take their shares once the commit publishes, the durable layers whose
+/// next trees its commit mints and points the primary at, and the
+/// channels the publish lands what the transaction wrote into them in.
+#[derive(Clone)]
+pub(crate) struct StackContext {
+    /// The primary's branch entity, whose `dialog.branch/revision` cell
+    /// the stack reads in `session:` from the branch metadata.
+    pub(crate) branch: Entity,
+    /// The stack's own layer, `session:`, where it records the revisions
+    /// of its layers and holds its selection.
+    pub(crate) own: Ephemeral,
+    /// Where the stack last recorded the primary.
+    pub(crate) observed: Observed,
+    pub(crate) composite: Composite,
+    /// The stack's memory layers, its own first.
+    pub(crate) memories: Vec<(Entity, Ephemeral)>,
+    /// The durable layers, each at the revision the primary pointed it
+    /// at when the transaction opened.
+    pub(crate) durables: Vec<DurableLayer>,
+    /// The stack's durable layers, and where the transaction read them
+    /// from: its commit refuses a primary other than the one the layers
+    /// were read at, and its publish records where it left them.
+    pub(crate) pinned: Pinned,
+    pub(crate) state: Arc<Durables>,
+    /// The stack's channels, the loopback first: the publish lands on
+    /// each one's outside end what the transaction wrote into it, the
+    /// commands it dispatched in the loopback's.
+    pub(crate) channels: Vec<Channel>,
+    /// What the outside ends of the channels other than the loopback
+    /// sent, each named for its channel: stimulus of the first tick, read
+    /// as rows of the channel, landing nowhere.
+    pub(crate) received: Changes,
+    /// The stack's mark that a poll of its subscriptions is scheduled:
+    /// set by a publish that moved the primary or wrote into a memory
+    /// layer.
+    pub(crate) scheduled: Arc<AtomicBool>,
 }
 
 /// What a [`Transaction`] runs on: a `&`[`Branch`], a `&`[`Snapshot`]
@@ -149,7 +199,16 @@ impl<L: Line> Transaction<L> {
             pinned,
             changes: Staged::default(),
             transients: Staged::default(),
+            stack: None,
         }
+    }
+
+    /// Commit through `stack`: induction reads its layers, and the
+    /// writes placed outside the primary are handed back as the shares of
+    /// its memory layers instead of landing in the tree.
+    pub(crate) fn with_stack(mut self, stack: StackContext) -> Self {
+        self.stack = Some(stack);
+        self
     }
 
     /// Assert a claim into this transaction.
@@ -164,9 +223,11 @@ impl<L: Line> Transaction<L> {
         self
     }
 
-    /// Dispatch a claim as a *transient* fact (a command): visible to
-    /// reads and to inductive-rule bodies during this commit, seeding
-    /// commit-time induction, but never committed to the branch.
+    /// Dispatch a claim as a *transient* fact (a command): a write into
+    /// [`control:`](crate::CONTROL), as `.at(control_layer())` is.
+    /// Visible to reads and to inductive-rule bodies during this commit
+    /// as a row of `control:`, seeding commit-time induction, but never
+    /// committed to the branch.
     pub fn dispatch<C: Statement>(mut self, claim: C) -> Self {
         self.transients.assert(claim);
         self
@@ -204,19 +265,28 @@ impl<L: Line> Transaction<L> {
             allow_empty: false,
             canonicalize: false,
             amend: false,
+            stack: self.stack.clone(),
         }
     }
 }
 
 impl<L: Line> Transaction<L> {
     /// The staged layers [`Transaction::query`] reads over the line:
-    /// the durable writes, then the transients. Shared, not copied.
+    /// the durable writes, then the transients, read as rows of
+    /// [`control:`](crate::CONTROL). Shared, not copied.
     fn layers(&self) -> Vec<Staged> {
-        [&self.changes, &self.transients]
-            .into_iter()
-            .filter(|layer| !layer.is_empty())
-            .cloned()
-            .collect()
+        let mut layers: Vec<Staged> = Vec::with_capacity(2);
+        if !self.changes.is_empty() {
+            layers.push(self.changes.clone());
+        }
+        if !self.transients.is_empty() {
+            layers.push(self.transients.clone().in_layer(control_layer()));
+        }
+        // Each share is read as the layer it is written into.
+        for (layer, share) in self.changes.shares() {
+            layers.push(Staged::from(share.clone()).in_layer(layer.clone()));
+        }
+        layers
     }
 }
 
@@ -230,11 +300,15 @@ impl Transaction<&Branch> {
     /// stream before the merge. Dispatched transients are part of the
     /// view too. The transaction itself stays open and committable.
     pub fn query(&self) -> TransactionQuery<'_> {
-        TransactionQuery::new(self.view(), self.layers())
+        let query = TransactionQuery::new(self.view(), self.layers());
+        match &self.stack {
+            Some(stack) => query.over(stack.composite.clone()),
+            None => query,
+        }
     }
 
     /// The branch at the revision this transaction pinned.
-    fn view(&self) -> View<'_> {
+    pub(crate) fn view(&self) -> View<'_> {
         View::at(
             Live::Branch(self.line),
             self.pinned.as_ref().map(|edition| &edition.content),
@@ -299,6 +373,7 @@ pub struct TransactionCommit<L: Line> {
     pub(super) allow_empty: bool,
     pub(super) canonicalize: bool,
     pub(super) amend: bool,
+    pub(super) stack: Option<StackContext>,
 }
 
 impl<L: Line> TransactionCommit<L> {
@@ -365,8 +440,9 @@ impl TransactionCommit<&Snapshot> {
         }
         let view = View::at(Live::Snapshot(snapshot), Some(&previous));
         let operator = Identify.perform(env).await?;
+        let composite = Composite::of(view.to_source());
         let mut changes = Box::pin(succession::settle(
-            vec![view.to_source()],
+            composite.clone(),
             shared_metadata(from_ref(&view), &operator),
             &self.changes,
             env,
@@ -375,7 +451,7 @@ impl TransactionCommit<&Snapshot> {
         // A snapshot commit reports only its revision: the transients
         // induction emitted surface on a staged
         // [`TransactionBatch::induced`] alone.
-        induce::induce(&view, &mut changes, self.transients, env).await?;
+        induce::induce(&view, &composite, &mut changes, self.transients, None, env).await?;
 
         let touches_rules = touches_rules(&changes);
         let touches_rule_facts = touches_rule_facts(&changes);

@@ -83,3 +83,17 @@ impl From<&Fact> for Claim {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Claim;
+    use std::mem::size_of;
+
+    /// A claim is four fields and nothing per row beside them: the
+    /// layer a row was read from is the match's `in` binding, not a
+    /// field of the claim.
+    #[test]
+    fn claim_is_80_bytes() {
+        assert_eq!(size_of::<Claim>(), 80);
+    }
+}
