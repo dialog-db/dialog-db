@@ -233,6 +233,8 @@ enum ColumnReader<'a> {
         values: Vec<&'a [u8]>,
         indices: &'a [u8],
         position: usize,
+        /// The value the reader last advanced to.
+        current: &'a [u8],
     },
 }
 
@@ -258,6 +260,7 @@ impl<'a> ColumnReader<'a> {
                 values: resolve_dictionary(table, table_ends)?,
                 indices,
                 position: 0,
+                current: &[],
             },
             _ => {
                 return Err(malformed(
@@ -267,29 +270,34 @@ impl<'a> ColumnReader<'a> {
         })
     }
 
-    /// Appends the next entry's component bytes onto `out`. One append per
-    /// component; the only reconstruction cost is the arena cursor's in-place
-    /// front-decode, reused across entries.
-    fn append_next(&mut self, out: &mut Vec<u8>) -> Result<(), DialogSearchTreeError> {
+    /// Moves to the next entry's component, which [`current`](Self::current)
+    /// then returns. The arena cursor front-decodes in place, reused across
+    /// entries.
+    fn advance(&mut self) -> Result<(), DialogSearchTreeError> {
         match self {
-            ColumnReader::Arena { cursor } => {
-                cursor.advance()?;
-                out.extend_from_slice(cursor.key());
-            }
+            ColumnReader::Arena { cursor } => cursor.advance()?,
             ColumnReader::Dictionary {
                 values,
                 indices,
                 position,
+                current,
             } => {
                 let (index, next) = read_varint(indices, *position)?;
                 *position = next;
-                let value = values
+                *current = values
                     .get(index as usize)
                     .ok_or_else(|| malformed("Dictionary index out of range"))?;
-                out.extend_from_slice(value);
             }
         }
         Ok(())
+    }
+
+    /// The component bytes of the entry the reader last advanced to.
+    fn current(&self) -> &[u8] {
+        match self {
+            ColumnReader::Arena { cursor } => cursor.key(),
+            ColumnReader::Dictionary { current, .. } => current,
+        }
     }
 }
 
@@ -322,11 +330,12 @@ impl<'a> StreamingLeaf<'a> {
         if columns.len() != components.len() {
             return Err(malformed("Column count does not match the key schema"));
         }
-        let readers = components
-            .iter()
-            .zip(columns)
-            .map(|(component, slices)| ColumnReader::new(component, slices))
-            .collect::<Result<_, _>>()?;
+        // Sized up front: collected through a `Result` the vector would
+        // grow one reader at a time, and a leaf is opened on every read.
+        let mut readers = Vec::with_capacity(components.len());
+        for (component, slices) in components.iter().zip(columns) {
+            readers.push(ColumnReader::new(component, slices)?);
+        }
         Ok(Self {
             readers,
             key_buf: Vec::new(),
@@ -343,9 +352,21 @@ impl<'a> StreamingLeaf<'a> {
             return Ok(None);
         }
         let at = self.index;
-        self.key_buf.clear();
         for reader in &mut self.readers {
-            reader.append_next(&mut self.key_buf)?;
+            reader.advance()?;
+        }
+        // Sized before it is filled: the buffer grows at most once per key
+        // that outgrows every key before it, whatever order the leaf holds
+        // its keys in, not once per component.
+        let length = self
+            .readers
+            .iter()
+            .map(|reader| reader.current().len())
+            .sum();
+        self.key_buf.clear();
+        self.key_buf.reserve(length);
+        for reader in &self.readers {
+            self.key_buf.extend_from_slice(reader.current());
         }
         self.index += 1;
         Ok(Some((at, &self.key_buf)))
