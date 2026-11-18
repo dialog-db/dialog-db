@@ -4720,6 +4720,94 @@ mod tests {
         Ok(())
     }
 
+    /// A durable layer an older release wrote, its pointer and the
+    /// revision's record both under the `did:key:z6Mk` name revisions had
+    /// before `revision:`, still opens: a stack opened afresh reads the
+    /// layer where the old pointer points it, a write moves the layer on
+    /// from that tree and points the primary at the new revision by its
+    /// current name, retiring the old claim, and a sync carries the layer
+    /// to a second replica, which reads it.
+    #[dialog_common::test]
+    async fn it_opens_a_durable_layer_an_older_release_pointed_at() -> Result<()> {
+        use crate::repository::branch::legacy;
+
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let upstream = repo.branch("upstream").open().perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.set_upstream(&upstream).perform(&operator).await?;
+        let notes = declare_notes(&branch, &operator).await?;
+        branch.push().perform(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+
+        let older = legacy::write();
+        let stack = branch.stack().perform(&operator).await?;
+        stack
+            .assert(note(&doc, "first", &notes))
+            .perform(&operator)
+            .await?;
+        let first = stack.pointed(&notes).expect("the layer moved");
+        let claims = pointers(&branch, &operator, &notes).await?;
+        drop(older);
+        assert!(
+            claims[0].contains("did:key:z6Mk"),
+            "the older release named the revision by its older name: {claims:?}"
+        );
+
+        let reopened = branch.stack().perform(&operator).await?;
+        assert_eq!(
+            named(reopened.pointed(&notes)),
+            named(Some(first.clone())),
+            "the old pointer names the revision it did"
+        );
+        assert_eq!(
+            notes_read(&reopened, &operator, notes_in(&notes)).await?,
+            vec!["String(\"first\") in memory:notes".to_string()],
+            "a stack opened afresh reads the layer the old pointer points at"
+        );
+
+        reopened
+            .assert(note(&doc, "second", &notes))
+            .perform(&operator)
+            .await?;
+        let second = reopened.pointed(&notes).expect("the layer moved");
+        assert_eq!(
+            second.edition,
+            first.edition.successor(),
+            "the write builds on the tree the old pointer named"
+        );
+        assert_eq!(
+            pointers(&branch, &operator, &notes).await?,
+            pointer_to(&second),
+            "the new pointer, by the current name, succeeds the old one"
+        );
+
+        reopened
+            .sync(crate::Download::QueriedRanges)
+            .perform(&operator)
+            .await?;
+        let replica = repo.branch("replica").open().perform(&operator).await?;
+        replica.set_upstream(&upstream).perform(&operator).await?;
+        let mirrored = replica
+            .stack()
+            .declare(LayerDeclaration::new(notes.clone(), LayerType::Branch))
+            .perform(&operator)
+            .await?;
+        mirrored
+            .sync(crate::Download::QueriedRanges)
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            notes_read(&mirrored, &operator, notes_in(&notes)).await?,
+            vec![
+                "String(\"first\") in memory:notes".to_string(),
+                "String(\"second\") in memory:notes".to_string(),
+            ],
+            "a second replica reads the layer after a sync"
+        );
+        Ok(())
+    }
+
     /// Two replicas each write the durable layer, different cells and the
     /// same single-valued cell with different values, then each syncs
     /// through one upstream, the first and then the second, and the first

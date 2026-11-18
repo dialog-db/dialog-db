@@ -204,13 +204,20 @@ pub(crate) async fn revision_of(
     let the: Relation = REVISION_ATTRIBUTE
         .parse()
         .map_err(|error| CommitError::Induction(format!("revision attribute: {error}")))?;
+    // A pointer names its revision by the name the release that wrote it
+    // used, and the tree may hold the record under either: `revision:`,
+    // or the `did:key:z6Mk` name an older release wrote. Read the
+    // pointer's own name first, then the other.
+    let current = Version::current_of(&pointed.revision);
     let mut records = cell(archive, &pointed.tree, &the, &pointed.revision, store).await?;
-    if records.is_empty()
-        && let Some(legacy) = Version::legacy_of(&pointed.revision)
-    {
-        // A tree an older release wrote holds the record under the name
-        // revisions had before `revision:`.
-        records = cell(archive, &pointed.tree, &the, &legacy, store).await?;
+    if records.is_empty() {
+        let other = match &current {
+            Some(current) if *current == pointed.revision => Version::legacy_of(current),
+            other => other.clone(),
+        };
+        if let Some(other) = other {
+            records = cell(archive, &pointed.tree, &the, &other, store).await?;
+        }
     }
     for (value, _) in records {
         let Value::Record(bytes) = value else {
@@ -220,9 +227,7 @@ pub(crate) async fn revision_of(
             continue;
         };
         let version = record.version();
-        let named = version.entity() == pointed.revision
-            || Version::legacy_of(&pointed.revision)
-                .is_some_and(|legacy| legacy == version.legacy_entity());
+        let named = current.as_ref() == Some(&version.entity());
         if !named || record.verify(&version).is_err() {
             continue;
         }
@@ -673,7 +678,13 @@ pub(crate) async fn merge<Env: MintEnv + TreeEnv>(
     let store = erased(env);
     let mut named: Vec<Revision> = Vec::new();
     for claim in claims {
-        if named.iter().all(|held| held.entity() != claim.revision) {
+        // Claims an older release wrote name a revision by its older
+        // name; one revision under both names is still one revision.
+        let claimed = Version::current_of(&claim.revision);
+        if named
+            .iter()
+            .all(|held| claimed.as_ref() != Some(&held.entity()))
+        {
             named.push(revision_of(&archive, claim, store).await?);
         }
     }

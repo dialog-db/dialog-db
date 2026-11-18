@@ -56,9 +56,16 @@ as one.
   revision concepts and a stack's durable layers all do) and writes new
   ones under `revision:`, so one tree can hold both. An embedder runs
   nothing.
+- A durable layer's pointer, the `dialog.branch/revision` of
+  `memory:<name>` stored in the primary's tree, names its revision by
+  the name the release that wrote it used. This release follows a
+  pointer an older release wrote, by either name, and opens the layer;
+  the layer's next move points the primary at the new revision by its
+  `revision:` name and retires the older claim, as any move does.
 - An older release cannot find a record written under `revision:`, so
-  it cannot read the history of what this release committed. Upgrade
-  every replica of a space before any of them commits with this release.
+  it cannot read the history of what this release committed, nor follow
+  a durable layer's pointer this release wrote. Upgrade every replica of
+  a space before any of them commits with this release.
 
 ### A tree node is a handle, and five resolvers read it
 
@@ -134,10 +141,14 @@ an entry the subject of a concept.
 
 #### Compatibility and migration
 
-- Nothing stored changes: `dialog.branch/tree` is
-  derived from the branch when a query runs and was never written, and
-  resolver rows are read off blocks. An older release reads everything
-  this one writes. A rule stored on a branch that uses `tree/key`,
+- Nothing stored changes. A branch's `dialog.branch/tree` is derived
+  when a query runs and never written; it now reads as a `node:`
+  entity. A durable layer's pointer does write `dialog.branch/tree`, of
+  `memory:<name>` in the primary's tree, and still writes it as the
+  tree's base58 text, so the same attribute reads as an entity of a
+  branch and as text of a layer: a rule reading a layer's pointer reads
+  text. Resolver rows are read off blocks. An older release reads
+  everything this one writes. A rule stored on a branch that uses `tree/key`,
   `tree/blob` or `tree/manifest`, a snake_case manifest slot, or a
   base58 string as `of`, or that reads `dialog.branch/tree` as text, no
   longer compiles or no longer matches, and has to be re-authored.

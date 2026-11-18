@@ -174,6 +174,19 @@ impl Version {
             .expect("a did:key URI formed from a 32-byte hash is always a valid entity")
     }
 
+    /// The entity a revision is named by now, given either of its names:
+    /// a `revision:` entity is itself, and the `did:key:z6Mk` one an older
+    /// release wrote becomes its `revision:` name. `None` for an entity
+    /// that names no revision.
+    pub fn current_of(entity: &Entity) -> Option<Entity> {
+        let name = entity.as_str();
+        if name.starts_with(REVISION_PREFIX) {
+            return Some(entity.clone());
+        }
+        let reference = name.strip_prefix(LEGACY_REVISION_PREFIX)?;
+        Entity::try_from(prefixed(REVISION_PREFIX, reference)).ok()
+    }
+
     /// The entity an older release named a revision by, given the one it
     /// is named by now; `None` for an entity that names no revision.
     pub fn legacy_of(entity: &Entity) -> Option<Entity> {
