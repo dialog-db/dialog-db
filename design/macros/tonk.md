@@ -100,7 +100,12 @@ Then over the whole notebook, 376 claims on the YAML side ([tonk-notebook-bar.md
 
 The agent's opinion, 2026-11-18: the count of identical claims has done its work. It found the declarations a concept does not write, the default, the blank. For a rule it measures spelling, and two spellings of one rule differ only where the same rule arrives from both notations, which stops once the YAML is gone. What a proof of concept has to show is behaviour: the notebook installed from the sketch, a command issued, the same facts read back as from the YAML.
 
-How `tonk-worker` would install from the notation is read, not built: one branch at `install_claims_for`, which every install and upgrade path goes through; `is_component_url` wants a `.yaml` suffix; and the notation reads core from `core.clj`, four concepts, where a space's core is installed from YAML.
+**It runs** (2026-11-18, [tonk-notebook-runs.md](tonk-notebook-runs.md), tonk-labs/tonk#1338, a draft). `tonk-worker` installs the notebook from the notation through its own install path: one branch at `install_claims_for`, a `.clj` file taken as a component, and `core.clj` read for names with the space's core left as YAML. A test installs the notebook from the YAML in one space and from the sketch in another and runs one script against both: create, insert, edit, move, remove, retitle. All six steps read the same, position keys by their order. The views resolve without a browser and give the same records, but for two:
+
+- The notebook's two route concepts are not found. The YAML pins them to an entity, the router names it, and the notation cannot pin a concept. In a browser the pages would not be found.
+- Block entities and position keys are spelled differently: the default for a line with no `cardinality:` moves the command's entity. The order holds.
+
+Not checked: the wasm build, a page in a browser, events posting.
 
 ## Not decided
 
