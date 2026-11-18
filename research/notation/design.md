@@ -421,39 +421,56 @@ A remote call, Unison's `fork` and `await`, is a layer on top: a request sent, a
 
 ## Views
 
-**Proposed.** A view is a rule whose conclusion is markup, folded over its body. It has no form of its own:
+**Proposed.** `(view concept name template condition…)`: the concept the view renders, its name, the template, and the conditions that bind the template's variables.
 
 ```clj
-(rule (list/card ?l [:article
-                      [:h2 ?name]
-                      [:p ?count " open"]
-                      [:ul ?row]])
+(view todo :row
+  [:li
+    [:input {:type "checkbox"
+             :checked ?done
+             :on/change (todo/toggle todo: ?t checked: .currentTarget.checked)}]
+    [:span ?title]]
+  (todo ?t title: ?title done: ?done))
+
+(view list :card
+  [:article
+    [:h2 ?name]
+    [:p ?count " open"]
+    [:ul {view: :row  of: ?t}]]
   (list ?l name: ?name)
   (list/count-open ?l ?count)
-  (todo ?t list: ?l)
-  (todo/row ?t ?row))
-
-(rule (todo/row ?t [:li ?title])
-  (todo ?t title: ?title))
+  (todo ?t list: ?l))
 ```
 
-- The conclusion is a derived attribute of one concept, `list/card`, and exposes only its entity. From outside it is `(list/card ?l ?markup)`; the slots are the body's own variables.
-- The template is a fold over the group of rows for one `?l`. A slot whose variable takes one value in the group renders once; one that takes many renders each. There is no `for`: anything can be many, and many repeats, as tonk's templates do today.
-- A vector is markup, as in Hiccup. Correlated slots, a row and its tag, need a view of their own: two slots varying in one group render their own values each, unpaired.
-- Order comes from positional dictionaries, which sort by position, or from CSS `order`. Unordered values keep a stable order between renders, so nothing reshuffles when nothing changed.
-- A concept has as many views as names: `list/card`, `list/detail`.
+A concept has as many views as names, `:row`, `:card`, `:detail`, and one view per name, as in tonk's views dictionary today.
 
-A view is a derived attribute like `list/count-open`, with a template for its fold where `list/count-open` has `count`. It is found as a view because its fold is markup. Editing the template changes the rule's hash, as editing any rule's body does, but consumers depend on `list/card`, the concept's hash and a name, which does not change.
+### What it expands to
 
-A view whose template is a record instead of markup is a query:
+**A rule.** `(view todo :row TEMPLATE CONDITIONS…)` is a deductive rule concluding the built-in relation `view`, with the template folded into its value: `(rule (view todo :row ?markup) CONDITIONS…)`. It is deductive, so nothing runs until something renders it, and nothing is stored. Like every rule it is indexed by what it concludes; indexing the conclusion's constants, `todo` and `:row`, as well lets the views of a concept be listed. That index is an engine addition.
+
+**The entity.** The conditions apply the view's concept exactly once, `(todo ?t …)`, and that application's entity is the one rendered: rendering `:row` for `todo:9c1e` runs the conditions with `?t` bound to it. No application of the concept, or two, is an analysis error.
+
+**The fold.** The conditions give rows, and the template is filled once per entity from all of them:
+
+- An element repeats once per distinct combination of the values of the variables it holds directly that take more than one value; otherwise it renders once. `[:li ?title]` over three titles is three `li`.
+- Values from one row stay together. An element holding `?title` and `?done` repeats per pair, so each check box keeps its own title.
+- There is no `for` and no loop form: anything can be many, and many repeats, as tonk's templates do today.
+
+**The value.** The result is a markup value, opaque to queries like any record value: an element is its tag, its attributes and its children, and text is text. A vector is markup, as in Hiccup.
+
+**Nested views** are references, `{view: :row of: ?t}`, never markup. The renderer resolves each one and subscribes to it, so a change re-renders the smallest view it touches: a renamed to-do re-renders its `li`, not the card.
+
+**Event bindings.** An attribute `:on/<type>` holds the command its element posts, every field accounted for: from the conditions' variables (`todo: ?t`), or from the live event, written as a path (`.currentTarget.checked`, `.detail.amount`, `.timeStamp`). A path is allowed only in an event binding. It expands to data on the element: the event type, the command, the bound values, and the paths still to read. The renderer listens for `<type>` at the view's root. When an event reaches an element with a binding, it reads the paths, takes each value as the command field's `as:` wants, and asserts the command. A path that does not resolve means nothing posts. A `submit` binding prevents the default. The analyzer checks a binding like any call: every field of the command, and nothing else.
+
+**The DOM.** The renderer turns a markup value into DOM and patches it on a change: an element by its position in its parent, a repeated element by the row values it repeats over, so a new to-do inserts one `li`. A value bound to `:checked`, `:value` or `:selected` sets the property, not the attribute. Order comes from positional dictionaries, which sort by position, or from CSS `order`; unordered values keep a stable order between renders.
+
+A view whose template is a record instead of markup is a query, called by name for data:
 
 ```clj
-(rule (list/summary ?l {name: ?name  open: ?count})
+(view list :summary {name: ?name  open: ?count}
   (list ?l name: ?name)
   (list/count-open ?l ?count))
 ```
-
-Events and routes are as [macros](macros.md) left them, and are not redone here.
 
 ## Prior art
 
@@ -473,7 +490,8 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 | Bloom: a row's fields stay together because a row is one tuple. | A command's rows are keyed by its name and content. |
 | Bloom^L: lattices merge without coordination. | Electors are merges; `last` is the one that needs a clock. Computing folds are not, and conclude only into a concept's domain. |
 | Datomic: cardinality one replaces, many adds; aggregates live in `:find` and group by what is not aggregated. | `cardinality:` does the same for writes; every fold, views included, groups the same way. |
-| Hiccup: markup as vectors. | A view's template, a fold over its body's rows. |
+| Hiccup: markup as vectors, events as attributes (Reagent's `:on-click`). | A view's template, a fold over its conditions' rows, with commands bound inline. |
+| tonk's `event!:` declarations, `on:<name>=<command>` bindings. | Inline bindings: the command written in full at the element, with paths for what the event fills. |
 
 ## Open
 
@@ -504,5 +522,6 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 - The cardinality work (`claude/pick-strategy-rules-crdt-tvdpm7`, #793) lets any deductive rule fold and ranks a fold's value against stored claims. The notation puts electors only in concept heads and every other fold only into a concept's domain, which is concluded only, so a folded value never competes with a stored claim. The engine and the notation have to agree on this.
 - A rename under `:many` when the old value is on another layer leaves the old value beside the new one.
 - How a rule names a variant's cases: `(todo/state ?s)`, the concept's domain and the field, is the spelling used so far.
-- How a view's template binds events and names commands, now that it is Hiccup.
+- Event flags beyond `submit`'s prevented default: spelling `stopPropagation`, or a `submit` that keeps the default.
+- Routes, which [macros](macros.md) left as they were, now that views are a form of their own.
 - How a concept's domain is spelled when the concept's name is ambiguous: `list/` resolves by name in the document.

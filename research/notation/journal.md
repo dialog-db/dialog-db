@@ -1039,3 +1039,19 @@ Set aside: deriving names from the wrapped concept (coordination between layers)
 
 **Decision.** The design takes it as proposed.
 
+## 2026-11-17 — Views as a form, events inline
+
+**Question.** What is a view, and how does it bind events, now that commands are concepts with their own attributes?
+
+**Method.** Design discussion with the maintainer, against tonk's event model (`tonk guide events`), no reader round.
+
+**Results.** Captured in [design](design.md):
+
+- `(view concept name template condition…)` is a top-level form. It expands to a deductive rule concluding the built-in `view` relation, so nothing runs until rendered. The conditions apply the concept once, and that is the entity rendered. The template folds the rows: an element repeats per distinct combination of its many-valued variables, values from one row staying together.
+- Nested views are references, `{view: :row of: ?t}`, so a change re-renders the smallest view it touches.
+- Events bind inline, `:on/change (todo/toggle todo: ?t checked: .currentTarget.checked)`: the real DOM event, the whole command, fields from the conditions or from paths into the event. tonk's `event!:` declarations kept DOM knowledge apart from commands for another host's sake; a view is already DOM-specific, so the mapping goes at the element.
+
+Set aside: views as derived attributes, `list/card` (views could not be listed by name, and the user wanted `(view todo …)`); `(rule (view list :card …))` read as a stored definition (a rule re-derives when its data changes); a record or a declared `on/toggle` as the binding (no visible tie to the event).
+
+**Decision.** The design takes it as proposed. Listing a concept's views needs the engine to index a rule's conclusion constants.
+
