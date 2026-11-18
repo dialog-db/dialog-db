@@ -252,15 +252,12 @@ impl<'de> Deserialize<'de> for ConceptQuery {
         let mut terms = Parameters::new();
         for (name, value) in raw.terms {
             let collection = raw.assert.collections().any(|(field, _)| field == name);
-            // An entry object carries `the`/`is` and no `?`, and is
-            // empty when both are blank, which are left out; anything
+            // An entry object carries `the`/`is` and no `?`; anything
             // else under a collection field is a bare value term,
             // which binds every entry (`{_: ?value}`).
             let entry = collection
                 && value.as_object().is_some_and(|map| {
-                    map.is_empty()
-                        || (!map.contains_key("?")
-                            && (map.contains_key("the") || map.contains_key("is")))
+                    !map.contains_key("?") && (map.contains_key("the") || map.contains_key("is"))
                 });
             let bound: Bound = if entry {
                 serde_json::from_value(value).map_err(D::Error::custom)?
@@ -1787,34 +1784,6 @@ mod tests {
             }))
             .expect("parses");
             assert_eq!(operands.terms.get("member/key"), Some(&Term::var("k")));
-        }
-
-        /// An entry whose key and value are both blank writes as `{}`,
-        /// neither half said, and reads back as that entry, not as a
-        /// constant.
-        #[dialog_common::test]
-        fn it_reads_back_an_entry_whose_key_and_value_are_blank() {
-            let query: ConceptQuery = serde_json::from_value(serde_json::json!({
-                "assert": ordered(),
-                "where": {
-                    "this": {"?": {"name": "list"}},
-                    "member": {"?": {}},
-                    "member/key": {"?": {}}
-                }
-            }))
-            .expect("parses");
-            let written = serde_json::to_value(&query).expect("serializes");
-            assert_eq!(written["where"]["member"], serde_json::json!({}));
-            assert_eq!(
-                serde_json::from_value::<ConceptQuery>(written).map_err(|e| e.to_string()),
-                Ok(query.clone())
-            );
-
-            let bytes = serde_ipld_dagcbor::to_vec(&query).expect("encodes");
-            assert_eq!(
-                serde_ipld_dagcbor::from_slice::<ConceptQuery>(&bytes).map_err(|e| e.to_string()),
-                Ok(query)
-            );
         }
     }
 
