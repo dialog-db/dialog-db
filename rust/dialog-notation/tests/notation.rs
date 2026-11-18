@@ -2349,3 +2349,37 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
     );
     Ok(())
 }
+
+/// How far tonk's table gets, read after core as tonk reads a component:
+/// a second document, against a build fitted to the notebook. A step that
+/// moves these numbers moves them here on purpose.
+#[dialog_common::test]
+async fn it_measures_how_far_the_table_gets() -> Result<()> {
+    let measured = bar::Bar::of_all(&[
+        include_str!("../sketches/core.clj"),
+        include_str!("../sketches/table.clj"),
+    ])?;
+    let groups: Vec<String> = measured
+        .groups()
+        .iter()
+        .map(|(said, stops)| {
+            let forms: Vec<String> = stops
+                .iter()
+                .map(|stop| format!("{:?}", stop.form))
+                .collect();
+            format!("{} {said} {}", stops.len(), forms.join(" "))
+        })
+        .collect();
+    assert_eq!(
+        (
+            measured.forms,
+            measured.read,
+            measured.expanded,
+            measured.compiled,
+            measured.described
+        ),
+        (54, 54, 54, 48, 6),
+        "{groups:#?}"
+    );
+    Ok(())
+}
