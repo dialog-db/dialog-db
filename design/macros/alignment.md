@@ -22,7 +22,7 @@ Two of the eight meet the same wall: 3 and 8 are folds in a rule that derives, w
 
 ## What tonk's documents need, in the order they need it
 
-Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), from 2026-11-18. The bar is [sketches/notebook.clj](sketches/notebook.clj), measured by `cargo run -p dialog-notation --example bar` and pinned in `it_measures_how_far_the_notebook_gets`: of 56 forms, 56 read, 34 expand and 32 compile before step J.
+Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), from 2026-11-18. The bar is [sketches/notebook.clj](sketches/notebook.clj), measured by `cargo run -p dialog-notation --example bar` and pinned in `it_measures_how_far_the_notebook_gets`: of 56 forms, 56 read, 34 expand and 32 compile before step J; 43 and 41 once a line of one entry takes `by:`.
 
 | | the design now | built here | gap |
 |---|---|---|---|

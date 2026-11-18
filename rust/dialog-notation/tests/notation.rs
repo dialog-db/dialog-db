@@ -230,6 +230,22 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
         .await?,
         vec![r#"(xyz.tonk.element.method element:x update: "return 2")"#]
     );
+    // One entry written by its attribute, `by:` on the line, as tonk's
+    // element writes its methods; and read the same way.
+    notebook
+        .submit(
+            r#"(assert (xyz.tonk.element.method/released of: element:x is: "return 3"
+                  as: :text cardinality: :one by: :name))"#,
+        )
+        .await?;
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(query (xyz.tonk.element.method/released of: ?e is: ?s as: :text cardinality: :one by: :name))"
+        )
+        .await?,
+        vec![r#"(xyz.tonk.element.method element:x released: "return 3")"#]
+    );
     // One entry, by its key.
     assert_eq!(
         report(
@@ -1879,7 +1895,7 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
             measured.expanded,
             measured.compiled
         ),
-        (56, 56, 34, 32),
+        (56, 56, 43, 41),
         "{groups:#?}"
     );
     Ok(())

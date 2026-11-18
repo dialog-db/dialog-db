@@ -182,12 +182,22 @@ fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
                  `by: :position`"
             )));
         }
-        (None, Some(_)) => {
-            return Err(Error::Refused(format!(
-                "{tree} says `by:`, which a line over a collection says: the key a variable \
-                 in the name, `xyz.tonk.notebook/?p`"
-            )));
-        }
+        // One entry, its key written in the name: `by:` is part of the
+        // attribute's identity, so it is said here too.
+        (None, Some(by)) => match by.keyword().and_then(Keyed::of) {
+            Some(_) => (
+                "entry",
+                Some((
+                    Syntax::Constant(dialog_corpus::Value::String(field.to_string())),
+                    by,
+                )),
+            ),
+            None => {
+                return Err(Error::Refused(format!(
+                    "{by} is not what a key is: `by: :name` or `by: :position`"
+                )));
+            }
+        },
         (None, None) => (field, None),
     };
     let (entity, mut value) = match (operand.items.as_slice(), terms.remove("is")) {
@@ -1619,8 +1629,8 @@ mod tests {
                 "says what a key is",
             ),
             (
-                "(concept (m ?e source: ?s) (xyz.m/source of: ?e is: ?s by: :name))",
-                "says `by:`, which a line over a collection says",
+                "(concept (m ?e source: ?s) (xyz.m/source of: ?e is: ?s by: :colour))",
+                "is not what a key is",
             ),
             (
                 "(concept (m ?e name: ?n source: ?s) (xyz.m/?n of: ?e is: ?s by: :colour))",

@@ -1366,6 +1366,14 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** Nothing. The numbers are pinned in `it_measures_how_far_the_notebook_gets`, so a step that moves them says so.
 
+## 2026-11-18, Building: one entry written by its attribute, `by:` on the line
+
+**Asked.** Nothing: the notebook's bar found it. Nine of the sketch's forms write an element's methods one entry each, the key in the attribute's name and `by: :name` on the line, and the build refused `by:` without a key variable.
+
+**Learned.** The design puts `by:` on the line because it is part of the attribute's identity, so a line of one entry says it too. Such a line is now the entry with that key, written and read as step G's entries are.
+
+**Decided.** Nothing new. The bar moves from 34 expanded and 32 compiled to 43 and 41, of 56.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.
