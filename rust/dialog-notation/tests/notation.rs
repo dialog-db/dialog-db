@@ -2328,7 +2328,7 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
             measured.compiled,
             measured.described
         ),
-        (56, 56, 52, 47, 5),
+        (56, 56, 53, 48, 5),
         "{groups:#?}"
     );
     // With core in front, as tonk reads a component, the concepts the
@@ -2345,7 +2345,7 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
             joined.compiled,
             joined.described
         ),
-        (60, 60, 59, 54, 5)
+        (60, 60, 60, 55, 5)
     );
     Ok(())
 }

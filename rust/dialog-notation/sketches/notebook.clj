@@ -513,12 +513,11 @@
 ; Persist an inserted block.
 ; GAP: a command's own entity. The YAML reads the insert's entity, `this:
 ; ?this`, and makes it the block's; the design derives a command's entity
-; when it is asserted and gives a rule no way to read it. `id` over every
-; field is the nearest, and whether it gives the same entity the design does
-; not say. YAML 704.
+; when it is asserted and gives a rule no way to read it. `of: ?b` on the
+; command premise reads it here. That spelling is the managing agent's
+; opinion, not the design's. YAML 704.
 (rule (assert (notebook/block ?b notebook: ?n source: ?s))
-  (block/insert notebook: ?n source: ?s next: ?x prev: ?p)
-  (id ?b notebook: ?n source: ?s next: ?x prev: ?p))
+  (block/insert of: ?b notebook: ?n source: ?s next: ?x prev: ?p))
 
 ; A block already in the sequence is at the position it is stored under, the
 ; first when it is stored under several (see `block/stray-entry`). This gives
@@ -534,10 +533,10 @@
 ; `case:none` at the tail matches no block, which ends the recursion.
 
 ; Record an inserted block's successor.
-; GAP: a command's own entity, as above. YAML 738.
+; GAP: a command's own entity, read with `of:` as above, the managing
+; agent's opinion and not the design's. YAML 738.
 (rule (block/chain ?b next: ?x)
-  (block/insert notebook: ?n source: ?s next: ?x prev: ?p)
-  (id ?b notebook: ?n source: ?s next: ?x prev: ?p))
+  (block/insert of: ?b notebook: ?n source: ?s next: ?x prev: ?p))
 
 ; The document's edge has a position: the empty one, which `dialog/position`
 ; reads as an open bound. That keeps the tail rule to one rule.
@@ -549,11 +548,11 @@
 ; correct only when there is nothing to come after.
 
 ; Position the last new block after the block it follows.
-; GAP: a command's own entity, as above. YAML 773.
+; GAP: a command's own entity, read with `of:` as above, the managing
+; agent's opinion and not the design's. YAML 773.
 (rule (block/position ?b at: ?at)
   (block/chain ?b next: case:none)
-  (block/insert notebook: ?n source: ?s next: case:none prev: ?p)
-  (id ?b notebook: ?n source: ?s next: case:none prev: ?p)
+  (block/insert of: ?b notebook: ?n source: ?s next: case:none prev: ?p)
   (block/position ?p at: ?lo)
   (dialog/position ?b after: ?lo before: "" is: ?at))
 
@@ -563,11 +562,11 @@
 ; bounds, so a run appended after a block lands after it.
 
 ; Position a block before its successor.
-; GAP: a command's own entity, as above. YAML 811.
+; GAP: a command's own entity, read with `of:` as above, the managing
+; agent's opinion and not the design's. YAML 811.
 (rule (block/position ?b at: ?at)
   (block/chain ?b next: ?x)
-  (block/insert notebook: ?n source: ?s next: ?x prev: ?p)
-  (id ?b notebook: ?n source: ?s next: ?x prev: ?p)
+  (block/insert of: ?b notebook: ?n source: ?s next: ?x prev: ?p)
   (block/position ?p at: ?lo)
   (block/position ?x at: ?hi)
   (dialog/position ?b after: ?lo before: ?hi is: ?at))
@@ -575,10 +574,10 @@
 ; The derived position becomes the block's entry in the sequence.
 
 ; Place an inserted block.
-; GAP: a command's own entity, as above. YAML 835.
+; GAP: a command's own entity, read with `of:` as above, the managing
+; agent's opinion and not the design's. YAML 835.
 (rule (assert (notebook/blocks ?n key: ?k block: ?b))
-  (block/insert notebook: ?n source: ?s next: ?x prev: ?p)
-  (id ?b notebook: ?n source: ?s next: ?x prev: ?p)
+  (block/insert of: ?b notebook: ?n source: ?s next: ?x prev: ?p)
   (block/position ?b at: ?k))
 
 ; Retitle a notebook from its heading.

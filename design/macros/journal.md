@@ -1505,6 +1505,14 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** Built in `blanked` in `expand.rs`, for every rule but a `syntax`, `warning` or `report` one, and never in a head. Whether Dialog's canonical form treats any variable used once as a blank stays open and the maintainer's. The bar is unchanged: the notebook alone 56 / 52 / 47 / 5, of 56; with core 60 / 59 / 54 / 5, of 60.
 
+## 2026-11-18, Building: the notebook reads an insert's entity
+
+**Asked.** Step V: rewrite the sketch's five rules marked `; GAP: a command's own entity` to read the entity with `of:` on the command premise, as the YAML does with `this:`, and keep each GAP comment, saying the spelling is the managing agent's opinion.
+
+**Learned.** Each rule now reads `(block/insert of: ?b ...)` and has no `id` premise. The rule tonk's note calls rule 8, YAML 835 and form 41, placed an inserted block in the sequence and was refused as "?b is the entity of no head"; it now expands and compiles. The other four expanded before and still do. The insert's own fields the rules no longer use are kept as written, so the rules match the YAML's shape.
+
+**Decided.** Nothing beyond the sketch. The bar, read / expanded / compiled / described: before, the notebook alone 56 / 52 / 47 / 5, of 56, with core 60 / 59 / 54 / 5, of 60; after, 56 / 53 / 48 / 5 and 60 / 60 / 55 / 5. With core every form expands, and what does not compile is the five views.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.
