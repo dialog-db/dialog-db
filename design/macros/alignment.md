@@ -45,7 +45,7 @@ Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), 
 | choosing among claims | an elector in the head: `(account ?a status: (top ?s))`, ordered by the line's `as:` list | nothing | #793 |
 | a variable of the body | is in the head, so a concept runs both ways | checked, for lines as for reads | done |
 | `!` | no form carries one: `assert`, `retract` | the same since 2026-11-16; `assert!` and `retract!` are refused with the word to write | done |
-| a parameter left out of a read | matches anything | refused since 2026-11-13; open again on 2026-11-15, not built | this branch |
+| a parameter left out of a read | matches anything | built since 2026-11-15: a read leaving a field out is the read with `...`, in a query and a premise; the field is still read, so an entity with no claim of it is no instance. A write through a concept still says every field. Pinned on a branch 2026-11-18 | done |
 | a derived attribute | a rule concludes an attribute in a concept's own domain: `(rule (list/count-open ?l (count ?t)) …)`, read as `(list/count-open list:home ?n)`. It replaced the getter | built 2026-11-18, to a relation of its own, `concept.list.count-open`. One that folds nothing runs. One that folds is refused as unsupported | a decision: the engine refuses a fold in a rule that derives (below) |
 | a layer | `in:` on a line, a constant or a field | nothing | the layers work (#795 on) |
 | a view | proposed: a template in Hiccup over one concept, kept as data | nothing | after the above |

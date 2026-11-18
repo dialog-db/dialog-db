@@ -1374,6 +1374,18 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** Nothing new. The bar moves from 34 expanded and 32 compiled to 43 and 41, of 56.
 
+## 2026-11-18, Building: a parameter left out of a read
+
+**Asked.** Step J: `(todo ?t text: ?x)` with `state:` left out reads as if `...` were written, in a query and a premise; in an assert through a concept a missing field stays an error. alignment.md had it "refused since 2026-11-13; open again on 2026-11-15, not built".
+
+**Learned.**
+
+- It was built, and the row was stale. Since the read became open (2026-11-15), the walker takes a trailing `...` off a read before it asks the rules, so a read with `...` and one without are one read (`ask` in `expand.rs`). The field left out is still read under a variable of the expansion's own, so it matches any value.
+- So an entity that holds no claim of the field is no instance: `todo:3`, with a text and no state, is not a `todo`. That is what a concept is in the design, a set of attributes, and what tonk's YAML says of a block written with only its source (notebook.yaml line 467). Whether "matches anything" also takes in a field with no claim, the design does not say in so many words.
+- A write through the concept that leaves a field out is refused by the compiler, as before.
+
+**Decided.** Nothing. Pinned on a branch, `it_reads_a_concept_with_a_parameter_left_out`. The bar does not move: no form of the notebook stopped on it. 116 unit tests, 35 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

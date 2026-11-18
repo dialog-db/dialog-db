@@ -425,6 +425,54 @@ async fn it_writes_once_what_a_when_matches() -> Result<()> {
     Ok(())
 }
 
+/// A parameter a read leaves out matches anything, in a query and in a
+/// premise, as if `...` were written: the field is still read, so an
+/// entity that holds no claim of it is no instance. A write through a
+/// concept says every field.
+#[dialog_common::test]
+async fn it_reads_a_concept_with_a_parameter_left_out() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(concept (todo ?t text: ?x state: ?s)
+                 (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
+                 (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one))
+               (assert (todo todo:1 text: "Call mom" state: :open))
+               (assert (todo todo:2 text: "Buy milk" state: :done))
+               (assert (xyz.todo/text todo:3 "No state"))
+               (rule (xyz.said ?t text: ?x) (todo ?t text: ?x))"#,
+        )
+        .await?;
+    let both = vec![
+        r#"(xyz.todo todo:1 text: "Call mom")"#,
+        r#"(xyz.todo todo:2 text: "Buy milk")"#,
+    ];
+    assert_eq!(
+        report(&mut notebook, "(query (todo ?t text: ?x))").await?,
+        both
+    );
+    assert_eq!(
+        report(&mut notebook, "(query (todo ?t text: ?x ...))").await?,
+        both
+    );
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.said ?t text: ?x))").await?,
+        vec![
+            r#"(xyz.said todo:1 text: "Call mom")"#,
+            r#"(xyz.said todo:2 text: "Buy milk")"#,
+        ]
+    );
+    let partial = notebook
+        .submit(r#"(assert (todo todo:4 text: "Half"))"#)
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&partial, Err(Ok(Error::Refused(why))) if why.contains("a write says every field")),
+        "{partial:?}"
+    );
+    Ok(())
+}
+
 /// A concept written as lines, an attribute a line, runs as one written
 /// as a read of several fields does: written through by a rule a
 /// command fires and read back. `:one` reads the newest claim and
