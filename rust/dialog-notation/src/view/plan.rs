@@ -41,7 +41,7 @@ use crate::Error;
 use crate::compile::{Query, Step, compile};
 use crate::kernel::{self, Keyed, Premise, Term};
 use crate::syntax::{Parameters, Syntax};
-use crate::view::{Attribute, Input, Nested, Node, Piece, View};
+use crate::view::{Attribute, Call, Input, Nested, Node, Piece, View};
 
 /// What stands at a place in the template.
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +50,8 @@ pub enum Placed {
     Element(String),
     /// A view nested by reference.
     View(Nested),
+    /// A view called: mounted once a match of its conditions, narrowed.
+    Call(Call),
 }
 
 /// A place in the template that has instances: an element or a nested
@@ -307,8 +309,36 @@ fn places(
             });
             events.push(Vec::new());
         }
+        Node::Call(call) => {
+            into.push(Place {
+                path,
+                parent,
+                placed: Placed::Call((**call).clone()),
+                holds: call_holds(call),
+                bound: Vec::new(),
+                key: Vec::new(),
+                layer: 0,
+            });
+            events.push(Vec::new());
+        }
         Node::Text(_) | Node::Value(_) | Node::Variable(_) => {}
     }
+}
+
+/// The variables a call holds: in its entity and its labels.
+fn call_holds(call: &Call) -> Vec<String> {
+    let mut found = Vec::new();
+    if let Some(of) = &call.of {
+        of.variables(&mut found);
+    }
+    for (_, term) in &call.labels {
+        term.variables(&mut found);
+    }
+    let mut holds = Vec::new();
+    for name in &found {
+        add(name, &mut holds);
+    }
+    holds
 }
 
 /// Whether `ancestor` is `element` or stands above it.
@@ -632,7 +662,11 @@ impl Plan {
     /// field has one value, a collection's position first.
     fn key(&self, element: usize) -> Vec<String> {
         if element == 0 {
-            return vec![self.entity.clone()];
+            // A view with no condition renders no entity: one root.
+            return match self.entity.as_str() {
+                "" => Vec::new(),
+                entity => vec![entity.to_string()],
+            };
         }
         let premises = self.premises(element);
         let mut known: BTreeSet<String> = BTreeSet::from([self.entity.clone()]);
@@ -1002,6 +1036,7 @@ pub(crate) mod tests {
             .map(|place| match &place.placed {
                 Placed::Element(tag) => tag.clone(),
                 Placed::View(nested) => nested.view.clone(),
+                Placed::Call(call) => call.view.clone(),
             })
             .collect();
         assert_eq!(tags, ["article", "h2", "ul", "li"]);

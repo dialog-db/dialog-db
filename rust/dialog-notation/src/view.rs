@@ -40,7 +40,8 @@ pub struct View {
     pub concept: String,
     /// The view's name: `row` for `:row`.
     pub name: String,
-    /// The variable the conditions bind to the entity rendered.
+    /// The variable the conditions bind to the entity rendered. Empty for
+    /// a view with no condition, which renders no entity and stands once.
     pub entity: String,
     /// What it renders.
     pub template: Node,
@@ -67,7 +68,41 @@ pub enum Node {
     /// Another view, of an entity: `{:view :row :of ?t}`. A reference,
     /// never markup: the renderer resolves it.
     View(Nested),
+    /// Another view, called: `(view todo :item list: ?l state: :open)`,
+    /// mounted once a match of that view's conditions narrowed by the
+    /// call's labels and entity.
+    Call(Box<Call>),
 }
+
+/// A view called in a template, `(view concept :name entity label: term …)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Call {
+    /// The concept whose view it is.
+    pub concept: String,
+    /// The view's name.
+    pub view: String,
+    /// The entity it is called for, written first unlabeled or as `of:`:
+    /// a variable or a value. None: every match.
+    pub of: Option<Syntax>,
+    /// The labels after it, fields of the concept, as written.
+    pub labels: Vec<(String, Syntax)>,
+    /// Whether the documents read hold the view. One that is not found is
+    /// shown as its source.
+    pub found: bool,
+    /// The concept read the labels and the entity make, as kernel
+    /// premises, its entity the variable [`CALLED`] where none is
+    /// given: what narrows the called view's matches.
+    pub narrowing: Vec<Syntax>,
+    /// The concept's fields, by label, in the order of the alphabet.
+    pub fields: Vec<String>,
+    /// The concept read with every field a variable, `?source-<label>`,
+    /// its entity [`CALLED`], as kernel premises: what shows a view not
+    /// found as its source.
+    pub source: Vec<Syntax>,
+}
+
+/// The variable a call's premises name the called entity by.
+pub const CALLED: &str = "view-of";
 
 /// An element: its tag, its attributes, the events it binds and what it
 /// holds.
@@ -177,6 +212,7 @@ impl View {
             .to_string();
         let entity = match at("entity")? {
             Syntax::Variable(name) => name.clone(),
+            Syntax::Blank => String::new(),
             other => return Err(refused(format!("{other} is not the variable of an entity"))),
         };
         let instance = match operand.terms.get("instance") {
@@ -188,11 +224,18 @@ impl View {
             }
             None => Vec::new(),
         };
+        let mut template = node(at("template")?)?;
+        // What analysis said of each call, in the order the template
+        // holds them.
+        if let Some(Syntax::Tuple(said)) = operand.terms.get("calls") {
+            let mut said = said.iter();
+            fill(&mut template, &mut said)?;
+        }
         Ok(View {
             concept,
             name,
             entity,
-            template: node(at("template")?)?,
+            template,
             conditions: operand.items.clone(),
             instance,
         })
@@ -242,12 +285,54 @@ impl View {
                         walk(child, into);
                     }
                 }
+                Node::Call(call) => {
+                    fn inside<'a>(tree: &'a Syntax, into: &mut Vec<&'a str>) {
+                        match tree {
+                            Syntax::Variable(name) => add(name, into),
+                            Syntax::Application(operator, operand) => {
+                                inside(operator, into);
+                                operand.items.iter().for_each(|item| inside(item, into));
+                                operand.terms.values().for_each(|term| inside(term, into));
+                            }
+                            Syntax::Map(entries) => entries.iter().for_each(|(key, value)| {
+                                inside(key, into);
+                                inside(value, into);
+                            }),
+                            Syntax::Tuple(items) => {
+                                items.iter().for_each(|item| inside(item, into))
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(of) = &call.of {
+                        inside(of, into);
+                    }
+                    for (_, term) in &call.labels {
+                        inside(term, into);
+                    }
+                }
                 Node::Text(_) | Node::Value(_) => {}
             }
         }
         let mut names = Vec::new();
         walk(&self.template, &mut names);
         names
+    }
+
+    /// Every view the template calls, in the order written.
+    pub fn calls(&self) -> Vec<&Call> {
+        fn walk<'a>(node: &'a Node, into: &mut Vec<&'a Call>) {
+            match node {
+                Node::Call(call) => into.push(call),
+                Node::Element(element) => {
+                    element.children.iter().for_each(|child| walk(child, into));
+                }
+                _ => {}
+            }
+        }
+        let mut calls = Vec::new();
+        walk(&self.template, &mut calls);
+        calls
     }
 
     /// Every event the template binds, in the order written.
@@ -333,6 +418,9 @@ fn node(tree: &Syntax) -> Result<Node, Error> {
             Node::Element(element)
         }
         Syntax::Map(entries) => Node::View(nested(tree, entries)?),
+        Syntax::Application(..) if tree.applies() == Some("view") => {
+            Node::Call(Box::new(call(tree)?))
+        }
         Syntax::Variable(name) => Node::Variable(name.clone()),
         Syntax::Constant(Value::String(text)) => Node::Text(text.clone()),
         Syntax::Constant(Value::Boolean(_)) => {
@@ -433,6 +521,93 @@ fn event(kind: &str, value: &Syntax) -> Result<Event, Error> {
         command: command.to_string(),
         fields,
     })
+}
+
+/// `(view concept :name entity label: term …)` in a template: the entity
+/// first unlabeled, or as `of:`, and every other label a field of the
+/// concept. What analysis says of it is filled in by [`fill`].
+fn call(tree: &Syntax) -> Result<Call, Error> {
+    let shape = || {
+        refused(format!(
+            "{tree}: a view called in a template is `(view concept :name entity label: term …)`"
+        ))
+    };
+    let operand = tree.operand().ok_or_else(shape)?;
+    let (concept, view, entity) = match operand.items.as_slice() {
+        [Syntax::Reference(concept), name, rest @ ..] if rest.len() <= 1 => {
+            let view = keyword(name).ok_or_else(shape)?.to_string();
+            (concept.clone(), view, rest.first().cloned())
+        }
+        _ => return Err(shape()),
+    };
+    let of = match (entity, operand.terms.get("of")) {
+        (Some(_), Some(_)) => {
+            return Err(refused(format!(
+                "{tree}: the entity is written once, first or as `of:`"
+            )));
+        }
+        (Some(entity), None) => Some(entity),
+        (None, Some(entity)) => Some(entity.clone()),
+        (None, None) => None,
+    };
+    if let Some(of) = &of
+        && !matches!(of, Syntax::Variable(_) | Syntax::Constant(_))
+    {
+        return Err(refused(format!(
+            "{tree}: the entity a view is called for is a variable or a value, not {of}"
+        )));
+    }
+    Ok(Call {
+        concept,
+        view,
+        of,
+        labels: operand
+            .terms
+            .iter()
+            .filter(|(label, _)| label.as_str() != "of")
+            .map(|(label, term)| (label.clone(), term.clone()))
+            .collect(),
+        found: false,
+        narrowing: Vec::new(),
+        fields: Vec::new(),
+        source: Vec::new(),
+    })
+}
+
+/// What analysis said of each call, `[found narrowing fields source]`,
+/// put into the calls of a template in the order it holds them.
+fn fill<'a>(node: &mut Node, said: &mut impl Iterator<Item = &'a Syntax>) -> Result<(), Error> {
+    match node {
+        Node::Call(call) => {
+            let Some(Syntax::Tuple(parts)) = said.next() else {
+                return Err(refused(format!(
+                    "the call of {} :{} has nothing said of it",
+                    call.concept, call.view
+                )));
+            };
+            let premises = |part: Option<&Syntax>| match part {
+                Some(Syntax::Tuple(items)) => items.clone(),
+                _ => Vec::new(),
+            };
+            call.found = matches!(parts.first(), Some(Syntax::Constant(Value::Boolean(true))));
+            call.narrowing = premises(parts.get(1));
+            call.fields = premises(parts.get(2))
+                .iter()
+                .filter_map(|field| match field {
+                    Syntax::Reference(label) => Some(label.clone()),
+                    _ => None,
+                })
+                .collect();
+            call.source = premises(parts.get(3));
+        }
+        Node::Element(element) => {
+            for child in &mut element.children {
+                fill(child, said)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// `{:view :row :of ?t}`. `:of` may be left out, the view of every

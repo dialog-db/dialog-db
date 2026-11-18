@@ -58,8 +58,12 @@ pub struct Mount {
     pub model: Option<String>,
     /// The entity it renders, when the reference names one.
     pub of: Option<Value>,
-    /// The reference's other entries, their parts joined.
+    /// The reference's other entries, their parts joined; a call's
+    /// labels, each term as the notation writes it.
     pub entries: Vec<(String, String)>,
+    /// What the variables a call holds are bound to here: what its
+    /// narrowing reads with.
+    pub given: Vec<(String, Value)>,
 }
 
 /// What an instance is.
@@ -427,7 +431,7 @@ impl Maintainer {
                         Node::Text(text) => Some(text.clone()),
                         Node::Value(value) => Some(value.to_string()),
                         Node::Variable(name) => Some(value_text(name)),
-                        Node::Element(_) | Node::View(_) => None,
+                        Node::Element(_) | Node::View(_) | Node::Call(_) => None,
                     })
                     .collect(),
             },
@@ -443,7 +447,37 @@ impl Maintainer {
                     .iter()
                     .map(|(name, pieces)| (name.clone(), parts(pieces)))
                     .collect(),
+                given: Vec::new(),
             }),
+            Node::Call(call) => {
+                let bound = |term: &crate::syntax::Syntax| match term {
+                    crate::syntax::Syntax::Variable(name) => values.get(name).cloned(),
+                    crate::syntax::Syntax::Constant(value) => Some(value.clone()),
+                    _ => None,
+                };
+                let given = self.plan.elements[element]
+                    .holds
+                    .iter()
+                    .filter_map(|name| Some((name.clone(), values.get(name)?.clone())))
+                    .collect();
+                Own::View(Mount {
+                    view: call.view.clone(),
+                    model: Some(call.concept.clone()),
+                    of: call.of.as_ref().and_then(bound),
+                    entries: call
+                        .labels
+                        .iter()
+                        .map(|(label, term)| {
+                            let shown = match bound(term) {
+                                Some(value) => crate::syntax::Syntax::Constant(value).to_string(),
+                                None => term.to_string(),
+                            };
+                            (label.clone(), shown)
+                        })
+                        .collect(),
+                    given,
+                })
+            }
             Node::Text(_) | Node::Value(_) | Node::Variable(_) => Own::Element {
                 attributes: Vec::new(),
                 events: Vec::new(),

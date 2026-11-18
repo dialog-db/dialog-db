@@ -637,6 +637,7 @@ async fn it_maintains_a_nested_view_as_a_view_of_its_own() -> Result<()> {
                             model: None,
                             of: Some(entity("todo:1")),
                             entries: Vec::new(),
+                            given: Vec::new(),
                         }),
                     },
                 }
@@ -707,6 +708,7 @@ fn summary(plan: &Plan) -> String {
     let tag = |at: usize| match &plan.elements[at].placed {
         dialog_notation::Placed::Element(tag) => tag.clone(),
         dialog_notation::Placed::View(nested) => format!("{{:view :{}}}", nested.view),
+        dialog_notation::Placed::Call(call) => format!("(view {} :{})", call.concept, call.view),
     };
     let layers: Vec<String> = plan
         .layers

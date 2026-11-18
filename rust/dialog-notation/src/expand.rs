@@ -559,7 +559,9 @@ fn open(tree: &Syntax) -> (Syntax, bool) {
 ///
 /// A form with a label written is one record, and its one part with no
 /// label is the record's `of:`. So beside labels a second part with no
-/// label is refused, and so is `of:` beside a part with none. `...` and
+/// label is refused, and so is `of:` beside a part with none. A view
+/// called in a template names its concept and its view first, and those
+/// two are not counted. `...` and
 /// what follows it are the parts not named, and no part of their own.
 fn valid(tree: &Syntax) -> Result<(), (Syntax, Error)> {
     let refuse = |why: String| Err((tree.clone(), Error::Refused(why)));
@@ -579,11 +581,16 @@ fn valid(tree: &Syntax) -> Result<(), (Syntax, Error)> {
                 .iter()
                 .chain(operand.terms.values())
                 .try_for_each(valid)?;
+            // A view called in a template names its concept and its view
+            // first, `(view todo :item list: ?l)`: after those two, a part
+            // with no label is the entity it is called for, as `of:` is.
+            let called = usize::from(tree.applies() == Some("view")) * 2;
             let named = operand
                 .items
                 .iter()
                 .take_while(|item| !matches!(item, Syntax::Reference(name) if name == REST))
-                .count();
+                .count()
+                .saturating_sub(called);
             if !operand.terms.is_empty() && named > 1 {
                 return refuse(format!(
                     "{tree} has {named} parts with no label beside its labelled parts: the \
@@ -1476,6 +1483,77 @@ impl Expander {
         }
     }
 
+    /// The premises a read expands to, as a rule's premises do, with
+    /// `entity` the one it is rendered for.
+    fn premises_of(&mut self, read: Syntax, entity: &Syntax) -> Result<Vec<Syntax>, Error> {
+        let rules = self.top(Syntax::Application(
+            Box::new(Syntax::Reference("rule".into())),
+            Parameters {
+                items: vec![apply("view.rendered", vec![entity.clone()]), read],
+                ..Parameters::default()
+            },
+        ))?;
+        Ok(match rules.as_slice() {
+            [rule] => Clauses::of(rule).when,
+            _ => Vec::new(),
+        })
+    }
+
+    /// What analysis says of a call: `[found narrowing fields source]`.
+    /// The concept must be declared; the view need not be, and is then
+    /// shown as its source.
+    fn call(&mut self, call: &crate::view::Call) -> Result<Syntax, Error> {
+        use crate::view::CALLED;
+        if !self.concepts.contains(&call.concept) {
+            return Err(Error::Unknown(format!(
+                "(view {} :{} …): no concept {} is declared",
+                call.concept, call.view, call.concept
+            )));
+        }
+        let found = self
+            .views
+            .contains(&(call.concept.clone(), call.view.clone()));
+        let entity = call
+            .of
+            .clone()
+            .unwrap_or_else(|| Syntax::Variable(CALLED.into()));
+        let read = |labels: Vec<(String, Syntax)>| {
+            Syntax::Application(
+                Box::new(Syntax::Reference(call.concept.clone())),
+                Parameters {
+                    items: vec![entity.clone()],
+                    terms: labels.into_iter().collect(),
+                },
+            )
+        };
+        let narrowing = self.premises_of(read(call.labels.clone()), &entity)?;
+        let fields: Vec<String> = self
+            .syntax
+            .iter()
+            .find_map(|rule| {
+                rule.signature
+                    .as_ref()
+                    .filter(|signature| signature.name == call.concept)
+            })
+            .map(|signature| signature.parameters.iter().cloned().collect())
+            .unwrap_or_default();
+        let source = self.premises_of(
+            read(
+                fields
+                    .iter()
+                    .map(|label| (label.clone(), Syntax::Variable(format!("source-{label}"))))
+                    .collect(),
+            ),
+            &Syntax::Variable(CALLED.into()),
+        )?;
+        Ok(Syntax::Tuple(vec![
+            Syntax::Constant(dialog_corpus::Value::Boolean(found)),
+            Syntax::Tuple(narrowing),
+            Syntax::Tuple(fields.into_iter().map(Syntax::Reference).collect()),
+            Syntax::Tuple(source),
+        ]))
+    }
+
     /// `(view concept :name template condition…)`, as the kernel form
     /// that describes it: its conditions expanded to premises, and the
     /// concept, the name, the entity and the template beside them.
@@ -1507,9 +1585,11 @@ impl Expander {
             .iter()
             .filter(|condition| condition.applies() == Some(concept_name.as_str()))
             .collect();
-        let entity = match applications.as_slice() {
-            [one] => match items(one).first() {
-                Some(entity @ Syntax::Variable(_)) => entity.clone(),
+        // A view with no condition renders no entity: it stands once.
+        let entity = match (conditions.is_empty(), applications.as_slice()) {
+            (true, _) => None,
+            (false, [one]) => match items(one).first() {
+                Some(entity @ Syntax::Variable(_)) => Some(entity.clone()),
                 _ => {
                     return Err(Error::Refused(format!(
                         "{one}: the application of the view's concept binds the entity rendered \
@@ -1517,7 +1597,7 @@ impl Expander {
                     )));
                 }
             },
-            _ => {
+            (false, _) => {
                 return Err(Error::Refused(format!(
                     "{tree}: the conditions apply the view's concept {concept_name} once, and that \
                      application's entity is the one rendered; they apply it {} times",
@@ -1525,63 +1605,76 @@ impl Expander {
                 )));
             }
         };
-        // The conditions expand as a rule's premises do.
-        let mut parts = vec![apply("view.rendered", vec![entity.clone()])];
-        parts.extend(conditions.iter().cloned());
-        let rules = self.top(Syntax::Application(
-            Box::new(Syntax::Reference("rule".into())),
+        let (premises, clauses, instance) = match &entity {
+            None => (Vec::new(), None, Vec::new()),
+            Some(entity) => {
+                // The conditions expand as a rule's premises do.
+                let mut parts = vec![apply("view.rendered", vec![entity.clone()])];
+                parts.extend(conditions.iter().cloned());
+                let rules = self.top(Syntax::Application(
+                    Box::new(Syntax::Reference("rule".into())),
+                    Parameters {
+                        items: parts,
+                        ..Parameters::default()
+                    },
+                ))?;
+                let [rule] = rules.as_slice() else {
+                    return Err(Error::Unsupported(format!(
+                        "{tree}: its conditions read through several definitions, and a view of \
+                         several is not decided"
+                    )));
+                };
+                let clauses = Clauses::of(rule);
+                let mut premises = clauses.when.clone();
+                if !clauses.unless.is_empty() {
+                    premises.push(apply("unless", clauses.unless.clone()));
+                }
+                // What makes the entity rendered an instance of the
+                // concept: the concept applied to it alone, every field
+                // left out and so still required. A back end that keeps
+                // the view's root while this holds needs it apart from
+                // the conditions.
+                let instance =
+                    self.premises_of(apply(concept_name, vec![entity.clone()]), entity)?;
+                (premises, Some(clauses), instance)
+            }
+        };
+        let mut terms = BTreeMap::from([
+            ("concept".into(), concept.clone()),
+            ("name".into(), name.clone()),
+            ("entity".into(), entity.clone().unwrap_or(Syntax::Blank)),
+            ("template".into(), template.clone()),
+            ("instance".into(), Syntax::Tuple(instance)),
+        ]);
+        // What analysis says of each view the template calls: whether a
+        // document read holds it, the read that narrows it, the concept's
+        // fields, and the read that shows it as its source.
+        let called = crate::view::View::describe(&Syntax::Application(
+            Box::new(Syntax::Reference("view".into())),
             Parameters {
-                items: parts,
-                ..Parameters::default()
+                items: premises.clone(),
+                terms: terms.clone(),
             },
         ))?;
-        let [rule] = rules.as_slice() else {
-            return Err(Error::Unsupported(format!(
-                "{tree}: its conditions read through several definitions, and a view of several \
-                 is not decided"
-            )));
-        };
-        let clauses = Clauses::of(rule);
-        let mut premises = clauses.when.clone();
-        if !clauses.unless.is_empty() {
-            premises.push(apply("unless", clauses.unless.clone()));
+        let mut said = Vec::new();
+        for call in called.calls() {
+            said.push(self.call(call)?);
         }
-        // What makes the entity rendered an instance of the concept: the
-        // concept applied to it alone, every field left out and so still
-        // required. A back end that keeps the view's root while this
-        // holds needs it apart from the conditions.
-        let instance = self.top(Syntax::Application(
-            Box::new(Syntax::Reference("rule".into())),
-            Parameters {
-                items: vec![
-                    apply("view.rendered", vec![entity.clone()]),
-                    apply(concept_name, vec![entity.clone()]),
-                ],
-                ..Parameters::default()
-            },
-        ))?;
-        let instance = match instance.as_slice() {
-            [rule] => Clauses::of(rule).when,
-            _ => Vec::new(),
-        };
+        if !said.is_empty() {
+            terms.insert("calls".into(), Syntax::Tuple(said));
+        }
         let described = Syntax::Application(
             Box::new(Syntax::Reference("view".into())),
             Parameters {
                 items: premises,
-                terms: BTreeMap::from([
-                    ("concept".into(), concept.clone()),
-                    ("name".into(), name.clone()),
-                    ("entity".into(), entity),
-                    ("template".into(), template.clone()),
-                    ("instance".into(), Syntax::Tuple(instance)),
-                ]),
+                terms,
             },
         );
         let view = crate::view::View::describe(&described)?;
         let mut bound = Vec::new();
         clauses
-            .when
             .iter()
+            .flat_map(|clauses| &clauses.when)
             .for_each(|premise| premise.variables(&mut bound));
         if let Some(variable) = view
             .variables()
@@ -1630,10 +1723,15 @@ impl Expander {
         }
         // A nested view names a view of the documents read: with
         // `:model`, that concept's view of the name.
+        // One of a declared concept that no document read holds is shown
+        // as its source by the renderer, as a call's is.
         if let Some(nested) = view.nested().into_iter().find(|nested| {
             !self.views.iter().any(|(concept, name)| {
                 *name == nested.view && nested.model.as_ref().is_none_or(|model| model == concept)
-            })
+            }) && nested
+                .model
+                .as_ref()
+                .is_none_or(|model| !self.concepts.contains(model))
         }) {
             return Err(Error::Refused(match &nested.model {
                 Some(model) => format!(
@@ -2092,6 +2190,72 @@ mod tests {
         };
         assert_eq!(plan.layers.len(), 1);
         assert_eq!(plan.elements[0].key, ["t"]);
+    }
+
+    /// A call in a template is a nested view: `(view concept :name)`, the
+    /// entity first or as `of:`, labels after it. Analysis says whether a
+    /// document read holds the view, the read that narrows it, the
+    /// concept's fields and the read that shows it as its source. A view
+    /// with no condition renders no entity.
+    #[test]
+    fn it_describes_a_view_called_in_a_template() {
+        use crate::view::{CALLED, Node};
+        let kernel = expanded(
+            VIEWS,
+            r#"(view todo :row [:li ?title] (todo ?t title: ?title))
+               (view todo :directory
+                 [:ul (view todo :row done: :yes) (view todo :chip of: todo:1)])"#,
+        )
+        .unwrap();
+        let directory = crate::view::View::describe(&parse(&kernel[1]).unwrap().remove(0)).unwrap();
+        assert_eq!(directory.entity, "");
+        assert!(directory.conditions.is_empty() && directory.instance.is_empty());
+        let calls = directory.calls();
+        let [row, chip] = calls.as_slice() else {
+            panic!("two calls: {calls:?}");
+        };
+        assert_eq!((row.concept.as_str(), row.view.as_str()), ("todo", "row"));
+        assert!(
+            row.found && !chip.found,
+            "the chip is no view: shown as its source"
+        );
+        assert_eq!(row.of, None);
+        assert_eq!(row.labels.len(), 1);
+        assert_eq!(row.fields, ["done", "title"]);
+        let narrowing = row.narrowing[0].to_string();
+        assert!(
+            narrowing.starts_with(&format!("(xyz.todo ?{CALLED} ")),
+            "{narrowing}"
+        );
+        assert!(narrowing.contains("done: (:last :yes)"), "{narrowing}");
+        assert!(
+            chip.narrowing[0]
+                .to_string()
+                .starts_with("(xyz.todo todo:1 ")
+        );
+        let source = chip.source[0].to_string();
+        assert!(source.contains("?source-title"), "{source}");
+        let Node::Element(ul) = &directory.template else {
+            panic!("an element");
+        };
+        assert!(matches!(ul.children[0], Node::Call(_)));
+
+        // The concept must be declared, the view need not be.
+        assert!(matches!(
+            expanded(VIEWS, "(view todo :list [:ul (view note :row)])"),
+            Err(Error::Unknown(why)) if why.contains("no concept note")
+        ));
+        assert!(matches!(
+            expanded(VIEWS, "(view todo :list [:ul (view todo :row ?t of: ?t)] (todo ?t title: ?x))"),
+            Err(Error::Refused(why)) if why.contains("says `of:` twice")
+        ));
+        // A reference by map to a declared concept's view that no document
+        // holds is no longer refused: it is shown as its source. One that
+        // names no concept still is.
+        assert!(
+            view("(view todo :row [:li {:view :card :model todo}] (todo ?t title: ?title))")
+                .is_ok()
+        );
     }
 
     /// What a view's template may not say is refused where the view is

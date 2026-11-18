@@ -374,7 +374,8 @@ pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
     if form.applies() == Some("view") {
         let view = crate::view::View::describe(form)?;
         let plan = crate::view::plan::Plan::of(&view)?;
-        for layer in 0..plan.layers.len() {
+        // A layer with no condition, a view's that has none, has no query.
+        for layer in (0..plan.layers.len()).filter(|at| !plan.layers[*at].conditions.is_empty()) {
             let said = |why: String| {
                 format!(
                     "the view {} :{}, layer {layer}: {why}",
