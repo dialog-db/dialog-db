@@ -34,6 +34,11 @@ pub struct Attribution {
     /// one field's write succeeds the newest claim the cell holds, a
     /// cardinality many field's lands beside the others.
     pub cardinality: Cardinality,
+    /// The layer the write lands in (`in:`), when the descriptor names
+    /// one or the instance binds the descriptor's variable; the primary
+    /// otherwise.
+    #[serde(rename = "in", default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<Entity>,
 }
 
 /// What an attribute's `the` holds: one relation, or every entry of a
@@ -281,11 +286,37 @@ pub struct AttributeDescriptor {
     the: The,
     description: String,
     content_type: Option<Type>,
-    /// The values `as` lists: the domain a value is one of.
-    among: Vec<Value>,
     /// How many claims a cell holds: what a read returns and what a
     /// write does.
     cardinality: Cardinality,
+    /// What few attributes say: a listed domain, a layer. Boxed, and
+    /// `None` when the attribute says neither: a descriptor is held in
+    /// every concept's field map and cloned with it, so the common one
+    /// stays small.
+    rare: Option<Box<Rare>>,
+}
+
+/// The parts of an [`AttributeDescriptor`] few attributes have.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Rare {
+    /// The values `as` lists, best first: the domain a value is one
+    /// of, which a field picking `top` ranks by.
+    among: Vec<Value>,
+    /// The layer the attribute's facts are read from and written to
+    /// (`in:`): a constant layer, or a variable a concept field binds. A
+    /// read with none, or with the variable unbound, reads every layer;
+    /// a write with none lands in the primary. No part of the
+    /// attribute's identity: one attribute's rows may lie on any layer.
+    layer: Option<Term<Entity>>,
+}
+
+impl Rare {
+    /// The parts held as a descriptor holds them: `None` when there are
+    /// none.
+    fn boxed(among: Vec<Value>, layer: Option<Term<Entity>>) -> Option<Box<Self>> {
+        let rare = Self { among, layer };
+        (rare != Self::default()).then(|| Box::new(rare))
+    }
 }
 
 /// The wire form of an [`AttributeDescriptor`]: `the` one relation, `as`
@@ -316,6 +347,8 @@ struct Wire {
     /// The preview spelling of `pick`: refused.
     #[serde(default, skip_serializing)]
     select: Option<IgnoredAny>,
+    #[serde(rename = "in", default, skip_serializing_if = "Option::is_none")]
+    layer: Option<Term<Entity>>,
 }
 
 /// A cardinality as an attribute's wire form spells it: `one` or
@@ -439,18 +472,19 @@ impl TryFrom<Wire> for AttributeDescriptor {
             the,
             description: wire.description,
             content_type,
-            among,
             cardinality,
+            rare: Rare::boxed(among, wire.layer),
         })
     }
 }
 
 impl From<AttributeDescriptor> for Wire {
     fn from(descriptor: AttributeDescriptor) -> Self {
-        let content = if descriptor.among.is_empty() {
+        let Rare { among, layer } = descriptor.rare.map(|rare| *rare).unwrap_or_default();
+        let content = if among.is_empty() {
             descriptor.content_type.map(As::Kind)
         } else {
-            Some(As::Domain(descriptor.among))
+            Some(As::Domain(among))
         };
         Wire {
             the: OneOrMany::One(descriptor.the),
@@ -462,6 +496,7 @@ impl From<AttributeDescriptor> for Wire {
             content,
             pick: None,
             select: None,
+            layer,
         }
     }
 }
@@ -489,16 +524,72 @@ impl AttributeDescriptor {
             the,
             description: description.into(),
             content_type,
-            among: Vec::new(),
             cardinality,
+            rare: None,
         }
+    }
+
+    /// The rare parts, to change: made when there are none yet. A
+    /// change that leaves none calls [`settle`](Self::settle).
+    fn rare_mut(&mut self) -> &mut Rare {
+        self.rare.get_or_insert_with(Box::default)
+    }
+
+    /// Drop the rare parts when a change left none.
+    fn settle(&mut self) {
+        if self
+            .rare
+            .as_deref()
+            .is_some_and(|rare| *rare == Rare::default())
+        {
+            self.rare = None;
+        }
+    }
+
+    /// This descriptor reading and writing `layer` (`in:`): a constant
+    /// layer, or a variable a concept field binds.
+    pub fn in_layer(mut self, layer: Term<Entity>) -> Self {
+        self.rare_mut().layer = Some(layer);
+        self
+    }
+
+    /// The layer the attribute reads from and writes to, when the
+    /// descriptor names one. See [`in_layer`](Self::in_layer).
+    pub fn layer(&self) -> Option<&Term<Entity>> {
+        self.rare.as_deref().and_then(|rare| rare.layer.as_ref())
+    }
+
+    /// The layer a write through this descriptor lands in, when the
+    /// descriptor names a constant one.
+    pub fn constant_layer(&self) -> Option<Entity> {
+        match self.layer() {
+            Some(Term::Constant(layer)) => Entity::try_from(layer.clone()).ok(),
+            _ => None,
+        }
+    }
+
+    /// The layer term of a premise over this descriptor, as `parameters`
+    /// bind it: the descriptor's constant, the caller's term for the
+    /// descriptor's variable, or the variable itself.
+    fn layer_term(&self, parameters: &Parameters) -> Option<Term<Entity>> {
+        let layer = self.layer()?;
+        let name = layer.name()?;
+        Some(match parameters.get(name).cloned() {
+            Some(Term::Variable {
+                name: Some(name), ..
+            }) => Term::var(name.clone()),
+            Some(Term::Variable { name: None, .. }) => Term::blank(),
+            Some(Term::Constant(value)) => Term::Constant(value),
+            None => layer.clone(),
+        })
     }
 
     /// This descriptor over the listed value domain: the values the
     /// attribute holds, best first: the order a field picking `top`
     /// ranks them by.
     pub fn with_domain(mut self, values: Vec<Value>) -> Self {
-        self.among = values;
+        self.rare_mut().among = values;
+        self.settle();
         self
     }
 
@@ -510,14 +601,17 @@ impl AttributeDescriptor {
 
     /// The values `as` lists, if it lists any.
     pub fn among(&self) -> &[Value] {
-        &self.among
+        self.rare.as_deref().map_or(&[], |rare| &rare.among)
     }
 
     /// This descriptor's relation read plainly, under its cardinality
     /// alone and with no listed domain: the relation itself, which is
     /// what rules derive into.
     pub fn plain(mut self) -> Self {
-        self.among = Vec::new();
+        if let Some(rare) = self.rare.as_deref_mut() {
+            rare.among = Vec::new();
+        }
+        self.settle();
         self
     }
 
@@ -603,6 +697,7 @@ impl AttributeDescriptor {
                 the,
                 is: value.clone(),
                 cardinality: self.cardinality,
+                layer: self.constant_layer(),
             })
         } else {
             Err(FieldTypeError::TypeMismatch {
@@ -668,13 +763,22 @@ impl AttributeDescriptor {
             None => Term::blank(),
         };
 
-        Ok(AttributeQuery::new(
+        let query = AttributeQuery::new(
             self.the().term("the"),
             of,
             is,
             cause,
             Some(self.cardinality()),
-        ))
+        );
+        Ok(
+            match self
+                .layer_term(&parameters)
+                .or_else(|| self.layer().cloned())
+            {
+                Some(layer) => query.with_layer(layer),
+                None => query,
+            },
+        )
     }
 
     /// The attribute's identity: its merkle reference under
@@ -708,10 +812,10 @@ impl AttributeDescriptor {
                 ENTITY.reference_of(content_type.uri().as_bytes()),
             ));
         }
-        if !self.among.is_empty() {
+        if !self.among().is_empty() {
             entries.push((
                 field::AMONG,
-                ReferenceType::LIST.list(self.among.iter().map(Value::reference)),
+                ReferenceType::LIST.list(self.among().iter().map(Value::reference)),
             ));
         }
         ATTRIBUTE.map(entries)

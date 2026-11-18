@@ -32,8 +32,7 @@
 //! the commit will leave.
 
 use crate::repository::CellSettlement;
-use crate::repository::branch::session::{Erased, QueryEnv};
-use crate::repository::source::Source;
+use crate::repository::branch::session::{Composite, Erased, QueryEnv};
 use crate::repository::staged::squash;
 use crate::rules::derives_attr;
 use crate::{CommitError, Ephemeral, Staged};
@@ -68,7 +67,7 @@ use std::fmt::Display;
 /// read.
 #[tracing::instrument(skip_all, name = "settle")]
 pub(crate) async fn settle(
-    sources: Vec<Source>,
+    composite: Composite,
     overlay: Ephemeral,
     staged: &Staged,
     env: &Erased,
@@ -79,7 +78,7 @@ pub(crate) async fn settle(
 
     // What every write observed of the line: its claims, read once per
     // cell a succession writes.
-    let line = QueryEnv::new(sources.clone(), overlay.clone(), env);
+    let line = QueryEnv::over(composite.clone(), overlay.clone(), env);
     // A commit leaves a cell to the tree unless the tree cannot see
     // every candidate the read elects among: a rule derives the
     // relation (one the line knows, or one this transaction installs,
@@ -96,7 +95,7 @@ pub(crate) async fn settle(
             if !relations.contains(&the) {
                 relations.push(the);
             }
-            if overlay_holds(&sources, the, of) {
+            if overlay_holds(&composite, the, of) {
                 unseen = true;
                 break;
             }
@@ -120,7 +119,9 @@ pub(crate) async fn settle(
     let mut settlement = staged
         .take_settlement(&observed)
         .unwrap_or_else(|| ReadSettlement::new(line.pending_edition()));
-    settlement.advance(&sources, &overlay, staged, env).await?;
+    settlement
+        .advance(&composite, &overlay, staged, env)
+        .await?;
     // The settled cells replace the writes the export passes through.
     let mut settled = staged.export();
     for ((the, of), cell) in &settlement.cells {
@@ -172,7 +173,7 @@ impl ReadSettlement {
     #[tracing::instrument(skip_all, name = "settle_cell")]
     pub(crate) async fn advance(
         &mut self,
-        sources: &[Source],
+        composite: &Composite,
         overlay: &Ephemeral,
         layer: &Staged,
         env: &Erased,
@@ -181,7 +182,7 @@ impl ReadSettlement {
         if self.upto >= log.len() {
             return Ok(());
         }
-        let line = QueryEnv::new(sources.to_vec(), overlay.clone(), env);
+        let line = QueryEnv::over(composite.clone(), overlay.clone(), env);
         for index in self.upto..log.len() {
             let (the, of, change) = &log[index];
             let key = (the.clone(), of.clone());
@@ -209,7 +210,7 @@ impl ReadSettlement {
                 Change::Assert(_, cardinality)
                     if cardinality.elects() && self.derives.at(&line, the).await? =>
                 {
-                    let view = QueryEnv::new(sources.to_vec(), overlay.clone(), env)
+                    let view = QueryEnv::over(composite.clone(), overlay.clone(), env)
                         .with_layers(vec![self.prefix.clone()]);
                     let candidates = derived_candidates(&view, the, of).await?;
                     drop(view);
@@ -320,12 +321,18 @@ struct Candidate {
     claim: bool,
 }
 
-/// Whether some line's session overlay holds a fact of the cell.
-fn overlay_holds(sources: &[Source], the: &CorpusRelation, of: &Entity) -> bool {
+/// Whether some line's session overlay, or some memory layer, holds a
+/// fact of the cell.
+fn overlay_holds(composite: &Composite, the: &CorpusRelation, of: &Entity) -> bool {
     let selector = Selector::new().the(the.clone()).of(of.clone());
-    sources
+    composite
+        .sources
         .iter()
         .any(|source| !source.overlay().scan(&selector).is_empty())
+        || composite
+            .memories
+            .iter()
+            .any(|(_, memory)| !memory.scan(&selector).is_empty())
 }
 
 /// The claims a cell holds as `view` reads them: the stored claims a

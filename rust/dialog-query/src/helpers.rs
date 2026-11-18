@@ -33,8 +33,8 @@ use dialog_common::{ConditionalSync, Held, Holdings, Holds};
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::{
-    DialogCorpusError, Fact, FactStream, Instruction, Relation as CorpusRelation, Select, Selector,
-    Value,
+    DialogCorpusError, Fact, FactStream, Instruction, Layered, Relation as CorpusRelation, Select,
+    SelectIn, Selector, Value,
 };
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::Load as ArchiveLoad;
@@ -522,6 +522,33 @@ where
         let counting = CountingStore::new(store, self.journal.clone());
         let stream = select.execute(counting).await?;
         Ok(Box::pin(stream))
+    }
+}
+
+/// A branch holds one layer, the primary: every row is read from it.
+#[dialog_capability::provider]
+impl<'a, Env> Provider<SelectIn<'a>> for JoinEnv<'a, Env>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Import>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    async fn execute(
+        &self,
+        input: Selector<Constrained>,
+    ) -> Result<Layered<'a>, DialogCorpusError> {
+        Ok(Layered::primary(
+            Provider::<Select<'a>>::execute(self, input).await?,
+        ))
     }
 }
 

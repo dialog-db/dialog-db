@@ -669,6 +669,9 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
             let mut terms = Parameters::new();
             terms.insert("this".to_string(), Term::<Any>::var("this"));
             terms.insert(ConceptDescriptor::VALUE.to_string(), value.clone());
+            if let Some(layer) = field.descriptor().layer().and_then(Term::name) {
+                terms.insert(layer.to_string(), Term::<Any>::var(layer));
+            }
             if let The::Collection { .. } = field.the() {
                 terms.insert(
                     The::key_operand(ConceptDescriptor::VALUE),
@@ -718,6 +721,11 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
         // claim under one, every claim under many; a field that
         // declares an aggregate, the one claim of each cell it elects.
         let scanned = Some(field.descriptor().cardinality());
+        let layer = field
+            .descriptor()
+            .layer()
+            .cloned()
+            .unwrap_or_else(Term::blank);
         let premise: Premise = if field.is_optional() {
             let query = OptionalAttributeQuery::new(
                 field.the().term(name),
@@ -725,7 +733,8 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
                 value.clone(),
                 Term::blank(),
                 scanned,
-            );
+            )
+            .with_layer(layer.clone());
             match field.ranking() {
                 Some(ranking) => query.ranked(ranking).into(),
                 None => query.into(),
@@ -737,7 +746,8 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
                 value.clone(),
                 Term::blank(),
                 scanned,
-            );
+            )
+            .with_layer(layer);
             match field.ranking() {
                 Some(ranking) => query.ranked(ranking).into(),
                 None => query.into(),

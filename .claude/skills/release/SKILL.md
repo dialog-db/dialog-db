@@ -33,9 +33,10 @@ order of operations around them.
 
 ## Pre-release
 
-For a dependent that needs a change still in review: on that pull
-request's branch, `scripts/release.sh prepare <next>-rc.<n>` (versions
-only; the changelog stays under `Unreleased`), commit, tag the commit
-`v<next>-rc.<n>`, push the tag, and pin the dependent to it. The `Release`
-workflow publishes it as a pre-release. Increment `<n>` for each new head
-the dependent needs.
+A pre-release is a tag on `main`, cut the same way as a release with
+`<version>` = `<next>-rc.<n>` (the changelog stays under `Unreleased`).
+Never prepare or tag one on a pull request's branch or any other commit
+off `main`. A dependent that needs a change still in review pins the
+exact revision of the pull request's head (`rev = "<sha>"`), never the
+branch, on its own pull request only; its `main` takes tags only, so it
+moves to the tag once the change is on `main` and tagged there.

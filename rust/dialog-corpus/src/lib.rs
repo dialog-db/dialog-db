@@ -113,6 +113,9 @@ pub use constants::*;
 mod key;
 pub use key::*;
 
+mod layer;
+pub use layer::*;
+
 /// Shared tree-ops on the corpus.
 mod buffered;
 pub use buffered::*;
