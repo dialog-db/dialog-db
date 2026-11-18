@@ -86,16 +86,21 @@ Measured on 2026-11-18 on four definitions of `notebook.yaml` (a concept, a comm
 
 The hypothesis holds for what was measured. What is left is three choices of default or identity, not machinery.
 
-Then over the whole notebook, 376 claims on the YAML side ([tonk-notebook-bar.md](tonk-notebook-bar.md), pinned in a test on tonk's local branch):
+Then over the whole notebook, 376 claims on the YAML side ([tonk-notebook-bar.md](tonk-notebook-bar.md), pinned in a test on tonk's local branch), with views and events lowered too:
 
 | | the same | different | missing | only in the notation |
 |---|---|---|---|---|
-| the notation as it is | 87 | 206 | 83 | 263 |
-| with lines of no `cardinality:` read as `:one`, an adjustment made on the text | 202 | 113 | 61 | 148 |
+| the notation as it is | 107 | 211 | 58 | 277 |
+| with lines of no `cardinality:` read as `:one`, an adjustment made on the text | 231 | 111 | 34 | 153 |
 
-With the adjustment, concepts are 65 of 78 the same and commands 111 of 118. Rules are 4 of 112: a rule's identity moves with any difference in its body. Seven of the sixteen rules differ only in a variable used once where the YAML writes `_`, and four recompute the command's entity with `id` where the YAML reads it. Views and events are 26 claims with no back end yet; all five views reach a description.
+- **Views.** All five views give a template tonk's own parser reads as the same tree as the YAML's, and the same bindings. None is the same text byte for byte. The 19 event claims are the same.
+- **Concepts and commands** are near the same with the adjustment: 65 of 78 and 111 of 118.
+- **Rules** are most of what differs. A rule's identity moves with any difference in its body: 3 of 16 are the same. What sets the others apart is a variable the author wrote and used once where the YAML writes `_` (4 rules), a collection's key bound with `==` on one side and directly on the other (6), and both (1).
+- **What the notation cannot say and tonk's router reads:** a concept pinned to an entity. Five of the library's 41 event bindings do not follow the name the back end gives an event.
 
-What the description lacks for tonk's stored views: the name tonk gives a variable's slot, the event's name, the two event flags, and a concept pinned to an entity, which the notation has no spelling for and the router reads.
+The agent's opinion, 2026-11-18: the count of identical claims has done its work. It found the declarations a concept does not write, the default, the blank. For a rule it measures spelling, and two spellings of one rule differ only where the same rule arrives from both notations, which stops once the YAML is gone. What a proof of concept has to show is behaviour: the notebook installed from the sketch, a command issued, the same facts read back as from the YAML.
+
+How `tonk-worker` would install from the notation is read, not built: one branch at `install_claims_for`, which every install and upgrade path goes through; `is_component_url` wants a `.yaml` suffix; and the notation reads core from `core.clj`, four concepts, where a space's core is installed from YAML.
 
 ## Not decided
 
