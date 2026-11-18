@@ -1337,3 +1337,190 @@ async fn it_clones_the_element_that_shows_a_field_of_many_values() -> Result<()>
     assert_eq!(moved.step(&notebook).await?, removed);
     Ok(())
 }
+
+const CALLS: &str = r#"
+    (view list :lists [:section (view list :card)])
+    (view list :card
+      [:article [:h2 ?name] [:ul (view todo :item list: ?l state: :open)]]
+      (list ?l name: ?name))
+    (view todo :item [:li {:subject ?t} ?title] (todo ?t title: ?title ...))
+    (view list :board [:article (view todo :chip list: ?l)] (list ?l name: ?name))"#;
+
+/// A view calls another, `(view todo :item list: ?l state: :open)`:
+/// each call is mounted with subscriptions of its own, rendering every
+/// to-do its labels narrow to. The lists stand with no list; a list
+/// added mounts its card, the card its items. Completing a to-do takes it
+/// out of the open items. A call of a view no document holds shows each
+/// to-do as its source, and the text follows a field.
+#[dialog_common::test]
+async fn it_mounts_a_called_view_narrowed_and_shows_one_not_found_as_source() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    write(&mut notebook, CONCEPTS).await?;
+    let views = views_in(CONCEPTS, CALLS)?;
+    let mut lists = Caller::open(&notebook, views.clone(), ("list", "lists"), None).await?;
+    let mut board = Caller::open(
+        &notebook,
+        views,
+        ("list", "board"),
+        Some(entity("list:home")),
+    )
+    .await?;
+    let first = lists.step(&notebook).await?;
+    assert!(
+        matches!(first.as_slice(), [(path, Patch::Insert { parent, .. })] if path.is_empty() && parent.is_empty()),
+        "{first:?}"
+    );
+    assert_eq!(lists.written(), "[:section]");
+    assert_eq!(board.step(&notebook).await?, []);
+
+    write(&mut notebook, r#"(assert (list list:home name: "Home"))"#).await?;
+    let card = vec![(0, Vec::new()), (0, Vec::new())];
+    let added = lists.step(&notebook).await?;
+    assert!(
+        matches!(added.as_slice(), [(path, Patch::Insert { parent, index: 0, .. })] if *path == [card.clone()] && parent.is_empty()),
+        "{added:?}"
+    );
+    assert_eq!(
+        lists.written(),
+        r#"[:section [:article [:h2 "Home"] [:ul]]]"#
+    );
+    board.step(&notebook).await?;
+    assert_eq!(board.written(), "[:article]");
+
+    write(
+        &mut notebook,
+        r#"(assert (todo todo:1 list: list:home title: "Buy milk" state: :open))"#,
+    )
+    .await?;
+    let items = vec![
+        card.clone(),
+        vec![
+            (0, vec![entity("list:home")]),
+            (1, Vec::new()),
+            (0, Vec::new()),
+        ],
+    ];
+    assert_eq!(
+        lists.step(&notebook).await?,
+        [(
+            items.clone(),
+            Patch::Insert {
+                parent: Vec::new(),
+                slot: 0,
+                index: 0,
+                instance: shown(
+                    vec![entity("todo:1")],
+                    element(
+                        "li",
+                        &[("subject", "todo:1")],
+                        vec![Slot::Text("Buy milk".into())]
+                    )
+                ),
+            }
+        )]
+    );
+    let chips = vec![vec![(0, vec![entity("list:home")]), (0, Vec::new())]];
+    let source = |state: &str, title: &str| {
+        format!("(todo todo:1 list: list:home state: {state} title: \"{title}\")")
+    };
+    assert_eq!(
+        board.step(&notebook).await?,
+        [(
+            chips.clone(),
+            Patch::Insert {
+                parent: Vec::new(),
+                slot: 0,
+                index: 0,
+                instance: shown(
+                    vec![entity("todo:1")],
+                    element(
+                        dialog_notation::view::plan::SOURCE_TAG,
+                        &[],
+                        vec![Slot::Text(source(":open", "Buy milk"))]
+                    )
+                ),
+            }
+        )]
+    );
+
+    write(
+        &mut notebook,
+        r#"(assert (todo todo:1 list: list:home title: "Buy oat milk" state: :open))"#,
+    )
+    .await?;
+    let item = vec![(0, vec![entity("todo:1")])];
+    assert_eq!(
+        lists.step(&notebook).await?,
+        [(
+            items.clone(),
+            Patch::SetText {
+                at: item.clone(),
+                slot: 0,
+                text: "Buy oat milk".into(),
+            }
+        )]
+    );
+    assert_eq!(
+        board.step(&notebook).await?,
+        [(
+            chips.clone(),
+            Patch::SetText {
+                at: item.clone(),
+                slot: 0,
+                text: source(":open", "Buy oat milk"),
+            }
+        )]
+    );
+
+    write(
+        &mut notebook,
+        r#"(assert (todo todo:1 list: list:home title: "Buy oat milk" state: :done))"#,
+    )
+    .await?;
+    assert_eq!(
+        lists.step(&notebook).await?,
+        [(items.clone(), Patch::Remove { at: item.clone() })],
+        "a completed to-do is no open item"
+    );
+    assert_eq!(
+        lists.written(),
+        r#"[:section [:article [:h2 "Home"] [:ul]]]"#
+    );
+    assert_eq!(
+        board.step(&notebook).await?,
+        [(
+            chips.clone(),
+            Patch::SetText {
+                at: item.clone(),
+                slot: 0,
+                text: source(":done", "Buy oat milk"),
+            }
+        )]
+    );
+
+    write(
+        &mut notebook,
+        r#"(assert (todo todo:2 list: list:home title: "Call mum" state: :open))"#,
+    )
+    .await?;
+    lists.step(&notebook).await?;
+    assert_eq!(
+        lists.written(),
+        r#"[:section [:article [:h2 "Home"] [:ul [:li {:subject "todo:2"} "Call mum"]]]]"#
+    );
+    write(
+        &mut notebook,
+        r#"(retract (todo todo:2 list: list:home title: "Call mum" state: :open))"#,
+    )
+    .await?;
+    assert_eq!(
+        lists.step(&notebook).await?,
+        [(
+            items,
+            Patch::Remove {
+                at: vec![(0, vec![entity("todo:2")])]
+            }
+        )]
+    );
+    Ok(())
+}
