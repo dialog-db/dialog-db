@@ -27,6 +27,7 @@ Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), 
 | | the design now | built here | gap |
 |---|---|---|---|
 | E. a document's order | "The order of its forms does not matter" | built 2026-11-18: concepts and rules about syntax are expanded first, and what failed is expanded again once a macro's expansion declares a name | a name two expansions need of each other is refused as whatever the first met |
+| F. creating things | `(id ?t list: ?l text: ?x)` derives an entity from labels and values, `(fresh ?n)` mints one, both as a rule's premises | built 2026-11-18 for `id`: the entity `(:id domain …)` names, the domain the head's that `?t` is the entity of. The to-do example creates with it | `fresh` unsupported: Dialog-DB has no formula that mints. Whether `id` names a domain or a concept stays open; an entity of no head or of two domains is unsupported |
 
 
 ## What the design says and the build does not do yet

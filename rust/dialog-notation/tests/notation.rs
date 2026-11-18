@@ -144,6 +144,47 @@ async fn it_runs_a_document_whose_uses_stand_above_its_declarations() -> Result<
     Ok(())
 }
 
+/// A command's rule makes the entity of what it creates with `id`: the
+/// same list and text make one to-do, on every device, and it is the
+/// entity `(:id xyz.todo list: … text: …)` names.
+#[dialog_common::test]
+async fn it_makes_an_entity_with_id_in_a_rule() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let (_, diagnostics) = notebook
+        .submit(
+            r#"(concept (todo ?t list: ?l text: ?x state: ?s)
+                 (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
+                 (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
+                 (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one))
+               (concept (todo/add list: ?l text: ?x)
+                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
+                 (xyz.todo.add/text of: ?c is: ?x as: :text in: :control))
+               (rule (assert (todo ?t list: ?l text: ?x state: :open))
+                 (todo/add list: ?l text: ?x)
+                 (id ?t list: ?l text: ?x))"#,
+        )
+        .await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    for _ in 0..2 {
+        notebook
+            .submit(r#"(assert (todo/add list: list:home text: "Buy milk"))"#)
+            .await?;
+    }
+    let todos = report(&mut notebook, "(query (todo ?t text: ?x ...))").await?;
+    assert_eq!(todos.len(), 1, "{todos:?}");
+    assert!(todos[0].starts_with("(xyz.todo id:"), "{todos:?}");
+
+    notebook
+        .submit(
+            r#"(assert (xyz.todo (:id xyz.todo list: list:home text: "Buy milk") tag: (:text "shop")))"#,
+        )
+        .await?;
+    let tagged = report(&mut notebook, "(query (xyz.todo ?t tag: ?g))").await?;
+    let entity = |row: &str| row.split_whitespace().nth(1).map(str::to_string);
+    assert_eq!(entity(&tagged[0]), entity(&todos[0]), "{tagged:?}");
+    Ok(())
+}
+
 /// A concept written as lines, an attribute a line, runs as one written
 /// as a read of several fields does: written through by a rule a
 /// command fires and read back. `:one` reads the newest claim and

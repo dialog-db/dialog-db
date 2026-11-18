@@ -3,7 +3,7 @@
 ; shared a document they would share a tick, and the state would hold
 ; both.
 
-(assert (todo/complete todo: todo:2))
+(assert (todo/complete list: list:home text: "Call mum"))
 (assert (list/archive list: list:work))
 
 ; A command is declared, so one misspelled, `(todo/compleet …)`, is

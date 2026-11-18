@@ -1267,6 +1267,79 @@ impl Expander {
         }
     }
 
+    /// `(id ?t list: ?l text: ?x)` and `(fresh ?n)`, the formulas a new
+    /// thing is made by, as the kernel premise they are, or `None` for
+    /// any other premise.
+    ///
+    /// `id` binds `?t` to the entity `(:id domain list: ?l text: ?x)`
+    /// names, the same on every device. The design leaves open whether
+    /// it names a domain or a concept; the build takes the domain of
+    /// the head `?t` is the entity of, so `id` names what `(:id …)`
+    /// names there. A head of no domain, or of two, is unsupported.
+    ///
+    /// `fresh` is unsupported: Dialog-DB has no formula that mints.
+    fn made(&self, premise: &Syntax, heads: &[Syntax]) -> Result<Option<Syntax>, Error> {
+        let word = match premise.applies() {
+            Some(word @ ("id" | "fresh")) if !self.concepts.contains(word) => word,
+            _ => return Ok(None),
+        };
+        if word == "fresh" {
+            return Err(Error::Unsupported(format!(
+                "{premise}: Dialog-DB has no formula that makes a new entity in a rule. Its \
+                 formulas are functions of their inputs, and an entity never equal to any \
+                 other is not one"
+            )));
+        }
+        let (Some(operand), [entity @ Syntax::Variable(_)]) = (premise.operand(), items(premise))
+        else {
+            return Err(Error::Refused(format!(
+                "{premise} binds one variable, the entity: `(id ?t list: ?l text: ?x)`"
+            )));
+        };
+        if operand.terms.is_empty() || operand.terms.contains_key("is") {
+            return Err(Error::Refused(format!(
+                "{premise} identifies its entity by labels and values, and says no `is:`: \
+                 `(id ?t list: ?l text: ?x)`"
+            )));
+        }
+        let mut domains: Vec<&str> = heads
+            .iter()
+            .filter_map(|head| match head.is_read() {
+                true => Some(head),
+                false => items(head).first(),
+            })
+            .filter(|read| read.is_read() && items(read).first() == Some(entity))
+            .filter_map(Syntax::applies)
+            .collect();
+        domains.dedup();
+        let domain = match domains.as_slice() {
+            [domain] => domain.to_string(),
+            [] => {
+                return Err(Error::Unsupported(format!(
+                    "{premise}: {entity} is the entity of no head, and the build takes the \
+                     domain an `id` names from the head: whether `id` names a domain or a \
+                     concept is not decided"
+                )));
+            }
+            _ => {
+                return Err(Error::Unsupported(format!(
+                    "{premise}: {entity} is the entity of heads of {}, and whether `id` names a \
+                     domain or a concept is not decided",
+                    domains.join(" and ")
+                )));
+            }
+        };
+        let mut terms = operand.terms.clone();
+        terms.insert("is".into(), entity.clone());
+        Ok(Some(Syntax::Application(
+            Box::new(Syntax::Constant(syntax::entity("id:")?)),
+            Parameters {
+                items: vec![Syntax::Reference(domain)],
+                terms,
+            },
+        )))
+    }
+
     /// A top-level tree, rewritten until it is kernel rules. A write at
     /// the top level is a rule with that head and whatever clauses
     /// follow it. A kernel rule has one head, so a head that stands for
@@ -1366,6 +1439,10 @@ impl Expander {
                     "{premise} is a head, and stands among the premises: the first part of a rule is its head, and a rule has one, so write a rule for each"
                 )));
             }
+            if let Some(made) = self.about(&premise, |this| this.made(&premise, &heads))? {
+                walked.when.push(made);
+                continue;
+            }
             walked.when.extend(members(self.about(&premise, |this| {
                 this.application(premise.clone(), Position::Premise)
             })?));
@@ -1426,6 +1503,55 @@ mod tests {
         expander.submit(setup)?;
         let (kernel, _) = expander.submit(text)?;
         Ok(kernel.iter().map(Syntax::to_string).collect())
+    }
+
+    /// `id` stands as a premise and binds its entity to what `(:id …)`
+    /// names in the domain of the head it is the entity of. Whether it
+    /// names a domain or a concept is not decided, so an entity of no
+    /// head or of heads of two domains is unsupported, and so is
+    /// `fresh`, which Dialog-DB has no formula for.
+    #[test]
+    fn it_reads_id_and_fresh_as_premises() {
+        let made = expanded(
+            TODO,
+            "(rule (assert (todo ?t list: ?l text: ?x state: :open))
+               (todo/add list: ?l text: ?x)
+               (id ?t list: ?l text: ?x))",
+        )
+        .unwrap();
+        assert_eq!(made.len(), 1);
+        assert!(
+            made[0].ends_with(" (:id xyz.todo is: ?t list: ?l text: ?x))"),
+            "{made:?}"
+        );
+        for (text, why) in [
+            (
+                "(rule (assert (xyz.note ?n text: ?x)) (xyz.draft ?d text: ?x) (fresh ?n))",
+                "no formula that makes a new entity",
+            ),
+            (
+                "(rule (xyz.seen ?d n: ?x) (xyz.draft ?d text: ?x) (id ?t text: ?x))",
+                "is the entity of no head",
+            ),
+            (
+                "(concept (card ?c title: ?x owner: ?o)
+                   (xyz.card ?c title: ?x) (xyz.owned ?c by: ?o))
+                 (rule (assert (card ?c title: ?x owner: ?o))
+                   (xyz.draft ?d title: ?x by: ?o)
+                   (id ?c title: ?x))",
+                "is the entity of heads of xyz.card and xyz.owned",
+            ),
+        ] {
+            assert!(
+                matches!(expanded("", text), Err(Error::Unsupported(why2)) if why2.contains(why)),
+                "{text}: {:?}",
+                expanded("", text)
+            );
+        }
+        assert!(matches!(
+            expanded("", "(rule (assert (xyz.note ?n text: ?x)) (xyz.draft ?d text: ?x) (id ?n))"),
+            Err(Error::Refused(why)) if why.contains("by labels and values")
+        ));
     }
 
     /// The order of a document's forms does not matter: uses written

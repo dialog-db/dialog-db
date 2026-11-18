@@ -1293,6 +1293,19 @@ Built: the reader's `{` and `former_key` in `form.rs`, the two printers, every t
 
 **Decided.** Nothing new. 110 unit tests, 29 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: creating things, `id` and `fresh`
+
+**Asked.** Step F: the design's two formulas that make a new thing, as a rule's premises. `(id ?t list: ?l text: ?x)` binds `?t` to the entity those labels and values identify; `(fresh ?n)` binds a new one.
+
+**Learned.**
+
+- `(:id domain label: term …)` stood only where a term stands, a chain of `entity/derive` from the domain and the sorted labels through each value. As a premise it is the same chain, ending in the variable `id` binds. So `id` names exactly what `(:id …)` names, given a domain.
+- `(id ?t …)` writes no domain. The design lists open whether `id` names a domain or a concept. The build takes the domain of the head `?t` is the entity of: in the to-do's rule, `xyz.todo`. An entity of no head, and one of heads of two domains (a concept over two), would each need the question answered, and are unsupported.
+- dialog-query has no formula that mints. Its formulas are functions of their inputs and are cached as such (`formula/cache.rs`); the only entity formula is `entity/derive`. `(fresh ?n)` is unsupported. What the engine would need: a formula that is not a function, run once per firing of an inductive rule, its entity drawn from what that firing has that no other has (its cause, or a random value it records), so a rule that fires again is not given a second entity for the same firing.
+- The to-do example now adds by list and text, and its rule makes the entity with `id`. Completing finds the to-do by its list and text, since the entity is no longer one an author writes.
+
+**Decided.** Nothing the design leaves open: the domain an `id` names is the head's, said in the refusals, and the question stays the maintainer's. 111 unit tests, 30 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

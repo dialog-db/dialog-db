@@ -817,6 +817,32 @@ impl Scope {
                 let with = self.term(formula.at("").ok_or_else(|| missing("`:` part"))?, None)?;
                 Ok(json!({ "assert": name, "where": { "of": of, "with": with } }))
             }
+            // `(:id domain label: term … is: ?t)` as a premise: the chain
+            // of `entity/derive` ends in what `is:` holds.
+            "id" if result.is_none() => {
+                let Some(Term::Variable(is)) = formula.at("is") else {
+                    return Err(Error::Refused(
+                        "(:id …) as a premise binds a variable under `is:`".into(),
+                    ));
+                };
+                let is = self.name(is);
+                let inner = Formula {
+                    labelled: formula
+                        .labelled
+                        .iter()
+                        .filter(|(label, _)| label != "is")
+                        .cloned()
+                        .collect(),
+                    ..formula.clone()
+                };
+                if inner.labelled.is_empty() {
+                    return Err(missing("label to identify by"));
+                }
+                self.id(&inner, Some(&is))?;
+                self.when
+                    .pop()
+                    .ok_or_else(|| Error::Refused("(:id …) derived nothing".into()))
+            }
             "value" if result.is_none() => {
                 let this = self.term(subject()?, None)?;
                 let is = self.term(formula.at("is").ok_or_else(|| missing("`is:` part"))?, None)?;

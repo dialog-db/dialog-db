@@ -24,6 +24,7 @@ text ──read──▶ forms ──expand──▶ kernel rules ──compile�
 | `(xyz.todo ?t text: (:last (:text ?x)))` | a concept of one attribute, `{the: xyz.todo/text, as: text:, pick: last:}` |
 | `(assert A)`, `A` on the control layer, with premises | an `InductiveRule` over a concept marked `Transient` |
 | `(:id domain label: term …)` | a chain of `entity/derive`, from the domain and the sorted labels through each value |
+| `(:id domain label: term … is: ?t)` as a premise, which `(id ?t label: term …)` is | the same chain, ending in `?t` |
 | `(+ ?a : ?b)` where a term stands | a `math/sum` premise and a variable for its value |
 | `(< ?a : ?b)`, `(:value ?a is: ?b)`, `(:text ?x)` | the `<`, `==` and `type` constraints |
 

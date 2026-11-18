@@ -16,39 +16,42 @@
 ; only; its entity is derived from what it says.
 
 ; Adding a to-do, to a list.
-(concept (todo/add todo: ?t list: ?l text: ?x)
-  (xyz.todo.add/todo of: ?c is: ?t as: :entity in: :control)
+(concept (todo/add list: ?l text: ?x)
   (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
   (xyz.todo.add/text of: ?c is: ?x as: :text in: :control))
 
-; Completing one.
-(concept (todo/complete todo: ?t)
-  (xyz.todo.complete/todo of: ?c is: ?t as: :entity in: :control))
+; Completing one, found by its list and its text.
+(concept (todo/complete list: ?l text: ?x)
+  (xyz.todo.complete/list of: ?c is: ?l as: :entity in: :control)
+  (xyz.todo.complete/text of: ?c is: ?x as: :text in: :control))
 
 ; Archiving a list.
 (concept (list/archive list: ?l)
   (xyz.list.archive/list of: ?c is: ?l as: :entity in: :control))
 
-; Adding a to-do opens it.
+; Adding a to-do opens it. Its entity is the one its list and its text
+; identify, so the same list and text make one to-do on every device.
 (rule (assert (todo ?t list: ?l text: ?x state: :open))
-  (todo/add todo: ?t list: ?l text: ?x))
+  (todo/add list: ?l text: ?x)
+  (id ?t list: ?l text: ?x))
 
 ; A write says every field, so one that changes the state alone writes
 ; the attribute, not the concept.
 (rule (assert (xyz.todo/state of: ?t is: :done as: [:open :done] cardinality: :one))
-  (todo/complete todo: ?t))
+  (todo/complete list: ?l text: ?x)
+  (todo ?t list: ?l text: ?x ...))
 
 ; A rule may issue a command, which is read in the tick after.
 
 ; Archiving a list completes what is on it.
-(rule (assert (todo/complete todo: ?t))
+(rule (assert (todo/complete list: ?l text: ?x))
   (list/archive list: ?l)
-  (todo ?t list: ?l ...))
+  (todo ?t list: ?l text: ?x ...))
 
 ; What is left to do, derived and never stored.
 (rule (xyz.pending ?t text: ?x)
   (todo ?t text: ?x state: :open ...))
 
-(assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))
-(assert (todo/add todo: todo:2 list: list:home text: "Call mum"))
-(assert (todo/add todo: todo:3 list: list:work text: "Ship it"))
+(assert (todo/add list: list:home text: "Buy milk"))
+(assert (todo/add list: list:home text: "Call mum"))
+(assert (todo/add list: list:work text: "Ship it"))
