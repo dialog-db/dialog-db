@@ -71,3 +71,47 @@ Built 2026-11-18 in `rust/dialog-notation`: `Plan::of` (`src/view/plan.rs`), `Ma
 - The entity rendered is bound above the root, and the root takes the concept applied to it alone. Without that, every condition binds `?l` and goes to the root.
 - Siblings that both need a condition share it at their common ancestor. A join on a variable no element holds is pulled into the element whose condition it ties, or is a filter where its variables are bound.
 - A layer of several reads compiles to a rule and a query of it. `Branch::subscribe` takes no rule, so the rule is put in the branch's session overlay.
+
+## The maintainer's form, 2026-11-18
+
+Spoken, after the prototype. Put down in substance, his words where quoted.
+
+The layered reading keeps a card for an empty list, but which part of a template stays when nothing matches is implied by where the variables sit, and is not said. Move one variable up and the frame is gone. "I think we need something there."
+
+His answer: "define a container as a separate view", and within a view everything repeats. A nested view is written as a call, which he liked "because then you can have maybe constraints on other fields too", and the call says `view`: "it's `view notebook row` instead of just `notebook row`". "That works for me."
+
+```clj
+(view notebook :directory
+  [:div {:class "notebook-index"}
+    (view notebook :row)])                  ; every notebook, a row each
+
+(view notebook :row
+  [:a {:href ["/notebook/" ?n]} [:span ?title]]
+  (notebook ?n title: ?title))
+
+(view list :card
+  [:article [:h2 ?name]
+    [:ul (view todo :item list: ?l state: :open)]]   ; the open items of this list
+  (list ?l name: ?name))
+
+(view todo :item
+  [:li ?title]
+  (todo ?t title: ?title ...))
+```
+
+```
+ a view with no condition      stands once, always                       the frame
+ a view with conditions        its whole template, once a match          nothing in it repeats on its own
+ (view concept :name …)        a read of the concept with a view's name  where repetition happens; its labels narrow the match
+ in a template
+```
+
+- A directory is a view like any other. `:directory`, `:card`, `:row` are names. Several views of one concept are wanted: directory and ui today, an embed for a message thread and one for a terminal considered.
+- No notebooks: the index's `div`, empty. No to-dos: the article, its heading, an empty `ul`. Both are written, not inferred.
+- A view that is not found is shown as its source: the entity as the notation writes it. "It's more like a view source." That is the renderer's, and it takes the place of tonk's view of any model, which is where the host was read ([design-view-context.md](design-view-context.md)).
+- Every reference names its concept, so no template reads which model it was asked for.
+
+Open, and his: whether a view and a concept are two things at all. "Concept is kind of the view."
+
+Not decided by him and the agent's to show: what a view with two conditions and no nested view does. By "everything repeats" it is one instance of the whole template a match, the one-query reading the prototype already has, which shows nothing for an empty list. The layered reading stays in the build beside it until both have been seen on the real views.
+

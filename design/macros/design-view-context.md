@@ -47,3 +47,8 @@ The second and third columns are not alternatives: the second covers a view of a
 The branch is not a view's business in any column but the last. A subscription inherits it already; an element that builds a URL could be given it the same way, by the renderer.
 
 Open: whether a space ever replaces the view of any model, which decides whether a variable concept is needed at all.
+
+## 2026-11-18, later
+
+The maintainer's form for a nested view answers this without choosing a column ([design-view-maintenance.md](design-view-maintenance.md)): a reference is a call that names its concept, `(view notebook :row)`, so no template reads which model was asked for, and a view that is not found is shown as its source by the renderer, which takes the place of the view of any model. That is the second and third columns together. The branch being read is still the renderer's to hand on, and not addressed.
+

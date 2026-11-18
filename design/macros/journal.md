@@ -1592,3 +1592,14 @@ In order. One is asked, answered and written down before the next.
 The rule needed readings the specification leaves open: siblings that both hold what a condition binds take it at their common ancestor; a join on a variable no element holds is pulled in, or is a filter where its variables are bound; the entity rendered is bound above the root, which takes the concept applied to it alone. On the eleven views of the notebook and the table nothing was left unplaced and every layer compiles; the index route's site is shared at its root, the table's unshown name is the root's, and a `:directory` view is a root an instance where tonk renders one index. `Branch::subscribe` takes no rule beside its query, so a layer of several reads has its rule put in the branch's session overlay.
 
 **Decided.** The managing agent's, until the maintainer says otherwise: the key rule above, the order of siblings by key with a collection's position first, no root for an entity that is no instance, a patch naming an instance by its address, and a view compiling to its plan (`Step::View`) when every layer's query compiles. The pinned numbers move on purpose: the notebook compiles 53 of 56 forms (was 48), 60 of 60 with core (was 55), the table 54 of 54 (was 48).
+
+## 2026-11-18, Designing: a container is a view, and a nested view is a call
+
+**Asked.** With the prototype in hand: what a directory is, what stands when nothing matches, and how a nested view is written.
+
+**Learned.** A directory is one more view, by name. What the layered reading infers (the part of a template that stays) the maintainer wants written: a container is a view of its own, and within a view everything repeats. He found `{:view :row}` not obvious as a nested view; a call is, and its labels can narrow what it shows; and it should say `view`. A view that is not found shows as its source, which is the renderer's.
+
+The agent had pressed the layered rule as the answer. It keeps the card, and it hides which part stays. His form says it.
+
+**Decided.** The form, his: `(view concept :name label: term …)` in a template, containers as views, view source for a view not found. Open, his: whether a view and a concept are two things. To prototype: the notebook and table views restated in that form, and what each shows with nothing to show.
+
