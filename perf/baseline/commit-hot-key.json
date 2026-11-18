@@ -19,13 +19,13 @@
     "span.settle": 100,
     "span.write_instructions": 100
   },
-  "instructions": 194405516,
-  "instructions_outside_allocator": 154772710,
+  "instructions": 194673414,
+  "instructions_outside_allocator": 155268902,
   "allocations": {
-    "alloc.bytes": 299366827,
-    "alloc.calls": 114055,
-    "free.calls": 112222,
-    "realloc.calls": 18065,
-    "realloc.from.bytes": 6696123
+    "alloc.bytes": 299825182,
+    "alloc.calls": 112960,
+    "free.calls": 111121,
+    "realloc.calls": 18066,
+    "realloc.from.bytes": 6696891
   }
 }
