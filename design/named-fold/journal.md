@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | A fold in a deductive rule can be admitted with a two-line change to the analysis: a cycle through it sets one rule aside, the same rule on every replica. That was never what kept the refusal. #827 made the same change and took it back because a folded value concluded into an attribute competes with the claims stored there, and nothing can be written through it. On the spike a stored `5` is read over a folded `150`. | **Delimiting**, back from Directing. The problem statement names the cycle as the cause; the cause the maintainer holds is that a computed value has no place of its own. |
-| **Agenda** | Whether the notation's rule (a derived attribute is named under a concept, concluded only, never asserted) is the place a computed value belongs. What a read does with a claim stored under such a name, which a merge can always bring. Whether a subscription over a fold is maintained or asked again (the spike asks again; `e9712a9` on #827 maintained it per entity). | Ask the maintainer the first question. Then state the problem again and redraw the matrix for it. |
+| **Status** | A folded value concluded into an attribute is read together with what is stored there, and the spike shows the stored value winning. The maintainer's new direction: a getter, a query and a view are a kind apart from a concept, deriving what is never stored, with no domain. On the stack no query, subscription or inductive rule can state a fold at all; the "closed places" are places a fold is not refused, not places it can be written. One attribute, `dialog.rule/quarantined`, is already answered without the store. | **Delimiting.** The problem is restated in [design-no-domain](design-no-domain.md) around where a computed value lives, with four alternatives drawn against the code. |
+| **Agenda** | Whether a getter must be readable in a rule that derives (tonk's library would say). Whether a reserved prefix answered at `QueryEnv::select` hides a stored claim from every read. Whether inline needs only a fold query type. | Ask the maintainer whether the restated problem is his, and whether a getter read by a rule that derives is wanted. Then the two hypotheses that split inline from a reserved namespace. |
 
 ## 2026-11-18, Directing: from a refused getter to a problem
 
@@ -40,3 +40,18 @@ Two things said before cannot both be true: the problem statement says the refus
 **Decided.** Not decided. The spike stays a branch; it does not go into the stack.
 
 **Backtracked.** From Directing to Delimiting. The matrix was drawn for a cause that is answerable and was answered. The cause that stands is where a folded value lives, which only the third column of the matrix speaks to. The problem is to be stated again before any column is chosen.
+
+## 2026-11-18, Delimiting: what a derivation with no domain could be
+
+**Asked.** The maintainer, spoken: a query, a getter and a view are a kind apart from a concept; they derive, what they derive is not stored, so nothing competes with it; they could have no domain, which is why it could not be stored. A first attempt at what that is in the engine, read from the stack at `62b1f10`, the spike and #827. Nothing was built or run.
+
+**Learned.**
+
+- No fold can be stated outside a deductive rule. Every read is an `Application` and none folds; a query of several premises is itself a deductive rule laid over the query; `InductiveRule` takes no `reduce`, and its descriptor would drop one without a word. `DeductiveRule::with_reduce` is the one constructor, and it is the one refused. The "closed places" of `notes/attribute-heads.md` do not exist as places to write a fold, and `notes/attribute-heads.md:445` says as much for inductive rules. The view note's getter, read in a subscription, stands on this.
+- A read of a derived attribute always plans the stored scan first; only the exact path skips it, and a fold rules that out.
+- The precedent for a name nothing stored can answer is not `dialog.rule/*`, which is written freely and kept inert by content address. It is `dialog.rule/quarantined`, answered at `QueryEnv::select` from the analysis, and `dialog.revision/*`, which the write gate refuses. A merge screens no attribute.
+- The notation's `concept.list.count-open/is` is an ordinary attribute to the engine; only the notation refuses a write of it.
+- "No domain" taken literally is a conclusion with no `Relation`, since a relation must be `domain/name`. That is the one alternative in which no claim can exist under the name, and by far the largest.
+
+**Decided.** Not decided. Two questions decide between inline and a reserved namespace: whether a getter must be read by a rule that derives (N5), and whether answering a prefix at `QueryEnv::select` hides a stored claim from every read (N2). The maintainer is to say whether the restated problem is his.
+
