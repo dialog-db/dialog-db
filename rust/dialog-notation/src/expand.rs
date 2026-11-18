@@ -381,6 +381,73 @@ fn lines(template: Syntax) -> Result<Syntax, Error> {
     })
 }
 
+/// `rule` with every variable an expansion named for itself, `?c.<site>`,
+/// written `_` in the premises where it occurs once in the whole rule: it
+/// joins nothing, and `_` is how one that joins nothing is written, so a
+/// rule stores alike whoever wrote it (the managing agent's reading). A
+/// variable the author wrote is never changed. Heads are left as they are:
+/// a field a head leaves out is told apart by its variable. A query is
+/// stored nowhere, and its report reads the entity its premise binds, so
+/// it is left as it is too.
+fn blanked(rule: Syntax) -> Syntax {
+    let mut clauses = Clauses::of(&rule);
+    if clauses
+        .head
+        .as_ref()
+        .and_then(Syntax::applies)
+        .is_some_and(|word| matches!(word, "syntax" | "warning" | "report"))
+    {
+        return rule;
+    }
+    let mut all = Vec::new();
+    rule.variables(&mut all);
+    let once: BTreeSet<String> = all
+        .iter()
+        .filter(|name| name.contains('.') && all.iter().filter(|other| other == name).count() == 1)
+        .cloned()
+        .collect();
+    if once.is_empty() {
+        return rule;
+    }
+    fn walk(tree: &Syntax, once: &BTreeSet<String>) -> Syntax {
+        match tree {
+            Syntax::Variable(name) if once.contains(name) => Syntax::Blank,
+            Syntax::Application(operator, operand) => Syntax::Application(
+                Box::new(walk(operator, once)),
+                Parameters {
+                    items: operand.items.iter().map(|item| walk(item, once)).collect(),
+                    terms: operand
+                        .terms
+                        .iter()
+                        .map(|(label, term)| (label.clone(), walk(term, once)))
+                        .collect(),
+                },
+            ),
+            Syntax::Tuple(items) => {
+                Syntax::Tuple(items.iter().map(|item| walk(item, once)).collect())
+            }
+            Syntax::Map(entries) => Syntax::Map(
+                entries
+                    .iter()
+                    .map(|(key, value)| (walk(key, once), walk(value, once)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+    clauses.when = clauses
+        .when
+        .iter()
+        .map(|premise| walk(premise, &once))
+        .collect();
+    clauses.unless = clauses
+        .unless
+        .iter()
+        .map(|premise| walk(premise, &once))
+        .collect();
+    clauses.into_rule()
+}
+
 /// The parts with no label of an application, or none.
 fn items(tree: &Syntax) -> &[Syntax] {
     tree.operand().map_or(&[], |operand| &operand.items)
@@ -1795,7 +1862,7 @@ impl Expander {
             {
                 continue;
             }
-            rules.push(rule);
+            rules.push(blanked(rule));
         }
         if rules.is_empty() {
             return Err(Error::Refused(format!("{tree} reports no field")));
@@ -2165,6 +2232,41 @@ mod tests {
         ));
     }
 
+    /// A variable the expansion named for itself and the rule uses once
+    /// is written `_` among the premises, so the stored body holds a
+    /// blank there. One the author wrote is kept, used once or not, and
+    /// so is a command's entity read with `of:` and used again.
+    #[test]
+    fn it_writes_an_expansions_variable_used_once_as_a_blank() {
+        let rule = expanded(
+            TODO,
+            "(rule (xyz.added ?t text: ?x) (todo/add todo: ?t text: ?x))",
+        )
+        .unwrap();
+        assert_eq!(
+            rule,
+            vec![
+                "(rule (xyz.added ?t text: ?x) (xyz.todo.add _ list: (:control _) text: (:control ?x) todo: (:control ?t)))"
+            ]
+        );
+        let compiled = crate::compile(&parse(&rule[0]).unwrap().remove(0));
+        let Ok([crate::compile::Step::Deduce(stored)]) = compiled.as_deref() else {
+            panic!("one rule");
+        };
+        let body = serde_json::to_string(&stored.descriptor()).unwrap();
+        assert!(!body.contains("?c."), "{body}");
+        assert!(body.contains(r#"{"?":{}}"#), "{body}");
+
+        let read = expanded(
+            TODO,
+            "(rule (xyz.added ?c text: ?x) (todo/add of: ?c text: ?x))",
+        )
+        .unwrap();
+        assert!(read[0].contains("(xyz.todo.add ?c "), "{read:?}");
+        let own = expanded("", "(rule (xyz.seen ?t n: 1) (xyz.todo ?t text: ?once))").unwrap();
+        assert!(own[0].contains("text: ?once"), "{own:?}");
+    }
+
     /// The order of a document's forms does not matter: uses written
     /// above the concepts and commands they use expand as they do
     /// below them.
@@ -2388,16 +2490,12 @@ mod tests {
             panic!("one rule: {kernel:?}");
         };
         let rule = rule.to_string();
-        assert!(
-            rule.starts_with(
-                "(rule (assert (xyz.todo ?t list: (:last (:entity ?l)) state: (:last :open) text: (:last (:text ?x)))) \
-                 (xyz.todo.add ?c."
-            ),
-            "{rule}"
-        );
-        assert!(
-            rule.ends_with(" list: (:control ?l) text: (:control ?x) todo: (:control ?t)))"),
-            "{rule}"
+        // The command's entity, which the author did not write and the
+        // rule uses once, is a blank.
+        assert_eq!(
+            rule,
+            "(rule (assert (xyz.todo ?t list: (:last (:entity ?l)) state: (:last :open) text: (:last (:text ?x)))) \
+             (xyz.todo.add _ list: (:control ?l) text: (:control ?x) todo: (:control ?t)))"
         );
         assert!(diagnostics.is_empty());
     }
@@ -2500,10 +2598,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(premise.len(), 1);
-        assert!(
-            premise[0].starts_with("(rule (xyz.added ?t text: ?x) (xyz.todo.add ?c.")
-                && premise[0].ends_with(" text: (:control ?x) todo: (:control ?t)))"),
-            "{premise:?}"
+        assert_eq!(
+            premise[0],
+            "(rule (xyz.added ?t text: ?x) (xyz.todo.add _ list: (:control _) text: (:control ?x) todo: (:control ?t)))"
         );
         let deduced = expanded(
             TODO,

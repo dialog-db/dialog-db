@@ -1497,6 +1497,14 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** Nothing. The bar, read / expanded / compiled / described: the notebook alone 56 / 52 / 47 / 5, of 56; with core 60 / 59 / 54 / 5, of 60. 120 unit tests, 41 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: an expansion's variable used once
+
+**Asked.** Step U: write a variable the expander introduced, and the rule uses once, as `_`. A variable the author wrote is kept. The managing agent's opinion, reversible.
+
+**Learned.** The variables the expander introduces are the ones named with a `.` in them, `?c.<site>` and the like, since the reader refuses an author's variable named so. Lowering them to a blank in a rule's premises and its `unless` changes no answer: a blank and a variable read once match the same claims. The stored body of a rule over a command premise now has `{"?":{}}` where it had a named local.
+
+**Decided.** Built in `blanked` in `expand.rs`, for every rule but a `syntax`, `warning` or `report` one, and never in a head. Whether Dialog's canonical form treats any variable used once as a blank stays open and the maintainer's. The bar is unchanged: the notebook alone 56 / 52 / 47 / 5, of 56; with core 60 / 59 / 54 / 5, of 60.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

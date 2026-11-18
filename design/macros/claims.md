@@ -305,3 +305,5 @@
 | an attribute written as a list is its parts joined, as text children are | opinion | the managing agent's, 2026-11-18 | decides in the build; pinned by `it_describes_parts_presence_and_a_nested_view_of_a_concept` |
 | `true` as an attribute's value is the attribute present with no value, there only, and `false` is refused | opinion | the managing agent's, 2026-11-18 | decides in the build |
 | a nested view's `:of` may be left out, `:model` names the concept whose view it is, and other entries are kept for the back end | opinion | the managing agent's, 2026-11-18 | decides in the build |
+| a variable the expander introduced that a rule uses once is written `_` in its premises and its `unless`; one the author wrote is kept, used once or not | opinion | the managing agent's, 2026-11-18 | decides in the build, reversible; pinned by `it_writes_an_expansions_variable_used_once_as_a_blank` |
+| whether Dialog's canonical form writes any variable used once as a blank | hypothesis | open | the maintainer's to decide |
