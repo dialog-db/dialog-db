@@ -255,7 +255,7 @@ impl Maintainer {
     /// instance of its concept where none is given.
     pub fn new(plan: Plan, entity: Option<Value>) -> Maintainer {
         let count = plan.elements.len();
-        let lineage = (0..count)
+        let lineage: Vec<Vec<usize>> = (0..count)
             .map(|at| {
                 let mut line = vec![at];
                 let mut up = plan.elements[at].parent;
@@ -278,8 +278,25 @@ impl Maintainer {
                 shows[parent].extend(below);
             }
         }
+        let mut live: Vec<BTreeMap<Chain, BTreeMap<Kept, usize>>> = vec![BTreeMap::new(); count];
+        // What a layer with no condition holds stands once, with no row:
+        // a view's frame, what is outside its repeating element.
+        for (index, layer) in plan.layers.iter().enumerate() {
+            if !layer.conditions.is_empty() {
+                continue;
+            }
+            for at in plan.region(index) {
+                let line: &Vec<usize> = &lineage[at];
+                if line.iter().all(|up| plan.elements[*up].key.is_empty()) {
+                    live[at].insert(
+                        vec![Vec::new(); line.len()],
+                        BTreeMap::from([(Vec::new(), 1)]),
+                    );
+                }
+            }
+        }
         Maintainer {
-            live: vec![BTreeMap::new(); count],
+            live,
             entity: entity.map(Datum),
             plan,
             lineage,
@@ -318,15 +335,19 @@ impl Maintainer {
     /// Whether an instance is in the tree: it has a row, and so does
     /// every instance above it, the root being of the entity rendered.
     fn mounted(&self, element: usize, chain: &Chain) -> bool {
-        if let (Some(entity), Some(root)) = (&self.entity, chain.first())
-            && root.as_slice() != std::slice::from_ref(entity)
-        {
-            return false;
-        }
-        self.lineage[element]
-            .iter()
-            .enumerate()
-            .all(|(depth, at)| self.live[*at].contains_key(&chain[..=depth]))
+        // The entity rendered is the key of the element told apart by it.
+        let rendered = |depth: usize, at: usize| match &self.entity {
+            Some(entity)
+                if self.plan.elements[at].key.first().map(String::as_str)
+                    == Some(self.plan.entity.as_str()) =>
+            {
+                chain[depth].first() == Some(entity)
+            }
+            _ => true,
+        };
+        self.lineage[element].iter().enumerate().all(|(depth, at)| {
+            rendered(depth, *at) && self.live[*at].contains_key(&chain[..=depth])
+        })
     }
 
     /// The row an instance shows: the first of those behind it.
@@ -355,6 +376,26 @@ impl Maintainer {
             for (name, value) in row.unwrap_or_default() {
                 values.insert(name, value.0);
             }
+        }
+        // A view not found shows its entity as the notation writes it.
+        if let (Some(fields), Some(entity)) = (&self.plan.source, values.get(&self.plan.entity)) {
+            use crate::syntax::{Parameters, Syntax};
+            let written = Syntax::Application(
+                Box::new(Syntax::Reference(self.plan.concept.clone())),
+                Parameters {
+                    items: vec![Syntax::Constant(entity.clone())],
+                    terms: fields
+                        .iter()
+                        .filter_map(|(label, name)| {
+                            Some((label.clone(), Syntax::Constant(values.get(name)?.clone())))
+                        })
+                        .collect(),
+                },
+            );
+            values.insert(
+                crate::view::plan::SOURCE.into(),
+                Value::String(written.to_string()),
+            );
         }
         values
     }

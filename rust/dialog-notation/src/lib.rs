@@ -81,7 +81,7 @@ pub use view::plan::{Case, Condition, Layer, Place, Placed, Plan, Why};
 pub use view::tree::{
     Address, Change, Content, Given, Maintainer, Mount, Patch, Posted, Rendered, Row, Shown, render,
 };
-pub use view::{Attribute, Element, Event, Input, Nested, Node, Piece, View};
+pub use view::{Attribute, CALLED, Call, Element, Event, Input, Nested, Node, Piece, View};
 pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};
 
 /// Why a document was not read, expanded or compiled.

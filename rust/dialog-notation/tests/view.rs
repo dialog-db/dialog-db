@@ -89,18 +89,24 @@ enum Feed {
     Asked(Vec<Row>),
 }
 
-/// A view's layers, each fed from the branch, and its maintainer.
+/// A view's layers, each fed from the branch, and its maintainer. A
+/// layer with no condition has no query and no feed.
 struct Driven {
     plan: Plan,
-    entity: Value,
-    queries: Vec<Query>,
-    feeds: Vec<Feed>,
+    entity: Option<Value>,
+    queries: Vec<Option<Query>>,
+    feeds: Vec<Option<Feed>>,
     maintainer: Maintainer,
     tree: Rendered,
 }
 
 /// Every row of a layer's query, as the branch stands.
-async fn ask(notebook: &Notebook, plan: &Plan, query: &Query, entity: &Value) -> Result<Vec<Row>> {
+async fn ask(
+    notebook: &Notebook,
+    plan: &Plan,
+    query: &Query,
+    entity: Option<&Value>,
+) -> Result<Vec<Row>> {
     let mut layer = notebook.branch.query();
     if let Some(rule) = &query.rule {
         layer = layer.with(rule.clone());
@@ -112,19 +118,30 @@ async fn ask(notebook: &Notebook, plan: &Plan, query: &Query, entity: &Value) ->
         .await?;
     let mut rows = found
         .iter()
-        .map(|conclusion| plan.row(query, conclusion, Some(entity)))
+        .map(|conclusion| plan.row(query, conclusion, entity))
         .collect::<Result<Vec<_>, _>>()?;
     rows.sort_by_key(|row| format!("{row:?}"));
     Ok(rows)
 }
 
 impl Driven {
-    async fn new(notebook: &Notebook, plan: Plan, entity: Value, how: How) -> Result<Driven> {
+    async fn new(
+        notebook: &Notebook,
+        plan: Plan,
+        entity: impl Into<Option<Value>>,
+        how: How,
+    ) -> Result<Driven> {
+        let entity = entity.into();
         let mut queries = Vec::new();
         let mut feeds = Vec::new();
         for layer in 0..plan.layers.len() {
-            let query = plan.query(layer, Some(&entity))?;
-            feeds.push(match how {
+            if plan.layers[layer].conditions.is_empty() {
+                queries.push(None);
+                feeds.push(None);
+                continue;
+            }
+            let query = plan.query(layer, entity.as_ref())?;
+            feeds.push(Some(match how {
                 How::Subscribed => {
                     if let Some(rule) = &query.rule {
                         notebook.branch.overlay().assert(rule.clone())?;
@@ -132,11 +149,11 @@ impl Driven {
                     Feed::Subscribed(Box::new(notebook.branch.subscribe(query.select.clone())))
                 }
                 How::Asked => Feed::Asked(Vec::new()),
-            });
-            queries.push(query);
+            }));
+            queries.push(Some(query));
         }
         Ok(Driven {
-            maintainer: Maintainer::new(plan.clone(), Some(entity.clone())),
+            maintainer: Maintainer::new(plan.clone(), entity.clone()),
             plan,
             entity,
             queries,
@@ -150,6 +167,7 @@ impl Driven {
     fn evaluations(&self) -> Vec<(usize, usize)> {
         self.feeds
             .iter()
+            .flatten()
             .filter_map(|feed| match feed {
                 Feed::Subscribed(subscription) => {
                     Some((subscription.recomputes(), subscription.maintenances()))
@@ -160,11 +178,16 @@ impl Driven {
     }
 
     /// The rows that came and went since the last step, fed to the
-    /// maintainer as one change; the patches it gives, checked.
+    /// maintainer as one change; the patches it gives, checked. The first
+    /// step also gives what stands with no row.
     async fn step(&mut self, notebook: &Notebook) -> Result<Vec<Patch>> {
+        let first = self.tree == Rendered::default();
         let mut changes = Vec::new();
         for (layer, feed) in self.feeds.iter_mut().enumerate() {
-            let query = &self.queries[layer];
+            let (Some(feed), Some(query)) = (feed, &self.queries[layer]) else {
+                continue;
+            };
+            let entity = self.entity.as_ref();
             let (arrived, left) = match feed {
                 Feed::Subscribed(subscription) => {
                     match subscription.poll(&notebook.operator).await? {
@@ -172,19 +195,19 @@ impl Driven {
                             delta
                                 .asserted
                                 .iter()
-                                .map(|row| self.plan.row(query, row, Some(&self.entity)))
+                                .map(|row| self.plan.row(query, row, entity))
                                 .collect::<Result<Vec<_>, _>>()?,
                             delta
                                 .retracted
                                 .iter()
-                                .map(|row| self.plan.row(query, row, Some(&self.entity)))
+                                .map(|row| self.plan.row(query, row, entity))
                                 .collect::<Result<Vec<_>, _>>()?,
                         ),
                         None => (Vec::new(), Vec::new()),
                     }
                 }
                 Feed::Asked(last) => {
-                    let now = ask(notebook, &self.plan, query, &self.entity).await?;
+                    let now = ask(notebook, &self.plan, query, entity).await?;
                     let arrived = now
                         .iter()
                         .filter(|row| !last.contains(row))
@@ -205,19 +228,38 @@ impl Driven {
                 left,
             });
         }
-        let patches = self.maintainer.apply(&changes);
-        for patch in &patches {
+        let mut patches = Vec::new();
+        if first {
+            // What stands with no row is there before any row arrives.
+            for (index, shown) in self.maintainer.tree().roots.into_iter().enumerate() {
+                patches.push(Patch::Insert {
+                    parent: Vec::new(),
+                    slot: 0,
+                    index,
+                    instance: shown,
+                });
+            }
+            for patch in &patches {
+                self.tree.apply(patch).map_err(anyhow::Error::msg)?;
+            }
+        }
+        let more = self.maintainer.apply(&changes);
+        for patch in &more {
             self.tree.apply(patch).map_err(anyhow::Error::msg)?;
         }
+        patches.extend(more);
         let maintained = self.maintainer.tree();
         assert_eq!(self.tree, maintained, "the patches make the tree");
         let mut every = Vec::new();
         for query in &self.queries {
-            every.push(ask(notebook, &self.plan, query, &self.entity).await?);
+            every.push(match query {
+                Some(query) => ask(notebook, &self.plan, query, self.entity.as_ref()).await?,
+                None => Vec::new(),
+            });
         }
         assert_eq!(
             maintained,
-            render(&self.plan, Some(&self.entity), &every),
+            render(&self.plan, self.entity.as_ref(), &every),
             "the tree maintained is the tree rendered afresh"
         );
         Ok(patches)
@@ -721,6 +763,7 @@ fn summary(plan: &Plan) -> String {
                 .map(|condition| format!("{:?}", condition.why))
                 .collect();
             let compiles = match plan.query(index, None) {
+                _ if layer.conditions.is_empty() => "stands".to_string(),
                 Ok(_) => "compiles".to_string(),
                 Err(error) => format!("refused: {error}"),
             };
@@ -767,6 +810,10 @@ fn summary(plan: &Plan) -> String {
             } => format!("unbound ?{variable} at {} event {event}", tag(*element)),
             dialog_notation::Case::Unjoined { layer, variable } => {
                 format!("unjoined ?{variable} in layer {layer}")
+            }
+            dialog_notation::Case::Other { variable } => format!("other ?{variable}"),
+            dialog_notation::Case::Flat { element, variable } => {
+                format!("flat ?{variable} at {}", tag(*element))
             }
         })
         .collect();
@@ -838,5 +885,455 @@ async fn it_lays_out_every_view_of_the_sketches() -> Result<()> {
              xyz.tonk.table",
         ]
     );
+    Ok(())
+}
+
+/// A view and every view it calls, each mounted where its call stands:
+/// one maintainer a call, with its own subscriptions, rendering every
+/// match of the called view narrowed by the call, or for the call's
+/// entity. A view that no document holds is shown as its source.
+struct Caller {
+    views: Vec<View>,
+    mounted: Vec<(Vec<dialog_notation::Address>, Driven)>,
+}
+
+impl Caller {
+    async fn open(
+        notebook: &Notebook,
+        views: Vec<View>,
+        top: (&str, &str),
+        entity: Option<Value>,
+    ) -> Result<Caller> {
+        let view = views
+            .iter()
+            .find(|view| (view.concept.as_str(), view.name.as_str()) == top)
+            .ok_or_else(|| anyhow::anyhow!("no view {top:?}"))?;
+        let driven = Driven::new(notebook, Plan::repeating(view)?, entity, How::Subscribed).await?;
+        Ok(Caller {
+            views,
+            mounted: vec![(Vec::new(), driven)],
+        })
+    }
+
+    /// The patches of a step, each with the calls it is mounted under.
+    async fn step(
+        &mut self,
+        notebook: &Notebook,
+    ) -> Result<Vec<(Vec<dialog_notation::Address>, Patch)>> {
+        let mut said = Vec::new();
+        let mut at = 0;
+        while at < self.mounted.len() {
+            let path = self.mounted[at].0.clone();
+            let patches = self.mounted[at].1.step(notebook).await?;
+            let mut arrived = Vec::new();
+            let mut gone: Vec<dialog_notation::Address> = Vec::new();
+            for patch in &patches {
+                match patch {
+                    Patch::Insert {
+                        parent,
+                        slot,
+                        instance,
+                        ..
+                    } => {
+                        let mut address = parent.clone();
+                        address.push((*slot, instance.key.clone()));
+                        mounts(address, instance, &mut arrived);
+                    }
+                    Patch::Remove { at } => gone.push(at.clone()),
+                    Patch::SetView { at, mount } => {
+                        gone.push(at.clone());
+                        arrived.push((at.clone(), mount.clone()));
+                    }
+                    _ => {}
+                }
+                said.push((path.clone(), patch.clone()));
+            }
+            // What went takes every call mounted under it.
+            let depth = path.len();
+            self.mounted.retain(|(mounted, _)| {
+                !(mounted.len() > depth
+                    && mounted[..depth] == path[..]
+                    && gone.iter().any(|at| mounted[depth].starts_with(at)))
+            });
+            let plan = self.mounted[at].1.plan.clone();
+            for (address, mount) in arrived {
+                let slots: Vec<usize> = address.iter().map(|(slot, _)| *slot).collect();
+                let Some(dialog_notation::Placed::Call(call)) = plan
+                    .place_at(&slots)
+                    .map(|place| plan.elements[place].placed.clone())
+                else {
+                    continue;
+                };
+                let called = match self
+                    .views
+                    .iter()
+                    .find(|view| view.concept == call.concept && view.name == call.view)
+                {
+                    Some(view) => Plan::called(view, &call, &mount.given)?,
+                    None => Plan::source(&call, &mount.given)?,
+                };
+                let driven =
+                    Driven::new(notebook, called, mount.of.clone(), How::Subscribed).await?;
+                let mut below = path.clone();
+                below.push(address);
+                self.mounted.push((below, driven));
+            }
+            at += 1;
+        }
+        Ok(said)
+    }
+
+    /// The whole tree, each call replaced by what it mounts, written as
+    /// Hiccup.
+    fn written(&self) -> String {
+        let top = &self.mounted[0].1.tree;
+        top.roots
+            .iter()
+            .map(|root| self.hiccup(&[], vec![(0, root.key.clone())], root))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn hiccup(
+        &self,
+        path: &[dialog_notation::Address],
+        at: dialog_notation::Address,
+        shown: &Shown,
+    ) -> String {
+        match &shown.content {
+            Content::View(_) => {
+                let mut below = path.to_vec();
+                below.push(at);
+                match self.mounted.iter().find(|(mounted, _)| *mounted == below) {
+                    Some((_, driven)) => driven
+                        .tree
+                        .roots
+                        .iter()
+                        .map(|root| self.hiccup(&below, vec![(0, root.key.clone())], root))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    None => String::new(),
+                }
+            }
+            Content::Element {
+                tag,
+                attributes,
+                slots,
+                ..
+            } => {
+                let mut out = format!("[:{tag}");
+                if !attributes.is_empty() {
+                    let written: Vec<String> = attributes
+                        .iter()
+                        .map(|(name, value)| format!(":{name} {value:?}"))
+                        .collect();
+                    out.push_str(&format!(" {{{}}}", written.join(" ")));
+                }
+                for (index, inside) in slots.iter().enumerate() {
+                    match inside {
+                        Slot::Text(text) => out.push_str(&format!(" {text:?}")),
+                        Slot::Instances(list) => {
+                            for child in list {
+                                let mut below = at.clone();
+                                below.push((index, child.key.clone()));
+                                let written = self.hiccup(path, below, child);
+                                if !written.is_empty() {
+                                    out.push(' ');
+                                    out.push_str(&written);
+                                }
+                            }
+                        }
+                    }
+                }
+                out.push(']');
+                out
+            }
+        }
+    }
+}
+
+/// The views of a document written after the concepts, described.
+fn views_in(concepts: &str, views: &str) -> Result<Vec<View>> {
+    let analysis = Analyzer::new()?.analyze(&parse(&format!("{concepts}\n{views}"))?);
+    let refused: Vec<String> = analysis
+        .diagnostics
+        .iter()
+        .filter_map(|diagnostic| diagnostic.refusal.as_ref().map(ToString::to_string))
+        .collect();
+    assert!(refused.is_empty(), "{refused:?}");
+    Ok(analysis
+        .analyzed
+        .iter()
+        .filter(|tree| tree.applies() == Some("view"))
+        .map(View::describe)
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+/// A task with one title and tags of many values.
+const TASKS: &str = r#"
+    (concept (task ?t title: ?title tag: ?tag)
+      (xyz.task/title of: ?t is: ?title as: :text cardinality: :one)
+      (xyz.task/tag of: ?t is: ?tag as: :text cardinality: :many))"#;
+
+const LISTS: &str = r#"
+    (view list :directory
+      [:ul {:class "lists"} [:li {:subject ?l} ?name]]
+      (list ?l name: ?name))
+    (view list :unmarked
+      [:ul {:class "lists"} [:li ?name]]
+      (list ?l name: ?name))"#;
+
+const ROWS: &str = r#"
+    (view task :row
+      [:li ?title [:span {:class "tag"} ?tag]]
+      (task ?t title: ?title tag: ?tag))
+    (view task :moved
+      [:li [:p ?title] [:span {:class "tag"} ?tag]]
+      (task ?t title: ?title tag: ?tag))"#;
+
+fn element(tag: &str, attributes: &[(&str, &str)], slots: Vec<Slot>) -> Content {
+    Content::Element {
+        tag: tag.into(),
+        attributes: attributes
+            .iter()
+            .map(|(name, value)| ((*name).into(), (*value).into()))
+            .collect(),
+        events: Vec::new(),
+        slots,
+    }
+}
+
+fn shown(key: Vec<Value>, content: Content) -> Shown {
+    Shown { key, content }
+}
+
+/// By tonk's rule, the element that holds the entity's variable alone in
+/// an attribute, `{:subject ?l}`, repeats once a list, and what is
+/// outside it stands once: with no list, the `ul`, empty. Without the
+/// marker the whole template repeats, a `ul` a list, and with no list
+/// nothing is there.
+#[dialog_common::test]
+async fn it_repeats_the_marked_element_and_keeps_what_is_outside() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    write(&mut notebook, CONCEPTS).await?;
+    let views = views_in(CONCEPTS, LISTS)?;
+    let mut marked = Caller::open(&notebook, views.clone(), ("list", "directory"), None).await?;
+    let mut unmarked = Caller::open(&notebook, views, ("list", "unmarked"), None).await?;
+
+    assert_eq!(
+        marked.step(&notebook).await?,
+        [(
+            Vec::new(),
+            Patch::Insert {
+                parent: Vec::new(),
+                slot: 0,
+                index: 0,
+                instance: shown(
+                    Vec::new(),
+                    element(
+                        "ul",
+                        &[("class", "lists")],
+                        vec![Slot::Instances(Vec::new())]
+                    )
+                ),
+            }
+        )]
+    );
+    assert_eq!(marked.written(), r#"[:ul {:class "lists"}]"#);
+    assert_eq!(unmarked.step(&notebook).await?, []);
+    assert_eq!(unmarked.written(), "");
+
+    write(&mut notebook, r#"(assert (list list:home name: "Home"))"#).await?;
+    let li = |uri: &str, name: &str| {
+        shown(
+            vec![entity(uri)],
+            element("li", &[("subject", uri)], vec![Slot::Text(name.into())]),
+        )
+    };
+    assert_eq!(
+        marked.step(&notebook).await?,
+        [(
+            Vec::new(),
+            Patch::Insert {
+                parent: vec![(0, Vec::new())],
+                slot: 0,
+                index: 0,
+                instance: li("list:home", "Home"),
+            }
+        )]
+    );
+    let ul = |uri: &str, name: &str| {
+        shown(
+            vec![entity(uri)],
+            element(
+                "ul",
+                &[("class", "lists")],
+                vec![Slot::Instances(vec![shown(
+                    Vec::new(),
+                    element("li", &[], vec![Slot::Text(name.into())]),
+                )])],
+            ),
+        )
+    };
+    assert_eq!(
+        unmarked.step(&notebook).await?,
+        [(
+            Vec::new(),
+            Patch::Insert {
+                parent: Vec::new(),
+                slot: 0,
+                index: 0,
+                instance: ul("list:home", "Home"),
+            }
+        )],
+        "with no marker the whole template repeats"
+    );
+
+    write(&mut notebook, r#"(assert (list list:work name: "Work"))"#).await?;
+    assert_eq!(
+        marked.step(&notebook).await?,
+        [(
+            Vec::new(),
+            Patch::Insert {
+                parent: vec![(0, Vec::new())],
+                slot: 0,
+                index: 1,
+                instance: li("list:work", "Work"),
+            }
+        )]
+    );
+    assert_eq!(
+        marked.written(),
+        r#"[:ul {:class "lists"} [:li {:subject "list:home"} "Home"] [:li {:subject "list:work"} "Work"]]"#
+    );
+    unmarked.step(&notebook).await?;
+    assert_eq!(
+        unmarked.written(),
+        r#"[:ul {:class "lists"} [:li "Home"]] [:ul {:class "lists"} [:li "Work"]]"#
+    );
+    Ok(())
+}
+
+/// A field of many values, as the concept declares it, is cloned at the
+/// element that shows it, once a value, within the one match of the
+/// task. A task with no tag is no `task`: the concept requires every
+/// field, so nothing is shown. Moving the one-valued title into another
+/// element changes nothing of what repeats.
+#[dialog_common::test]
+async fn it_clones_the_element_that_shows_a_field_of_many_values() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    write(&mut notebook, TASKS).await?;
+    let views = views_in(TASKS, ROWS)?;
+    let keys = |name: &str| -> Result<Vec<(String, Vec<String>)>> {
+        let view = views.iter().find(|view| view.name == name).expect("a view");
+        Ok(Plan::repeating(view)?
+            .elements
+            .iter()
+            .filter(|place| !place.key.is_empty())
+            .map(|place| match &place.placed {
+                dialog_notation::Placed::Element(tag) => (tag.clone(), place.key.clone()),
+                _ => (String::new(), place.key.clone()),
+            })
+            .collect())
+    };
+    let repeats = vec![
+        ("li".to_string(), vec!["t".to_string()]),
+        ("span".into(), vec!["tag".into()]),
+    ];
+    assert_eq!(keys("row")?, repeats);
+    assert_eq!(keys("moved")?, repeats, "the title moved, the same repeats");
+
+    let mut row = Caller::open(
+        &notebook,
+        views.clone(),
+        ("task", "row"),
+        Some(entity("task:1")),
+    )
+    .await?;
+    let mut moved =
+        Caller::open(&notebook, views, ("task", "moved"), Some(entity("task:1"))).await?;
+    assert_eq!(row.step(&notebook).await?, []);
+    moved.step(&notebook).await?;
+
+    write(
+        &mut notebook,
+        r#"(assert (xyz.task/title task:1 "Buy milk"))"#,
+    )
+    .await?;
+    assert_eq!(row.step(&notebook).await?, [], "no tag: no task");
+    assert_eq!(moved.step(&notebook).await?, []);
+
+    let tag = |name: &str| {
+        shown(
+            vec![Value::String(name.into())],
+            element("span", &[("class", "tag")], vec![Slot::Text(name.into())]),
+        )
+    };
+    write(&mut notebook, r#"(assert (xyz.task/tag task:1 "shop"))"#).await?;
+    assert_eq!(
+        row.step(&notebook).await?,
+        [(
+            Vec::new(),
+            Patch::Insert {
+                parent: Vec::new(),
+                slot: 0,
+                index: 0,
+                instance: shown(
+                    vec![entity("task:1")],
+                    element(
+                        "li",
+                        &[],
+                        vec![
+                            Slot::Text("Buy milk".into()),
+                            Slot::Instances(vec![tag("shop")])
+                        ]
+                    )
+                ),
+            }
+        )]
+    );
+    moved.step(&notebook).await?;
+    assert_eq!(
+        moved.written(),
+        r#"[:li [:p "Buy milk"] [:span {:class "tag"} "shop"]]"#
+    );
+
+    write(&mut notebook, r#"(assert (xyz.task/tag task:1 "home"))"#).await?;
+    let added = [(
+        Vec::new(),
+        Patch::Insert {
+            parent: vec![(0, vec![entity("task:1")])],
+            slot: 1,
+            index: 0,
+            instance: tag("home"),
+        },
+    )];
+    assert_eq!(
+        row.step(&notebook).await?,
+        added,
+        "a second tag is one span"
+    );
+    assert_eq!(
+        moved.step(&notebook).await?,
+        added,
+        "and the same with the title moved"
+    );
+    assert_eq!(
+        row.written(),
+        r#"[:li "Buy milk" [:span {:class "tag"} "home"] [:span {:class "tag"} "shop"]]"#
+    );
+
+    write(&mut notebook, r#"(retract (xyz.task/tag task:1 "shop"))"#).await?;
+    let removed = [(
+        Vec::new(),
+        Patch::Remove {
+            at: vec![
+                (0, vec![entity("task:1")]),
+                (1, vec![Value::String("shop".into())]),
+            ],
+        },
+    )];
+    assert_eq!(row.step(&notebook).await?, removed);
+    assert_eq!(moved.step(&notebook).await?, removed);
     Ok(())
 }

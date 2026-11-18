@@ -41,7 +41,7 @@ use crate::Error;
 use crate::compile::{Query, Step, compile};
 use crate::kernel::{self, Keyed, Premise, Term};
 use crate::syntax::{Parameters, Syntax};
-use crate::view::{Attribute, Call, Input, Nested, Node, Piece, View};
+use crate::view::{Attribute, CALLED, Call, Element, Input, Nested, Node, Piece, View};
 
 /// What stands at a place in the template.
 #[derive(Clone, Debug, PartialEq)]
@@ -150,6 +150,21 @@ pub enum Case {
         /// Whether an event of the element is what holds it.
         event: bool,
     },
+    /// A variable shown that is no field of the view's entity: tonk's
+    /// rule, over one concept, says nothing of it. Repeated here as a
+    /// field of many values is.
+    Other {
+        /// The variable.
+        variable: String,
+    },
+    /// A field of many values held on the repeating element itself:
+    /// tonk's planner leaves it a flat binding there, no element cloned.
+    Flat {
+        /// The element.
+        element: usize,
+        /// The variable.
+        variable: String,
+    },
     /// A layer's conditions do not bind a key of an element above it, so
     /// its rows are not tied to one instance of that element.
     Unjoined {
@@ -178,7 +193,18 @@ pub struct Plan {
     pub layers: Vec<Layer>,
     /// What surprised the rule.
     pub cases: Vec<Case>,
+    /// For a view not found, shown as its source: each field of the
+    /// concept and the variable it is read into. The text is the concept
+    /// applied to the entity with its fields, as the notation writes it,
+    /// under the variable [`SOURCE`].
+    pub source: Option<Vec<(String, String)>>,
 }
+
+/// The variable a view shown as its source holds its text under.
+pub const SOURCE: &str = "view-source";
+
+/// The tag a view shown as its source is wrapped in.
+pub const SOURCE_TAG: &str = "view-source";
 
 /// A premise, with what it holds and what it binds.
 struct Info {
@@ -520,6 +546,7 @@ impl Plan {
             elements,
             layers,
             cases,
+            source: None,
         };
         plan.finish(&events);
         Ok(plan)
@@ -560,9 +587,297 @@ impl Plan {
                 row: Vec::new(),
             }],
             cases: Vec::new(),
+            source: None,
         };
         plan.finish(&events);
         Ok(plan)
+    }
+
+    /// The reading a view gets by default, tonk's rule. One query over
+    /// every condition; its matches are the view's entity. The element
+    /// that repeats once a match is the outermost one that holds a
+    /// variable, when it is the only one that deep and an attribute of it
+    /// holds the entity's variable and nothing else, `{:subject ?n}`;
+    /// otherwise the whole template. What is outside it stands once,
+    /// with no match too. Within a match, a field of many values (a line
+    /// that keeps every claim, or a collection) is cloned at the lowest
+    /// element that holds every place it is shown, as tonk's planner
+    /// finds it.
+    pub fn repeating(view: &View) -> Result<Plan, Error> {
+        let (mut elements, events) = Plan::places(view)?;
+        let mut conditions: Vec<Condition> = view
+            .instance
+            .iter()
+            .map(|premise| Condition {
+                premise: premise.clone(),
+                why: Why::Instance,
+            })
+            .collect();
+        conditions.extend(view.conditions.iter().map(|premise| Condition {
+            premise: premise.clone(),
+            why: Why::Single,
+        }));
+        let entity = view.entity.clone();
+        let mut bound: BTreeSet<String> = BTreeSet::new();
+        if !entity.is_empty() {
+            bound.insert(entity.clone());
+        }
+        for condition in &conditions {
+            bound.extend(info(&condition.premise).vars);
+        }
+        let premises: Vec<Premise> = conditions
+            .iter()
+            .filter(|condition| condition.premise.applies() != Some("unless"))
+            .filter_map(|condition| kernel::premise(&condition.premise).ok())
+            .collect();
+
+        // The repeating element: tonk's `this_repeat_root`.
+        let hosts: Vec<usize> = (0..elements.len())
+            .filter(|at| !elements[*at].holds.is_empty())
+            .collect();
+        let depth = hosts.iter().map(|at| elements[*at].path.len()).min();
+        let shallowest: Vec<usize> = hosts
+            .iter()
+            .copied()
+            .filter(|at| Some(elements[*at].path.len()) == depth)
+            .collect();
+        let marked = |at: usize| {
+            !entity.is_empty()
+                && matches!(
+                    node_at(&view.template, &elements[at].path),
+                    Node::Element(Element { attributes, .. })
+                        if attributes.iter().any(|(_, value)| {
+                            matches!(value, Attribute::Variable(name) if *name == entity)
+                        })
+                )
+        };
+        let repeat = match shallowest.as_slice() {
+            [one] if marked(*one) => *one,
+            _ => 0,
+        };
+        let inside = |elements: &[Place], at: usize| above(elements, repeat, at);
+
+        let mut layers = Vec::new();
+        if repeat != 0 {
+            layers.push(Layer {
+                element: 0,
+                conditions: Vec::new(),
+                row: Vec::new(),
+            });
+        }
+        let body = layers.len();
+        layers.push(Layer {
+            element: repeat,
+            conditions,
+            row: Vec::new(),
+        });
+        for at in 0..elements.len() {
+            let within = inside(&elements, at);
+            elements[at].layer = if within { body } else { 0 };
+            elements[at].bound = if within {
+                bound.iter().cloned().collect()
+            } else {
+                Vec::new()
+            };
+        }
+
+        // The axes within a match: a variable shown that the entity does
+        // not fix. A collection's key rides on its value's axis, as
+        // tonk's `{x/key}` does.
+        let fixed = closure(&BTreeSet::from([entity.clone()]), &premises);
+        let held: BTreeSet<String> = (0..elements.len())
+            .filter(|at| inside(&elements, *at))
+            .flat_map(|at| elements[at].holds.clone())
+            .collect();
+        let riding: BTreeSet<String> = premises
+            .iter()
+            .filter_map(|premise| match premise {
+                Premise::Read(read) => Some(read),
+                Premise::Formula(_) => None,
+            })
+            .flat_map(|read| &read.fields)
+            .filter_map(|field| match (&field.key, &field.term) {
+                (Some((Term::Variable(key), _)), Term::Variable(value)) if held.contains(value) => {
+                    Some(key.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let of_entity = |name: &str| {
+            premises.iter().any(|premise| match premise {
+                Premise::Read(read) => {
+                    matches!(&read.entity, Term::Variable(subject) if *subject == entity)
+                        && read.fields.iter().any(|field| {
+                            matches!(&field.term, Term::Variable(term) if term == name)
+                                || matches!(&field.key, Some((Term::Variable(key), _)) if key == name)
+                        })
+                }
+                Premise::Formula(_) => false,
+            })
+        };
+        let mut cases = Vec::new();
+        let mut axes: std::collections::BTreeMap<usize, Vec<String>> = Default::default();
+        let base = elements[repeat].path.len();
+        for name in held
+            .iter()
+            .filter(|name| **name != entity && !fixed.contains(*name) && !riding.contains(*name))
+        {
+            if !of_entity(name) {
+                cases.push(Case::Other {
+                    variable: name.clone(),
+                });
+            }
+            let hosts: Vec<Vec<usize>> = (0..elements.len())
+                .filter(|at| inside(&elements, *at) && elements[*at].holds.contains(name))
+                .map(|at| elements[at].path[base..].to_vec())
+                .collect();
+            let mut roots: Vec<Vec<usize>> = Vec::new();
+            let lca = common(&hosts);
+            if !lca.is_empty() && hosts.contains(&lca) {
+                roots.push(lca);
+            } else if !lca.is_empty() {
+                let mut clusters: std::collections::BTreeMap<usize, Vec<Vec<usize>>> =
+                    Default::default();
+                for host in &hosts {
+                    clusters
+                        .entry(host[lca.len()])
+                        .or_default()
+                        .push(host.clone());
+                }
+                roots.extend(clusters.values().map(|cluster| common(cluster)));
+            } else {
+                for host in &hosts {
+                    if !host.is_empty() && !roots.contains(host) {
+                        roots.push(host.clone());
+                    }
+                }
+                if hosts.iter().any(Vec::is_empty) {
+                    cases.push(Case::Flat {
+                        element: repeat,
+                        variable: name.clone(),
+                    });
+                }
+            }
+            for root in roots {
+                let mut path = elements[repeat].path.clone();
+                path.extend(root);
+                if let Some(at) = (0..elements.len()).find(|at| elements[*at].path == path) {
+                    axes.entry(at).or_default().push(name.clone());
+                }
+            }
+        }
+        if !entity.is_empty() {
+            elements[repeat].key = vec![entity.clone()];
+        }
+        for at in 0..elements.len() {
+            let Some(names) = axes.get(&at) else {
+                continue;
+            };
+            let mut known: BTreeSet<String> = BTreeSet::from([entity.clone()]);
+            let mut up = elements[at].parent;
+            while let Some(parent) = up {
+                known.extend(elements[parent].key.iter().cloned());
+                up = elements[parent].parent;
+            }
+            let mut key = Vec::new();
+            let mut positions = Vec::new();
+            for name in names {
+                let mut visiting = BTreeSet::new();
+                ensure(
+                    name,
+                    &premises,
+                    &known,
+                    &mut key,
+                    &mut positions,
+                    &mut visiting,
+                );
+            }
+            let (mut first, rest): (Vec<String>, Vec<String>) =
+                key.into_iter().partition(|name| positions.contains(name));
+            first.extend(rest);
+            if at != repeat {
+                elements[at].key = first;
+            } else {
+                elements[at].key.extend(first);
+            }
+        }
+        let mut plan = Plan {
+            concept: view.concept.clone(),
+            name: view.name.clone(),
+            entity,
+            template: view.template.clone(),
+            elements,
+            layers,
+            cases,
+            source: None,
+        };
+        plan.unbound(&events);
+        plan.rows();
+        Ok(plan)
+    }
+
+    /// The plan of a view called from another: the called view's own
+    /// conditions and the call's narrowing read, the variables the call
+    /// holds put in by what they are bound to where it stands.
+    pub fn called(callee: &View, call: &Call, given: &[(String, Value)]) -> Result<Plan, Error> {
+        let mut view = callee.clone();
+        if !callee.conditions.is_empty() {
+            let entity = Syntax::Variable(callee.entity.clone());
+            view.conditions.extend(
+                narrowed(&call.narrowing, given)
+                    .iter()
+                    .map(|premise| substitute(premise, CALLED, &entity)),
+            );
+        }
+        Plan::repeating(&view)
+    }
+
+    /// The plan of a view called that no document holds, shown as its
+    /// source: an element [`SOURCE_TAG`] a match, holding the concept
+    /// applied to the entity with its fields as the notation writes it.
+    pub fn source(call: &Call, given: &[(String, Value)]) -> Result<Plan, Error> {
+        let mut conditions = narrowed(&call.narrowing, given);
+        conditions.extend(call.source.iter().cloned());
+        let view = View {
+            concept: call.concept.clone(),
+            name: call.view.clone(),
+            entity: CALLED.into(),
+            template: Node::Element(Element {
+                tag: SOURCE_TAG.into(),
+                attributes: Vec::new(),
+                events: Vec::new(),
+                children: vec![Node::Variable(SOURCE.into())],
+            }),
+            conditions,
+            instance: Vec::new(),
+        };
+        let mut plan = Plan::repeating(&view)?;
+        let fields: Vec<(String, String)> = call
+            .fields
+            .iter()
+            .map(|label| (label.clone(), format!("source-{label}")))
+            .collect();
+        let mut holds = vec![CALLED.to_string()];
+        holds.extend(fields.iter().map(|(_, name)| name.clone()));
+        plan.elements[0].holds = holds;
+        plan.elements[0].key = vec![CALLED.into()];
+        plan.cases.clear();
+        plan.source = Some(fields);
+        plan.rows();
+        Ok(plan)
+    }
+
+    /// The place an address names, by the slot of each parent from the
+    /// root down; the root's slot is not looked at.
+    pub fn place_at(&self, slots: &[usize]) -> Option<usize> {
+        let mut at = 0;
+        for slot in slots.iter().skip(1) {
+            at = (0..self.elements.len()).find(|child| {
+                self.elements[*child].parent == Some(at)
+                    && self.elements[*child].path.last() == Some(slot)
+            })?;
+        }
+        Some(at)
     }
 
     fn places(view: &View) -> Result<(Vec<Place>, Vec<Vec<String>>), Error> {
@@ -581,6 +896,17 @@ impl Plan {
     /// Keys, rows, and the cases of an unbound variable and an unjoined
     /// layer, once the conditions are placed.
     fn finish(&mut self, events: &[Vec<String>]) {
+        self.unbound(events);
+        for at in 0..self.elements.len() {
+            let key = self.key(at);
+            self.elements[at].key = key;
+        }
+        self.rows();
+    }
+
+    /// The case of each variable an element holds that nothing binds at
+    /// it.
+    fn unbound(&mut self, events: &[Vec<String>]) {
         for (at, held) in events.iter().enumerate() {
             let unbound: Vec<String> = self.elements[at]
                 .holds
@@ -597,10 +923,11 @@ impl Plan {
                 });
             }
         }
-        for at in 0..self.elements.len() {
-            let key = self.key(at);
-            self.elements[at].key = key;
-        }
+    }
+
+    /// Each layer's row, once the keys are known, and the case of a
+    /// layer that does not bind a key above it.
+    fn rows(&mut self) {
         for index in 0..self.layers.len() {
             let owner = self.layers[index].element;
             let mut row = Vec::new();
@@ -941,6 +1268,50 @@ fn closure(fixed: &BTreeSet<String>, premises: &[Premise]) -> BTreeSet<String> {
             return fixed;
         }
     }
+}
+
+/// The longest path every path starts with.
+fn common(paths: &[Vec<usize>]) -> Vec<usize> {
+    let Some((first, rest)) = paths.split_first() else {
+        return Vec::new();
+    };
+    let mut length = first.len();
+    for path in rest {
+        length = length.min(
+            first
+                .iter()
+                .zip(path)
+                .take_while(|(one, other)| one == other)
+                .count(),
+        );
+    }
+    first[..length].to_vec()
+}
+
+/// The part of a template at a path.
+fn node_at<'a>(template: &'a Node, path: &[usize]) -> &'a Node {
+    let mut node = template;
+    for index in path {
+        if let Node::Element(parent) = node {
+            node = &parent.children[*index];
+        }
+    }
+    node
+}
+
+/// A call's narrowing premises, each variable the call holds put in by
+/// what it is bound to.
+fn narrowed(premises: &[Syntax], given: &[(String, Value)]) -> Vec<Syntax> {
+    premises
+        .iter()
+        .map(|premise| {
+            given
+                .iter()
+                .fold(premise.clone(), |premise, (name, value)| {
+                    substitute(&premise, name, &Syntax::Constant(value.clone()))
+                })
+        })
+        .collect()
 }
 
 /// A tree with a variable put in by a value.
