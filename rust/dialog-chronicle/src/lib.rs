@@ -10,11 +10,12 @@
 //! way the `fs` provider does, from one file instead of a file per block.
 //! The tree, queries and sync read and write it as they do any archive.
 //!
-//! It builds `research/single-file-format/design.md` up to its fifth step: an
-//! artifact tree node is kept as a frame over the file's tokens, and a read
-//! realizes the node's block from its frame. Writers in any number of
-//! processes take turns on the file's lock. Serving the tree a node read
-//! straight from its rows, without realizing a block, is the step after.
+//! It builds `research/single-file-format/design.md`: a tree node is kept as
+//! a frame over the file's tokens, and the tree reads it in place, through
+//! the node commands, with no block built; a `Get` rebuilds the block from
+//! its frame. As a `Space`'s memory it keeps the space's cells too. Writers
+//! in any number of processes take turns on the file's lock. The crate's
+//! README covers using it and moving a replica into it.
 //!
 //! ```no_run
 //! # use dialog_chronicle::Chronicle;
