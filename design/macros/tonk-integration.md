@@ -118,6 +118,8 @@ Each column is a place to hand over. The notation's own compiler, `dialog-notati
 
 Reading the runtime side: views, events and elements are read from the branch by name and by fixed attributes, so whichever column a front end hands over at, it has to write those attributes and names exactly as the YAML path does. The display never sees how a claim was written.
 
+**Corrected on 2026-11-18.** `db.meta/source` is not stored: tonk makes it up when it reads a concept (`tonk-schema/src/concept.rs:1090`). And the hypothesis below was measured on four definitions and holds for them ([tonk-claims-diff.md](tonk-claims-diff.md)).
+
 **Hypothesis.** Column C is the cheapest place for a proof of concept: `library_claims_after` is one function with one caller per install path, it keeps tonk's install, upgrade and uninstall as they are, and dialog-notation's `Step`s are already claims and dialog rules. The work is then a tonk-specific back end for dialog-notation that writes, beside its rules, what tonk's runtime reads: concept descriptors as `db.meta/source`, `db.name/referent` for each named concept, command, element and route concept, and view rows with a `bindings` record. What would confirm it: `notebook.clj` compiled to `LibraryClaims`, installed by `install_component` beside YAML `core.yaml`, and the notebook page rendering and taking edits. What would refute it: a runtime reader that needs something only the analyzer computes and does not store (the embeds pass, `view.rs:494`, is one to check), or rule entities differing between the two front ends so that an upgrade from the YAML install cannot revert it.
 
 ## Which dialog tonk runs, and what this branch changes under it

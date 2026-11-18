@@ -63,12 +63,35 @@ So an event can go, once a binding can say it prevents the default: 9 of 38 need
 Read on 2026-11-18, from the two notes above.
 
 - The notebook folds nothing. So a fold in a rule that derives (#830) is not between the notebook and a proof of concept. It is between the design's `view` and dialog.
-- tonk's display reads a view from the branch as HTML text under `xyz.tonk.view/<facet>` with a compiled `bindings` record, finds a concept by name through `db.name/referent`, and reads its descriptor from `db.meta/source`. `dialog-notation` writes none of these. So a proof of concept in tonk needs a back end that does, whatever a `view` compiles to for dialog alone.
+- tonk's display reads a view from the branch as HTML text under `xyz.tonk.view/<facet>` with a compiled `bindings` record, finds a concept by name through `db.name/referent`, and makes its descriptor up from the declaration's claims when it reads (`db.meta/source` is not stored; corrected 2026-11-18). `dialog-notation` writes none of these. So a proof of concept in tonk needs a back end that does, whatever a `view` compiles to for dialog alone.
 - That separates two things the question "what does a view compile to" had as one: the form and its meaning, which are the design's, and what a back end lowers it to. For tonk as it renders today the lowering is HTML text and bindings; for dialog alone it is a rule that folds.
 - The order the notebook asks the build for: collections (15 of its 53 forms), `id` as a premise (7), views with inline events (5), a parameter left out of a read (4), then `dialog/position`, `!=` and a write with `when` (2 each).
 - 24 of the 53 forms hit something the design does not spell, in 15 kinds, 10 of them not in the design's Open list. They are the maintainer's, one at a time.
 
+## Where the notation hands over to tonk, measured
+
+Measured on 2026-11-18 on four definitions of `notebook.yaml` (a concept, a command, a rule that writes, a route), comparing the claims tonk's YAML path stores with what `dialog-notation`'s output installs ([tonk-claims-diff.md](tonk-claims-diff.md)). The hypothesis was that the cheapest hand-over is a library's claims.
+
+| of the 39 claims the YAML path writes | the same | different | missing |
+|---|---|---|---|
+| the notation as it is | 0 | 7 | 32 |
+| with tonk writing its declaration and name claims around it, 80 lines | 13 | 26 | 0 |
+| and the command's lines saying `cardinality: :one` | 31 | 8 | 0 |
+
+- A concept or a command declared in the notation writes nothing to a branch, and tonk's display finds a concept by what its declaration wrote. The 80 lines read the descriptor back through a compiled query, as the crate gives no declaration as data.
+- A line with no `cardinality:` reads every claim here and the newest in tonk. That moves every attribute's entity and the command's. The design writes a command's lines without one and says no default.
+- The 8 left are a rule's identity (5), a route's entity (2) and one description. The rule differs only in a variable used once here where tonk writes `_`: the canonical spelling renames locals and does not treat one used once as a blank.
+- A concept's identity agrees on both sides, so `in: :control` is no part of it.
+- Views, events and elements were not measured: the sketch's views do not compile yet.
+
+The hypothesis holds for what was measured. What is left is three choices of default or identity, not machinery.
+
 ## Not decided
 
-- What the POC has to show. The agent's hypothesis: one document that holds every kind of form, written in the notation, compiled by `dialog-notation` and running in tonk, with its YAML deleted. `notebook.yaml` is the smallest that holds every kind. Not looked at: how tonk's analyzer and evaluator take a document, so what "running in tonk" costs.
+- What a line with no `cardinality:` holds. tonk's lines hold one.
+- Whether a variable used once and `_` are one rule. Today they are two.
+- Whether an assert that makes its entity keeps the `id` entity, or tonk's back end derives it as `Entity::of` does. A route written both ways is two rows.
+- Where a declaration goes: whether declaring a concept writes it to the branch, and whether the crate gives a declaration as data.
+
+- What the POC has to show. The agent's hypothesis: one document that holds every kind of form, written in the notation, compiled by `dialog-notation` and running in tonk, with its YAML deleted. `notebook.yaml` is the smallest that holds every kind. How tonk takes a document is in [tonk-integration.md](tonk-integration.md), and what the hand-over costs is measured above.
 - What a `view` compiles to for the POC: what tonk renders today (a dictionary entry and a template, no fold, no new renderer), or what the design says (a rule that folds into a markup value, and a renderer for it).
