@@ -605,14 +605,10 @@ impl Plan {
     /// finds it.
     pub fn repeating(view: &View) -> Result<Plan, Error> {
         let (mut elements, events) = Plan::places(view)?;
-        let mut conditions: Vec<Condition> = view
-            .instance
-            .iter()
-            .map(|premise| Condition {
-                premise: premise.clone(),
-                why: Why::Instance,
-            })
-            .collect();
+        // The conditions apply the concept to the entity, so they hold
+        // only of an instance: the premises of the instance are not
+        // repeated beside them.
+        let mut conditions: Vec<Condition> = Vec::new();
         conditions.extend(view.conditions.iter().map(|premise| Condition {
             premise: premise.clone(),
             why: Why::Single,
@@ -821,7 +817,10 @@ impl Plan {
     /// holds put in by what they are bound to where it stands.
     pub fn called(callee: &View, call: &Call, given: &[(String, Value)]) -> Result<Plan, Error> {
         let mut view = callee.clone();
-        if !callee.conditions.is_empty() {
+        // A call with no label narrows nothing the called view's own
+        // conditions do not: its read is the concept applied to the entity
+        // alone, and an entity it names is the one the view is rendered for.
+        if !callee.conditions.is_empty() && !call.labels.is_empty() {
             let entity = Syntax::Variable(callee.entity.clone());
             view.conditions.extend(
                 narrowed(&call.narrowing, given)

@@ -1524,3 +1524,208 @@ async fn it_mounts_a_called_view_narrowed_and_shows_one_not_found_as_source() ->
     );
     Ok(())
 }
+
+/// The forms of a document that are not views, its writes kept or not.
+fn forms_of(text: &str, writes: bool) -> Result<String> {
+    let forms = dialog_notation::read(text)?;
+    Ok(forms
+        .iter()
+        .filter(|form| form.head() != Some("view"))
+        .filter(|form| writes || !matches!(form.head(), Some("assert" | "retract")))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// What a sketch's restated views render on a branch: each view's
+/// repeating element and its axes, then the trees with nothing to show
+/// and after the writes.
+async fn rendered(
+    sketch: &str,
+    views: &str,
+    tops: &[(&str, &str, Option<&str>)],
+    data: &[&str],
+) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+    let core = include_str!("../sketches/core.clj");
+    let described = views_of(&[core, &forms_of(sketch, true)?, views])?;
+    let plans: Vec<String> = described
+        .iter()
+        .map(|view| {
+            let plan = Plan::repeating(view)?;
+            let tag = |at: usize| match &plan.elements[at].placed {
+                dialog_notation::Placed::Element(tag) => tag.clone(),
+                dialog_notation::Placed::View(nested) => format!("{{:view :{}}}", nested.view),
+                dialog_notation::Placed::Call(call) => {
+                    format!("(view {} :{})", call.concept, call.view)
+                }
+            };
+            let repeats: Vec<String> = plan
+                .elements
+                .iter()
+                .enumerate()
+                .filter(|(_, place)| !place.key.is_empty())
+                .map(|(at, place)| format!("{} by {}", tag(at), place.key.join(" ")))
+                .collect();
+            Ok(format!(
+                "{} :{} repeats {}{}",
+                plan.concept,
+                plan.name,
+                if repeats.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    repeats.join(", ")
+                },
+                if plan.cases.is_empty() {
+                    String::new()
+                } else {
+                    format!(" | {:?}", plan.cases)
+                }
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let mut notebook = Notebook::open().await?;
+    write(&mut notebook, core).await?;
+    // The concepts alone: what the views read. The sketch's rules are
+    // not what is rendered.
+    let concepts: String = dialog_notation::read(sketch)?
+        .iter()
+        .filter(|form| form.head() == Some("concept"))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    write(&mut notebook, &concepts).await?;
+    let mut callers = Vec::new();
+    for (concept, name, entity_of) in tops {
+        callers.push(
+            Caller::open(
+                &notebook,
+                described.clone(),
+                (concept, name),
+                entity_of.map(entity),
+            )
+            .await?,
+        );
+    }
+    let mut empty = Vec::new();
+    for caller in &mut callers {
+        caller.step(&notebook).await?;
+        empty.push(caller.written());
+    }
+    let writes: String = dialog_notation::read(sketch)?
+        .iter()
+        .filter(|form| matches!(form.head(), Some("assert" | "retract")))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    write(&mut notebook, &writes).await?;
+    for text in data {
+        write(&mut notebook, text).await?;
+    }
+    let mut full = Vec::new();
+    for caller in &mut callers {
+        caller.step(&notebook).await?;
+        full.push(caller.written());
+    }
+    Ok((plans, empty, full))
+}
+
+/// The notebook's and the table's views restated with calls and
+/// markers, read after core and the forms of their documents that are not
+/// views, rendered on a branch by tonk's rule: what repeats in each, what
+/// each shows with nothing to show, and with the sketches' own seeds and a
+/// notebook of two blocks.
+#[dialog_common::test]
+async fn it_renders_the_restated_views_with_nothing_and_with_a_little() -> Result<()> {
+    let (plans, empty, full) = rendered(
+        include_str!("../sketches/notebook.clj"),
+        include_str!("../sketches/notebook-views.clj"),
+        &[
+            ("notebook", "ui", Some("notebook:1")),
+            ("notebook", "directory", None),
+            ("notebook/block", "directory", None),
+            ("notebook/index-route", "ui", Some("site:1")),
+            ("notebook/route", "ui", Some("site:2")),
+        ],
+        &[
+            r#"(assert (notebook notebook:1 title: "Plan" key: "N1" block: block:a))"#,
+            r#"(assert (notebook notebook:1 title: "Plan" key: "N2" block: block:b))"#,
+            r#"(assert (notebook/block block:a notebook: notebook:1 source: "Hi"))"#,
+            r#"(assert (notebook/block block:b notebook: notebook:1 source: "Text"))"#,
+            r#"(assert (notebook/index-route site:1 repo: "r" branch: "main"))"#,
+            r#"(assert (notebook/route site:2 entity: notebook:1 repo: "r" branch: "main"))"#,
+        ],
+    )
+    .await?;
+    assert_eq!(
+        plans,
+        [
+            "notebook :ui repeats tonk-notebook by n, span by b",
+            "notebook :directory repeats div by n",
+            "notebook/block :directory repeats div by b",
+            "notebook/index-route :ui repeats tonk-notebook-index by site",
+            "notebook/route :ui repeats div by site",
+        ]
+    );
+    assert_eq!(
+        empty,
+        [
+            r#"[:notebook-save {:style "display: block;"}]"#,
+            "",
+            r#"[:div {:class "notebook-block-rows"}]"#,
+            "",
+            "",
+        ]
+    );
+    let index = r#"[:div {:class "notebook-index"} [:a {:class "notebook-index__item" :href "/notebook/id:notebook/scratch"} [:span {:class "notebook-index__title"} "Scratch"]]] [:div {:class "notebook-index"} [:a {:class "notebook-index__item" :href "/notebook/notebook:1"} [:span {:class "notebook-index__title"} "Plan"]]]"#;
+    assert_eq!(full[1], index, "one index a notebook, as tonk renders it");
+    let order = r#"[:div {:class "notebook-order"} [:span {:class "notebook-order__item" :data-block "block:a" :data-key "N1"}] [:span {:class "notebook-order__item" :data-block "block:b" :data-key "N2"}]]"#;
+    assert!(full[0].contains(order), "{}", full[0]);
+    assert!(full[4].starts_with(r#"[:div {:class "notebook-space"} [:notebook-save"#));
+    assert!(full[3].ends_with(&format!("{index}]")), "{}", full[3]);
+
+    let (plans, empty, full) = rendered(
+        include_str!("../sketches/table.clj"),
+        include_str!("../sketches/table-views.clj"),
+        &[
+            ("table/sheet", "directory", None),
+            ("table/cell", "directory", None),
+            ("table/column", "directory", None),
+            ("table/row", "directory", None),
+            ("table", "ui", Some("id:table/book")),
+            ("table", "directory", None),
+        ],
+        &[],
+    )
+    .await?;
+    assert_eq!(
+        plans,
+        [
+            "table/sheet :directory repeats div by s",
+            "table/cell :directory repeats div by c",
+            "table/column :directory repeats div by k",
+            "table/row :directory repeats div by r",
+            "table :ui repeats tonk-table by t",
+            "table :directory repeats div by t",
+        ]
+    );
+    assert_eq!(
+        empty,
+        [
+            r#"[:div {:class "table-sheet-rows"}]"#,
+            r#"[:div {:class "table-cell-rows"}]"#,
+            r#"[:div {:class "table-column-rows"}]"#,
+            r#"[:div {:class "table-rowsize-rows"}]"#,
+            "",
+            "",
+        ]
+    );
+    assert_eq!(
+        full[0],
+        r#"[:div {:class "table-sheet-rows"} [:div {:class "table-sheet-row" :subject "id:table/book/sheet1" :data-table "id:table/book" :data-name "Sheet1" :data-order "m"}]]"#
+    );
+    assert_eq!(full[1].matches("table-cell-row\"").count(), 14);
+    assert!(full[5].starts_with(
+        r#"[:div {:class "table-directory"} [:tonk-table {:subject "id:table/book"}"#
+    ));
+    Ok(())
+}
