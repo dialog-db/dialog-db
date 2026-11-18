@@ -2383,3 +2383,113 @@ async fn it_measures_how_far_the_table_gets() -> Result<()> {
     );
     Ok(())
 }
+
+/// The table's own forms, its views left out, since a document holding a
+/// view is refused whole (#830).
+fn the_table_without_its_views() -> Result<String> {
+    let forms = dialog_notation::read(include_str!("../sketches/table.clj"))?;
+    Ok(forms
+        .iter()
+        .filter(|form| form.head() != Some("view"))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// The table's rules, run on a branch as the sketch writes them, do what
+/// table.yaml's rules do: an edit replaces a cell's content, a clear
+/// retracts the content so the cell is no `table/cell` while its address
+/// stays, a create makes the cell, sheet or column at the command's own
+/// entity, and a rename or a resize upserts the one field.
+#[dialog_common::test]
+async fn it_runs_the_table_on_a_branch() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let (_, diagnostics) = notebook.submit(&the_table_without_its_views()?).await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let cells = "(query (table/cell ?c sheet: id:table/book/sheet1 at: ?at content: ?x))";
+    assert_eq!(report(&mut notebook, cells).await?.len(), 14);
+
+    notebook
+        .submit(r#"(assert (table/edit-cell cell: id:table/book/s1!B2 content: "5"))"#)
+        .await?;
+    notebook
+        .submit("(assert (table/clear-cell cell: id:table/book/s1!C4))")
+        .await?;
+    notebook
+        .submit(
+            r#"(assert (table/create-cell sheet: id:table/book/sheet1 at: "E1" content: "Note" time: 1))"#,
+        )
+        .await?;
+    let after = report(&mut notebook, cells).await?;
+    assert_eq!(after.len(), 14, "{after:#?}");
+    assert!(after.contains(
+        &r#"(xyz.tonk.table.cell id:table/book/s1!B2 at: "B2" content: "5" sheet: id:table/book/sheet1)"#
+            .to_string()
+    ));
+    assert!(!after.iter().any(|row| row.contains("s1!C4")), "{after:#?}");
+    assert!(
+        after
+            .iter()
+            .any(|row| row.contains(r#"at: "E1" content: "Note""#)
+                && !row.starts_with("(xyz.tonk.table.cell id:table/book/")),
+        "{after:#?}"
+    );
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(query (xyz.tonk.table.cell/at id:table/book/s1!C4 ?at))"
+        )
+        .await?,
+        vec![r#"(xyz.tonk.table.cell id:table/book/s1!C4 at: "C4")"#]
+    );
+
+    notebook
+        .submit(
+            r#"(assert (table/create-sheet table: id:table/book name: "Sheet2" order: "n" time: 2))"#,
+        )
+        .await?;
+    let made = report(
+        &mut notebook,
+        r#"(query (table/sheet ?s table: id:table/book name: "Sheet2" order: "n"))"#,
+    )
+    .await?;
+    let entity = |row: &str| row.split_whitespace().nth(1).map(str::to_string);
+    let sheet = entity(&made[0]).expect("a sheet");
+    notebook
+        .submit(&format!(
+            r#"(assert (table/rename-sheet sheet: {sheet} name: "Costs"))"#
+        ))
+        .await?;
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(query (table/sheet ?s table: id:table/book name: ?name order: ?order))"
+        )
+        .await?,
+        vec![
+            format!(r#"(xyz.tonk.table.sheet {sheet} name: "Costs" order: "n" table: id:table/book)"#),
+            r#"(xyz.tonk.table.sheet id:table/book/sheet1 name: "Sheet1" order: "m" table: id:table/book)"#
+                .to_string(),
+        ]
+    );
+
+    notebook
+        .submit(
+            r#"(assert (table/create-column sheet: id:table/book/sheet1 at: "B" width: "80" time: 3))"#,
+        )
+        .await?;
+    let columns = "(query (table/column ?k sheet: id:table/book/sheet1 at: ?at width: ?w))";
+    let column = entity(&report(&mut notebook, columns).await?[0]).expect("a column");
+    notebook
+        .submit(&format!(
+            r#"(assert (table/resize-column column: {column} width: "120"))"#
+        ))
+        .await?;
+    assert_eq!(
+        report(&mut notebook, columns).await?,
+        vec![format!(
+            r#"(xyz.tonk.table.column {column} at: "B" sheet: id:table/book/sheet1 width: "120")"#
+        )]
+    );
+    Ok(())
+}
