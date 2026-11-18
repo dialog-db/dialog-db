@@ -117,4 +117,5 @@ fn it_refuses_truncated_and_malformed_frames() {
     assert!(dictionary.accept(bytes.into()).is_ok());
 }
 
+mod generated;
 mod hostile;
