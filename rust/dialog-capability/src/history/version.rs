@@ -1,8 +1,8 @@
-use crate::identity::Entity;
+use crate::identity::{Entity, hashed_uri};
 use std::cmp::Ordering;
 use std::fmt::{self, Display};
+use std::io::Cursor;
 
-use base58::ToBase58 as _;
 use serde::{Deserialize, Serialize};
 
 use super::HistoryError;
@@ -73,9 +73,9 @@ impl Version {
         bytes
     }
 
-    /// The base58 of the hash a revision's entity is formed from: blake3
-    /// of the canonical dag-cbor of the version.
-    fn entity_reference(&self) -> String {
+    /// The hash a revision's entity is formed from: blake3 of the
+    /// canonical dag-cbor of the version.
+    fn entity_hash(&self) -> [u8; 32] {
         /// Canonical dag-cbor input for the derivation. The shape (variant
         /// and field names) is part of the derivation; changing it changes
         /// every revision entity.
@@ -84,12 +84,20 @@ impl Version {
             Revision { origin: &'a [u8], edition: u64 },
         }
 
-        let bytes = serde_ipld_dagcbor::to_vec(&RevisionHash::Revision {
-            origin: self.origin.key_bytes().as_slice(),
-            edition: self.edition.value(),
-        })
-        .expect("dag-cbor encoding of a version cannot fail");
-        blake3::hash(&bytes).as_bytes().to_base58()
+        // Encoded on the stack: the encoding is a few dozen bytes, and a
+        // revision is named on every commit and every read of a branch.
+        let mut buffer = [0u8; 128];
+        let mut cursor = Cursor::new(&mut buffer[..]);
+        serde_ipld_dagcbor::to_writer(
+            &mut cursor,
+            &RevisionHash::Revision {
+                origin: self.origin.key_bytes().as_slice(),
+                edition: self.edition.value(),
+            },
+        )
+        .expect("dag-cbor encoding of a version fits in 128 bytes");
+        let length = cursor.position() as usize;
+        *blake3::hash(&buffer[..length]).as_bytes()
     }
 
     /// The URI of the entity naming the revision this version identifies:
@@ -99,7 +107,7 @@ impl Version {
     /// from) a revision without holding it. It is the entity the
     /// revision's record is recorded under.
     pub fn entity_uri(&self) -> String {
-        prefixed(REVISION_PREFIX, &self.entity_reference())
+        hashed_uri(REVISION_PREFIX, &self.entity_hash())
     }
 
     /// The URI revisions were named by before they had a scheme of their
@@ -108,7 +116,7 @@ impl Version {
     /// A replica written by an older release holds its revision records
     /// under this name, so a reader looks under both.
     pub fn legacy_entity_uri(&self) -> String {
-        prefixed(LEGACY_REVISION_PREFIX, &self.entity_reference())
+        hashed_uri(LEGACY_REVISION_PREFIX, &self.entity_hash())
     }
 
     /// Reconstruct a [`Version`] from its key byte representation
@@ -155,23 +163,57 @@ impl Version {
     /// The content-derived entity naming the revision this version
     /// identifies ([`entity_uri`](Self::entity_uri)).
     pub fn entity(&self) -> Entity {
-        self.entity_uri()
-            .parse()
+        Entity::try_from(self.entity_uri())
             .expect("a revision URI formed from a 32-byte hash is always a valid entity")
     }
 
     /// The entity an older release named this revision by
     /// ([`legacy_entity_uri`](Self::legacy_entity_uri)).
     pub fn legacy_entity(&self) -> Entity {
-        self.legacy_entity_uri()
-            .parse()
+        Entity::try_from(self.legacy_entity_uri())
             .expect("a did:key URI formed from a 32-byte hash is always a valid entity")
     }
 
     /// The entity an older release named a revision by, given the one it
     /// is named by now; `None` for an entity that names no revision.
     pub fn legacy_of(entity: &Entity) -> Option<Entity> {
-        let reference = entity.to_string().strip_prefix(REVISION_PREFIX)?.to_owned();
-        prefixed(LEGACY_REVISION_PREFIX, &reference).parse().ok()
+        let reference = entity.as_str().strip_prefix(REVISION_PREFIX)?;
+        Entity::try_from(prefixed(LEGACY_REVISION_PREFIX, reference)).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use crate::history::Origin;
+    use base58::ToBase58 as _;
+
+    /// A revision is named by blake3 of its version's dag-cbor, however
+    /// that encoding is buffered: the name is what every replica derives
+    /// and stores records under, so it must not move.
+    #[dialog_common::test]
+    fn it_names_a_revision_by_its_versions_encoding() {
+        #[derive(Serialize)]
+        enum RevisionHash<'a> {
+            Revision { origin: &'a [u8], edition: u64 },
+        }
+        for (seed, edition) in [(0u8, 0u64), (1, 1), (2, u64::MAX), (3, 1 << 40)] {
+            let origin = Origin::from(*blake3::hash(&[seed]).as_bytes());
+            let version = Version::new(origin, Edition::new(edition));
+            let encoded = serde_ipld_dagcbor::to_vec(&RevisionHash::Revision {
+                origin: origin.key_bytes().as_slice(),
+                edition,
+            })
+            .expect("encodes");
+            let reference = blake3::hash(&encoded).as_bytes().to_base58();
+            assert_eq!(version.entity_uri(), format!("revision:{reference}"));
+            assert_eq!(
+                version.legacy_entity_uri(),
+                format!("did:key:z6Mk{reference}")
+            );
+        }
     }
 }

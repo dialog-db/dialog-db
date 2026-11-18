@@ -4,6 +4,7 @@
 //! semantic triples. Entities are based on URIs and provide unique identification
 //! for objects in the triple store.
 
+use std::iter::repeat_n;
 use std::{
     fmt::{Debug, Display, Formatter, Result as FmtResult},
     ops::Deref,
@@ -87,7 +88,7 @@ impl TryFrom<String> for Entity {
     type Error = IdentityError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        value.parse()
+        Self::try_from(Uri::try_from(value)?)
     }
 }
 
@@ -188,13 +189,8 @@ impl Entity {
     /// same node is the same entity on every replica and in every revision
     /// that reaches it.
     pub fn from_node(hash: &[u8; 32]) -> Result<Entity, IdentityError> {
-        // Allocated once at its length: a branch names its root by one on
-        // every revision.
-        let reference = hash.to_base58();
-        let mut uri = String::with_capacity(NODE_SCHEME.len() + reference.len());
-        uri.push_str(NODE_SCHEME);
-        uri.push_str(&reference);
-        uri.parse()
+        // A branch names its root by one on every revision.
+        Entity::try_from(hashed_uri(NODE_SCHEME, hash))
     }
 
     /// The content hash a `node:` entity names, if this entity is one and
@@ -204,6 +200,45 @@ impl Entity {
         let bytes = payload.from_base58().ok()?;
         <[u8; 32]>::try_from(bytes).ok()
     }
+}
+
+/// The Bitcoin base58 alphabet, which `base58::ToBase58` encodes with.
+const BASE58: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/// The most base58 digits 32 bytes take.
+const BASE58_DIGITS: usize = 44;
+
+/// `prefix` then the base58 of `hash`, encoded straight into one string
+/// allocated at its length. Revisions and nodes are named this way on
+/// every commit and every read of a branch, so the encoding does not go
+/// through a string of its own first.
+pub(crate) fn hashed_uri(prefix: &str, hash: &[u8; 32]) -> String {
+    let mut digits = [0u8; BASE58_DIGITS];
+    let mut length = 0;
+    for byte in hash {
+        let mut carry = u32::from(*byte);
+        for digit in &mut digits[..length] {
+            carry += u32::from(*digit) << 8;
+            *digit = (carry % 58) as u8;
+            carry /= 58;
+        }
+        while carry > 0 {
+            digits[length] = (carry % 58) as u8;
+            length += 1;
+            carry /= 58;
+        }
+    }
+    let zeros = hash.iter().take_while(|byte| **byte == 0).count();
+    let mut uri = String::with_capacity(prefix.len() + zeros + length);
+    uri.push_str(prefix);
+    uri.extend(repeat_n('1', zeros));
+    uri.extend(
+        digits[..length]
+            .iter()
+            .rev()
+            .map(|digit| char::from(BASE58[usize::from(*digit)])),
+    );
+    uri
 }
 
 impl Debug for Entity {
@@ -218,6 +253,26 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+
+    /// A hash encodes as `base58::ToBase58` encodes it, leading zero
+    /// bytes included.
+    #[dialog_common::test]
+    fn it_encodes_a_hash_as_base58_does() {
+        use base58::ToBase58 as _;
+        let mut hashes = vec![[0u8; 32], [0xff; 32]];
+        let mut leading = [7u8; 32];
+        leading[..3].fill(0);
+        hashes.push(leading);
+        for seed in 0u8..32 {
+            hashes.push(*blake3::hash(&[seed]).as_bytes());
+        }
+        for hash in hashes {
+            assert_eq!(
+                super::hashed_uri("node:", &hash),
+                format!("node:{}", hash.to_base58())
+            );
+        }
+    }
 
     #[dialog_common::test]
     fn it_round_trips_a_blob_entity() {
