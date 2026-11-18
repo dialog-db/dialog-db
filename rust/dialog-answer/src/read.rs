@@ -20,6 +20,16 @@ struct Token {
     tag: Tag,
 }
 
+/// The fewest bytes a token takes in a frame: its tag and its length.
+const TOKEN_HEAD: usize = 1 + 4;
+
+impl Token {
+    /// The token's bytes in `frame`, the frame that wrote it.
+    fn slice<'a>(&self, frame: &'a [u8]) -> &'a [u8] {
+        &frame[self.at as usize..(self.at + self.len) as usize]
+    }
+}
+
 /// One accepted frame: its columns and where its sections' lanes sit.
 #[derive(Debug, Clone)]
 pub struct Answer {
@@ -98,6 +108,10 @@ impl Dictionary {
 
     /// Accepts the session's next frame: checks it, learns its tokens and
     /// keeps its bytes, which its tokens are read from from then on.
+    ///
+    /// A refused frame changes nothing: every check, the column names'
+    /// included, runs before the dictionary learns a token, so the
+    /// session's real next frame is still accepted after it.
     pub fn accept(&mut self, bytes: Arc<[u8]>) -> Result<Answer, Error> {
         let mut cursor = Cursor {
             bytes: &bytes,
@@ -120,7 +134,12 @@ impl Dictionary {
         }
         let count = cursor.u32()?;
         let frame = self.frames.len() as u32;
-        let mut learned = Vec::with_capacity(count as usize);
+        // The count is the sender's word: reserve no more tokens than the
+        // frame's remaining bytes could hold, each at least a tag and a
+        // length, so a short frame declaring billions is refused as
+        // truncated instead of reserving room for them.
+        let room = (bytes.len() - cursor.at) / TOKEN_HEAD;
+        let mut learned = Vec::with_capacity((count as usize).min(room));
         for index in 0..count {
             let id = base + index;
             let tag = cursor.u8()?;
@@ -164,15 +183,27 @@ impl Dictionary {
             }
             sections.push((rows, at));
         }
-        self.tokens.extend(learned);
-        self.frames.push(bytes.clone());
+        // A column is named by a token the session sent before or this
+        // frame sends: resolved before anything is learned.
         let columns = column_ids
             .into_iter()
-            .map(|id| match self.read(id) {
-                Some(Scalar::Text(name)) => Ok(name.into()),
-                _ => Err(Error::Malformed(id)),
+            .map(|id| {
+                let name = if id < base {
+                    self.read(id)
+                } else if id < known {
+                    let token = &learned[(id - base) as usize];
+                    Some(Scalar::decode(token.tag, token.slice(&bytes)))
+                } else {
+                    return Err(Error::Unknown(id));
+                };
+                match name {
+                    Some(Scalar::Text(name)) => Ok(Box::<str>::from(name)),
+                    _ => Err(Error::Malformed(id)),
+                }
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
+        self.tokens.extend(learned);
+        self.frames.push(bytes.clone());
         Ok(Answer {
             bytes,
             kind,
@@ -185,8 +216,7 @@ impl Dictionary {
     pub fn read(&self, id: u32) -> Option<Scalar<'_>> {
         let token = self.tokens.get(id as usize)?;
         let frame = &self.frames[token.frame as usize];
-        let bytes = &frame[token.at as usize..(token.at + token.len) as usize];
-        Some(Scalar::decode(token.tag, bytes))
+        Some(Scalar::decode(token.tag, token.slice(frame)))
     }
 }
 
@@ -208,6 +238,12 @@ impl Answer {
 
     /// The rows of section `index`: a snapshot's rows, or a delta's
     /// asserted (0) or retracted (1) rows.
+    ///
+    /// # Panics
+    ///
+    /// When the answer has no such section: past 0 for a snapshot, past 1
+    /// for a delta. The count follows from [`Self::kind`], not from the
+    /// frame's bytes.
     pub fn section(&self, index: usize) -> Rows<'_> {
         let (rows, lanes) = self.sections[index];
         Rows {
@@ -251,19 +287,26 @@ impl<'a> Rows<'a> {
 }
 
 impl<'a> Row<'a> {
-    /// The token id the row holds for `column`, or [`ABSENT`] / [`UNBOUND`].
-    pub fn id(&self, column: usize) -> u32 {
+    /// The token id the row holds for `column`, or [`ABSENT`] / [`UNBOUND`];
+    /// `None` when the answer has no such column. A lane is read only
+    /// within its own section: an index past the columns would land on the
+    /// next section's bytes.
+    pub fn id(&self, column: usize) -> Option<u32> {
+        if column >= self.rows.answer.columns.len() {
+            return None;
+        }
         let at = self.rows.lanes + (column * self.rows.rows as usize + self.index as usize) * 4;
         let bytes = &self.rows.answer.bytes[at..at + 4];
-        u32::from_le_bytes(bytes.try_into().expect("four bytes"))
+        Some(u32::from_le_bytes(bytes.try_into().expect("four bytes")))
     }
 
-    /// What the row holds for `column`, read from `dictionary`.
+    /// What the row holds for `column`, read from `dictionary`: unbound
+    /// for a column the answer does not have, as nothing is bound there.
     pub fn cell<'d>(&self, dictionary: &'d Dictionary, column: usize) -> Cell<'d> {
         match self.id(column) {
-            UNBOUND => Cell::Unbound,
-            ABSENT => Cell::Absent,
-            id => dictionary
+            None | Some(UNBOUND) => Cell::Unbound,
+            Some(ABSENT) => Cell::Absent,
+            Some(id) => dictionary
                 .read(id)
                 .map(Cell::Value)
                 .unwrap_or(Cell::Unbound),

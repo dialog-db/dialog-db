@@ -271,10 +271,10 @@ fn read_everything(dictionary: &Dictionary, answer: &crate::Answer) {
 /// frame cut at every length: `accept` returns an error or an answer whose
 /// every cell reads, and never panics.
 ///
-/// The high byte of the header's token count (offset 12) is not mutated:
-/// setting it makes the frame declare billions of tokens, which the
-/// reader reserves room for before reading any, and that allocation aborts
-/// the process rather than panicking. `tests/reservation.rs` measures it.
+/// The header's token count is mutated too: a frame that declares
+/// billions of tokens it does not hold is refused as truncated, with no
+/// more reserved than its bytes could describe (`tests/reservation.rs`
+/// measures that).
 ///
 /// Native only: on `wasm32-unknown-unknown` a panic aborts, so
 /// `catch_unwind` cannot turn one into a failure that names the mutation.
@@ -305,7 +305,7 @@ fn it_never_panics_on_a_mutated_frame() {
         for cut in 0..bytes.len() {
             attempt(at, format!("cut at {cut}"), bytes[..cut].to_vec());
         }
-        for position in (0..bytes.len()).filter(|position| *position != 12) {
+        for position in 0..bytes.len() {
             for (name, mutate) in [
                 ("xor 0x01", (|b: u8| b ^ 0x01) as fn(u8) -> u8),
                 ("xor 0x80", |b| b ^ 0x80),

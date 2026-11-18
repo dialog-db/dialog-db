@@ -89,25 +89,25 @@ fn it_refuses_a_column_id_it_never_received_as_unknown() {
 /// A header that declares far more tokens than the frame holds is refused
 /// as [`Error::Truncated`].
 ///
-/// The count is kept survivable on purpose: the reader reserves room for
-/// every declared token (16 bytes each) before reading any, so a 13-byte
-/// header declaring `u32::MAX` tokens asks for about 64 GiB and aborts the
-/// process instead of returning an error. That reservation is measured by
-/// `tests/reservation.rs`; this test pins only the refusal.
+/// Declaring `u32::MAX` tokens included: the reader reserves no more
+/// tokens than the frame's bytes could hold, so the count alone allocates
+/// nothing. What it reserves is measured by `tests/reservation.rs`.
 #[dialog_common::test]
 fn it_refuses_a_header_that_declares_more_tokens_than_it_holds() {
-    let mut header = Vec::new();
-    header.extend_from_slice(MAGIC);
-    header.push(0);
-    header.extend_from_slice(&0u32.to_le_bytes());
-    header.extend_from_slice(&(1u32 << 22).to_le_bytes());
-    let mut dictionary = Dictionary::default();
-    let refused = dictionary.accept(header.into());
-    assert!(
-        matches!(refused, Err(Error::Truncated)),
-        "expected Truncated, found {refused:?}"
-    );
-    assert!(dictionary.is_empty());
+    for count in [1u32 << 22, u32::MAX] {
+        let mut header = Vec::new();
+        header.extend_from_slice(MAGIC);
+        header.push(0);
+        header.extend_from_slice(&0u32.to_le_bytes());
+        header.extend_from_slice(&count.to_le_bytes());
+        let mut dictionary = Dictionary::default();
+        let refused = dictionary.accept(header.into());
+        assert!(
+            matches!(refused, Err(Error::Truncated)),
+            "expected Truncated for {count} declared tokens, found {refused:?}"
+        );
+        assert!(dictionary.is_empty());
+    }
 }
 
 /// A column index past the answer's columns reads no value. In a delta

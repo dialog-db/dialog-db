@@ -33,12 +33,11 @@ static ALLOCATOR: Largest = Largest;
 
 /// A frame is refused before the reader allocates more than the frame
 /// could describe. A 13-byte header that declares 2^22 tokens holds none
-/// of them, yet the reader reserves room for all of them (16 bytes each,
-/// 64 MiB) before reading the first. Declaring `u32::MAX` tokens asks for
-/// about 64 GiB, which aborts the process (and overflows the capacity on
-/// a 32-bit target such as wasm32) instead of returning
-/// [`Error::Truncated`]; the survivable count here shows the same
-/// reservation without taking the test process down.
+/// of them; reserving room for all of them (16 bytes each) would take
+/// 64 MiB, and for `u32::MAX` about 64 GiB, which aborts the process (and
+/// overflows the capacity on a 32-bit target such as wasm32) instead of
+/// returning [`Error::Truncated`]. The count here is one a regression
+/// survives, so it fails this test rather than the test process.
 #[dialog_common::test]
 fn it_allocates_no_more_than_the_frame_describes() {
     let mut header = Vec::new();
