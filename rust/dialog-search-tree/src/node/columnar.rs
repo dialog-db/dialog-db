@@ -474,6 +474,34 @@ mod tests {
         Ok(())
     }
 
+    /// A leaf whose key stream claims a key longer than the block is
+    /// refused as malformed when its first key is read, before anything is
+    /// sized from the claim: the lengths are the block's word, and a block
+    /// can come from a remote.
+    #[dialog_common::test]
+    async fn it_refuses_a_key_longer_than_its_block() -> Result<()> {
+        const PARTS: &[Component] = &[Component::arena_var(), Component::dictionary_var()];
+        let schema = Schema::new(PARTS);
+        let rows: Vec<Vec<&[u8]>> = vec![vec![b"AA", b"age"]];
+        let mut columns = encode_columns(&schema, &rows)?;
+        // A suffix of u32::MAX bytes, then a shared length of u32::MAX.
+        for lengths in [[0, u32::MAX], [u32::MAX, 0]] {
+            let ColumnData::Arena { stream, .. } = &mut columns[0] else {
+                panic!("the first component is an arena column");
+            };
+            stream.clear();
+            for length in lengths {
+                crate::node::codec::write_varint(stream, length);
+            }
+            let refused = keys_of(&schema, &columns, 1);
+            assert!(
+                matches!(refused, Err(DialogSearchTreeError::Encoding(_))),
+                "{lengths:?}: {refused:?}"
+            );
+        }
+        Ok(())
+    }
+
     /// Encoding routes each component to its schema's column class.
     #[dialog_common::test]
     async fn it_encodes_one_column_per_component() -> Result<()> {
