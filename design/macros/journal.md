@@ -1476,6 +1476,19 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** Nothing. The bar of core and the notebook: 60 forms, 60 read, 55 expanded, 54 compiled, pinned beside the notebook's own. 119 unit tests, 41 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: three gaps in a view's template
+
+**Asked.** Step S, three readings of the managing agent's, each kept reversible. (1) An attribute written as a list is its parts joined, as text children are: `:href ["/notebook/" ?n]`. (2) `true` as an attribute's value is the attribute present with no value, `:draft true`, there only; `false` is refused, saying to leave the attribute out. (3) A nested view: `:view` names it, `:of` may be left out (the view of every instance), `:model` names the concept whose view it is, and any other entry, the sketch's `:with`, is kept with its parts for the back end.
+
+**Learned.**
+
+- The description grows: `Attribute::Parts(Vec<Piece>)` and `Attribute::Present`, `Piece` of text, values and variables, and `Nested` with `of` optional, `model`, and `entries` of named parts. Every variable in a part or an entry is one a condition must bind.
+- With `:model`, the view looked up is that concept's view of that name, so the walker keeps each view as its concept and its name, and refuses a `:model` that the documents read hold no such view of.
+- `true` stays no term anywhere but an attribute's value: as a child of an element it is unsupported, as before.
+- All five of the notebook's views are described now. Each stops only at Dialog-DB's compiler, which refuses a view (#830).
+
+**Decided.** The managing agent's three readings, built. The bar: the notebook alone 52 expanded and 47 compiled, of 56; with core 59 and 54, of 60. 120 unit tests, 41 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

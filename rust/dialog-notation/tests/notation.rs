@@ -2326,7 +2326,7 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
             measured.expanded,
             measured.compiled
         ),
-        (56, 56, 48, 47),
+        (56, 56, 52, 47),
         "{groups:#?}"
     );
     // With core in front, as tonk reads a component, the concepts the
@@ -2337,7 +2337,7 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
     ])?;
     assert_eq!(
         (joined.forms, joined.read, joined.expanded, joined.compiled),
-        (60, 60, 55, 54)
+        (60, 60, 59, 54)
     );
     Ok(())
 }

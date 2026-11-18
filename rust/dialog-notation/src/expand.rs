@@ -649,9 +649,9 @@ pub struct Expander {
     /// How many rules about syntax have been kept, ever: what tells a
     /// pass over a document that it declared something.
     declared: usize,
-    /// The names of the views declared, in this document and the ones
-    /// before it.
-    views: BTreeSet<String>,
+    /// The views declared, in this document and the ones before it: each
+    /// the concept it is of and its name.
+    views: BTreeSet<(String, String)>,
     /// The domains some installed rule reads.
     reads: BTreeSet<String>,
     /// Every form the rules were asked about since the last report,
@@ -729,10 +729,11 @@ impl Expander {
             .collect();
         // The views a template may nest, wherever in the document they are.
         for tree in &trees {
-            if let (Some("view"), [_, name, ..]) = (tree.applies(), items(tree))
+            if let (Some("view"), [Syntax::Reference(concept), name, ..]) =
+                (tree.applies(), items(tree))
                 && let Some(name) = name.keyword()
             {
-                self.views.insert(name.to_string());
+                self.views.insert((concept.clone(), name.to_string()));
             }
         }
         let mut done: BTreeMap<usize, Vec<Syntax>> = BTreeMap::new();
@@ -1541,15 +1542,21 @@ impl Expander {
                 )));
             }
         }
-        if let Some(nested) = view
-            .nested()
-            .into_iter()
-            .find(|nested| !self.views.contains(&nested.view))
-        {
-            return Err(Error::Refused(format!(
-                "{{:view :{} :of ?{}}} names no view declared",
-                nested.view, nested.of
-            )));
+        // A nested view names a view of the documents read: with
+        // `:model`, that concept's view of the name.
+        if let Some(nested) = view.nested().into_iter().find(|nested| {
+            !self.views.iter().any(|(concept, name)| {
+                *name == nested.view && nested.model.as_ref().is_none_or(|model| model == concept)
+            })
+        }) {
+            return Err(Error::Refused(match &nested.model {
+                Some(model) => format!(
+                    "{{:view :{} :model {model}}} names no view: the documents read hold no \
+                     view :{} of {model}",
+                    nested.view, nested.view
+                ),
+                None => format!("{{:view :{}}} names no view declared", nested.view),
+            }));
         }
         Ok(described)
     }
@@ -1985,6 +1992,7 @@ mod tests {
             })
         );
         assert_eq!(described.nested()[0].view, "row");
+        assert_eq!(described.nested()[0].of.as_deref(), Some("t"));
         // The Dialog-DB back end has no form for it.
         let kernel = expanded(
             VIEWS,
@@ -1998,9 +2006,10 @@ mod tests {
     }
 
     /// What a view's template may not say is refused where the view is
-    /// analyzed, and what the design leaves open in a template is
-    /// unsupported: a valueless attribute, an attribute of several parts,
-    /// a nested view by anything but its name and entity, or of no entity.
+    /// analyzed: an unbound variable, in an attribute's parts or a nested
+    /// view's entries too; an event of no declared command or of other
+    /// fields; a nested view no document read holds; `false` as an
+    /// attribute.
     #[test]
     fn it_refuses_a_view_that_does_not_hold_together() {
         for (text, why) in [
@@ -2021,6 +2030,22 @@ mod tests {
                 "names no view declared",
             ),
             (
+                "(view todo :row [:li {:view :row :model note}] (todo ?t title: ?title))",
+                "the documents read hold no view :row of note",
+            ),
+            (
+                "(view todo :row [:li {:hidden false}] (todo ?t title: ?title))",
+                "an attribute that is not there is left out",
+            ),
+            (
+                r#"(view todo :row [:a {:href ["/todo/" ?other]}] (todo ?t title: ?title))"#,
+                "holds ?other, which no condition binds",
+            ),
+            (
+                r#"(view todo :row [:li {:view :row :with [?other "@"]}] (todo ?t title: ?title))"#,
+                "holds ?other, which no condition binds",
+            ),
+            (
                 "(view todo :row [:li ?title] (xyz.other ?t title: ?title))",
                 "apply it 0 times",
             ),
@@ -2035,30 +2060,60 @@ mod tests {
                 expanded(VIEWS, text)
             );
         }
-        for (text, why) in [
-            (
-                "(view todo :row [:li {:hidden true}] (todo ?t title: ?title))",
-                "a valueless attribute",
-            ),
-            (
-                r#"(view todo :row [:a {:href ["/todo/" ?t]}] (todo ?t title: ?title))"#,
-                "an attribute built of several parts",
-            ),
-            (
-                "(view todo :row [:li {:view :row :model todo}] (todo ?t title: ?title))",
-                "a nested view by `:model` is not decided",
-            ),
-            (
-                "(view todo :row [:li {:view :row}] (todo ?t title: ?title))",
-                "a nested view of no entity",
-            ),
-        ] {
-            assert!(
-                matches!(expanded(VIEWS, text), Err(Error::Unsupported(said)) if said.contains(why)),
-                "{text}: {:?}",
-                expanded(VIEWS, text)
-            );
-        }
+        // `true` as a child is still no term.
+        assert!(matches!(
+            expanded(VIEWS, "(view todo :row [:li true] (todo ?t title: ?title))"),
+            Err(Error::Unsupported(said)) if said.contains("no boolean term")
+        ));
+    }
+
+    /// The managing agent's readings of three gaps in a template: an
+    /// attribute written as a list is its parts joined, `true` is an
+    /// attribute present with no value, and a nested view may leave out
+    /// its entity, name its concept with `:model`, and carry other
+    /// entries for the back end.
+    #[test]
+    fn it_describes_parts_presence_and_a_nested_view_of_a_concept() {
+        use crate::view::{Attribute, Node, Piece};
+        let described = view(
+            r#"(view todo :row
+                 [:a {:href ["/todo/" ?t] :draft true}
+                   {:view :row :model todo :with [?title "@" "main"]}
+                   {:view :row}]
+                 (todo ?t title: ?title))"#,
+        )
+        .unwrap();
+        let Node::Element(a) = &described.template else {
+            panic!("an element");
+        };
+        assert_eq!(
+            a.attributes,
+            vec![
+                (
+                    "href".to_string(),
+                    Attribute::Parts(vec![
+                        Piece::Text("/todo/".into()),
+                        Piece::Variable("t".into())
+                    ])
+                ),
+                ("draft".to_string(), Attribute::Present),
+            ]
+        );
+        let nested = described.nested();
+        assert_eq!(nested[0].model.as_deref(), Some("todo"));
+        assert_eq!(nested[0].of, None);
+        assert_eq!(
+            nested[0].entries,
+            vec![(
+                "with".to_string(),
+                vec![
+                    Piece::Variable("title".into()),
+                    Piece::Text("@".into()),
+                    Piece::Text("main".into())
+                ]
+            )]
+        );
+        assert_eq!(nested[1].model, None);
     }
 
     /// `id` stands as a premise and binds its entity to what `(:id …)`

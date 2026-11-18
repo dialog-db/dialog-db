@@ -80,6 +80,22 @@ pub enum Attribute {
     Value(Syntax),
     /// What a condition bound this variable to.
     Variable(String),
+    /// Its parts joined, in order, as text children are:
+    /// `:href ["/notebook/" ?n]`.
+    Parts(Vec<Piece>),
+    /// Present, with no value: `:draft true`.
+    Present,
+}
+
+/// A part of a value written as a list.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Piece {
+    /// Text, as written.
+    Text(String),
+    /// A value other than text: a number.
+    Value(Syntax),
+    /// What a condition bound this variable to.
+    Variable(String),
 }
 
 /// An event an element binds: its DOM type, the command it posts, and
@@ -110,8 +126,14 @@ pub enum Input {
 pub struct Nested {
     /// The view's name.
     pub view: String,
-    /// The variable whose entity it renders.
-    pub of: String,
+    /// The variable whose entity it renders, or none: the view of every
+    /// instance.
+    pub of: Option<String>,
+    /// The concept whose view it is, when `:model` names it.
+    pub model: Option<String>,
+    /// Every other entry of the reference, by its key, with its parts.
+    /// The notation gives them no meaning: they are the back end's.
+    pub entries: Vec<(String, Vec<Piece>)>,
 }
 
 fn keyword(node: &Syntax) -> Option<&str> {
@@ -156,25 +178,41 @@ impl View {
 
     /// Every variable the template holds, events included, each once.
     pub fn variables(&self) -> Vec<&str> {
-        fn walk<'a>(node: &'a Node, into: &mut Vec<&'a str>) {
-            let mut add = |name: &'a str| {
-                if !into.contains(&name) {
-                    into.push(name);
+        fn add<'a>(name: &'a str, into: &mut Vec<&'a str>) {
+            if !into.contains(&name) {
+                into.push(name);
+            }
+        }
+        fn parts<'a>(pieces: &'a [Piece], into: &mut Vec<&'a str>) {
+            for piece in pieces {
+                if let Piece::Variable(name) = piece {
+                    add(name, into);
                 }
-            };
+            }
+        }
+        fn walk<'a>(node: &'a Node, into: &mut Vec<&'a str>) {
             match node {
-                Node::Variable(name) => add(name),
-                Node::View(nested) => add(&nested.of),
+                Node::Variable(name) => add(name, into),
+                Node::View(nested) => {
+                    if let Some(of) = &nested.of {
+                        add(of, into);
+                    }
+                    for (_, pieces) in &nested.entries {
+                        parts(pieces, into);
+                    }
+                }
                 Node::Element(element) => {
                     for (_, attribute) in &element.attributes {
-                        if let Attribute::Variable(name) = attribute {
-                            add(name);
+                        match attribute {
+                            Attribute::Variable(name) => add(name, into),
+                            Attribute::Parts(pieces) => parts(pieces, into),
+                            _ => {}
                         }
                     }
                     for event in &element.events {
                         for (_, input) in &event.fields {
                             if let Input::Variable(name) = input {
-                                add(name);
+                                add(name, into);
                             }
                         }
                     }
@@ -290,29 +328,48 @@ fn node(tree: &Syntax) -> Result<Node, Error> {
 }
 
 /// An attribute's value.
+///
+/// A list is its parts joined, as text children are, `:href ["/n/" ?n]`,
+/// and `true` is the attribute present with no value, `:draft true`:
+/// both the managing agent's readings. `false` is refused: an attribute
+/// that is not there is left out.
 fn attribute(name: &str, value: &Syntax) -> Result<Attribute, Error> {
     Ok(match value {
         Syntax::Constant(Value::String(text)) => Attribute::Text(text.clone()),
         Syntax::Variable(variable) => Attribute::Variable(variable.clone()),
-        Syntax::Constant(Value::Boolean(_)) => {
-            return Err(Error::Unsupported(format!(
-                ":{name} {value}: a valueless attribute has no spelling in the design, which has no \
-                 boolean term"
+        Syntax::Constant(Value::Boolean(true)) => Attribute::Present,
+        Syntax::Constant(Value::Boolean(false)) => {
+            return Err(refused(format!(
+                ":{name} false: an attribute that is not there is left out, not written `false`"
             )));
         }
-        Syntax::Tuple(_) => {
-            return Err(Error::Unsupported(format!(
-                ":{name} {value}: an attribute built of several parts is not decided; the design \
-                 joins text children only"
-            )));
-        }
+        Syntax::Tuple(items) => Attribute::Parts(pieces(name, items)?),
         Syntax::Constant(_) => Attribute::Value(value.clone()),
         other => {
             return Err(refused(format!(
-                ":{name} {other}: an attribute's value is text, a value or a variable"
+                ":{name} {other}: an attribute's value is text, a value, a variable, a list of \
+                 those or `true`"
             )));
         }
     })
+}
+
+/// The parts of a value written as a list: text, values and variables.
+fn pieces(name: &str, items: &[Syntax]) -> Result<Vec<Piece>, Error> {
+    items
+        .iter()
+        .map(|item| match item {
+            Syntax::Constant(Value::String(text)) => Ok(Piece::Text(text.clone())),
+            Syntax::Variable(variable) => Ok(Piece::Variable(variable.clone())),
+            Syntax::Constant(Value::Boolean(_)) => Err(refused(format!(
+                ":{name}: {item} is no part of a value; its parts are text, values and variables"
+            ))),
+            Syntax::Constant(_) => Ok(Piece::Value(item.clone())),
+            other => Err(refused(format!(
+                ":{name}: {other} is no part of a value; its parts are text, values and variables"
+            ))),
+        })
+        .collect()
 }
 
 /// `:on/<kind> (command field: term …)`.
@@ -356,39 +413,51 @@ fn event(kind: &str, value: &Syntax) -> Result<Event, Error> {
     })
 }
 
-/// `{:view :row :of ?t}`.
+/// `{:view :row :of ?t}`. `:of` may be left out, the view of every
+/// instance; `:model` names the concept whose view it is; any other
+/// entry is kept with its parts, the notation giving it no meaning. Each
+/// the managing agent's reading.
 fn nested(tree: &Syntax, entries: &[(Syntax, Syntax)]) -> Result<Nested, Error> {
-    let mut view = None;
-    let mut of = None;
+    let mut nested = Nested {
+        view: String::new(),
+        of: None,
+        model: None,
+        entries: Vec::new(),
+    };
     for (key, value) in entries {
-        match (key, value) {
-            (Syntax::Reference(name), value) if name == "view" => {
-                view = keyword(value).map(str::to_string);
+        let Syntax::Reference(name) = key else {
+            return Err(refused(format!(
+                "{tree}: a nested view is `{{:view :row :of ?t}}`"
+            )));
+        };
+        match (name.as_str(), value) {
+            ("view", value) => {
+                nested.view = keyword(value)
+                    .ok_or_else(|| refused(format!("{tree}: `:view` names a view, `:row`")))?
+                    .to_string();
             }
-            (Syntax::Reference(name), Syntax::Variable(variable)) if name == "of" => {
-                of = Some(variable.clone());
-            }
-            (Syntax::Reference(name), _) => {
-                return Err(Error::Unsupported(format!(
-                    "{tree}: a nested view by `:{name}` is not decided; the design's reference \
-                     names the view and the entity, `{{:view :row :of ?t}}`"
-                )));
-            }
-            _ => {
+            ("of", Syntax::Variable(variable)) => nested.of = Some(variable.clone()),
+            ("of", other) => {
                 return Err(refused(format!(
-                    "{tree}: a nested view is `{{:view :row :of ?t}}`"
+                    "{tree}: `:of` is the variable of the entity rendered, not {other}"
                 )));
             }
+            ("model", Syntax::Reference(concept)) => nested.model = Some(concept.clone()),
+            ("model", other) => {
+                return Err(refused(format!(
+                    "{tree}: `:model` names a concept, not {other}"
+                )));
+            }
+            (_, Syntax::Tuple(items)) => nested.entries.push((name.clone(), pieces(name, items)?)),
+            (_, value) => nested
+                .entries
+                .push((name.clone(), pieces(name, std::slice::from_ref(value))?)),
         }
     }
-    match (view, of) {
-        (Some(view), Some(of)) => Ok(Nested { view, of }),
-        (Some(_), None) => Err(Error::Unsupported(format!(
-            "{tree}: a nested view of no entity is not decided; the design's reference names \
-             the entity, `{{:view :row :of ?t}}`"
-        ))),
-        _ => Err(refused(format!(
+    if nested.view.is_empty() {
+        return Err(refused(format!(
             "{tree}: a nested view names its view, `{{:view :row :of ?t}}`"
-        ))),
+        )));
     }
+    Ok(nested)
 }
