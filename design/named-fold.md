@@ -1,6 +1,6 @@
 # A value computed over many facts cannot be given a name
 
-**Phase: Directing.** The problem is stated and the approaches are listed. Nothing is decided. See the [journal](named-fold/journal.md) for where the topic stands.
+**Phase: Delimiting.** Back from Directing on 2026-11-18: a spike showed the cause stated below is not what keeps the refusal in place. See the [journal](named-fold/journal.md) for where the topic stands.
 
 ## Description
 
@@ -40,6 +40,14 @@ The cause is one property dialog keeps on purpose. A deductive rule is open: it 
                                                                          so no deductive rule may fold at all
 ```
 
+A spike (`spike/named-fold`, 2026-11-18) lifted the refusal and made a cycle through a fold a quarantine, in two lines of the analysis. Merged in either order, replicas set the same rule aside. So the cause above is answerable, and it was answered once before: #827 carried the same change (`3293f0f`) and took it back (`411c3ff`) for another reason, now in its `notes/attribute-heads.md`:
+
+> A computing fold (`count`, `sum`, `avg`) yields a value none of its inputs holds: concluded into an attribute it would compete with the claims stored there, and nothing could be written through it, so where it belongs is not settled.
+
+The spike shows the competition: with a `5` stored under `org.dept/total` and a rule that sums it to `150`, a read gives `5`.
+
+So the problem statement above names the wrong cause, and is to be written again around this one: a folded value has no place of its own. A name that can be folded into can today also be written to, and a read cannot tell the two apart.
+
 ## Approach
 
-Not decided. The [direction](named-fold/direction.md) lists five.
+Not decided. The [direction](named-fold/direction.md) lists five, drawn up for the cause as first stated; its second column is now measured.

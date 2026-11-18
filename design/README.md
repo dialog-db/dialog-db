@@ -86,7 +86,8 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   **Describing.** Split out of file-writers: capturing what a transaction
   considered, so a replay is skipped when nothing it read overlaps.
 - [A value computed over many facts cannot be given a name](named-fold.md):
-  **Directing.** The notation's derived attributes and views are deductive
-  rules that fold, and a deductive rule takes no fold, so that a merge of
-  rule sets never fails a query. Five approaches are listed; none is
-  chosen.
+  **Delimiting.** The notation's derived attributes and views are deductive
+  rules that fold, and a deductive rule takes no fold. A spike admitted one
+  with a cycle through it quarantined; what keeps the refusal is that a
+  folded value competes with the claims stored under its name. The problem
+  is to be stated again.
