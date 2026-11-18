@@ -1529,6 +1529,20 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** The hypothesis holds: no new kind of gap outside views, one inside a view, undecided, pinned refused by `it_refuses_a_nested_view_whose_model_the_host_gives`. Nothing is built for it. The notebook's bar is unchanged: 56 / 53 / 48 / 5, and with core 60 / 60 / 55 / 5.
 
+## 2026-11-18, Building: the table run on a branch, and its sketch read again
+
+**Asked.** The rest of steps Y and Z: report the table's numbers from the bar, sort every stopping form and GAP comment, build what is new and decided, pin what is new and undecided, and read the sketch again against the YAML and the design, restoring any spelling bent to suit the build.
+
+**Learned.**
+
+- The bar, core in front: 54 / 54 / 54 / 48 / 6. The six that stop are the views, each with "not supported yet: the view ... is a description, read by `View::describe`; Dialog-DB has no form for a view" (#830). Nothing else stops.
+- Of the GAP comments, every kind but one is the notebook's or core's, as the entry above sorts them. None is new and decided, so nothing is built.
+- The one new kind, a value the host element gives, is already pinned refused. In the table it does not stop a form: a `<tonk-display>` with no entity renders its model's own `directory`, so the host of `table :directory` renders `table`, and `:model table` is that value written out. It stops core's view of any model, `tonk:_` (core.yaml 48, 966).
+- The sketch has no spelling bent to the build. `cardinality: :one` on every line is the notebook's and core's reading of a field with no pick. `:view :ui` for a display with an entity and `:directory` for one without is tonk's own default, as the notebook wrote it for YAML 327, 434 and 463. A model named by its concept's name and not its pinned entity is the notebook's kind, the design's open question.
+- Compiled is not run, so the table's rules were run on a branch from the sketch's own forms, its views left out. They do what the YAML's rules do. The clear rule leaves the cell's address, as the YAML's comment says its style may linger.
+
+**Decided.** Nothing new. The GAP comment at YAML 548 says why the model written out is the same model there. `it_runs_the_table_on_a_branch` added. The bar is unchanged: the table 54 / 54 / 54 / 48 / 6; the notebook 56 / 53 / 48 / 5, with core 60 / 60 / 55 / 5.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

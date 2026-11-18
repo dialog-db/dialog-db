@@ -69,6 +69,10 @@ Its gaps, sorted:
 
 The one new kind is inside a view. The design's template holds the conditions' variables and, in an event binding, paths of the event; a value read from the element the view is rendered into is neither. Written with the attribute's name for `:model` it is refused (`it_refuses_a_nested_view_whose_model_the_host_gives`); the sketch writes the model out, `:model table`, which is the view's own. Tonk's core uses the same value in its default directory view (core.yaml 48, 966) and `dom.host/with` beside it (2374), so a third document will meet it.
 
+In the table the model written out is the same model, not a narrower one: a `<tonk-display>` with no entity renders its model's own `directory` (core.yaml 32-36), so the host of `table :directory` renders `table`. prose-editor.yaml 182 is the same shape. Only core's view of any model, `tonk:_`, needs the host's value with no way to write it out, so the gap stops a form there and not here.
+
+Run on a branch, the table's rules do what table.yaml's do (`it_runs_the_table_on_a_branch`, the sketch's own forms with its views left out): an edit replaces a cell's content, a clear retracts it so the cell leaves `table/cell` while its address stays, a create makes the cell, sheet or column at the command's own entity, and a rename or a resize upserts the one field. The sketch was read again against the YAML and the design, line by line, on 2026-11-18, and no spelling in it was bent to suit the build.
+
 ## What the design says and the build does not do yet
 
 | | the design, at R45 | built here | needs |

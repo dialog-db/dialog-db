@@ -444,7 +444,11 @@
 ; display renders the entity under the model its host was rendering, which
 ; is not among the view's conditions. The design's template holds only the
 ; conditions' variables and, in an event binding, paths of the event. The
-; nearest is the model written out, which is this view's own. YAML 548.
+; nearest is the model written out, which is this view's own. Here it is
+; the same model: a `<tonk-display>` with no entity renders its model's own
+; `directory` (core.yaml 32-36), so the host of this view renders `table`.
+; Where the host's model is not known, in core's view of any model
+; (core.yaml 48, 966), the model cannot be written out. YAML 548.
 ; GAP: a nested view with no view named, `<tonk-display entity={this}>`:
 ; the display picks the entity's view. The design's reference names one,
 ; `{:view :row :of ?t}`; `:ui` is the nearest. YAML 548.
