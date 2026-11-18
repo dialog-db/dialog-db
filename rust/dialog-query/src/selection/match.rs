@@ -733,8 +733,13 @@ impl Match {
         name: N,
     ) -> Result<(), EvaluationError> {
         let key = name.as_ref();
-        if let Some(existing) = self.find(key) {
-            match existing {
+        // Presence is read from the slot: a scanned value is made only to
+        // report the conflict.
+        if let Some(existing) = self.find_slot(key) {
+            if !existing.is_present() {
+                return Ok(());
+            }
+            match existing.binding() {
                 Binding::Absent => Ok(()),
                 Binding::Present(value) => Err(EvaluationError::Assignment {
                     reason: format!(
@@ -758,7 +763,7 @@ impl Match {
         match term {
             Term::Variable {
                 name: Some(key), ..
-            } => self.find(key).is_some(),
+            } => self.find_slot(key).is_some(),
             Term::Variable { name: None, .. } => false,
             Term::Constant(_) => true,
         }

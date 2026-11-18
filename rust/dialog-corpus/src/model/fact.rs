@@ -682,8 +682,14 @@ pub struct CheckedRow {
 
 impl FactView {
     /// Validates this row once, as [`Self::to_owned`] would, without
-    /// materializing it: [`CorruptEntry`](DialogCorpusError::CorruptEntry)
-    /// for stored bytes that fail.
+    /// materializing it: a row `to_owned` refuses is refused with the same
+    /// error, and a row it reads reads the same.
+    ///
+    /// A value is read in place when its stored bytes are what `to_owned`
+    /// would read: anything else (a value that does not decode, or an
+    /// entity stored as a URI that is not its own canonical rendering) is
+    /// left to `to_owned`, which decides, so the in-place and the eager
+    /// scan of a row agree.
     pub fn checked(self) -> Result<CheckedRow, DialogCorpusError> {
         let (entity, attribute, value) = {
             let key = self.key().unwrap_or(&[]);
@@ -703,8 +709,28 @@ impl FactView {
                             })?;
                             super::spilled_value_view(parts.value_type, bytes)
                         }
-                    }
-                    .map_err(as_corrupt_entry)?;
+                    };
+                    // An entity whose stored URI is its canonical rendering
+                    // reads as stored: `to_owned`'s parse renders it
+                    // unchanged. That parse also refuses whitespace and
+                    // controls, which a canonical rendering can still hold
+                    // in an opaque path ("user:a b"), so they are checked
+                    // apart.
+                    let value = match value {
+                        Ok(super::ValueView::Entity(uri))
+                            if uri
+                                .chars()
+                                .any(|c| c.is_ascii_whitespace() || c.is_control())
+                                || Uri::check_stored(&uri).is_err() =>
+                        {
+                            None
+                        }
+                        Ok(view) => Some(view),
+                        Err(_) => None,
+                    };
+                    let Some(value) = value else {
+                        return self.checked_as_owned();
+                    };
                     (
                         super::view::cow_str(parts.entity)?,
                         super::view::cow_str(parts.attribute)?,
@@ -716,18 +742,11 @@ impl FactView {
             Uri::check_stored(&of)
                 .map_err(|error| DialogCorpusError::CorruptEntry(format!("{error}")))?;
             super::view::check_relation(&the)?;
-            let value = match value {
-                super::ValueView::String(text) => Stored::String(Piece::text(key, text)),
-                super::ValueView::Entity(text) => Stored::Entity(Piece::text(key, text)),
-                super::ValueView::Symbol(text) => Stored::Symbol(Piece::text(key, text)),
-                super::ValueView::Bytes(bytes) => Stored::Bytes(Piece::of(key, bytes)),
-                super::ValueView::Record(bytes) => Stored::Record(Piece::of(key, bytes)),
-                super::ValueView::UnsignedInt(n) => Stored::UnsignedInt(n),
-                super::ValueView::SignedInt(n) => Stored::SignedInt(n),
-                super::ValueView::Float(n) => Stored::Float(n),
-                super::ValueView::Boolean(b) => Stored::Boolean(b),
-            };
-            (Piece::text(key, of), Piece::text(key, the), value)
+            (
+                Piece::text(key, of),
+                Piece::text(key, the),
+                Stored::of(key, value),
+            )
         };
         let cause = self.cause().cloned();
         let key = match self.backing {
@@ -741,6 +760,41 @@ impl FactView {
             attribute,
             value,
         })
+    }
+}
+
+impl FactView {
+    /// [`Self::checked`] for a row whose value is not read in place: the
+    /// row `to_owned` reads, held as owned pieces, or its refusal.
+    #[cold]
+    fn checked_as_owned(&self) -> Result<CheckedRow, DialogCorpusError> {
+        let fact = self.to_owned()?;
+        let owned = |text: &str| Piece::Owned(text.as_bytes().into());
+        Ok(CheckedRow {
+            key: None,
+            cause: fact.cause.clone(),
+            entity: owned(fact.of.as_str()),
+            attribute: owned(fact.the.as_str()),
+            value: Stored::of(&[], super::ValueView::from(&fact.is)),
+        })
+    }
+}
+
+impl Stored {
+    /// `value`, its text and bytes located in `key` when they borrow from
+    /// it, owned otherwise.
+    fn of(key: &[u8], value: super::ValueView<'_>) -> Stored {
+        match value {
+            super::ValueView::String(text) => Stored::String(Piece::text(key, text)),
+            super::ValueView::Entity(text) => Stored::Entity(Piece::text(key, text)),
+            super::ValueView::Symbol(text) => Stored::Symbol(Piece::text(key, text)),
+            super::ValueView::Bytes(bytes) => Stored::Bytes(Piece::of(key, bytes)),
+            super::ValueView::Record(bytes) => Stored::Record(Piece::of(key, bytes)),
+            super::ValueView::UnsignedInt(n) => Stored::UnsignedInt(n),
+            super::ValueView::SignedInt(n) => Stored::SignedInt(n),
+            super::ValueView::Float(n) => Stored::Float(n),
+            super::ValueView::Boolean(b) => Stored::Boolean(b),
+        }
     }
 }
 
