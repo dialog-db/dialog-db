@@ -17,7 +17,7 @@ Read at `45b0fdd1` on 2026-11-16, and again at `31929a6f` on 2026-11-18. Eight c
 | 7. a write with `when` | any top-level write may take one; it runs once and is not installed | nothing | this branch |
 | 8. a view | proposed: `(view concept name template condition…)`, a deductive rule concluding `view` with the template folded into its value; events inline as `:on/<type>` | nothing | a fold in a rule that derives, a markup value, a renderer |
 
-Three of the eight meet the same wall: 3 and 8 are folds in a rule that derives, which main still refuses (`ReduceInOpenRule`), and the design's own Open list says the engine and the notation have to agree (#793, now #827). The contradiction below stands, with the getter now a derived attribute.
+Two of the eight meet the same wall: 3 and 8 are folds in a rule that derives, which main still refuses (`ReduceInOpenRule`). The refusal has a design topic of its own now, #830 (`design/named-fold`). A spike there (2026-11-18, `spike/named-fold`) admitted the fold with a cycle through it quarantined, and it runs. What keeps the refusal is the reason #827 gave when it took the same change back: a folded value concluded into an attribute competes with the claims stored there. On the spike a stored `5` is read over a folded `150`. So what 3 and 8 wait on is a decision about where a computed value lives, not on work in dialog-query.
 
 
 ## What tonk's documents need, in the order they need it
@@ -84,6 +84,8 @@ Both are the maintainer's. Which gives is his. What each way would mean for the 
 | where it may be read | anywhere a read stands | where the engine admits a fold: a query, a view, a rule that writes |
 | read in a rule that derives | allowed, so a fold feeds a derivation | refused, with the engine's reason |
 | what the engine needs | a fold in a rule that derives, stratified as `unless` is | a fold a query or a subscription can state, which main does not expose as a way to ask yet |
+
+The left column was spiked on 2026-11-18 and runs (#830's journal). It does not settle the row the table lacks: what a read gives when a claim is stored under the derived attribute's name, which a merge can bring whatever a write refuses.
 
 Not checked: whether a query on main can state a fold at all. `DeductiveRule::with_reduce` is the one constructor found, and it is the one refused.
 
