@@ -1,0 +1,27 @@
+[package]
+name = "dialog-stack"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "A branch and the layers its schema declares, read and written as one"
+license.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+# The stack lives in `dialog-repository` for now; this crate re-exports
+# it, so an embedder's imports stay put when the code moves here.
+[dependencies]
+dialog-repository = { workspace = true }
+
+# The README's examples are this crate's doc tests: they read and write
+# facts with the corpus and query crates, and back a stack up with serde.
+[dev-dependencies]
+anyhow = { workspace = true }
+dialog-common = { workspace = true }
+dialog-corpus = { workspace = true }
+dialog-query = { workspace = true }
+serde_json = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("web-integration-tests"))'] }

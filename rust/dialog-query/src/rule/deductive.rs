@@ -664,6 +664,9 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
             let mut terms = Parameters::new();
             terms.insert("this".to_string(), Term::<Any>::var("this"));
             terms.insert(ConceptDescriptor::VALUE.to_string(), value.clone());
+            if let Some(layer) = field.descriptor().layer().and_then(Term::name) {
+                terms.insert(layer.to_string(), Term::<Any>::var(layer));
+            }
             if let The::Collection { .. } = field.the() {
                 terms.insert(
                     The::key_operand(ConceptDescriptor::VALUE),
@@ -712,6 +715,11 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
         // The scan reads under the pick's scan arity: one claim for
         // `last`, every claim for a pick that elects among them.
         let scanned = Some(field.descriptor().scan_cardinality());
+        let layer = field
+            .descriptor()
+            .layer()
+            .cloned()
+            .unwrap_or_else(Term::blank);
         let premise: Premise = if field.is_optional() {
             OptionalAttributeQuery::new(
                 field.the().term(name),
@@ -720,6 +728,7 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
                 Term::blank(),
                 scanned,
             )
+            .with_layer(layer)
             .into()
         } else {
             AttributeQuery::new(
@@ -729,6 +738,7 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
                 Term::blank(),
                 scanned,
             )
+            .with_layer(layer)
             .into()
         };
         premises.push(premise);

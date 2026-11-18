@@ -1314,8 +1314,7 @@ fn a_swap_and_a_retraction_racing_land_one() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A cell is updated in the writer's turn, as SQLite commits under its
-/// write lock: an update waits while another process holds the turn, and
+/// A cell is updated in the writer's turn: an update waits while another process holds the turn, and
 /// lands once it is let go. A read never waits.
 #[dialog_common::test]
 fn a_cell_update_waits_for_the_turn_and_a_read_does_not() -> anyhow::Result<()> {

@@ -1,9 +1,11 @@
 //! Query trait for polymorphic querying across different store types
 
 mod application;
+mod hash;
 mod output;
 
 pub use application::*;
+pub use hash::*;
 pub use output::*;
 
 #[cfg(test)]
