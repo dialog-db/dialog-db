@@ -25,6 +25,7 @@ use crate::Error;
 use crate::syntax::Syntax;
 
 pub mod plan;
+pub mod tree;
 
 /// A view: the concept it renders, its name, the variable that is the
 /// entity rendered, its template and its conditions.
