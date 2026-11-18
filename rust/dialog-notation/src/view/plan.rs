@@ -754,11 +754,34 @@ impl Plan {
                     });
                 }
             }
+            // An entry of a collection is told apart by its key first, so
+            // the entries stand in the collection's order.
+            let key = premises.iter().find_map(|premise| match premise {
+                Premise::Read(read) => {
+                    read.fields
+                        .iter()
+                        .find_map(|field| match (&field.key, &field.term) {
+                            (Some((Term::Variable(key), _)), Term::Variable(value))
+                                if value == name =>
+                            {
+                                Some(key.clone())
+                            }
+                            _ => None,
+                        })
+                }
+                Premise::Formula(_) => None,
+            });
             for root in roots {
                 let mut path = elements[repeat].path.clone();
                 path.extend(root);
                 if let Some(at) = (0..elements.len()).find(|at| elements[*at].path == path) {
-                    axes.entry(at).or_default().push(name.clone());
+                    let names = axes.entry(at).or_default();
+                    if let Some(key) = &key
+                        && !names.contains(key)
+                    {
+                        names.push(key.clone());
+                    }
+                    names.push(name.clone());
                 }
             }
         }
@@ -1042,39 +1065,40 @@ impl Plan {
             .iter()
             .filter(|name| given.is_none() || **name != self.entity)
             .collect();
-        // The head's entity: the entity rendered, or the first a read of
-        // the layer is of.
-        let subject = given.clone().or_else(|| {
-            premises
-                .iter()
-                .find_map(|premise| match kernel::premise(premise) {
-                    Ok(Premise::Read(read)) => match read.entity {
-                        Term::Variable(name) if name == self.entity => {
-                            Some(Syntax::Variable(name.clone()))
-                        }
-                        _ => None,
-                    },
-                    _ => None,
-                })
-        });
-        let subject = subject
-            .or_else(|| {
-                premises
-                    .iter()
-                    .find_map(|premise| match kernel::premise(premise) {
-                        Ok(Premise::Read(read)) => match read.entity {
-                            Term::Variable(name) => Some(Syntax::Variable(name)),
-                            _ => None,
-                        },
-                        _ => None,
-                    })
-            })
-            .ok_or_else(|| {
-                Error::Refused(format!(
-                    "layer {layer} of the view {} :{} reads no entity",
-                    self.concept, self.name
-                ))
-            })?;
+        // The head's entity. A row of a query of several reads is facts of
+        // the head's entity, read back a field at a time, so rows are kept
+        // apart only where the entity fixes their other values: of the
+        // entities the reads are of, the one that fixes most of the row,
+        // and the entity rendered where none is a variable.
+        let parsed: Vec<Premise> = premises
+            .iter()
+            .filter(|premise| premise.applies() != Some("unless"))
+            .filter_map(|premise| kernel::premise(premise).ok())
+            .collect();
+        let mut candidates: Vec<String> = Vec::new();
+        for premise in &parsed {
+            if let Premise::Read(read) = premise
+                && let Term::Variable(name) = &read.entity
+                && !candidates.contains(name)
+            {
+                candidates.push(name.clone());
+            }
+        }
+        let fixes = |name: &String| {
+            let fixed = closure(&BTreeSet::from([name.clone()]), &parsed);
+            row.iter().filter(|held| fixed.contains(**held)).count()
+        };
+        let best = candidates
+            .iter()
+            .enumerate()
+            .max_by_key(|(at, name)| (fixes(name), **name == self.entity, *at))
+            .map(|(_, name)| Syntax::Variable(name.clone()));
+        let subject = best.or_else(|| given.clone()).ok_or_else(|| {
+            Error::Refused(format!(
+                "layer {layer} of the view {} :{} reads no entity",
+                self.concept, self.name
+            ))
+        })?;
         let head = Syntax::Application(
             Box::new(Syntax::Reference("view.layer".into())),
             Parameters {

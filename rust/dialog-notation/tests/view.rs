@@ -1659,7 +1659,7 @@ async fn it_renders_the_restated_views_with_nothing_and_with_a_little() -> Resul
     assert_eq!(
         plans,
         [
-            "notebook :ui repeats tonk-notebook by n, span by b",
+            "notebook :ui repeats tonk-notebook by n, span by k b",
             "notebook :directory repeats div by n",
             "notebook/block :directory repeats div by b",
             "notebook/index-route :ui repeats tonk-notebook-index by site",
@@ -1727,5 +1727,335 @@ async fn it_renders_the_restated_views_with_nothing_and_with_a_little() -> Resul
     assert!(full[5].starts_with(
         r#"[:div {:class "table-directory"} [:tonk-table {:subject "id:table/book"}"#
     ));
+    Ok(())
+}
+
+impl Caller {
+    /// A view mounted under a plan of the caller's choosing.
+    async fn with(
+        notebook: &Notebook,
+        views: Vec<View>,
+        plan: Plan,
+        entity: Option<Value>,
+    ) -> Result<Caller> {
+        let driven = Driven::new(notebook, plan, entity, How::Subscribed).await?;
+        Ok(Caller {
+            views,
+            mounted: vec![(Vec::new(), driven)],
+        })
+    }
+}
+
+/// A view under tonk's rule and under the layered plan, side by side:
+/// for each reading, the tree before any write and after each, and the
+/// patches each write gave.
+async fn side_by_side(
+    concepts: &str,
+    views: &str,
+    view: (&str, &str),
+    entity_of: Option<&str>,
+    writes: &[&str],
+) -> Result<Vec<(&'static str, Vec<String>, Vec<Vec<Patch>>)>> {
+    let mut notebook = Notebook::open().await?;
+    write(&mut notebook, concepts).await?;
+    let described = views_in(concepts, views)?;
+    let chosen = described
+        .iter()
+        .find(|described| (described.concept.as_str(), described.name.as_str()) == view)
+        .expect("the view")
+        .clone();
+    let mut readings = Vec::new();
+    for (label, plan) in [
+        ("tonk", Plan::repeating(&chosen)?),
+        ("layered", Plan::of(&chosen)?),
+    ] {
+        readings.push((
+            label,
+            Caller::with(&notebook, described.clone(), plan, entity_of.map(entity)).await?,
+            Vec::new(),
+            Vec::new(),
+        ));
+    }
+    for (_, caller, trees, patches) in &mut readings {
+        let said = caller.step(&notebook).await?;
+        trees.push(caller.written());
+        patches.push(said.into_iter().map(|(_, patch)| patch).collect());
+    }
+    for text in writes {
+        write(&mut notebook, text).await?;
+        for (_, caller, trees, patches) in &mut readings {
+            let said = caller.step(&notebook).await?;
+            trees.push(caller.written());
+            patches.push(said.into_iter().map(|(_, patch)| patch).collect());
+        }
+    }
+    Ok(readings
+        .into_iter()
+        .map(|(label, _, trees, patches)| (label, trees, patches))
+        .collect())
+}
+
+const INDEX: &str = r#"
+    (concept (notebook ?n title: ?title)
+      (xyz.nb/title of: ?n is: ?title as: :text cardinality: :one))"#;
+
+const INDEXES: &str = r#"
+    (view notebook :index
+      [:div {:class "notebook-index"} [:a {:href ["/notebook/" ?n]} [:span ?title]]]
+      (notebook ?n title: ?title))
+    (view notebook :marked
+      [:div {:class "notebook-index"}
+        [:a {:subject ?n :href ["/notebook/" ?n]} [:span ?title]]]
+      (notebook ?n title: ?title))"#;
+
+const BOOKS: &str = r#"
+    (concept (book ?n key: ?k block: ?b)
+      (xyz.book/?k of: ?n is: ?b as: :entity cardinality: :one by: :position))"#;
+
+const ORDER: &str = r#"
+    (view book :order
+      [:div {:class "order"} [:span {:data-block ?b :data-key ?k}]]
+      (book ?n key: ?k block: ?b))"#;
+
+/// A patch said short: what it does, to what, and how deep.
+fn said(patch: &Patch) -> String {
+    let tag = |shown: &Shown| match &shown.content {
+        Content::Element { tag, .. } => tag.clone(),
+        Content::View(mount) => format!("(view :{})", mount.view),
+    };
+    match patch {
+        Patch::Insert {
+            parent, instance, ..
+        } => format!("insert {} under {}", tag(instance), parent.len()),
+        Patch::Remove { at } => format!("remove at {}", at.len()),
+        Patch::SetText { text, .. } => format!("text {text:?}"),
+        Patch::SetAttribute { name, value, .. } => format!(":{name} {value:?}"),
+        Patch::SetEvent { .. } => "event".into(),
+        Patch::SetView { .. } => "view".into(),
+    }
+}
+
+/// One case side by side: for each reading, each step's tree and what
+/// its patches did.
+async fn compared(
+    concepts: &str,
+    views: &str,
+    view: (&str, &str),
+    entity_of: Option<&str>,
+    writes: &[&str],
+) -> Result<Vec<(String, Vec<String>)>> {
+    Ok(side_by_side(concepts, views, view, entity_of, writes)
+        .await?
+        .into_iter()
+        .map(|(label, trees, patches)| {
+            let steps = trees
+                .iter()
+                .zip(&patches)
+                .map(|(tree, patches)| {
+                    let did: Vec<String> = patches.iter().map(said).collect();
+                    format!("{tree} | {}", did.join(", "))
+                })
+                .collect();
+            (label.to_string(), steps)
+        })
+        .collect())
+}
+
+fn reading(label: &str, steps: &[&str]) -> (String, Vec<String>) {
+    (
+        label.to_string(),
+        steps.iter().map(ToString::to_string).collect(),
+    )
+}
+
+/// tonk's rule, the default, beside the layered plan, on four cases:
+/// the notebook index with no notebook, one and two, with and without the
+/// marker; the list card whose conditions read a second entity; the
+/// to-do row with no tag, one and two, and with its title moved; and the
+/// blocks of a notebook by position. Each step's tree, and what the
+/// write before it patched.
+#[dialog_common::test]
+async fn it_compares_tonks_rule_with_the_layered_plan() -> Result<()> {
+    let notebooks = [
+        r#"(assert (notebook notebook:1 title: "Plan"))"#,
+        r#"(assert (notebook notebook:2 title: "Trip"))"#,
+    ];
+    let index =
+        r#"[:div {:class "notebook-index"} [:a {:href "/notebook/notebook:1"} [:span "Plan"]]]"#;
+    let index2 =
+        r#"[:div {:class "notebook-index"} [:a {:href "/notebook/notebook:2"} [:span "Trip"]]]"#;
+    let unmarked = [
+        " | ".to_string(),
+        format!("{index} | insert div under 0"),
+        format!("{index} {index2} | insert div under 0"),
+    ];
+    assert_eq!(
+        compared(INDEX, INDEXES, ("notebook", "index"), None, &notebooks).await?,
+        [
+            ("tonk".to_string(), unmarked.to_vec()),
+            ("layered".to_string(), unmarked.to_vec()),
+        ],
+        "with no marker both repeat the whole index a notebook"
+    );
+    let a = |n: &str, title: &str| {
+        format!(
+            r#"[:a {{:subject "notebook:{n}" :href "/notebook/notebook:{n}"}} [:span "{title}"]]"#
+        )
+    };
+    let div = |inside: &str| format!(r#"[:div {{:class "notebook-index"}}{inside}]"#);
+    assert_eq!(
+        compared(INDEX, INDEXES, ("notebook", "marked"), None, &notebooks).await?,
+        [
+            (
+                "tonk".to_string(),
+                vec![
+                    format!("{} | insert div under 0", div("")),
+                    format!(
+                        "{} | insert a under 1",
+                        div(&format!(" {}", a("1", "Plan")))
+                    ),
+                    format!(
+                        "{} | insert a under 1",
+                        div(&format!(" {} {}", a("1", "Plan"), a("2", "Trip")))
+                    ),
+                ]
+            ),
+            (
+                "layered".to_string(),
+                vec![
+                    " | ".to_string(),
+                    format!(
+                        "{} | insert div under 0",
+                        div(&format!(" {}", a("1", "Plan")))
+                    ),
+                    format!(
+                        "{} {} | insert div under 0",
+                        div(&format!(" {}", a("1", "Plan"))),
+                        div(&format!(" {}", a("2", "Trip")))
+                    ),
+                ]
+            ),
+        ],
+        "the marker: tonk keeps the index and repeats the link; the layered plan ignores it"
+    );
+
+    let todos = [
+        r#"(assert (list list:home name: "Home"))"#,
+        r#"(assert (todo todo:1 list: list:home title: "Buy milk" state: :open))"#,
+        r#"(assert (todo todo:2 list: list:home title: "Call mum" state: :open))"#,
+    ];
+    let li = |title: &str| format!(r#"[:li {{:class "open:"}} "{title}"]"#);
+    assert_eq!(
+        compared(CONCEPTS, CARD, ("list", "card"), Some("list:home"), &todos).await?,
+        [
+            reading(
+                "tonk",
+                &[
+                    " | ",
+                    " | ",
+                    &format!(
+                        r#"[:article [:h2 "Home"] [:ul {}]] | insert article under 0"#,
+                        li("Buy milk")
+                    ),
+                    &format!(
+                        r#"[:article [:h2 "Home"] [:ul {} {}]] | insert li under 2"#,
+                        li("Buy milk"),
+                        li("Call mum")
+                    ),
+                ]
+            ),
+            reading(
+                "layered",
+                &[
+                    " | ",
+                    r#"[:article [:h2 "Home"] [:ul]] | insert article under 0"#,
+                    &format!(
+                        r#"[:article [:h2 "Home"] [:ul {}]] | insert li under 2"#,
+                        li("Buy milk")
+                    ),
+                    &format!(
+                        r#"[:article [:h2 "Home"] [:ul {} {}]] | insert li under 2"#,
+                        li("Buy milk"),
+                        li("Call mum")
+                    ),
+                ]
+            ),
+        ],
+        "a second entity: one query has no card for a list with no to-do"
+    );
+
+    let tags = [
+        r#"(assert (xyz.task/title task:1 "Buy milk"))"#,
+        r#"(assert (xyz.task/tag task:1 "shop"))"#,
+        r#"(assert (xyz.task/tag task:1 "home"))"#,
+    ];
+    let span = |tag: &str| format!(r#"[:span {{:class "tag"}} "{tag}"]"#);
+    let row = [
+        " | ".to_string(),
+        " | ".to_string(),
+        format!(r#"[:li "Buy milk" {}] | insert li under 0"#, span("shop")),
+        format!(
+            r#"[:li "Buy milk" {} {}] | insert span under 1"#,
+            span("home"),
+            span("shop")
+        ),
+    ];
+    assert_eq!(
+        compared(TASKS, ROWS, ("task", "row"), Some("task:1"), &tags).await?,
+        [
+            ("tonk".to_string(), row.to_vec()),
+            ("layered".to_string(), row.to_vec())
+        ],
+        "a field of many values: both clone the span, and a task with no tag is none"
+    );
+    let moved = [
+        " | ".to_string(),
+        " | ".to_string(),
+        format!(
+            r#"[:li [:p "Buy milk"] {}] | insert li under 0"#,
+            span("shop")
+        ),
+        format!(
+            r#"[:li [:p "Buy milk"] {} {}] | insert span under 1"#,
+            span("home"),
+            span("shop")
+        ),
+    ];
+    assert_eq!(
+        compared(TASKS, ROWS, ("task", "moved"), Some("task:1"), &tags).await?,
+        [
+            ("tonk".to_string(), moved.to_vec()),
+            ("layered".to_string(), moved.to_vec())
+        ],
+        "the title moved: the same repeats"
+    );
+
+    let entries = [
+        r#"(assert (book book:1 key: "N2" block: block:b))"#,
+        r#"(assert (book book:1 key: "N1" block: block:a))"#,
+    ];
+    let entry = |block: &str, key: &str| {
+        format!(r#"[:span {{:data-block "block:{block}" :data-key "{key}"}}]"#)
+    };
+    let order = [
+        " | ".to_string(),
+        format!(
+            r#"[:div {{:class "order"}} {}] | insert div under 0"#,
+            entry("b", "N2")
+        ),
+        format!(
+            r#"[:div {{:class "order"}} {} {}] | insert span under 1"#,
+            entry("a", "N1"),
+            entry("b", "N2")
+        ),
+    ];
+    assert_eq!(
+        compared(BOOKS, ORDER, ("book", "order"), Some("book:1"), &entries).await?,
+        [
+            ("tonk".to_string(), order.to_vec()),
+            ("layered".to_string(), order.to_vec())
+        ],
+        "entries by position: an entry before the first is one span, first"
+    );
     Ok(())
 }
