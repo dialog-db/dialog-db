@@ -88,6 +88,9 @@ struct Choice {
     of: usize,
 }
 
+/// The formula that makes a position between two others.
+const POSITION: &str = "dialog/position";
+
 /// What a kernel rule says of itself when it is a write at the top level
 /// with a `when`: it runs once and is not installed.
 pub const ONCE: &str = "once";
@@ -1293,6 +1296,18 @@ impl Expander {
                     .map(|member| self.application(member, position))
                     .collect::<Result<Vec<_>, _>>()?;
                 return Ok(apply("all", each));
+            }
+            // `(dialog/position ?b after: ?lo before: ?hi is: ?at)`, the
+            // formula a position key is made by, as the design writes it:
+            // a name with a `/` that is no attribute.
+            if word.as_deref() == Some(POSITION)
+                && !self.concepts.contains(POSITION)
+                && let Syntax::Application(_, operand) = &tree
+            {
+                return Ok(Syntax::Application(
+                    Box::new(Syntax::Constant(syntax::entity("position:")?)),
+                    operand.clone(),
+                ));
             }
             // A concept declared under a name that holds a `/` is the
             // concept, not an attribute.

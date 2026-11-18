@@ -514,6 +514,71 @@ async fn it_compares_with_equality_and_inequality() -> Result<()> {
     Ok(())
 }
 
+/// `dialog/position` makes the key of an entry between two others, so
+/// an entry written between two sorts between them.
+#[dialog_common::test]
+async fn it_places_an_entry_between_two_with_dialog_position() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(&format!(
+            r#"{COLLECTIONS}
+               (concept (block/insert block: ?x notebook: ?b after: ?lo before: ?hi)
+                 (xyz.block.insert/block of: ?c is: ?x as: :entity in: :control)
+                 (xyz.block.insert/notebook of: ?c is: ?b as: :entity in: :control)
+                 (xyz.block.insert/after of: ?c is: ?lo as: :text in: :control)
+                 (xyz.block.insert/before of: ?c is: ?hi as: :text in: :control))
+               (rule (assert (notebook-entry ?b at: ?at block: ?x))
+                 (block/insert block: ?x notebook: ?b after: ?lo before: ?hi)
+                 (dialog/position ?x after: ?lo before: ?hi is: ?at))
+               (rule (xyz.between ?x at: ?k)
+                 (notebook-entry ?b at: ?k block: ?x)
+                 (notebook-entry ?b at: ?lo block: block:a)
+                 (notebook-entry ?b at: ?hi block: block:c)
+                 (< ?lo : ?k)
+                 (< ?k : ?hi))
+               (assert (block/insert block: block:a notebook: notebook:1 after: "" before: ""))"#
+        ))
+        .await?;
+    let first = report(
+        &mut notebook,
+        "(query (notebook-entry notebook:1 at: ?k block: block:a))",
+    )
+    .await?;
+    assert_eq!(first.len(), 1, "{first:?}");
+    let key = |row: &str| {
+        row.split_whitespace()
+            .nth(2)
+            .and_then(|key| key.strip_suffix(':'))
+            .map(str::to_string)
+            .unwrap_or_default()
+    };
+    let a = key(&first[0]);
+    notebook
+        .submit(&format!(
+            r#"(assert (block/insert block: block:c notebook: notebook:1 after: "{a}" before: ""))"#
+        ))
+        .await?;
+    let last = report(
+        &mut notebook,
+        "(query (notebook-entry notebook:1 at: ?k block: block:c))",
+    )
+    .await?;
+    let c = key(&last[0]);
+    assert!(a < c, "{a} {c}");
+    notebook
+        .submit(&format!(
+            r#"(assert (block/insert block: block:b notebook: notebook:1 after: "{a}" before: "{c}"))"#
+        ))
+        .await?;
+    let between = report(&mut notebook, "(query (xyz.between ?x at: ?k))").await?;
+    assert_eq!(between.len(), 1, "{between:?}");
+    assert!(
+        between[0].starts_with("(xyz.between block:b at: "),
+        "{between:?}"
+    );
+    Ok(())
+}
+
 /// A concept written as lines, an attribute a line, runs as one written
 /// as a read of several fields does: written through by a rule a
 /// command fires and read back. `:one` reads the newest claim and
@@ -1984,7 +2049,7 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
             measured.expanded,
             measured.compiled
         ),
-        (56, 56, 45, 41),
+        (56, 56, 47, 43),
         "{groups:#?}"
     );
     Ok(())

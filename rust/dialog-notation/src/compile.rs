@@ -1095,6 +1095,27 @@ impl Scope {
                     .pop()
                     .ok_or_else(|| Error::Refused("(:id …) derived nothing".into()))
             }
+            // `(dialog/position ?b after: ?lo before: ?hi is: ?at)`: the
+            // position between two, `""` an open bound, biased by the
+            // member so the same insert on two devices lands alike.
+            "position" => {
+                let member = self.term(subject()?, None)?;
+                let mut cells = Map::new();
+                cells.insert("member".into(), member);
+                for cell in ["after", "before"] {
+                    let term = formula
+                        .at(cell)
+                        .ok_or_else(|| missing(&format!("`{cell}:` part")))?;
+                    cells.insert(cell.into(), self.term(term, Some("text"))?);
+                }
+                let is = match (&result, formula.at("is")) {
+                    (Some(result), None) => result.clone(),
+                    (None, Some(is)) => self.term(is, None)?,
+                    _ => return Err(missing("`is:` part, or a place where its value stands")),
+                };
+                cells.insert("is".into(), is);
+                Ok(json!({ "assert": "dialog/position", "where": cells }))
+            }
             "value" | "==" if result.is_none() => {
                 let this = self.term(subject()?, None)?;
                 let is = self.term(formula.at("is").ok_or_else(|| missing("`is:` part"))?, None)?;

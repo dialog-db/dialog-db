@@ -1398,6 +1398,18 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** Nothing: the design gives the spelling. The bar moves to 45 expanded, 41 compiled: the notebook's two `!=` rules expand, and stop at the retract of a collection entry, which is not decided. 116 unit tests, 36 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: `dialog/position`
+
+**Asked.** Step L: `(dialog/position ?b after: ?lo before: ?hi is: ?at)`, how tonk writes a position key for a `by: :position` collection.
+
+**Learned.**
+
+- The design spells it so, among a rule's formulas. dialog-query has it, `dialog/position` (`rust/dialog-query/src/formula/position.rs`): cells `member`, `after`, `before` and `is`, `""` an open bound, the member's entity biasing the position so the same insert on two devices lands alike. The subject with no label is the member.
+- Its name holds a `/`, so the walker read it as an attribute line. It is the one formula named so, and is taken before a line is.
+- On a branch an entry written between two others sorts between them under `<`, which compares positions as the index sorts them (`it_places_an_entry_between_two_with_dialog_position`).
+
+**Decided.** Nothing: the design and the engine agree. The bar moves to 47 expanded and 43 compiled: the notebook's two position rules expand and compile. 116 unit tests, 37 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

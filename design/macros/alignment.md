@@ -22,7 +22,7 @@ Two of the eight meet the same wall: 3 and 8 are folds in a rule that derives, w
 
 ## What tonk's documents need, in the order they need it
 
-Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), from 2026-11-18. The bar is [sketches/notebook.clj](sketches/notebook.clj), measured by `cargo run -p dialog-notation --example bar` and pinned in `it_measures_how_far_the_notebook_gets`: of 56 forms, 56 read, 34 expand and 32 compile before step J; 43 and 41 once a line of one entry takes `by:`; 45 and 41 after K.
+Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), from 2026-11-18. The bar is [sketches/notebook.clj](sketches/notebook.clj), measured by `cargo run -p dialog-notation --example bar` and pinned in `it_measures_how_far_the_notebook_gets`: of 56 forms, 56 read, 34 expand and 32 compile before step J; 43 and 41 once a line of one entry takes `by:`; 45 and 41 after K; 47 and 43 after L.
 
 | | the design now | built here | gap |
 |---|---|---|---|
@@ -32,6 +32,7 @@ Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), 
 | H. a text over lines | open: "How text spans lines or holds `\"`" | built 2026-11-18, the managing agent's choice: a text spans lines as written, `\"` and `\\` as in Clojure, printed back to the same text | no file included, no indentation taken off; an escape other than `\" \\ \n \t \r` is refused |
 | I. a write with `when` | any top-level write may take one; it runs once and is not installed; every variable is bound by it | built 2026-11-18 for `assert` and `retract`: a query of the `when` over the branch before the document, each match making the write. Under `:one` the write succeeds the cell's claim, as main's `last` does | the `when` does not see the document's own writes or rules. A command with a `when` is unsupported, not decided. Premises after a top-level write with no `when` are refused |
 | K. equality | constraints `(== ?a is: ?b)`, `(!= ?a is: ?b)` | built 2026-11-18 as premises: `==` is Dialog-DB's equality, `!=` the absence of it | `!=` inside `unless` is unsupported. Neither checks an assert |
+| L. `dialog/position` | `(dialog/position ?b after: ?lo before: ?hi is: ?at)` among a rule's formulas | built 2026-11-18, to dialog-query's formula of that name | none known |
 
 
 ## What the design says and the build does not do yet
