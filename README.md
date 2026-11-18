@@ -41,3 +41,30 @@ node report.js results/<file>.json          # rounds 1 and 2
 node round3-report.js results/<file>.json   # round 3
 node round4-report.js results/<file>.json   # round 4
 ```
+
+## `research/zero-copy-answers/`
+
+The tools and raw runs of the zero-copy answers research
+(`research/zero-copy-answers.md` and its journal on `main`; the engine
+change landed through
+[#825](https://github.com/dialog-db/dialog-db/pull/825), the answer frame
+is [#831](https://github.com/dialog-db/dialog-db/pull/831)).
+
+- `design.md`, `evaluation.md`: what the prototype did and the axes it was
+  measured on, as they stood when the report was written.
+- `harness/answers.rs`: the `answers` harness, a `dialog-perf` binary
+  (`rust/dialog-perf/src/bin/answers.rs`) with every phase: the engine,
+  tonk's JSON both ways, JSON written from rows in place, the answer frame
+  written and read, the columnar lower bound, and a delta encoded both
+  ways. It needs #825's engine (`ConceptConclusion::view`) and #831's
+  crate; copy it into `rust/dialog-perf/src/bin/` of such a checkout and
+  add `dialog-answer` and `ipld-core` to `dialog-perf`'s dependencies.
+  Main's build of it is `--cfg dialog_main`.
+- `bench/`: the page-side measurement (`frame.js`, the JS frame reader;
+  `bench.html` and `run.mjs`, which time it against `JSON.parse` in
+  headless Chromium over the harness's `run --dump` output) and
+  `charts.py`, which draws the report's charts from a sweep and
+  `tonk_bench` reports.
+- `results/2026-11-16/`: every report behind the journal's numbers:
+  `answers/` (one sweep, each dataset and variant), `tonk-bench/`,
+  `browser.json`, and the charts and `charts.md` drawn from them.
