@@ -1,6 +1,24 @@
 # Where the build stands against the notation's design
 
-The notation is designed on #728: `research/notation/design.md`, read here at `45b0fdd1` (reader rounds to R45). This branch builds it. The build took its spellings from that design as of R25 and then settled things of its own, so the two have drifted both ways.
+The notation is designed on #728: `research/notation/design.md`, read here at `31929a6f` (reader rounds to R46). This branch builds it. The build took its spellings from that design as of R25 and then settled things of its own, so the two have drifted both ways.
+
+## What moved in the design since it was last read here
+
+Read at `45b0fdd1` on 2026-11-16, and again at `31929a6f` on 2026-11-18. Eight commits between them. What each changes for the build, in the order it is to be closed:
+
+| | the design now | built here | gap |
+|---|---|---|---|
+| 1. a command | a concept whose head names no entity, declared, with attributes of its own on a control layer: `(concept (todo/add list: ?l text: ?x) (tonk.todo.add/list of: ?c is: ?l as: :entity in: :control) …)`. Its entity is derived from what is written | not declared: a name around a concept, `(add (todo …))`, in a domain of its own under `command.`, its entity derived by `:id` | the form, the declaration, the name. The derived entity and the one-round lifetime are there |
+| 2. issuing one | `(assert (todo/add …))`, at the top and in a rule's head, lands for the next tick and holds that tick only. A command in a head with no word is a deduction: it holds in this tick | the other way round since 2026-11-16: no word issues, for the round after, and `(assert (command …))` is refused | this reverses what the agent chose on 2026-11-16 (`design-issue.md`). The design said it a day later (`0b394c5`), and it is the maintainer's |
+| 3. a derived attribute | a rule concludes an attribute in a concept's own domain: `(rule (list/count-open ?l (count ?t)) …)`, read `(list/count-open list:home ?n)`. Concluded only: asserting it is an error. The getter is gone | the getter: `(open-count (list ?l) is: …)`, in `getter.open-count.list` | the spelling and the refusal of an assert. One that folds still waits on the engine (below) |
+| 4. an attribute's two terms | unlabeled, the entity then the value: `(xyz.todo/title ?t "Buy milk")`. `of:` and `is:` are the labeled spelling | `of:` and `is:` only | this branch |
+| 5. a variant | the relation of its cases: `(todo/state ?s)` ranges over `open:` and `done:` | read as `:entity`, cases unchecked | this branch for the relation; a type for it in the engine |
+| 6. a collection | the key a variable in the attribute's name, `by: :name` or `:position`: `(xyz.tonk.notebook/?p of: ?b is: ?x … by: :position)` | nothing | dialog's `Keyed`; not looked at yet |
+| 7. a write with `when` | any top-level write may take one; it runs once and is not installed | nothing | this branch |
+| 8. a view | proposed: `(view concept name template condition…)`, a deductive rule concluding `view` with the template folded into its value; events inline as `:on/<type>` | nothing | a fold in a rule that derives, a markup value, a renderer |
+
+Three of the eight meet the same wall: 3 and 8 are folds in a rule that derives, which main still refuses (`ReduceInOpenRule`), and the design's own Open list says the engine and the notation have to agree (#793, now #827). The contradiction below stands, with the getter's name changed.
+
 
 ## What the design says and the build does not do yet
 

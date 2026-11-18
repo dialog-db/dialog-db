@@ -1207,6 +1207,16 @@ Not looked at: what a write under `:one` retires. It is what the engine does for
 
 Built: `Term::Fold` and `FOLDS` in `kernel.rs`; the refusal in `compile.rs`; `(:getter …)` and `(:said …)` in `expand.rs`; the getter's rule in the prelude. 101 unit tests, 27 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Designing: the design moved, and a label as a keyword
+
+**Asked.** The maintainer: to start closing the gaps, to read #728's design again as "some things have shifted", and "perhaps instead of my special labels we should just use keyword based labeling".
+
+**Learned.** The design was read at `31929a6f`, eight commits past the last reading. What moved is a table at the top of [alignment.md](alignment.md). The largest is the command: it is now a declared concept whose head names no entity, on a control layer, issued with `assert`. That reverses the build's choice of 2026-11-16, which issued with no word and refused `assert`; the design said its own a day later, and it is the maintainer's, so the build follows. Getters are gone for attributes in a concept's own domain, which fold, and so is `view`, which is now a rule that folds: main still refuses both (`ReduceInOpenRule`).
+
+On labels: paired by place, a keyword label cannot be told from a keyword value that has no label, and the design's `view` form has one, `(view todo :row …)`. The design also spells a map's key two ways in one template, which may be what prompted the question. Four ways to spell a label are a matrix in [design-labels.md](design-labels.md).
+
+**Decided.** Not decided: how a label is spelled. It rests on two open hypotheses, both the agent's. The order the gaps are closed in is the alignment table's, commands first, and none of the first four depends on how a label is spelled.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.
