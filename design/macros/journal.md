@@ -1603,3 +1603,11 @@ The agent had pressed the layered rule as the answer. It keeps the card, and it 
 
 **Decided.** The form, his: `(view concept :name label: term …)` in a template, containers as views, view source for a view not found. Open, his: whether a view and a concept are two things. To prototype: the notebook and table views restated in that form, and what each shows with nothing to show.
 
+## 2026-11-18, Designing: tonk's rule for what repeats
+
+**Asked.** Where repetition happens inside a view, once containers and calls are in. The maintainer saw that a call says it between views and nothing says it within one.
+
+**Learned.** tonk already has the answer he wants, and it says what stays without a container: the element marked with the entity alone in an attribute repeats a match, what is outside it renders once whether or not anything matches, and a field of many values repeats the lowest element that holds it. The agent offered a split (written between entities, declared within one) and an inline nested view; neither was needed.
+
+**Decided.** tonk's rule, the maintainer's. The container as a view of its own is set aside. A nested view stays a call. Open: a view whose conditions read a second entity, which tonk's views cannot.
+

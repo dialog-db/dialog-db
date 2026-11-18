@@ -115,3 +115,43 @@ Open, and his: whether a view and a concept are two things at all. "Concept is k
 
 Not decided by him and the agent's to show: what a view with two conditions and no nested view does. By "everything repeats" it is one instance of the whole template a match, the one-query reading the prototype already has, which shows nothing for an empty list. The layered reading stays in the build beside it until both have been seen on the real views.
 
+## tonk's rule, 2026-11-18, later still
+
+The maintainer, written: repetition still happens inside a view, so with containers it is still not obvious where. "I think we stick to tonk's approach and maybe it also means whole container thing is not really needed. In tonk to define bounds of the loop you simply stick an attribute of repeating piece."
+
+So the container as a view of its own is set aside. tonk's rule, from `tonk-template/src/lib.rs` (`this_repeat_root`, `PlanNode::Iteration`) and `tonk-core/docs/templates.md`:
+
+```
+ what repeats                    where                                              what stays
+ the view's entity, a match      the element that holds the entity alone in an      everything outside it, once,
+                                 attribute, when that is the outermost element      with no match too
+                                 that shows anything of the entity; else the
+                                 whole template
+ a field of many values          the lowest element that holds every place the      the rest of that instance
+                                 field is shown
+```
+
+In the notation, the same:
+
+```clj
+(view notebook :directory
+  [:div {:class "notebook-index"}
+    [:a {:subject ?n :href ["/notebook/" ?n]}     ; ?n alone in an attribute: this repeats
+      [:span ?title]]]
+  (notebook ?n title: ?title))
+
+(view todo :item
+  [:li ?title
+    [:span {:class "tag"} ?tag]]                  ; tag holds many: the span repeats
+  (todo ?t title: ?title tag: ?tag))
+```
+
+- The marker is any attribute whose value is the entity's variable and nothing else. Its name does not matter. `["/notebook/" ?n]` is not one.
+- A view shown for one entity is one match, so it renders once with or without the marker.
+- No notebooks: the `div`, empty. It is outside the repeating element.
+- What a field of many values is, the concept says: `cardinality: :many`, or a collection `by:`.
+
+A nested view stays a call, `(view concept :name …)`, as decided earlier today.
+
+What tonk's rule does not say, since a tonk view is over one concept: a view whose conditions read a second entity (`(todo ?t list: ?l)` beside `(list ?l name: ?name)`). The layered reading of the prototype is one answer; a call is another. Not decided.
+
