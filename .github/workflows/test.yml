@@ -270,9 +270,14 @@ jobs:
     steps:
       - run: echo "Lints are good!"
 
+  # Beside the Rust lints, not after them. The lints take a quarter of an
+  # hour, and a run that waits for them before it starts a test cannot
+  # finish in less than that plus the slowest configuration. A commit that
+  # fails a lint now spends runner time on tests whose result is not
+  # needed; that is the price of hearing about both sooner.
   tests:
     name: 'Tests'
-    needs: ['lints']
+    needs: ['lint_nix']
     runs-on: 'ubuntu-latest'
     strategy:
       matrix:
@@ -303,18 +308,25 @@ jobs:
           # Only main writes the cache: an upload must not fail a PR's
           # checks, and an unmerged branch must not write what main reads.
           skipPush: ${{ github.ref != 'refs/heads/main' }}
-      # TMPDIR must live on the large /nix volume, not the root
-      # filesystem. nothing-but-nix leaves the root filesystem only
-      # root-safe-haven (16GB) of free space, and the wasm build and
-      # test artifacts (test binaries, the shared wasm cache, browser
-      # profiles) can outgrow that; the /nix volume has ~90GB of
-      # headroom.
+      # TMPDIR and cargo's home live on the large /nix volume, not the
+      # root filesystem. nothing-but-nix leaves the root filesystem only
+      # root-safe-haven (16GB) of free space, which the test artifacts
+      # (test binaries, the shared wasm cache, browser profiles) can
+      # outgrow; the /nix volume has ~90GB of headroom.
+      #
+      # The archives are built in the sandbox and need no cargo home. The
+      # cross-target tests do: each builds its wasm side with cargo when
+      # it runs. nothing-but-nix keeps purging the runner in the
+      # background, and the last thing it deletes is $HOME/.cargo, cargo's
+      # default home (#638).
       - name: 'Run test configuration'
+        shell: bash
         run: |
-          sudo mkdir -p /nix/tmp
+          sudo mkdir -p /nix/tmp /nix/cargo
           sudo chmod 1777 /nix/tmp
+          sudo chown "$(id -u):$(id -g)" /nix/cargo
           nix develop \
             --accept-flake-config \
             --set-env-var TMPDIR /nix/tmp \
+            --set-env-var CARGO_HOME /nix/cargo \
             --command ${{ matrix.configuration }}
-

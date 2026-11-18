@@ -259,10 +259,19 @@ async fn rival_merges(greater_keeps: bool) -> Result<()> {
 
     commit!(c, ce, "post:a");
     commit!(k, ke, "post:b");
-    b.pull().from(c).perform(be).await?;
-    b.pull().from(k).perform(be).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(c)
+        .perform(be)
+        .await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(k)
+        .perform(be)
+        .await?;
     let builder_merge = b.revision().expect("the builder's merge");
-    k.pull().from(c).perform(ke).await?;
+    k.pull(crate::Download::MinimalRanges)
+        .from(c)
+        .perform(ke)
+        .await?;
     let keeper_merge = k.revision().expect("the keeper's merge");
     assert_eq!(
         builder_merge.edition, keeper_merge.edition,
@@ -271,7 +280,10 @@ async fn rival_merges(greater_keeps: bool) -> Result<()> {
     commit!(c, ce, "post:a2");
 
     // The keeper meets the builder's rival.
-    k.pull().from(b).perform(ke).await?;
+    k.pull(crate::Download::MinimalRanges)
+        .from(b)
+        .perform(ke)
+        .await?;
     let settled = k.revision().expect("the keeper's head");
     if greater_keeps {
         assert_eq!(settled, keeper_merge, "the greater rival keeps its head");
@@ -283,9 +295,15 @@ async fn rival_merges(greater_keeps: bool) -> Result<()> {
     }
 
     // The builder builds on its rival before it meets the other.
-    b.pull().from(c).perform(be).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(c)
+        .perform(be)
+        .await?;
     // The keeper pulls the builder's line again.
-    k.pull().from(b).perform(ke).await?;
+    k.pull(crate::Download::MinimalRanges)
+        .from(b)
+        .perform(ke)
+        .await?;
 
     assert_eq!(walkable!(k, ke), Ok(()), "the keeper's history is whole");
     let expected: BTreeSet<String> = ["post:a", "post:b", "post:a2"]
@@ -296,7 +314,11 @@ async fn rival_merges(greater_keeps: bool) -> Result<()> {
 
     // A writer that never held the builder's rival can vouch for every
     // revision the keeper's head brings in.
-    let prepared = c.pull().from(k).prepare(ce).await?;
+    let prepared = c
+        .pull(crate::Download::MinimalRanges)
+        .from(k)
+        .prepare(ce)
+        .await?;
     prepared.novelty(ce).await?;
     prepared.commit(ce).await?;
     assert_eq!(walkable!(c, ce), Ok(()), "the committer's history is whole");
@@ -339,14 +361,23 @@ async fn reset_behind_the_base(separate_caches: bool, record: Record) -> Result<
     commit!(w2, &two, "post:two");
     commit!(w1, &one, "post:one");
     let first = w1.revision().expect("w1's first commit");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     let merge = w1.revision().expect("w1's merge");
-    w2.pull().from(&w1).perform(&two).await?;
+    w2.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&two)
+        .await?;
     assert_eq!(w2.revision().as_ref(), Some(&merge), "w2 fast-forwards");
 
     w1.reset(first).perform_unchecked(&one).await?;
     rewrite_bases!(w1, &one, record);
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
 
     assert_eq!(
         w1.revision().as_ref(),
@@ -421,11 +452,17 @@ async fn no_base(record: Record) -> Result<()> {
     let w2 = line!(profile, name, &two, "two");
 
     commit!(w1, &one, "post:a");
-    w2.pull().from(&w1).perform(&two).await?;
+    w2.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&two)
+        .await?;
     commit!(w2, &two, "post:b");
     let b = w2.revision().expect("B");
     commit!(w2, &two, "post:c");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     assert_eq!(w1.revision(), w2.revision(), "w1 fast-forwards to C");
     commit!(w2, &two, "post:d");
 
@@ -433,7 +470,10 @@ async fn no_base(record: Record) -> Result<()> {
     w1.reset(b).perform_unchecked(&one).await?;
     commit!(w1, &one, "post:e");
     rewrite_bases!(w1, &one, record);
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
 
     assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
     let expected: BTreeSet<String> = ["post:a", "post:b", "post:c", "post:d", "post:e"]
@@ -484,11 +524,20 @@ async fn upstream_reset(commit_on_top: bool, record: Record) -> Result<()> {
     let w3 = line!(profile, name, &three, "three");
 
     commit!(w1, &one, "post:a");
-    w2.pull().from(&w1).perform(&two).await?;
-    w3.pull().from(&w1).perform(&three).await?;
+    w2.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&two)
+        .await?;
+    w3.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&three)
+        .await?;
     commit!(w2, &two, "post:c");
     let c = w2.revision().expect("C");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     assert_eq!(w1.revision().as_ref(), Some(&c), "w1 fast-forwards to C");
     commit!(w3, &three, "post:y");
     commit!(w3, &three, "post:z");
@@ -502,7 +551,10 @@ async fn upstream_reset(commit_on_top: bool, record: Record) -> Result<()> {
         facts.push("post:x");
     }
     rewrite_bases!(w1, &one, record);
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
 
     assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
     let expected: BTreeSet<String> = facts
@@ -532,13 +584,22 @@ async fn it_keeps_a_replica_that_never_reset_whole_when_another_resets_and_pushe
     let w3 = line!(profile, name, &three, "three");
 
     commit!(w2, &two, "post:a");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     let b = w1.revision().expect("B");
     commit!(w3, &three, "post:w3");
-    w3.pull().from(&w2).perform(&three).await?;
+    w3.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&three)
+        .await?;
     w3.push().to(&w2).perform(&three).await?;
     let c = w3.revision().expect("C");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
 
     w1.reset(b).perform_unchecked(&one).await?;
     let pushed = w1.push().to(&w2).perform(&one).await;
@@ -556,7 +617,10 @@ async fn it_keeps_a_replica_that_never_reset_whole_when_another_resets_and_pushe
     assert_eq!(w2.revision().as_ref(), Some(&c), "the upstream keeps C");
 
     commit!(w3, &three, "post:e");
-    w3.pull().from(&w2).perform(&three).await?;
+    w3.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&three)
+        .await?;
     assert_eq!(walkable!(w3, &three), Ok(()), "w3's history is whole");
     let expected: BTreeSet<String> = ["post:a", "post:w3", "post:e"]
         .iter()
@@ -600,11 +664,23 @@ async fn it_lets_the_greater_rival_push_onto_the_lesser_after_a_pull() -> Result
     let (ce, be, ke) = (&envs[committer], &envs[lesser], &envs[greater]);
     commit!(c, ce, "post:a");
     commit!(k, ke, "post:b");
-    b.pull().from(c).perform(be).await?;
-    b.pull().from(k).perform(be).await?;
-    k.pull().from(c).perform(ke).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(c)
+        .perform(be)
+        .await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(k)
+        .perform(be)
+        .await?;
+    k.pull(crate::Download::MinimalRanges)
+        .from(c)
+        .perform(ke)
+        .await?;
     let keeper_merge = k.revision().expect("the greater merge");
-    k.pull().from(b).perform(ke).await?;
+    k.pull(crate::Download::MinimalRanges)
+        .from(b)
+        .perform(ke)
+        .await?;
     assert_eq!(
         k.revision().as_ref(),
         Some(&keeper_merge),
@@ -680,7 +756,10 @@ async fn it_refuses_a_takeover_so_a_push_cannot_rewind_the_upstream() -> Result<
     let w2 = line!(profile, name, &two, "two");
     let w3 = line!(profile, name, &three, "three");
     commit!(w1, &one, "post:a");
-    w3.pull().from(&w1).perform(&three).await?;
+    w3.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&three)
+        .await?;
     commit!(w3, &three, "post:y");
     commit!(w3, &three, "post:z");
     let z = w3.revision().expect("Z");
@@ -717,7 +796,10 @@ async fn it_moves_a_branch_forward() -> Result<()> {
     let w2 = line!(profile, name, &two, "two");
     commit!(w1, &one, "post:a");
     let a = w1.revision().expect("A");
-    w2.pull().from(&w1).perform(&two).await?;
+    w2.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&two)
+        .await?;
     commit!(w2, &two, "post:b");
     let b = w2.revision().expect("B");
 
@@ -754,12 +836,21 @@ async fn it_keeps_a_retraction_when_it_merges_from_no_base() -> Result<()> {
     let w2 = line!(profile, name, &two, "two");
 
     commit!(w1, &one, "post:a");
-    w2.pull().from(&w1).perform(&two).await?;
+    w2.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&two)
+        .await?;
     commit!(w2, &two, "post:f");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     let holding = w1.revision().expect("w1 holds f");
     retract!(w2, &two, "post:f");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     assert_eq!(w1.revision(), w2.revision(), "w1 takes the retraction");
     commit!(w2, &two, "post:x");
 
@@ -767,7 +858,10 @@ async fn it_keeps_a_retraction_when_it_merges_from_no_base() -> Result<()> {
     // mint, with a commit on top the upstream has not seen.
     w1.reset(holding).perform_unchecked(&one).await?;
     commit!(w1, &one, "post:g");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
 
     assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
     let expected: BTreeSet<String> = ["post:a", "post:g", "post:x"]
@@ -793,11 +887,17 @@ async fn it_does_not_push_a_head_a_reset_left_behind_the_base() -> Result<()> {
     let w1 = line!(profile, name, &one, "one");
     let w2 = line!(profile, name, &two, "two");
     commit!(w1, &one, "post:a");
-    w2.pull().from(&w1).perform(&two).await?;
+    w2.pull(crate::Download::MinimalRanges)
+        .from(&w1)
+        .perform(&two)
+        .await?;
     commit!(w2, &two, "post:b");
     let b = w2.revision().expect("B");
     commit!(w2, &two, "post:c");
-    w1.pull().from(&w2).perform(&one).await?;
+    w1.pull(crate::Download::MinimalRanges)
+        .from(&w2)
+        .perform(&one)
+        .await?;
     w1.reset(b).perform_unchecked(&one).await?;
     let (head, tracked, based) = (w1.revision(), w1.tracked(), w1.based());
     let pushed = w1.push().to(&w2).perform(&one).await;
@@ -1096,7 +1196,7 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                 expected.extend(of(&live, Some(&theirs)));
                 let expected: Written = expected.difference(&covered).cloned().collect();
                 lines[to]
-                    .pull()
+                    .pull(crate::Download::MinimalRanges)
                     .from(&lines[from])
                     .perform(&envs[to])
                     .await?;

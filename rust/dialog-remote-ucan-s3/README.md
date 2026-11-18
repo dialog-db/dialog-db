@@ -21,7 +21,7 @@ let remote_main = origin.branch("main").open().perform(&operator).await?;
 main.set_upstream(remote_main).perform(&operator).await?;
 
 main.push().perform(&operator).await?;
-main.pull().perform(&operator).await?;
+main.pull(dialog_repository::Download::MinimalRanges).perform(&operator).await?;
 ```
 
 ## Collaboration

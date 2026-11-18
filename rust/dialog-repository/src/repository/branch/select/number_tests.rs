@@ -1527,7 +1527,10 @@ async fn it_pulls_mixed_numbers_as_the_narrowest_types() -> Result<()> {
 
     let feature = repo.branch("feature").open().perform(&operator).await?;
     feature.set_upstream(&main).perform(&operator).await?;
-    feature.pull().perform(&operator).await?;
+    feature
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     feature.refresh(&operator).await?;
 
     assert_eq!(facts(&feature, "item/size", &operator).await?, upstream);
@@ -1610,7 +1613,10 @@ async fn it_pulls_a_numeric_heavy_upstream_an_earlier_release_wrote() -> Result<
 
     let feature = repo.branch("feature").open().perform(&operator).await?;
     feature.set_upstream(&main).perform(&operator).await?;
-    feature.pull().perform(&operator).await?;
+    feature
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     feature.refresh(&operator).await?;
     assert_eq!(feature.storage_encoding(&operator).await?, Some(0));
     assert!(feature.needs_migration(&operator).await?);
@@ -1650,7 +1656,10 @@ async fn it_pulls_a_numeric_heavy_upstream_an_earlier_release_wrote() -> Result<
         &operator,
     )
     .await?;
-    feature.pull().perform(&operator).await?;
+    feature
+        .pull(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
     feature.refresh(&operator).await?;
     assert_eq!(
         feature.storage_encoding(&operator).await?,

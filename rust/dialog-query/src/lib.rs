@@ -6,6 +6,10 @@
 //! This crate implements the core query planning and execution functionality.
 
 #![warn(missing_docs)]
+// The tests exercise the one-shot `.commit().publish().perform(..)` a
+// commit used to be, which must keep failing on a lost race as it did;
+// code outside them commits through `Branch::transact`.
+#![cfg_attr(test, allow(deprecated))]
 #![warn(clippy::absolute_paths)]
 #![warn(clippy::default_trait_access)]
 #![warn(clippy::fallible_impl_from)]
@@ -98,6 +102,11 @@ mod memo;
 /// derived rows and encodings, pinned as tests.
 #[cfg(test)]
 mod number_tests;
+
+/// A typed variable over a field that declares no type, pinned as
+/// tests.
+#[cfg(test)]
+mod typed_read_tests;
 
 mod sort_order;
 pub use sort_order::*;

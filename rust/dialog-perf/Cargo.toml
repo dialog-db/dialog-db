@@ -29,6 +29,7 @@ dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-peer = { workspace = true, features = ["helpers"] }
 dialog-query = { workspace = true }
+dialog-remote-s3 = { workspace = true }
 dialog-repository = { workspace = true }
 dialog-storage = { workspace = true }
 futures-util = { workspace = true }

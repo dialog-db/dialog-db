@@ -333,6 +333,29 @@ impl Snapshot {
         }
     }
 
+    /// A line of `subject` that is read and minted only at revisions its
+    /// caller names, through a [`View`](crate::repository::source::View)
+    /// or a [`Source`](crate::repository::source::Source) built on it: a
+    /// durable layer of a stack, which has no head of its own. Commits
+    /// through it mint on `line`. Its own head is a placeholder, never
+    /// read: the zero tree on `line`, by the subject.
+    pub(crate) fn detached(subject: Subject, caches: Caches, line: Entity) -> Self {
+        let placeholder = Revision::new(
+            crate::TreeReference::from([0; 32]),
+            line.clone(),
+            subject.did().clone(),
+        );
+        Snapshot {
+            subject,
+            head: RwLock::new(Head {
+                revision: placeholder,
+                lineage: Some(line),
+            }),
+            caches,
+            overlay: Ephemeral::default(),
+        }
+    }
+
     /// The revision this snapshot names.
     pub fn revision(&self) -> Revision {
         self.head.read().revision.clone()
@@ -832,7 +855,7 @@ impl SnapshotExport {
                     }
                 }
 
-                yield Item::Block(Block::new(node.buffer().clone()));
+                yield Item::Block(Block::new(node.buffer()?.clone()));
             }
 
             // Spilled values, discovered above. Their reads are

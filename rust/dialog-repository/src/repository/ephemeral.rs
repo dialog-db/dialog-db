@@ -136,6 +136,9 @@ struct State {
     shadowed: HashMap<SortKey, Fact>,
     sequence: u64,
     hash: Blake3Hash,
+    /// The hash as of the last instant that was not a record (see
+    /// [`Ephemeral::record`]): what [`Ephemeral::settled`] answers.
+    settled: Blake3Hash,
     /// The most recent instants, oldest first, at most
     /// [`LOG_CAPACITY`].
     log: VecDeque<Instant>,
@@ -152,6 +155,7 @@ impl Default for State {
             shadowed: HashMap::new(),
             sequence: 0,
             hash: Blake3Hash::from([0u8; 32]),
+            settled: Blake3Hash::from([0u8; 32]),
             log: VecDeque::new(),
             rules: OnceLock::new(),
         }
@@ -558,6 +562,7 @@ impl State {
             }
         }
         self.hash = Blake3Hash::hash_iter(chunks.iter().map(Vec::as_slice));
+        self.settled = self.hash.clone();
         let instant = Instant {
             sequence: self.sequence,
             hash: self.hash.clone(),
@@ -613,6 +618,7 @@ impl Ephemeral {
             shadowed: base.shadowed.clone(),
             sequence: base.sequence,
             hash: base.hash.clone(),
+            settled: base.settled.clone(),
             log: VecDeque::new(),
             rules: base.rules.clone(),
         };
@@ -643,6 +649,7 @@ impl Ephemeral {
             shadowed: base.shadowed.clone(),
             sequence: base.sequence,
             hash: base.hash.clone(),
+            settled: base.settled.clone(),
             log: VecDeque::new(),
             rules: base.rules.clone(),
         };
@@ -704,6 +711,40 @@ impl Ephemeral {
             state.apply(instruction, &mut delta);
         }
         Ok(state.mint(delta))
+    }
+
+    /// Land a batch of instructions as one instant that records
+    /// something about the line rather than changing it: the revision
+    /// moves, as for any instant, and the instant is read as any other
+    /// is, but [`settled`](Self::settled) stays where it was. What a
+    /// stack writes when it records its layers' revisions in its own
+    /// layer, so the recording is not itself a move of that layer.
+    pub(crate) fn record(&self, changes: Changes) -> Result<Option<Instant>, DialogCorpusError> {
+        if changes.has_assets() {
+            return Err(DialogCorpusError::AssetsUnsupported(
+                "an ephemeral line".into(),
+            ));
+        }
+        if changes.is_empty() {
+            return Ok(None);
+        }
+        let mut state = self.state.write();
+        let settled = state.settled.clone();
+        let mut delta = Delta::recorded();
+        for instruction in changes.into_instructions() {
+            state.apply(instruction, &mut delta);
+        }
+        let instant = state.mint(delta);
+        state.settled = settled;
+        Ok(instant)
+    }
+
+    /// The line's hash as of its last instant that was not a record
+    /// ([`record`](Self::record)): the hash of its revision before the
+    /// records that followed its last change, the all-zero hash for a
+    /// line no instant but records has changed.
+    pub(crate) fn settled(&self) -> Blake3Hash {
+        self.state.read().settled.clone()
     }
 
     /// Everything this line holds, as one batch: each tombstone as the

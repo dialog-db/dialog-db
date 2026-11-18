@@ -51,7 +51,7 @@ pub use math::{Difference, Floor, Modulo, Product, Quotient, Round, Sum, Truncat
 pub use position::{Position as PositionFormula, PositionParts as PositionPartsFormula};
 pub use revision::{
     Revision as RevisionFormula, RevisionAttestation as RevisionAttestationFormula,
-    RevisionParent as RevisionParentFormula,
+    RevisionParent as RevisionParentFormula, RevisionSlot as RevisionSlotFormula,
 };
 pub use string::{Concatenate, Length, Like, Lowercase, Uppercase};
 

@@ -201,6 +201,7 @@ async fn execute_run(daemon: &Arc<Daemon>, request: RunRequest) -> Result<RunRep
         include_ignored: request.args.include_ignored,
         filtered_count: filtered.filtered,
         nocapture: request.nocapture,
+        env: &request.env,
     })?;
     let index_html = INDEX_TEMPLATE.replace(
         "/* {NOCAPTURE} */ false",

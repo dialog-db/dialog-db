@@ -664,7 +664,10 @@ async fn concurrent_last_writes_settle_by_commit_across_every_cell() -> Result<(
         base = base.assert(salary(person, 1, Pick::Last));
     }
     base.commit().publish().perform(&operator).await?;
-    b.pull().from(&a).perform(&operator).await?;
+    b.pull(crate::Download::MinimalRanges)
+        .from(&a)
+        .perform(&operator)
+        .await?;
 
     // Concurrent: values chosen so that neither the value order nor the
     // fact hashes agree with one side across every cell.
@@ -683,8 +686,16 @@ async fn concurrent_last_writes_settle_by_commit_across_every_cell() -> Result<(
     theirs.commit().publish().perform(&operator).await?;
     let mut quiesced = false;
     for _ in 0..4 {
-        let pulled_a = a.pull().from(&b).perform(&operator).await?;
-        let pulled_b = b.pull().from(&a).perform(&operator).await?;
+        let pulled_a = a
+            .pull(crate::Download::MinimalRanges)
+            .from(&b)
+            .perform(&operator)
+            .await?;
+        let pulled_b = b
+            .pull(crate::Download::MinimalRanges)
+            .from(&a)
+            .perform(&operator)
+            .await?;
         if pulled_a.is_none() && pulled_b.is_none() {
             quiesced = true;
             break;

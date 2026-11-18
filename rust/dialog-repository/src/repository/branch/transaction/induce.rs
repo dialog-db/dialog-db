@@ -16,11 +16,14 @@
 //!    (branch ⊕ durable changes ⊕ this round's transients). Sibling
 //!    rules in a round read identical state.
 //! 3. Bound heads emit facts by cardinality (`Replace` for one,
-//!    `Assert` for many). A head concept carrying the
-//!    `dialog.concept/transient` marker routes to the next round's
-//!    stimulus and is never committed; a durable head passes a novelty
-//!    check (an instruction that leaves the view unchanged contributes
-//!    nothing) and folds into the commit.
+//!    `Assert` for many). A head cell landing in
+//!    [`control:`](crate::CONTROL), the loopback, routes to the next
+//!    round's stimulus and is never committed: one whose descriptor
+//!    names `in: control:`, and every cell naming no layer of a head
+//!    concept carrying the `dialog.concept/transient` marker (a
+//!    command). A durable head passes a novelty check (an instruction
+//!    that leaves the view unchanged contributes nothing) and folds into
+//!    the commit.
 //! 4. The loop ends when a round produces no novelty and no
 //!    transients, or errors after [`MAX_ROUNDS`] rounds — the runaway
 //!    guard for self-feeding cascades.
@@ -35,14 +38,14 @@ use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_search_tree::nodes;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
-    Change, Changes, DialogCorpusError, Entity, Fact, Instruction, Relation, Select, Selector,
-    Statement, Value,
+    Change, Changes, DialogCorpusError, Entity, Fact, Instruction, Pick, Relation, Select,
+    Selector, Statement, Value,
 };
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -50,15 +53,23 @@ use dialog_effects::memory::Resolve;
 use dialog_query::attribute::The;
 use dialog_query::rule::inductive::Polarity;
 use dialog_query::rule::statement::Reach;
-use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
+use dialog_query::{
+    Any, Binding, ConceptQuery, Environment, InductiveRule, Match, Planner, Premise, Proposition,
+    Term,
+};
 use futures_util::{StreamExt as _, TryStreamExt};
 
+use crate::Ephemeral;
+use crate::placement::{
+    control_layer, follows_selection, memory_layer, session_layer, take_dispatched,
+};
 use crate::repository::archive::erased;
-use crate::repository::branch::session::{QueryEnv, shared_metadata};
+use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
 use crate::rules::{
     TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
 };
+use crate::stack::effect::invoked;
 use crate::{CommitError, RemoteSite, Revision, Staged};
 use std::slice::from_ref;
 
@@ -70,16 +81,36 @@ pub(crate) const MAX_ROUNDS: u32 = 16;
 
 /// Run commit-time induction over `changes` + `transients`, folding
 /// durable novelty into `changes`. Transients never enter `changes`;
-/// they are visible to rule bodies for exactly one round.
+/// they are visible to rule bodies for exactly one round, as rows of
+/// [`control:`](crate::CONTROL). A write of `changes` or of `transients`
+/// into `control:` is a transient too.
 ///
-/// Returns every transient a rule head emitted, across all rounds. The
-/// dispatched `transients` are not part of it.
+/// Returns every transient a rule head emitted, across all rounds, the
+/// writes each round's heads landed in a layer, one entry per round
+/// that wrote one, in round order, and how many rounds ran: each round
+/// is a tick, and a layer takes each tick's writes as an instant of its
+/// own. The dispatched `transients` are not part of the first two. The
+/// writes `transients` names for a layer are stimulus too, read as rows
+/// of that layer. The layered writes stay in `changes` as well, merged,
+/// which is how each round's view reads every earlier round's.
+///
+/// Through a stack (a composite holding the loopback), each command
+/// entity a round's stimulus carries in `control:` is marked as
+/// invoked in that round: its `dialog.command/invoked` row, naming the
+/// round, is a row of `control:` beside the command's own for that one
+/// round (see [`invoked`]), and is no emitted transient.
+///
+/// `selected` is the layer a session selects: a durable head cell whose
+/// descriptor names no layer lands there, unless its attribute is
+/// machinery under `dialog.`.
 pub(crate) async fn induce<Env>(
     view: &View<'_>,
+    composite: &Composite,
     changes: &mut Changes,
-    transients: Changes,
+    mut transients: Changes,
+    selected: Option<&Entity>,
     env: &Env,
-) -> Result<Changes, CommitError>
+) -> Result<(Changes, Vec<Vec<(Entity, Changes)>>, u32), CommitError>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
@@ -100,10 +131,24 @@ where
         + ConditionalSync
         + 'static,
 {
+    // A write into the loopback is a dispatch: it is this tick's
+    // stimulus, read as a row of `control:`, and lands nowhere.
+    let dispatched = take_dispatched(&mut transients);
+    transients.merge(dispatched);
+    let dispatched = take_dispatched(changes);
+    transients.merge(dispatched);
+
     // Transients never commit, so an asset among them would be dropped:
     // refuse the commit before anything is written instead.
     if transients.has_assets() {
         return Err(DialogCorpusError::AssetsUnsupported("a dispatched transient".into()).into());
+    }
+    // Through a stack, every command is marked in the round it is
+    // stimulus of: the first, for the ones dispatched.
+    let marks = composite.channels.contains(&control_layer());
+    if marks {
+        let marked = invoked(&transients, 1);
+        transients.merge(marked);
     }
 
     // Round 1 stimulus: everything the commit changes, plus the
@@ -112,11 +157,14 @@ where
     // and induce). Every head advance is an instant; the lag is how a
     // missed one is caught up.
     let mut stimulus: Vec<Instruction> = changes.clone().into_instructions();
+    stimulus.extend(layered_instructions(changes));
     stimulus.extend(transients.clone().into_instructions());
+    stimulus.extend(layered_instructions(&transients));
     stimulus.extend(lag_delta(view, env).await?);
     let mut induced = Changes::new();
+    let mut ticks = Vec::new();
     if stimulus.is_empty() {
-        return Ok(induced);
+        return Ok((induced, ticks, 0));
     }
 
     // Committed trigger structures, resolved once per induction: the
@@ -131,9 +179,11 @@ where
     // overlay of the round view, which does not change across rounds.
     let operator = Identify.perform(env).await?;
 
-    // This round's transient facts. Round 1 sees the dispatched
-    // commands; round N+1 sees only the transients round N emitted —
-    // a transient lives for exactly one round.
+    // This round's transient facts, the rows of `control:`. Round 1
+    // sees the dispatched commands; round N+1 sees only the transients
+    // round N emitted — a transient lives for exactly one round. Their
+    // writes into other layers (a session's revision rows) are read as
+    // those layers.
     let mut transient_overlay = transients;
 
     let mut round: u32 = 0;
@@ -223,16 +273,36 @@ where
         // round's transients, through the same layered QueryEnv a
         // transaction query uses, so rule bodies read exactly what a
         // mid-transaction query would: the writes as staged layers
-        // beside the shared metadata.
-        let view = QueryEnv::new(
-            vec![view.to_source()],
-            shared_metadata(from_ref(view), &operator),
-            env,
-        )
-        .with_layers(vec![
-            Staged::from(changes.clone()),
-            Staged::from(transient_overlay.clone()),
-        ]);
+        // beside the shared metadata. Each layer's writes, the earlier
+        // rounds' heads landing in it among them, are read as that
+        // layer, so a round reads the state the ticks before it left. A
+        // memory layer the composite holds reads them as a copy of
+        // itself with them applied, as the ticks will land at publish,
+        // so a head under `last` succeeds the layer's own row of the
+        // cell; a layer it does not hold reads them as a staged layer.
+        let written = Staged::from(changes.clone());
+        let mut layered = composite.clone();
+        let mut shares: Vec<Staged> = Vec::new();
+        for (layer, share) in written.shares() {
+            match layered.memories.iter_mut().find(|(held, _)| held == layer) {
+                Some((_, memory)) => *memory = memory.extending(share.clone()),
+                None => shares.push(Staged::from(share.clone()).in_layer(layer.clone())),
+            }
+        }
+        let mut control = transient_overlay.clone();
+        let transient_shares = control.take_shares();
+        let view = QueryEnv::over(layered, shared_metadata(from_ref(view), &operator), env)
+            .with_layers(
+                [written, Staged::from(control).in_layer(control_layer())]
+                    .into_iter()
+                    .chain(shares)
+                    .chain(
+                        transient_shares
+                            .into_iter()
+                            .map(|(layer, share)| Staged::from(share).in_layer(layer)),
+                    )
+                    .collect(),
+            );
 
         // Close the touched set over derivation: a base-fact write
         // reaches inductive rules premised on the derived concepts it
@@ -289,6 +359,7 @@ where
                 fire(
                     &rule,
                     transient_head,
+                    selected,
                     &view,
                     &mut novelty,
                     &mut emitted_transients,
@@ -298,6 +369,7 @@ where
                 fire_seeded(
                     &rule,
                     transient_head,
+                    selected,
                     &assert_rows,
                     &view,
                     &mut novelty,
@@ -311,14 +383,31 @@ where
         // emissions to the next round's stimulus. The incoming
         // transients simply expire — nothing entered `changes`, so
         // there is no sweep.
-        stimulus = novelty.clone().into_instructions();
+        // The round's writes into layers are its tick: kept apart, so
+        // each layer takes them as one instant, and folded into
+        // `changes` too, so the next round's view reads them.
+        stimulus = layered_instructions(&novelty);
+        stimulus.extend(novelty.clone().into_instructions());
         stimulus.extend(emitted_transients.clone().into_instructions());
+        stimulus.extend(layered_instructions(&emitted_transients));
+        let shares = novelty.take_shares();
+        for (layer, share) in &shares {
+            share.clone().into_layer(layer.clone()).assert(changes);
+        }
+        if !shares.is_empty() {
+            ticks.push(shares);
+        }
         novelty.assert(changes);
         emitted_transients.clone().assert(&mut induced);
+        if marks {
+            let marked = invoked(&emitted_transients, round + 1);
+            stimulus.extend(marked.clone().into_instructions());
+            emitted_transients.merge(marked);
+        }
         transient_overlay = emitted_transients;
     }
 
-    Ok(induced)
+    Ok((induced, ticks, round))
 }
 
 /// The committed side of trigger dispatch for one induction run: the
@@ -976,6 +1065,7 @@ async fn select<'a>(
 async fn fire<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    selected: Option<&Entity>,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
@@ -989,14 +1079,23 @@ async fn fire<'a>(
     if matches.is_empty() {
         return Ok(());
     }
-    emit_matches(rule, transient_head, matches, view, novelty, transients).await
+    emit_matches(
+        rule,
+        transient_head,
+        selected,
+        matches,
+        view,
+        novelty,
+        transients,
+    )
+    .await
 }
 
 /// The reach of a rule's concept premises, split by polarity:
 /// positive premises (seedable by an assert/replace row) and `unless`
 /// premises (only enabled by removal — never seedable).
 fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
-    use dialog_query::{Negation, Premise, Proposition};
+    use dialog_query::Negation;
 
     let mut positive = BTreeSet::new();
     let mut unless = BTreeSet::new();
@@ -1013,90 +1112,332 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
     (positive, unless)
 }
 
-/// Delta-restricted firing: bind each stimulus row into every positive
-/// concept premise that names its attribute, then evaluate the body
+/// Delta-restricted firing: bind stimulus rows into every positive
+/// concept premise that names their attributes, then evaluate the body
 /// with those bindings fixed — the remaining premises join against the
 /// frozen view through the planner as usual. Every new match this
 /// round must bind at least one new row into at least one positive
 /// premise (removal-enabled and derived-premise firings take the
 /// full-body path instead), so seeding is complete for this candidate
 /// class while costing the delta's join fan-out, not relation size.
+///
+/// Several rows of one entity that [`seed_groups`] finds combinable are
+/// first bound into one evaluation. It finds every match of the rows
+/// seeded one by one when it finds any (see [`seed_groups`] for why);
+/// when it finds none, the rows are seeded one by one.
 async fn fire_seeded<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    selected: Option<&Entity>,
     rows: &[Fact],
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
-    use dialog_query::{Premise, Proposition};
+    let matches = seeded_matches(rule, rows, view, Seeding::Grouped).await?;
+    #[cfg(test)]
+    let before = (novelty.clone(), transients.clone());
+    if !matches.is_empty() {
+        emit_matches(
+            rule,
+            transient_head,
+            selected,
+            matches,
+            view,
+            novelty,
+            transients,
+        )
+        .await?;
+    }
+    #[cfg(test)]
+    oracle::agrees(
+        rule,
+        transient_head,
+        selected,
+        rows,
+        view,
+        before,
+        novelty,
+        transients,
+    )
+    .await?;
+    Ok(())
+}
 
+/// How [`seeded_matches`] binds a premise's rows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Seeding {
+    /// Each row alone: the reference the grouped seeding must equal.
+    #[cfg_attr(not(test), allow(dead_code))]
+    PerRow,
+    /// Combinable rows of one entity together, falling back to each
+    /// alone when together they find nothing.
+    Grouped,
+}
+
+/// The matches a seeded firing of `rule` finds for `rows`, in the order
+/// seeding the rows one by one finds them: a group's matches stand at
+/// its first row, and a row seeded alone after its group found nothing
+/// stands at its own. The order is what [`emit_matches`] writes in, and
+/// two matches writing one transient cell under `last` are decided by
+/// it: the later replaces the earlier.
+async fn seeded_matches<'a>(
+    rule: &InductiveRule,
+    rows: &[Fact],
+    view: &QueryEnv<'a>,
+    seeding: Seeding,
+) -> Result<Vec<Match>, CommitError> {
     let mut matches: Vec<Match> = Vec::new();
-    for premise in &rule.analysis().premises {
+    for (at, premise) in rule.analysis().premises.iter().enumerate() {
         let Premise::Assert(Proposition::Concept(query)) = premise else {
             continue;
         };
-        for row in rows {
-            // The premise fields this row's attribute matches — the
-            // row's value binds there, its subject binds `this`.
-            let mut matched = Match::new();
-            let mut scope = Environment::new();
-            let mut seeded = false;
-            let mut compatible = true;
-            for (name, field) in query.predicate.with().iter() {
-                let relation = field.descriptor().the();
-                if !Reach::of(relation).covers(&row.the) {
+        // A premise that leaves its subject unnamed is seeded with the
+        // subject named, so the seed binds the entity its rows are
+        // about (see [`subject_named`]).
+        let named = subject_named(rule, at);
+        let (query, premises) = match &named {
+            Some((premises, query)) => (query, Some(premises.as_slice())),
+            None => (query, None),
+        };
+        let groups = match seeding {
+            Seeding::Grouped => seed_groups(query, rows),
+            Seeding::PerRow => (0..rows.len()).map(|at| vec![at]).collect(),
+        };
+        // What each group or row found, keyed by the row it stands at.
+        let mut found: Vec<(usize, Vec<Match>)> = Vec::with_capacity(groups.len());
+        for group in groups {
+            #[cfg(test)]
+            if seeding == Seeding::Grouped {
+                oracle::count(if group.len() > 1 { 1 } else { group.len() });
+            }
+            if group.len() > 1 {
+                let together = evaluate_seed(
+                    rule,
+                    premises,
+                    query,
+                    group.iter().map(|&at| &rows[at]),
+                    view,
+                )
+                .await?;
+                if !together.is_empty() {
+                    found.push((group[0], together));
                     continue;
                 }
-                if !bind_seed(
-                    &mut matched,
-                    &mut scope,
-                    query.terms.get(name),
-                    row.is.clone(),
-                ) {
-                    compatible = false;
-                    break;
-                }
-                // A collection premise binds the entry's key too: the
-                // name half of the row's attribute.
-                if relation.attribute().is_none()
-                    && !bind_seed(
-                        &mut matched,
-                        &mut scope,
-                        query.terms.get(&The::key_operand(name)),
-                        Value::String(row.the.name().to_owned()),
-                    )
-                {
-                    compatible = false;
-                    break;
-                }
-                seeded = true;
             }
-            if !seeded || !compatible {
+            #[cfg(test)]
+            if seeding == Seeding::Grouped && group.len() > 1 {
+                oracle::count(group.len());
+            }
+            for at in group {
+                found.push((
+                    at,
+                    evaluate_seed(rule, premises, query, [&rows[at]], view).await?,
+                ));
+            }
+        }
+        // Groups come in the order of their first rows, so only rows
+        // seeded alone after their group found nothing are out of
+        // place; a stable sort puts them back between the others.
+        found.sort_by_key(|(at, _)| *at);
+        matches.extend(found.into_iter().flat_map(|(_, found)| found));
+    }
+    Ok(matches)
+}
+
+/// Evaluates `rule` with `rows` bound into `query` (see [`seed`]); no
+/// matches when the rows do not bind it. `premises` are the rule's with
+/// the subject of `query` named, when the rule leaves it unnamed
+/// ([`subject_named`]); they are planned under the types the rule was
+/// analyzed to, which say nothing of the one variable added.
+async fn evaluate_seed<'a, 'r>(
+    rule: &InductiveRule,
+    premises: Option<&[Premise]>,
+    query: &ConceptQuery,
+    rows: impl IntoIterator<Item = &'r Fact>,
+    view: &QueryEnv<'a>,
+) -> Result<Vec<Match>, CommitError> {
+    let Some((matched, scope)) = seed(query, rows) else {
+        return Ok(Vec::new());
+    };
+    let plan = match premises {
+        Some(premises) => Planner::with_types(premises.to_vec(), rule.analysis().types.clone())
+            .plan(&scope)
+            .map_err(|error| CommitError::Induction(format!("seeded rule body: {error}")))?,
+        None => rule.plan(&scope),
+    };
+    plan.evaluate(matched.seed(), view)
+        .try_collect()
+        .await
+        .map_err(|error| CommitError::Induction(format!("seeded rule body: {error}")))
+}
+
+/// The premises of `rule` with the subject of the concept premise at
+/// `at` named, and that premise as it then reads; `None` when the
+/// premise names its subject already, with a variable or a constant.
+///
+/// A row is a fact of one entity, and it matches a premise as a field
+/// of that entity. So the matches a row newly makes through a premise
+/// are those where the premise is read at the row's entity. A premise
+/// that gives `this` no variable leaves [`seed`] nothing to bind the
+/// entity to: the row's value alone would be bound, the premise read at
+/// every entity holding that value, and the rule fired for entities
+/// the commit did not touch. Naming the subject, in a variable nothing
+/// else in the rule reads, gives the seed its place. The variable binds
+/// what the unnamed subject matched and constrains nothing else, so a
+/// full evaluation finds the same matches with it or without.
+fn subject_named(rule: &InductiveRule, at: usize) -> Option<(Vec<Premise>, ConceptQuery)> {
+    let premises = &rule.analysis().premises;
+    let Premise::Assert(Proposition::Concept(query)) = &premises[at] else {
+        return None;
+    };
+    match query.terms.get("this") {
+        None | Some(Term::Variable { name: None, .. }) => {}
+        Some(_) => return None,
+    }
+
+    // A name no premise, head field or key operand of the rule has: a
+    // match binds it, and nothing may read it by accident.
+    let mut taken: BTreeSet<String> = BTreeSet::from(["this".to_string()]);
+    for premise in premises {
+        for (_, term) in premise.parameters().iter() {
+            if let Some(name) = term.name() {
+                taken.insert(name.to_string());
+            }
+        }
+    }
+    for (name, _) in rule.conclusion().with().iter() {
+        taken.insert(name.to_string());
+        taken.insert(The::key_operand(name));
+    }
+    let mut subject = String::from("subject");
+    while taken.contains(&subject) {
+        subject.push('\'');
+    }
+
+    let mut query = query.clone();
+    query
+        .terms
+        .insert("this".to_string(), Term::<Any>::var(subject));
+    let mut premises = premises.clone();
+    premises[at] = Premise::Assert(Proposition::Concept(query.clone()));
+    Some((premises, query))
+}
+
+/// The rows of `rows` that may seed `query` together: the rows of one
+/// entity that each bind exactly one field of the premise, a single
+/// attribute (not a collection's half, whose key varies by row) read
+/// under `last`, no two of them the same field. Every other row is a
+/// group of its own; a row naming no field of the premise is in none.
+///
+/// Bound together, a group finds the matches where every field holds
+/// its row's value. Each row alone binds its own field and reads the
+/// others free, and a free field under `last` reads the one value its
+/// cell elects in the round view. A seeded read yields a row's value
+/// only when that value is the one elected. So when the group finds any
+/// match, every field's elected value is its row's value, each row alone
+/// reads exactly the frame the group bound, and the two find the same
+/// matches. When the group finds none, some field elects another value
+/// (an overlay row standing above this commit, a derived candidate, a
+/// tie with another claim of the cell) or the rest of the body fails;
+/// either way [`seeded_matches`] seeds the rows one by one, which is
+/// what it did before. No assumption about which layer a read elects
+/// from is made here: the engine's own seeded read checks it.
+///
+/// Groups come in the order of their first rows, and the rows of a
+/// group in their own order, so the matches keep the order seeding the
+/// rows one by one finds them in.
+fn seed_groups(query: &dialog_query::ConceptQuery, rows: &[Fact]) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut together: BTreeMap<&Entity, (Vec<usize>, BTreeSet<&str>, bool)> = BTreeMap::new();
+    for (at, row) in rows.iter().enumerate() {
+        let fields: Vec<_> = query
+            .predicate
+            .with()
+            .iter()
+            .filter(|(_, field)| Reach::of(field.descriptor().the()).covers(&row.the))
+            .collect();
+        let [(name, field)] = fields.as_slice() else {
+            // Binds no field (nothing to seed) or several: alone.
+            if !fields.is_empty() {
+                groups.push(vec![at]);
+            }
+            continue;
+        };
+        let combinable = field.descriptor().the().attribute().is_some()
+            && matches!(field.descriptor().pick(), Pick::Last);
+        if !combinable {
+            groups.push(vec![at]);
+            continue;
+        }
+        let (members, names, repeated) = together.entry(&row.of).or_default();
+        if !names.insert(name) {
+            *repeated = true;
+        }
+        members.push(at);
+    }
+    for (_, (members, _, repeated)) in together {
+        if repeated {
+            groups.extend(members.into_iter().map(|at| vec![at]));
+        } else {
+            groups.push(members);
+        }
+    }
+    groups.sort_by_key(|group| group[0]);
+    groups
+}
+
+/// Binds `rows` into `query`: each row's value where its attribute
+/// matches a field, the key too for a collection field, and its subject
+/// as `this`. `None` when a row matches no field or contradicts a
+/// binding (a constant it does not read as, or another row's value).
+fn seed<'r>(
+    query: &dialog_query::ConceptQuery,
+    rows: impl IntoIterator<Item = &'r Fact>,
+) -> Option<(Match, Environment)> {
+    let mut matched = Match::new();
+    let mut scope = Environment::new();
+    for row in rows {
+        let mut seeded = false;
+        for (name, field) in query.predicate.with().iter() {
+            let relation = field.descriptor().the();
+            if !Reach::of(relation).covers(&row.the) {
                 continue;
             }
             if !bind_seed(
                 &mut matched,
                 &mut scope,
+                query.terms.get(name),
+                row.is.clone(),
+            ) {
+                return None;
+            }
+            // A collection premise binds the entry's key too: the
+            // name half of the row's attribute.
+            if relation.attribute().is_none()
+                && !bind_seed(
+                    &mut matched,
+                    &mut scope,
+                    query.terms.get(&The::key_operand(name)),
+                    Value::String(row.the.name().to_owned()),
+                )
+            {
+                return None;
+            }
+            seeded = true;
+        }
+        if !seeded
+            || !bind_seed(
+                &mut matched,
+                &mut scope,
                 query.terms.get("this"),
                 Value::Entity(row.of.clone()),
-            ) {
-                continue;
-            }
-
-            let plan = rule.plan(&scope);
-            let seeded_matches: Vec<Match> = plan
-                .evaluate(matched.seed(), view)
-                .try_collect()
-                .await
-                .map_err(|error| CommitError::Induction(format!("seeded rule body: {error}")))?;
-            matches.extend(seeded_matches);
+            )
+        {
+            return None;
         }
     }
-    if matches.is_empty() {
-        return Ok(());
-    }
-    emit_matches(rule, transient_head, matches, view, novelty, transients).await
+    Some((matched, scope))
 }
 
 /// Bind a seed value into a premise term: a named variable binds (and
@@ -1128,72 +1469,162 @@ fn bind_seed(
     }
 }
 
-/// Emit a rule's head for every produced match: transient heads into
-/// `transients`, durable heads (novelty-checked against the frozen
-/// view) into `novelty`.
+/// What a head writes, as `emit_matches` tells two heads apart: its
+/// subject, then each field's attribute, value and pick.
+type WrittenHead = (Entity, Vec<(Relation, Value, Pick, Option<Entity>)>);
+
+/// Emit a rule's head for every produced match: the cells landing in
+/// `control:` into `transients`, the rest (novelty-checked against the
+/// frozen view) into `novelty`. A cell lands in `control:` when its
+/// descriptor names it (`in: control:`), or names no layer and the head
+/// is a command (`transient_head`); a command's cell naming another
+/// layer, a channel say, lands there as any head does.
 async fn emit_matches<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    selected: Option<&Entity>,
     matches: Vec<Match>,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
-    let conclusion = rule.conclusion();
-    for matched in matches {
-        // The head subject. A rule whose premises leave `this` unbound
-        // has no cell to write; skip the binding.
-        let this = match matched.lookup(&Term::<Any>::var("this")) {
-            Ok(Binding::Present(Value::Entity(entity))) => entity,
-            _ => continue,
-        };
+    // A transient head is a command: a cell of it naming no layer lands
+    // in `control:`, so it never follows the selection.
+    let selected = selected.filter(|_| !transient_head);
+    let heads = written_heads(rule, selected, &matches)?;
 
+    // A seeded rule is evaluated once per stimulus row a premise names,
+    // so an event that carries several of a premise's fields finds the
+    // same binding once per field: each distinct head is written once,
+    // the first time it is found. The heads are compared where they
+    // stand, without a copy, and only when there are two to compare.
+    let mut first = vec![true; heads.len()];
+    if heads.len() > 1 {
+        let mut seen: hashbrown::HashSet<&WrittenHead> =
+            hashbrown::HashSet::with_capacity(heads.len());
+        for (at, head) in heads.iter().enumerate() {
+            first[at] = seen.insert(head);
+        }
+    }
+
+    let control = control_layer();
+    for ((this, cells), first) in heads.into_iter().zip(first) {
+        if !first {
+            continue;
+        }
         let mut head = Changes::new();
-        for (name, field) in conclusion.with().iter() {
-            let Ok(Binding::Present(value)) = matched.lookup(&Term::<Any>::var(name)) else {
-                // Optional head fields the frame didn't bind emit
-                // nothing.
-                continue;
+        // The cells landing in the loopback, or another channel: the next
+        // round's stimulus.
+        let mut dispatched = Changes::new();
+        // The cells whose descriptor names a layer (`in:`) other than
+        // the primary. The layer elects among its own rows of a cell,
+        // so a head landing there keeps its pick and succeeds no claim
+        // of the line.
+        let mut shared: Vec<(Entity, Instruction)> = Vec::new();
+        for (attribute, value, pick, layer) in cells {
+            let fact = Fact {
+                the: attribute,
+                of: this.clone(),
+                is: value,
+                cause: None,
             };
-            // A collection head writes under `domain/key`, the key
-            // being what the body bound to the field's key operand.
-            let relation = field.descriptor().the();
-            let attribute = match relation.attribute() {
-                Some(attribute) => attribute,
-                None => {
-                    let key = Term::<Any>::var(The::key_operand(name));
-                    let Ok(Binding::Present(Value::String(key))) = matched.lookup(&key) else {
-                        continue;
-                    };
-                    relation.entry(&key).map_err(|error| {
-                        CommitError::Induction(format!("head field {name}: {error}"))
-                    })?
+            let layer = match layer {
+                None if transient_head => Some(control.clone()),
+                layer => layer,
+            };
+            if layer.as_ref() == Some(&control) {
+                match rule.polarity() {
+                    Polarity::Retract => dialog_corpus::Update::dissociate(
+                        &mut dispatched,
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                    ),
+                    Polarity::Assert => dialog_corpus::Update::associate(
+                        &mut dispatched,
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                        pick,
+                    ),
                 }
-            };
-            match rule.polarity() {
+                continue;
+            }
+            // A cell landing in another channel is the next round's
+            // stimulus too, read as a row of that channel.
+            if let Some(channel) = layer.as_ref().filter(|layer| view.is_channel(layer)) {
+                match rule.polarity() {
+                    Polarity::Retract => dialog_corpus::Update::dissociate_in(
+                        &mut dispatched,
+                        channel.clone(),
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                    ),
+                    Polarity::Assert => dialog_corpus::Update::associate_in(
+                        &mut dispatched,
+                        channel.clone(),
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                        pick,
+                    ),
+                }
+                continue;
+            }
+            match (layer, rule.polarity()) {
+                (Some(layer), Polarity::Retract) => {
+                    shared.push((layer, Instruction::Retract(fact)));
+                }
+                (Some(layer), Polarity::Assert) => {
+                    // The session's own layer is read live, and its row of
+                    // the cell stands above a write staged for it: a head
+                    // under `last` landing there retracts that row, so the
+                    // rounds after read the head as the publish will leave
+                    // it. A memory layer the composite holds needs none of
+                    // this: the round view reads it with the ticks applied.
+                    if layer == session_layer()
+                        && matches!(pick, Pick::Last)
+                        && let Some(own) = view.session_store()
+                    {
+                        let cell = Selector::new().the(fact.the.clone()).of(fact.of.clone());
+                        for held in own.scan(&cell) {
+                            if held.is != fact.is {
+                                shared.push((layer.clone(), Instruction::Retract(held)));
+                            }
+                        }
+                    }
+                    shared.push((layer, Instruction::Assert(fact, pick)));
+                }
                 // A retracting head dissociates the exact bound
                 // triple, cardinality-independent.
-                Polarity::Retract => {
-                    dialog_corpus::Update::dissociate(&mut head, attribute, this.clone(), value);
+                (_, Polarity::Retract) => {
+                    dialog_corpus::Update::dissociate(&mut head, fact.the, fact.of, fact.is);
                 }
                 // An asserting head writes as the field's pick says: a
                 // set appends, and a choosing pick succeeds the claim
                 // it elects, resolved against the view at commit.
-                Polarity::Assert => {
-                    dialog_corpus::Update::associate(
-                        &mut head,
-                        attribute,
-                        this.clone(),
-                        value,
-                        field.descriptor().pick().clone(),
-                    );
+                (_, Polarity::Assert) => {
+                    dialog_corpus::Update::associate(&mut head, fact.the, fact.of, fact.is, pick);
                 }
             }
         }
 
-        if transient_head {
-            head.assert(transients);
+        dispatched.assert(transients);
+        if shared.is_empty() && head.is_empty() {
             continue;
+        }
+        for (layer, instruction) in shared {
+            if is_novel_in(view, &instruction, Some(&layer)).await? {
+                match instruction {
+                    Instruction::Assert(a, policy) => dialog_corpus::Update::associate_in(
+                        novelty, layer, a.the, a.of, a.is, policy,
+                    ),
+                    Instruction::Retract(a) => {
+                        dialog_corpus::Update::dissociate_in(novelty, layer, a.the, a.of, a.is)
+                    }
+                }
+            }
         }
         // A head written by succession elects the claim it succeeds
         // against the round view, as a transaction's own writes do
@@ -1215,6 +1646,121 @@ async fn emit_matches<'a>(
     Ok(())
 }
 
+/// The head each of `matches` writes, in order: its subject and the
+/// cells of the fields it binds. A match that leaves `this` unbound
+/// writes nothing and is left out. A cell whose descriptor names no
+/// layer lands in `selected`, the layer a session selects, unless its
+/// attribute is machinery under `dialog.`.
+fn written_heads(
+    rule: &InductiveRule,
+    selected: Option<&Entity>,
+    matches: &[Match],
+) -> Result<Vec<WrittenHead>, CommitError> {
+    let conclusion = rule.conclusion();
+    let mut heads: Vec<WrittenHead> = Vec::with_capacity(matches.len());
+    for matched in matches {
+        // The head subject. A rule whose premises leave `this` unbound
+        // has no cell to write; skip the binding.
+        let this = match matched.lookup(&Term::<Any>::var("this")) {
+            Ok(Binding::Present(Value::Entity(entity))) => entity,
+            _ => continue,
+        };
+
+        let mut cells = Vec::new();
+        for (name, field) in conclusion.with().iter() {
+            let Ok(Binding::Present(value)) = matched.lookup(&Term::<Any>::var(name)) else {
+                // Optional head fields the frame didn't bind emit
+                // nothing.
+                continue;
+            };
+            // A collection head writes under `domain/key`, the key
+            // being what the body bound to the field's key operand.
+            let relation = field.descriptor().the();
+            let attribute = match relation.attribute() {
+                Some(attribute) => attribute,
+                None => {
+                    let key = Term::<Any>::var(The::key_operand(name));
+                    let Ok(Binding::Present(Value::String(key))) = matched.lookup(&key) else {
+                        continue;
+                    };
+                    relation.entry(&key).map_err(|error| {
+                        CommitError::Induction(format!("head field {name}: {error}"))
+                    })?
+                }
+            };
+            // The layer the cell lands in (`in:`): the descriptor's
+            // constant, or the layer the body bound its variable to, or,
+            // with none named, the selected one; the primary's own name
+            // is no layer apart.
+            let named = match field.descriptor().layer() {
+                Some(Term::Constant(layer)) => Entity::try_from(layer.clone()).ok(),
+                Some(Term::Variable {
+                    name: Some(name), ..
+                }) => match matched.lookup(&Term::<Any>::var(name.as_ref())) {
+                    Ok(Binding::Present(Value::Entity(layer))) => Some(layer),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let layer = match named {
+                Some(layer) => Some(layer),
+                None if follows_selection(&attribute) => selected.cloned(),
+                None => None,
+            }
+            .filter(|layer| *layer != memory_layer());
+            cells.push((attribute, value, field.descriptor().pick().clone(), layer));
+        }
+        heads.push((this, cells));
+    }
+    Ok(heads)
+}
+
+/// What the writes of `share` under `last` into the session's own layer
+/// succeed: the rows `own` holds of each such cell, other than the one
+/// written, as retractions. The session's own layer is read live and
+/// its row of a cell stands above a write staged for it, so without the
+/// retraction a round would read the row the layer held, not the write.
+pub(crate) fn succession_in_own(own: &Ephemeral, share: &Changes) -> Changes {
+    let mut retractions = Changes::new();
+    for (of, the, change) in share.iter() {
+        let Change::Assert(is, Pick::Last) = change else {
+            continue;
+        };
+        for held in own.scan(&Selector::new().the(the.clone()).of(of.clone())) {
+            if held.is != *is {
+                dialog_corpus::Update::dissociate(
+                    &mut retractions,
+                    the.clone(),
+                    of.clone(),
+                    held.is,
+                );
+            }
+        }
+    }
+    retractions
+}
+
+/// The writes into layers among `changes`, as instructions: what a round's
+/// heads landing in a layer give the next round as stimulus, beside the
+/// writes bound for the primary.
+fn layered_instructions(changes: &Changes) -> Vec<Instruction> {
+    changes
+        .iter_in()
+        .map(|(_, of, the, change)| {
+            let fact = |is: &Value| Fact {
+                the: the.clone(),
+                of: of.clone(),
+                is: is.clone(),
+                cause: None,
+            };
+            match change {
+                Change::Assert(is, policy) => Instruction::Assert(fact(is), policy.clone()),
+                Change::Retract(is) => Instruction::Retract(fact(is)),
+            }
+        })
+        .collect()
+}
+
 /// Whether applying `instruction` would change the view: asserting a
 /// triple already present (or replacing with the value already held)
 /// contributes nothing, and neither does retracting an absent triple.
@@ -1223,19 +1769,108 @@ async fn emit_matches<'a>(
 /// frozen round view, so siblings within a round judge novelty against
 /// identical state.
 async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<bool, CommitError> {
+    is_novel_in(view, instruction, None).await
+}
+
+/// [`is_novel`], judged within `layer` when one is named: a head landing
+/// in a layer is novel unless that layer holds it.
+async fn is_novel_in<'a>(
+    view: &QueryEnv<'a>,
+    instruction: &Instruction,
+    layer: Option<&Entity>,
+) -> Result<bool, CommitError> {
     let fact = match instruction {
         Instruction::Assert(a, _) | Instruction::Retract(a) => a,
     };
-    let selector = Selector::new()
+    let mut selector = Selector::new()
         .the(fact.the.clone())
         .of(fact.of.clone())
         .is(fact.is.clone());
+    if let Some(layer) = layer {
+        selector = selector.in_layer(layer.clone());
+    }
     let present = !select(view, selector).await?.is_empty();
     Ok(match instruction {
         Instruction::Assert(_, _) => !present,
         Instruction::Retract(_) => present,
     })
 }
+
+/// A differential check, in tests only: every seeded firing also seeds
+/// its rows one by one, writes those matches through the same emission
+/// against the same frozen view, and what the two write must be the
+/// same, novelty and transients alike. Comparing what is written, not
+/// the heads found, sees the order of the matches too: two transient
+/// writes to one cell under `last` are decided by which comes later.
+/// It runs under every test that commits through a rule, so the
+/// equivalence [`seed_groups`] argues for is checked wherever those
+/// tests reach, not only where a test was written for it.
+#[cfg(test)]
+mod oracle {
+    use super::{InductiveRule, QueryEnv, Seeding, emit_matches, seeded_matches};
+    use crate::CommitError;
+    use dialog_corpus::{Changes, Entity, Fact};
+    use std::cell::Cell;
+
+    // Per thread: the test runtime drives each test on one thread.
+    thread_local! {
+        static EVALUATIONS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Notes `n` evaluations of grouped seeding on this thread.
+    pub(super) fn count(n: usize) {
+        EVALUATIONS.with(|evaluations| evaluations.set(evaluations.get() + n));
+    }
+
+    /// The evaluations grouped seeding made on this thread since the
+    /// last call, the oracle's own per-row ones not among them.
+    pub(super) fn evaluations() -> usize {
+        EVALUATIONS.with(|evaluations| evaluations.replace(0))
+    }
+
+    /// Seeding the rows of `rows` one by one, from the `before` the
+    /// grouped firing started from, writes the `novelty` and
+    /// `transients` the grouped firing wrote; panics with both when it
+    /// does not.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn agrees(
+        rule: &InductiveRule,
+        transient_head: bool,
+        selected: Option<&Entity>,
+        rows: &[Fact],
+        view: &QueryEnv<'_>,
+        before: (Changes, Changes),
+        novelty: &Changes,
+        transients: &Changes,
+    ) -> Result<(), CommitError> {
+        let per_row = seeded_matches(rule, rows, view, Seeding::PerRow).await?;
+        let (mut expected_novelty, mut expected_transients) = before;
+        if !per_row.is_empty() {
+            emit_matches(
+                rule,
+                transient_head,
+                selected,
+                per_row,
+                view,
+                &mut expected_novelty,
+                &mut expected_transients,
+            )
+            .await?;
+        }
+        assert_eq!(
+            novelty, &expected_novelty,
+            "grouped seeding must write the novelty seeding row by row writes"
+        );
+        assert_eq!(
+            transients, &expected_transients,
+            "grouped seeding must write the transients seeding row by row writes"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod subject_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1244,14 +1879,16 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::Composite;
     use crate::helpers::test_repo;
+    use crate::repository::source::Live;
     use crate::rules::Transient;
     use crate::{Branch, CommitError, RemoteSite, Revision};
     use anyhow::Result;
     use dialog_capability::{Fork, Provider};
     use dialog_common::ConditionalSync;
     use dialog_corpus::tree::CorpusNode;
-    use dialog_corpus::{Changes, Entity, Instruction, Selector, Value};
+    use dialog_corpus::{Changes, Entity, Fact, Instruction, Selector, Value};
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
@@ -3428,6 +4065,667 @@ mod tests {
             "the key is a position: {key}"
         );
         assert_eq!(value, &Value::Entity(item));
+        Ok(())
+    }
+
+    /// A command naming every field of a premise seeds the rule once per
+    /// field, and each evaluation finds the same binding. Induction writes
+    /// the head once, not once per seed: the head here is a set, which
+    /// keeps every copy written to it.
+    #[dialog_common::test]
+    async fn it_writes_a_head_once_however_many_rows_seed_it() -> Result<()> {
+        use dialog_corpus::Statement;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let rule: InductiveRule = serde_json::from_value(json!({
+            "description": "Record who an assign command names",
+            "assert!": {
+                "with": {
+                    "assignee": { "the": "issue/assignee", "as": "text:", "pick": "all:" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "issue": { "the": "cmd.assign/issue", "as": "entity:" },
+                            "who": { "the": "cmd.assign/who", "as": "text:" },
+                            "note": { "the": "cmd.assign/note", "as": "text:" }
+                        }
+                    },
+                    "where": {
+                        "issue": { "?": { "name": "this" } },
+                        "who": { "?": { "name": "assignee" } },
+                        "note": { "?": { "name": "note" } }
+                    }
+                }
+            ]
+        }))?;
+        branch
+            .transaction()
+            .assert(rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        let issue: Entity = "issue:1".parse()?;
+        let mut transients = Changes::new();
+        dialog_query::the!("cmd.assign/issue")
+            .of(command.clone())
+            .is(issue.clone())
+            .assert(&mut transients);
+        dialog_query::the!("cmd.assign/who")
+            .of(command.clone())
+            .is("member-0".to_string())
+            .assert(&mut transients);
+        dialog_query::the!("cmd.assign/note")
+            .of(command)
+            .is("from the board".to_string())
+            .assert(&mut transients);
+
+        let mut changes = Changes::new();
+        let view = Live::from(&branch).pin();
+        super::induce(
+            &view,
+            &Composite::of(view.to_source()),
+            &mut changes,
+            transients,
+            None,
+            &operator,
+        )
+        .await?;
+
+        assert_eq!(
+            asserted(&changes),
+            vec![(
+                "issue/assignee".to_string(),
+                issue,
+                Value::String("member-0".to_string())
+            )],
+            "three seeds of one binding write its head once"
+        );
+        Ok(())
+    }
+
+    /// The first positive concept premise of `rule`.
+    fn first_premise(rule: &InductiveRule) -> dialog_query::ConceptQuery {
+        use dialog_query::{Premise, Proposition};
+        rule.analysis()
+            .premises
+            .iter()
+            .find_map(|premise| match premise {
+                Premise::Assert(Proposition::Concept(query)) => Some(query.clone()),
+                _ => None,
+            })
+            .expect("the rule has a concept premise")
+    }
+
+    /// Rows of one entity may seed together when each binds one distinct
+    /// single attribute read under `last`, wherever the row came from. A
+    /// set field and two rows to one field each seed alone.
+    #[dialog_common::test]
+    fn it_groups_rows_that_bind_distinct_last_fields() -> Result<()> {
+        let rule: InductiveRule = serde_json::from_value(json!({
+            "assert!": {
+                "with": { "seen": { "the": "seen/who", "as": "text:", "pick": "all:" } }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "issue": { "the": "cmd.assign/issue", "as": "entity:" },
+                            "who": { "the": "cmd.assign/who", "as": "text:" },
+                            "tag": { "the": "cmd.assign/tag", "as": "text:", "pick": "all:" }
+                        }
+                    },
+                    "where": {
+                        "issue": { "?": { "name": "this" } },
+                        "who": { "?": { "name": "seen" } },
+                        "tag": { "?": { "name": "tag" } }
+                    }
+                }
+            ]
+        }))?;
+        let query = first_premise(&rule);
+        let row = |the: &str, of: &str, is: Value| -> Result<Fact> {
+            Ok(Fact {
+                the: the.parse()?,
+                of: of.parse()?,
+                is,
+                cause: None,
+            })
+        };
+        let text = |value: &str| Value::String(value.to_string());
+        let rows = vec![
+            row(
+                "cmd.assign/issue",
+                "cmd:1",
+                Value::Entity("issue:1".parse()?),
+            )?,
+            row("cmd.assign/who", "cmd:1", text("member-0"))?,
+            row("cmd.assign/tag", "cmd:1", text("urgent"))?,
+            row("cmd.assign/who", "cmd:2", text("member-1"))?,
+            row("cmd.assign/who", "cmd:3", text("member-2"))?,
+            row("cmd.assign/who", "cmd:3", text("member-3"))?,
+            row("unrelated/name", "cmd:1", text("ignored"))?,
+        ];
+        let mut groups = super::seed_groups(&query, &rows);
+        groups.sort();
+        assert_eq!(
+            groups,
+            vec![vec![0, 1], vec![2], vec![3], vec![4], vec![5]],
+            "cmd:1's `last` rows may seed together; its set row and cmd:3's \
+             two writes to one field seed alone; cmd:2's one row is a group \
+             of one; a row naming no field seeds nothing"
+        );
+        Ok(())
+    }
+
+    /// A rule whose premise reads three `last` fields of an assign
+    /// command and records the `who` it names as the issue's assignee.
+    fn assign_rule() -> Result<InductiveRule> {
+        Ok(serde_json::from_value(json!({
+            "description": "Record who an assign command names",
+            "assert!": {
+                "with": {
+                    "assignee": { "the": "issue/assignee", "as": "text:", "pick": "all:" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "issue": { "the": "cmd.assign/issue", "as": "entity:" },
+                            "who": { "the": "cmd.assign/who", "as": "text:" },
+                            "note": { "the": "cmd.assign/note", "as": "text:" }
+                        }
+                    },
+                    "where": {
+                        "issue": { "?": { "name": "this" } },
+                        "who": { "?": { "name": "assignee" } },
+                        "note": { "?": { "name": "note" } }
+                    }
+                }
+            ]
+        }))?)
+    }
+
+    /// The happy path: the command's three rows bind one evaluation,
+    /// which finds the one binding seeding them one by one finds.
+    #[dialog_common::test]
+    async fn it_evaluates_a_command_once_when_its_fields_bind_together() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(assign_rule()?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        let issue: Entity = "issue:1".parse()?;
+        super::oracle::evaluations();
+        branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.assign/issue")
+                    .of(command.clone())
+                    .is(issue.clone()),
+            )
+            .dispatch(
+                dialog_query::the!("cmd.assign/who")
+                    .of(command.clone())
+                    .is("member-0".to_string()),
+            )
+            .dispatch(
+                dialog_query::the!("cmd.assign/note")
+                    .of(command)
+                    .is("from the board".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            super::oracle::evaluations(),
+            1,
+            "three rows of one command, one evaluation"
+        );
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "issue/assignee", &issue).await?,
+            vec![Value::String("member-0".to_string())]
+        );
+        Ok(())
+    }
+
+    /// A session overlay row stands above every staged write, so the
+    /// round view elects the overlay's `who`, not the command's. Bound
+    /// together the rows find nothing; seeded one by one, the rows that
+    /// leave `who` free read the overlay's value and match. The firing
+    /// falls back to them and derives what they derive.
+    #[dialog_common::test]
+    async fn it_falls_back_when_an_overlay_row_stands_above_a_grouped_field() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(assign_rule()?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        let issue: Entity = "issue:1".parse()?;
+        branch.overlay().assert(
+            dialog_query::the!("cmd.assign/who")
+                .of(command.clone())
+                .is("from-the-session".to_string()),
+        )?;
+        super::oracle::evaluations();
+        branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.assign/issue")
+                    .of(command.clone())
+                    .is(issue.clone()),
+            )
+            .dispatch(
+                dialog_query::the!("cmd.assign/who")
+                    .of(command.clone())
+                    .is("member-0".to_string()),
+            )
+            .dispatch(
+                dialog_query::the!("cmd.assign/note")
+                    .of(command)
+                    .is("from the board".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            super::oracle::evaluations(),
+            4,
+            "the group found nothing, so each of its three rows was seeded alone"
+        );
+        branch.overlay().clear();
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "issue/assignee", &issue).await?,
+            vec![Value::String("from-the-session".to_string())],
+            "the rows left free read the overlay's value, as seeding them alone does"
+        );
+        Ok(())
+    }
+
+    /// A deductive rule derives `who` from `alias`; its candidate stands
+    /// past the commit's own `who` claim, so `last` elects the derived
+    /// value. The commit writes `who` itself, so the rule is seeded, not
+    /// fully evaluated, and the group binding the commit's `who` finds
+    /// nothing. The firing falls back to the rows one by one.
+    #[dialog_common::test]
+    async fn it_falls_back_when_a_derived_candidate_displaces_a_grouped_field() -> Result<()> {
+        use dialog_query::DeductiveRule;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alias: DeductiveRule = serde_json::from_value(json!({
+            "deduce": {
+                "with": { "who": { "the": "cmd.assign/who", "as": "text:" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "alias": { "the": "cmd.assign/alias", "as": "text:" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "alias": { "?": { "name": "who" } }
+                }
+            }]
+        }))?;
+        branch
+            .transaction()
+            .assert(alias)
+            .assert(assign_rule()?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        let issue: Entity = "issue:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("cmd.assign/issue")
+                    .of(command.clone())
+                    .is(issue.clone()),
+            )
+            .assert(
+                dialog_query::the!("cmd.assign/who")
+                    .of(command.clone())
+                    .is("member-0".to_string()),
+            )
+            .assert(
+                dialog_query::the!("cmd.assign/note")
+                    .of(command.clone())
+                    .is("from the board".to_string()),
+            )
+            .assert(
+                dialog_query::the!("cmd.assign/alias")
+                    .of(command)
+                    .is("alias-0".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        let assignees = values(&branch, &operator, "issue/assignee", &issue).await?;
+        assert!(
+            assignees.contains(&Value::String("alias-0".to_string())),
+            "the rows left free read the derived `who`, as seeding them alone does: {assignees:?}"
+        );
+        Ok(())
+    }
+
+    /// A durable `who` written in round 1 and a transient `who` emitted
+    /// in round 2 for the same command stand equal in round 3's view:
+    /// both at the pending edition, neither succeeding the other, so
+    /// `last` elects by [`Value::tiebreak`]. The values are chosen so
+    /// the durable one wins. The command's transient rows group in
+    /// round 3 and bind the transient `who`, which `last` does not
+    /// elect, so the group finds nothing; seeded one by one, the rows
+    /// that leave `who` free read the durable value and match. The
+    /// firing falls back to them and writes what they write.
+    ///
+    /// Checking a group against the stimulus alone (whether the round's
+    /// rows hold another claim of a grouped cell) could not see this:
+    /// round 3's stimulus holds one `who`, the transient, and the claim
+    /// that displaces it was folded into the commit two rounds before.
+    #[dialog_common::test]
+    async fn it_falls_back_when_a_round_one_write_ties_a_round_two_transient() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // Round 1 stages the command's fields as transients; round 2
+        // turns them into the command, also transient; round 3 fires
+        // `assign_rule` on it.
+        let staged = json!({
+            "who": { "the": "stage/who", "as": "text:" },
+            "issue": { "the": "stage/issue", "as": "entity:" },
+            "note": { "the": "stage/note", "as": "text:" }
+        });
+        let command_fields = json!({
+            "who": { "the": "cmd.assign/who", "as": "text:" },
+            "issue": { "the": "cmd.assign/issue", "as": "entity:" },
+            "note": { "the": "cmd.assign/note", "as": "text:" }
+        });
+        let bind = json!({
+            "this": { "?": { "name": "this" } },
+            "who": { "?": { "name": "who" } },
+            "issue": { "?": { "name": "issue" } },
+            "note": { "?": { "name": "note" } }
+        });
+        let stage: InductiveRule = serde_json::from_value(json!({
+            "assert!": { "with": staged },
+            "when": [{
+                "assert": { "with": {
+                    "who": { "the": "src/who", "as": "text:" },
+                    "issue": { "the": "src/issue", "as": "entity:" },
+                    "note": { "the": "src/note", "as": "text:" }
+                } },
+                "where": bind
+            }]
+        }))?;
+        let issue_command: InductiveRule = serde_json::from_value(json!({
+            "assert!": { "with": command_fields },
+            "when": [{ "assert": { "with": staged }, "where": bind }]
+        }))?;
+        let transient = |with: &serde_json::Value| -> Result<Transient> {
+            let concept: ConceptDescriptor = serde_json::from_value(json!({ "with": with }))?;
+            Ok(Transient(concept.this()))
+        };
+        branch
+            .transaction()
+            .assert(assign_rule()?)
+            .assert(stage)
+            .assert(issue_command)
+            .assert(transient(&staged)?)
+            .assert(transient(&command_fields)?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let (a, b) = (
+            Value::String("member-a".to_string()),
+            Value::String("member-b".to_string()),
+        );
+        let (durable, transient) = if a.tiebreak() > b.tiebreak() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        let (Value::String(durable_who), Value::String(transient_who)) =
+            (durable.clone(), transient)
+        else {
+            unreachable!("both values are text");
+        };
+
+        let command: Entity = "cmd:1".parse()?;
+        let issue: Entity = "issue:1".parse()?;
+        super::oracle::evaluations();
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("cmd.assign/who")
+                    .of(command.clone())
+                    .is(durable_who),
+            )
+            .assert(
+                dialog_query::the!("src/who")
+                    .of(command.clone())
+                    .is(transient_who),
+            )
+            .assert(
+                dialog_query::the!("src/issue")
+                    .of(command.clone())
+                    .is(issue.clone()),
+            )
+            .assert(
+                dialog_query::the!("src/note")
+                    .of(command)
+                    .is("from the board".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            super::oracle::evaluations(),
+            // Round 1: `assign_rule` seeded by the durable `who` alone,
+            // and `stage` by its three rows together. Round 2:
+            // `issue_command` by its three rows together. Round 3:
+            // `assign_rule` by the command's three rows together, which
+            // find nothing, then by each alone.
+            1 + 1 + 1 + (1 + 3),
+            "the round-3 group found nothing, so each of its three rows was seeded alone"
+        );
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "issue/assignee", &issue).await?,
+            vec![durable],
+            "the rows left free read the durable `who` the tie elects, as seeding them alone does"
+        );
+        Ok(())
+    }
+
+    /// A row the watermark lag carries in groups with this commit's rows
+    /// of the same entity: the issue arrives by a raw commit, the `who`
+    /// and `note` by an inducing one, and the firing derives the head
+    /// as seeding them one by one does.
+    #[dialog_common::test]
+    async fn it_groups_a_lag_row_with_the_commit_rows_of_its_entity() -> Result<()> {
+        use futures_util::stream;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(assign_rule()?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        let issue: Entity = "issue:1".parse()?;
+        branch
+            .commit(stream::iter(vec![Instruction::Assert(
+                Fact {
+                    the: "cmd.assign/issue".parse()?,
+                    of: command.clone(),
+                    is: Value::Entity(issue.clone()),
+                    cause: None,
+                },
+                dialog_corpus::Pick::Last,
+            )]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        super::oracle::evaluations();
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("cmd.assign/who")
+                    .of(command.clone())
+                    .is("member-0".to_string()),
+            )
+            .assert(
+                dialog_query::the!("cmd.assign/note")
+                    .of(command)
+                    .is("from the board".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            super::oracle::evaluations(),
+            1,
+            "the lag's row and the commit's two, one evaluation"
+        );
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "issue/assignee", &issue).await?,
+            vec![Value::String("member-0".to_string())]
+        );
+        Ok(())
+    }
+
+    /// A set field shows every value it holds, not only the one this
+    /// commit adds, so a row binding it never seeds with the others:
+    /// the title row, seeded alone, still finds the tag the branch
+    /// already held.
+    #[dialog_common::test]
+    async fn it_finds_older_values_of_a_set_field_a_row_leaves_free() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let rule: InductiveRule = serde_json::from_value(json!({
+            "description": "Record each tag a titled document holds",
+            "assert!": {
+                "with": { "tag": { "the": "seen/tag", "as": "text:", "pick": "all:" } }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "tag": { "the": "doc/tag", "as": "text:", "pick": "all:" },
+                            "title": { "the": "doc/title", "as": "text:" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "tag": { "?": { "name": "tag" } },
+                        "title": { "?": { "name": "title" } }
+                    }
+                }
+            ]
+        }))?;
+        let doc: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/tag")
+                    .of(doc.clone())
+                    .is("old".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        branch
+            .transaction()
+            .assert(rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/tag")
+                    .of(doc.clone())
+                    .is("new".to_string()),
+            )
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Title".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let mut tags = values(&branch, &operator, "seen/tag", &doc).await?;
+        tags.sort_by_key(|value| format!("{value:?}"));
+        assert_eq!(
+            tags,
+            vec![
+                Value::String("new".to_string()),
+                Value::String("old".to_string())
+            ],
+            "the title's seed reaches the tag the branch already held"
+        );
         Ok(())
     }
 

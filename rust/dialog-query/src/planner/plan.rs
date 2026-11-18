@@ -81,7 +81,8 @@ pub enum Plan {
     Concept(Header, ConceptQuery),
     /// Resolver application: per input row, perform the resolver's
     /// idempotent effect through the environment and project rows.
-    Resolver(Header, ResolverQuery),
+    /// Boxed, as in [`Proposition::Resolver`].
+    Resolver(Header, Box<ResolverQuery>),
     /// Negation as a filter: a match passes only if evaluating the
     /// inner plan against it produces no rows.
     Negate(Header, Box<Plan>),

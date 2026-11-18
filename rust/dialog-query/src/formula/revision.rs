@@ -17,12 +17,14 @@
 //!   names — a tampered or fabricated record yields no rows.
 //! - The `this` output is the revision entity *derived* from the record
 //!   (origin from `(lineage, issuer)`, edition from the parents), not
-//!   the entity the record was found at. Sharing the `this` variable
+//!   the entity the record was found at. [`RevisionSlot`] gives the
+//!   entities that revision's record may be stored at, and joining it
 //!   with the scan's `of` makes the join itself reject a valid record
 //!   replayed at another revision entity.
 
-use dialog_corpus::history::{RevisionRecord, verify_issuer_signature};
+use dialog_corpus::history::{RevisionRecord, Version, verify_issuer_signature};
 use std::collections::HashSet;
+use std::iter;
 
 use crate::formula::Input;
 use crate::types::RecordBytes;
@@ -182,6 +184,37 @@ impl RevisionParent {
                 this: this.clone(),
                 parent: parent.entity(),
             })
+            .collect()
+    }
+}
+
+/// The entities a revision's record may be stored at: the revision
+/// entity itself, and the name an older release gave the same revision
+/// (`did:key:z6Mk…`, before revisions had the `revision:` scheme). One
+/// row each; an entity that names no revision yields only itself.
+///
+/// The projection rules read a record at either, so a tree an older
+/// release wrote projects under the current names. Registered as
+/// `dialog/revision-slot`.
+#[derive(Debug, Clone, Formula)]
+pub struct RevisionSlot {
+    /// The revision entity.
+    pub of: Entity,
+    /// An entity the revision's record may be stored at.
+    #[output]
+    pub is: Entity,
+}
+
+impl RevisionSlot {
+    /// The revision entity, then its older name.
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
+        let slot = |is: Entity| RevisionSlot {
+            of: input.of.clone(),
+            is,
+        };
+        iter::once(input.of.clone())
+            .chain(Version::legacy_of(&input.of))
+            .map(slot)
             .collect()
     }
 }
@@ -403,6 +436,27 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert!(cache.is_empty());
+    }
+
+    #[dialog_common::test]
+    fn it_gives_a_revision_both_names_its_record_may_be_under() {
+        let version = Version::new(Origin::from([3u8; 32]), Edition::new(4));
+        let slots = |of: Entity| -> Vec<Entity> {
+            RevisionSlot::compute(RevisionSlotInput { of })
+                .into_iter()
+                .map(|slot| slot.is)
+                .collect()
+        };
+        assert_eq!(
+            slots(version.entity()),
+            vec![version.entity(), version.legacy_entity()]
+        );
+
+        // An entity that names no revision is its own only slot, the
+        // older name included: nothing is read at a third entity.
+        for other in [version.legacy_entity(), "user:alice".parse().unwrap()] {
+            assert_eq!(slots(other.clone()), vec![other]);
+        }
     }
 
     #[test]

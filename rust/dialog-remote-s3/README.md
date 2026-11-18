@@ -49,7 +49,7 @@ main
     .await?;
 
 main
-    .pull()
+    .pull(dialog_repository::Download::MinimalRanges)
     .perform(&operator)
     .await?;
 ```

@@ -2,6 +2,7 @@ use core::fmt;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
+use std::sync::Arc;
 
 use dialog_common::ConditionalSend;
 
@@ -195,6 +196,19 @@ pub trait Provider<C: Command> {
 /// # }
 /// ```
 impl<C, T> Provider<C> for &T
+where
+    C: Command,
+    T: Provider<C> + ?Sized,
+{
+    fn execute(&self, input: C::Input) -> Resume<'_, C::Output> {
+        (**self).execute(input)
+    }
+}
+
+/// A shared environment provides what the environment provides: an
+/// `Arc<dyn Env>` erases an environment's type and stays `'static`,
+/// for code that holds environments of any type.
+impl<C, T> Provider<C> for Arc<T>
 where
     C: Command,
     T: Provider<C> + ?Sized,

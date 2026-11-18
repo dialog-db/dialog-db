@@ -16,6 +16,10 @@ import {
     default as init,
 } from '{MODULE_JS}';
 
+// Variables the runner was asked to pass (WBG_POOL_PASS_ENV), for tests to
+// read, as a wasm test has no process environment.
+{ENV}
+
 function grab(id) {
     const element = document.getElementById(id);
     return element ? element.textContent : '';

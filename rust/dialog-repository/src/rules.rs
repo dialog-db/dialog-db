@@ -64,7 +64,7 @@ use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::formula::revision::{
-    RevisionAttestationQuery, RevisionParentQuery, RevisionQuery,
+    RevisionAttestationQuery, RevisionParentQuery, RevisionQuery, RevisionSlotQuery,
 };
 use dialog_query::rule::statement::{Reach, derives_entities};
 use dialog_query::session::Quarantine;
@@ -436,30 +436,45 @@ fn ancestor_rules(conclusion: ConceptDescriptor, parent: ConceptDescriptor) -> V
     vec![base, step]
 }
 
-/// Assemble a record-projection rule: scan the revision entity's
-/// `dialog.db/revision` fact into `?record`, then apply `formula` to
-/// project its fields. The formula derives `?this` from the record's
-/// own contents, so sharing the variable with the scan's entity makes
-/// the join reject a record replayed at another revision entity.
+/// Assemble a record-projection rule: scan a `dialog.db/revision` fact
+/// into `?record`, then apply `formula` to project its fields.
+///
+/// The formula derives `?this` from the record's own contents, and
+/// `dialog/revision-slot` gives the entities that revision's record may
+/// be stored at (`revision:…`, and the `did:key:…` an older release
+/// wrote it under). The scan reads at one of those, so a record replayed
+/// at another entity joins nothing, and a record an older release wrote
+/// projects under the revision's current name. Asked of one revision,
+/// the rule is the two lookups; asked of none, it is one scan of the
+/// attribute.
 fn projection_rule(conclusion: ConceptDescriptor, formula: FormulaQuery) -> DeductiveRule {
-    DeductiveRule::new(conclusion, vec![record_scan(), formula.into()])
-        .expect("the revision projection rule compiles")
+    let mut premises = record_scan().to_vec();
+    premises.push(formula.into());
+    DeductiveRule::new(conclusion, premises).expect("the revision projection rule compiles")
 }
 
-/// The scan binding `record` to the revision record on `this`.
-fn record_scan() -> Premise {
-    AttributeQuery::new(
+/// The premises binding `record` to the revision record of `this`: the
+/// entities `dialog/revision-slot` says it may be stored at, and the scan
+/// of the record at one of them.
+fn record_scan() -> [Premise; 2] {
+    let slot: FormulaQuery = RevisionSlotQuery {
+        of: Term::var("this"),
+        is: Term::var("at"),
+    }
+    .into();
+    let scan: Premise = AttributeQuery::new(
         Term::Constant(Value::Symbol(
             REVISION_ATTRIBUTE
                 .parse()
                 .expect("the revision attribute is valid"),
         )),
-        Term::var("this"),
+        Term::var("at"),
         Term::<Any>::typed_var("record", Kind::from(dialog_query::Type::Record)),
         Term::blank(),
         Some(Cardinality::One),
     )
-    .into()
+    .into();
+    [slot.into(), scan]
 }
 
 /// The rules concluding [`schema::RevisionAttestation`], one per principal
@@ -504,16 +519,10 @@ fn attestation_rules(conclusion: ConceptDescriptor) -> Vec<DeductiveRule> {
         attested: Term::var("attested"),
     }
     .into();
-    let authority = DeductiveRule::new(
-        conclusion,
-        vec![
-            record_scan(),
-            revision("issuer").into(),
-            delegation,
-            attested.into(),
-        ],
-    )
-    .expect("the revision attestation rule compiles");
+    let mut premises = record_scan().to_vec();
+    premises.extend([revision("issuer").into(), delegation, attested.into()]);
+    let authority =
+        DeductiveRule::new(conclusion, premises).expect("the revision attestation rule compiles");
 
     vec![issuer, authority]
 }

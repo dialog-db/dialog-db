@@ -185,6 +185,32 @@ impl<'a> KeyCursor<'a> {
         Ok(())
     }
 
+    /// The length of the key the next [`advance`](Self::advance) decodes,
+    /// read without decoding it. A record `advance` would refuse is
+    /// refused here too, so a length is only ever one the block holds.
+    /// `advance` keeps its own checks rather than sharing these: it runs
+    /// once per key, this once per leaf.
+    pub fn next_len(&self) -> Result<usize, DialogSearchTreeError> {
+        let (shared, at) = read_varint(self.stream, self.position)?;
+        let (suffix_length, at) = read_varint(self.stream, at)?;
+        let end = at
+            .checked_add(suffix_length as usize)
+            .filter(|end| *end <= self.stream.len())
+            .ok_or_else(|| {
+                DialogSearchTreeError::Encoding("Key stream ended inside a suffix".into())
+            })?;
+        let retained = self
+            .prefix_length
+            .checked_add(shared as usize)
+            .filter(|retained| *retained <= self.key.len())
+            .ok_or_else(|| {
+                DialogSearchTreeError::Encoding(
+                    "Key stream shares more bytes than the previous key holds".into(),
+                )
+            })?;
+        Ok(retained + (end - at))
+    }
+
     /// The current full key. Valid only after a successful
     /// [`advance`](Self::advance).
     pub fn key(&self) -> &[u8] {
@@ -199,9 +225,44 @@ mod tests {
     use anyhow::Result;
 
     use super::{KeyCursor, encode_keys, read_varint, write_varint};
+    use crate::DialogSearchTreeError;
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// A record's length is only reported once the record is known to fit:
+    /// a suffix past the stream's end, or more shared bytes than the key
+    /// holds, is refused, with no length sized from it, and no overflow on
+    /// a 32-bit target.
+    #[dialog_common::test]
+    async fn it_refuses_a_length_the_stream_does_not_hold() -> Result<()> {
+        for (shared, suffix) in [(0, u32::MAX), (u32::MAX, 0), (u32::MAX, u32::MAX), (1, 0)] {
+            let mut stream = Vec::new();
+            write_varint(&mut stream, shared);
+            write_varint(&mut stream, suffix);
+            let cursor = KeyCursor::new(b"", &stream, 0);
+            assert!(
+                matches!(cursor.next_len(), Err(DialogSearchTreeError::Encoding(_))),
+                "next_len of ({shared}, {suffix})"
+            );
+        }
+        // `advance` refuses a record that shares more than the key holds.
+        let mut stream = Vec::new();
+        write_varint(&mut stream, 1);
+        write_varint(&mut stream, 0);
+        let mut cursor = KeyCursor::new(b"", &stream, 0);
+        assert!(matches!(
+            cursor.advance(),
+            Err(DialogSearchTreeError::Encoding(_))
+        ));
+
+        let (prefix, stream) = encode_keys(&[b"ab".as_slice(), b"ac".as_slice()]);
+        let mut cursor = KeyCursor::new(&prefix, &stream, 0);
+        assert_eq!(cursor.next_len()?, 2);
+        cursor.advance()?;
+        assert_eq!(cursor.next_len()?, 2);
+        Ok(())
+    }
 
     #[dialog_common::test]
     async fn it_round_trips_varints() -> Result<()> {

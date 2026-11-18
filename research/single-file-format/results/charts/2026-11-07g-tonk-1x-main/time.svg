@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 460" font-family="system-ui, sans-serif" font-size="12">
+<rect width="960" height="460" fill="#ffffff"/>
+<text x="70" y="24" font-size="16" font-weight="600">Time against main/fs, lower is better</text>
+<text x="70" y="44" fill="#4b5563">dataset 3ea7f49117155b92; median of 3 runs, whiskers from the lowest to the highest run</text>
+<line x1="70" x2="940" y1="350.0" y2="350.0" stroke="#e5e7eb"/>
+<text x="64" y="354.0" text-anchor="end" fill="#4b5563">0.00</text>
+<line x1="70" x2="940" y1="294.0" y2="294.0" stroke="#e5e7eb"/>
+<text x="64" y="298.0" text-anchor="end" fill="#4b5563">0.31</text>
+<line x1="70" x2="940" y1="238.0" y2="238.0" stroke="#e5e7eb"/>
+<text x="64" y="242.0" text-anchor="end" fill="#4b5563">0.61</text>
+<line x1="70" x2="940" y1="182.0" y2="182.0" stroke="#e5e7eb"/>
+<text x="64" y="186.0" text-anchor="end" fill="#4b5563">0.92</text>
+<line x1="70" x2="940" y1="126.0" y2="126.0" stroke="#e5e7eb"/>
+<text x="64" y="130.0" text-anchor="end" fill="#4b5563">1.23</text>
+<line x1="70" x2="940" y1="70.0" y2="70.0" stroke="#e5e7eb"/>
+<text x="64" y="74.0" text-anchor="end" fill="#4b5563">1.54</text>
+<text x="16" y="210.0" transform="rotate(-90 16 210.0)" text-anchor="middle" fill="#4b5563">× main/fs</text>
+<line x1="70" x2="940" y1="167.7" y2="167.7" stroke="#111827" stroke-dasharray="4 3"/>
+<rect x="79.7" y="167.7" width="17.3" height="182.3" fill="#6b7280"/>
+<line x1="88.3" x2="88.3" y1="219.1" y2="163.8" stroke="#111827"/>
+<rect x="99.0" y="193.7" width="17.3" height="156.3" fill="#2563eb"/>
+<line x1="107.7" x2="107.7" y1="200.8" y2="188.0" stroke="#111827"/>
+<rect x="118.3" y="200.2" width="17.3" height="149.8" fill="#d97706"/>
+<line x1="127.0" x2="127.0" y1="206.5" y2="194.9" stroke="#111827"/>
+<rect x="137.7" y="192.1" width="17.3" height="157.9" fill="#059669"/>
+<line x1="146.3" x2="146.3" y1="206.7" y2="172.6" stroke="#111827"/>
+<text x="118.3" y="366" text-anchor="end" transform="rotate(-30 118.3 366)">v2/issue cold</text>
+<rect x="176.3" y="167.7" width="17.3" height="182.3" fill="#6b7280"/>
+<line x1="185.0" x2="185.0" y1="171.8" y2="164.6" stroke="#111827"/>
+<rect x="195.7" y="162.0" width="17.3" height="188.0" fill="#2563eb"/>
+<line x1="204.3" x2="204.3" y1="162.7" y2="156.6" stroke="#111827"/>
+<rect x="215.0" y="160.8" width="17.3" height="189.2" fill="#d97706"/>
+<line x1="223.7" x2="223.7" y1="164.6" y2="148.6" stroke="#111827"/>
+<rect x="234.3" y="163.2" width="17.3" height="186.8" fill="#059669"/>
+<line x1="243.0" x2="243.0" y1="165.6" y2="160.7" stroke="#111827"/>
+<text x="215.0" y="366" text-anchor="end" transform="rotate(-30 215.0 366)">v2/issue warm</text>
+<rect x="273.0" y="167.7" width="17.3" height="182.3" fill="#6b7280"/>
+<line x1="281.7" x2="281.7" y1="184.3" y2="163.5" stroke="#111827"/>
+<rect x="292.3" y="171.6" width="17.3" height="178.4" fill="#2563eb"/>
+<line x1="301.0" x2="301.0" y1="177.1" y2="169.4" stroke="#111827"/>
+<rect x="311.7" y="174.8" width="17.3" height="175.2" fill="#d97706"/>
+<line x1="320.3" x2="320.3" y1="182.2" y2="166.7" stroke="#111827"/>
+<rect x="331.0" y="177.5" width="17.3" height="172.5" fill="#059669"/>
+<line x1="339.7" x2="339.7" y1="180.9" y2="172.3" stroke="#111827"/>
+<text x="311.7" y="366" text-anchor="end" transform="rotate(-30 311.7 366)">memo/full cold</text>
+<rect x="369.7" y="167.7" width="17.3" height="182.3" fill="#6b7280"/>
+<line x1="378.3" x2="378.3" y1="187.0" y2="165.6" stroke="#111827"/>
+<rect x="389.0" y="175.4" width="17.3" height="174.6" fill="#2563eb"/>
+<line x1="397.7" x2="397.7" y1="178.4" y2="123.5" stroke="#111827"/>
+<rect x="408.3" y="183.4" width="17.3" height="166.6" fill="#d97706"/>
+<line x1="417.0" x2="417.0" y1="184.2" y2="162.3" stroke="#111827"/>
+<rect x="427.7" y="180.2" width="17.3" height="169.8" fill="#059669"/>
+<line x1="436.3" x2="436.3" y1="183.3" y2="165.8" stroke="#111827"/>
+<text x="408.3" y="366" text-anchor="end" transform="rotate(-30 408.3 366)">issue detail cold</text>
+<rect x="466.3" y="167.7" width="17.3" height="182.3" fill="#6b7280"/>
+<line x1="475.0" x2="475.0" y1="181.1" y2="167.5" stroke="#111827"/>
+<rect x="485.7" y="155.6" width="17.3" height="194.4" fill="#2563eb"/>
+<line x1="494.3" x2="494.3" y1="155.6" y2="154.3" stroke="#111827"/>
+<rect x="505.0" y="154.7" width="17.3" height="195.3" fill="#d97706"/>
+<line x1="513.7" x2="513.7" y1="158.2" y2="150.1" stroke="#111827"/>
+<rect x="524.3" y="154.7" width="17.3" height="195.3" fill="#059669"/>
+<line x1="533.0" x2="533.0" y1="161.8" y2="152.1" stroke="#111827"/>
+<text x="505.0" y="366" text-anchor="end" transform="rotate(-30 505.0 366)">command</text>
+<rect x="563.0" y="167.7" width="17.3" height="182.3" fill="#6b7280"/>
+<line x1="571.7" x2="571.7" y1="172.7" y2="164.0" stroke="#111827"/>
+<rect x="582.3" y="147.0" width="17.3" height="203.0" fill="#2563eb"/>
+<line x1="591.0" x2="591.0" y1="151.8" y2="137.1" stroke="#111827"/>
+<rect x="601.7" y="152.9" width="17.3" height="197.1" fill="#d97706"/>
+<line x1="610.3" x2="610.3" y1="161.3" y2="139.8" stroke="#111827"/>
+<rect x="621.0" y="158.7" width="17.3" height="191.3" fill="#059669"/>
+<line x1="629.7" x2="629.7" y1="158.9" y2="153.3" stroke="#111827"/>
+<text x="601.7" y="366" text-anchor="end" transform="rotate(-30 601.7 366)">command after pull</text>
+<rect x="659.7" y="167.7" width="17.3" height="182.3" fill="#6b7280"/>
+<line x1="668.3" x2="668.3" y1="179.1" y2="158.5" stroke="#111827"/>
+<rect x="679.0" y="96.2" width="17.3" height="253.8" fill="#2563eb"/>
+<line x1="687.7" x2="687.7" y1="105.9" y2="95.5" stroke="#111827"/>
+<rect x="698.3" y="116.4" width="17.3" height="233.6" fill="#d97706"/>
+<line x1="707.0" x2="707.0" y1="122.5" y2="105.2" stroke="#111827"/>
+<rect x="717.7" y="119.6" width="17.3" height="230.4" fill="#059669"/>
+<line x1="726.3" x2="726.3" y1="124.7" y2="114.0" stroke="#111827"/>
+<text x="698.3" y="366" text-anchor="end" transform="rotate(-30 698.3 366)">pull</text>
+<rect x="756.3" y="167.7" width="17.3" height="182.3" fill="#6b7280"/>
+<line x1="765.0" x2="765.0" y1="173.7" y2="160.8" stroke="#111827"/>
+<rect x="775.7" y="176.1" width="17.3" height="173.9" fill="#2563eb"/>
+<line x1="784.3" x2="784.3" y1="178.5" y2="174.3" stroke="#111827"/>
+<rect x="795.0" y="170.0" width="17.3" height="180.0" fill="#d97706"/>
+<line x1="803.7" x2="803.7" y1="179.9" y2="169.6" stroke="#111827"/>
+<rect x="814.3" y="173.8" width="17.3" height="176.2" fill="#059669"/>
+<line x1="823.0" x2="823.0" y1="175.7" y2="173.0" stroke="#111827"/>
+<text x="795.0" y="366" text-anchor="end" transform="rotate(-30 795.0 366)">push</text>
+<rect x="853.0" y="167.7" width="17.3" height="182.3" fill="#6b7280"/>
+<line x1="861.7" x2="861.7" y1="173.1" y2="158.6" stroke="#111827"/>
+<rect x="872.3" y="153.8" width="17.3" height="196.2" fill="#2563eb"/>
+<line x1="881.0" x2="881.0" y1="158.9" y2="152.1" stroke="#111827"/>
+<rect x="891.7" y="155.3" width="17.3" height="194.7" fill="#d97706"/>
+<line x1="900.3" x2="900.3" y1="159.8" y2="151.4" stroke="#111827"/>
+<rect x="911.0" y="151.2" width="17.3" height="198.8" fill="#059669"/>
+<line x1="919.7" x2="919.7" y1="158.7" y2="147.6" stroke="#111827"/>
+<text x="891.7" y="366" text-anchor="end" transform="rotate(-30 891.7 366)">v2/issue poll</text>
+<rect x="345" y="436" width="12" height="12" fill="#6b7280"/>
+<text x="363" y="446">main/fs</text>
+<rect x="436" y="436" width="12" height="12" fill="#2563eb"/>
+<text x="454" y="446">file 9</text>
+<rect x="520" y="436" width="12" height="12" fill="#d97706"/>
+<text x="538" y="446">file 9, mapped once</text>
+<rect x="695" y="436" width="12" height="12" fill="#059669"/>
+<text x="713" y="446">file 9, mapped once, fanout 8</text>
+</svg>

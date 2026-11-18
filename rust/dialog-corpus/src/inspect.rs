@@ -1,11 +1,14 @@
-//! Tree-node inspection: pure decoders over node blocks an
-//! [`archive::Load`](dialog_effects::archive::Load) fetches.
+//! Tree-node inspection: pure readings of a search-tree node.
 //!
-//! Together these back the query engine's tree procedures (`tree/node`,
-//! `tree/span`, `tree/key`, `tree/manifest`): a `Load` fetches a raw
-//! node block by content hash through the evaluation environment, and
-//! the `inspect_*` functions project the node's *logical model* out of
-//! the fetched bytes without touching storage:
+//! Together these back the query engine's tree resolvers (`tree/node`,
+//! `tree/span`, `tree/entry`, `tree/block`): a resolver asks the
+//! evaluation environment for a node by its content hash, and the
+//! functions here project the node's *logical model* out of it without
+//! touching storage. Each reading comes in two forms: over a decoded
+//! node ([`summary`], [`spans`], [`keys`], [`entries`],
+//! [`blob_records`], [`manifest`]), which is what an environment hands
+//! out and keeps, and over a block's bytes (`inspect_*`), which decodes
+//! first.
 //!
 //! - a node is an index (a table of spans) or a segment (a run of
 //!   entries), with a byte size, a scale estimate, and pending novelty;
@@ -188,8 +191,18 @@ pub struct ManifestSummary {
 
 /// Decode the node behind `bytes` into its [`NodeSummary`].
 pub fn inspect_node(bytes: Vec<u8>) -> Result<NodeSummary, DialogCorpusError> {
-    let size = bytes.len() as u64;
-    let node = CorpusNode::try_from(Buffer::from(bytes))?;
+    summary(&CorpusNode::try_from(Buffer::from(bytes))?)
+}
+
+/// What `node` is: its kind, the size of its block, and its counts.
+///
+/// This and the functions beside it read a node already decoded, which
+/// is what an environment's node layer hands out and keeps
+/// ([`nodes::Read`](dialog_search_tree::nodes::Read)): a reader that asks
+/// for several parts of one node decodes it once. The `inspect_*`
+/// functions are the same readings for a caller holding only bytes.
+pub fn summary(node: &CorpusNode) -> Result<NodeSummary, DialogCorpusError> {
+    let size = node.buffer()?.as_ref().len() as u64;
     let scale = node.scale().as_u8() as u64;
 
     Ok(match node.as_index() {
@@ -217,7 +230,12 @@ pub fn inspect_node(bytes: Vec<u8>) -> Result<NodeSummary, DialogCorpusError> {
 /// span, in key order. A segment has no spans and yields an empty
 /// vector (not an error — queries union over mixed levels).
 pub fn inspect_spans(bytes: Vec<u8>) -> Result<Vec<SpanSummary>, DialogCorpusError> {
-    let node = CorpusNode::try_from(Buffer::from(bytes))?;
+    spans(&CorpusNode::try_from(Buffer::from(bytes))?)
+}
+
+/// One [`SpanSummary`] per span of the index node `node`, in key order;
+/// none for a segment.
+pub fn spans(node: &CorpusNode) -> Result<Vec<SpanSummary>, DialogCorpusError> {
     let Ok(index) = node.as_index() else {
         return Ok(Vec::new());
     };
@@ -247,7 +265,7 @@ pub fn inspect_spans(bytes: Vec<u8>) -> Result<Vec<SpanSummary>, DialogCorpusErr
             rank,
             novelty: index
                 .buffer_for(at)
-                .map(|buffer| buffer.count.to_native() as u64)
+                .map(|buffer| buffer.count() as u64)
                 .unwrap_or(0),
         });
     }
@@ -258,7 +276,12 @@ pub fn inspect_spans(bytes: Vec<u8>) -> Result<Vec<SpanSummary>, DialogCorpusErr
 /// entry, in entry order. An index node has no entries and yields an
 /// empty vector.
 pub fn inspect_keys(bytes: Vec<u8>) -> Result<Vec<KeySummary>, DialogCorpusError> {
-    let node = CorpusNode::try_from(Buffer::from(bytes))?;
+    keys(&CorpusNode::try_from(Buffer::from(bytes))?)
+}
+
+/// One [`KeySummary`] per entry of the segment node `node`, in entry
+/// order; none for an index.
+pub fn keys(node: &CorpusNode) -> Result<Vec<KeySummary>, DialogCorpusError> {
     if node.as_index().is_ok() {
         return Ok(Vec::new());
     }
@@ -281,7 +304,12 @@ pub fn inspect_keys(bytes: Vec<u8>) -> Result<Vec<KeySummary>, DialogCorpusError
 /// (with empty metadata) so counts line up. An index node yields an
 /// empty vector.
 pub fn inspect_entries(bytes: Vec<u8>) -> Result<Vec<EntrySummary>, DialogCorpusError> {
-    let node = CorpusNode::try_from(Buffer::from(bytes))?;
+    entries(&CorpusNode::try_from(Buffer::from(bytes))?)
+}
+
+/// One [`EntrySummary`] per entry of the segment node `node`, in entry
+/// order; none for an index.
+pub fn entries(node: &CorpusNode) -> Result<Vec<EntrySummary>, DialogCorpusError> {
     if node.as_index().is_ok() {
         return Ok(Vec::new());
     }
@@ -344,7 +372,12 @@ pub fn inspect_entries(bytes: Vec<u8>) -> Result<Vec<EntrySummary>, DialogCorpus
 /// per blob-index entry. Non-blob entries (and index nodes) yield no
 /// rows.
 pub fn inspect_blob_records(bytes: Vec<u8>) -> Result<Vec<BlobEntrySummary>, DialogCorpusError> {
-    let node = CorpusNode::try_from(Buffer::from(bytes))?;
+    blob_records(&CorpusNode::try_from(Buffer::from(bytes))?)
+}
+
+/// One [`BlobEntrySummary`] per blob-index entry of the segment node
+/// `node`; none for an index.
+pub fn blob_records(node: &CorpusNode) -> Result<Vec<BlobEntrySummary>, DialogCorpusError> {
     if node.as_index().is_ok() {
         return Ok(Vec::new());
     }
@@ -371,7 +404,11 @@ pub fn inspect_blob_records(bytes: Vec<u8>) -> Result<Vec<BlobEntrySummary>, Dia
 
 /// Decode the manifest embedded in the node behind `bytes`.
 pub fn inspect_manifest(bytes: Vec<u8>) -> Result<ManifestSummary, DialogCorpusError> {
-    let node = CorpusNode::try_from(Buffer::from(bytes))?;
+    manifest(&CorpusNode::try_from(Buffer::from(bytes))?)
+}
+
+/// The manifest `node` embeds.
+pub fn manifest(node: &CorpusNode) -> Result<ManifestSummary, DialogCorpusError> {
     let manifest: Manifest = node.manifest()?;
     Ok(ManifestSummary {
         version: node.layout_version(),

@@ -71,6 +71,9 @@
 //! nothing is pending: those reads drive the hints, in the setup. What a
 //! measured poll enqueues runs in the next measured phase, as it would
 //! on a replica.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use anyhow::{Context as _, Result};
 use dialog_capability::Provider;
@@ -144,7 +147,10 @@ pub(crate) async fn phases(
 
     // The subscribed replica: joined, and its first poll paid.
     let (client, client_operator) = site.mount("soak-catchup").await?;
-    client.pull().perform(&client_operator).await?;
+    client
+        .pull(dialog_repository::Download::MinimalRanges)
+        .perform(&client_operator)
+        .await?;
     let mut subscription = client.subscribe(landing());
     let first = subscription
         .poll(&client_operator)
@@ -202,7 +208,10 @@ pub(crate) async fn phases(
         let mut writers = Vec::with_capacity(m);
         for index in 0..m {
             let (writer, writer_operator) = site.mount(&format!("soak-writer-{index}")).await?;
-            writer.pull().perform(&writer_operator).await?;
+            writer
+                .pull(dialog_repository::Download::MinimalRanges)
+                .perform(&writer_operator)
+                .await?;
             writers.push((writer, writer_operator));
         }
         for j in 0..k {
@@ -216,7 +225,10 @@ pub(crate) async fn phases(
             // Merge what the other writers pushed since, then push: the
             // head the client catches up on is a chain of merges minted
             // by m origins.
-            writer.pull().perform(writer_operator).await?;
+            writer
+                .pull(dialog_repository::Download::MinimalRanges)
+                .perform(writer_operator)
+                .await?;
             writer
                 .push()
                 .perform(writer_operator)
@@ -248,7 +260,10 @@ async fn catch_up(
     phases: &mut Vec<PhaseReport>,
 ) -> Result<()> {
     measured(&format!("pull-{suffix}"), phases, async {
-        client.pull().perform(operator).await?;
+        client
+            .pull(dialog_repository::Download::MinimalRanges)
+            .perform(operator)
+            .await?;
         Ok(())
     })
     .await?;
