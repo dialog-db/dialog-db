@@ -647,19 +647,9 @@ pub fn separator_components(bytes: &[u8]) -> Vec<KeyComponent> {
         return out;
     }
     match tag {
-        ENTITY_KEY_TAG => fields(&mut out, prefix, &FACT_FIELDS, false),
-        ATTRIBUTE_KEY_TAG => fields(
-            &mut out,
-            prefix,
-            &["attribute", "entity", "vtype", "value"],
-            false,
-        ),
-        VALUE_KEY_TAG => fields(
-            &mut out,
-            prefix,
-            &["vtype", "value", "attribute", "entity"],
-            true,
-        ),
+        ENTITY_KEY_TAG => fields(&mut out, prefix, &FACT_FIELDS),
+        ATTRIBUTE_KEY_TAG => fields(&mut out, prefix, &["attribute", "entity", "vtype", "value"]),
+        VALUE_KEY_TAG => fields(&mut out, prefix, &["vtype", "value", "attribute", "entity"]),
         // A history or coverage key opens with its version: a 32-byte
         // origin and an 8-byte big-endian edition, binary that reads as
         // nothing as text. Each is named only when wholly present; what
@@ -683,7 +673,7 @@ pub fn separator_components(bytes: &[u8]) -> Vec<KeyComponent> {
                             format!("@{number}"),
                             edition.to_vec(),
                         ));
-                        fields(&mut out, &rest[8..], &FACT_FIELDS, false);
+                        fields(&mut out, &rest[8..], &FACT_FIELDS);
                     }
                     None if !rest.is_empty() => {
                         out.push(KeyComponent::new("opaque", hex(rest), rest.to_vec()))
@@ -712,32 +702,51 @@ pub fn separator_components(bytes: &[u8]) -> Vec<KeyComponent> {
 /// A fact's fields in the entity ordering.
 const FACT_FIELDS: [&str; 4] = ["entity", "attribute", "vtype", "value"];
 
-/// Split the NUL-delimited key fields in `bytes`, naming each by its
-/// place in `order`. With `typed`, the first byte is a value-type tag
-/// rather than a delimited field, as the value ordering opens with one.
-fn fields(out: &mut Vec<KeyComponent>, bytes: &[u8], order: &[&'static str], typed: bool) {
+/// Read the key fields in `bytes` in `order`, as far as they reach. A
+/// value-type tag is one byte; any other field runs to the next NUL, but
+/// a value that ends the ordering runs to the end, since a value may
+/// hold NULs.
+fn fields(out: &mut Vec<KeyComponent>, bytes: &[u8], order: &[&'static str]) {
     let mut rest = bytes;
-    let mut next = 0;
-    if typed && let Some((vtype, tail)) = rest.split_first() {
-        out.push(KeyComponent::new(
-            "vtype",
-            ValueDataType::from(*vtype).to_string(),
-            vec![*vtype],
-        ));
+    let mut vtype: Option<ValueDataType> = None;
+    for (at, kind) in order.iter().enumerate() {
+        if rest.is_empty() {
+            return;
+        }
+        if *kind == "vtype" {
+            let tag = ValueDataType::from(rest[0]);
+            out.push(KeyComponent::new("vtype", tag.to_string(), vec![rest[0]]));
+            vtype = Some(tag);
+            rest = &rest[1..];
+            continue;
+        }
+        let last = at + 1 == order.len();
+        let (field, tail) = match rest.iter().position(|byte| *byte == 0) {
+            Some(end) if !(last && *kind == "value") => (&rest[..end], &rest[end + 1..]),
+            _ => (rest, &rest[rest.len()..]),
+        };
         rest = tail;
-        next = 1;
+        if field.is_empty() {
+            continue;
+        }
+        let text = match (*kind, vtype) {
+            ("value", Some(ValueDataType::Bytes | ValueDataType::Record)) => hex(field),
+            _ => legible(field),
+        };
+        out.push(KeyComponent::new(kind, text, field.to_vec()));
     }
-    for field in rest
-        .split(|byte| *byte == 0)
-        .filter(|field| !field.is_empty())
-    {
-        out.push(KeyComponent::new(
-            order.get(next).copied().unwrap_or("opaque"),
-            String::from_utf8_lossy(field).into_owned(),
-            field.to_vec(),
-        ));
-        next += 1;
+    if !rest.is_empty() {
+        out.push(KeyComponent::new("opaque", hex(rest), rest.to_vec()));
     }
+}
+
+/// `bytes` as text, a byte that is not printable read as `·`, so a
+/// separator cut mid-field never shows control characters.
+fn legible(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .map(|char| if char.is_control() { '·' } else { char })
+        .collect()
 }
 
 #[cfg(test)]
@@ -873,6 +882,37 @@ mod tests {
         assert_eq!(kinds, vec!["index", "entity", "attribute"], "{separator:?}");
         assert_eq!(&separator[1].bytes, entity);
         assert_eq!(separator[2].text, "tes");
+    }
+
+    /// A value-type tag is one byte and no delimited field, so a
+    /// separator reads it on its own and the value after it whole: a
+    /// Bytes value as hex, NULs and all; a String value as text.
+    #[dialog_common::test]
+    fn it_reads_a_separators_value_by_its_type() {
+        let mut key = vec![ATTRIBUTE_KEY_TAG];
+        key.extend_from_slice(b"test/name\0did:key:z6Mk\0");
+        key.push(0);
+        key.extend_from_slice(&[0xff, 0x00, 0x01]);
+        let kinds = |parts: &[KeyComponent]| parts.iter().map(|part| part.kind).collect::<Vec<_>>();
+        let separator = separator_components(&key);
+        assert_eq!(
+            kinds(&separator),
+            vec!["index", "attribute", "entity", "vtype", "value"],
+            "{separator:?}"
+        );
+        assert_eq!(separator[3].text, "Bytes");
+        assert_eq!(separator[4].text, "ff0001");
+
+        let mut key = vec![VALUE_KEY_TAG, 3];
+        key.extend_from_slice(b"Alice\0test/na");
+        let separator = separator_components(&key);
+        assert_eq!(
+            kinds(&separator),
+            vec!["index", "vtype", "value", "attribute"]
+        );
+        assert_eq!(separator[1].text, "String");
+        assert_eq!(separator[2].text, "Alice");
+        assert_eq!(separator[3].text, "test/na");
     }
 
     /// A history separator names its version rather than reading the
