@@ -15,12 +15,12 @@ tonk at `c006b50` (2026-11-17), `rust/tonk-core/assets/library/*.yaml`, top-leve
 | `command!` | 63 | being built: a declared concept on a control layer |
 | `rule!` | 55 | yes |
 | `attribute!` | 51 | an attribute needs no declaration; its type and cardinality are on the line |
-| `event!` | 38 | no. In the design an event is inline in a view |
-| `element!` | 24 | no, and the design does not say |
-| `route!` | 17 | no, and the design lists it open |
+| `event!` | 38 | no. In the design an event is inline in a view; 10 of the 38 need a flag the design has no spelling for |
+| `element!` | 24 | data: an assert of a concept `core.yaml` declares. Needs a collection `by: :name` and a text that spans lines |
+| `route!` | 17 | data: an assert of a concept `core.yaml` declares |
 | a concept asserted as data (`notebook!`, `table/cell!`, …) | 27 | yes, `assert` |
 
-462 forms that are not data. 153 of them, a third, are `view!`, `event!`, `element!` and `route!`: the part of the design that is least settled is the part a tonk document cannot do without.
+462 forms. 112 of them are `view!` and `event!`, a quarter, and no tonk document with a page can do without them: the part of the design that is least settled.
 
 | document | lines | forms |
 |---|---|---|
@@ -33,7 +33,30 @@ tonk at `c006b50` (2026-11-17), `rust/tonk-core/assets/library/*.yaml`, top-leve
 
 13 crates in tonk depend on `tonk-notation`, the analyzer, the evaluator, the language server, the display and the template among them. tonk pins dialog at `v0.5.0-rc.6`, which this stack has merged.
 
-A view in tonk today is an entry in a concept's dictionary: a name and a template of HTML text with `{field}` slots, rendered by tonk's own renderer. An event is declared apart, a type and paths into it.
+## The four forms the build does not have
+
+Read in tonk's library on 2026-11-18, after the maintainer's answers: an event should become unnecessary, an element is a dictionary concept, a route is a concept an external router routes to.
+
+**`route!` and `element!` are not forms.** `core.yaml` declares both as concepts (`tonk:route` over `xyz.tonk.route/path` and `xyz.tonk.route/concept`; the element over `xyz.tonk.element/description` and four dictionaries). `route!:` and `element!:` assert them, as `notebook!:` asserts a notebook. In the notation they are `assert`.
+
+**A route** is a path and a concept, and 15 of the 21 name an entity of their own. None holds a condition. Three are catch-alls that overlap the rest (`/{*model}`, `/{*rest}`, `/{*entity}@{*model}!{*view}`), and which wins is the router's to say. Where a page depends on more than the path, the concept routed to decides: `tonk:hub` serves five paths. So nothing in the library asks for a route to be a rule. A rule would have to say which of two matching patterns wins, which the router says today.
+
+**An element** is a description and up to four dictionaries: `method` (all 24), `attribute` (5), `getter` (4), `setter` (4). 9 of the 24 hold more than one. A method's value is a text of JavaScript, 39 of them included from a file (`!include/text`), the rest written in place over many lines. It needs two things the build does not have: a collection keyed `by: :name` (the design's own example is `xyz.tonk.element.method/?n`), and a text that spans lines or comes from a file, which the design lists open. The design also says a concept holds one collection, so an element is four concepts over one entity, or is asserted attribute by attribute.
+
+**An event** is a DOM event type and paths into the event, declared apart and bound by name in a template: 38 declared, 41 places bound, so nearly every one is bound once and writing it inline repeats little. What the 38 hold:
+
+| | of 38 | inline, as the design has it |
+|---|---|---|
+| a type and paths (`.detail`, `.currentTarget`, `.timeStamp`, `.submitter`) | 38 | `:on/<type> (command field: .path)` |
+| the view's own entity, `"{this}"` | 6 | a variable of the conditions |
+| a constant | 1 | a constant in the command |
+| `prevent-default` on a `submit` | 5 | implied |
+| `prevent-default` on a `click` or a `change` | 9 | no spelling: the design lists event flags open |
+| `stop-propagation` | 1 | no spelling |
+
+So an event can go, once a binding can say it prevents the default: 9 of 38 need it and are not a `submit`.
+
+**A view** is an entry in a concept's dictionary: a name and a template of HTML text with `{field}` slots, rendered by tonk's own renderer. It is the one form of the four that is a form.
 
 ## Not decided
 
