@@ -1,6 +1,6 @@
 # What porting notebook.yaml found
 
-`rust/tonk-core/assets/library/notebook.yaml` at tonk `c006b50`, written in the notation as `research/notation/design.md` has it at `origin/docs/notation` (R46), with a struct's keys as keywords: [sketches/notebook.clj](sketches/notebook.clj). How the result would reach tonk is in [tonk-integration.md](tonk-integration.md).
+`rust/tonk-core/assets/library/notebook.yaml` at tonk `c006b50`, written in the notation as `research/notation/design.md` has it at `origin/docs/notation` (R46), with a struct's keys as keywords: [sketches/notebook.clj](../../rust/dialog-notation/sketches/notebook.clj). How the result would reach tonk is in [tonk-integration.md](tonk-integration.md).
 
 The YAML holds 53 top-level forms: 3 attributes, 9 concepts, 16 rules, 1 element, 5 views, 2 routes, 6 commands, 4 events and 7 asserts of data. 24 of them hit at least one gap; 29 port as the design says.
 

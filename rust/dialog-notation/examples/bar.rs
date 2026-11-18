@@ -2,7 +2,7 @@
 //!
 //! ```sh
 //! cargo run -p dialog-notation --example bar -- \
-//!     design/macros/sketches/core.clj design/macros/sketches/notebook.clj
+//!     rust/dialog-notation/sketches/core.clj rust/dialog-notation/sketches/notebook.clj
 //! ```
 //!
 //! Several documents are read in order as one, as tonk reads a component
@@ -20,8 +20,8 @@ fn main() -> Result<()> {
     let mut paths: Vec<String> = std::env::args().skip(1).collect();
     if paths.is_empty() {
         paths = vec![
-            "design/macros/sketches/core.clj".into(),
-            "design/macros/sketches/notebook.clj".into(),
+            "rust/dialog-notation/sketches/core.clj".into(),
+            "rust/dialog-notation/sketches/notebook.clj".into(),
         ];
     }
     let texts = paths

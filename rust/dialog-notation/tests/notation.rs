@@ -2308,7 +2308,7 @@ async fn it_refuses_and_says_what_is_not_supported() -> Result<()> {
 /// these numbers moves them here on purpose.
 #[dialog_common::test]
 async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
-    let measured = bar::Bar::of(include_str!("../../../design/macros/sketches/notebook.clj"))?;
+    let measured = bar::Bar::of(include_str!("../sketches/notebook.clj"))?;
     let groups: Vec<String> = measured
         .groups()
         .iter()
@@ -2334,8 +2334,8 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
     // With core in front, as tonk reads a component, the concepts the
     // notebook takes from core are declared.
     let joined = bar::Bar::of_all(&[
-        include_str!("../../../design/macros/sketches/core.clj"),
-        include_str!("../../../design/macros/sketches/notebook.clj"),
+        include_str!("../sketches/core.clj"),
+        include_str!("../sketches/notebook.clj"),
     ])?;
     assert_eq!(
         (
