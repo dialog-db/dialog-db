@@ -49,6 +49,26 @@ What the build does today, against what tonk's YAML does, both found by [tonk-cl
 - A variable a rule's premise uses once is kept under its name, where tonk writes `_`: a command premise's own entity is a variable of the expansion's own, `?c.<site>`, and Dialog-DB stores a named variable as a named local and `_` as a blank. So the same rule written in either gets two identities.
 
 
+## A second document: the table
+
+Tonk's `table.yaml` at bfb2d72 is written as [sketches/table.clj](../../rust/dialog-notation/sketches/table.clj), form by form, to test whether the build that carries the notebook was fitted to it. The managing agent's hypothesis: the table needs no new kind of gap outside views. It is pinned in `it_measures_how_far_the_table_gets`, read after core: 54 forms, 54 read, 54 expand, 48 compile, 6 described. The six that do not compile are the table's views, which Dialog-DB refuses (#830). Core needs nothing added: the table reads no core concept.
+
+Its gaps, sorted:
+
+| gap | YAML | kind |
+|---|---|---|
+| a concept pinned to an entity, `this: tonk:table` | 98, 107, 121, 149, 162 | the notebook's (395, 442) |
+| an optional field, `maybe: style` | 127, 493 | core's, on `site` (1744) |
+| a command's own entity, read with `of:` | 399, 415, 443, 457 | the notebook's, step M and V |
+| a view with no entity, `directory` | 480-510, 543 | the notebook's (343, 359) |
+| a view of a concept named by its pinned entity, `this: tonk:table/sheet` | 481-505, 535-538 | the notebook's concept named by an entity (392, 439) |
+| a valueless attribute, `hidden` | 534 | the notebook's (323), step S |
+| a nested view with no entity, `:model` | 535-538 | the notebook's (327), step S |
+| a nested view with no view named, `<tonk-display entity={this}>` | 548 | the notebook's (327, 434, 463), where the sketch names one with no GAP |
+| a value the host element gives, `model={dom.host/model}` | 548 | new, and the design does not decide it |
+
+The one new kind is inside a view. The design's template holds the conditions' variables and, in an event binding, paths of the event; a value read from the element the view is rendered into is neither. Written with the attribute's name for `:model` it is refused (`it_refuses_a_nested_view_whose_model_the_host_gives`); the sketch writes the model out, `:model table`, which is the view's own. Tonk's core uses the same value in its default directory view (core.yaml 48, 966) and `dom.host/with` beside it (2374), so a third document will meet it.
+
 ## What the design says and the build does not do yet
 
 | | the design, at R45 | built here | needs |

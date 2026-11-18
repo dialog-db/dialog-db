@@ -1521,6 +1521,14 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** Built, all additive. `Line::label`, `Line::descriptor` and `Key::label`; `Checked::declaration_forms` and `Checked::step_forms`, parallel to `declarations` and `steps`, so `Declaration` keeps its shape; `check_forms` beside `check`, with `Analyzer::analyze_forms` under it. Through `check_forms` every step and analyzed tree carries its description, so a back end has no need of `described`. `check` is as it was, and fills the two new vectors too. The bar is unchanged: 56 / 53 / 48 / 5 and 60 / 60 / 55 / 5.
 
+## 2026-11-18, Building: a second document, the table
+
+**Asked.** Steps X, Y and Z: write tonk's `table.yaml` in the notation as designed, measure it on the bar after core, and sort every stopping form and every GAP comment by whether the notebook met its kind. The managing agent's hypothesis: no new kind of gap outside views.
+
+**Learned.** Read after core, every form of the table reads and expands, and the six that do not compile are its views, which Dialog-DB refuses (#830): 54 / 54 / 54 / 48 / 6, of 54. Nothing the build accepts was spelled to suit it: the table's commands, rules, retract and seeds are the notebook's shapes again, a facet concept a field, a create that takes the command's entity, a retract through a concept with its field written. Of nine kinds of GAP, eight are the notebook's or core's. The new one is a value the host element gives a template, `model={dom.host/model}` (YAML 548), and the design does not decide it. The notebook met a nested view with no view named (YAML 327, 434, 463) and named one with no GAP comment; the table marks it.
+
+**Decided.** The hypothesis holds: no new kind of gap outside views, one inside a view, undecided, pinned refused by `it_refuses_a_nested_view_whose_model_the_host_gives`. Nothing is built for it. The notebook's bar is unchanged: 56 / 53 / 48 / 5, and with core 60 / 60 / 55 / 5.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

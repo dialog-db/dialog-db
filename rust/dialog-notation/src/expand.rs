@@ -2134,6 +2134,26 @@ mod tests {
         ));
     }
 
+    /// A nested view whose model the host element gives, as tonk's
+    /// `<tonk-display entity={this} model={dom.host/model}>` (table.yaml
+    /// 548), has no spelling: the design's template holds the
+    /// conditions' variables, and paths only in an event binding. Written
+    /// with the attribute's name for `:model`, it is refused as a view no
+    /// document holds. Not decided, so not built.
+    #[test]
+    fn it_refuses_a_nested_view_whose_model_the_host_gives() {
+        let text = "(view todo :row [:li {:view :row :of ?t :model dom.host/model}] \
+                    (todo ?t title: ?title))";
+        assert!(
+            matches!(
+                expanded(VIEWS, text),
+                Err(Error::Refused(said)) if said.contains("hold no view :row of dom.host/model")
+            ),
+            "{:?}",
+            expanded(VIEWS, text)
+        );
+    }
+
     /// The managing agent's readings of three gaps in a template: an
     /// attribute written as a list is its parts joined, `true` is an
     /// attribute present with no value, and a nested view may leave out
