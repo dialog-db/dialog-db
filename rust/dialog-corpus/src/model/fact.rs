@@ -1124,3 +1124,6 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod checked_tests;
