@@ -36,7 +36,7 @@ use crate::Error;
 use crate::diagnostic::Diagnostic;
 use crate::form::Kind;
 use crate::kernel::QUOTE;
-use crate::kernel::{CONTROL, Head, Rule, TYPES};
+use crate::kernel::{CONTROL, Head, Keyed, Rule, TYPES};
 use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, REST, fill, matches};
 use crate::syntax::{self, DERIVED, Parameters, Signature, Syntax};
@@ -158,6 +158,32 @@ fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
         return Ok(None);
     };
     let mut terms = operand.terms.clone();
+    // A line over a collection leaves the key a variable in the name,
+    // and says what a key is.
+    let by = terms.remove("by");
+    let (field, key) = match (field.strip_prefix('?'), by) {
+        (Some(key), Some(by)) => match by.keyword().and_then(Keyed::of) {
+            Some(_) => ("entry", Some((Syntax::Variable(key.to_string()), by))),
+            None => {
+                return Err(Error::Refused(format!(
+                    "{by} is not what a key is: `by: :name` or `by: :position`"
+                )));
+            }
+        },
+        (Some(_), None) => {
+            return Err(Error::Refused(format!(
+                "{tree} is over a collection, and says what a key is: `by: :name` or \
+                 `by: :position`"
+            )));
+        }
+        (None, Some(_)) => {
+            return Err(Error::Refused(format!(
+                "{tree} says `by:`, which a line over a collection says: the key a variable \
+                 in the name, `xyz.tonk.notebook/?p`"
+            )));
+        }
+        (None, None) => (field, None),
+    };
     let (entity, mut value) = match (operand.items.as_slice(), terms.remove("is")) {
         ([entity], Some(value)) => (entity, value),
         // Unlabeled, an attribute's two terms are the entity and then
@@ -217,6 +243,15 @@ fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
             )));
         }
         value = wrap(CONTROL, value)?;
+    }
+    if let Some((key, by)) = key {
+        value = Syntax::Application(
+            Box::new(Syntax::Constant(syntax::entity("entry:")?)),
+            Parameters {
+                items: vec![value],
+                terms: BTreeMap::from([("key".into(), key), ("by".into(), by)]),
+            },
+        );
     }
     if let Some(label) = terms.keys().next() {
         return Err(Error::Refused(format!(
@@ -900,6 +935,31 @@ impl Expander {
                 "a concept maps both ways, and a check has no inverse: {check}"
             )));
         }
+        // A concept holds one collection, and its key is a head field.
+        let entries: Vec<&Syntax> = said
+            .iter()
+            .flat_map(|tree| tree.operand().into_iter().flat_map(|operand| operand.terms.values()))
+            .filter(|term| matches!(term, Syntax::Application(operator, _) if operator.keyword() == Some("entry")))
+            .collect();
+        if entries.len() > 1 {
+            return Err(Error::Refused(format!(
+                "{pattern} holds {} collections, and a concept holds one: two would give a row \
+                 for every pair of their entries",
+                entries.len()
+            )));
+        }
+        let mut heads = Vec::new();
+        pattern.variables(&mut heads);
+        if let Some(Syntax::Variable(key)) = entries
+            .first()
+            .and_then(|entry| entry.operand())
+            .and_then(|operand| operand.terms.get("key"))
+            && !heads.contains(key)
+        {
+            return Err(Error::Refused(format!(
+                "the key of a collection is a field of the concept's head: ?{key}"
+            )));
+        }
         let controls = said.iter().filter(|tree| on_control(tree)).count();
         let touched = said
             .iter()
@@ -1503,6 +1563,56 @@ mod tests {
         expander.submit(setup)?;
         let (kernel, _) = expander.submit(text)?;
         Ok(kernel.iter().map(Syntax::to_string).collect())
+    }
+
+    /// A line over a collection leaves the key a variable in the
+    /// attribute's name and says what a key is. It is the read of every
+    /// entry, its key a field of the concept's head. A concept holds one
+    /// collection.
+    #[test]
+    fn it_reads_a_line_over_a_collection() {
+        assert_eq!(
+            expanded(
+                "(concept (notebook-entry ?b at: ?p block: ?x)
+                   (xyz.tonk.notebook/?p of: ?b is: ?x as: :entity cardinality: :one by: :position))",
+                "(query (notebook-entry notebook:1 at: ?p block: ?x))"
+            )
+            .unwrap(),
+            vec![
+                "(rule (report (xyz.tonk.notebook notebook:1 entry: (:entry (:last (:entity ?x)) by: :position key: ?p))) \
+                 (xyz.tonk.notebook notebook:1 entry: (:entry (:last (:entity ?x)) by: :position key: ?p)))"
+            ]
+        );
+        for (text, why) in [
+            (
+                "(concept (m ?e name: ?n source: ?s) (xyz.m/?n of: ?e is: ?s))",
+                "says what a key is",
+            ),
+            (
+                "(concept (m ?e source: ?s) (xyz.m/source of: ?e is: ?s by: :name))",
+                "says `by:`, which a line over a collection says",
+            ),
+            (
+                "(concept (m ?e name: ?n source: ?s) (xyz.m/?n of: ?e is: ?s by: :colour))",
+                "is not what a key is",
+            ),
+            (
+                "(concept (m ?e source: ?s) (xyz.m/?n of: ?e is: ?s by: :name))",
+                "the key of a collection is a field of the concept's head: ?n",
+            ),
+            (
+                "(concept (m ?e name: ?n source: ?s at: ?p block: ?b)
+                   (xyz.m/?n of: ?e is: ?s by: :name)
+                   (xyz.n/?p of: ?e is: ?b by: :position))",
+                "a concept holds one",
+            ),
+        ] {
+            assert!(
+                matches!(expanded("", text), Err(Error::Refused(said)) if said.contains(why)),
+                "{text}: {:?}",
+                expanded("", text)
+            );
+        }
     }
 
     /// `id` stands as a premise and binds its entity to what `(:id …)`

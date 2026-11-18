@@ -1306,6 +1306,22 @@ Built: the reader's `{` and `former_key` in `form.rs`, the two printers, every t
 
 **Decided.** Nothing the design leaves open: the domain an `id` names is the head's, said in the refusals, and the question stays the maintainer's. 111 unit tests, 30 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: collections
+
+**Asked.** Step G: the design's collections. A line over one leaves the key a variable in the attribute's name and says what a key is, `(xyz.tonk.notebook/?p of: ?b is: ?x … by: :position)`. Build the read, the assert of one entry, and the check that the key is a head field and that a concept holds one collection.
+
+**Learned.**
+
+- Dialog keeps a collection as the attributes of one domain whose name is the key: `xyz.tonk.notebook/N1`. A descriptor reads every entry as `{the: {domain, keyed: sequence | dictionary}}` (`The::Collection` in `rust/dialog-query/src/attribute/descriptor.rs`), and a query binds an entry under its field as `{the: key, is: value}`. A rule's head writes an entry under the key its body binds to `<field>/key`. Both kinds run from a rule, read and written.
+- The kernel had nowhere to keep a key, since a field is one attribute. A line over a collection is now the field `entry:` of its domain, its value `(:entry value key: ?p by: :position)`, and the kernel reads the key and what it is off that wrapper as it reads a type. The name `entry` is the build's, internal to the kernel read.
+- A key a position is spelled uppercase, `N1`, and a relation written as text takes no uppercase name (`Relation::validate`). So a ground write of one entry is resolved under a name of its own and given the entry's attribute after, through `The::entry`, which also refuses a key of the wrong shape. For the same reason an entry cannot be read by its attribute written out, `(xyz.tonk.notebook/N2 notebook:1 ?x)`: Dialog-DB refuses the name. Through the concept, `(notebook-entry notebook:1 at: "N2" block: ?x)`, it reads.
+- A row says an entry under its key, as the attribute it is: `(xyz.tonk.notebook notebook:1 N1: block:a)`.
+- Two entries of one sequence, their keys compared with `<`, run in one rule: text keys compare in the order the index sorts them (`constraint/compare.rs`).
+
+Not decided, unsupported: what a retract of a collection concept takes, every entry or the entity and the key.
+
+**Decided.** By the agent: a key is written as text, `at: "N1"`. The concept's check refuses a key that is no head field and a second collection, as the design says. 113 unit tests, 31 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

@@ -35,7 +35,7 @@ use serde_json::{Map, Value as Json, json};
 
 use crate::Error;
 use crate::data;
-use crate::kernel::{Field, Formula, Head, Premise, QUOTE, Read, Rule, TYPES, Term};
+use crate::kernel::{Field, Formula, Head, Keyed, Premise, QUOTE, Read, Rule, TYPES, Term};
 use crate::pattern::REST;
 use crate::syntax::{self, Parameters, Syntax};
 
@@ -81,7 +81,9 @@ pub struct Query {
     pub select: ConceptQuery,
     domain: String,
     entity: Slot,
-    fields: Vec<(String, Slot)>,
+    /// Each field's label, what its key is where it is an entry of a
+    /// collection, and its value.
+    fields: Vec<(String, Option<Slot>, Slot)>,
 }
 
 impl Query {
@@ -105,8 +107,15 @@ impl Query {
             items: vec![fill(&self.entity)?],
             ..Parameters::default()
         };
-        for (label, slot) in &self.fields {
-            operand.terms.insert(label.clone(), fill(slot)?);
+        // An entry of a collection is said under its key, as the
+        // attribute it is: `(xyz.tonk.notebook notebook:1 N1: block:a)`.
+        for (label, key, slot) in &self.fields {
+            let label = match key.as_ref().map(fill).transpose()? {
+                Some(Syntax::Constant(Value::String(key))) => key,
+                Some(other) => other.to_string(),
+                None => label.clone(),
+            };
+            operand.terms.insert(label, fill(slot)?);
         }
         Ok(Syntax::Application(
             Box::new(Syntax::Reference(self.domain.clone())),
@@ -224,6 +233,7 @@ pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
                 kind: Some("text".into()),
                 pick: Some("last".into()),
                 layer: None,
+                key: None,
             }],
         })?));
     }
@@ -508,11 +518,33 @@ fn value(term: &Term, kind: Option<&str>) -> Result<Option<Value>, Error> {
         .transpose()
 }
 
+/// The domain of a collection a field is every entry of, and what its
+/// key is, as Dialog-DB says it.
+fn collection(field: &Field) -> Option<(&str, &'static str)> {
+    let (_, keyed) = field.key.as_ref()?;
+    let (domain, _) = field.attribute.rsplit_once('/')?;
+    Some((
+        domain,
+        match keyed {
+            Keyed::Name => "dictionary",
+            Keyed::Position => "sequence",
+        },
+    ))
+}
+
 /// The attribute a field reads or writes. With no pick written the
 /// field holds every value: it is a relation, and a relation is a set.
+/// A field that is every entry of a collection reads the collection.
 fn attribute(field: &Field) -> Json {
     let mut attribute = Map::new();
-    attribute.insert("the".into(), json!(field.attribute));
+    match collection(field) {
+        Some((domain, keyed)) => {
+            attribute.insert("the".into(), json!({ "domain": domain, "keyed": keyed }));
+        }
+        None => {
+            attribute.insert("the".into(), json!(field.attribute));
+        }
+    }
     if let Some(kind) = &field.kind {
         attribute.insert("as".into(), json!(format!("{kind}:")));
     }
@@ -545,13 +577,41 @@ fn statement(read: &Read) -> Result<ConceptStatement, Error> {
                 field.attribute
             ))
         })?;
-        let descriptor: AttributeDescriptor = serde_json::from_value(attribute(field))
-            .map_err(|error| refused("the attribute", error))?;
-        with.push(
-            descriptor
-                .resolve(value)
-                .map_err(|error| refused("the value", error))?,
-        );
+        let mut written = attribute(field);
+        // One entry of a collection is written under its key: the
+        // attribute `domain/key`, of the collection's key shape. A
+        // relation spelled as text takes no position for its name, so
+        // the attribute is put in once the value is resolved.
+        let mut entry = None;
+        if let (Some((domain, keyed)), Some((key, _))) = (collection(field), &field.key) {
+            let Term::Text(key) = key else {
+                return Err(Error::Refused(format!(
+                    "a write with no premise needs the key of its entry of {domain}, as text"
+                )));
+            };
+            let keyed = match keyed {
+                "dictionary" => dialog_query::Keyed::Dictionary,
+                _ => dialog_query::Keyed::Sequence,
+            };
+            let symbol = domain
+                .parse()
+                .map_err(|error| refused("the collection", error))?;
+            entry = Some(
+                dialog_query::The::collection(symbol, keyed)
+                    .entry(key)
+                    .map_err(|error| refused("the key", error))?,
+            );
+            written["the"] = json!(format!("{domain}/entry"));
+        }
+        let descriptor: AttributeDescriptor =
+            serde_json::from_value(written).map_err(|error| refused("the attribute", error))?;
+        let mut attribution = descriptor
+            .resolve(value)
+            .map_err(|error| refused("the value", error))?;
+        if let Some(entry) = entry {
+            attribution.the = entry;
+        }
+        with.push(attribution);
     }
     if with.is_empty() {
         return Err(Error::Refused(format!("{} writes no field", read.domain)));
@@ -581,10 +641,13 @@ fn ground(head: &Head) -> Result<Step, Error> {
 /// what was written.
 fn whole(read: &Read, bound: &BTreeSet<String>) -> Result<(), Error> {
     let named = read.named(bound);
+    let unnamed = |term: &Term| matches!(term, Term::Variable(name) if name.contains('.') && !bound.contains(name));
     let left_out: Vec<&str> = read
         .fields
         .iter()
-        .filter(|field| !named.contains(field))
+        .filter(|field| {
+            !named.contains(field) || field.key.as_ref().is_some_and(|(key, _)| unnamed(key))
+        })
         .map(|field| field.attribute.as_str())
         .collect();
     if left_out.is_empty() {
@@ -770,7 +833,10 @@ impl Scope {
         let mut terms = Map::new();
         terms.insert("this".into(), self.term(&read.entity, None)?);
         for field in &read.fields {
-            let term = self.term(&field.term, field.kind.as_deref())?;
+            let mut term = self.term(&field.term, field.kind.as_deref())?;
+            if let Some((key, _)) = &field.key {
+                term = json!({ "the": self.term(key, None)?, "is": term });
+            }
             if with.insert(field.label.clone(), attribute(field)).is_some() {
                 return Err(Error::Refused(format!(
                     "{} names {} twice",
@@ -897,6 +963,11 @@ impl Scope {
                     "{} names {} twice",
                     read.domain, field.label
                 )));
+            }
+            // An entry's key is the head's key operand, `entry/key`.
+            if let Some((key, _)) = &field.key {
+                let value = self.term(key, None)?;
+                self.when.push(tie(&format!("{}/key", field.label), value));
             }
             match &field.term {
                 Term::Variable(name) if self.name(name) == field.label => {}
@@ -1061,7 +1132,15 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
     }
     let read = &read;
     let fields = read.named(&bound);
-    for term in fields.iter().map(|field| &field.term).chain([&read.entity]) {
+    let keys = fields
+        .iter()
+        .filter_map(|field| field.key.as_ref().map(|(key, _)| key));
+    for term in fields
+        .iter()
+        .map(|field| &field.term)
+        .chain(keys)
+        .chain([&read.entity])
+    {
         if let Term::Variable(name) = term
             && !bound.contains(name)
         {
@@ -1116,7 +1195,13 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                 let entity = slot(&read.entity, &mut scope)?;
                 let fields = fields
                     .iter()
-                    .map(|field| Ok((field.label.clone(), slot(&field.term, &mut scope)?)))
+                    .map(|field| {
+                        let key = match &field.key {
+                            Some((key, _)) => Some(slot(key, &mut scope)?),
+                            None => None,
+                        };
+                        Ok((field.label.clone(), key, slot(&field.term, &mut scope)?))
+                    })
                     .collect::<Result<Vec<_>, Error>>()?;
                 Ok::<_, Error>((entity, fields))
             })();
@@ -1154,6 +1239,32 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
     let mut columns: Vec<Field> = Vec::new();
     let mut slots = Vec::new();
     for field in &fields {
+        // An entry's key is a column of its own.
+        let key = match &field.key {
+            None => None,
+            Some((key, _)) => Some(match shown(key) {
+                Some(form) => Slot::Is(form),
+                None => {
+                    let column = format!("c{}", columns.len());
+                    if let Term::Variable(name) = key {
+                        scope
+                            .names
+                            .entry(name.clone())
+                            .or_insert_with(|| column.clone());
+                    }
+                    columns.push(Field {
+                        label: column.clone(),
+                        attribute: format!("{relation}/{column}"),
+                        term: key.clone(),
+                        kind: None,
+                        pick: None,
+                        layer: None,
+                        key: None,
+                    });
+                    Slot::Bound(column)
+                }
+            }),
+        };
         let slot = match shown(&field.term) {
             Some(form) => Slot::Is(form),
             None => {
@@ -1171,11 +1282,12 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                     kind: None,
                     pick: None,
                     layer: None,
+                    key: None,
                 });
                 Slot::Bound(column)
             }
         };
-        slots.push((field.label.clone(), slot));
+        slots.push((field.label.clone(), key, slot));
     }
     if columns.is_empty() {
         columns.push(Field {
@@ -1185,6 +1297,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
             kind: None,
             pick: None,
             layer: None,
+            key: None,
         });
     }
     scope.body(rule)?;

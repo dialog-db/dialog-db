@@ -65,6 +65,27 @@ pub enum Term {
     },
 }
 
+/// What a collection's key is: a name, which makes it a dictionary, or
+/// a position, which makes it a sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keyed {
+    /// `by: :name`.
+    Name,
+    /// `by: :position`.
+    Position,
+}
+
+impl Keyed {
+    /// The key as a line says it: `name` or `position`.
+    pub fn of(word: &str) -> Option<Keyed> {
+        match word {
+            "name" => Some(Keyed::Name),
+            "position" => Some(Keyed::Position),
+            _ => None,
+        }
+    }
+}
+
 /// One field of a read: an attribute, the term its value stands under,
 /// and the type and pick it is read under.
 #[derive(Clone, Debug, PartialEq)]
@@ -81,6 +102,10 @@ pub struct Field {
     pub pick: Option<String>,
     /// The layer, when the term was written on one.
     pub layer: Option<String>,
+    /// Where the field is every entry of a collection: the term its key
+    /// stands under, and what a key is. Its attribute is then the
+    /// collection's domain and `[symbol]` or `[position]`.
+    pub key: Option<(Term, Keyed)>,
 }
 
 /// An application of a relation: one entity and the fields named.
@@ -266,6 +291,27 @@ fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
     let mut kind = None;
     let mut pick = None;
     let mut layer = None;
+    let mut key = None;
+    // `(:entry ?x key: ?p by: :position)`: every entry of a collection.
+    if let Syntax::Application(operator, operand) = node
+        && operator.keyword() == Some("entry")
+    {
+        let (Some(at), Some(keyed), [inner]) = (
+            operand.terms.get("key"),
+            operand
+                .terms
+                .get("by")
+                .and_then(Syntax::keyword)
+                .and_then(Keyed::of),
+            operand.items.as_slice(),
+        ) else {
+            return Err(Error::Refused(format!(
+                "{node} is an entry: `(:entry value key: term by: :name)`"
+            )));
+        };
+        key = Some((term(at)?, keyed));
+        node = inner;
+    }
     while let Syntax::Application(operator, operand) = node {
         let (Some(word), [inner], true) = (
             operator.keyword(),
@@ -296,6 +342,7 @@ fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
         kind,
         pick,
         layer,
+        key,
     })
 }
 
@@ -401,6 +448,12 @@ fn head(node: &Syntax) -> Result<Head, Error> {
             "{node} retracts a command: what that means is not decided, since a command \
              holds for one tick and nothing keeps it"
         ))),
+        (Some("retract"), _) if inner.fields.iter().any(|field| field.key.is_some()) => {
+            Err(Error::Unsupported(format!(
+                "{node} retracts from a collection: what a retract of a collection takes, \
+                 every entry or the entity and the key, is not decided"
+            )))
+        }
         (Some("retract"), false) => Ok(Head::Retract(inner)),
         (Some("report"), _) => Ok(Head::Report(inner)),
         _ => Err(Error::Refused(format!("{node} is not a kernel head"))),
@@ -502,9 +555,12 @@ impl Rule {
             match premise {
                 Premise::Read(read) => {
                     term(&read.entity, &mut names);
-                    read.fields
-                        .iter()
-                        .for_each(|field| term(&field.term, &mut names));
+                    for field in &read.fields {
+                        term(&field.term, &mut names);
+                        if let Some((key, _)) = &field.key {
+                            term(key, &mut names);
+                        }
+                    }
                 }
                 Premise::Formula(inner) => formula(inner, &mut names),
             }
@@ -645,6 +701,22 @@ mod tests {
             assert!(
                 matches!(Rule::parse(&form), Err(Error::Refused(why)) if why.contains("folds one thing")),
                 "{unread}"
+            );
+        }
+    }
+
+    /// What a retract of a collection takes is not decided, so one is
+    /// unsupported, whatever it names.
+    #[test]
+    fn it_refuses_a_retract_from_a_collection() {
+        for text in [
+            r#"(rule (retract (xyz.n notebook:1 entry: (:entry block:a key: "N1" by: :position))))"#,
+            "(rule (retract (xyz.n ?b entry: (:entry ?x key: ?p by: :position))) (xyz.c ?b at: ?p))",
+        ] {
+            let rule = Rule::parse(&forms(text).unwrap().remove(0));
+            assert!(
+                matches!(&rule, Err(Error::Unsupported(why)) if why.contains("retracts from a collection")),
+                "{text}: {rule:?}"
             );
         }
     }

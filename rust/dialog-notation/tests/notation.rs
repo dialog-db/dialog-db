@@ -185,6 +185,123 @@ async fn it_makes_an_entity_with_id_in_a_rule() -> Result<()> {
     Ok(())
 }
 
+const COLLECTIONS: &str = "
+    (concept (notebook-entry ?b at: ?p block: ?x)
+      (xyz.tonk.notebook/?p of: ?b is: ?x as: :entity cardinality: :one by: :position))
+    (concept (element-method ?e name: ?n source: ?s)
+      (xyz.tonk.element.method/?n of: ?e is: ?s as: :text cardinality: :one by: :name))";
+
+/// A collection's entries are its attributes: a line over one leaves
+/// the key a variable in the name. Each entry is asserted by its key,
+/// read a row a key, read and written by rules, and a key of the wrong
+/// shape is refused. A retract of a collection is not decided.
+#[dialog_common::test]
+async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let (_, diagnostics) = notebook
+        .submit(&format!(
+            r#"{COLLECTIONS}
+               (assert (notebook-entry notebook:1 at: "N1" block: block:a))
+               (assert (notebook-entry notebook:1 at: "N2" block: block:b))
+               (assert (element-method element:x name: "render" source: "return 1"))
+               (assert (element-method element:x name: "update" source: "return 2"))"#
+        ))
+        .await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(query (notebook-entry notebook:1 at: ?p block: ?x))"
+        )
+        .await?,
+        vec![
+            "(xyz.tonk.notebook notebook:1 N1: block:a)",
+            "(xyz.tonk.notebook notebook:1 N2: block:b)",
+        ]
+    );
+    assert_eq!(
+        report(
+            &mut notebook,
+            r#"(query (element-method ?e name: "update" source: ?s))"#
+        )
+        .await?,
+        vec![r#"(xyz.tonk.element.method element:x update: "return 2")"#]
+    );
+    // One entry, by its key.
+    assert_eq!(
+        report(
+            &mut notebook,
+            r#"(query (notebook-entry notebook:1 at: "N2" block: ?x))"#
+        )
+        .await?,
+        vec!["(xyz.tonk.notebook notebook:1 N2: block:b)"]
+    );
+
+    // A rule reads every entry, its key bound, and one writes an entry
+    // under a key its premises bind.
+    notebook
+        .submit(
+            r#"(rule (xyz.placed ?x at: ?p) (notebook-entry ?b at: ?p block: ?x))
+               (rule (assert (notebook-entry ?b at: ?p block: ?x))
+                 (xyz.move ?x to: ?b at: ?p))
+               (assert (xyz.move block:c to: notebook:1 at: (:text "N3")))"#,
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.placed ?x at: ?p))").await?,
+        vec![
+            r#"(xyz.placed block:a at: "N1")"#,
+            r#"(xyz.placed block:b at: "N2")"#,
+            r#"(xyz.placed block:c at: "N3")"#,
+        ]
+    );
+
+    // Two entries of one sequence, their keys compared: an entry is
+    // stray when another of its notebook's entries sorts first.
+    notebook
+        .submit(
+            "(rule (xyz.stray ?x at: ?p)
+               (notebook-entry ?b at: ?p block: ?x)
+               (notebook-entry ?b at: ?q block: ?y)
+               (< ?q : ?p))",
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (xyz.stray ?x at: ?p))").await?,
+        vec![
+            r#"(xyz.stray block:b at: "N2")"#,
+            r#"(xyz.stray block:c at: "N3")"#,
+        ]
+    );
+
+    let why = |result: Result<(Vec<String>, Vec<dialog_notation::Diagnostic>)>| {
+        result.map_err(|error| error.downcast::<Error>())
+    };
+    let shape = notebook
+        .submit(r#"(assert (notebook-entry notebook:1 at: "first" block: block:d))"#)
+        .await;
+    assert!(matches!(why(shape), Err(Ok(Error::Refused(said))) if said.contains("the key")),);
+    let retracted = notebook
+        .submit(r#"(retract (notebook-entry notebook:1 at: "N1" block: block:a))"#)
+        .await;
+    assert!(
+        matches!(why(retracted), Err(Ok(Error::Unsupported(said))) if said.contains("retracts from a collection"))
+    );
+    assert_eq!(
+        report(
+            &mut notebook,
+            "(query (notebook-entry notebook:1 at: ?p block: ?x))"
+        )
+        .await?,
+        vec![
+            "(xyz.tonk.notebook notebook:1 N1: block:a)",
+            "(xyz.tonk.notebook notebook:1 N2: block:b)",
+            "(xyz.tonk.notebook notebook:1 N3: block:c)",
+        ]
+    );
+    Ok(())
+}
+
 /// A concept written as lines, an attribute a line, runs as one written
 /// as a read of several fields does: written through by a rule a
 /// command fires and read back. `:one` reads the newest claim and
