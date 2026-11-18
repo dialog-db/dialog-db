@@ -129,6 +129,15 @@ What this changes for you:
 - `dialog_corpus::inspect` has a reading of each part that takes a
   decoded node (`summary`, `spans`, `keys`, `entries`, `blob_records`,
   `manifest`) beside the `inspect_*` functions that take bytes.
+- `tree/entry` of an index node yields the operations it buffers, one
+  row each, with a new slot `span` naming the span the operation rides
+  (absent on a segment's entry). It yielded no rows for an index.
+- `dialog/separator-part` reads a separator field by field as far as it
+  reaches, as `dialog/key-part` reads a key: `entity`, `attribute`,
+  `vtype` and `value` parts in the ordering's order, and a history or
+  coverage separator's `origin` (hex) and `edition`. It yielded the tag
+  and one `prefix` part of the rest as lossy text, which for a history
+  separator was the origin's raw bytes.
 - A resolver still requires its handle. A rule whose body is a resolver
   alone is refused at install as before; a rule that names its nodes by
   a fact installs, and reads those nodes and no others.

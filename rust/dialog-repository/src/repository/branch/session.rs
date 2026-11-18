@@ -4994,6 +4994,7 @@ mod resolver_tests {
         "blob",
         "blob-size",
         "blob-version",
+        "span",
     ];
 
     async fn rows(
@@ -5130,6 +5131,45 @@ mod resolver_tests {
         Ok(())
     }
 
+    /// A write to a tree with an index root can ride the root as a
+    /// buffered operation rather than reach a segment. `tree/entry` of
+    /// the root yields each such operation whole, naming the span it is
+    /// buffered against, and the root's `novelty` counts them.
+    #[dialog_common::test]
+    async fn it_reads_the_operations_an_index_buffers() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
+        branch
+            .transaction()
+            .assert(the!("test/name").of(Entity::new()?).is("late".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let root = root_of(&branch);
+
+        let node = rows(&branch, &operator, ask("tree/node", &root, NODE)).await;
+        assert_eq!(text(&node[0], "kind"), "index");
+        let buffered = unsigned(&node[0], "novelty");
+        assert!(buffered > 0, "the late write rides the root");
+        let spans: Vec<Entity> = rows(&branch, &operator, ask("tree/span", &root, SPAN))
+            .await
+            .iter()
+            .map(|row| entity(row, "span"))
+            .collect();
+        let entries = rows(&branch, &operator, ask("tree/entry", &root, ENTRY)).await;
+        assert_eq!(entries.len() as u128, buffered, "one row per buffered op");
+        for row in &entries {
+            assert!(
+                spans.contains(&entity(row, "span")),
+                "a buffered op names a span of the node: {row:?}"
+            );
+            assert_eq!(text(row, "state"), "asserted");
+        }
+        Ok(())
+    }
+
     /// A tree wide enough for an index root: one span per child, the
     /// ranges contiguous, each span named by its node and position and
     /// each child by a handle, and the descent reaches segments whose
@@ -5152,11 +5192,12 @@ mod resolver_tests {
             unsigned(&node[0], "count"),
             "one span per child"
         );
-        assert!(
+        assert_eq!(
             rows(&branch, &operator, ask("tree/entry", &root, ENTRY))
                 .await
-                .is_empty(),
-            "an index has no entries"
+                .len() as u128,
+            unsigned(&node[0], "novelty"),
+            "an index's entries are the operations it buffers"
         );
         assert!(
             bytes(&spans[0], "separator").is_empty(),
