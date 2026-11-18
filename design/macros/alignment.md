@@ -35,6 +35,13 @@ Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), 
 | L. `dialog/position` | `(dialog/position ?b after: ?lo before: ?hi is: ?at)` among a rule's formulas | built 2026-11-18, to dialog-query's formula of that name | none known |
 | M. a command's own entity | not said | built 2026-11-18, the managing agent's opinion: `of: ?c` in a premise that reads a command binds the entity its content derived | in a head or at the top level `of:` on a command is unknown. The notebook sketch uses `id` instead, which names another entity |
 | N. a view | proposed: `(view concept name template condition…)`, events inline as `:on/<type>` | built 2026-11-18 to a description, `View::describe`, checked for unbound variables, undeclared commands, an event's fields and nested views that name no view. Dialog-DB refuses it (#830) | unsupported: a valueless attribute, an attribute of several parts, a nested view by `:model` or `:with` or of no entity. No renderer, no lowering to tonk |
+| P. a declaration as data | not said: what a back end reads | built 2026-11-18: `Checked::declarations`, each concept and command with its description, its lines as written and the descriptor a read of it compiles to, and each view | a concept a macro declares is not listed |
+
+
+What the build does today, against what tonk's YAML does, both found by [tonk-claims-diff.md](tonk-claims-diff.md) and the maintainer's to decide:
+
+- A line with no `cardinality:` reads every claim: it has no pick, and a field with none reads `all` (`attribute` in `compile.rs`). tonk's reads the newest. A command's lines in the design say no cardinality, so the same command gets another descriptor entity than tonk's.
+- A variable a rule's premise uses once is kept under its name, where tonk writes `_`: a command premise's own entity is a variable of the expansion's own, `?c.<site>`, and Dialog-DB stores a named variable as a named local and `_` as a blank. So the same rule written in either gets two identities.
 
 
 ## What the design says and the build does not do yet

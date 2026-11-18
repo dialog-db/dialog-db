@@ -8,6 +8,7 @@
 use crate::Syntax;
 use crate::analyze::Analyzer;
 use crate::compile::{Step, compile};
+use crate::declare::{self, Declaration};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::parse_document;
 use crate::written::{Comment, Segment, Written};
@@ -23,6 +24,11 @@ pub struct Checked {
     /// What the analyzed trees compile to, in the order written.
     /// Nothing when any part of the document is refused.
     pub steps: Vec<Step>,
+    /// What the document declares, in the order written: its concepts
+    /// and commands, and its views. Given whenever analysis refused
+    /// nothing, whatever Dialog-DB's compiler refuses, so a back end
+    /// that renders a view still reads it.
+    pub declarations: Vec<Declaration>,
     /// What the trees of the document leave out of its text.
     pub written: Written,
     /// Everything there is to say about the document, each with where
@@ -51,6 +57,7 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
     let mut checked = Checked {
         analyzed: Vec::new(),
         steps: Vec::new(),
+        declarations: Vec::new(),
         written: parsed.written,
         diagnostics: parsed.diagnostics,
     };
@@ -60,6 +67,25 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
     let mut trial = analyzer.clone();
     let analysis = trial.analyze(&parsed.trees);
     checked.diagnostics = analysis.diagnostics;
+    if checked.refusals().next().is_none() {
+        let mut declared: Vec<(usize, Declaration)> = Vec::new();
+        for (at, tree) in parsed.trees.iter().enumerate() {
+            if tree.applies() == Some("concept")
+                && let Some(concept) = declare::concept(tree, at, &checked.written, &trial)
+            {
+                declared.push((at, Declaration::Concept(concept)));
+            }
+        }
+        for (analyzed, origin) in analysis.analyzed.iter().zip(&analysis.origin) {
+            if analyzed.applies() == Some("view")
+                && let Some(view) = declare::view(analyzed, *origin, &checked.written)
+            {
+                declared.push((*origin, view));
+            }
+        }
+        declared.sort_by_key(|(at, _)| *at);
+        checked.declarations = declared.into_iter().map(|(_, declared)| declared).collect();
+    }
     let mut steps = Vec::new();
     let mut trees = Vec::new();
     for (analyzed, origin) in analysis.analyzed.iter().zip(&analysis.origin) {

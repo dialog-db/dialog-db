@@ -1437,6 +1437,19 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Decided.** By the agent: a map with a `:view` key is a nested view wherever it stands. The bar moves to 48 expanded, 43 compiled: one of the notebook's five views, `notebook/block :directory`, expands, and stops at Dialog-DB; the other four stop at what is unsupported in their templates. 118 unit tests, 39 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: a declaration as data
+
+**Asked.** Step P, from [tonk-claims-diff.md](tonk-claims-diff.md): a tonk back end writes tonk's own declaration claims for each concept and command, and the crate gave no public way to get what a document declares. It read a concept's descriptor back by compiling a query over it. Expose, for each declared concept and command, its name, its description, whether it is a command, its lines with theirs, and the Dialog-DB descriptor it compiles to, in one list with the views.
+
+**Learned.**
+
+- A concept is a rule about syntax once installed, and compiles to nothing, so the declaration is read off the form as written: `Checked::declarations`, a `Declaration` each, `Concept` or `View`, in the order written. A line keeps what was written: the attribute's full name, `of:`, `is:`, `as:`, `cardinality:` or none, `in:`, the key over a collection, and the comment above it. A body written as wrapped reads gives a line a field.
+- The descriptor is still what a read compiles to: the declaration's head as a query, compiled through the analyzer that holds the document's declarations, one `ConceptDescriptor` a domain it reads.
+- `check` refuses a document whole on any refusal, Dialog-DB's compiler included, and refuses every view (#830). So declarations are given whenever analysis refused nothing, whatever the compiler says: a back end that renders views reads them from a document the Dialog-DB back end refuses.
+- A concept declared by a macro's expansion, not by `concept`, is not in the list.
+
+**Decided.** By the agent: declarations are given when analysis passes, even if compiling does not. 118 unit tests, 40 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

@@ -669,6 +669,108 @@ async fn it_refuses_a_view_on_a_branch_and_describes_it() -> Result<()> {
     Ok(())
 }
 
+/// What a checked document declares comes back as data: the to-do
+/// example's concept and its three commands, each with the comment above
+/// it, its lines with theirs, whether it is a command, and the
+/// descriptor a read of it compiles to.
+#[dialog_common::test]
+async fn it_gives_what_a_document_declares_as_data() -> Result<()> {
+    let mut analyzer = dialog_notation::Analyzer::new()?;
+    let checked = dialog_notation::check(&mut analyzer, include_str!("../examples/todo.clj"));
+    assert_eq!(checked.refusals().count(), 0);
+    let concepts: Vec<&dialog_notation::Concept> = checked
+        .declarations
+        .iter()
+        .filter_map(|declared| match declared {
+            dialog_notation::Declaration::Concept(concept) => Some(concept),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        concepts
+            .iter()
+            .map(|concept| (concept.name.as_str(), concept.command))
+            .collect::<Vec<_>>(),
+        vec![
+            ("todo", false),
+            ("todo/add", true),
+            ("todo/complete", true),
+            ("list/archive", true),
+        ]
+    );
+    let todo = concepts[0];
+    assert!(
+        todo.description
+            .as_deref()
+            .is_some_and(|said| said.starts_with("Something to do, on a list.")),
+        "{:?}",
+        todo.description
+    );
+    assert_eq!(todo.entity.as_deref(), Some("t"));
+    assert_eq!(
+        todo.lines
+            .iter()
+            .map(|line| (
+                line.attribute.as_str(),
+                line.cardinality.as_deref(),
+                line.layer.as_deref()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("xyz.todo/list", Some("one"), None),
+            ("xyz.todo/text", Some("one"), None),
+            ("xyz.todo/state", Some("one"), None),
+        ]
+    );
+    assert_eq!(todo.descriptors.len(), 1);
+    let add = concepts[1];
+    assert_eq!(
+        add.description.as_deref(),
+        Some("Adding a to-do, to a list.")
+    );
+    assert_eq!(add.entity, None);
+    assert_eq!(
+        add.lines
+            .iter()
+            .map(|line| (
+                line.attribute.as_str(),
+                line.cardinality.as_deref(),
+                line.layer.as_deref()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("xyz.todo.add/list", None, Some("control")),
+            ("xyz.todo.add/text", None, Some("control")),
+        ]
+    );
+    assert_eq!(add.descriptors.len(), 1);
+
+    // A line's description is the comment above it. A view is declared
+    // beside the concepts, though Dialog-DB's compiler refuses it.
+    let checked = dialog_notation::check(
+        &mut dialog_notation::Analyzer::new()?,
+        "; A note.
+(concept (note ?n text: ?x)
+  ; What it says.
+  (xyz.note/text of: ?n is: ?x as: :text))
+
+; One note, as a row.
+(view note :row [:li ?x] (note ?n text: ?x))",
+    );
+    let [
+        dialog_notation::Declaration::Concept(note),
+        dialog_notation::Declaration::View { description, view },
+    ] = checked.declarations.as_slice()
+    else {
+        panic!("a concept and a view: {:?}", checked.declarations);
+    };
+    assert_eq!(note.lines[0].description.as_deref(), Some("What it says."));
+    assert_eq!(note.lines[0].cardinality, None);
+    assert_eq!(description.as_deref(), Some("One note, as a row."));
+    assert_eq!(view.name, "row");
+    Ok(())
+}
+
 /// A concept written as lines, an attribute a line, runs as one written
 /// as a read of several fields does: written through by a rule a
 /// command fires and read back. `:one` reads the newest claim and
