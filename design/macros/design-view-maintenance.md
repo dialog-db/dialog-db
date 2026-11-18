@@ -72,6 +72,22 @@ Built 2026-11-18 in `rust/dialog-notation`: `Plan::of` (`src/view/plan.rs`), `Ma
 - Siblings that both need a condition share it at their common ancestor. A join on a variable no element holds is pulled into the element whose condition it ties, or is a filter where its variables are bound.
 - A layer of several reads compiles to a rule and a query of it. `Branch::subscribe` takes no rule, so the rule is put in the branch's session overlay.
 
+Later the same day, after his choice of tonk's rule (below): `Plan::repeating` is the reading `compile` gives, `Plan::of` stays beside it. A nested view is a call, `(view concept :name entity label: term …)`; each call is mounted with its own subscriptions, narrowed by its labels, and a call of a view no document holds shows each match as its source, `[:view-source "(todo todo:1 list: list:home state: :open title: \"Buy milk\")"]`.
+
+```
+                       tonk's rule (default)                    layered plan
+ index, no marker      0: nothing  2: two div, a link each       the same
+ index, a marker       0: the div  2: one div, two links         0: nothing  2: two div (the marker means nothing)
+ card, inline items    0: nothing  2: article, two li            0: article, h2, empty ul  2: two li
+ row, tags             0 tags: nothing  2: one li, two span      the same
+ blocks by position    0: nothing  2: one div, two span by key   the same
+ what stays            written, by the marker                    inferred, from where variables sit
+```
+
+- tonk's code, where the words above differ: the marker counts only when the outermost element holding anything is the one that deep; a field of many values is cloned at its hosts' common ancestor only when that ancestor shows it, else at each child cluster below it, and on the repeating element itself it is not cloned at all; every field not declared `cardinality: :one` is an axis.
+- A task with no tag is no `task`, in both readings: a concept requires every field, a `:many` one too. tonk's planner would keep the `li` with no span.
+- A view over a second entity (the card) is outside tonk's rule. One query has no row for a list with no to-do, so no card. The real views have none: tonk reaches a second concept through a nested display, here a call.
+
 ## The maintainer's form, 2026-11-18
 
 Spoken, after the prototype. Put down in substance, his words where quoted.

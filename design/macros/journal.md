@@ -1611,3 +1611,11 @@ The agent had pressed the layered rule as the answer. It keeps the card, and it 
 
 **Decided.** tonk's rule, the maintainer's. The container as a view of its own is set aside. A nested view stays a call. Open: a view whose conditions read a second entity, which tonk's views cannot.
 
+
+## 2026-11-18, Building: a view repeats as tonk's do
+
+**Asked.** First a container as a view of its own, then, the same afternoon, tonk's rule instead: a marker attribute on the repeating element, and a field of many values cloned where it is shown. A nested view a call, and a view not found shown as its source.
+
+**Learned.** The call form needed one change to the reader, which refused two parts with no label beside labels; a view's call names its concept and its view first. tonk's rule, built as `Plan::repeating` from its code: with the marker the index stands empty and repeats its links; without it the whole template repeats, which is what tonk's own notebook directory does. Tags are cloned at the span in both readings, by the concept's cardinality, and moving the title changes nothing. A task with no tag is no task at all. Of the eleven restated views, ten repeat the element tonk's planner repeats; `table :directory` does not, as a call has no attribute to carry a marker. Two faults surfaced and were fixed in the build: a query of several reads crossed a row's values when its head was the list, and entries sorted by block, not position. One was sidestepped and is not understood: a rule with a blank and a bound read of one collection does not hydrate.
+
+**Decided.** The maintainer's: tonk's rule is the default and the layered plan stays beside it. Open and his: a view over a second entity, and whether a call may carry a marker.
