@@ -86,6 +86,17 @@ Measured on 2026-11-18 on four definitions of `notebook.yaml` (a concept, a comm
 
 The hypothesis holds for what was measured. What is left is three choices of default or identity, not machinery.
 
+Then over the whole notebook, 376 claims on the YAML side ([tonk-notebook-bar.md](tonk-notebook-bar.md), pinned in a test on tonk's local branch):
+
+| | the same | different | missing | only in the notation |
+|---|---|---|---|---|
+| the notation as it is | 87 | 206 | 83 | 263 |
+| with lines of no `cardinality:` read as `:one`, an adjustment made on the text | 202 | 113 | 61 | 148 |
+
+With the adjustment, concepts are 65 of 78 the same and commands 111 of 118. Rules are 4 of 112: a rule's identity moves with any difference in its body. Seven of the sixteen rules differ only in a variable used once where the YAML writes `_`, and four recompute the command's entity with `id` where the YAML reads it. Views and events are 26 claims with no back end yet; all five views reach a description.
+
+What the description lacks for tonk's stored views: the name tonk gives a variable's slot, the event's name, the two event flags, and a concept pinned to an entity, which the notation has no spelling for and the router reads.
+
 ## Not decided
 
 - What a line with no `cardinality:` holds. tonk's lines hold one.
