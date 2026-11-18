@@ -519,6 +519,15 @@ its variant keeps the `lazy` label so its reports compare with the ones
 recorded on 2026-11-16. Reproducing the eager column needs a build of
 this branch from before the switches were removed.
 
+## 2026-11-18 — the frame moves to its own pull request
+
+Nothing calls `dialog-answer`, so it is reviewed apart from the engine
+change: the crate, the harness's frame and columnar phases, the delta it
+encoded both ways, and the page bench (`bench/frame.js`, `bench.html`,
+`run.mjs`). The numbers recorded on 2026-11-16 were taken with them, and
+reproducing the frame's columns needs that pull request. The `answers`
+harness here runs the engine and tonk's JSON phases.
+
 ## How to reproduce
 
 ```sh

@@ -73,6 +73,9 @@ materialized (once per row now, not once per probe).
 
 ## The answer frame (`rust/dialog-answer`)
 
+Split into a pull request of its own, with its harness phases and the
+page bench: nothing calls it, and the engine change lands without it.
+
 A crate with no dependencies, so a page or a guest can take the reader
 alone.
 

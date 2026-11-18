@@ -16,7 +16,6 @@ strip = "debuginfo"
 
 [workspace]
 members = [
-    "rust/dialog-answer",
     "rust/dialog-chronicle",
     "rust/dialog-corpus",
     "rust/dialog-baseline",
@@ -221,8 +220,6 @@ version = "0.5.0-rc.6"
 path = "./rust/dialog-migration"
 version = "0.5.0-rc.6"
 
-[workspace.dependencies.dialog-answer]
-path = "./rust/dialog-answer"
 
 [workspace.dependencies.dialog-corpus]
 path = "./rust/dialog-corpus"

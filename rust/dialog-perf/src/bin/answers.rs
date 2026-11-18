@@ -4,9 +4,10 @@
 
 //! # answers
 //!
-//! What answering a concept query costs, from the scan to the receiver
-//! holding rows it can read, phase by phase, for the zero-copy answers
-//! research (`research/zero-copy-answers.md`).
+//! What answering a concept query costs, from the scan to tonk's JSON and
+//! back, phase by phase, for the zero-copy answers research
+//! (`research/zero-copy-answers.md`). The binary answer frame's phases
+//! live with the frame, in its own pull request.
 //!
 //! ```text
 //! answers run --dataset issue --rows 3000           # one store, every phase, JSON
@@ -24,25 +25,16 @@
 //!   snapshot frame;
 //! - `json_decode`: the receiver's `serde_json` back into `Conclusion`s
 //!   (in a page this is `JSON.parse` and `serde_wasm_bindgen`);
-//! - `frame_encode`: the conclusions into a `dialog_answer` frame, read
-//!   with `ConceptConclusion::view`;
-//! - `frame_read_all`: the receiver accepts the frame and reads every
-//!   cell, as a client that materializes every field would;
-//! - `frame_read_two`: accepts it and reads two fields of every row, as a
-//!   template that shows two would.
-//!
-//! Then a delta: a share of the rows change one field, and the delta's
-//! rows are encoded both ways, the frame on the snapshot's session.
+//! - `json_view_encode`: the same JSON written from the rows in place,
+//!   checked byte for byte against `json_encode`'s.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
-use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use dialog_answer::{Cell, Dictionary, Kind, Scalar, Session};
 #[cfg(not(dialog_main))]
 use dialog_corpus::ValueView;
 use dialog_corpus::{Entity, Pick, Value};
@@ -76,10 +68,6 @@ enum Commands {
         /// Timed repetitions of each phase, after one warm-up.
         #[arg(long, default_value_t = 15)]
         repeat: usize,
-        /// Write the snapshot's JSON and frame to `<dir>/<dataset>-<rows>.{json,frame}`,
-        /// for the page-side measurement (`research/zero-copy-answers/bench`).
-        #[arg(long)]
-        dump: Option<PathBuf>,
     },
     /// Run every dataset, size and binding mode under callgrind, then
     /// natively for wall time, interleaved; write one report each.
@@ -96,20 +84,8 @@ enum Commands {
     },
 }
 
-/// Where `run --dump` writes the snapshot's encodings.
-static DUMP: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-
 /// The phases, in order, by the name of the function each runs in.
-const PHASES: [&str; 8] = [
-    "columnar",
-    "json_view_encode",
-    "engine",
-    "json_encode",
-    "json_decode",
-    "frame_encode",
-    "frame_read_all",
-    "frame_read_two",
-];
+const PHASES: [&str; 4] = ["json_view_encode", "engine", "json_encode", "json_decode"];
 
 /// The variants a sweep runs: dataset, rows.
 const DATASETS: [(&str, usize); 4] = [
@@ -135,9 +111,7 @@ fn run_cli() -> Result<()> {
             dataset,
             rows,
             repeat,
-            dump,
         } => {
-            DUMP.set(dump).expect("set once");
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
@@ -207,92 +181,6 @@ fn project(conclusion: &ConceptConclusion, terms: &Parameters) -> Conclusion {
     }
 }
 
-/// A value read in place, as a frame cell.
-#[cfg(not(dialog_main))]
-fn scalar<'a>(view: &'a ValueView<'a>) -> Scalar<'a> {
-    match view {
-        ValueView::Bytes(bytes) => Scalar::Bytes(bytes),
-        ValueView::Entity(uri) => Scalar::Entity(uri),
-        ValueView::Boolean(b) => Scalar::Boolean(*b),
-        ValueView::String(text) => Scalar::Text(text),
-        ValueView::UnsignedInt(n) => Scalar::Natural(*n),
-        ValueView::SignedInt(n) => Scalar::Integer(*n),
-        ValueView::Float(n) => Scalar::Float(*n),
-        ValueView::Record(bytes) => Scalar::Record(bytes),
-        ValueView::Symbol(name) => Scalar::Symbol(name),
-    }
-}
-
-/// A field of `conclusion` read in place (`None` unbound, `Some(None)`
-/// absent).
-#[cfg(not(dialog_main))]
-fn view<'a>(conclusion: &'a ConceptConclusion, field: &str) -> Option<Option<ValueView<'a>>> {
-    conclusion.view(field)
-}
-
-/// Main has no in-place read: every field is looked up as main reads it,
-/// into an owned value, and written from that. The harness's queries name
-/// each variable after its field.
-#[cfg(dialog_main)]
-fn write_rows(
-    frame: &mut dialog_answer::Frame<'_>,
-    columns: &[&str],
-    conclusions: &[ConceptConclusion],
-) {
-    for conclusion in conclusions {
-        let values: Vec<Option<Option<Value>>> = columns
-            .iter()
-            .map(|column| {
-                let binding = conclusion
-                    .source()
-                    .lookup(&dialog_query::Term::<dialog_query::Any>::var(*column))
-                    .ok()?;
-                Some(binding.as_value().cloned())
-            })
-            .collect();
-        frame.row_with(
-            values
-                .iter()
-                .map(|cell| cell.as_ref().map(|value| value.as_ref().map(owned_scalar))),
-        );
-    }
-}
-
-#[cfg(dialog_main)]
-fn owned_scalar(value: &Value) -> Scalar<'_> {
-    match value {
-        Value::Bytes(bytes) => Scalar::Bytes(bytes),
-        Value::Entity(entity) => Scalar::Entity(entity.as_str()),
-        Value::Boolean(b) => Scalar::Boolean(*b),
-        Value::String(text) => Scalar::Text(text),
-        Value::UnsignedInt(n) => Scalar::Natural(*n),
-        Value::SignedInt(n) => Scalar::Integer(*n),
-        Value::Float(n) => Scalar::Float(*n),
-        Value::Record(bytes) => Scalar::Record(bytes),
-        Value::Symbol(name) => Scalar::Symbol(name.as_str()),
-    }
-}
-
-/// Writes `conclusions` into `frame`, every column read in place.
-#[cfg(not(dialog_main))]
-fn write_rows(
-    frame: &mut dialog_answer::Frame<'_>,
-    columns: &[&str],
-    conclusions: &[ConceptConclusion],
-) {
-    for conclusion in conclusions {
-        let views: Vec<Option<Option<ValueView<'_>>>> = columns
-            .iter()
-            .map(|column| view(conclusion, column))
-            .collect();
-        frame.row_with(
-            views
-                .iter()
-                .map(|cell| cell.as_ref().map(|value| value.as_ref().map(scalar))),
-        );
-    }
-}
-
 #[unsafe(no_mangle)]
 #[inline(never)]
 fn answers_phase_engine(
@@ -318,140 +206,6 @@ fn answer(
                 .await
         })
         .expect("the query runs")
-}
-
-/// The columnar floor: a concept read of required cardinality-one fields
-/// answered straight into a frame, with no row in between. One scan per
-/// field over its attribute (AEV, so every scan is in entity order), each
-/// entity's competing rows elected as the engine elects them, the cursors
-/// aligned on the entity's stored bytes, and every cell written from the
-/// winner's key in place. What the engine's general path costs above this
-/// is the price of its generality: rules, joins of any shape, rows a
-/// caller can extend. It reads stored facts only, so a concept with rules
-/// installed is not answered by it; the harness's concepts have none.
-#[cfg(not(dialog_main))]
-#[unsafe(no_mangle)]
-#[inline(never)]
-fn answers_phase_columnar(
-    runtime: &tokio::runtime::Runtime,
-    env: &Env,
-    attributes: &[&str],
-    columns: &[&str],
-) -> Vec<u8> {
-    runtime
-        .block_on(columnar(env, attributes, columns))
-        .expect("the columnar read runs")
-}
-
-#[cfg(not(dialog_main))]
-struct Lane<'a> {
-    stream: dialog_corpus::FactStream<'a>,
-    /// The next row, read ahead of the group it opens.
-    next: Option<dialog_corpus::FactView>,
-    /// The current entity's elected winner.
-    winner: Option<dialog_corpus::CheckedRow>,
-}
-
-#[cfg(not(dialog_main))]
-impl Lane<'_> {
-    /// Reads the next entity's rows and elects its winner.
-    async fn advance(&mut self) -> Result<()> {
-        use futures_util::StreamExt as _;
-        self.winner = None;
-        loop {
-            let first = match self.next.take() {
-                Some(row) => row,
-                None => match self.stream.next().await {
-                    Some(row) => row?,
-                    None => return Ok(()),
-                },
-            };
-            let mut winner = first;
-            while let Some(row) = self.stream.next().await {
-                let row = row?;
-                if row.of_bytes()? == winner.of_bytes()? {
-                    winner = winner.elect(row)?;
-                } else {
-                    self.next = Some(row);
-                    break;
-                }
-            }
-            // A corrupt winner is passed over, as the engine passes it.
-            if let Ok(winner) = winner.checked() {
-                self.winner = Some(winner);
-                return Ok(());
-            }
-        }
-    }
-
-    fn entity(&self) -> Option<&str> {
-        self.winner.as_ref().map(|winner| winner.of_str())
-    }
-}
-
-#[cfg(not(dialog_main))]
-async fn columnar(env: &Env, attributes: &[&str], columns: &[&str]) -> Result<Vec<u8>> {
-    let mut lanes = Vec::with_capacity(attributes.len());
-    for attribute in attributes {
-        let selector = dialog_corpus::Selector::new().the(attribute.parse()?);
-        let stream = env
-            .branch
-            .claims()
-            .select(selector)
-            .perform(&env.operator)
-            .await?;
-        let mut lane = Lane {
-            stream: Box::pin(stream),
-            next: None,
-            winner: None,
-        };
-        lane.advance().await?;
-        lanes.push(lane);
-    }
-    let mut session = Session::default();
-    let mut frame = session.frame(Kind::Snapshot, columns);
-    'rows: loop {
-        // The largest entity any lane stands on; every lane catches up.
-        let mut target: Option<String> = None;
-        for lane in &lanes {
-            match lane.entity() {
-                None => break 'rows,
-                Some(entity) => {
-                    if target.as_deref().is_none_or(|target| entity > target) {
-                        target = Some(entity.to_owned());
-                    }
-                }
-            }
-        }
-        let target = target.expect("lanes stand on entities");
-        let mut aligned = true;
-        for lane in &mut lanes {
-            while lane.entity().is_some_and(|entity| entity < target.as_str()) {
-                lane.advance().await?;
-            }
-            match lane.entity() {
-                None => break 'rows,
-                Some(entity) if entity != target => aligned = false,
-                Some(_) => {}
-            }
-        }
-        if !aligned {
-            continue;
-        }
-        let views: Vec<ValueView<'_>> = lanes
-            .iter()
-            .map(|lane| lane.winner.as_ref().expect("aligned").value_view())
-            .collect();
-        frame.row_with(
-            std::iter::once(Some(Some(Scalar::Entity(&target))))
-                .chain(views.iter().map(|view| Some(Some(scalar(view))))),
-        );
-        drop(views);
-        for lane in &mut lanes {
-            lane.advance().await?;
-        }
-    }
-    Ok(frame.finish())
 }
 
 #[unsafe(no_mangle)]
@@ -538,77 +292,10 @@ fn answers_phase_json_decode(bytes: &[u8]) -> usize {
     }
 }
 
-#[unsafe(no_mangle)]
-#[inline(never)]
-fn answers_phase_frame_encode(
-    session: &mut Session,
-    columns: &[&str],
-    conclusions: &[ConceptConclusion],
-) -> Vec<u8> {
-    snapshot_frame(session, columns, conclusions)
-}
-
-/// The conclusions as a snapshot frame of `session`.
-fn snapshot_frame(
-    session: &mut Session,
-    columns: &[&str],
-    conclusions: &[ConceptConclusion],
-) -> Vec<u8> {
-    let mut frame = session.frame(Kind::Snapshot, columns);
-    write_rows(&mut frame, columns, conclusions);
-    frame.finish()
-}
-
-/// Reads every cell of every row, summing what it read so nothing is
-/// optimized away.
-#[unsafe(no_mangle)]
-#[inline(never)]
-fn answers_phase_frame_read_all(bytes: Arc<[u8]>) -> usize {
-    let mut dictionary = Dictionary::default();
-    let answer = dictionary.accept(bytes).expect("a frame reads");
-    let columns = answer.columns().count();
-    let mut read = 0;
-    for row in answer.section(0).iter() {
-        for column in 0..columns {
-            read += weigh(row.cell(&dictionary, column));
-        }
-    }
-    read
-}
-
-/// Reads two fields of every row, as a template showing two does.
-#[unsafe(no_mangle)]
-#[inline(never)]
-fn answers_phase_frame_read_two(bytes: Arc<[u8]>, fields: [&str; 2]) -> usize {
-    let mut dictionary = Dictionary::default();
-    let answer = dictionary.accept(bytes).expect("a frame reads");
-    let [a, b] = fields.map(|field| answer.column(field).expect("the field is a column"));
-    let mut read = 0;
-    for row in answer.section(0).iter() {
-        read += weigh(row.cell(&dictionary, a)) + weigh(row.cell(&dictionary, b));
-    }
-    read
-}
-
-fn weigh(cell: Cell<'_>) -> usize {
-    match cell {
-        Cell::Value(Scalar::Text(text) | Scalar::Entity(text) | Scalar::Symbol(text)) => text.len(),
-        Cell::Value(Scalar::Bytes(bytes) | Scalar::Record(bytes)) => bytes.len(),
-        Cell::Value(_) => 1,
-        _ => 0,
-    }
-}
-
-/// The dataset's concept, the fields a query asks for, and the two a
-/// template would show.
+/// The dataset's concept and the fields a query asks for.
 struct Dataset {
     descriptor: ConceptDescriptor,
     fields: Vec<&'static str>,
-    shown: [&'static str; 2],
-    /// The field a delta changes.
-    changed: &'static str,
-    /// Each field's attribute, in `fields` order.
-    attributes: Vec<&'static str>,
 }
 
 fn dataset(name: &str) -> Result<Dataset> {
@@ -619,9 +306,6 @@ fn dataset(name: &str) -> Result<Dataset> {
                 "role": { "the": "stuff/role", "as": "text:" }
             }})),
             fields: vec!["name", "role"],
-            shown: ["name", "role"],
-            changed: "role",
-            attributes: vec!["stuff/name", "stuff/role"],
         },
         "issue" => Dataset {
             descriptor: concept(serde_json::json!({ "with": {
@@ -636,18 +320,6 @@ fn dataset(name: &str) -> Result<Dataset> {
             }})),
             fields: vec![
                 "ident", "title", "status", "priority", "created", "creator", "assignee", "project",
-            ],
-            shown: ["title", "status"],
-            changed: "status",
-            attributes: vec![
-                "issue/ident",
-                "issue/title",
-                "issue/status",
-                "issue/priority",
-                "issue/created",
-                "issue/creator",
-                "issue/assignee",
-                "issue/project",
             ],
         },
         // tonk's own issue concept (`v2/issue`): three required fields and
@@ -683,9 +355,6 @@ fn dataset(name: &str) -> Result<Dataset> {
                 "priority",
                 "project",
             ],
-            shown: ["title", "status"],
-            changed: "status",
-            attributes: vec![],
         },
         other => bail!("no dataset {other:?}: stuff, issue or tonk-issue"),
     })
@@ -1010,97 +679,12 @@ fn measure(
     #[cfg(feature = "trace-hydration")]
     hydration.insert("json_decode".into(), hydrated(rows, 1));
 
-    let (frame, encode) = phase(repeat, || {
-        answers_phase_frame_encode(&mut Session::default(), &columns, &conclusions)
-    });
-    phases.insert("frame_encode".into(), encode);
-    #[cfg(feature = "trace-hydration")]
-    hydration.insert("frame_encode".into(), hydrated(rows, 1));
-    let frame: Arc<[u8]> = frame.into();
-    let (_, read_all) = phase(repeat, || answers_phase_frame_read_all(frame.clone()));
-    phases.insert("frame_read_all".into(), read_all);
-    #[cfg(feature = "trace-hydration")]
-    hydration.insert("frame_read_all".into(), hydrated(rows, 1));
-    let (_, read_two) = phase(repeat, || {
-        answers_phase_frame_read_two(frame.clone(), set.shown)
-    });
-    phases.insert("frame_read_two".into(), read_two);
-    #[cfg(feature = "trace-hydration")]
-    hydration.insert("frame_read_two".into(), hydrated(rows, 1));
-    check_same(&json, &frame, &columns)?;
-    #[cfg(not(dialog_main))]
-    if !set.attributes.is_empty() {
-        let (columnar, run) = phase(repeat, || {
-            answers_phase_columnar(runtime, &env, &set.attributes, &columns)
-        });
-        phases.insert("columnar".into(), run);
-        // The columnar frame says what the engine's does, row for row: it
-        // writes them in entity order, which is the engine's too.
-        check_same(&json, &columnar.into(), &columns)?;
-    }
     bytes.insert("json_snapshot".into(), json.len());
-    if let Some(Some(dir)) = DUMP.get() {
-        std::fs::create_dir_all(dir)?;
-        std::fs::write(dir.join(format!("{name}-{rows}.json")), &json)?;
-        std::fs::write(dir.join(format!("{name}-{rows}.frame")), &frame[..])?;
-    }
     // The answer's identity: every variant of a dataset must agree on it.
     bytes.insert(
         "answer_hash".into(),
         u32::from_le_bytes(blake3::hash(&json).as_bytes()[..4].try_into()?) as usize,
     );
-    bytes.insert("frame_snapshot".into(), frame.len());
-
-    // A delta: every 20th row's `changed` field moves on, as a page sees
-    // after a round of edits. Both encodings carry the changed rows'
-    // new versions and the old ones they replace; the frame is written
-    // on the session that sent the snapshot.
-    let mut session = Session::default();
-    let snapshot = snapshot_frame(&mut session, &columns, &conclusions);
-    let before: BTreeMap<String, usize> = conclusions
-        .iter()
-        .enumerate()
-        .map(|(at, conclusion)| (conclusion.entity().to_string(), at))
-        .collect();
-    let changed: Vec<dialog_corpus::Fact> = seed(name, rows, 1)
-        .into_iter()
-        .enumerate()
-        .filter(|(_, fact)| fact.the.name() == set.changed)
-        .enumerate()
-        .filter(|(at, _)| at % 20 == 0)
-        .map(|(_, fact)| fact)
-        .map(|(_, fact)| fact)
-        .collect();
-    runtime.block_on(env.commit(assert_all(changed.clone(), Pick::Last)))?;
-    let after = answer(runtime, &env, query.clone());
-    let entities: std::collections::BTreeSet<String> =
-        changed.iter().map(|fact| fact.of.to_string()).collect();
-    let asserted: Vec<ConceptConclusion> = after
-        .into_iter()
-        .filter(|conclusion| entities.contains(&conclusion.entity().to_string()))
-        .collect();
-    let retracted: Vec<ConceptConclusion> = entities
-        .iter()
-        .map(|entity| conclusions[before[entity]].clone())
-        .collect();
-    let json_delta = serde_json::to_vec(&WireFrame::Delta {
-        asserted: asserted.iter().map(|c| project(c, &terms)).collect(),
-        retracted: retracted.iter().map(|c| project(c, &terms)).collect(),
-    })?;
-    let mut delta = session.frame(Kind::Delta, &columns);
-    write_rows(&mut delta, &columns, &asserted);
-    delta.retracted();
-    write_rows(&mut delta, &columns, &retracted);
-    let delta = delta.finish();
-    let mut dictionary = Dictionary::default();
-    dictionary.accept(snapshot.into())?;
-    let answer = dictionary.accept(delta.clone().into())?;
-    if answer.section(0).len() != entities.len() || answer.section(1).len() != entities.len() {
-        bail!("the delta's sections disagree with the change");
-    }
-    bytes.insert("delta_rows".into(), entities.len());
-    bytes.insert("json_delta".into(), json_delta.len());
-    bytes.insert("frame_delta".into(), delta.len());
 
     Ok(Report {
         dataset: name.into(),
@@ -1123,46 +707,6 @@ fn lazy() -> bool {
 #[cfg(dialog_main)]
 fn lazy() -> bool {
     false
-}
-
-/// Refuses a run whose frame does not say what the JSON says: every row,
-/// every field, the same value.
-fn check_same(json: &[u8], frame: &Arc<[u8]>, columns: &[&str]) -> Result<()> {
-    let WireFrame::Snapshot { conclusions } = serde_json::from_slice(json)? else {
-        bail!("not a snapshot");
-    };
-    let mut dictionary = Dictionary::default();
-    let answer = dictionary.accept(frame.clone())?;
-    let rows = answer.section(0);
-    if rows.len() != conclusions.len() {
-        bail!(
-            "the frame has {} rows, the JSON {}",
-            rows.len(),
-            conclusions.len()
-        );
-    }
-    for (row, conclusion) in rows.iter().zip(&conclusions) {
-        for (at, column) in columns.iter().enumerate() {
-            let cell = row.get(&dictionary, at);
-            let expected = if *column == "this" {
-                Some(Ipld::String(conclusion.this.clone()))
-            } else {
-                conclusion.fields.get(*column).cloned()
-            };
-            let got = cell.map(|scalar| match scalar {
-                Scalar::Text(t) | Scalar::Entity(t) | Scalar::Symbol(t) => Ipld::String(t.into()),
-                Scalar::Natural(n) => Ipld::Integer(n as i128),
-                Scalar::Integer(n) => Ipld::Integer(n),
-                Scalar::Float(n) => Ipld::Float(n),
-                Scalar::Boolean(b) => Ipld::Bool(b),
-                Scalar::Bytes(b) | Scalar::Record(b) => Ipld::Bytes(b.to_vec()),
-            });
-            if got != expected {
-                bail!("{column}: the frame says {got:?}, the JSON {expected:?}");
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Every variant under callgrind for instructions, then natively for wall

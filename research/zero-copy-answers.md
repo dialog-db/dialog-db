@@ -127,7 +127,9 @@ bytes (the answer's hash is in each report).
    an entity it lacks binds Absent, where main probed it once per entity.
 4. **`dialog-answer`**: a columnar answer frame, its tokens owned by the
    session so a delta carries only what the receiver has not seen, read
-   in place in Rust and in JS.
+   in place in Rust and in JS. Nothing calls it, so it is reviewed in a
+   pull request of its own, with the harness phases and the page bench
+   that measure it; the numbers below were taken with it.
 
 ### The answer to the question
 
