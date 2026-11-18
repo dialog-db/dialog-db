@@ -492,3 +492,197 @@ async fn it_renders_no_card_for_an_empty_list_from_one_query() -> Result<()> {
     );
     Ok(())
 }
+
+/// The card with each item a nested view, the to-do's own row.
+const NESTED: &str = r#"
+    (view todo :row [:li {:class ?s} ?title]
+      (todo ?t title: ?title state: ?s))
+    (view list :card
+      [:article
+        [:h2 ?name]
+        [:ul {:view :row :of ?t}]]
+      (list ?l name: ?name)
+      (todo ?t list: ?l))"#;
+
+/// A view and the views nested in it, each mounted where its reference's
+/// instance is and maintained as a view of its own, with its own
+/// subscriptions.
+struct Host {
+    outer: Driven,
+    inner: Plan,
+    mounted: Vec<(dialog_notation::Address, Driven)>,
+}
+
+/// Every nested reference in an instance, by its address.
+fn mounts(
+    at: dialog_notation::Address,
+    shown: &Shown,
+    into: &mut Vec<(dialog_notation::Address, dialog_notation::Mount)>,
+) {
+    match &shown.content {
+        Content::View(mount) => into.push((at, mount.clone())),
+        Content::Element { slots, .. } => {
+            for (slot, inside) in slots.iter().enumerate() {
+                if let Slot::Instances(list) = inside {
+                    for child in list {
+                        let mut below = at.clone();
+                        below.push((slot, child.key.clone()));
+                        mounts(below, child, into);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Host {
+    /// The patches of a step: the outer view's with no mount, then each
+    /// nested view's with the address it is mounted at.
+    async fn step(
+        &mut self,
+        notebook: &Notebook,
+    ) -> Result<Vec<(dialog_notation::Address, Patch)>> {
+        let mut said = Vec::new();
+        let outer = self.outer.step(notebook).await?;
+        let mut arrived = Vec::new();
+        for patch in &outer {
+            match patch {
+                Patch::Insert {
+                    parent,
+                    slot,
+                    instance,
+                    ..
+                } => {
+                    let mut at = parent.clone();
+                    at.push((*slot, instance.key.clone()));
+                    if parent.is_empty() {
+                        at = vec![(0, instance.key.clone())];
+                    }
+                    mounts(at, instance, &mut arrived);
+                }
+                Patch::Remove { at } => {
+                    self.mounted.retain(|(mounted, _)| !mounted.starts_with(at))
+                }
+                _ => {}
+            }
+            said.push((Vec::new(), patch.clone()));
+        }
+        for (at, driven) in &mut self.mounted {
+            for patch in driven.step(notebook).await? {
+                said.push((at.clone(), patch));
+            }
+        }
+        for (at, mount) in arrived {
+            let entity = mount.of.clone().expect("a row of a to-do");
+            let mut driven =
+                Driven::new(notebook, self.inner.clone(), entity, How::Subscribed).await?;
+            for patch in driven.step(notebook).await? {
+                said.push((at.clone(), patch));
+            }
+            self.mounted.push((at, driven));
+        }
+        Ok(said)
+    }
+}
+
+/// The card's items are references to each to-do's row, and each row is
+/// a view of its own, mounted where its reference is, with its own
+/// subscriptions: adding a to-do inserts the reference into the card and
+/// the row into the mount; retitling it changes one text of the row and
+/// nothing of the card; removing it removes the reference, and the row
+/// with it.
+#[dialog_common::test]
+async fn it_maintains_a_nested_view_as_a_view_of_its_own() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    write(&mut notebook, CONCEPTS).await?;
+    write(&mut notebook, r#"(assert (list list:home name: "Home"))"#).await?;
+    let card = Plan::of(&described(NESTED, "card", "list")?)?;
+    let row = Plan::of(&described(NESTED, "row", "todo")?)?;
+    assert_eq!(card.elements[3].key, ["t"], "a reference a to-do");
+    let mut host = Host {
+        outer: Driven::new(&notebook, card, entity("list:home"), How::Subscribed).await?,
+        inner: row,
+        mounted: Vec::new(),
+    };
+    let first = host.step(&notebook).await?;
+    assert!(
+        matches!(first.as_slice(), [(mount, Patch::Insert { .. })] if mount.is_empty()),
+        "{first:?}"
+    );
+
+    write(
+        &mut notebook,
+        r#"(assert (todo todo:1 list: list:home title: "Buy milk" state: :open))"#,
+    )
+    .await?;
+    let reference = || {
+        let mut at = items();
+        at.push((0, vec![entity("todo:1")]));
+        at
+    };
+    let root = || vec![(0, vec![entity("todo:1")])];
+    assert_eq!(
+        host.step(&notebook).await?,
+        [
+            (
+                Vec::new(),
+                Patch::Insert {
+                    parent: items(),
+                    slot: 0,
+                    index: 0,
+                    instance: Shown {
+                        key: vec![entity("todo:1")],
+                        content: Content::View(dialog_notation::Mount {
+                            view: "row".into(),
+                            model: None,
+                            of: Some(entity("todo:1")),
+                            entries: Vec::new(),
+                        }),
+                    },
+                }
+            ),
+            (
+                reference(),
+                Patch::Insert {
+                    parent: Vec::new(),
+                    slot: 0,
+                    index: 0,
+                    instance: li("todo:1", "Buy milk", "open:"),
+                }
+            ),
+        ]
+    );
+    assert_eq!(host.mounted.len(), 1);
+
+    write(
+        &mut notebook,
+        r#"(assert (todo todo:1 list: list:home title: "Buy oat milk" state: :open))"#,
+    )
+    .await?;
+    assert_eq!(
+        host.step(&notebook).await?,
+        [(
+            reference(),
+            Patch::SetText {
+                at: root(),
+                slot: 0,
+                text: "Buy oat milk".into(),
+            }
+        )],
+        "the row changes and the card does not"
+    );
+
+    write(
+        &mut notebook,
+        r#"(retract (todo todo:1 list: list:home title: "Buy oat milk" state: :open))"#,
+    )
+    .await?;
+    let removed = host.step(&notebook).await?;
+    assert_eq!(
+        removed,
+        [(Vec::new(), Patch::Remove { at: reference() })],
+        "the reference leaves and its row with it"
+    );
+    assert!(host.mounted.is_empty());
+    Ok(())
+}
