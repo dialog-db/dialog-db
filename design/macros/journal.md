@@ -1280,6 +1280,19 @@ Built: `derived` and the resolution order in `expand.rs`, `DERIVED` and `is_deri
 
 Built: the reader's `{` and `former_key` in `form.rs`, the two printers, every test text. 108 unit tests, 28 on a branch, 2 doc tests; lint clean.
 
+## 2026-11-18, Building: a document's forms in any order
+
+**Asked.** Step E of the tonk order ([tonk.md](tonk.md)): the design says the order of a document's forms does not matter, and the build expanded them top to bottom, so a command used above its declaration was read as an attribute.
+
+**Learned.**
+
+- What declares a name is a `concept`, or a `rule` whose head is `syntax` or `warning`. Each is known by its first word before it is expanded, so the walker expands those first, in the order written, and the rest after them.
+- A macro's expansion may also declare: `(note-kind memo)` expands to a concept. That is known only once it is expanded, so what failed before it is expanded again whenever a pass declared something, until a pass declares nothing. A name two such expansions need of each other is not a cycle the walker can break: it is refused with whatever the first one met, an unknown form or an attribute with no entity. Built and pinned, `it_expands_again_what_a_later_expansion_declares_a_name_for`; the mutual case is not pinned, since no core form makes one.
+- A document's kernel rules come back in the order of the trees they came of, whatever order they were expanded in, and so do its refusals.
+- A concept installed by one document is known to the next one on the same branch, since the walker keeps it (`it_runs_a_document_whose_uses_stand_above_its_declarations`). Nothing stores it on the branch: a new walker over the same branch does not know it ([poc.md](poc.md), syntax is not stored).
+
+**Decided.** Nothing new. 110 unit tests, 29 on a branch, 2 doc tests; lint clean.
+
 ## The queue
 
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.

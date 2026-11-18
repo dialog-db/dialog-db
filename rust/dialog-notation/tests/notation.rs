@@ -104,6 +104,46 @@ async fn it_defines_a_concept_and_runs_a_command_through_it() -> Result<()> {
     Ok(())
 }
 
+/// The order of a document's forms does not matter: here the commands
+/// are issued and the rules written above the concepts they use. A
+/// second document relies on what the first installed.
+#[dialog_common::test]
+async fn it_runs_a_document_whose_uses_stand_above_its_declarations() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let (rows, diagnostics) = notebook
+        .submit(
+            r#"(assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))
+               (rule (assert (todo ?t list: ?l text: ?x state: :open))
+                 (todo/add todo: ?t list: ?l text: ?x))
+               (query (xyz.todo ?t text: (:last ?x)))
+               (concept (todo/add todo: ?t list: ?l text: ?x)
+                 (xyz.todo.add/todo of: ?c is: ?t as: :entity in: :control)
+                 (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
+                 (xyz.todo.add/text of: ?c is: ?x as: :text in: :control))
+               (concept (todo ?t list: ?l text: ?x state: ?s)
+                 (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
+                 (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
+                 (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one))"#,
+        )
+        .await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(rows, vec![r#"(xyz.todo todo:1 text: "Buy milk")"#]);
+
+    // The next document uses the concept, the command and the rule the
+    // first one installed.
+    notebook
+        .submit(r#"(assert (todo/add todo: todo:2 list: list:home text: "Call mum"))"#)
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(query (todo ?t text: ?x state: :open ...))").await?,
+        vec![
+            r#"(xyz.todo todo:1 state: :open text: "Buy milk")"#,
+            r#"(xyz.todo todo:2 state: :open text: "Call mum")"#,
+        ]
+    );
+    Ok(())
+}
+
 /// A concept written as lines, an attribute a line, runs as one written
 /// as a read of several fields does: written through by a rule a
 /// command fires and read back. `:one` reads the newest claim and

@@ -20,6 +20,15 @@ Read at `45b0fdd1` on 2026-11-16, and again at `31929a6f` on 2026-11-18. Eight c
 Three of the eight meet the same wall: 3 and 8 are folds in a rule that derives, which main still refuses (`ReduceInOpenRule`), and the design's own Open list says the engine and the notation have to agree (#793, now #827). The contradiction below stands, with the getter now a derived attribute.
 
 
+## What tonk's documents need, in the order they need it
+
+Ordered by what `notebook.yaml` cannot be written without ([tonk.md](tonk.md)), from 2026-11-18.
+
+| | the design now | built here | gap |
+|---|---|---|---|
+| E. a document's order | "The order of its forms does not matter" | built 2026-11-18: concepts and rules about syntax are expanded first, and what failed is expanded again once a macro's expansion declares a name | a name two expansions need of each other is refused as whatever the first met |
+
+
 ## What the design says and the build does not do yet
 
 | | the design, at R45 | built here | needs |
@@ -28,7 +37,7 @@ Three of the eight meet the same wall: 3 and 8 are folds in a rule that derives,
 | which claim is read | `cardinality: :one` or `:many` on the line; picks are gone | `:one` reads the newest and `:many` every claim, on main's picks `last` and `all`. What a write under `:one` retires is the engine's, as it was for `last` | the engine's cardinality work (#793) for what a write does |
 | a variant, `as: [:open :done]` | a type: on a read it filters, on an assert it refuses | read as `:entity`. That the value is one of the cases is not checked, either way | a type for it in the engine |
 | a sized number, `as: (:float 64)` | a type | refused: not a type | this branch |
-| a layer, `in:` on a line | a constant or a field | refused as unsupported | the layers work (#795 on) |
+| a layer, `in:` on a line | a constant or a field | `:control` only, a command's, since 2026-11-18; any other refused as unsupported | the layers work (#795 on) |
 | choosing among claims | an elector in the head: `(account ?a status: (top ?s))`, ordered by the line's `as:` list | nothing | #793 |
 | a variable of the body | is in the head, so a concept runs both ways | checked, for lines as for reads | done |
 | `!` | no form carries one: `assert`, `retract` | the same since 2026-11-16; `assert!` and `retract!` are refused with the word to write | done |

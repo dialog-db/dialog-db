@@ -589,6 +589,9 @@ pub struct Expander {
     concepts: BTreeSet<String>,
     /// The commands declared, each the domain its claims are in.
     commands: BTreeMap<String, String>,
+    /// How many rules about syntax have been kept, ever: what tells a
+    /// pass over a document that it declared something.
+    declared: usize,
     /// The domains some installed rule reads.
     reads: BTreeSet<String>,
     /// Every form the rules were asked about since the last report,
@@ -649,35 +652,78 @@ impl Expander {
         self.asked.clear();
         self.origin.clear();
         self.document = trees.clone();
-        let mut kernel = Vec::new();
-        let mut diagnostics = Vec::new();
-        for (at, tree) in trees.into_iter().enumerate() {
-            self.tree = at;
-            self.blame.clear();
-            let kept = kernel.len();
-            if let Err(error) = self.each(at, &tree, &mut kernel) {
-                kernel.truncate(kept);
-                self.origin.truncate(kept);
-                // The refusal is about the innermost part being worked
-                // on that is a part of the tree as written.
-                let (form, inside) = self
-                    .blame
-                    .iter()
-                    .rev()
-                    .find_map(|part| Some((part.clone(), tree.locate(part)?)))
-                    .unwrap_or((tree.clone(), Path::new()));
-                let mut path = vec![Segment::Item(at)];
-                path.extend(inside);
-                diagnostics.push(Diagnostic::refused(Some(form), path, error));
+        // The order of a document's forms does not matter. What declares
+        // a name, a concept or a rule about syntax, is expanded before
+        // anything that may use it.
+        let declares = |tree: &Syntax| match tree.applies() {
+            Some("concept") => true,
+            Some("rule") => items(tree)
+                .first()
+                .and_then(Syntax::applies)
+                .is_some_and(|word| matches!(word, "syntax" | "warning")),
+            _ => false,
+        };
+        let mut pending: Vec<usize> = (0..trees.len())
+            .filter(|at| declares(&trees[*at]))
+            .chain((0..trees.len()).filter(|at| !declares(&trees[*at])))
+            .collect();
+        let mut done: BTreeMap<usize, Vec<Syntax>> = BTreeMap::new();
+        let mut refused: BTreeMap<usize, Diagnostic> = BTreeMap::new();
+        // A form a macro expands to may declare a name too. Whatever
+        // failed before it is expanded again once it has, until nothing
+        // more is declared. A name two such expansions need of each
+        // other is refused as whatever the first one met.
+        for _ in 0..=trees.len() {
+            let declared = self.declared;
+            let mut failed = Vec::new();
+            for at in pending {
+                let tree = &trees[at];
+                self.tree = at;
+                self.blame.clear();
+                let mut rules = Vec::new();
+                match self.each(tree, &mut rules) {
+                    Ok(()) => {
+                        refused.remove(&at);
+                        done.insert(at, rules);
+                    }
+                    Err(error) => {
+                        // The refusal is about the innermost part being
+                        // worked on that is a part of the tree as written.
+                        let (form, inside) = self
+                            .blame
+                            .iter()
+                            .rev()
+                            .find_map(|part| Some((part.clone(), tree.locate(part)?)))
+                            .unwrap_or((tree.clone(), Path::new()));
+                        let mut path = vec![Segment::Item(at)];
+                        path.extend(inside);
+                        refused.insert(at, Diagnostic::refused(Some(form), path, error));
+                        failed.push(at);
+                    }
+                }
+            }
+            pending = failed;
+            if pending.is_empty() || self.declared == declared {
+                break;
             }
         }
+        let mut kernel = Vec::new();
+        for (at, rules) in done {
+            for rule in rules {
+                if !kernel.contains(&rule) {
+                    kernel.push(rule);
+                    self.origin.push(at);
+                }
+            }
+        }
+        let mut diagnostics: Vec<Diagnostic> = refused.into_values().collect();
         diagnostics.extend(self.diagnose());
         (kernel, diagnostics)
     }
 
     /// The kernel rules one tree of a document expands to, added to
     /// `kernel`.
-    fn each(&mut self, at: usize, tree: &Syntax, kernel: &mut Vec<Syntax>) -> Result<(), Error> {
+    fn each(&mut self, tree: &Syntax, kernel: &mut Vec<Syntax>) -> Result<(), Error> {
         // Where several definitions take a form that is read, the rule
         // is expanded once a definition: what is read is what any of
         // them reads. Within one rule a form that recurs is the same
@@ -695,7 +741,6 @@ impl Expander {
                     && !kernel.contains(&rule)
                 {
                     kernel.push(rule);
-                    self.origin.push(at);
                 }
             }
             while let Some(last) = choices.last_mut() {
@@ -821,6 +866,7 @@ impl Expander {
                 }
             }
         }
+        self.declared += 1;
         self.syntax.push(Definition {
             answer,
             pattern,
@@ -1380,6 +1426,58 @@ mod tests {
         expander.submit(setup)?;
         let (kernel, _) = expander.submit(text)?;
         Ok(kernel.iter().map(Syntax::to_string).collect())
+    }
+
+    /// The order of a document's forms does not matter: uses written
+    /// above the concepts and commands they use expand as they do
+    /// below them.
+    #[test]
+    fn it_expands_a_document_in_any_order() {
+        let declarations = r#"
+            (concept (todo ?t list: ?l text: ?x state: ?s)
+              (xyz.todo ?t list: (:last (:entity ?l)) text: (:last (:text ?x)) state: (:last ?s)))
+            (concept (todo/add todo: ?t list: ?l text: ?x)
+              (xyz.todo.add/todo of: ?c is: ?t in: :control)
+              (xyz.todo.add/list of: ?c is: ?l in: :control)
+              (xyz.todo.add/text of: ?c is: ?x in: :control))"#;
+        let uses = r#"
+            (assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))
+            (rule (assert (todo ?t list: ?l text: ?x state: :open))
+              (todo/add todo: ?t list: ?l text: ?x))
+            (rule (todo/count ?l ?t) (todo ?t list: ?l ...))
+            (query (todo ?t text: ?x ...))"#;
+        let expand = |text: &str| {
+            let mut expander = Expander::new().unwrap();
+            let (kernel, diagnostics) = expander.submit(text).unwrap();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let mut kernel: Vec<String> = kernel.iter().map(Syntax::to_string).collect();
+            kernel.sort();
+            kernel
+        };
+        let first = expand(&format!("{declarations}{uses}"));
+        assert_eq!(first.len(), 4, "{first:?}");
+        assert_eq!(first, expand(&format!("{uses}{declarations}")));
+    }
+
+    /// A macro's expansion may declare a name: what used it above is
+    /// expanded again once it is declared.
+    #[test]
+    fn it_expands_again_what_a_later_expansion_declares_a_name_for() {
+        let mut expander = Expander::new().unwrap();
+        let (kernel, diagnostics) = expander
+            .submit(
+                "(query (memo ?t text: ?x))
+                 (rule (syntax (concept (?name ?t text: ?x) (xyz.note/text of: ?t is: ?x)))
+                   (expand (note-kind ?name)))
+                 (note-kind memo)",
+            )
+            .unwrap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            kernel.iter().map(Syntax::to_string).collect::<Vec<_>>(),
+            vec!["(rule (report (xyz.note ?t text: ?x)) (xyz.note ?t text: ?x))"]
+        );
+        assert_eq!(expander.origin(), &[0]);
     }
 
     /// A part a read leaves out matches anything, so a read of a
