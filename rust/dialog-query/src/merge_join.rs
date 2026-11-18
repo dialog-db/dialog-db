@@ -1013,4 +1013,63 @@ mod tests {
             );
         }
     }
+
+    /// Over random shapes where the left holds several rows per key (a
+    /// required cardinality-many field) and, in half the rounds, every left
+    /// row and some side rows bind a shared non-key variable `v`, the left
+    /// merge yields what probing every side once per left row yields, row
+    /// for row. A side row that holds the key but disagrees on `v` matches
+    /// nothing, as a probe with `v` pinned finds nothing.
+    #[dialog_common::test]
+    async fn it_matches_the_per_row_probe_with_repeated_left_keys() {
+        let mut state = 0x2545_f491_u64;
+        let mut next = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        for round in 0..300 {
+            let shared = round % 2 == 1;
+            let sorted = |next: &mut dyn FnMut(u64) -> u64, name: &str, share: bool| {
+                let count = if name == "l" { 1 + next(10) } else { next(8) };
+                let mut keys: Vec<i64> = (0..count).map(|_| next(6) as i64).collect();
+                keys.sort();
+                keys.iter()
+                    .enumerate()
+                    .map(|(at, k)| {
+                        let mut row = row(*k, name, *k * 100 + at as i64);
+                        if share && next(3) != 0 {
+                            row.bind(&Term::var("v"), Value::from(next(2) as i64))
+                                .unwrap();
+                        }
+                        row
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let left: Vec<Match> = sorted(&mut next, "l", false)
+                .into_iter()
+                .map(|mut row| {
+                    if shared {
+                        row.bind(&Term::var("v"), Value::from(key(&row).unwrap() % 2))
+                            .unwrap();
+                    }
+                    row
+                })
+                .collect();
+            let r = sorted(&mut next, "r", shared);
+            let s = sorted(&mut next, "s", shared);
+            let sides = vec![(r, "r"), (s, "s")];
+            let expected: Vec<Match> = left
+                .iter()
+                .flat_map(|row| probe_each(row, &sides))
+                .collect();
+            let got = run_left(left, sides).await;
+            assert_eq!(
+                markers(&got, &["l", "r", "s", "v"]),
+                markers(&expected, &["l", "r", "s", "v"]),
+                "round {round}: expected the left merge to match the per-row probe"
+            );
+        }
+    }
 }
