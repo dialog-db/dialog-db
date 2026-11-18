@@ -429,15 +429,15 @@ fn spell(rule: &Rule<'_>, names: &Rename) -> Result<(Vec<u8>, Identity), TypeErr
         .collect();
     let conclusion = ConceptDescriptor::try_from(fields)?;
     let renamed = rename_premises(rule.premises, names)?;
-    let mut keyed: Vec<(Vec<u8>, Premise)> = renamed
-        .into_iter()
-        .map(|premise| {
-            let key = encode_premise(&premise).ok_or_else(|| TypeError::TypeInference {
-                reason: "a premise that encoded stopped encoding under other names".to_string(),
-            })?;
-            Ok((key, premise))
-        })
-        .collect::<Result<_, TypeError>>()?;
+    // Sized up front: collected through a `Result` the vector would grow
+    // one push at a time, and every rule identity is spelled here.
+    let mut keyed: Vec<(Vec<u8>, Premise)> = Vec::with_capacity(renamed.len());
+    for premise in renamed {
+        let key = encode_premise(&premise).ok_or_else(|| TypeError::TypeInference {
+            reason: "a premise that encoded stopped encoding under other names".to_string(),
+        })?;
+        keyed.push((key, premise));
+    }
     keyed.sort_by(|a, b| a.0.cmp(&b.0));
     let mut reduce: Vec<(String, ReduceSpec)> = rule
         .reduce
@@ -455,11 +455,19 @@ fn spell(rule: &Rule<'_>, names: &Rename) -> Result<(Vec<u8>, Identity), TypeErr
         .collect();
     reduce.sort_by(|a, b| a.0.cmp(&b.0));
     let mut encoded = encode(&conclusion)?;
+    let reduced = encode(&reduce)?;
+    encoded.reserve(
+        keyed
+            .iter()
+            .map(|(key, _)| size_of::<u64>() + key.len())
+            .sum::<usize>()
+            + reduced.len(),
+    );
     for (key, _) in &keyed {
         encoded.extend_from_slice(&(key.len() as u64).to_be_bytes());
         encoded.extend_from_slice(key);
     }
-    encoded.extend(encode(&reduce)?);
+    encoded.extend(reduced);
     Ok((
         encoded,
         Identity {

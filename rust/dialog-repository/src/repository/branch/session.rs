@@ -4917,26 +4917,35 @@ mod resolver_tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::test_repo;
+    use crate::helpers::{Counting, test_repo};
     use crate::{Branch, Repository};
-    use base58::ToBase58;
+    use dialog_common::Blake3Hash;
     use dialog_corpus::{Entity, Value};
     use dialog_peer::Peer;
     use dialog_peer::helpers::test_session_with_peer;
+    use dialog_query::concept::query::ConceptQuery;
     use dialog_query::query::Output as _;
+    use dialog_query::rule::DeductiveRuleDescriptor;
     use dialog_query::{
-        ResolverConclusion, ResolverQuery, Term, TreeEntryQuery, TreeKeyQuery, TreeNodeQuery,
-        TreeSpanQuery, TreeValueQuery, the,
+        ConceptConclusion, Parameters, ResolverConclusion, ResolverQuery, Term, the,
     };
     use dialog_storage::provider::storage::VolatileSpace;
+    use std::collections::BTreeSet;
 
-    /// Commit a handful of facts and return the branch + the committed
-    /// root's node reference (base58, exactly as `dialog.branch/tree`
-    /// carries it).
+    type Operator = Peer<VolatileSpace, dialog_peer::Session>;
+
+    /// The handle of the branch's root node.
+    fn root_of(branch: &Branch) -> Entity {
+        let revision = branch.revision().expect("branch has a revision");
+        Entity::from_node(revision.tree.hash()).expect("a node entity")
+    }
+
+    /// Commit a handful of facts and return the branch and its root's
+    /// handle.
     async fn committed_branch(
         repo: &Repository<impl dialog_capability::Principal>,
-        operator: &Peer<VolatileSpace, dialog_peer::Session>,
-    ) -> anyhow::Result<(Branch, String)> {
+        operator: &Operator,
+    ) -> anyhow::Result<(Branch, Entity)> {
         let branch = repo.branch("main").open().perform(operator).await?;
         let mut tx = branch.transaction();
         for at in 0..8 {
@@ -4947,69 +4956,125 @@ mod resolver_tests {
             );
         }
         tx.commit().publish().perform(operator).await?;
-        let revision = branch
-            .revision()
-            .expect("branch has a revision after commit");
-        let tree_bytes: &[u8] = revision.tree.hash();
-        Ok((branch, ToBase58::to_base58(tree_bytes)))
+        let root = root_of(&branch);
+        Ok((branch, root))
     }
 
-    /// `tree/node` with every output free, over a constant reference.
-    fn tree_node(reference: &str) -> ResolverQuery {
-        ResolverQuery::TreeNode(TreeNodeQuery {
-            of: Term::from(Value::String(reference.into())).into(),
-            kind: Term::var("kind"),
-            size: Term::var("size"),
-            count: Term::var("count"),
-            scale: Term::var("scale"),
-            novelty: Term::var("novelty"),
-        })
+    /// Commit `count` facts with padded values: enough leaf weight
+    /// forces an index root, so spans and descent run against a real
+    /// multi-level tree.
+    async fn committed_wide_branch(
+        repo: &Repository<impl dialog_capability::Principal>,
+        operator: &Operator,
+        count: usize,
+    ) -> anyhow::Result<(Branch, Entity)> {
+        let branch = repo.branch("main").open().perform(operator).await?;
+        let pad = "p".repeat(160);
+        let mut tx = branch.transaction();
+        for at in 0..count {
+            tx = tx.assert(
+                the!("test/name")
+                    .of(Entity::new()?)
+                    .is(format!("entry-{at}-{pad}")),
+            );
+        }
+        tx.commit().publish().perform(operator).await?;
+        let root = root_of(&branch);
+        Ok((branch, root))
     }
 
-    fn tree_span(reference: &str) -> ResolverQuery {
-        ResolverQuery::TreeSpan(TreeSpanQuery {
-            of: Term::from(Value::String(reference.into())).into(),
-            at: Term::var("at"),
-            node: Term::var("node"),
-            separator: Term::var("separator"),
-            until: Term::var("until"),
-            scale: Term::var("scale"),
-            rank: Term::var("rank"),
-            novelty: Term::var("novelty"),
-        })
+    /// The resolver `name` over the handle `of`, with each of `slots`
+    /// bound to a variable of its own name.
+    fn ask(name: &str, of: &Entity, slots: &[&str]) -> ResolverQuery {
+        let mut wanted = serde_json::Map::new();
+        for slot in slots {
+            wanted.insert(
+                slot.to_string(),
+                serde_json::json!({ "?": { "name": slot } }),
+            );
+        }
+        let query: ResolverQuery =
+            serde_json::from_value(serde_json::json!({ "assert": name, "where": wanted }))
+                .unwrap_or_else(|error| panic!("{name} deserializes: {error}"));
+        let mut terms = Parameters::new();
+        terms.insert("of".into(), Term::from(of.clone()).into());
+        query.with_parameters(&terms)
     }
 
-    fn tree_entry(reference: &str) -> ResolverQuery {
-        ResolverQuery::TreeEntry(TreeEntryQuery {
-            of: Term::from(Value::String(reference.into())).into(),
-            at: Term::var("at"),
-            key: Term::var("key"),
-            state: Term::var("state"),
-            retraction: Term::var("retraction"),
-            origin: Term::var("origin"),
-            edition: Term::var("edition"),
-            cause: Term::var("cause"),
-            collapsed: Term::var("collapsed"),
-            supersedes: Term::var("supersedes"),
-            spill: Term::var("spill"),
-        })
+    const NODE: &[&str] = &[
+        "kind",
+        "size",
+        "count",
+        "scale",
+        "novelty",
+        "version",
+        "fanout-exponent",
+        "max-separator",
+        "inline-n",
+        "spill-prefix",
+        "max-segment",
+        "frame-ceiling-factor",
+        "anchor-selector",
+        "entry-overhead",
+        "key-overhead",
+        "link-overhead",
+    ];
+    const SPAN: &[&str] = &[
+        "span",
+        "at",
+        "node",
+        "separator",
+        "until",
+        "scale",
+        "rank",
+        "novelty",
+    ];
+    const ENTRY: &[&str] = &[
+        "entry",
+        "at",
+        "key",
+        "rank",
+        "state",
+        "retraction",
+        "origin",
+        "edition",
+        "cause",
+        "collapsed",
+        "supersedes",
+        "spill",
+        "blob",
+        "blob-size",
+        "blob-version",
+        "span",
+    ];
+
+    async fn rows(
+        branch: &Branch,
+        operator: &Operator,
+        query: ResolverQuery,
+    ) -> Vec<ResolverConclusion> {
+        branch
+            .query()
+            .select(query)
+            .perform(operator)
+            .try_vec()
+            .await
+            .expect("the resolver answers")
     }
 
-    fn tree_value(reference: &str) -> ResolverQuery {
-        ResolverQuery::TreeValue(TreeValueQuery {
-            of: Term::from(Value::String(reference.into())).into(),
-            size: Term::var("size"),
-            bytes: Term::var("bytes"),
-        })
-    }
-
-    fn tree_key(reference: &str) -> ResolverQuery {
-        ResolverQuery::TreeKey(TreeKeyQuery {
-            of: Term::from(Value::String(reference.into())).into(),
-            at: Term::var("at"),
-            key: Term::var("key"),
-            rank: Term::var("rank"),
-        })
+    /// [`rows`] through an environment that counts block reads.
+    async fn counted(
+        branch: &Branch,
+        env: &Counting<Operator>,
+        query: ResolverQuery,
+    ) -> Vec<ResolverConclusion> {
+        branch
+            .query()
+            .select(query)
+            .perform(env)
+            .try_vec()
+            .await
+            .expect("the resolver answers")
     }
 
     fn unsigned(row: &ResolverConclusion, slot: &str) -> u128 {
@@ -5026,388 +5091,253 @@ mod resolver_tests {
         }
     }
 
-    /// Commit `count` facts with padded values and return the branch +
-    /// root reference: enough leaf weight forces an index root, so the
-    /// span/descent surface runs against a real multi-level tree.
-    async fn committed_wide_branch(
-        repo: &Repository<impl dialog_capability::Principal>,
-        operator: &Peer<VolatileSpace, dialog_peer::Session>,
-        count: usize,
-    ) -> anyhow::Result<(Branch, String)> {
-        let branch = repo.branch("main").open().perform(operator).await?;
-        let pad = "p".repeat(160);
-        let mut tx = branch.transaction();
-        for at in 0..count {
-            tx = tx.assert(
-                the!("test/name")
-                    .of(Entity::new()?)
-                    .is(format!("entry-{at}-{pad}")),
-            );
+    fn bytes(row: &ResolverConclusion, slot: &str) -> Vec<u8> {
+        match row.get(slot) {
+            Some(Value::Bytes(value)) => value.clone(),
+            other => panic!("expected bytes `{slot}`, got {other:?}"),
         }
-        tx.commit().publish().perform(operator).await?;
-        let revision = branch
-            .revision()
-            .expect("branch has a revision after commit");
-        let tree_bytes: &[u8] = revision.tree.hash();
-        Ok((branch, ToBase58::to_base58(tree_bytes)))
     }
 
-    /// A blank `of` (a query that never names the node reference) is
-    /// scheduled but matches nothing: zero rows, no error. The planner
-    /// only refuses an unbound *variable* input.
+    fn entity(row: &ResolverConclusion, slot: &str) -> Entity {
+        match row.get(slot) {
+            Some(Value::Entity(value)) => value.clone(),
+            other => panic!("expected entity `{slot}`, got {other:?}"),
+        }
+    }
+
+    /// Every node the root reaches, by reading spans one node at a time.
+    async fn reachable(branch: &Branch, operator: &Operator, root: &Entity) -> BTreeSet<Entity> {
+        let mut all = BTreeSet::new();
+        let mut frontier = vec![root.clone()];
+        while let Some(next) = frontier.pop() {
+            for span in rows(branch, operator, ask("tree/span", &next, &["node"])).await {
+                frontier.push(entity(&span, "node"));
+            }
+            all.insert(next);
+        }
+        all
+    }
+
+    /// A rule that names its nodes by a fact, `probe/known`, and reads
+    /// `resolver` over each, concluding `conclusion`.
+    fn known(conclusion: serde_json::Value, premise: serde_json::Value) -> DeductiveRuleDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "deduce": { "with": conclusion },
+            "when": [
+                {
+                    "assert": { "with": {
+                        "known": { "the": "probe/known", "as": "text:" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "known": { "?": { "name": "known" } }
+                    }
+                },
+                premise
+            ]
+        }))
+        .expect("a rule descriptor")
+    }
+
+    /// `tree/node` says what a node is and the format it was written
+    /// under, every field of it, in one row.
     #[dialog_common::test]
-    async fn it_yields_nothing_for_a_blank_reference() -> anyhow::Result<()> {
+    async fn it_reads_what_a_node_is() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
-        let (branch, _root) = committed_branch(&repo, &operator).await?;
+        let (branch, root) = committed_branch(&repo, &operator).await?;
 
-        let rows: Vec<ResolverConclusion> = branch
-            .query()
-            .select(ResolverQuery::TreeNode(TreeNodeQuery {
-                of: Term::<Value>::blank().into(),
-                kind: Term::var("kind"),
-                size: Term::var("size"),
-                count: Term::var("count"),
-                scale: Term::var("scale"),
-                novelty: Term::var("novelty"),
-            }))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        assert!(
-            rows.is_empty(),
-            "a blank reference matches nothing: {rows:?}"
+        let answered = rows(&branch, &operator, ask("tree/node", &root, NODE)).await;
+        assert_eq!(answered.len(), 1, "one row per node: {answered:?}");
+        let row = &answered[0];
+        assert!(["index", "segment"].contains(&text(row, "kind").as_str()));
+        assert!(unsigned(row, "size") > 0, "the node has a byte size");
+        assert!(unsigned(row, "count") > 0, "the node has slots");
+        for slot in NODE {
+            assert!(row.contains_key(*slot), "`{slot}` is yielded: {row:?}");
+        }
+        assert!(unsigned(row, "fanout-exponent") > 0, "a tree branches");
+        assert!(unsigned(row, "version") > 0, "a node has a layout");
+        Ok(())
+    }
+
+    /// `tree/block` yields the node's block as stored: it hashes to the
+    /// node's handle and is as long as `tree/node` says.
+    #[dialog_common::test]
+    async fn it_reads_a_nodes_block() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_branch(&repo, &operator).await?;
+
+        let node = rows(&branch, &operator, ask("tree/node", &root, &["size"])).await;
+        let block = rows(&branch, &operator, ask("tree/block", &root, &["bytes"])).await;
+        assert_eq!(block.len(), 1, "one row per node");
+        let block = bytes(&block[0], "bytes");
+        assert_eq!(block.len() as u128, unsigned(&node[0], "size"));
+        assert_eq!(
+            Some(*Blake3Hash::hash(&block).as_bytes()),
+            root.node_hash(),
+            "the block is the one the handle names"
         );
         Ok(())
     }
 
-    /// A tree wide enough for an index root runs the whole span
-    /// surface end to end: one contiguous span row per child, and the
-    /// descent chain (span node -> tree/node -> tree/key) reaches real
-    /// segment entries.
+    /// A write to a tree with an index root can ride the root as a
+    /// buffered operation rather than reach a segment. `tree/entry` of
+    /// the root yields each such operation whole, naming the span it is
+    /// buffered against, and the root's `novelty` counts them.
+    #[dialog_common::test]
+    async fn it_reads_the_operations_an_index_buffers() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
+        branch
+            .transaction()
+            .assert(the!("test/name").of(Entity::new()?).is("late".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let root = root_of(&branch);
+
+        let node = rows(&branch, &operator, ask("tree/node", &root, NODE)).await;
+        assert_eq!(text(&node[0], "kind"), "index");
+        let buffered = unsigned(&node[0], "novelty");
+        assert!(buffered > 0, "the late write rides the root");
+        let spans: Vec<Entity> = rows(&branch, &operator, ask("tree/span", &root, SPAN))
+            .await
+            .iter()
+            .map(|row| entity(row, "span"))
+            .collect();
+        let entries = rows(&branch, &operator, ask("tree/entry", &root, ENTRY)).await;
+        assert_eq!(entries.len() as u128, buffered, "one row per buffered op");
+        for row in &entries {
+            assert!(
+                spans.contains(&entity(row, "span")),
+                "a buffered op names a span of the node: {row:?}"
+            );
+            assert_eq!(text(row, "state"), "asserted");
+        }
+        Ok(())
+    }
+
+    /// A tree wide enough for an index root: one span per child, the
+    /// ranges contiguous, each span named by its node and position and
+    /// each child by a handle, and the descent reaches segments whose
+    /// entries come whole, one row each.
     #[dialog_common::test]
     async fn it_descends_a_multi_level_tree() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_wide_branch(&repo, &operator, 800).await?;
 
-        let node: Vec<ResolverConclusion> = branch
-            .query()
-            .select(tree_node(&root))
-            .perform(&operator)
-            .try_vec()
-            .await?;
+        let node = rows(&branch, &operator, ask("tree/node", &root, NODE)).await;
         assert_eq!(
             text(&node[0], "kind"),
             "index",
-            "800 padded entries must outgrow one segment: {node:?}"
+            "800 padded entries outgrow a segment"
         );
-        let children = unsigned(&node[0], "count") as usize;
-
-        let spans: Vec<ResolverConclusion> = branch
-            .query()
-            .select(tree_span(&root))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        assert_eq!(spans.len(), children, "one span row per child");
+        let spans = rows(&branch, &operator, ask("tree/span", &root, SPAN)).await;
+        assert_eq!(
+            spans.len() as u128,
+            unsigned(&node[0], "count"),
+            "one span per child"
+        );
+        assert_eq!(
+            rows(&branch, &operator, ask("tree/entry", &root, ENTRY))
+                .await
+                .len() as u128,
+            unsigned(&node[0], "novelty"),
+            "an index's entries are the operations it buffers"
+        );
+        assert!(
+            bytes(&spans[0], "separator").is_empty(),
+            "the first span starts at the least key"
+        );
+        assert!(
+            bytes(spans.last().unwrap(), "until").is_empty(),
+            "the last span runs to the end"
+        );
         for pair in spans.windows(2) {
             assert_eq!(
-                pair[0].get("until"),
-                pair[1].get("separator"),
-                "spans tile the key space: {spans:?}"
+                bytes(&pair[0], "until"),
+                bytes(&pair[1], "separator"),
+                "a span ends where the next begins"
+            );
+        }
+        let root_hash = base58::ToBase58::to_base58(&root.node_hash().unwrap()[..]);
+        for (at, span) in spans.iter().enumerate() {
+            assert_eq!(unsigned(span, "at"), at as u128);
+            assert_eq!(
+                entity(span, "span").as_str(),
+                format!("span:{root_hash}/{at}"),
+                "a span is named by its node and its position"
+            );
+            assert!(
+                entity(span, "node").node_hash().is_some(),
+                "a child is a handle"
             );
         }
 
-        // Descend to the leaves whatever the depth: the fixture's
-        // entities are random, so the tree's shape is probabilistic and
-        // a child may itself be an index (the depth-3 draw that made
-        // the one-level version of this walk flaky).
-        let mut entries = 0usize;
-        let mut frontier: Vec<String> = spans.iter().map(|span| text(span, "node")).collect();
+        let mut entries = 0;
+        let mut frontier: Vec<Entity> = spans.iter().map(|span| entity(span, "node")).collect();
         while let Some(child) = frontier.pop() {
-            let child_node: Vec<ResolverConclusion> = branch
-                .query()
-                .select(tree_node(&child))
-                .perform(&operator)
-                .try_vec()
-                .await?;
-            assert_eq!(child_node.len(), 1, "child answers tree/node");
+            let child_node = rows(
+                &branch,
+                &operator,
+                ask("tree/node", &child, &["kind", "count"]),
+            )
+            .await;
+            assert_eq!(child_node.len(), 1, "a child answers tree/node");
+            let below = rows(&branch, &operator, ask("tree/span", &child, &["node"])).await;
             if text(&child_node[0], "kind") == "segment" {
-                let keys: Vec<ResolverConclusion> = branch
-                    .query()
-                    .select(tree_key(&child))
-                    .perform(&operator)
-                    .try_vec()
-                    .await?;
+                assert!(below.is_empty(), "a segment has no spans");
+                let found = rows(&branch, &operator, ask("tree/entry", &child, ENTRY)).await;
                 assert_eq!(
-                    keys.len(),
-                    unsigned(&child_node[0], "count") as usize,
-                    "one key row per segment entry"
+                    found.len() as u128,
+                    unsigned(&child_node[0], "count"),
+                    "one row per entry"
                 );
-                entries += keys.len();
+                let named: BTreeSet<Entity> =
+                    found.iter().map(|row| entity(row, "entry")).collect();
+                assert_eq!(named.len(), found.len(), "no two entries share an entity");
+                for (at, entry) in found.iter().enumerate() {
+                    assert_eq!(unsigned(entry, "at"), at as u128);
+                    assert!(!bytes(entry, "key").is_empty(), "an entry has a key");
+                    assert!(entry.contains_key("rank"), "and its key a rank");
+                    assert_eq!(text(entry, "state"), "asserted");
+                }
+                entries += found.len();
             } else {
-                let child_spans: Vec<ResolverConclusion> = branch
-                    .query()
-                    .select(tree_span(&child))
-                    .perform(&operator)
-                    .try_vec()
-                    .await?;
-                frontier.extend(child_spans.iter().map(|span| text(span, "node")));
+                frontier.extend(below.iter().map(|span| entity(span, "node")));
             }
         }
         assert!(
             entries >= 800,
-            "the leaves carry at least the committed facts, got {entries}"
+            "the descent reaches every fact's entries: {entries}"
         );
         Ok(())
     }
 
-    /// The flagship join shape: a premise binds the node reference as
-    /// a VARIABLE and the resolver consumes it — through a deductive
-    /// rule, so this also covers resolver premises in rule bodies and
-    /// the planner ordering the resolver after its binding premise.
-    #[dialog_common::test]
-    async fn it_joins_resolvers_on_a_bound_reference() -> anyhow::Result<()> {
-        use dialog_query::concept::query::ConceptQuery;
-        use dialog_query::rule::DeductiveRuleDescriptor;
-        use dialog_query::{ConceptConclusion, Parameters};
-
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let (branch, root) = committed_branch(&repo, &operator).await?;
-
-        // A committed fact carries the root reference; the rule joins
-        // it into `tree/node` through the `?root` variable.
-        let probe = Entity::new()?;
-        branch
-            .transaction()
-            .assert(the!("probe/tree").of(probe.clone()).is(root.clone()))
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-
-        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-            "deduce": { "with": {
-                "root": { "the": "probe/described-root", "as": "text:" },
-                "kind": { "the": "probe/described-kind", "as": "text:" }
-            }},
-            "when": [
-                {
-                    "assert": { "with": {
-                        "root": { "the": "probe/tree", "as": "text:" }
-                    }},
-                    "where": {
-                        "this": { "?": { "name": "this" } },
-                        "root": { "?": { "name": "root" } }
-                    }
-                },
-                {
-                    "assert": "tree/node",
-                    "where": {
-                        "of": { "?": { "name": "root" } },
-                        "kind": { "?": { "name": "kind" } }
-                    }
-                }
-            ]
-        }))?;
-        let rule = descriptor.compile().expect("the joining rule compiles");
-        let conclusion = rule.conclusion().clone();
-        branch
-            .transaction()
-            .assert(&rule)
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-
-        let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("this"));
-        terms.insert("root".into(), Term::var("root"));
-        terms.insert("kind".into(), Term::var("kind"));
-        let rows: Vec<ConceptConclusion> = branch
-            .query()
-            .select(ConceptQuery {
-                predicate: conclusion,
-                terms,
-            })
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        assert_eq!(rows.len(), 1, "the join yields one row: {rows:?}");
-        Ok(())
-    }
-
-    /// The committed root answers `tree/node` through the ordinary
-    /// query path: one row, a real kind, a positive size, and a count.
-    #[dialog_common::test]
-    async fn it_reads_the_root_node_through_resolvers() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let (branch, root) = committed_branch(&repo, &operator).await?;
-
-        let rows: Vec<ResolverConclusion> = branch
-            .query()
-            .select(tree_node(&root))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        assert_eq!(rows.len(), 1, "one row per node: {rows:?}");
-        let row = &rows[0];
-        let kind = text(row, "kind");
-        assert!(kind == "index" || kind == "segment", "kind set: {row:?}");
-        assert!(unsigned(row, "size") > 0, "node has a byte size");
-        assert!(unsigned(row, "count") > 0, "node has slots");
-        Ok(())
-    }
-
-    /// Structure is consistent between resolvers: a segment's
-    /// `tree/key` rows match its count and `tree/span` yields nothing;
-    /// an index's `tree/span` rows match its count, chain into
-    /// contiguous ranges, and each child answers `tree/node` in turn
-    /// (the descent chain).
-    #[dialog_common::test]
-    async fn it_descends_consistently() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let (branch, root) = committed_branch(&repo, &operator).await?;
-
-        let node: Vec<ResolverConclusion> = branch
-            .query()
-            .select(tree_node(&root))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        let count = unsigned(&node[0], "count") as usize;
-
-        let spans: Vec<ResolverConclusion> = branch
-            .query()
-            .select(tree_span(&root))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        let keys: Vec<ResolverConclusion> = branch
-            .query()
-            .select(tree_key(&root))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-
-        match text(&node[0], "kind").as_str() {
-            "segment" => {
-                assert_eq!(keys.len(), count, "one key row per entry");
-                assert!(spans.is_empty(), "a segment has no spans");
-                assert!(
-                    keys.iter().all(|row| matches!(row.get("key"), Some(Value::Bytes(bytes)) if !bytes.is_empty())),
-                    "keys carry bytes: {keys:?}"
-                );
-            }
-            "index" => {
-                assert_eq!(spans.len(), count, "one span row per child");
-                assert!(keys.is_empty(), "an index has no entries");
-                // Spans tile the key space: each span ends where the
-                // next begins, and the outer bounds are open.
-                for pair in spans.windows(2) {
-                    assert_eq!(
-                        pair[0].get("until"),
-                        pair[1].get("separator"),
-                        "spans are contiguous: {spans:?}"
-                    );
-                }
-                let child = text(&spans[0], "node");
-                let child_node: Vec<ResolverConclusion> = branch
-                    .query()
-                    .select(tree_node(&child))
-                    .perform(&operator)
-                    .try_vec()
-                    .await?;
-                assert_eq!(child_node.len(), 1, "the child answers tree/node");
-            }
-            other => panic!("unexpected kind {other}"),
+    /// Every entry of every segment the root reaches.
+    async fn entries_under(
+        branch: &Branch,
+        operator: &Operator,
+        root: &Entity,
+    ) -> Vec<ResolverConclusion> {
+        let mut entries = Vec::new();
+        for node in reachable(branch, operator, root).await {
+            entries.extend(rows(branch, operator, ask("tree/entry", &node, ENTRY)).await);
         }
-        Ok(())
+        entries
     }
 
-    /// Absent (well-formed but unknown) and malformed references
-    /// contribute nothing — zero rows, no error.
+    /// An entry comes whole. A value past the inline threshold spills,
+    /// and its entry names it as an `asset:` that `tree/value` reads
+    /// back; an inline value's entry has no `spill` at all. A versioned
+    /// commit's entries carry their claim's origin and edition.
     #[dialog_common::test]
-    async fn it_yields_nothing_for_absent_or_malformed_references() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let (branch, _root) = committed_branch(&repo, &operator).await?;
-
-        let absent = ToBase58::to_base58(&[7u8; 32][..]);
-        for reference in [absent.as_str(), "not-base58-!!!", ""] {
-            let rows: Vec<ResolverConclusion> = branch
-                .query()
-                .select(tree_node(reference))
-                .perform(&operator)
-                .try_vec()
-                .await?;
-            assert!(rows.is_empty(), "no rows for {reference:?}: {rows:?}");
-        }
-        Ok(())
-    }
-
-    /// Content addressing keeps history navigable: after a second
-    /// commit the old root still answers, and the new root differs.
-    #[dialog_common::test]
-    async fn it_keeps_old_roots_queryable() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let (branch, first) = committed_branch(&repo, &operator).await?;
-
-        branch
-            .transaction()
-            .assert(the!("test/name").of(Entity::new()?).is("later".to_string()))
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        let revision = branch.revision().expect("second revision");
-        let tree_bytes: &[u8] = revision.tree.hash();
-        let second = ToBase58::to_base58(tree_bytes);
-        assert_ne!(first, second, "the root moved");
-
-        for reference in [&first, &second] {
-            let rows: Vec<ResolverConclusion> = branch
-                .query()
-                .select(tree_node(reference))
-                .perform(&operator)
-                .try_vec()
-                .await?;
-            assert_eq!(rows.len(), 1, "root {reference} answers");
-        }
-        Ok(())
-    }
-
-    /// Transaction queries construct the same `QueryEnv`, so the tree
-    /// resolvers are available in the as-if-committed view too.
-    #[dialog_common::test]
-    async fn it_serves_resolvers_in_transaction_queries() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let (branch, root) = committed_branch(&repo, &operator).await?;
-
-        let tx = branch.transaction();
-        let rows: Vec<ResolverConclusion> = tx
-            .query()
-            .select(tree_node(&root))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        assert_eq!(rows.len(), 1, "tx query serves tree/node: {rows:?}");
-        Ok(())
-    }
-
-    /// A value past the inline threshold spills to a content-addressed
-    /// block; `tree/entry` names its reference and `tree/value` reads
-    /// it back — and versioned commits stamp claim metadata (origin,
-    /// edition) that `tree/entry` surfaces, which is what makes the
-    /// history region legible.
-    #[dialog_common::test]
-    async fn it_reads_spilled_values_and_claim_metadata() -> anyhow::Result<()> {
+    async fn it_reads_an_entry_whole() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -5420,66 +5350,429 @@ mod resolver_tests {
             .publish()
             .perform(&operator)
             .await?;
-        let revision = branch.revision().expect("committed");
-        let tree_bytes: &[u8] = revision.tree.hash();
-        let root = ToBase58::to_base58(tree_bytes);
-
-        // Walk every segment reachable from the root, collecting entry
-        // rows — shape-agnostic (the root may be a segment or index).
-        let mut queue = vec![root];
-        let mut entries: Vec<ResolverConclusion> = Vec::new();
-        while let Some(node) = queue.pop() {
-            entries.extend(
-                branch
-                    .query()
-                    .select(tree_entry(&node))
-                    .perform(&operator)
-                    .try_vec()
-                    .await?,
-            );
-            for span in branch
-                .query()
-                .select(tree_span(&node))
-                .perform(&operator)
-                .try_vec()
-                .await?
-            {
-                queue.push(text(&span, "node"));
-            }
-        }
+        let root = root_of(&branch);
+        let entries = entries_under(&branch, &operator, &root).await;
         assert!(!entries.is_empty(), "the committed tree has entries");
-
         assert!(
-            entries.iter().any(
-                |row| matches!(row.get("origin"), Some(Value::Bytes(bytes)) if !bytes.is_empty())
-            ),
-            "versioned commits stamp claim versions: {entries:?}"
+            entries
+                .iter()
+                .any(|row| !bytes(row, "origin").is_empty() && row.contains_key("edition")),
+            "a versioned commit stamps its claims: {entries:?}"
         );
 
         let spill = entries
             .iter()
             .find_map(|row| match row.get("spill") {
-                Some(Value::String(reference)) if !reference.is_empty() => Some(reference.clone()),
+                Some(Value::Entity(asset)) => Some(asset.clone()),
                 _ => None,
             })
             .expect("the 10 KiB value spilled");
+        assert!(
+            spill.as_str().starts_with("asset:"),
+            "a spill is an asset: {spill}"
+        );
 
-        let values: Vec<ResolverConclusion> = branch
-            .query()
-            .select(tree_value(&spill))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        assert_eq!(values.len(), 1, "one row per value block");
+        let values = rows(
+            &branch,
+            &operator,
+            ask("tree/value", &spill, &["size", "bytes"]),
+        )
+        .await;
+        assert_eq!(values.len(), 1, "one row per value");
         let size = unsigned(&values[0], "size");
         assert!(
             size >= big.len() as u128,
-            "the block holds the whole value ({size} bytes)"
+            "the value is whole ({size} bytes)"
         );
-        match values[0].get("bytes") {
-            Some(Value::Bytes(bytes)) => assert_eq!(bytes.len() as u128, size),
-            other => panic!("expected value bytes, got {other:?}"),
+        assert_eq!(bytes(&values[0], "bytes").len() as u128, size);
+
+        // A node's handle names no spilled value, and a spilled value's
+        // names no node.
+        assert!(
+            rows(&branch, &operator, ask("tree/value", &root, &["size"]))
+                .await
+                .is_empty()
+        );
+        assert!(
+            rows(&branch, &operator, ask("tree/node", &spill, &["kind"]))
+                .await
+                .is_empty()
+        );
+
+        // Enough small facts to fill segments: their entries have no
+        // spill, and none is a blob record.
+        let (branch, root) = committed_wide_branch(&repo, &operator, 800).await?;
+        let entries = entries_under(&branch, &operator, &root).await;
+        assert!(
+            entries.iter().any(|row| !row.contains_key("spill")),
+            "an inline value's entry has no spill"
+        );
+        assert!(
+            entries.iter().all(|row| !row.contains_key("blob")
+                && !row.contains_key("blob-size")
+                && !row.contains_key("blob-version")),
+            "an entry that is no blob record has no blob slots"
+        );
+        Ok(())
+    }
+
+    /// However many resolvers a query asks of one node, the environment
+    /// reads its block once at most: a node it already keeps is not read
+    /// again at all.
+    #[dialog_common::test]
+    async fn it_reads_a_node_once_for_every_part_asked() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_wide_branch(&repo, &operator, 800).await?;
+
+        let env = Counting::new(operator.clone());
+        counted(&branch, &env, ask("tree/node", &root, NODE)).await;
+        counted(&branch, &env, ask("tree/span", &root, SPAN)).await;
+        counted(&branch, &env, ask("tree/block", &root, &["bytes"])).await;
+        assert!(
+            env.block_reads() <= 1,
+            "three parts of one node are one read of its block at most: {}",
+            env.block_reads()
+        );
+        Ok(())
+    }
+
+    /// A handle that names no node the environment can reach, an entity
+    /// that is no handle, and a value that is no entity each yield no
+    /// rows and no error.
+    #[dialog_common::test]
+    async fn it_yields_nothing_for_what_is_not_a_reachable_node() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_branch(&repo, &operator).await?;
+
+        let unknown = Entity::from_node(&[7u8; 32])?;
+        let other: Entity = "user:alice".parse()?;
+        for handle in [&unknown, &other] {
+            let answered = rows(&branch, &operator, ask("tree/node", handle, NODE)).await;
+            assert!(answered.is_empty(), "no rows for {handle}: {answered:?}");
         }
+
+        let reference = base58::ToBase58::to_base58(&root.node_hash().unwrap()[..]);
+        let mut terms = Parameters::new();
+        terms.insert("of".into(), Term::from(Value::String(reference)).into());
+        let by_string = ask("tree/node", &root, NODE).with_parameters(&terms);
+        assert!(
+            rows(&branch, &operator, by_string).await.is_empty(),
+            "a node is asked for by its handle, not by a string of its hash"
+        );
+
+        let mut terms = Parameters::new();
+        terms.insert("of".into(), Term::<Value>::blank().into());
+        let blank = ask("tree/node", &root, NODE).with_parameters(&terms);
+        assert!(
+            rows(&branch, &operator, blank).await.is_empty(),
+            "a resolver given no handle finds no node of its own accord"
+        );
+        Ok(())
+    }
+
+    /// Content addressing keeps history navigable: after a second
+    /// commit the old root still answers, and the new root differs.
+    #[dialog_common::test]
+    async fn it_keeps_old_roots_readable() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, first) = committed_branch(&repo, &operator).await?;
+
+        branch
+            .transaction()
+            .assert(the!("test/name").of(Entity::new()?).is("later".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let second = root_of(&branch);
+        assert_ne!(first, second, "the root moved");
+        for root in [&first, &second] {
+            let answered = rows(&branch, &operator, ask("tree/node", root, &["kind"])).await;
+            assert_eq!(answered.len(), 1, "root {root} answers");
+        }
+        Ok(())
+    }
+
+    /// A transaction's query reads through the same environment, so the
+    /// resolvers answer in its as-if-committed view too.
+    #[dialog_common::test]
+    async fn it_serves_resolvers_in_transaction_queries() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_branch(&repo, &operator).await?;
+
+        let tx = branch.transaction();
+        let answered: Vec<ResolverConclusion> = tx
+            .query()
+            .select(ask("tree/node", &root, &["kind"]))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(answered.len(), 1, "a transaction's query serves tree/node");
+        Ok(())
+    }
+
+    /// A rule whose body is a resolver alone cannot be installed: nothing
+    /// in it says which nodes, and a resolver does not go looking.
+    #[dialog_common::test]
+    fn it_refuses_a_rule_that_names_no_nodes() {
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": {
+                "kind": { "the": "probe/node-kind", "as": "text:" }
+            }},
+            "when": [{
+                "assert": "tree/node",
+                "where": {
+                    "of": { "?": { "name": "this" } },
+                    "kind": { "?": { "name": "kind" } }
+                }
+            }]
+        }))
+        .expect("a rule descriptor");
+        let refused = descriptor
+            .compile()
+            .expect_err("the rule needs its node given");
+        assert!(
+            format!("{refused:?}").contains("RequiredBindings"),
+            "refused for the handle nothing binds: {refused:?}"
+        );
+    }
+
+    /// The branch's root reaches a rule as a handle: `dialog.branch/tree`
+    /// is the root's entity, and a rule joins it into `tree/span` and
+    /// each child on into `tree/node`, deriving one row per child on the
+    /// child's own entity.
+    #[dialog_common::test]
+    async fn it_derives_a_row_per_child_from_the_root() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
+
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": {
+                "parent": { "the": "probe/child-parent", "as": "entity:" },
+                "kind": { "the": "probe/child-kind", "as": "text:" }
+            }},
+            "when": [
+                {
+                    "assert": { "with": {
+                        "tree": { "the": "dialog.branch/tree", "as": "entity:" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "branch" } },
+                        "tree": { "?": { "name": "parent" } }
+                    }
+                },
+                {
+                    "assert": "tree/span",
+                    "where": {
+                        "of": { "?": { "name": "parent" } },
+                        "node": { "?": { "name": "this" } }
+                    }
+                },
+                {
+                    "assert": "tree/node",
+                    "where": {
+                        "of": { "?": { "name": "this" } },
+                        "kind": { "?": { "name": "kind" } }
+                    }
+                }
+            ]
+        }))?;
+        let rule = descriptor.compile().expect("the rule compiles");
+        let conclusion = rule.conclusion().clone();
+        branch
+            .transaction()
+            .assert(&rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        // Installing the rule committed, so read the root it left.
+        let root = root_of(&branch);
+        let spans = rows(&branch, &operator, ask("tree/span", &root, &["node"])).await;
+        assert!(spans.len() > 1, "the root is an index: {spans:?}");
+        let expected: BTreeSet<Entity> = spans.iter().map(|span| entity(span, "node")).collect();
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("parent".into(), Term::var("parent"));
+        terms.insert("kind".into(), Term::var("kind"));
+        let derived: Vec<ConceptConclusion> = branch
+            .query()
+            .select(ConceptQuery {
+                predicate: conclusion,
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let children: BTreeSet<Entity> = derived.iter().map(|row| row.entity().clone()).collect();
+        assert_eq!(derived.len(), spans.len(), "one row per child: {derived:?}");
+        assert_eq!(children, expected, "each row is on its own child");
+        for row in &derived {
+            let parent: Entity = row.get("parent")?;
+            assert_eq!(parent, root, "every child names the root as its parent");
+        }
+        Ok(())
+    }
+
+    /// A concept of nodes whose rule names its nodes by a fact: the rule
+    /// installs with no resolver listing anything, answers for the nodes
+    /// the facts name and for no other, and looks one up by `this`.
+    ///
+    /// That a node no fact names is never read is the planner's doing
+    /// and is pinned where a plan can be seen
+    /// (`it_is_planned_after_the_fact_that_names_its_node` in
+    /// `dialog-query`): here every node of a tree this replica wrote is
+    /// already kept by the environment, so no read of one would show.
+    #[dialog_common::test]
+    async fn it_reads_only_the_nodes_a_fact_names() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
+
+        let rule = known(
+            serde_json::json!({ "kind": { "the": "probe/node-kind", "as": "text:" } }),
+            serde_json::json!({
+                "assert": "tree/node",
+                "where": {
+                    "of": { "?": { "name": "this" } },
+                    "kind": { "?": { "name": "kind" } }
+                }
+            }),
+        )
+        .compile()
+        .expect("a rule that names its nodes compiles");
+        let conclusion = rule.conclusion().clone();
+        branch
+            .transaction()
+            .assert(&rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        // Name two nodes of the tree as it now stands: its root and one
+        // child. The facts are session facts, so naming them moves no root.
+        let root = root_of(&branch);
+        let children: Vec<Entity> = rows(&branch, &operator, ask("tree/span", &root, &["node"]))
+            .await
+            .iter()
+            .map(|span| entity(span, "node"))
+            .collect();
+        assert!(children.len() > 2, "the tree has nodes no fact will name");
+        let named = children[0].clone();
+        let unnamed = children[1].clone();
+        branch
+            .overlay()
+            .assert(the!("probe/known").of(root.clone()).is("yes".to_string()))?
+            .assert(the!("probe/known").of(named.clone()).is("yes".to_string()))?;
+
+        let select = |this: Term<Entity>| {
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), this.into());
+            terms.insert("kind".into(), Term::var("kind"));
+            ConceptQuery {
+                predicate: conclusion.clone(),
+                terms,
+            }
+        };
+        let answer = async |this: Term<Entity>| -> anyhow::Result<BTreeSet<Entity>> {
+            let derived: Vec<ConceptConclusion> = branch
+                .query()
+                .select(select(this))
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            Ok(derived.iter().map(|row| row.entity().clone()).collect())
+        };
+
+        assert_eq!(
+            answer(Term::var("this")).await?,
+            BTreeSet::from([root, named.clone()]),
+            "asked for everything, the nodes the facts name"
+        );
+        assert_eq!(
+            answer(Term::from(named.clone())).await?,
+            BTreeSet::from([named]),
+            "a named node is its one row"
+        );
+        assert!(
+            answer(Term::from(unnamed)).await?.is_empty(),
+            "a node no fact names is no row"
+        );
+        Ok(())
+    }
+
+    /// A node's children are read through the node: a concept keyed by
+    /// the parent lists the children of one node from that node's block
+    /// alone, and reads none of the children.
+    #[dialog_common::test]
+    async fn it_lists_the_children_of_a_given_node_from_its_block() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
+
+        let rule = known(
+            serde_json::json!({
+                "child": { "the": "probe/node-child", "as": "entity:", "pick": "all" }
+            }),
+            serde_json::json!({
+                "assert": "tree/span",
+                "where": {
+                    "of": { "?": { "name": "this" } },
+                    "node": { "?": { "name": "child" } }
+                }
+            }),
+        )
+        .compile()
+        .expect("a rule keyed by the parent compiles");
+        let conclusion = rule.conclusion().clone();
+        branch
+            .transaction()
+            .assert(&rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let root = root_of(&branch);
+        branch
+            .overlay()
+            .assert(the!("probe/known").of(root.clone()).is("yes".to_string()))?;
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::from(root.clone()).into());
+        terms.insert("child".into(), Term::var("child"));
+        let env = Counting::new(operator.clone());
+        let derived: Vec<ConceptConclusion> = branch
+            .query()
+            .select(ConceptQuery {
+                predicate: conclusion,
+                terms,
+            })
+            .perform(&env)
+            .try_vec()
+            .await?;
+        let mut children = BTreeSet::new();
+        for row in &derived {
+            children.insert(row.get::<Entity>("child")?);
+        }
+        assert!(children.len() > 1, "the root is an index: {derived:?}");
+        assert!(
+            env.block_reads() <= 1,
+            "the node's own block at most; no child's is read: {}",
+            env.block_reads()
+        );
+
+        let spans = rows(&branch, &operator, ask("tree/span", &root, &["node"])).await;
+        let expected: BTreeSet<Entity> = spans.iter().map(|span| entity(span, "node")).collect();
+        assert_eq!(children, expected, "every child of the node, and no other");
         Ok(())
     }
 }

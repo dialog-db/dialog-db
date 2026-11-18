@@ -168,6 +168,7 @@ pub mod arrivals;
 pub mod backup;
 pub(crate) mod durable;
 pub mod effect;
+pub mod holdings;
 pub mod invoke;
 pub mod subscribe;
 pub mod sync;
@@ -3211,6 +3212,147 @@ mod tests {
         Ok(state)
     }
 
+    /// Declare a session layer `state` and two rules that keep there
+    /// what the node commands are answered with: whether a node is held,
+    /// as last learned from a probe or a fetch.
+    async fn declare_holdings(branch: &Branch, env: &Operator) -> Result<Entity> {
+        use crate::stack::holdings::{FETCHED, FETCHED_LOCAL, PROBED, PROBED_LOCAL};
+        let state = layer("state");
+        let capture = |node: &str, local: &str| -> Result<InductiveRule> {
+            Ok(serde_json::from_value(serde_json::json!({
+                "assert!": {
+                    "with": {
+                        "held": {
+                            "the": "node/held", "as": "Boolean", "pick": "last",
+                            "in": "session:state"
+                        }
+                    }
+                },
+                "when": [
+                    {
+                        "assert": {
+                            "with": {
+                                "node": { "the": node, "as": "Entity" },
+                                "local": { "the": local, "as": "Boolean" }
+                            }
+                        },
+                        "where": {
+                            "this": { "?": { "name": "command" } },
+                            "node": { "?": { "name": "this" } },
+                            "local": { "?": { "name": "held" } }
+                        }
+                    }
+                ]
+            }))?)
+        };
+        branch
+            .transaction()
+            .assert(LayerDeclaration::new(state.clone(), LayerType::Session))
+            .assert(capture(PROBED, PROBED_LOCAL)?)
+            .assert(capture(FETCHED, FETCHED_LOCAL)?)
+            .commit()
+            .publish()
+            .perform(env)
+            .await?;
+        branch.refresh(env).await?;
+        Ok(state)
+    }
+
+    fn node_command(the: &str, command: &str, node: &Entity) -> impl Statement {
+        AttributeStatement {
+            the: QueryRelation::from(the.parse::<dialog_corpus::Relation>().unwrap()),
+            of: command.parse::<Entity>().expect("entity"),
+            is: dialog_corpus::Value::Entity(node.clone()),
+            cause: None,
+            cardinality: None,
+        }
+    }
+
+    /// Whether a node is held is asked by command and answered with one,
+    /// by providers a stack is given: a probe of a node the replica
+    /// holds is captured as held, a probe of one it does not as not
+    /// held, and a fetch that finds the node nowhere leaves it not held.
+    /// A command naming no node fails with a reason. Nothing is
+    /// committed.
+    #[dialog_common::test]
+    async fn it_learns_what_it_holds_by_command() -> Result<()> {
+        use crate::stack::holdings::{FETCH, PROBE, provide};
+
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let state = declare_holdings(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let memory = ephemeral(&stack, &state).expect("the state layer").clone();
+        provide(&stack, operator.clone())?;
+
+        let root = Entity::from_node(branch.revision().expect("a revision").tree.hash())?;
+        let elsewhere = Entity::from_node(&[7u8; 32])?;
+        let other: Entity = "user:alice".parse()?;
+        let before = branch.revision();
+
+        let report = stack
+            .invoke(node_command(PROBE, "probe:1", &root))
+            .perform(&operator)
+            .await?;
+        assert!(
+            held(&memory, "node/held", &root)?.is_empty(),
+            "performing the invocation ran no provider"
+        );
+        let effect = report.effect().perform(&operator).await?;
+        assert_eq!(effect.answered(), &["probe:1".parse::<Entity>()?]);
+        assert_eq!(
+            held(&memory, "node/held", &root)?,
+            vec!["Boolean(true)".to_string()],
+            "the root of a tree this replica wrote is held"
+        );
+
+        let report = stack
+            .invoke(node_command(PROBE, "probe:2", &elsewhere))
+            .perform(&operator)
+            .await?;
+        report.effect().perform(&operator).await?;
+        assert_eq!(
+            held(&memory, "node/held", &elsewhere)?,
+            vec!["Boolean(false)".to_string()],
+            "a node the replica never had is not held"
+        );
+
+        let report = stack
+            .invoke(node_command(FETCH, "fetch:1", &elsewhere))
+            .perform(&operator)
+            .await?;
+        let effect = report.effect().perform(&operator).await?;
+        assert_eq!(effect.answered(), &["fetch:1".parse::<Entity>()?]);
+        assert_eq!(
+            held(&memory, "node/held", &elsewhere)?,
+            vec!["Boolean(false)".to_string()],
+            "a fetch that finds the node nowhere leaves it not held"
+        );
+
+        let report = stack
+            .invoke(node_command(PROBE, "probe:3", &other))
+            .perform(&operator)
+            .await?;
+        let effect = report.effect().perform(&operator).await?;
+        assert!(effect.answered().is_empty());
+        let failed = effect.failed();
+        assert_eq!(
+            failed.len(),
+            1,
+            "a command naming no node fails: {failed:?}"
+        );
+        assert_eq!(failed[0].0, "probe:3".parse::<Entity>()?);
+        assert!(failed[0].1.contains("is not a node"), "{failed:?}");
+        assert!(
+            held(&memory, "node/held", &other)?.is_empty(),
+            "and nothing is captured for it"
+        );
+
+        assert_eq!(branch.revision(), before, "nothing was committed");
+        Ok(())
+    }
+
     pub(crate) fn fetch(command: &str, node: &Entity) -> impl Statement {
         dialog_query::the!("cmd.fetch/node")
             .of(command.parse::<Entity>().expect("entity"))
@@ -4571,6 +4713,94 @@ mod tests {
             notes_read(&mirrored, &operator, notes_in(&notes)).await?,
             vec!["String(\"kept\") in memory:notes".to_string()],
             "the second replica reads the layer"
+        );
+        Ok(())
+    }
+
+    /// A durable layer an older release wrote, its pointer and the
+    /// revision's record both under the `did:key:z6Mk` name revisions had
+    /// before `revision:`, still opens: a stack opened afresh reads the
+    /// layer where the old pointer points it, a write moves the layer on
+    /// from that tree and points the primary at the new revision by its
+    /// current name, retiring the old claim, and a sync carries the layer
+    /// to a second replica, which reads it.
+    #[dialog_common::test]
+    async fn it_opens_a_durable_layer_an_older_release_pointed_at() -> Result<()> {
+        use crate::repository::branch::legacy;
+
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let upstream = repo.branch("upstream").open().perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.set_upstream(&upstream).perform(&operator).await?;
+        let notes = declare_notes(&branch, &operator).await?;
+        branch.push().perform(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+
+        let older = legacy::write();
+        let stack = branch.stack().perform(&operator).await?;
+        stack
+            .assert(note(&doc, "first", &notes))
+            .perform(&operator)
+            .await?;
+        let first = stack.pointed(&notes).expect("the layer moved");
+        let claims = pointers(&branch, &operator, &notes).await?;
+        drop(older);
+        assert!(
+            claims[0].contains("did:key:z6Mk"),
+            "the older release named the revision by its older name: {claims:?}"
+        );
+
+        let reopened = branch.stack().perform(&operator).await?;
+        assert_eq!(
+            named(reopened.pointed(&notes)),
+            named(Some(first.clone())),
+            "the old pointer names the revision it did"
+        );
+        assert_eq!(
+            notes_read(&reopened, &operator, notes_in(&notes)).await?,
+            vec!["String(\"first\") in memory:notes".to_string()],
+            "a stack opened afresh reads the layer the old pointer points at"
+        );
+
+        reopened
+            .assert(note(&doc, "second", &notes))
+            .perform(&operator)
+            .await?;
+        let second = reopened.pointed(&notes).expect("the layer moved");
+        assert_eq!(
+            second.edition,
+            first.edition.successor(),
+            "the write builds on the tree the old pointer named"
+        );
+        assert_eq!(
+            pointers(&branch, &operator, &notes).await?,
+            pointer_to(&second),
+            "the new pointer, by the current name, succeeds the old one"
+        );
+
+        reopened
+            .sync(crate::Download::QueriedRanges)
+            .perform(&operator)
+            .await?;
+        let replica = repo.branch("replica").open().perform(&operator).await?;
+        replica.set_upstream(&upstream).perform(&operator).await?;
+        let mirrored = replica
+            .stack()
+            .declare(LayerDeclaration::new(notes.clone(), LayerType::Branch))
+            .perform(&operator)
+            .await?;
+        mirrored
+            .sync(crate::Download::QueriedRanges)
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            notes_read(&mirrored, &operator, notes_in(&notes)).await?,
+            vec![
+                "String(\"first\") in memory:notes".to_string(),
+                "String(\"second\") in memory:notes".to_string(),
+            ],
+            "a second replica reads the layer after a sync"
         );
         Ok(())
     }

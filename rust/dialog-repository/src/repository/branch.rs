@@ -37,6 +37,8 @@ mod claims;
 pub use claims::*;
 
 mod commit;
+#[cfg(test)]
+pub(crate) use commit::legacy;
 pub use commit::*;
 
 pub(crate) mod context;
