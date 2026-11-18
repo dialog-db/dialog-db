@@ -336,3 +336,6 @@ impl PartialEq for JoinKey {
 }
 
 impl Eq for JoinKey {}
+
+#[cfg(test)]
+mod tests;
