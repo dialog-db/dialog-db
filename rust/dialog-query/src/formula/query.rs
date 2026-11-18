@@ -708,4 +708,3 @@ mod tests {
         assert!(matches!(deserialized, FormulaQuery::Length(_)));
     }
 }
-

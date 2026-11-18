@@ -158,3 +158,17 @@ pub use dialog_capability::Provider;
 pub use dialog_common::ConditionalSync;
 pub use dialog_effects::archive;
 pub use dialog_macros::{Attribute, Concept, Formula};
+
+#[cfg(test)]
+mod size_probe {
+    #[test]
+    fn print_sizes() {
+        eprintln!(
+            "SIZES proposition={} premise={} formula={} resolver={}",
+            size_of::<crate::Proposition>(),
+            size_of::<crate::Premise>(),
+            size_of::<crate::FormulaQuery>(),
+            size_of::<crate::ResolverQuery>(),
+        );
+    }
+}
