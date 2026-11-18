@@ -188,7 +188,13 @@ impl Entity {
     /// same node is the same entity on every replica and in every revision
     /// that reaches it.
     pub fn from_node(hash: &[u8; 32]) -> Result<Entity, IdentityError> {
-        format!("{}{}", NODE_SCHEME, hash.to_base58()).parse()
+        // Allocated once at its length: a branch names its root by one on
+        // every revision.
+        let reference = hash.to_base58();
+        let mut uri = String::with_capacity(NODE_SCHEME.len() + reference.len());
+        uri.push_str(NODE_SCHEME);
+        uri.push_str(&reference);
+        uri.parse()
     }
 
     /// The content hash a `node:` entity names, if this entity is one and

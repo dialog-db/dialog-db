@@ -12,8 +12,20 @@ use super::{EDITION_LENGTH, Edition, ORIGIN_LENGTH, Origin};
 /// The scheme of a revision's entity: `revision:<base58(hash)>`.
 pub const REVISION_SCHEME: &str = "revision";
 
+/// What a revision's entity begins with: its scheme and the colon.
+const REVISION_PREFIX: &str = "revision:";
+
 /// What a revision's entity began with before `revision:`.
 const LEGACY_REVISION_PREFIX: &str = "did:key:z6Mk";
+
+/// `prefix` then `reference`, in a string allocated once at its length:
+/// every commit names its revision, so this runs on the commit path.
+fn prefixed(prefix: &str, reference: &str) -> String {
+    let mut uri = String::with_capacity(prefix.len() + reference.len());
+    uri.push_str(prefix);
+    uri.push_str(reference);
+    uri
+}
 
 /// The byte width of a [`Version`] in key encodings
 pub const VERSION_LENGTH: usize = EDITION_LENGTH + ORIGIN_LENGTH;
@@ -87,7 +99,7 @@ impl Version {
     /// from) a revision without holding it. It is the entity the
     /// revision's record is recorded under.
     pub fn entity_uri(&self) -> String {
-        format!("{REVISION_SCHEME}:{}", self.entity_reference())
+        prefixed(REVISION_PREFIX, &self.entity_reference())
     }
 
     /// The URI revisions were named by before they had a scheme of their
@@ -96,7 +108,7 @@ impl Version {
     /// A replica written by an older release holds its revision records
     /// under this name, so a reader looks under both.
     pub fn legacy_entity_uri(&self) -> String {
-        format!("{LEGACY_REVISION_PREFIX}{}", self.entity_reference())
+        prefixed(LEGACY_REVISION_PREFIX, &self.entity_reference())
     }
 
     /// Reconstruct a [`Version`] from its key byte representation
@@ -159,11 +171,7 @@ impl Version {
     /// The entity an older release named a revision by, given the one it
     /// is named by now; `None` for an entity that names no revision.
     pub fn legacy_of(entity: &Entity) -> Option<Entity> {
-        let reference = entity
-            .to_string()
-            .strip_prefix(REVISION_SCHEME)?
-            .strip_prefix(':')?
-            .to_owned();
-        format!("{LEGACY_REVISION_PREFIX}{reference}").parse().ok()
+        let reference = entity.to_string().strip_prefix(REVISION_PREFIX)?.to_owned();
+        prefixed(LEGACY_REVISION_PREFIX, &reference).parse().ok()
     }
 }
