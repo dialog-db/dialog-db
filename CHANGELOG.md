@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A query can fold, and a fold can be kept current
 
-(pull request to be opened)
+[#839](https://github.com/dialog-db/dialog-db/pull/839).
 
 Decided in [dialog-db/dialog-db#830](https://github.com/dialog-db/dialog-db/pull/830)
 (a fold is a query type, not a rule) and
