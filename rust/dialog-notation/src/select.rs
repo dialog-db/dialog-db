@@ -47,6 +47,7 @@ use dialog_query::{ConceptQuery, Fold, FoldConclusion, Term};
 
 use crate::Error;
 use crate::compile::{Query, Step, compile, written};
+use crate::data;
 use crate::syntax::{Parameters, Syntax};
 
 /// What a query's analyzed tree is applied as.
@@ -55,6 +56,10 @@ pub const SELECTED: &str = "select.query";
 /// The relation a query's conditions are reported in, a column a
 /// variable.
 pub const ROW: &str = "query.row";
+
+/// The field a row of a query's conditions is reported under as one
+/// record, where more than one of its columns is not its entity.
+pub const ROW_FIELD: &str = "row";
 
 /// The one function of a collection there is yet.
 pub const COUNT: &str = "count";
@@ -133,9 +138,20 @@ struct Collect {
     /// One of what is collected: a variable, or an entry `{?k ?v}`.
     item: Syntax,
     source: Source,
-    /// The fold Dialog-DB gives the whole by, an index into
-    /// [`Selection::folds`], with the terms it groups by.
-    folded: Option<(usize, Vec<String>)>,
+    /// The fold Dialog-DB gives the whole by, where it gives it.
+    folded: Option<Lowered>,
+}
+
+/// A read that collects, as Dialog-DB folds it.
+#[derive(Clone, Debug)]
+struct Lowered {
+    /// An index into [`Selection::folds`].
+    fold: usize,
+    /// The terms it groups by.
+    shared: Vec<String>,
+    /// Where what is collected is an entry `{?k ?v}`: the fields of the
+    /// record each member is that hold its key and its value.
+    entry: Option<(String, String)>,
 }
 
 /// The prefix of a variable a fold's groups read that no column is.
@@ -290,30 +306,79 @@ impl Selection {
     }
 
     /// The fold of a read that collects, where Dialog-DB can give it:
-    /// the read is one query, what it collects one variable, and the
-    /// terms it shares with the rest are bound by the conditions every
-    /// answer needs, which are one query too. The index of the fold
-    /// and the terms it groups by.
-    fn fold(&mut self, required: &Rows, collect: &Collect) -> Option<(usize, Vec<String>)> {
+    /// the read is one query, and the terms it shares with the rest are
+    /// bound by the conditions every answer needs, which are one query
+    /// too.
+    ///
+    /// Each query reports its rows under the entity they are about, a
+    /// field a column, and, where more than one column is not that
+    /// entity, the whole row as one record beside. A field beside
+    /// another can be read crossed with a row of the same entity, so the
+    /// fold groups by fields that cannot be: the entity, or a field of a
+    /// query with no record. A member is the field of the variable
+    /// collected, folded to its distinct values, which crossing leaves
+    /// as they are. An entry `{?k ?v}` is the record, which keeps its
+    /// key beside its value, and is counted by its distinct keys.
+    fn fold(&mut self, required: &Rows, collect: &Collect) -> Option<Lowered> {
         let Source::Rows(rows) = &collect.source else {
-            return None;
-        };
-        let Syntax::Variable(member) = &collect.item else {
             return None;
         };
         let ([groups], [inputs]) = (required.runs.as_slice(), rows.runs.as_slice()) else {
             return None;
         };
+        let mut wanted = Vec::new();
+        collect.item.variables(&mut wanted);
         let shared: Vec<String> = rows
             .columns
             .iter()
-            .filter(|column| *column != member)
+            .filter(|column| !wanted.contains(column))
             .cloned()
             .collect();
-        if !shared.iter().all(|term| required.columns.contains(term)) {
+        let (groups, inputs) = (&self.queries[*groups], &self.queries[*inputs]);
+        let label = |columns: &[String], name: &str| {
+            columns
+                .iter()
+                .position(|column| column == name)
+                .map(|at| format!("c{at}"))
+        };
+        let recorded = |query: &Query| query.bound(ROW_FIELD).is_some();
+        let mut grouped = Vec::new();
+        let mut read = Vec::new();
+        for term in &shared {
+            grouped.push((label(&required.columns, term)?, term.clone()));
+            read.push((label(&rows.columns, term)?, term.clone()));
+        }
+        let loose = grouped
+            .iter()
+            .filter(|(field, _)| groups.about() != Some(field.as_str()))
+            .count();
+        if recorded(groups) && loose > 1 {
             return None;
         }
-        let (groups, inputs) = (&self.queries[*groups], &self.queries[*inputs]);
+        if recorded(inputs)
+            && read
+                .iter()
+                .any(|(field, _)| inputs.about() != Some(field.as_str()))
+        {
+            return None;
+        }
+        let (member, counted_by, entry) = match &collect.item {
+            Syntax::Variable(member) => {
+                read.push((label(&rows.columns, member)?, member.clone()));
+                (member.clone(), member.clone(), None)
+            }
+            Syntax::Map(pair) => match pair.as_slice() {
+                [(Syntax::Variable(key), Syntax::Variable(value))] if recorded(inputs) => {
+                    let record = format!("{INPUTS}{ROW_FIELD}");
+                    read.push((ROW_FIELD.to_string(), record.clone()));
+                    read.push((label(&rows.columns, key)?, key.clone()));
+                    let fields = (label(&rows.columns, key)?, label(&rows.columns, value)?);
+                    (record, key.clone(), Some(fields))
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
         let reduce = Reduce::new(
             shared.clone(),
             vec![
@@ -325,18 +390,22 @@ impl Selection {
                 ReduceEntry::new(
                     counted(&collect.target),
                     Aggregator::CountDistinct,
-                    Term::var(member.as_str()),
+                    Term::var(counted_by.as_str()),
                 ),
             ],
         );
         let fold = Fold::new(
-            groups.renamed(&required.columns, GROUPS)?,
-            inputs.renamed(&rows.columns, INPUTS)?,
+            groups.renamed(&grouped, GROUPS)?,
+            inputs.renamed(&read, INPUTS)?,
             reduce,
         );
         let rules = groups.rule.iter().chain(&inputs.rule).cloned().collect();
         self.folds.push(Folded { rules, fold });
-        Some((self.folds.len() - 1, shared))
+        Some(Lowered {
+            fold: self.folds.len() - 1,
+            shared,
+            entry,
+        })
     }
 
     /// The rules of a part compiled, each a query of its own.
@@ -439,14 +508,20 @@ impl Evaluation<'_> {
         let mut seen = HashSet::new();
         for run in &rows.runs {
             for values in &self.results[*run] {
+                let record = values
+                    .get(ROW_FIELD)
+                    .and_then(|record| data::entries(record).ok().flatten());
                 let row: Row = rows
                     .columns
                     .iter()
                     .enumerate()
                     .filter_map(|(at, name)| {
-                        values
-                            .get(&format!("c{at}"))
-                            .map(|value| (name.clone(), written(value)))
+                        let label = format!("c{at}");
+                        match &record {
+                            Some(record) => data::field(record, &label),
+                            None => values.get(&label),
+                        }
+                        .map(|value| (name.clone(), written(value)))
                     })
                     .collect();
                 if seen.insert(format!("{row:?}")) {
@@ -482,8 +557,8 @@ impl Evaluation<'_> {
         }
         for collect in &defined.collects {
             for row in &mut rows {
-                if let Some((fold, shared)) = &collect.folded {
-                    let (whole, count) = self.fold(*fold, shared, &collect.target, row);
+                if let Some(lowered) = &collect.folded {
+                    let (whole, count) = self.fold(lowered, &collect.target, row);
                     row.insert(collect.target.clone(), whole);
                     row.insert(counted(&collect.target), count);
                     continue;
@@ -590,15 +665,10 @@ impl Evaluation<'_> {
     /// many it holds: the folded row whose groups agree with `row`. A
     /// row no fold gives is of a group the conditions did not give, and
     /// holds nothing.
-    fn fold(
-        &mut self,
-        fold: usize,
-        shared: &[String],
-        target: &str,
-        row: &Row,
-    ) -> (Syntax, Syntax) {
-        let folded = &self.folded[fold];
-        let index = self.folds.entry(fold).or_insert_with(|| {
+    fn fold(&mut self, lowered: &Lowered, target: &str, row: &Row) -> (Syntax, Syntax) {
+        let shared = &lowered.shared;
+        let folded = &self.folded[lowered.fold];
+        let index = self.folds.entry(lowered.fold).or_insert_with(|| {
             folded
                 .iter()
                 .enumerate()
@@ -614,16 +684,26 @@ impl Evaluation<'_> {
         let found = index
             .get(&keyed(shared.iter().map(|term| row.get(term))))
             .map(|at| &folded[*at]);
-        let members = match found.and_then(|found| found.get(target)).map(written) {
-            Some(Syntax::Tuple(items)) => items,
-            _ => Vec::new(),
-        };
+        let members = found
+            .and_then(|found| found.get(target))
+            .and_then(|whole| data::items(whole).ok().flatten())
+            .unwrap_or_default();
         let count = found
             .and_then(|found| found.get(&counted(target)).cloned())
             .unwrap_or(Value::UnsignedInt(0));
         let entries = members
-            .into_iter()
-            .map(|member| (Syntax::Reference(String::new()), member))
+            .iter()
+            .filter_map(|member| match &lowered.entry {
+                // An entry is the record of the row it was read from.
+                Some((key, value)) => {
+                    let record = data::entries(member).ok().flatten()?;
+                    Some((
+                        written(data::field(&record, key)?),
+                        written(data::field(&record, value)?),
+                    ))
+                }
+                None => Some((Syntax::Reference(String::new()), written(member))),
+            })
             .collect();
         (Syntax::Map(gathered(entries)), Syntax::Constant(count))
     }

@@ -275,20 +275,36 @@ impl Query {
             .collect()
     }
 
-    /// What to select with the variable of each column `c{at}` renamed
-    /// `columns[at]`, and every other variable `{prefix}` and its name,
-    /// so that the rows of two queries join on their columns alone.
-    /// `None` where a column is not one variable.
-    pub fn renamed(&self, columns: &[String], prefix: &str) -> Option<ConceptQuery> {
+    /// The variable the select binds a field to, by the field's label,
+    /// where the field is what a variable was bound to.
+    pub fn bound(&self, label: &str) -> Option<&str> {
+        self.fields.iter().find_map(|(field, _, slot)| match slot {
+            Slot::Bound(name) if field == label => Some(name.as_str()),
+            _ => None,
+        })
+    }
+
+    /// The label of the field that is the entity a row is reported
+    /// under, where one is.
+    pub fn about(&self) -> Option<&str> {
+        let Slot::Bound(entity) = &self.entity else {
+            return None;
+        };
+        self.fields.iter().find_map(|(field, _, slot)| match slot {
+            Slot::Bound(name) if name == entity => Some(field.as_str()),
+            _ => None,
+        })
+    }
+
+    /// What to select with the variable of each field `labels` names
+    /// renamed to the name beside it, and every other variable
+    /// `{prefix}` and its name, so that the rows of two queries join on
+    /// those fields alone. `None` where a field named is not what a
+    /// variable was bound to.
+    pub fn renamed(&self, labels: &[(String, String)], prefix: &str) -> Option<ConceptQuery> {
         let mut names = BTreeMap::new();
-        for (at, column) in columns.iter().enumerate() {
-            let label = format!("c{at}");
-            match self.fields.iter().find(|(field, _, _)| *field == label) {
-                Some((_, _, Slot::Bound(name))) => {
-                    names.insert(name.clone(), column.clone());
-                }
-                _ => return None,
-            }
+        for (label, name) in labels {
+            names.insert(self.bound(label)?.to_string(), name.clone());
         }
         fn rename(json: &mut Json, names: &BTreeMap<String, String>, prefix: &str) {
             match json {
@@ -1562,7 +1578,15 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
         | Term::Fold { .. } => None,
     };
 
-    if let ([Premise::Read(only)], []) = (rule.when.as_slice(), rule.unless.as_slice()) {
+    // A query's row that is one record too is derived by a rule, so the
+    // record is a value the select binds, which a fold can collect.
+    let recorded = read.domain == crate::select::ROW
+        && fields
+            .iter()
+            .any(|field| matches!(field.term, Term::Struct(_)));
+    if let ([Premise::Read(only)], []) = (rule.when.as_slice(), rule.unless.as_slice())
+        && !recorded
+    {
         let mut scope = Scope::default();
         let select = scope.read(only)?;
         if scope.when.is_empty() {
@@ -1684,6 +1708,14 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                 });
                 Slot::Bound(column)
             }
+        };
+        // A field that is the entity reads as the entity, so the select
+        // binds one variable to both.
+        let slot = match (&field.term, &read.entity) {
+            (Term::Variable(term), Term::Variable(entity)) if term == entity => {
+                Slot::Bound("this".into())
+            }
+            _ => slot,
         };
         slots.push((field.label.clone(), key, slot));
     }

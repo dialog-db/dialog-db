@@ -116,13 +116,26 @@ What this changes for you:
   list, its members in order, each once.
 - `collect` in a rule, a concept or a write, and a rule or concept that
   applies a query, are refused.
-- `Step::Select` holds a `Selection`: the Dialog-DB queries to run and
+- `Step::Select` holds a `Selection`: the Dialog-DB queries to run, the
+  `Fold`s it asks Dialog-DB for (`Selection::folds`), and
   `Selection::answer`, which puts their rows together.
+- A read that collects is folded by Dialog-DB where its read and the
+  conditions every answer needs are each one query: the whole of a
+  variable as its distinct values, and of an entry `{?k ?v}` as the
+  distinct records of the rows it was read from, counted by their keys.
+  What is not folded is put together in memory from the rows.
+- Each query a selection runs reports its rows under the entity its
+  reads are about, each column a field `c0`, `c1` and on, and, where more
+  than one column is not that entity, the whole row as one record under
+  `row` too. A subscription of one is maintained for the entity whose
+  facts changed: a tag added to one to-do among 200 reads about 20 tree
+  nodes, as among 20, where a row reported under an entity made of its
+  values read 94 and took time that grew with the to-dos.
 
-Why: no Dialog-DB query or rule can state a fold, and a rule that reads
-one could feed itself. A query is read only by whoever asks and by
-another query, so it collects freely, and it is evaluated in the
-notation over rows Dialog-DB gives.
+Why: no Dialog-DB rule can state a fold, and a rule that reads one could
+feed itself. A query is read only by whoever asks and by another query,
+so it collects freely, and what it collects Dialog-DB folds where it can
+say it as a query.
 
 ### A rule can name an entity it did not read
 

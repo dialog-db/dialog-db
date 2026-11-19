@@ -121,7 +121,8 @@ fn folds(text: &str) -> Result<usize> {
 /// A read that collects one variable, whose shared terms the conditions
 /// every answer needs bind, is folded by Dialog-DB, with `distinct` and
 /// `count-distinct`: the card's tags are one fold, asked for every card
-/// or for one. A read that collects entries is put together here.
+/// or for one. A read that collects entries is folded too, each entry
+/// the record of the row it was read from.
 #[dialog_common::test]
 fn it_asks_dialog_db_to_fold_a_collected_read() -> Result<()> {
     assert_eq!(
@@ -139,7 +140,7 @@ fn it_asks_dialog_db_to_fold_a_collected_read() -> Result<()> {
            (notebook/blocks ?n block: (collect ?blocks))
            (is ?outline {:title ?title :blocks ?blocks}))
          (select (notebook/outline ?n is: ?outline))";
-    assert_eq!(folds(&format!("{NOTEBOOK}{outline}"))?, 0);
+    assert_eq!(folds(&format!("{NOTEBOOK}{outline}"))?, 1);
     Ok(())
 }
 
@@ -210,6 +211,63 @@ async fn it_keeps_a_collected_read_folded_under_a_subscription() -> Result<()> {
     }
     assert_eq!(answer.len(), 3);
     assert_eq!(standing.recomputes(), 2);
+    Ok(())
+}
+
+/// What a tag added to one of `n` to-dos costs the card's standing fold
+/// once it has been polled: how many times its inner subscriptions were
+/// evaluated whole again, and how many tree nodes the poll read.
+async fn tag_added(n: usize) -> Result<(usize, u64)> {
+    let mut notebook = Notebook::open().await?;
+    let mut seed = String::from(TODOS);
+    for i in 0..n {
+        seed.push_str(&format!(
+            "\n(assert (todo todo:n{i} title: \"Task {i}\"))\
+             \n(assert (todo/tag todo:n{i} tag: \"a{}\"))\
+             \n(assert (todo/tag todo:n{i} tag: \"b{}\"))",
+            i % 7,
+            i % 5
+        ));
+    }
+    let (_, diagnostics) = notebook.submit(&seed).await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let selection = selection(&format!("{TODOS}{CARD}(select (todo/card ?t is: ?card))"))?;
+    let folded = &selection.folds[0];
+    for rule in &folded.rules {
+        notebook.branch.overlay().assert(rule.clone())?;
+    }
+    let env = dialog_repository::helpers::Interposing::new(notebook.operator.clone());
+    let mut standing = notebook.branch.subscribe_fold(folded.fold.clone());
+    standing.poll(&env).await?;
+    let recomputed = standing.recomputes();
+    notebook
+        .submit(&format!(
+            r#"(assert (todo/tag todo:n{} tag: "new"))"#,
+            n / 2
+        ))
+        .await?;
+    let reads = env.reads();
+    let delta = standing.poll(&env).await?.expect("the tag moves a card");
+    assert_eq!((delta.asserted.len(), delta.retracted.len()), (1, 1));
+    Ok((standing.recomputes() - recomputed, env.reads() - reads))
+}
+
+/// A tag added to one to-do is maintained for that to-do alone: the
+/// fold's inner subscriptions are not evaluated whole again, and the
+/// poll reads a few nodes, as many among 200 to-dos as among 20 (about
+/// 20 each; reported under an entity made of the row's values, as they
+/// were, the poll read 88 and 94, and its time grew with the to-dos). Each
+/// inner query reports its rows under the entity they are about, the
+/// to-do, so the subscription re-derives the one to-do whose fact moved.
+#[dialog_common::test]
+async fn it_maintains_a_folded_read_for_the_entity_that_changed() -> Result<()> {
+    let (few, few_reads) = tag_added(20).await?;
+    let (many, many_reads) = tag_added(200).await?;
+    assert_eq!((few, many), (0, 0), "an inner subscription recomputed");
+    assert!(
+        few_reads <= 40 && many_reads <= 40,
+        "node reads grew: {few_reads} at 20, {many_reads} at 200"
+    );
     Ok(())
 }
 
