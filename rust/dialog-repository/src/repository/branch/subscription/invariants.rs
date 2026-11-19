@@ -2025,3 +2025,214 @@ async fn a_merge_leaving_two_claims_in_a_cell_keeps_a_recursive_subscription_fre
     );
     Ok(())
 }
+
+/// A note's title (`note/title`).
+#[derive(Attribute, Clone, PartialEq)]
+#[domain("note")]
+pub struct Title(pub String);
+
+/// A note's body (`note/body`).
+#[derive(Attribute, Clone, PartialEq)]
+#[domain("note")]
+pub struct Body(pub String);
+
+/// A note's tag (`note/tag`), which no note concept reads.
+#[derive(Attribute, Clone, PartialEq)]
+#[domain("note")]
+pub struct Tag(pub String);
+
+/// A note: an entity with a title and a body, scanned for candidates
+/// and read of each entity the rule re-derives, where each read is held
+/// by the scan's range.
+#[derive(Concept, Debug, Clone, PartialEq)]
+pub struct Note {
+    /// The note entity.
+    pub this: Entity,
+    /// Its title.
+    pub title: Title,
+    /// Its body.
+    pub body: Body,
+}
+
+/// A note's owner (`note/owner`).
+#[derive(Attribute, Clone, PartialEq)]
+#[domain("note")]
+pub struct Owner(pub Entity);
+
+/// A note whose owner holds a badge: a conformance premise reading the
+/// badge of each note's owner by point, and a delta-join looking up the
+/// notes an owner owns by value, where no rule scans the badges, so the
+/// badge points stay as they were read beside the ranges that hold the
+/// rest.
+#[derive(Concept, Debug, Clone, PartialEq)]
+pub struct Owned {
+    /// The note entity.
+    pub this: Entity,
+    /// Its title.
+    pub title: Title,
+    /// Its owner, who must hold a badge.
+    #[dialog(conforms = BadgeHolder)]
+    pub owner: Owner,
+}
+
+/// How many entities the wide runs write about, the last [`STRAYS`]
+/// never given a title by the population, so their writes land outside
+/// the answer until a step titles them.
+const NOTES: usize = 100;
+
+/// The entities of the wide runs that start outside the answer.
+const STRAYS: usize = 20;
+
+/// The wide runs' entity `index`.
+fn note(index: usize) -> Entity {
+    format!("id:note-{index:03}")
+        .parse()
+        .expect("a valid entity")
+}
+
+/// The attributes a wide run writes, in the order of a [`Cells`] row.
+const WIDE: [&str; 5] = [
+    "note/title",
+    "note/body",
+    "note/tag",
+    "note/owner",
+    "credential/badge",
+];
+
+/// What each entity of a wide run holds under each of [`WIDE`]: a
+/// text, or for the owner the index of the note that owns it.
+type Cells = [Option<String>; 5];
+
+/// One write of a wide run: a title, a body, a tag (an attribute no
+/// note reads), an owner or a badge asserted or retracted for one
+/// entity.
+fn wide_change(rng: &mut Xorshift, held: &mut [Cells], batch: &mut Changes) -> String {
+    let index = rng.below(NOTES);
+    let field = rng.below(WIDE.len());
+    let of = note(index);
+    let cell = &mut held[index][field];
+    let (assert, text) = match cell.clone() {
+        Some(text) if rng.chance(1, 2) => (false, text),
+        _ if field == 3 => (true, rng.below(NOTES).to_string()),
+        _ => (true, format!("v{}", rng.below(4))),
+    };
+    macro_rules! stage {
+        ($statement:expr) => {
+            if assert {
+                batch.assert($statement);
+            } else {
+                batch.retract($statement);
+            }
+        };
+    }
+    match field {
+        0 => stage!(Title::of(of).is(text.clone())),
+        1 => stage!(Body::of(of).is(text.clone())),
+        2 => stage!(Tag::of(of).is(text.clone())),
+        3 => stage!(Owner::of(of).is(note(text.parse().expect("an index")))),
+        _ => stage!(Badge::of(of).is(text.clone())),
+    }
+    *cell = assert.then(|| text.clone());
+    let the = WIDE[field];
+    format!("{} {the} n{index} = {text}", if assert { '+' } else { '-' })
+}
+
+/// A run of `seed` over [`NOTES`] entities: a population that gives
+/// every note but the [`STRAYS`] a title and a body, then `steps`
+/// steps of one to four writes each, by commit or through the session
+/// overlay, to entities in the answer and outside it and to an
+/// attribute no note reads. After each, the subscriptions hold the
+/// invariant, and the notes' cover stays a few ranges.
+async fn run_wide(seed: u64, steps: usize) -> anyhow::Result<()> {
+    const BOUND: usize = 16;
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let mut rng = Xorshift::new(seed);
+    let mut held: Vec<Cells> = vec![Default::default(); NOTES];
+    let mut population = Changes::new();
+    for (index, cells) in held.iter_mut().enumerate() {
+        if index < NOTES - STRAYS {
+            population.assert(Title::of(note(index)).is(format!("t{index}")));
+            cells[0] = Some(format!("t{index}"));
+        }
+        population.assert(Body::of(note(index)).is(format!("b{index}")));
+        cells[1] = Some(format!("b{index}"));
+        // Every note is owned by the next, and all but every fifth hold a
+        // badge, so the owners' badges are read by point, a hundred of
+        // them, and some notes fail to conform.
+        let owner = (index + 1) % NOTES;
+        population.assert(Owner::of(note(index)).is(note(owner)));
+        cells[3] = Some(owner.to_string());
+        if index % 5 != 0 {
+            population.assert(Badge::of(note(index)).is(format!("g{index}")));
+            cells[4] = Some(format!("g{index}"));
+        }
+    }
+    branch
+        .transaction()
+        .integrate(population)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let mut log = Log {
+        seed,
+        steps: vec!["a population of titled and untitled notes".into()],
+    };
+    let mut watches = Watches::<Note>::new("Note", &branch, &operator).await?;
+    let mut owned = Watches::<Owned>::new("Owned", &branch, &operator).await?;
+    for step in 1..=steps {
+        let mut batch = Changes::new();
+        let mut described = Vec::new();
+        for _ in 0..1 + rng.below(4) {
+            described.push(wide_change(&mut rng, &mut held, &mut batch));
+        }
+        let commit = rng.chance(1, 2);
+        log.steps.push(format!(
+            "{} [{}]",
+            if commit { "Commit" } else { "Overlay" },
+            described.join(", ")
+        ));
+        if commit {
+            branch
+                .transaction()
+                .integrate(batch)
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        } else {
+            branch.overlay().apply(batch)?;
+        }
+        watches
+            .check(step, &mut rng, &branch, &operator, &log)
+            .await?;
+        owned
+            .check(step, &mut rng, &branch, &operator, &log)
+            .await?;
+        let cover = watches.every.subscription.demand().len();
+        anyhow::ensure!(
+            cover <= BOUND,
+            "seed {seed}, step {step}: a cover over {NOTES} notes holds {cover} ranges"
+        );
+    }
+    watches.ensure_maintained(seed)?;
+    owned.ensure_maintained(seed)
+}
+
+/// A cover that leaves out the point reads its attribute ranges hold
+/// lets every change through that the cover with them did. Over random
+/// writes to notes in the answer and outside it, to an attribute no note
+/// reads, and to the owners and badges a conformance premise reads by
+/// point, each maintained subscription stays a fresh evaluation's
+/// answer, its deltas stay exactly the difference from the last poll,
+/// and the notes' cover stays a few ranges where it grew by two per
+/// note re-derived.
+#[dialog_common::test]
+async fn a_coarse_cover_maintains_what_a_fresh_evaluation_answers() -> anyhow::Result<()> {
+    for seed in [1, 2, 3] {
+        run_wide(seed, 60).await?;
+    }
+    Ok(())
+}
