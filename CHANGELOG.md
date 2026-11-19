@@ -14,6 +14,35 @@ says how to cut a release.
 
 ## Unreleased
 
+### A subscription's poll costs the entities it touched, not its whole answer
+
+[#838](https://github.com/dialog-db/dialog-db/pull/838).
+
+A subscription keeps a range of its cover per entity it read, and a
+poll gates the tree difference by that cover. Every node, buffered
+operation and changed entry the difference walked was tested against
+every range, so one changed fact under a cover of ten thousand ranges
+cost tens of thousands of comparisons per node. The scope is now sorted
+and merged once and each test is a binary search. A maintained poll
+then compared each re-derived entity with the kept answer by scanning
+every kept row; the kept answer is now indexed by entity, so the
+comparison reads that entity's rows only.
+
+What this changes for you:
+
+- Nothing in the API. A poll's delta, its order and `results()` read as
+  they did.
+- A poll over a large cover, and a poll that re-derives many entities of
+  a large answer, does work in the touched entities and the log of the
+  cover, where it did work in their product.
+
+Why: a subscription's answer grows with the data it watches, and the
+cost of a poll that changed one fact grew with the square of it.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes.
+
 ### An ephemeral line can be read as it stood, at no cost to take: `Ephemeral::frozen`
 
 [#841](https://github.com/dialog-db/dialog-db/pull/841).
@@ -120,7 +149,6 @@ What this changes for you:
 Why: copying values was most of a concept read's cost after the scan,
 and a concept with an optional field, which most of tonk's are, was
 never merged, so its list read probed every field of every entity.
-
 
 ### A coverage entry spills nothing
 
