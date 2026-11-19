@@ -566,6 +566,10 @@ impl Application for AttributeQueryOnly {
     fn realize(&self, input: Match) -> Result<Claim, EvaluationError> {
         input.prove(self.query.source())
     }
+
+    fn bindings(&self, claim: &Claim) -> Option<Match> {
+        self.query.bindings(claim)
+    }
 }
 
 impl TryFrom<&AttributeQueryOnly> for Selector<Constrained> {
