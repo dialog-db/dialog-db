@@ -14,6 +14,87 @@ says how to cut a release.
 
 ## Unreleased
 
+### The notation keeps its definitions compiled on the branch, each under the entity its canonical form makes, and a name is a namespace
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
+`design/macros/definitions-plan.md` on `feat/notation-poc`.
+
+A concept, a macro and a query are compiled when they are defined, every
+reference in them resolved and written out where it stands, and kept as
+data: `definition:` and the hash of their canonical form, in which the
+variables are named by the engine's own labelling of a rule (colour
+refinement, then individualisation) and the parts whose order says
+nothing are sorted. Two spellings of one definition are one entity; the
+name and the description are no part of it. Beside it a source map says
+what was written and, for each reference, the name it was written under
+and the definition it resolved to.
+
+A name is a namespace: a key bound to one referent. A document binds
+what it defines in mine, the profile the branch is read under (the
+`dialog.session/profile` every query of a branch is given): the name to
+the name's own namespace, and in that the signature, its kind and labels
+in order (`concept (done: title:)`), to the definition. `Name` is a rule
+over every namespace's bindings. `todo` is every namespace's `todo`,
+resolved by the labels written; `@cdata/todo` is the `todo` of what
+`cdata` in mine is bound to; `todo#3fa9` is the one whose hash starts so.
+
+What this changes for you:
+
+- A query is kept as its analyzed tree with every query it calls
+  inlined, and `select` reads that: a callee defined again changes no
+  caller's answers, entity or kept form until the caller is defined
+  again. What a call gives by value narrows the query by `(== ?v is:
+  value)` among the premises of its rules, where it was narrowed by
+  analyzing the query again.
+- A macro's template is expanded where the macro is defined, its
+  pattern's variables holes. A part that applies a definition only once
+  a hole is filled, as `(note ?n ... ?fields)` does, or that several
+  definitions take, is left as written and expanded where the macro is
+  used.
+- Two definitions of one signature in two namespaces are refused, with
+  the new `Error::Several`, whose `Candidates` lists each by namespace and
+  entity, and nothing of the document is kept or written. Labels that
+  differ still tell definitions apart, a read the labels fit several of
+  still reads every one, and several rules concluding one concept are
+  all read, as before.
+- A later definition under the signature of an earlier one in mine binds
+  the name to it in place of the earlier, which stays kept.
+- New: the module `dialog_notation::definition` (`Definition`, `Defined`,
+  `Source`, `Reference`, `Binding`, `Namespaces`, `Name`, the attributes
+  under `definition::attribute`, `statements`, `NAME_RULE`);
+  `Analysis::defined` and `Checked::defined`, what a document defined;
+  `Analyzer::with_namespace`, `Analyzer::load`, `Analyzer::take`,
+  `Analyzer::resolve_at`, `Analyzer::namespaces` and
+  `Analyzer::definitions`; `Live::kept`, `Live::analyzer`,
+  `Live::refresh`, `live::written` and `live::name_rule`.
+- New in `dialog-query`: `rule::canonical::labelling` and
+  `rule::canonical::Atom`, the labelling a rule's identity is made by,
+  for anything else that names its variables apart from their spelling.
+- A symbol that starts with `@` or holds a `#` reads as a name, never as
+  an attribute or a domain.
+
+Why: a query kept as written and analyzed again at each `select`, and a
+macro expanded again against the table at each use, answered by
+whatever their names meant last, so a definition arriving under a name
+by a merge changed answers nobody asked to change. Nothing was loaded
+from a branch, so every document was submitted again to every analyzer.
+
+#### Compatibility and migration
+
+- A replica now stores, for each definition a submitted document makes,
+  `syntax.definition/is` and `syntax.definition/kind` under
+  `definition:<hash>`; `syntax.source/definition`, `syntax.source/form`
+  and `syntax.source/references` (and `syntax.source/revision` where the
+  caller gave one) under `source:<hash>`; two bindings, each
+  `syntax.binding/namespace`, `syntax.binding/key` and
+  `syntax.binding/referent` under `binding:<hash>`; and the deductive rule
+  that concludes `syntax.name`. Nothing older is rewritten: a replica that
+  holds documents' rules and facts and no definitions loads none, and a
+  document is submitted once more for its definitions to be kept. An
+  older release reads these as facts and a rule like any other. An
+  embedder writes `live::written(&checked.defined)` with a document's
+  transaction and opens an analyzer with `Live::analyzer`.
+
 ### The notation keeps a selection or a view current on a branch itself
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773).
