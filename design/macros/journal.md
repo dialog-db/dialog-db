@@ -1692,3 +1692,11 @@ The agent's inferred rule is withdrawn. So, if the sketch holds, are the design'
 
 **Decided.** The maintainer's: the read says it collects, and a query needs a required condition. Not decided: the marker, proposed as `(all ?g)`; and the word for asking.
 
+## 2026-11-18, Designing: collect
+
+**Asked.** The marker. `all` does not say a list comes out. The agent offered `list`; the maintainer prefers `collect`, and likes a spread too.
+
+**Learned.** A spread is the right idea with no free spelling: three dots after a term open an application, inside brackets they are a pattern over a stored list, and after a label they need the reader changed and are a template's own rest inside a rule about syntax. The notebook's page restated as queries is three where it was two views, and it shows whole for a notebook with no block, which the marker form did not.
+
+**Decided.** The maintainer's: `(collect ?g)`. Not decided: the word for asking. Next to test: the table's views.
+
