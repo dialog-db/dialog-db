@@ -120,12 +120,6 @@ impl AsRef<[u8]> for VerifierCredentialExport {
 /// Whether these bytes are a signer export for some supported algorithm.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn is_signer_export(bytes: &[u8]) -> bool {
-    if bytes.len() == SIGNER_EXPORT_SIZE
-        && bytes.starts_with(PRIVATE_TAG)
-        && bytes[PUBLIC_KEY_OFFSET..].starts_with(PUBLIC_TAG)
-    {
-        return true;
-    }
     #[cfg(feature = "es256")]
     if bytes.len() == ES256_SIGNER_EXPORT_SIZE
         && bytes.starts_with(ES256_PRIVATE_TAG)
@@ -133,20 +127,19 @@ fn is_signer_export(bytes: &[u8]) -> bool {
     {
         return true;
     }
-    false
+    bytes.len() == SIGNER_EXPORT_SIZE
+        && bytes.starts_with(PRIVATE_TAG)
+        && bytes[PUBLIC_KEY_OFFSET..].starts_with(PUBLIC_TAG)
 }
 
 /// Whether these bytes are a verifier export for some supported algorithm.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn is_verifier_export(bytes: &[u8]) -> bool {
-    if bytes.len() == VERIFIER_EXPORT_SIZE && bytes.starts_with(PUBLIC_TAG) {
-        return true;
-    }
     #[cfg(feature = "es256")]
     if bytes.len() == ES256_VERIFIER_EXPORT_SIZE && bytes.starts_with(ES256_PUBLIC_TAG) {
         return true;
     }
-    false
+    bytes.len() == VERIFIER_EXPORT_SIZE && bytes.starts_with(PUBLIC_TAG)
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
