@@ -51,13 +51,13 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 
 | | one at a time: a row for each, and no row for none | the whole: one row, and empty for none |
 |---|---|---|
-| many values | `(todo/tag ?t tag: ?g)` | `(todo/tag ?t tag: {... ?tags})`, a set: a map with no names |
-| a keyed collection | `(notebook/blocks ?n block: {?k ?b})` | `(notebook/blocks ?n block: {... ?blocks})`, a map |
+| many values | `(todo/tag ?t tag: ?g)` | `(todo/tag ?t tag: (collect ?tags))`, a set: a map with no names |
+| a keyed collection | `(notebook/blocks ?n block: {?k ?b})` | `(notebook/blocks ?n block: (collect ?blocks))`, a map |
 
-- The spread is the pattern's own rest, which already takes what is not named, as a collection, and already may take nothing. Here nothing is named, so it takes all.
+- `collect` stands where an elector does. `(top ?s)` chooses one of a field's claims; `(collect ?s)` takes every one.
 - Key and value are paired because they were never apart: an entry is one term.
-- What comes out is a map either way. A keyed collection's has its keys. Many plain values have none, and a map with no names is a set: `{: "errand" : "home"}`. No list: many values have no order, and a sequence's order is in its keys.
-- On a stored record `{... ?r}` binds what `?r` alone would, so nobody writes it there, and the spelling is in effect unused. In a condition it takes; in `is` or a template the same spelling puts, `{:title ?title ... ?more}`.
+- What comes out is a map either way. A keyed collection's has its keys. Many plain values have none, and a map with no names is a set: `{: "errand" : "home"}`, stored in a record as a list. No list as such: many values have no order, and a sequence's order is in its keys.
+- A pattern takes one value apart; `collect` puts many rows together. `{…}` and `[…]` in a condition are always the first.
 - **A read of the whole never gates**, as `unless` never binds. So every other term in it is bound by a required condition, a constant, or blank, and a query of such reads alone is refused: nothing would say which entities.
 - It is a fold, so it is refused in a `rule`.
 - A write goes through one entry: `(assert (notebook/blocks ?n block: {"N3" block:x}))`. The whole is not written.
@@ -78,7 +78,7 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 ```clj
 (query (todo/card ?t is: ?card)
   (todo ?t title: ?title)
-  (todo/tag ?t tag: {... ?tags})
+  (todo/tag ?t tag: (collect ?tags))
   (is ?card {:title ?title :tags ?tags}))
 ```
 
@@ -98,7 +98,7 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 
 (query (todo/row ?t list: ?l is: ?row)
   (todo ?t list: ?l title: ?title)
-  (todo/chip ?t is: {... ?chips})
+  (todo/chip ?t is: (collect ?chips))
   (view ?row [:li ?title ?chips]))
 ```
 ```html
@@ -113,7 +113,7 @@ Written `(todo/chip ?t is: ?chip)`, one at a time, "Call mum" has no `li`.
 ```clj
 (query (notebook/outline ?n is: ?outline)
   (notebook/named ?n title: ?title)
-  (notebook/blocks ?n block: {... ?blocks})
+  (notebook/blocks ?n block: (collect ?blocks))
   (is ?outline {:title ?title :blocks ?blocks}))
 ```
 
@@ -131,7 +131,7 @@ With each block's source, which is a join for each entry. The item is a query wh
 
 (query (notebook/outline ?n is: ?outline)
   (notebook/named ?n title: ?title)
-  (notebook/source ?n is: {... ?sources})
+  (notebook/source ?n is: (collect ?sources))
   (is ?outline {:title ?title :blocks ?sources}))
 ```
 
@@ -154,8 +154,8 @@ With each block's source, which is a join for each entry. The item is a query wh
 
 (query (notebook/ui ?n is: ?ui)
   (notebook/named ?n title: ?title)
-  (notebook/order-item ?n is: {... ?order})
-  (notebook/block-row _ notebook: ?n is: {... ?rows})
+  (notebook/order-item ?n is: (collect ?order))
+  (notebook/block-row _ notebook: ?n is: (collect ?rows))
   (view ?ui
     [:notebook-save {:style "display: block;"}
       [:tonk-notebook {:data-subject ?n :data-notebook ?n :title ?title
@@ -168,18 +168,18 @@ With each block's source, which is a join for each entry. The item is a query wh
 
 Two views this morning, three queries now, and a notebook with no block shows its whole page, where the marker form showed its outer element only. The order's items stand by position; the rows are a set, which is all tonk's hidden rows need.
 
-## The spread, against a word
+## A word, not the spread
 
-| | the spread: `{... ?blocks}`, `{... ?tags}` | a word: `(collect ?blocks)` |
+**Decided, the maintainer's: not `{... ?x}`.** It does not say whether it takes a value apart or puts rows together, and those are different things.
+
+| | a word: `(collect ?blocks)` | the spread: `{... ?blocks}` |
 |---|---|---|
-| says what comes out | 🟢 a map, by the braces; with its keys or with none by the field's declaration | by the field's declaration, which the call does not show |
-| says it does not gate | by what a rest is: it may take nothing | 🟢 by a word, which an error can name |
-| already in the notation | 🟢 `{:author ?who ... ?others}` and `[?first ... ?more]` are in its tests | no |
-| second meaning | on a field that stores one record, `{... ?r}` is that record, and no claim is no row; on a collection it is every entry, and none is `{}`. All there is, both times, and on a stored record nobody has cause to write it, since `?r` says the same | none |
-| new to the reader | 🟡 a map with no names, `{: 1 : 2}`, which the reader refuses today ("a map key with no name"), and a variable for a key, `{?k ?b}`, which a record pattern refuses today ("a key is a label or text") | a word |
-| a set as a value | ? a map with no names. Whether dialog's `Record` can hold entries with no key is not checked | the same |
+| says which it is | 🟢 only ever puts together | 🔴 a pattern's rest, which takes apart; here it would put together |
+| says it does not gate | 🟢 by a word an error can name | by what a rest is |
+| says what comes out | a map: with its keys or with none, by the field | a map, by the braces |
+| already in the notation | no; it sits where an elector does | yes, as destructuring |
 
-**Proposed: the spread**, with `collect` to fall back on if readers take `{... ?x}` on a collection for gating. `[?g]`, set aside earlier, was a different case: as a pattern it is a list of exactly one, and as a collection it would have meant all. A rest means all there is under both.
+`collect` was set aside an hour before on two counts, and both are since answered. It seemed to promise a list: it makes a map, always. A dictionary had no way to say how key and value pair: an entry is one term.
 
 ## What it replaces
 
@@ -187,7 +187,7 @@ Two views this morning, three queries now, and a notebook with no block shows it
 |---|---|
 | `(view concept :name template condition…)` and its call | a query named under the concept, `todo/row`, whose answer is markup, and its head applied |
 | a collection as two head fields, `at: ?k block: ?b` | one field holding an entry, `block: {?k ?b}`. The line is as it was; R46 tested the line |
-| the design's fold over an entity, and tonk's marker, taken this morning | a read of the whole, and nothing else repeats |
+| the design's fold over an entity, and tonk's marker, taken this morning | a read that collects, and nothing else repeats |
 | a fold in a rule's head (`list/count-open`), and the zero written by a second rule | `(count ?open)` of a set, where counting nothing gives 0. Nothing in the engine quarantines a fold (#830) |
 | a getter | a query of an entity and a value |
 | #712: a collection that is empty | one at a time, the row is rightly missing; the whole is `{}`, which is what #712 expected of it |
@@ -197,7 +197,7 @@ Two views this morning, three queries now, and a notebook with no block shows it
 
 - **A rule that must read a fold.** tonk's library has no fold in any rule; where it counts, an element's script does.
 - **A real view that reads worse.** Every repeated part built from more than one field is a query with a name. The notebook's page holds up. The table's views, rows of cells, are not restated yet.
-- **Readers.** None of it has met one: not the head with `is:`, not `{?k ?b}`, not the spread on a field.
+- **Readers.** None of it has met one: not the head with `is:`, not `{?k ?b}`, not `collect` on a field.
 
 ## Open
 

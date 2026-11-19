@@ -1720,3 +1720,13 @@ A separate clause for collecting needs inference or its own conditions, and infe
 
 **Decided.** The maintainer's: the set's spelling. Proposed still: the spread for the whole. Nothing is built.
 
+## 2026-11-18, Designing: a word after all
+
+**Asked.** Whether `{... ?x}` reads as taking a value apart or putting rows together.
+
+**Learned.** The maintainer does not find it obvious, and that is reason enough: they are different acts, and the notation's braces in a condition have only ever meant the first. The agent had argued position tells them apart; position tells taking from putting in a template, not one value from many rows in a condition. `collect`, dropped an hour before for promising a list and for not pairing keys, has neither fault now: it always makes a map, and an entry carries its key.
+
+**Backtracked.** From the spread to `collect`, the second change of marker this evening.
+
+**Decided.** The maintainer's: not the spread; a record stores a set as a list. The marker is `(collect ?x)`. Nothing is built.
+
