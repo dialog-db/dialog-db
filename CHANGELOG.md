@@ -349,8 +349,41 @@ Why: a rule set has to mean one thing whatever else is installed. The
 same body gave a different answer when an unrelated rule closed a cycle
 around it, with nothing reported. Setting the rule aside is reported,
 and names the rule.
+### A concept read binds stored values in place, and reads optional fields in one pass
+
+Research: [zero-copy answers](research/zero-copy-answers.md)
+
+A concept read used to turn every row it scanned into owned values (an
+entity with a hash of its URI, an attribute, a value, a claim) and copy
+them again into each joined row. It now binds the scanned row in place
+and makes a value only when something reads it as one; a join compares
+the stored bytes. A concept with optional fields used to be read by
+probing every optional field once per entity; its optional fields are
+now read once each, in entity order, beside the required ones, and an
+entity a field lacks binds `Absent` as before.
+
+What this changes for you:
+
+- **List reads and subscriptions are faster.** On tonk-team at 10×, the
+  issue list reads in 82 ms where it took 288, the activity list in 106
+  where it took 486, and their subscription polls in 23 and 46 ms where
+  they took 939 and 1,398. Results are the same, row for row.
+- **New reads that do not hydrate:** `Match::view` and
+  `ConceptConclusion::view` return a `ValueView` borrowed from the stored
+  row; `Match::absent` answers without making the value;
+  `Conclusion::this_uri` (with a default) and
+  `ConceptConclusion::this_uri` give the entity's URI as stored.
+  `dialog_corpus` gains `ValueView`, `FactView::checked` and `CheckedRow`.
+- Nothing stored or synced changes.
+
+Why: copying values was most of a concept read's cost after the scan,
+and a concept with an optional field, which most of tonk's are, was
+never merged, so its list read probed every field of every entity.
+
 
 ### A coverage entry spills nothing
+
+[#833](https://github.com/dialog-db/dialog-db/pull/833).
 
 A coverage key carries a hash of the covered value in the spilled form,
 whatever the value's size, so claims can be matched by it; no value is
@@ -374,6 +407,8 @@ none.
 - Nothing stored changes.
 
 ### An index node's buffered operations are its entries, and a separator reads as the key it is
+
+[#832](https://github.com/dialog-db/dialog-db/pull/832).
 
 An index node buffers writes headed for its children (`novelty`), and
 `tree/entry` gave no rows for an index, so a query could count them but
@@ -409,6 +444,8 @@ buffers and where its boundaries fall are part of that.
 - Nothing stored changes: both read blocks as they are.
 
 ### A revision is named by `revision:`, not by a `did:key:`
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829).
 
 A revision's entity was `did:key:z6Mk<base58(hash)>`: the shape of a key
 DID around a blake3 hash of the revision's version. It read as a
@@ -463,7 +500,7 @@ as one.
 
 ### A tree node is a handle, and five resolvers read it
 
-Argued in [design/tree-exploration.md](./design/tree-exploration.md).
+[#829](https://github.com/dialog-db/dialog-db/pull/829), argued in [design/tree-exploration.md](./design/tree-exploration.md).
 
 The seven `tree/*` resolvers each loaded a node's block and decoded one
 part of it, so a query asking three things of one node decoded it three
@@ -549,7 +586,7 @@ an entry the subject of a concept.
 
 ### A stack learns what its replica holds of a tree by command
 
-Argued in [design/tree-exploration.md](./design/tree-exploration.md).
+[#829](https://github.com/dialog-db/dialog-db/pull/829), argued in [design/tree-exploration.md](./design/tree-exploration.md).
 Built on the stack's providers
 ([#816](https://github.com/dialog-db/dialog-db/pull/816)).
 

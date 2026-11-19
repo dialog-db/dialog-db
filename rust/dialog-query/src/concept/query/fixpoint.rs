@@ -970,7 +970,7 @@ where
     // row settles them and the rest replay; only it reads the premises.
     let mut stages: Vec<Stage> = Vec::new();
     for row in delta {
-        let mut matched = Match::new();
+        let mut matched = Match::eager();
         if !bind_occurrence(&mut matched, leading, row) {
             continue;
         }
@@ -1033,7 +1033,7 @@ where
                 continue;
             }
             let plan = split.rule.plan(&Environment::new());
-            let body = plan.evaluate(Match::new().seed(), env);
+            let body = plan.evaluate(Match::eager().seed(), env);
             let results: Vec<Match> = match split.rule.reducer() {
                 Some(reducer) => reducer.fold(body).await?,
                 None => body.try_collect().await?,
@@ -1274,7 +1274,7 @@ where
                     BaseSource::Attribute(slots) => {
                         let (the, of, is) = slots.as_ref();
                         for fact in additions {
-                            let mut matched = Match::new();
+                            let mut matched = Match::eager();
                             let mut scope = Environment::new();
                             if bind_source_slot(
                                 &mut matched,
@@ -1301,7 +1301,7 @@ where
                     }
                     BaseSource::LocalConcept { this } => {
                         for entity in &subjects {
-                            let mut matched = Match::new();
+                            let mut matched = Match::eager();
                             let mut scope = Environment::new();
                             if bind_source_slot(
                                 &mut matched,
@@ -1541,7 +1541,7 @@ where
                         })
                         .collect();
                     for combination in Combinations::new(choices.iter().map(Vec::len).collect()) {
-                        let mut matched = Match::new();
+                        let mut matched = Match::eager();
                         let mut scope = Environment::new();
                         let mut compatible = true;
                         for (index, (occurrence, row_index)) in
@@ -1652,7 +1652,7 @@ where
 {
     let mut derived: Option<Answer> = None;
     for split in &member.rules {
-        let mut seed = Match::new();
+        let mut seed = Match::eager();
         let mut seed_scope = Environment::new();
         let mut consistent = true;
         for (operand, value) in row {

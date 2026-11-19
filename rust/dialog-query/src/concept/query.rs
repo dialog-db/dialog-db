@@ -52,26 +52,21 @@ use std::sync::Mutex;
 /// Parameters are bound by name: a concept's parameter variables are
 /// untyped (`Term::var`), so no kind check applies to them.
 fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, EvaluationError> {
-    let mut matched = Match::new();
+    let mut matched = Match::for_scope_of(source);
 
     for (param_name, user_param) in terms.iter() {
         match user_param {
+            // The slot moves in as it is: a value the caller's row holds in
+            // place is not hydrated to enter the scope. Unbound is expected
+            // here: the user supplied a placeholder term (e.g.
+            // `Term::var("alice")` in `Query<Person> { this: ..., ... }`)
+            // that the concept query is about to bind; downstream
+            // evaluation fills it in.
             Term::Variable {
                 name: Some(name), ..
-            } => match source.get(name) {
-                Some(Binding::Present(value)) => {
-                    matched.bind_variable(param_name, None, value.clone())?;
-                }
-                Some(Binding::Absent) => {
-                    matched.bind_absent_variable(param_name)?;
-                }
-                // Unbound is expected here: the user supplied a
-                // placeholder term (e.g. `Term::var("alice")` in
-                // `Query<Person> { this: ..., ... }`) that the
-                // concept query is about to bind. Skip it:
-                // downstream evaluation fills it in.
-                None => {}
-            },
+            } => {
+                matched.bind_slot_of(&Term::<Any>::var(param_name.as_str()), source, name)?;
+            }
             Term::Constant(value) => {
                 matched.bind_variable(param_name, None, value.clone())?;
             }
@@ -122,28 +117,26 @@ fn merge_parameters(
             continue;
         }
 
-        match result.get(param_name) {
-            Some(Binding::Present(value)) => {
-                if !took(merged.bind(user_param, value.clone()))? {
-                    return Ok(None);
-                }
+        // The slot moves over as it is: a binding a scan made in place
+        // stays in place in the caller's row.
+        match merged.bind_slot_of(user_param, result, param_name) {
+            // Unbound is expected: not every parameter survives the
+            // concept evaluation (e.g. a blank slot the rule never
+            // touched). Skip and let the user variable stay
+            // un-extended.
+            Ok(None) | Ok(Some(false)) => {}
+            Ok(Some(true)) => {
                 if let Some(name) = user_param.shared_name()
                     && let Some(standing) = result.standing_of(param_name)
                 {
                     merged.cite_variable_standing(name, standing);
                 }
             }
-            Some(Binding::Absent) => {
-                let absent = took(merged.bind_absent(user_param))?;
-                if !absent {
+            Err(error) => {
+                if !took(Err(error))? {
                     return Ok(None);
                 }
             }
-            // Unbound is expected: not every parameter survives the
-            // concept evaluation (e.g. a blank slot the rule never
-            // touched). Skip and let the user variable stay
-            // un-extended.
-            None => {}
         }
     }
     merged.adopt_citations(result);

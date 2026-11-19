@@ -111,6 +111,10 @@ mod number_tests;
 #[cfg(test)]
 mod typed_read_tests;
 
+/// Scans binding rows in place against binding them eagerly, pinned as
+/// tests.
+#[cfg(test)]
+mod lazy_rows_tests;
 /// Concept fields that elect their claim, pinned as tests.
 #[cfg(test)]
 mod selective_tests;

@@ -381,6 +381,12 @@ pub trait Conclusion: ConditionalSend {
     /// Each instance has a corresponding entity and this method
     /// returns a reference to it.
     fn this(&self) -> &Entity;
+
+    /// The URI of the entity this instance describes. A conclusion that
+    /// holds its entity in place answers without building it.
+    fn this_uri(&self) -> &str {
+        self.this().as_str()
+    }
 }
 
 #[cfg(test)]
