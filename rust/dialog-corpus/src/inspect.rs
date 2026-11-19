@@ -349,11 +349,16 @@ pub fn entries(node: &CorpusNode) -> Result<Vec<EntrySummary>, DialogCorpusError
 /// The summary of one entry, stored or buffered.
 fn entry(at: u64, span: Option<u64>, key: Vec<u8>, state: State<Datum>) -> EntrySummary {
     // Lenient spill detection: only fact-shaped keys carry a value
-    // payload; anything that does not parse is simply not spilled.
-    let spill = varkey::parse_key(&key).and_then(|parts| match parts.value {
-        ValuePayload::Spilled { hash, .. } => Blake3Hash::try_from(hash.as_slice()).ok(),
-        ValuePayload::Inline(_) => None,
-    });
+    // payload; anything that does not parse is simply not spilled. A
+    // coverage key carries a hash of the covered value in the spilled form
+    // whatever the value's size, to match claims by it; no value is stored
+    // under it, so it spills nothing.
+    let spill = varkey::parse_key(&key)
+        .filter(|parts| parts.tag != COVERAGE_KEY_TAG)
+        .and_then(|parts| match parts.value {
+            ValuePayload::Spilled { hash, .. } => Blake3Hash::try_from(hash.as_slice()).ok(),
+            ValuePayload::Inline(_) => None,
+        });
     match state {
         State::Added(datum) => EntrySummary {
             at,
@@ -602,7 +607,22 @@ pub fn key_components(bytes: &[u8]) -> Vec<KeyComponent> {
                 synthetic.push(ENTITY_KEY_TAG);
                 synthetic.extend_from_slice(tail);
                 let tail_key = Key::from(synthetic);
-                push_fields(&mut out, [0, 1, 2, 3], fact_fields(&EntityKey(&tail_key)));
+                let fields = fact_fields(&EntityKey(&tail_key));
+                if tag == COVERAGE_KEY_TAG {
+                    // The covered value's hash, not a spilled value, under
+                    // a type byte fixed at `Bytes` (see `coverage_key`).
+                    let [entity, attribute, _, value] = fields;
+                    out.push(entity);
+                    out.push(attribute);
+                    let hash = value.text.trim_start_matches("spill:").to_owned();
+                    out.push(KeyComponent::new(
+                        "reference",
+                        format!("value:{hash}"),
+                        value.bytes,
+                    ));
+                    return out;
+                }
+                push_fields(&mut out, [0, 1, 2, 3], fields);
             }
         }
         // Context: tag ‖ origin, one watermark per origin.
@@ -983,6 +1003,41 @@ mod tests {
         );
         assert_eq!(parts[2].text, "test/name");
         assert_eq!(parts[5].bytes.len(), 513 - key.len());
+    }
+
+    /// A coverage key carries a hash of the covered value in the spilled
+    /// form, whatever the value's size, and nothing is stored under it: an
+    /// entry at a coverage key spills nothing, and its key reads the hash
+    /// as a reference to the value, not as a spilled value.
+    #[dialog_common::test]
+    fn it_reads_a_coverage_keys_value_as_a_reference() {
+        use crate::history::{Edition, Origin, Version};
+        let version = Version::new(Origin::from([7; 32]), Edition::new(3));
+        let of: Entity = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+            .parse()
+            .expect("entity parses");
+        let the = "test/name".parse().expect("attribute parses");
+        let key = crate::coverage_key(&version, &of, &the, &CorpusValue::String("a".into()));
+        let bytes = key.as_ref().to_vec();
+
+        let parts = key_components(&bytes);
+        let kinds: Vec<&str> = parts.iter().map(|part| part.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "index",
+                "origin",
+                "edition",
+                "entity",
+                "attribute",
+                "reference"
+            ],
+            "{parts:?}"
+        );
+        assert!(parts[5].text.starts_with("value:"), "{:?}", parts[5]);
+
+        let summary = entry(0, None, bytes, State::Removed);
+        assert_eq!(summary.spill, None, "a coverage entry spills nothing");
     }
 
     /// A history separator names its version rather than reading the
