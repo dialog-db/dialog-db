@@ -462,7 +462,9 @@ fn fold_column(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>,
             for value in values {
                 distinct.entry(encode(&value)?).or_insert(value);
             }
-            Ok(Some(dialog_corpus::Composite::list(distinct.into_values()).into()))
+            Ok(Some(
+                dialog_corpus::Composite::list(distinct.into_values()).into(),
+            ))
         }
         Aggregator::Sum => fold_sum(entry, values).map(Some),
         Aggregator::Min => fold_extremum(entry, values, Ordering::Less),

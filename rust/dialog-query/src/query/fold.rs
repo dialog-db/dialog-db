@@ -227,10 +227,18 @@ mod tests {
         let two: Entity = "id:todo-2".parse()?;
         branch
             .transaction()
-            .assert(the!("todo/title").of(one.clone()).is("Buy milk".to_string()))
+            .assert(
+                the!("todo/title")
+                    .of(one.clone())
+                    .is("Buy milk".to_string()),
+            )
             .assert(the!("todo/tag").of(one.clone()).is("home".to_string()))
             .assert(the!("todo/tag").of(one.clone()).is("errand".to_string()))
-            .assert(the!("todo/title").of(two.clone()).is("Call mum".to_string()))
+            .assert(
+                the!("todo/title")
+                    .of(two.clone())
+                    .is("Call mum".to_string()),
+            )
             .commit()
             .publish()
             .perform(&operator)
@@ -290,7 +298,9 @@ mod tests {
         let (sets, one, two) = fold(Aggregator::Distinct).await?;
         let list = |items: Vec<&str>| -> Value {
             dialog_corpus::Composite::list(
-                items.into_iter().map(|item| Value::String(item.to_string())),
+                items
+                    .into_iter()
+                    .map(|item| Value::String(item.to_string())),
             )
             .into()
         };
@@ -309,8 +319,8 @@ mod tests {
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let mut caller = Match::new();
         caller.bind(&Term::<Any>::var("t"), Value::Entity(two.clone()))?;
-        let rows = Selection::try_vec(folded(Aggregator::Count).evaluate(caller.seed(), &source))
-            .await?;
+        let rows =
+            Selection::try_vec(folded(Aggregator::Count).evaluate(caller.seed(), &source)).await?;
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].lookup(&Term::<Any>::var("tags"))?,

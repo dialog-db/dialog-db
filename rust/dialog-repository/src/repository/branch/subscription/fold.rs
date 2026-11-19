@@ -56,9 +56,17 @@ async fn it_counts_through_a_branch_and_under_a_subscription() -> anyhow::Result
     let two: Entity = "id:todo-2".parse()?;
     branch
         .transaction()
-        .assert(the!("todo/title").of(one.clone()).is("Buy milk".to_string()))
+        .assert(
+            the!("todo/title")
+                .of(one.clone())
+                .is("Buy milk".to_string()),
+        )
         .assert(the!("todo/tag").of(one.clone()).is("home".to_string()))
-        .assert(the!("todo/title").of(two.clone()).is("Call mum".to_string()))
+        .assert(
+            the!("todo/title")
+                .of(two.clone())
+                .is("Call mum".to_string()),
+        )
         .commit()
         .publish()
         .perform(&operator)
@@ -106,7 +114,10 @@ async fn it_counts_through_a_branch_and_under_a_subscription() -> anyhow::Result
         .publish()
         .perform(&operator)
         .await?;
-    let delta = subscription.poll(&operator).await?.expect("a tag taken away");
+    let delta = subscription
+        .poll(&operator)
+        .await?
+        .expect("a tag taken away");
     assert_eq!(
         counts(&delta.asserted),
         BTreeMap::from([(one.clone(), Value::UnsignedInt(0))])

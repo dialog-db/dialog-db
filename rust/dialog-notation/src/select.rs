@@ -590,7 +590,13 @@ impl Evaluation<'_> {
     /// many it holds: the folded row whose groups agree with `row`. A
     /// row no fold gives is of a group the conditions did not give, and
     /// holds nothing.
-    fn fold(&mut self, fold: usize, shared: &[String], target: &str, row: &Row) -> (Syntax, Syntax) {
+    fn fold(
+        &mut self,
+        fold: usize,
+        shared: &[String],
+        target: &str,
+        row: &Row,
+    ) -> (Syntax, Syntax) {
         let folded = &self.folded[fold];
         let index = self.folds.entry(fold).or_insert_with(|| {
             folded
