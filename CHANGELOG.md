@@ -121,7 +121,7 @@ inner polls and the groups a change moved.
 
 ### A concept read binds stored values in place, and reads optional fields in one pass
 
-Research: [zero-copy answers](research/zero-copy-answers.md)
+[#825](https://github.com/dialog-db/dialog-db/pull/825). Research: [zero-copy answers](research/zero-copy-answers.md)
 
 A concept read used to turn every row it scanned into owned values (an
 entity with a hash of its URI, an attribute, a value, a claim) and copy
