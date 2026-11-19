@@ -642,6 +642,21 @@ mod native {
                 );
                 report.count("rows/issue-detail", rows.len() as u64);
             }
+            // `DIALOG_FRESH_DETAIL=1`: the same read, cold, by a member that
+            // has queried nothing, so no earlier query's leftovers serve it.
+            if std::env::var("DIALOG_FRESH_DETAIL").is_ok_and(|v| v == "1") {
+                let fresh = &members[2];
+                fresh.profile.caches().release(&server.did());
+                let started = Instant::now();
+                let rows = fresh
+                    .branch
+                    .select(query(activity, &[("issue", issue.clone())]))
+                    .perform(&fresh.operator)
+                    .try_vec()
+                    .await?;
+                report.time("query/issue-detail-fresh/cold", started.elapsed());
+                report.count("rows/issue-detail-fresh", rows.len() as u64);
+            }
         }
 
         // The reader keeps the issues page and the memos open.
