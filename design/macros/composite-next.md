@@ -110,3 +110,19 @@ What the agent takes as the brief, each its own to be overruled:
 | where | a new branch on #812's head, for a pull request against main that takes #812's place | #812 belongs to another session, idle |
 
 Then, in order: the patterns (#778) moved onto it, and the notation.
+
+## 2026-11-20, measured: what the syntax trees are
+
+Counted over the 133 forms of the notation's sketches, examples and prelude, by a reader written to `form.rs` and the node shapes of `syntax.rs`; exact for shapes, the bytes computed.
+
+| | least | median | 95 in 100 | most |
+|---|---|---|---|---|
+| composites in a form | 11 | 28 | 53 | 213 |
+| fields in a map, of 3554 | 0 | 2 | 3 | 9 |
+| items in a list, of 713 | 0 | 1 | 4 | 10 |
+| depth | 7 | 7 | 16 | 19 |
+| bytes of a form in dag-cbor | 339 | 893 | 1833 | 7026 |
+
+One map and two lists have more than 8 entries. So a scan is the usual way to a field and a table of offsets the rare one; and a tree is many small composites nested deep, which is what a view over one buffer is for: the earlier thread measured taking a nested record out at 6 to 7 times a copy.
+
+Found in the earlier thread's branches: `feat/composite-types` and `feat/open-record` are of the type system only and unmerged, `decision/record-value` is superseded, and the rest are unrelated. Nothing but #812 and its research is built on. Its journal's "fields are named by attributes, not a free name" (2026-11-06) is superseded by the map of arbitrary keys with the record its sub-band (2026-11-20). Its rule that a repeated key's values are a set is kept, and the notation, whose maps refuse a key twice, has to refuse that itself.
