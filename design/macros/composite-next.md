@@ -126,3 +126,18 @@ Counted over the 133 forms of the notation's sketches, examples and prelude, by 
 One map and two lists have more than 8 entries. So a scan is the usual way to a field and a table of offsets the rare one; and a tree is many small composites nested deep, which is what a view over one buffer is for: the earlier thread measured taking a nested record out at 6 to 7 times a copy.
 
 Found in the earlier thread's branches: `feat/composite-types` and `feat/open-record` are of the type system only and unmerged, `decision/record-value` is superseded, and the rest are unrelated. Nothing but #812 and its research is built on. Its journal's "fields are named by attributes, not a free name" (2026-11-06) is superseded by the map of arbitrary keys with the record its sub-band (2026-11-20). Its rule that a repeated key's values are a set is kept, and the notation, whose maps refuse a key twice, has to refuse that itself.
+
+## 2026-11-20, tried: the patterns against today's main
+
+Main merged into `feat/patterns` (#778) on a scratch branch, not pushed: two conflicts, both of lines added side by side (`CHANGELOG.md`, `dialog-corpus/src/model.rs`), nothing to decide. 2725 tests pass, clippy is clean. #825's binding in place is untouched: patterns never change `Match` or `slot.rs`.
+
+| part of #778 | size | leans on |
+|---|---|---|
+| the value: `composite.rs`, its tests, `identity.rs` | about 2000 lines, all in dialog-corpus | nothing of the patterns |
+| the patterns: `pattern.rs`, `parameters.rs`, the rule and planner changes | about 4000 lines | the value through `pattern.rs` alone, by one re-export |
+
+So the two come apart where it is wanted: the value under the patterns is replaced by the new composite and the patterns are moved onto it in one file, with their tests.
+
+What every query pays for patterns, read and not measured: a check for shapes and a branch for each row in a concept's evaluation, a scan of each premise list when planning, one more match for each row in an equality. #840 recorded the baselines after reads got faster, so that fixed cost is a larger share now: one gate run on the rule and query scenarios is owed before it lands.
+
+For the maintainer when it comes to landing: #778 against main directly or #777 first; a rule holding a pattern has no stored form until #799.
