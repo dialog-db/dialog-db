@@ -894,6 +894,14 @@ impl Application for ConceptQuery {
         Some(&self.predicate)
     }
 
+    /// A concept conclusion keeps the match it was realized from, and
+    /// [`adopt`](Application::adopt) puts back the subject a
+    /// restriction pinned, so a maintained row gives the bindings a
+    /// recomputed one does.
+    fn bindings(&self, conclusion: &ConceptConclusion) -> Option<Match> {
+        Some(conclusion.source.clone())
+    }
+
     /// A restriction pins `this` to a constant, so the rows it realizes
     /// carry the restricted terms and a match with no binding for this
     /// query's `this` variable. Put both back: the row then reads, term
