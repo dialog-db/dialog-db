@@ -1730,3 +1730,11 @@ A separate clause for collecting needs inference or its own conditions, and infe
 
 **Decided.** The maintainer's: not the spread; a record stores a set as a list. The marker is `(collect ?x)`. Nothing is built.
 
+## 2026-11-18, Designing: or a spelling of the variable
+
+**Asked.** The maintainer, once `collect` was back: maybe `?x…`, `…?x`, `?..x` or `{?..x}`.
+
+**Learned.** The reader takes anything after `?` as a variable's name, so two of these are plain variables today and say nothing of it. Three of the four sit one space from a form that means something else. `?..x` does not.
+
+**Decided.** Not decided: `(collect ?x)` or `?..x`. The agent's hypothesis is that the word reads right unaided more often, which a reader round would settle.
+

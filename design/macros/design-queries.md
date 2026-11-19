@@ -170,7 +170,7 @@ Two views this morning, three queries now, and a notebook with no block shows it
 
 ## A word, not the spread
 
-**Decided, the maintainer's: not `{... ?x}`.** It does not say whether it takes a value apart or puts rows together, and those are different things.
+**The maintainer's: not `{... ?x}`.** It does not say whether it takes a value apart or puts rows together, and those are different things.
 
 | | a word: `(collect ?blocks)` | the spread: `{... ?blocks}` |
 |---|---|---|
@@ -180,6 +180,17 @@ Two views this morning, three queries now, and a notebook with no block shows it
 | already in the notation | no; it sits where an elector does | yes, as destructuring |
 
 `collect` was set aside an hour before on two counts, and both are since answered. It seemed to promise a list: it makes a map, always. A dictionary had no way to say how key and value pair: an entry is one term.
+
+**Reopened by the maintainer the same evening:** a spelling of the variable in place of the word.
+
+| | reads today as | a neighbour one space away |
+|---|---|---|
+| `?x...` | a variable named `x...`, with no error | `?x ...`, the open application, three times in `todo.clj` |
+| `...?x` | an error: "`...` stands apart from what follows it" | `... ?x`, the rest |
+| `?..x` | a variable named `..x`, with no error | none |
+| `{?..x}` | a struct that ends on a key, which gets a blank value | none; and under `{?k ?b}` it is an entry with any value |
+
+Of the four, `?..x`. Against `(collect ?x)` it is shorter and adds no form; the word explains itself, sits with the electors, and is what an error would say anyway. Which a reader gets right unaided is a round's question, not run.
 
 ## What it replaces
 
