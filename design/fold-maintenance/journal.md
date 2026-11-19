@@ -60,3 +60,25 @@ The agent proposed a wider problem, "a subscriber pays for the unit derived agai
 **Learned.** The agent kept asking for a problem statement for a decision already made. The statement in the topic stands as proposed and is not put to him again.
 
 **Decided.** By the maintainer: build. The agent's plan, which he liked: index the kept answer by entity after a profile; the fold kept from signed rows; the rows of a seeded join kept, later and only if measured. What a fold's subscription holds is in [design-fold-state.md](design-fold-state.md), the agent's decision: each group's rows folded again by the engine's own fold, so it equals asking again by construction, with a value changed by a step as a later refinement. Rests on the open hypothesis that the inner subscriptions cost the change.
+
+## 2026-11-19, Measuring: ten thousand rows, release, and where one poll goes
+
+**Question.** Three hypotheses of the agent's: the scan of the kept answer is what grows; a view's change is within 2 times a plain subscription on a release build; a change through another entity costs the rows it changes.
+
+**Method.** `cargo run --release -p dialog-notation --example cost -- 5` at 10, 100, 1000 and 10000 on `wip/engine-fold` at `56b5a13`, with probes inside one poll, since removed. [Output](cost-release-2026-11-19.txt).
+
+**Results.** All three refuted.
+
+| one change, ms | 100 | 1000 | 10000 |
+|---|---|---|---|
+| plain subscription, rename | 0.36 | 0.58 | 1.66 |
+| a view, rename | 0.81 | 3.66 | 296 |
+| one row reached through another entity | 1.32 | 2.88 | 115 |
+| a list renamed, N rows change | 10.9 | 111 | 5639 |
+| the fold asked again | 9.1 | 105 | 3059 |
+
+**Learned.** What grows for one changed row is the diff. A subscription whose rule is keyed by an entity records a range for each entity it read, and the diff scoped to ten thousand ranges costs 80 to 200 ms where the rest of the poll is under 4. Nobody had guessed it. The scan of the kept answer is real and second: it is most of a plain subscription's growth, and it is 4 s of the 5.6 when N rows change, entities times rows.
+
+So there are three things to fix in the engine, and the fold is the third: the diff over many ranges, the answer compared by a scan, the fold asked again.
+
+**Decided.** The agent's, in the maintainer's absence: fix them in that order of what they cost, the first two on main as a defect of the subscription, the fold on its own branch.
