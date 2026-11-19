@@ -32,8 +32,17 @@ Counted in the prelude, the model and every sketch and example. None refers to i
 Corrected by the maintainer, 2026-11-20:
 
 - The form hashed is canonical: conditions and anything else whose order does not matter are put in the order the rule's canonical labelling gives, and variables named by it. Two spellings of one definition are one entity.
-- A name's entity is made of the name alone and points at every definition standing under it. A definition holds its signature, and an application is resolved by the labels it writes. Where several of one signature fit, the reference is refused and the candidates listed with their hashes; `name#hash` says which. Several rules concluding one concept are all read, as now.
-- Later, by the maintainer's direction: a name is canonical within a namespace, a reference is resolved over all namespaces with one preferred, and a namespace's name resolves to a hash. So the name's entity will want a namespace in it, and is built so that adding one does not move what is stored: a definition's entity never holds a name.
+- Names, as the maintainer shaped them on 2026-11-20:
+
+```
+ stored    namespace N ── binds "todo" ──▶ definition:<hash>        one referent for a name in a namespace
+ derived   Name(name, namespace, definition)                        a rule over every namespace's bindings
+ written   todo          every row of Name for "todo": one, or several to choose from
+           @cdata/todo   the row whose namespace is cdata's
+           todo#3fa9     the row whose definition's hash starts so
+```
+
+  A reference is resolved by the labels written among the rows it finds; several of one signature left over are refused, the candidates listed by namespace and hash. Several rules concluding one concept are all read, as now. A definition's entity never holds a name or a namespace.
 
 The name and the description are not part of what is hashed.
 
