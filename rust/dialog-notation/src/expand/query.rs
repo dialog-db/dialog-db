@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Error;
 use crate::form::Kind;
-use crate::select::{COLLECT, COUNT, ROW, ROW_FIELD, SELECTED, collected, unknown_function};
+use crate::select::{COLLECT, COUNT, PART, ROW, ROW_FIELD, SELECTED, collected, unknown_function};
 use crate::syntax::{Parameters, Syntax};
 
 use super::{Expander, apply, items};
@@ -879,8 +879,28 @@ impl Expander {
         };
         let mut rules = Vec::new();
         self.each(&rule, &mut rules)?;
+        // Read through several definitions, each is a rule of its own;
+        // they are told they report one part, so that they derive one
+        // relation, and one query reads every row of the part.
+        if rules.len() > 1 {
+            let part = Syntax::Constant(crate::data::text(rule.reference()?.to_string()));
+            rules = rules.iter().map(|each| parted(each, &part)).collect();
+        }
         Ok(rules)
     }
+}
+
+/// A kernel rule that reports a query's row, with the row naming
+/// `part`.
+fn parted(rule: &Syntax, part: &Syntax) -> Syntax {
+    let mut rule = rule.clone();
+    if let Syntax::Application(_, operand) = &mut rule
+        && let Some(Syntax::Application(_, report)) = operand.items.first_mut()
+        && let Some(Syntax::Application(_, row)) = report.items.first_mut()
+    {
+        row.terms.insert(PART.into(), part.clone());
+    }
+    rule
 }
 
 /// The entity a query's conditions are about: the variable most of the

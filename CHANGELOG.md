@@ -123,7 +123,13 @@ What this changes for you:
   conditions every answer needs are each one query: the whole of a
   variable as its distinct values, and of an entry `{?k ?v}` as the
   distinct records of the rows it was read from, counted by their keys.
-  What is not folded is put together in memory from the rows.
+  A part read through several definitions is one query too: each
+  definition's rule derives the one relation the part is named by. What
+  is not folded is put together in memory from the rows: a collected
+  call, and a read that shares a term with the rest beside its entity
+  while more than one of its columns is not the entity.
+- New: `Selection::read`, which of `Selection::queries` the answers read;
+  a query only a fold reads may be given no rows.
 - Each query a selection runs reports its rows under the entity its
   reads are about, each column a field `c0`, `c1` and on, and, where more
   than one column is not that entity, the whole row as one record under

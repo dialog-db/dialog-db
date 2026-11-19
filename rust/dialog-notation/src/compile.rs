@@ -1529,6 +1529,26 @@ fn induce(rule: &Rule, read: &Read, head: &str) -> Result<InductiveRule, Error> 
 /// rule derives a relation of the report's own, a column for each
 /// variable the head holds, and that relation is what is selected.
 fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
+    // A query's row of a part read through several definitions names
+    // the part: each definition is a rule of its own, and every one of
+    // them derives the one relation the part is named by, so one select
+    // reads them all.
+    let mut read = read.clone();
+    let mut site = site.to_string();
+    let mut parted = false;
+    if read.domain == crate::select::ROW
+        && let Some(at) = read
+            .fields
+            .iter()
+            .position(|field| field.label == crate::select::PART)
+        && let Term::Text(part) = &read.fields[at].term
+    {
+        site = part.clone();
+        read.fields.remove(at);
+        parted = true;
+    }
+    let site = site.as_str();
+    let read = &read;
     let bound = rule.bound();
     // A read of a command names no entity, so where it is reported each
     // side of the query has an entity of its expansion's own. The row
@@ -1580,10 +1600,11 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
 
     // A query's row that is one record too is derived by a rule, so the
     // record is a value the select binds, which a fold can collect.
-    let recorded = read.domain == crate::select::ROW
-        && fields
-            .iter()
-            .any(|field| matches!(field.term, Term::Struct(_)));
+    let recorded = parted
+        || read.domain == crate::select::ROW
+            && fields
+                .iter()
+                .any(|field| matches!(field.term, Term::Struct(_)));
     if let ([Premise::Read(only)], []) = (rule.when.as_slice(), rule.unless.as_slice())
         && !recorded
     {

@@ -61,6 +61,10 @@ pub const ROW: &str = "query.row";
 /// record, where more than one of its columns is not its entity.
 pub const ROW_FIELD: &str = "row";
 
+/// The field a query's row of a part read through several definitions
+/// names the part by, so that each definition derives one relation.
+pub const PART: &str = "part";
+
 /// The one function of a collection there is yet.
 pub const COUNT: &str = "count";
 
@@ -323,9 +327,7 @@ impl Selection {
         let Source::Rows(rows) = &collect.source else {
             return None;
         };
-        let ([groups], [inputs]) = (required.runs.as_slice(), rows.runs.as_slice()) else {
-            return None;
-        };
+        let (groups, inputs) = (self.one(required)?, self.one(rows)?);
         let mut wanted = Vec::new();
         collect.item.variables(&mut wanted);
         let shared: Vec<String> = rows
@@ -334,7 +336,7 @@ impl Selection {
             .filter(|column| !wanted.contains(column))
             .cloned()
             .collect();
-        let (groups, inputs) = (&self.queries[*groups], &self.queries[*inputs]);
+        let (groups, inputs) = (&self.queries[groups], &self.queries[inputs]);
         let label = |columns: &[String], name: &str| {
             columns
                 .iter()
@@ -399,13 +401,55 @@ impl Selection {
             inputs.renamed(&read, INPUTS)?,
             reduce,
         );
-        let rules = groups.rule.iter().chain(&inputs.rule).cloned().collect();
+        let rules = required
+            .runs
+            .iter()
+            .chain(&rows.runs)
+            .filter_map(|run| self.queries[*run].rule.clone())
+            .collect();
         self.folds.push(Folded { rules, fold });
         Some(Lowered {
             fold: self.folds.len() - 1,
             shared,
             entry,
         })
+    }
+
+    /// The one query that reads every row of a part, by its index in
+    /// [`Selection::queries`]: its one run, or the first of several that
+    /// select one relation, each deriving a part of it.
+    fn one(&self, rows: &Rows) -> Option<usize> {
+        let (first, rest) = rows.runs.split_first()?;
+        let select = |run: &usize| serde_json::to_value(&self.queries[*run].select).ok();
+        let selected = select(first)?;
+        rest.iter()
+            .all(|run| select(run).as_ref() == Some(&selected))
+            .then_some(*first)
+    }
+
+    /// Which of [`Selection::queries`] [`Selection::answer`] reads the
+    /// rows of: those of the conditions every answer needs, and those of
+    /// a collecting read Dialog-DB does not fold. The rows of a query
+    /// only a fold reads may be given as none.
+    pub fn read(&self) -> Vec<bool> {
+        let mut read = vec![false; self.queries.len()];
+        for defined in self.defined.values() {
+            let parts = defined
+                .required
+                .iter()
+                .chain(defined.collects.iter().filter_map(|collect| {
+                    match (&collect.source, &collect.folded) {
+                        (Source::Rows(rows), None) => Some(rows),
+                        _ => None,
+                    }
+                }));
+            for rows in parts {
+                for run in &rows.runs {
+                    read[*run] = true;
+                }
+            }
+        }
+        read
     }
 
     /// The rules of a part compiled, each a query of its own.

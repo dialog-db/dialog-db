@@ -355,6 +355,193 @@ async fn it_collects_a_keyed_collection_as_a_map() -> Result<()> {
     Ok(())
 }
 
+/// The outline: a notebook's title and the whole of its blocks, a map.
+const OUTLINE: &str = "(query (notebook/outline ?n is: ?outline)
+       (notebook/named ?n title: ?title)
+       (notebook/blocks ?n block: (collect ?blocks))
+       (is ?outline {:title ?title :blocks ?blocks :count (count ?blocks)}))";
+
+/// The answers of a selection, its rows asked once and its folds kept
+/// standing: each fold polled after its rules are laid, its rows those a
+/// standing fold reports, so a map Dialog-DB folds is the same selected
+/// and maintained.
+async fn standing(
+    notebook: &Notebook,
+    selection: &dialog_notation::Selection,
+) -> Result<Vec<String>> {
+    use dialog_query::query::Output as _;
+    let mut results = Vec::new();
+    for query in &selection.queries {
+        let mut layer = notebook.branch.query();
+        if let Some(rule) = &query.rule {
+            layer = layer.with(rule.clone());
+        }
+        let rows: Vec<dialog_query::ConceptConclusion> = layer
+            .select(query.select.clone())
+            .perform(&notebook.operator)
+            .try_vec()
+            .await?;
+        results.push(
+            rows.iter()
+                .map(|row| query.values(row))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    }
+    let mut folded = Vec::new();
+    for fold in &selection.folds {
+        for rule in &fold.rules {
+            notebook.branch.overlay().assert(rule.clone())?;
+        }
+        let mut kept = notebook.branch.subscribe_fold(fold.fold.clone());
+        let rows = match kept.poll(&notebook.operator).await? {
+            Some(delta) => delta.asserted,
+            None => Vec::new(),
+        };
+        folded.push(rows.iter().map(|row| fold.values(row)).collect());
+    }
+    Ok(selection
+        .answer(&results, &folded)?
+        .iter()
+        .map(ToString::to_string)
+        .collect())
+}
+
+/// A collected entry `{?k ?v}` is folded by Dialog-DB as the record of
+/// the row it was read from, so its key stays beside its value: two
+/// blocks of one source under two keys are two entries, and two blocks
+/// under one key are one, the first in the order of their values, as
+/// what is put together in memory keeps. It is counted by its keys.
+#[dialog_common::test]
+async fn it_folds_a_collected_entry_keeping_its_key_beside_its_value() -> Result<()> {
+    let mut notebook = notebooks().await?;
+    let (_, diagnostics) = notebook
+        .submit(
+            r#"(assert (notebook/named notebook:3 title: "Shared"))
+               (assert (notebook/blocks notebook:3 block: {"N1" block:a}))
+               (assert (notebook/blocks notebook:3 block: {"N2" block:a}))
+               (assert (notebook/named notebook:4 title: "Keyed"))
+               (assert (notebook/blocks notebook:4 block: {"N1" block:b}))
+               (assert (notebook/blocks notebook:4 block: {"N1" block:a}))"#,
+        )
+        .await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let asked = format!("{NOTEBOOK}{OUTLINE}(select (notebook/outline ?n is: ?outline))");
+    let selection = selection(&asked)?;
+    assert_eq!(selection.folds.len(), 1);
+    let expected = vec![
+        r#"(notebook/outline notebook:1 is: {:title "Field notes" :blocks {"N1" block:a "N2" block:b "N3" block:c} :count 3})"#,
+        r#"(notebook/outline notebook:2 is: {:title "Untitled" :blocks {} :count 0})"#,
+        r#"(notebook/outline notebook:3 is: {:title "Shared" :blocks {"N1" block:a "N2" block:a} :count 2})"#,
+        r#"(notebook/outline notebook:4 is: {:title "Keyed" :blocks {"N1" block:a} :count 1})"#,
+    ];
+    assert_eq!(standing(&notebook, &selection).await?, expected);
+    notebook.submit(OUTLINE).await?;
+    assert_eq!(
+        report(&mut notebook, "(select (notebook/outline ?n is: ?outline))").await?,
+        expected
+    );
+    Ok(())
+}
+
+/// Items whose tags are read through two definitions of `item/tag`, one
+/// of the tag attribute and one of the label attribute.
+const LABELLED: &str = r#"
+    (concept (item ?t title: ?title)
+      (xyz.item/title of: ?t is: ?title as: :text cardinality: :one))
+    (concept (item/tag ?t tag: ?g)
+      (xyz.item/tag of: ?t is: ?g as: :text cardinality: :many))
+    (concept (item/tag ?t tag: ?g source: ?s)
+      (xyz.item/label of: ?t is: ?g as: :text cardinality: :many)
+      (xyz.item/source of: ?t is: ?s as: :text cardinality: :one))
+    (query (item/card ?t is: ?card)
+      (item ?t title: ?title)
+      (item/tag ?t tag: (collect ?tags) ...)
+      (is ?card {:title ?title :tags ?tags}))"#;
+
+/// A collected read through two definitions is one query: each
+/// definition derives the one relation of the part, so Dialog-DB folds
+/// the tags of both.
+#[dialog_common::test]
+async fn it_folds_a_collected_read_through_several_definitions() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let (_, diagnostics) = notebook
+        .submit(&format!(
+            r#"{LABELLED}
+               (assert (item item:1 title: "One"))
+               (assert (item/tag item:1 tag: "a"))
+               (assert (item/tag item:1 tag: "b" source: "s"))
+               (assert (item item:2 title: "Two"))"#
+        ))
+        .await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let selection = selection(&format!("{LABELLED}(select (item/card ?t is: ?card))"))?;
+    assert_eq!(
+        selection.queries.len(),
+        3,
+        "the title, and the tags through each definition"
+    );
+    assert_eq!(selection.folds.len(), 1);
+    let expected = vec![
+        r#"(item/card item:1 is: {:title "One" :tags {: "a" : "b"}})"#,
+        r#"(item/card item:2 is: {:title "Two" :tags {}})"#,
+    ];
+    assert_eq!(standing(&notebook, &selection).await?, expected);
+    assert_eq!(
+        report(&mut notebook, "(select (item/card ?t is: ?card))").await?,
+        expected
+    );
+    Ok(())
+}
+
+/// A collected call is put together in memory: what a query answers may
+/// itself be collected, and a query is not a relation Dialog-DB can
+/// fold. The fallback answers it.
+#[dialog_common::test]
+fn it_puts_a_collected_call_together_in_memory() -> Result<()> {
+    let chips = "(query (todo/chip ?t tag: ?g is: ?chip)
+           (todo/tag ?t tag: ?g)
+           (is ?chip {:tag ?g}))
+         (query (todo/chips ?t is: ?card)
+           (todo ?t title: ?title)
+           (todo/chip ?t is: (collect ?chips))
+           (is ?card {:title ?title :chips ?chips}))
+         (select (todo/chips ?t is: ?card))";
+    assert_eq!(folds(&format!("{TODOS}{chips}"))?, 0);
+    Ok(())
+}
+
+/// A collected read that shares a term with the rest beside its entity,
+/// and has more than one column beside the entity, is put together in
+/// memory: its rows are reported as a record under the entity, and a
+/// field of one row could be read beside a field of another, so a fold
+/// could not group by the term the read shares. The fallback answers.
+#[dialog_common::test]
+async fn it_puts_a_read_grouped_beside_its_entity_together_in_memory() -> Result<()> {
+    let noted = r#"
+        (concept (todo/note ?t day: ?d text: ?x)
+          (xyz.todo.note/day of: ?t is: ?d as: :text cardinality: :many)
+          (xyz.todo.note/text of: ?t is: ?x as: :text cardinality: :many))
+        (query (todo/day ?t is: ?card)
+          (todo ?t title: ?title)
+          (todo/note ?t day: ?d)
+          (todo/note ?t day: ?d text: (collect ?texts))
+          (is ?card {:title ?title :day ?d :texts ?texts}))"#;
+    assert_eq!(
+        folds(&format!("{TODOS}{noted}(select (todo/day ?t is: ?card))"))?,
+        0
+    );
+    let mut notebook = todos().await?;
+    notebook.submit(noted).await?;
+    notebook
+        .submit(r#"(assert (todo/note todo:1 day: "mon" text: "early"))"#)
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(select (todo/day ?t is: ?card))").await?,
+        vec![r#"(todo/day todo:1 is: {:title "Buy milk" :day "mon" :texts {: "early"}})"#]
+    );
+    Ok(())
+}
+
 /// A query whose answer is an entry, collected by another, gives a map
 /// again: each block's source by its position. A block with no source is
 /// no answer of the item, so it is absent from the map.
