@@ -377,9 +377,23 @@ async fn notation(
             rows += found.len();
             results_of.push(found);
         }
+        let mut folded = Vec::new();
+        for fold in &selection.folds {
+            let mut layer = notebook.branch.query();
+            for rule in &fold.rules {
+                layer = layer.with(rule.clone());
+            }
+            let found = layer
+                .select(fold.fold.clone())
+                .perform(&env)
+                .try_vec()
+                .await?;
+            rows += found.len();
+            folded.push(found.iter().map(|row| fold.values(row)).collect());
+        }
         let queried = start.elapsed().as_micros();
         let answering = Instant::now();
-        let answers = selection.answer(&results_of)?;
+        let answers = selection.answer(&results_of, &folded)?;
         let answered = answering.elapsed().as_micros();
         let micros = start.elapsed().as_micros();
         let (nodes, blobs) = since(&env, from);
@@ -529,6 +543,42 @@ async fn baseline(n: usize, results: &mut Results) -> Result<()> {
             },
         );
     }
+    // The card's tags counted by Dialog-DB: the fold `(select
+    // (todo/card ?t is: ?card))` lowers its collected read to, under a
+    // subscription, a tag added.
+    let card = selection("(select (todo/card ?t is: ?card))")?;
+    let folded = card
+        .folds
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("the card's tags are not folded"))?;
+    for rule in &folded.rules {
+        notebook.branch.overlay().assert(rule.clone())?;
+    }
+    let mut counted = notebook.branch.subscribe(folded.fold.clone());
+    counted.poll(&env).await?;
+    notebook
+        .submit(&format!(r#"(assert (todo/tag todo:{k} tag: "newest"))"#))
+        .await?;
+    let recomputed = counted.recomputes();
+    let from = mark(&env);
+    let start = Instant::now();
+    let delta = counted.poll(&env).await?;
+    let micros = start.elapsed().as_micros();
+    let (nodes, blobs) = since(&env, from);
+    record(
+        results,
+        "B8 tags folded, tag added",
+        n,
+        Sample {
+            micros,
+            nodes,
+            blobs,
+            rows: delta
+                .map(|delta| delta.asserted.len() + delta.retracted.len())
+                .unwrap_or_default(),
+            patches: usize::from(counted.recomputes() > recomputed),
+        },
+    );
     let one = query_of(
         &mut Analyzer::new()?,
         &format!("(select (todo todo:{k} title: ?title))"),

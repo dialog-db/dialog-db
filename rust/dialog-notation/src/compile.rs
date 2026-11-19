@@ -275,6 +275,50 @@ impl Query {
             .collect()
     }
 
+    /// What to select with the variable of each column `c{at}` renamed
+    /// `columns[at]`, and every other variable `{prefix}` and its name,
+    /// so that the rows of two queries join on their columns alone.
+    /// `None` where a column is not one variable.
+    pub fn renamed(&self, columns: &[String], prefix: &str) -> Option<ConceptQuery> {
+        let mut names = BTreeMap::new();
+        for (at, column) in columns.iter().enumerate() {
+            let label = format!("c{at}");
+            match self.fields.iter().find(|(field, _, _)| *field == label) {
+                Some((_, _, Slot::Bound(name))) => {
+                    names.insert(name.clone(), column.clone());
+                }
+                _ => return None,
+            }
+        }
+        fn rename(json: &mut Json, names: &BTreeMap<String, String>, prefix: &str) {
+            match json {
+                Json::Object(object) => {
+                    if let Some(Json::Object(variable)) = object.get_mut("?")
+                        && let Some(Json::String(name)) = variable.get_mut("name")
+                    {
+                        *name = names
+                            .get(name.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| format!("{prefix}{name}"));
+                        return;
+                    }
+                    for value in object.values_mut() {
+                        rename(value, names, prefix);
+                    }
+                }
+                Json::Array(items) => {
+                    for item in items {
+                        rename(item, names, prefix);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut select = serde_json::to_value(&self.select).ok()?;
+        rename(&mut select, &names, prefix);
+        serde_json::from_value(select).ok()
+    }
+
     /// A match, as the head the query reports with its variables
     /// replaced by what they were bound to.
     pub fn row(&self, conclusion: &ConceptConclusion) -> Result<Syntax, Error> {

@@ -125,6 +125,11 @@ pub enum Aggregator {
     Max,
     /// `f64` mean of the present numeric values.
     Avg,
+    /// The set of distinct present values in the group, compared by
+    /// dag-cbor bytes, as a list in the order of those bytes: a record
+    /// stores a set as a list. The empty list over inputs that are all
+    /// absent.
+    Distinct,
 }
 
 impl Display for Aggregator {
@@ -136,6 +141,7 @@ impl Display for Aggregator {
             Aggregator::Min => "min",
             Aggregator::Max => "max",
             Aggregator::Avg => "avg",
+            Aggregator::Distinct => "distinct",
         };
         write!(f, "{name}")
     }
@@ -152,7 +158,7 @@ impl Aggregator {
     /// this requirement is non-empty.
     pub fn input_requirement(self) -> Type {
         let primitive = match self {
-            Aggregator::Count | Aggregator::CountDistinct => Primitive::ALL,
+            Aggregator::Count | Aggregator::CountDistinct | Aggregator::Distinct => Primitive::ALL,
             Aggregator::Sum | Aggregator::Avg => Primitive::NUMERIC,
             Aggregator::Min | Aggregator::Max => Primitive::COMPARABLE,
         };
@@ -191,6 +197,8 @@ impl Aggregator {
         let optional = input.is_optional();
         Some(match self {
             Aggregator::Count | Aggregator::CountDistinct => Type::from(ValueType::UnsignedInt),
+            // A collection, never optional: the empty one is its identity.
+            Aggregator::Distinct => Type::from(ValueType::Record),
             Aggregator::Sum => {
                 let integers = Primitive::singleton(ValueType::UnsignedInt)
                     .union(Primitive::singleton(ValueType::SignedInt));
@@ -448,6 +456,13 @@ fn fold_column(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>,
                 distinct.insert(encode(value)?);
             }
             Ok(Some(Value::UnsignedInt(distinct.len() as u128)))
+        }
+        Aggregator::Distinct => {
+            let mut distinct = BTreeMap::new();
+            for value in values {
+                distinct.entry(encode(&value)?).or_insert(value);
+            }
+            Ok(Some(dialog_corpus::Composite::list(distinct.into_values()).into()))
         }
         Aggregator::Sum => fold_sum(entry, values).map(Some),
         Aggregator::Min => fold_extremum(entry, values, Ordering::Less),

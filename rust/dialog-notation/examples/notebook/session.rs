@@ -164,7 +164,22 @@ impl Notebook {
                         .collect::<Result<Vec<_>, _>>()?,
                 );
             }
-            for answer in selection.answer(&results)? {
+            // A read that collects Dialog-DB folds is one more query,
+            // with the rules its two queries read laid over the branch.
+            let mut folded = Vec::new();
+            for fold in &selection.folds {
+                let mut layer = self.branch.query();
+                for rule in &fold.rules {
+                    layer = layer.with(rule.clone());
+                }
+                let rows = layer
+                    .select(fold.fold.clone())
+                    .perform(&self.operator)
+                    .try_vec()
+                    .await?;
+                folded.push(rows.iter().map(|row| fold.values(row)).collect());
+            }
+            for answer in selection.answer(&results, &folded)? {
                 report.push(answer.to_string());
             }
         }

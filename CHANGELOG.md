@@ -14,6 +14,38 @@ says how to cut a release.
 
 ## Unreleased
 
+### A query can fold, and `distinct` gives the set of a group's values
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
+[design/named-fold/design-no-domain.md](./design/named-fold/design-no-domain.md),
+its "Inline" column.
+
+`Fold::new(groups, inputs, reduce)` is a query in `dialog-query` that
+folds the rows of `inputs` with a `Reduce`, one row for each row of
+`groups`, joined on the grouping fields of the `Reduce`. A group no input
+joins is folded over inputs all absent, so `count` gives 0 for it.
+`Aggregator::Distinct` gives the distinct present values of a group as a
+list in the order of their bytes, and the empty list over none. A fold is
+selected and subscribed to as any query is; it has no name and installs
+no rule, so an authored deductive rule still cannot fold.
+
+What this changes for you:
+
+- New: `Fold`, `FoldConclusion` and `Aggregator::Distinct`, shown as
+  `distinct`, typed a record.
+- A match on `Aggregator` must name `Distinct`.
+- A subscription over a fold asks it again whole on each poll that
+  touches what it read: a fold cannot yet be restricted to one entity.
+
+Why: a fold the notation asks for is Dialog-DB's to give, and a query
+that has no name cannot have a stored value read beside its own.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: a fold is a query asked in memory and
+  nothing of it is written. Nothing is rewritten on upgrade, and an older
+  release reads what this one writes.
+
 ### A view is a query whose answer is markup, and the `(view concept :name …)` form is gone
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
