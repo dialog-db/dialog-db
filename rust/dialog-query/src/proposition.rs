@@ -46,8 +46,10 @@ pub enum Proposition {
     Constraint(Constraint),
     /// Resolver application: a moded premise resolved by performing
     /// an idempotent effect through the evaluation environment (e.g.
-    /// the `tree/*` inspection family).
-    Resolver(ResolverQuery),
+    /// the `tree/*` inspection family). Boxed: a resolver carries a
+    /// term per slot, and `tree/entry` has many, which unboxed would set
+    /// the size of every premise of every rule.
+    Resolver(Box<ResolverQuery>),
 }
 
 impl Proposition {
@@ -120,7 +122,7 @@ impl From<FormulaQuery> for Proposition {
 
 impl From<ResolverQuery> for Proposition {
     fn from(application: ResolverQuery) -> Self {
-        Proposition::Resolver(application)
+        Proposition::Resolver(Box::new(application))
     }
 }
 
@@ -183,7 +185,7 @@ impl<'de> Deserialize<'de> for Proposition {
                 if let Ok(constraint) = serde_json::from_value::<Constraint>(raw.clone()) {
                     Ok(Proposition::Constraint(constraint))
                 } else if let Ok(pq) = serde_json::from_value::<ResolverQuery>(raw.clone()) {
-                    Ok(Proposition::Resolver(pq))
+                    Ok(Proposition::Resolver(Box::new(pq)))
                 } else {
                     let fq: FormulaQuery =
                         serde_json::from_value(raw).map_err(de::Error::custom)?;

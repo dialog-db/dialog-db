@@ -95,32 +95,38 @@ macro_rules! define_descriptor {
 
 define_descriptor!(
     /// Descriptor for string/text values.
-    Text, Type::String
+    Text,
+    Type::String
 );
 
 define_descriptor!(
     /// Descriptor for boolean values.
-    Boolean, Type::Boolean
+    Boolean,
+    Type::Boolean
 );
 
 define_descriptor!(
     /// Descriptor for unsigned integer values (`u8`-`u128`, `usize`).
-    UnsignedInteger, Type::UnsignedInt
+    UnsignedInteger,
+    Type::UnsignedInt
 );
 
 define_descriptor!(
     /// Descriptor for signed integer values (`i8`-`i128`).
-    SignedInteger, Type::SignedInt
+    SignedInteger,
+    Type::SignedInt
 );
 
 define_descriptor!(
     /// Descriptor for floating-point values (`f32`, `f64`).
-    Float, Type::Float
+    Float,
+    Type::Float
 );
 
 define_descriptor!(
     /// Descriptor for binary data (`Vec<u8>`).
-    Bytes, Type::Bytes
+    Bytes,
+    Type::Bytes
 );
 
 /// Descriptors whose terms can carry a *narrowed* kind at plan
@@ -165,17 +171,20 @@ macro_rules! define_refinable_descriptor {
 
 define_refinable_descriptor!(
     /// Descriptor for entity references.
-    EntityType, Type::Entity
+    EntityType,
+    Type::Entity
 );
 
 define_refinable_descriptor!(
     /// Descriptor for attribute symbols.
-    Symbol, Type::Symbol
+    Symbol,
+    Type::Symbol
 );
 
 define_descriptor!(
     /// Descriptor for opaque record values.
-    Record, Type::Record
+    Record,
+    Type::Record
 );
 
 define_descriptor!(

@@ -27,6 +27,7 @@
 
 use core::fmt;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::mem::take;
 use std::sync::{Arc, OnceLock};
 
 use dialog_common::Blake3Hash;
@@ -80,6 +81,13 @@ struct State {
     /// The hash of the rule facts held and retracted ([`Facts::rules`]),
     /// once read; reset by a write of one.
     rules: OnceLock<Option<Blake3Hash>>,
+    /// The writes into layers (`in:`), by layer, as batches: a transaction
+    /// holds them beside its writes bound for the primary and the commit
+    /// routes each to its layer (see [`Changes::take_shares`]).
+    shares: Vec<(Entity, Changes)>,
+    /// The layer this store's own facts are read as (`in:`), when it
+    /// holds one layer's share; the primary's writes have none.
+    layer: Option<Entity>,
 }
 
 /// A settlement of a store's writes under one observation of the lines.
@@ -231,13 +239,17 @@ impl Staged {
         self.apply(changes);
     }
 
-    /// Apply a batch, each `(entity, attribute)` cell's writes in the
-    /// order they were recorded.
     pub(crate) fn apply(&mut self, mut changes: Changes) {
         if changes.is_empty() {
             return;
         }
         let state = Arc::make_mut(&mut self.0);
+        for (layer, share) in changes.take_shares() {
+            match state.shares.iter_mut().find(|(held, _)| *held == layer) {
+                Some((_, held)) => held.merge(share),
+                None => state.shares.push((layer, share)),
+            }
+        }
         for change in changes.take_assets() {
             match change {
                 AssetChange::Import(asset) => state.assets.import(asset),
@@ -280,6 +292,59 @@ impl Staged {
         &self.0.log
     }
 
+    /// The writes into layers (`in:`), by layer, in the order the layers
+    /// were first written.
+    pub(crate) fn shares(&self) -> &[(Entity, Changes)] {
+        &self.0.shares
+    }
+
+    /// Take the writes into layers out of the store, leaving the writes
+    /// bound for the primary.
+    pub(crate) fn take_shares(&mut self) -> Vec<(Entity, Changes)> {
+        take(&mut Arc::make_mut(&mut self.0).shares)
+    }
+
+    /// Take out every write bound for the primary whose attribute
+    /// `selects` accepts, in the order the transaction made them, and
+    /// return them as a batch bound for the primary; the writes that
+    /// stay, the writes into layers and the asset changes are kept as
+    /// they were. A store none of whose writes is selected is left as it
+    /// is.
+    pub(crate) fn take_cells<F: Fn(&Relation) -> bool>(&mut self, selects: F) -> Changes {
+        let mut taken = Changes::new();
+        if !self.0.log.iter().any(|(the, _, _)| selects(the)) {
+            return taken;
+        }
+        let mut kept = State {
+            assets: self.0.assets.clone(),
+            shares: self.0.shares.clone(),
+            layer: self.0.layer.clone(),
+            ..State::default()
+        };
+        for (the, of, change) in &self.0.log {
+            if selects(the) {
+                taken.put_cell(the.clone(), of.clone(), vec![change.clone()]);
+            } else {
+                kept.apply_change(the, of, change);
+            }
+        }
+        self.0 = Arc::new(kept);
+        taken
+    }
+
+    /// This store read as the layer named `layer` (`in:`): what a read
+    /// over a transaction stamps on the rows of one share.
+    pub(crate) fn in_layer(mut self, layer: Entity) -> Self {
+        Arc::make_mut(&mut self.0).layer = Some(layer);
+        self
+    }
+
+    /// The layer this store's rows are read as, when it holds one
+    /// layer's share. See [`in_layer`](Self::in_layer).
+    pub(crate) fn layer(&self) -> Option<&Entity> {
+        self.0.layer.as_ref()
+    }
+
     /// Whether any write succeeds a claim the commit has yet to settle.
     pub(crate) fn has_successions(&self) -> bool {
         !self.0.electing.is_empty()
@@ -292,9 +357,20 @@ impl Staged {
     /// what this store reads as over it.
     pub(crate) fn export(&self) -> Changes {
         let mut changes = self.0.assets.clone();
+        self.put_cells(&mut changes, |_| true);
+        for (layer, share) in &self.0.shares {
+            changes.merge(share.clone().into_layer(layer.clone()));
+        }
+        changes
+    }
+
+    fn put_cells<F: Fn(&Relation) -> bool>(&self, changes: &mut Changes, selects: F) {
         let mut cells: Vec<(Relation, Entity)> = Vec::new();
         let mut writes: HashMap<(Relation, Entity), Vec<Change>> = HashMap::new();
         for (the, of, change) in &self.0.log {
+            if !selects(the) {
+                continue;
+            }
             let key = (the.clone(), of.clone());
             if !writes.contains_key(&key) {
                 cells.push(key.clone());
@@ -306,12 +382,11 @@ impl Staged {
             let (the, of) = key;
             changes.put_cell(the, of, squash(cell, &|_| true));
         }
-        changes
     }
 
     /// Whether nothing was written.
     pub(crate) fn is_empty(&self) -> bool {
-        self.0.log.is_empty() && !self.0.assets.has_assets()
+        self.0.log.is_empty() && !self.0.assets.has_assets() && self.0.shares.is_empty()
     }
 
     /// The held facts a selector matches, in the store's own key order.

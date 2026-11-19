@@ -4,6 +4,7 @@
 //! semantic triples. Entities are based on URIs and provide unique identification
 //! for objects in the triple store.
 
+use std::iter::repeat_n;
 use std::{
     fmt::{Debug, Display, Formatter, Result as FmtResult},
     ops::Deref,
@@ -87,7 +88,7 @@ impl TryFrom<String> for Entity {
     type Error = IdentityError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        value.parse()
+        Self::try_from(Uri::try_from(value)?)
     }
 }
 
@@ -121,6 +122,9 @@ const ASSET_SCHEME: &str = "asset:";
 /// read, never written: trees replicated before the switch hold facts on
 /// entities of this form.
 const LEGACY_BLOB_SCHEME: &str = "blob:";
+
+/// Scheme prefix for search-tree node entities: `node:<base58(hash)>`.
+const NODE_SCHEME: &str = "node:";
 
 impl Entity {
     /// Initialize a new [`Entity`] with a randomly generated, globally unique
@@ -177,6 +181,64 @@ impl Entity {
         let bytes = payload.from_base58().ok()?;
         <[u8; 32]>::try_from(bytes).ok()
     }
+
+    /// The entity naming a search-tree node by its content hash:
+    /// `node:<base58(hash)>`.
+    ///
+    /// A node is content addressed, so the hash is its whole identity: the
+    /// same node is the same entity on every replica and in every revision
+    /// that reaches it.
+    pub fn from_node(hash: &[u8; 32]) -> Result<Entity, IdentityError> {
+        // A branch names its root by one on every revision.
+        Entity::try_from(hashed_uri(NODE_SCHEME, hash))
+    }
+
+    /// The content hash a `node:` entity names, if this entity is one and
+    /// its payload decodes to 32 base58 bytes.
+    pub fn node_hash(&self) -> Option<[u8; 32]> {
+        let payload = self.as_str().strip_prefix(NODE_SCHEME)?;
+        let bytes = payload.from_base58().ok()?;
+        <[u8; 32]>::try_from(bytes).ok()
+    }
+}
+
+/// The Bitcoin base58 alphabet, which `base58::ToBase58` encodes with.
+const BASE58: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/// The most base58 digits 32 bytes take.
+const BASE58_DIGITS: usize = 44;
+
+/// `prefix` then the base58 of `hash`, encoded straight into one string
+/// allocated at its length. Revisions and nodes are named this way on
+/// every commit and every read of a branch, so the encoding does not go
+/// through a string of its own first.
+pub(crate) fn hashed_uri(prefix: &str, hash: &[u8; 32]) -> String {
+    let mut digits = [0u8; BASE58_DIGITS];
+    let mut length = 0;
+    for byte in hash {
+        let mut carry = u32::from(*byte);
+        for digit in &mut digits[..length] {
+            carry += u32::from(*digit) << 8;
+            *digit = (carry % 58) as u8;
+            carry /= 58;
+        }
+        while carry > 0 {
+            digits[length] = (carry % 58) as u8;
+            length += 1;
+            carry /= 58;
+        }
+    }
+    let zeros = hash.iter().take_while(|byte| **byte == 0).count();
+    let mut uri = String::with_capacity(prefix.len() + zeros + length);
+    uri.push_str(prefix);
+    uri.extend(repeat_n('1', zeros));
+    uri.extend(
+        digits[..length]
+            .iter()
+            .rev()
+            .map(|digit| char::from(BASE58[usize::from(*digit)])),
+    );
+    uri
 }
 
 impl Debug for Entity {
@@ -192,6 +254,26 @@ mod tests {
 
     use super::*;
 
+    /// A hash encodes as `base58::ToBase58` encodes it, leading zero
+    /// bytes included.
+    #[dialog_common::test]
+    fn it_encodes_a_hash_as_base58_does() {
+        use base58::ToBase58 as _;
+        let mut hashes = vec![[0u8; 32], [0xff; 32]];
+        let mut leading = [7u8; 32];
+        leading[..3].fill(0);
+        hashes.push(leading);
+        for seed in 0u8..32 {
+            hashes.push(*blake3::hash(&[seed]).as_bytes());
+        }
+        for hash in hashes {
+            assert_eq!(
+                super::hashed_uri("node:", &hash),
+                format!("node:{}", hash.to_base58())
+            );
+        }
+    }
+
     #[dialog_common::test]
     fn it_round_trips_a_blob_entity() {
         let hash: [u8; 32] = [7u8; 32];
@@ -201,6 +283,22 @@ mod tests {
         // String round-trip: parse the display form back.
         let reparsed: Entity = entity.as_str().parse().expect("parses");
         assert_eq!(reparsed.blob_hash(), Some(hash));
+    }
+
+    #[dialog_common::test]
+    fn it_round_trips_a_node_entity() {
+        let hash: [u8; 32] = [9u8; 32];
+        let entity = Entity::from_node(&hash).expect("constructs");
+        assert!(entity.as_str().starts_with("node:"));
+        assert_eq!(entity.node_hash(), Some(hash));
+        let reparsed: Entity = entity.as_str().parse().expect("parses");
+        assert_eq!(reparsed.node_hash(), Some(hash));
+        // A node is not content in the blob store, and the reverse.
+        assert_eq!(entity.blob_hash(), None);
+        assert_eq!(
+            Entity::from_blob(&hash).expect("constructs").node_hash(),
+            None
+        );
     }
 
     #[dialog_common::test]

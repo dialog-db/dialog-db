@@ -1,9 +1,13 @@
 //! Query trait for polymorphic querying across different store types
 
 mod application;
+mod fold;
+mod hash;
 mod output;
 
 pub use application::*;
+pub use fold::{Fold, FoldConclusion};
+pub use hash::*;
 pub use output::*;
 
 #[cfg(test)]

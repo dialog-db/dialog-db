@@ -40,6 +40,31 @@
 mod repository;
 pub use repository::*;
 
+/// Attribute placement: which layer an attribute's facts live in.
+pub mod placement;
+pub use placement::{
+    CONTROL, LayerDeclaration, LayerType, MEMORY, SESSION, control_layer, layer_branch_attr,
+    layer_type_attr, memory_layer, revision_attr, selection_attr, session_layer,
+};
+
+/// A channel: a layer whose rows live one tick, with two ends.
+pub mod channel;
+pub use channel::Channel;
+
+/// A stack: the primary branch and the layers its schema declares.
+pub mod stack;
+pub use stack::effect::{
+    Command, Effect, EffectReport, Failure, Provider, answered_attr, failed_attr, invoked_attr,
+    progress_attr, provided_attr, unhandled_attr,
+};
+pub use stack::holdings;
+pub use stack::invoke::{Attempt, Invocation, InvocationReport, MAX_RERUNS};
+pub use stack::{
+    Arrivals, Backup, Durable, Layer, LayerBackup, OpenStack, OpenStackEnv, QueryHash, Stack,
+    StackBatch, StackBatchPublish, StackCommit, StackEnv, StackPublish, StackTransaction,
+    Subscriber, SyncEnv, SyncError, SyncStack,
+};
+
 /// Streaming-merge and tombstone helpers used by the query-session
 /// composition layer.
 pub(crate) mod layer;

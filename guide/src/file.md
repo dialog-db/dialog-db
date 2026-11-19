@@ -14,7 +14,7 @@ The chapter follows one fact into the file and back out, then walks through what
 cargo run -p dialog-chronicle --example guide_bytes
 ```
 
-Hashes, keys and the offsets that follow them differ from run to run, since each run's session has a key of its own. The layout does not.
+Hashes, keys and the offsets that follow them differ from run to run, since each run's session has a key of its own, and a revision's size moves by a few bytes with the hashes it holds. The layout does not.
 
 </div>
 
@@ -123,7 +123,7 @@ When Alice's peer created the repository, its file looked like this:
 </svg>
 </figure>
 
-Every file starts with sixteen bytes of **magic**: `DIALOG`, the byte `b6`, a byte for the format's version, now 1, and eight zeros, reserved. The `b6` is a pilcrow in Latin-1 and is not valid UTF-8 on its own, so a tool that reads the file as text fails at once. A file that starts with anything else is not opened.
+Every file starts with sixteen bytes of **magic**: `DIALOG`, the byte `b6`, a byte for the format's version, now 1, and eight zeros, reserved. The `b6` is a pilcrow in Latin-1 and is not valid UTF-8 on its own, so a tool that reads the file as text fails at once. A file that starts with anything else is refused. The one exception is a file no longer than its head whose first bytes are all zeros, or the start of the magic with no durable slot: an open that was making it was cut short, so nothing was ever appended, and it is made again.
 
 <figure class="dg">
 <svg class="dg" viewBox="0 0 760 150" width="760" height="150" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The sixteen bytes of magic: DIALOG, the byte b6, the format version 1, then eight zero bytes, reserved">
@@ -726,7 +726,7 @@ Every record has the same nine-byte header:
 | 4 | tokens: a count, then each token's pad byte, padding, length and bytes | the whole body |
 | 5 | frame: a pad byte, padding, then the frame's data | the whole body |
 | 7 | pages: pages of the file's index | until a page is reused; each page has its own |
-| 8 | extent: space claimed by one writer | its header only; each frame inside has its own |
+| 8 | extent: space claimed by one writer | nothing: it is written to after it is claimed; each frame inside has its own |
 | 9 | cell: one value of a memory cell | the whole body |
 
 The commit's append is the tokens record and the frame record. The new head follows as two cell records, `revision` and `induction` (see [step 5](#step-5-the-head-moves)), each its own append:
@@ -865,7 +865,7 @@ An append writes the older of the two rolling slots. That way one of them is alw
 The turn itself is not a lock on the file. It is a lock on one byte, far past the end of any data:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 760 190" width="760" height="190" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The lock bytes sit at 2^62, far past any data, so locking them never blocks a read or a write">
+<svg class="dg" viewBox="0 0 760 208" width="760" height="208" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The lock bytes sit at 2^62, far past any data, so locking them never blocks a read or a write">
 <defs><marker id="lk-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <line class="dashed" x1="126" y1="60" x2="396" y2="60"/>
 <rect class="value" x="16" y="48" width="110" height="24"/>
@@ -888,11 +888,12 @@ The turn itself is not a lock on the file. It is a lock on one byte, far past th
 <text class="small muted" x="704" y="92" text-anchor="middle">2⁶²+1+x</text>
 <text class="label small muted" x="16" y="124">turn: held by the writer laying out and writing an append.   present: held shared by every process with the file open.</text>
 <text class="label small muted" x="16" y="142">recovery: held while a process opens the file.   sync: held while a sync point is made.   owner(x): held by extent x&#x27;s writer.</text>
-<text class="label small muted" x="16" y="166">POSIX record locks on Unix, LockFileEx on Windows: a process that dies lets go of every byte it held.</text>
+<text class="label small muted" x="16" y="160">left(x), at 2⁶²+2⁶¹+x: held shared by the process that left extent x free for another to take.</text>
+<text class="label small muted" x="16" y="184">POSIX record locks on Unix, LockFileEx on Windows: a process that dies lets go of every byte it held.</text>
 </svg>
 </figure>
 
-Readers take no lock at all. The writer holding the turn waits on no other lock, so no cycle of waiting runs through it.
+A read takes no lock: a process holds `present` while it has the file open and `recovery` while it opens it, and nothing to read. The writer holding the turn waits on no other lock, but for the last close, which makes its sync point in the turn and waits for `sync` there. A sync point made outside the turn only tries the turn, never waits for it, so no cycle of waiting forms.
 
 <div class="aside">
 
@@ -902,7 +903,7 @@ Readers take no lock at all. The writer holding the turn waits on no other lock,
 
 ### Step 5: the head moves
 
-The branch's head is a cell (see [Commits and History](./history.md)), and the file keeps cells the way SQLite keeps commits in its write-ahead log. An update appends a cell record holding the cell's name and its new value, and the cells' own index, rooted in the slot, files the name at its newest record. Nothing is written over.
+The branch's head is a cell (see [Commits and History](./history.md)), and the file keeps cells as a log. An update appends a cell record holding the cell's name and its new value, and the cells' own index, rooted in the slot, files the name at its newest record. Nothing is written over.
 
 <figure class="dg">
 <svg class="dg" viewBox="0 0 760 344" width="760" height="344" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The head&#x27;s cell record: its name, its value naming the new root, and the extents it needs, none here">
@@ -1043,7 +1044,7 @@ The order of the records is what keeps heads safe:
 <text class="label small" x="250" y="136">everything is there: the branch is at commit 2, whole</text>
 <text class="label small muted" x="16" y="168">The disk can reorder unsynced writes, so a record is kept only if everything before it in the slot is whole:</text>
 <text class="label small muted" x="16" y="186">opening walks every record since the durable slot by its checksum. What a power loss can lose is a suffix.</text>
-<text class="label small muted" x="16" y="212">Like SQLite&#x27;s synchronous=NORMAL: an update is durable at the next sync point, not at its own.</text>
+<text class="label small muted" x="16" y="212">An update is durable at the next sync point, not at its own.</text>
 </svg>
 </figure>
 
@@ -1080,8 +1081,8 @@ Until now, everything Alice wrote went to the operating system, not necessarily 
 <text x="32" y="215" text-anchor="middle">5</text>
 <text class="label small" x="56" y="208">write rolling slot 13</text>
 <text class="small muted" x="56" y="224">durable = 12: pages and extents freed before 12 can be reused</text>
-<text class="label small muted" x="16" y="252">One follows every 64 appends, 2 seconds, or 2,048 freed index pages, and Chronicle::sync. It is made after the turn</text>
-<text class="label small muted" x="16" y="270">is let go. After 2 seconds a thread in each process makes one even if no append follows.</text>
+<text class="label small muted" x="16" y="252">One follows every 64 appends, 2 seconds, or 2,048 freed index pages, once the turn is let go, and Chronicle::sync and</text>
+<text class="label small muted" x="16" y="270">the last close make one. A thread in each process makes one within 3 seconds even if no append follows.</text>
 </svg>
 </figure>
 
@@ -1175,7 +1176,7 @@ The node is then read **in place**: the archive decodes the frame's rows once, a
 
 <div class="aside">
 
-**Implementations.** The file's index is [`dialog-chronicle/src/archive/tree.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/tree.rs), and what it maps is [`archive/index.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/index.rs). A node read in place is [`archive/served.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/served.rs), through `NodeSource` and the node views in [`dialog-search-tree/src/node/view.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-search-tree/src/node/view.rs).
+**Implementations.** The file's index is [`dialog-chronicle/src/archive/tree.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/tree.rs), and what it maps is [`archive/index.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/index.rs). A node read in place is [`archive/served.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-chronicle/src/archive/served.rs), which answers the tree's node commands (`nodes::Read`, `Preload`, `Write`) with the node views in [`dialog-search-tree/src/node/view.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-search-tree/src/node/view.rs).
 
 </div>
 
@@ -1242,7 +1243,7 @@ The new root is written against commit 2's, which was written against commit 1's
 <text class="label small muted" x="16" y="28">base ←</text>
 <text class="label small muted" x="16" y="136">Reading frame 213,645 decodes six frames: the whole one, then each frame&#x27;s copies and new rows on top. A writer looks up the</text>
 <text class="label small muted" x="16" y="154">node&#x27;s lineage (its catalog, its kind and its first key) to find the frame to write against.</text>
-<text class="label small muted" x="16" y="180">At depth 32 (CHAIN) the next version is written whole again, so no read decodes more than 32 frames.</text>
+<text class="label small muted" x="16" y="180">Once a chain is 32 frames long (CHAIN), the next version is written whole again, so no read decodes more than 32 frames.</text>
 <text class="label small muted" x="16" y="206">Commit 5&#x27;s root is frame 147,934, also written against 147,739: two versions can share a base.</text>
 </svg>
 </figure>
@@ -1386,7 +1387,7 @@ An extent is a record whose body is written later, one frame at a time:
 <path class="wire" d="M480,132 L480,138 L704,138 L704,132"/>
 <text class="small muted" x="592" y="152" text-anchor="middle">epoch 4: claimed by append 4</text>
 <rect class="value" x="16" y="180" width="620" height="28"/>
-<text class="small" x="24" y="198">frame record, 8,050 bytes: hash 66b11878…, kind ff (whole), then the 7,996-byte block</text>
+<text class="small" x="24" y="198">frame record, 8,059 bytes: hash 66b11878…, kind ff (whole), then the 7,996-byte block</text>
 <text class="label small muted" x="16" y="238">Only the count is written over, after the frames it counts. The epoch tells a new claim of the same space from an old one.</text>
 </svg>
 </figure>
@@ -1438,7 +1439,7 @@ Bob's commit and Alice's went to the same file but could have gone to different 
 <line class="critical" x1="436" y1="40" x2="436" y2="100"/>
 <text class="small critical" x="436" y="116" text-anchor="middle">the reader&#x27;s snapshot ends here</text>
 <text class="label small muted" x="16" y="36">the file, while commit 3 is written</text>
-<text class="label small muted" x="16" y="152">Everything a slot names stays as it was, except index pages, which are reused. So a reader reads its snapshot without</text>
+<text class="label small muted" x="16" y="152">Nothing a slot names is written over but index pages, which are reused, and extents&#x27; counts. So a reader reads its snapshot without</text>
 <text class="label small muted" x="16" y="170">a lock, and the writer never waits for it. A lookup that misses looks for a newer slot, once the file has grown.</text>
 <text class="label small muted" x="16" y="196">An index page reused since is caught: each page records the append that wrote it and a checksum, and its parent names</text>
 <text class="label small muted" x="16" y="214">both (page 876, append 29). A mismatch is stale: the reader takes the newest slot and looks again.</text>
@@ -1564,7 +1565,7 @@ Opening a file is where a crash is noticed. A process holds a recovery byte whil
 <line x1="380" y1="96" x2="380" y2="114" marker-end="url(#rc-arrow)"/>
 <text class="small muted" x="388" y="110">no</text>
 <rect x="200" y="116" width="360" height="30"/>
-<text class="small" x="380" y="136" text-anchor="middle">another process present, or same boot?</text>
+<text class="small" x="380" y="136" text-anchor="middle">another process present, or same boot (Linux)?</text>
 <line x1="560" y1="131" x2="600" y2="131" marker-end="url(#rc-arrow)"/>
 <text class="small muted" x="580" y="126" text-anchor="middle">yes</text>
 <rect class="value" x="602" y="116" width="142" height="30"/>
@@ -1606,9 +1607,9 @@ Whether this works is tested, not argued. The tests record every write the archi
 <text class="small muted" x="542" y="82" text-anchor="middle">kept</text>
 <rect class="ghost" x="566" y="34" width="70" height="30"/>
 <text class="small muted" x="601" y="82" text-anchor="middle">lost</text>
-<text class="label small muted" x="16" y="116">The archive&#x27;s tests replay their own writes onto such images, at every point and in 30 ways at each,</text>
-<text class="label small muted" x="16" y="134">and open each as after a reboot. Each must open, keep every block synced before the loss, read no block as</text>
-<text class="label small muted" x="16" y="152">other bytes, and hold heads whose every block is there.</text>
+<text class="label small muted" x="16" y="116">The archive&#x27;s tests replay their own writes onto such images at every point, losing each write or each sector alone,</text>
+<text class="label small muted" x="16" y="134">then 30 random sets, and open each as after a reboot. Each must open, keep every block synced before the loss,</text>
+<text class="label small muted" x="16" y="152">read no block as other bytes, and hold heads whose every block is there.</text>
 </svg>
 </figure>
 
@@ -1647,8 +1648,8 @@ Whether this works is tested, not argued. The tests record every write the archi
 <div class="aside caveat">
 
 - **Native only.** The crate compiles to nothing on the web. Its tests run on Linux, macOS and Windows. Whether the same file can live in a browser's file system, served by one worker a tab hosts, is being measured in [`research/single-file-format/browser`](https://github.com/dialog-db/dialog-db/tree/main/research/single-file-format/browser), not built.
-- **Opt-in.** Nothing switches a replica to it. A replica the file system store wrote can be moved in with the `chronicle` migration of the `dialog-migration` crate.
-- **Nothing is collected.** A node no head reaches any more, such as a losing try's, stays in the file.
+- **Opt-in.** Nothing switches a replica to it. The `chronicle` migration of the `dialog-migration` crate (`IntoChronicle`, or the `dialog-migrate` binary) moves the blocks of a replica the file system store wrote into each space's file. It moves no cells: a migrated space keeps its memory, branch heads among them, where it was, and names `Chronicle` as its archive only.
+- **Nothing is collected.** A node no head reaches any more, such as a losing try's, stays in the file. A later version may even be written against it: the winning retry's root is a frame on top of the lost try's.
 - **The format is still changing.** A file written now may not open in a later release.
 
 </div>
@@ -1663,7 +1664,7 @@ All integers are little-endian. *Varint* is LEB128, *zigzag* maps signed to unsi
 | rolling slots | 16 and 65,552 | 64 KiB each: length u32, crc32 u32, body |
 | durable slot | 131,088 and 196,624 | two copies, the same layout, written only at a sync point; the last 8 bytes of each 64 KiB hold the sequence of the copy last synced there |
 | records | from 262,160 | kind u8, length u32, crc32 u32, body |
-| lock bytes | from 2⁶²−3 | sync, recovery, present, turn, then an owner byte per extent |
+| lock bytes | from 2⁶²−3 | sync, recovery, present, turn, an owner byte per extent, and from 2⁶²+2⁶¹ a byte per extent left for another process |
 
 | record | body |
 |---|---|
@@ -1701,6 +1702,6 @@ All integers are little-endian. *Varint* is LEB128, *zigzag* maps signed to unsi
 | setting | value |
 |---|---|
 | extent size | 1 MiB (`Options::extent`) |
-| sync point | every 64 appends, 2 seconds, or 2,048 freed index pages; after 2 seconds a thread in each process makes one even if no append follows |
+| sync point | every 64 appends, 2 seconds, or 2,048 freed index pages, and at the last close; a thread in each process makes one within 3 seconds even if no append follows |
 | blocks in one append | at most 32,768 (`COMMIT_BLOCKS`); a larger commit is appended in parts |
 | longest chain of frames | 32 (`CHAIN`) |

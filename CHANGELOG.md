@@ -60,6 +60,1493 @@ which concurrent writers can leave half updated, or packed into opaque
 bytes no query could read and no two writers spelled alike. A composite is
 one value dialog can compare, key and, next, destructure.
 
+### An ephemeral line can be read as it stood, at no cost to take: `Ephemeral::frozen`
+
+[#841](https://github.com/dialog-db/dialog-db/pull/841).
+
+`Ephemeral::frozen` returns a `Frozen`: the line's facts, tombstones and
+revision as they stood when it was taken, answering the reads the line
+answers (`scan`, `select`, `export`, `len`, `is_empty`, `revision`) and
+never changing after. The line now holds its facts in chunks shared by
+reference count, so taking one copies nothing, and a write to the line
+while one is held copies the chunk it changes rather than every fact.
+
+What this changes for you:
+
+- New: `Ephemeral::frozen() -> Frozen`, and the `Frozen` type.
+- Nothing a read of a live line answers changes.
+
+Why: a subscription's poll is to read one fixed state of every layer,
+so that subscriptions of one view agree and a channel's facts, which
+last one tick, are read by a retry as they stood. Until now the state of
+a session overlay or a memory layer at an earlier point was had only by
+copying the whole line and undoing its instants.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten.
+
+### A query can fold, and a fold can be kept current
+
+[#839](https://github.com/dialog-db/dialog-db/pull/839).
+
+Decided in [dialog-db/dialog-db#830](https://github.com/dialog-db/dialog-db/pull/830)
+(a fold is a query type, not a rule) and
+[dialog-db/dialog-db#837](https://github.com/dialog-db/dialog-db/pull/837)
+(how it is kept current).
+
+`Fold::new(groups, inputs, reduce)` is a query in `dialog-query` that
+folds the rows of `inputs` with a `Reduce`, one row for each row of
+`groups`, joined on the grouping fields of the `Reduce`. A group no input
+joins is folded over inputs all absent, so `count` gives 0 for it. A fold
+is asked and subscribed to as any query is; it has no name and installs
+no rule, so an authored deductive rule still cannot fold.
+
+What this changes for you:
+
+- New: `Fold` and `FoldConclusion`, a folded row with the value of each
+  grouping field and each fold.
+- New: `Branch::subscribe_fold(fold)` and `Stack::fold_subscription(fold)`
+  give a `FoldSubscription`, polled as a `Subscription` is and giving
+  `Delta<FoldConclusion>`. It keeps a subscription of each of the fold's
+  two queries and the rows they report, and folds again in memory only the
+  groups a change moved a row of: a group whose row changed reports the
+  old row retracted and the new one asserted, and what it reports adds up
+  to what asking the fold whole gives. Both inner subscriptions are polled
+  at one state of the branch.
+- `Branch::subscribe(fold)` works too, and asks the whole fold again on
+  each poll that touches what it read; `Branch::subscribe_fold` is the
+  one that keeps it current.
+- New: `Application::bindings`, with a default of `None`: the bindings a
+  conclusion was realized from. Attribute queries, concept queries and
+  folds give them, and a `FoldSubscription` needs them of both its
+  queries; one over a query that gives none fails to poll.
+- New: `Fold::groups`, `Fold::inputs`, `Fold::key`, `Fold::fold_groups`
+  (the fold of a set of groups, which asking a fold and a
+  `FoldSubscription` both fold with) and `Reduce::fold_rows`.
+
+Why: a rule cannot fold, and a fold asked again whole on every change
+folds every group for a change to one. A query that folds needs no name
+and no stored value beside its own, and kept current it costs the two
+inner polls and the groups a change moved.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: a fold is a query asked in memory and
+  nothing of it is written. Nothing is rewritten on upgrade, and an older
+  release reads what this one writes.
+
+### A concept read binds stored values in place, and reads optional fields in one pass
+
+Research: [zero-copy answers](research/zero-copy-answers.md)
+
+A concept read used to turn every row it scanned into owned values (an
+entity with a hash of its URI, an attribute, a value, a claim) and copy
+them again into each joined row. It now binds the scanned row in place
+and makes a value only when something reads it as one; a join compares
+the stored bytes. A concept with optional fields used to be read by
+probing every optional field once per entity; its optional fields are
+now read once each, in entity order, beside the required ones, and an
+entity a field lacks binds `Absent` as before.
+
+What this changes for you:
+
+- **List reads and subscriptions are faster.** On tonk-team at 10×, the
+  issue list reads in 82 ms where it took 288, the activity list in 106
+  where it took 486, and their subscription polls in 23 and 46 ms where
+  they took 939 and 1,398. Results are the same, row for row.
+- **New reads that do not hydrate:** `Match::view` and
+  `ConceptConclusion::view` return a `ValueView` borrowed from the stored
+  row; `Match::absent` answers without making the value;
+  `Conclusion::this_uri` (with a default) and
+  `ConceptConclusion::this_uri` give the entity's URI as stored.
+  `dialog_corpus` gains `ValueView`, `FactView::checked` and `CheckedRow`.
+- Nothing stored or synced changes.
+
+Why: copying values was most of a concept read's cost after the scan,
+and a concept with an optional field, which most of tonk's are, was
+never merged, so its list read probed every field of every entity.
+
+
+### A coverage entry spills nothing
+
+[#833](https://github.com/dialog-db/dialog-db/pull/833).
+
+A coverage key carries a hash of the covered value in the spilled form,
+whatever the value's size, so claims can be matched by it; no value is
+stored under that hash. `tree/entry` read it as a spilled value, so an
+inspector offered to read a value that could never be read, and waited
+on it.
+
+What this changes for you:
+
+- `tree/entry` yields no `spill` for an entry at a coverage key, and
+  `inspect::entries` no `spill` in its `EntrySummary`.
+- `dialog/key-part` reads a coverage key as its index, origin, edition,
+  entity and attribute and a part of kind `reference`, `value:<hash>`,
+  where it read a value type of `Bytes` and a `spill` part.
+
+Why: a spill names bytes a reader can fetch; a coverage key's hash names
+none.
+
+#### Compatibility and migration
+
+- Nothing stored changes.
+
+### An index node's buffered operations are its entries, and a separator reads as the key it is
+
+[#832](https://github.com/dialog-db/dialog-db/pull/832).
+
+An index node buffers writes headed for its children (`novelty`), and
+`tree/entry` gave no rows for an index, so a query could count them but
+not read them. A separator was split into its tag and one `prefix` part
+of lossy text, which for a history separator was the origin's raw bytes,
+and a forced seam's separator, the last key before the seam padded with
+zero bytes past the separator bound, read as a key whose value was the
+padding.
+
+What this changes for you:
+
+- `tree/entry` of an index node yields one row per operation it
+  buffers, with a new slot `span` naming the span the operation rides,
+  as `tree/span` names it. `span` is absent on a segment's entry. `at`
+  counts the node's buffered operations; `rank` is absent on them.
+- `dialog_corpus::inspect::entries` returns an index node's buffered
+  operations, and `EntrySummary` has a new field `span: Option<u64>`.
+- `dialog/separator-part` reads a separator field by field as far as it
+  reaches, as `dialog/key-part` reads a key: `entity`, `attribute`,
+  `vtype` and `value` parts in the ordering's order, the value-type byte
+  on its own, and a Bytes or Record value as hex. A history or coverage
+  separator yields its `origin` (hex) and `edition`. The `prefix` part is
+  gone.
+- A separator that is a whole key reads as that key. A forced seam's
+  separator reads as the key before the seam and a part of kind
+  `padding`.
+
+Why: an inspector shows what a node holds, and the operations an index
+buffers and where its boundaries fall are part of that.
+
+#### Compatibility and migration
+
+- Nothing stored changes: both read blocks as they are.
+
+### A revision is named by `revision:`, not by a `did:key:`
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829).
+
+A revision's entity was `did:key:z6Mk<base58(hash)>`: the shape of a key
+DID around a blake3 hash of the revision's version. It read as a
+principal and was none, and nothing could tell a revision from a branch,
+a replica or an operator by its name.
+
+It is now `revision:<base58(hash)>`, over the same hash
+(`Version::entity`, `Revision::entity`). A commit writes the revision's
+signed record under that entity, `dialog.branch/revision` carries it, and
+the built-in `Revision`, `RevisionParent` and `RevisionAncestor` concepts
+yield it for `this`, `parent` and `ancestor`.
+
+What this changes for you:
+
+- A revision entity you read from a query starts with `revision:`. Code
+  that told revisions apart by parsing `did:key:z6Mk` has to change; an
+  entity compared whole needs nothing.
+- `Version::entity_did` is `Version::entity_uri`. `Version::legacy_entity`
+  and `Version::legacy_entity_uri` give the name a revision had before,
+  and `Version::legacy_of` turns the current name into it.
+- A new formula, `dialog/revision-slot`, takes a revision entity as `of`
+  and yields as `is` each entity its record may be stored under: the
+  entity itself, then its older name.
+- A fact your space wrote about a revision under its older name (a
+  comment on a commit, say) still names the older entity, and no longer
+  joins the `this` of `Revision`. Join through `dialog/revision-slot`,
+  or rewrite those facts.
+
+Why: an entity's scheme is what a reader, a rule and a view have to tell
+kinds of thing apart, and a node (`node:`) and an asset (`asset:`)
+already say what they are. A name shaped like a key invites treating it
+as one.
+
+#### Compatibility and migration
+
+- A replica written by an older release holds each revision's record
+  under `did:key:z6Mk…`. Nothing is rewritten on upgrade: this release
+  reads a record under either name (the history reader, the built-in
+  revision concepts and a stack's durable layers all do) and writes new
+  ones under `revision:`, so one tree can hold both. An embedder runs
+  nothing.
+- A durable layer's pointer, the `dialog.branch/revision` of
+  `memory:<name>` stored in the primary's tree, names its revision by
+  the name the release that wrote it used. This release follows a
+  pointer an older release wrote, by either name, and opens the layer;
+  the layer's next move points the primary at the new revision by its
+  `revision:` name and retires the older claim, as any move does.
+- An older release cannot find a record written under `revision:`, so
+  it cannot read the history of what this release committed, nor follow
+  a durable layer's pointer this release wrote. Upgrade every replica of
+  a space before any of them commits with this release.
+
+### A tree node is a handle, and five resolvers read it
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829), argued in [design/tree-exploration.md](./design/tree-exploration.md).
+
+The seven `tree/*` resolvers each loaded a node's block and decoded one
+part of it, so a query asking three things of one node decoded it three
+times. A segment's entries were split across three of them (`tree/key`,
+`tree/entry`, `tree/blob`) and paired by position. A node was named by
+the base58 string of its hash, which is not an entity, so a rule could
+not derive a concept whose rows were nodes.
+
+A node is now opaque to a query, which holds its handle: the entity
+`node:<base58(hash)>` (`Entity::from_node`, `Entity::node_hash`).
+`dialog.branch/tree` carries the root's handle and `tree/span` yields
+each child's. A resolver takes the handle as `of`, asks the environment
+for the decoded node (`nodes::Read`, as the tree's own reads do), and
+yields one part of it. The environment decodes a node once and keeps it.
+
+```text
+tree/node   what the node is, and the format it was written under
+tree/span   an index node's children, with what the node holds about each
+tree/entry  a segment node's entries, each whole
+tree/block  the node's block as stored
+tree/value  a spilled value's bytes, by its asset: entity
+```
+
+What this changes for you:
+
+- `dialog/key-part` and `dialog/separator-part` yield `part`, each
+  component's own entity (`part:<base58(blake3(key))>/<at>`), so a rule
+  can derive one row per component. A query asking either formula
+  names `part` among its terms too.
+- `tree/key`, `tree/blob` and `tree/manifest` are gone, with
+  `TreeKeyQuery`, `TreeBlobQuery` and `TreeManifestQuery`. A key and its
+  rank, and a blob record's fields, are slots of `tree/entry`; the
+  manifest's fields are slots of `tree/node`. `tree/block` is new.
+- `of` is an entity: a `node:` for every resolver but `tree/value`,
+  which takes an `asset:`. A base58 string or raw bytes, which `of`
+  used to take, match nothing.
+- `dialog.branch/tree` is an entity (`branch::Tree(Entity)`), not text.
+  A concept that reads it declares the field as an entity; the hash is
+  `tree.0.node_hash()`.
+- `tree/span` yields `node` as a `node:` entity, and a new slot `span`:
+  the span's own entity, `span:<base58(node)>/<position>`. `tree/entry`
+  yields `entry`, `entry:<base58(node)>/<position>`. A rule deriving a
+  concept of spans or of entries has an entity for each row.
+- `tree/entry` yields `spill` and `blob` as `asset:` entities. A slot
+  that does not apply to a row is absent: `spill` when the value is
+  inline (it was an empty string), `origin` and `edition` when the
+  write was unversioned (they were empty and 0), the blob slots on any
+  entry that is no blob record, and the claim slots on one that is.
+- Slot names are kebab-case: `max-separator`, `inline-n`,
+  `spill-prefix`, `max-segment`, `frame-ceiling-factor`,
+  `anchor-selector`. `fanout_n` is `fanout-exponent`. `tree/node` also
+  yields `entry-overhead`, `key-overhead` and `link-overhead`, which no
+  resolver did.
+- `RESOLVER_COST` is 50,000, from 200. Where a rule's body has a fact
+  that decides whether a node is read, the planner now asks the fact
+  first, whether or not the caller gave the node.
+- `dialog_corpus::inspect` has a reading of each part that takes a
+  decoded node (`summary`, `spans`, `keys`, `entries`, `blob_records`,
+  `manifest`) beside the `inspect_*` functions that take bytes.
+- A resolver still requires its handle. A rule whose body is a resolver
+  alone is refused at install as before; a rule that names its nodes by
+  a fact installs, and reads those nodes and no others.
+
+Why: a query should be able to read everything a node holds without the
+embedder decoding blocks for it, and the reading and decoding of a node
+belong to the environment, which already does both for the tree. A
+handle that is an entity is what a rule needs to make a node, a span or
+an entry the subject of a concept.
+
+#### Compatibility and migration
+
+- Nothing stored changes. A branch's `dialog.branch/tree` is derived
+  when a query runs and never written; it now reads as a `node:`
+  entity. A durable layer's pointer does write `dialog.branch/tree`, of
+  `memory:<name>` in the primary's tree, and still writes it as the
+  tree's base58 text, so the same attribute reads as an entity of a
+  branch and as text of a layer: a rule reading a layer's pointer reads
+  text. Resolver rows are read off blocks. An older release reads
+  everything this one writes. A rule stored on a branch that uses `tree/key`,
+  `tree/blob` or `tree/manifest`, a snake_case manifest slot, or a
+  base58 string as `of`, or that reads `dialog.branch/tree` as text, no
+  longer compiles or no longer matches, and has to be re-authored.
+
+### A stack learns what its replica holds of a tree by command
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829), argued in [design/tree-exploration.md](./design/tree-exploration.md).
+Built on the stack's providers
+([#816](https://github.com/dialog-db/dialog-db/pull/816)).
+
+A tree resolver fetches a node the replica lacks, so that what a query
+answers does not depend on what happened to be local. That left a
+consumer no way to know, before it asked, whether asking for a node
+would fetch it.
+
+`dialog_repository::holdings` has two commands for that and the
+providers that answer them (`holdings::provide(&stack, env)`):
+
+- `dialog.node.probe/node`, the node to ask about, is answered with
+  `dialog.node.probed/node` and `dialog.node.probed/local`: whether the
+  replica holds the node, with nothing fetched.
+- `dialog.node.fetch/node`, the node to bring local, is answered with
+  `dialog.node.fetched/node` and `dialog.node.fetched/local`: whether
+  the replica holds it, having tried.
+
+What this changes for you:
+
+- `holdings::{provide, providers, probe, fetch}` and the attribute names
+  beside them are new. A stack they are not registered with reports
+  these commands as unhandled, like any command no provider claims.
+- An answer is written into `control:`, so it is a command for one tick
+  and nothing keeps it. A space keeps it with a rule, and where the
+  rule's attribute is placed is where it is kept: on a layer of the
+  session it is read and subscribed to through the stack, never
+  committed or synced, and gone with the session. A space with no such
+  rule gets nothing.
+- A command whose value is not a `node:` entity, and a read that fails,
+  fail the command: it gets a `dialog.command/failed` row with the
+  reason.
+
+Why: whether a block is held changes with no commit, so a query step
+that reported it would answer the same query differently from one
+moment to the next. As a command's answer captured by a rule, it enters
+a query as a fact of a layer the query has pinned.
+### A provider claims the commands whose rows satisfy its concept, and a command sees the rows of its tick
+
+[#823](https://github.com/dialog-db/dialog-db/pull/823). Refs
+tonk-labs/tonk#1318, issues 9 and 10.
+
+A provider now claims a landed command when the command's rows satisfy
+its concept, the test decoding the concept from them would pass: every
+required field of the concept has a row of the field's attribute and,
+when the field declares a type, a value of that type. Optional fields are
+not needed, and rows of other attributes do not disqualify. Every
+provider whose concept a command satisfies runs, in registration order,
+each writing its own `answered` or `failed` row. One provider can answer
+several concepts (`Provider::new(&current, handler).also(&legacy)`); it
+runs at most once per command, and its `answered` row names the first
+of its concepts the command satisfies. The rows of the `control:` entity
+itself that land in a tick are the tick's own facts (who asked, and
+whatever an embedder stamps on the loopback): they are no command, and
+each command carries them as `Command::tick`.
+
+What this changes for you:
+
+- A provider no longer claims a command because one of its rows has an
+  attribute of the provider's concept. A command that carries one shared
+  attribute (a time stamp, an email) and lacks the concept's other
+  required fields is no longer that provider's; a command no concept is
+  satisfied by is `unhandled`, where before the first provider sharing
+  an attribute ran.
+- A command whose rows satisfy several providers' concepts runs every
+  one of them, in registration order, where before only the first
+  registered ran. It gets one `dialog.command/answered` row per provider
+  that answered and one `dialog.command/failed` row per provider that
+  failed (both are now cardinality-many), and `EffectReport::answered`
+  and `EffectReport::failed` name it once per provider. A rule copying
+  `answered` should read it under `pick: all`.
+- `Provider::also(&concept)` adds a concept to a provider, and
+  `Provider::concepts()` lists them; `Provider::concept()` is the first.
+  Registering a provider writes one `dialog.provider/command` row per
+  concept no provider registered before, and replaces the first
+  registered provider that shares a concept with it.
+- `InvocationReport::commands()` and `Effect::commands()` leave out the
+  rows of the `control:` entity itself, so they are never a command,
+  never `unhandled` and never marked `dialog.command/invoked`.
+  `InvocationReport::tick()`, `Effect::tick()` and `Command::tick()`
+  return them.
+
+Why: three of tonk's command groups share an attribute
+(`dom.event/time-stamp`, `elements.email/value`, `current-target/value`),
+so the provider of the wrong one ran: CheckEmail answered
+RegisterAccount, ProfileRename renamed a profile with a space's name.
+Tonk's own registry ran every handler whose decode succeeded, once per
+handler, which is the rule now. And tonk writes the asking client as a
+row of `control:` for the tick, which no provider could read and every
+effect reported as an unhandled command.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: the rule is applied in memory when
+  an effect runs, and the lifecycle and tick rows live in `control:` for
+  one tick. Nothing is rewritten on upgrade, and an older release reads
+  what this one writes.
+
+### A stack transaction's publish reports like an invocation, so its commands reach the stack's providers
+
+[#821](https://github.com/dialog-db/dialog-db/pull/821).
+
+`Stack::transaction()` now returns a `StackTransaction`, the
+stack-bound counterpart of a branch `Transaction`, and its publish
+returns an `InvocationReport`, the type `Invocation::perform` returns:
+the revision the publish left the primary at, the ticks its induction
+ran, and the commands it landed on `control:`, with `effect()` to run
+the stack's providers over them. That holds for the one-step
+`.commit().publish().perform(&env)` and for a staged chain:
+`.commit().perform(&env)` returns a `StackBatch`, whose next links are
+stack transactions too, and its `publish().perform(&env)` reports the
+commands of every link. A publish that loses its compare-and-swap
+still fails with `PublishError::VersionMismatch`, lands nothing and
+reports nothing; it is not re-run. `Branch::transaction()` is
+unchanged, and its publish still returns a `Revision`.
+
+What this changes for you:
+
+- A stack transaction's publish returns an `InvocationReport`, not a
+  `Revision`: `let revision = stack.transaction()...publish().perform(&env).await?`
+  becomes `let report = ...; report.revision()`, and the same for a
+  staged chain's `batch.publish()`. This is breaking for callers that
+  read the revision.
+- `Stack::transaction()` returns `StackTransaction<&Branch>`, its
+  `commit()` a `StackCommit`, its staged batch a `StackBatch` and their
+  publishes `StackPublish` and `StackBatchPublish`. They carry the
+  methods of the branch types they wrap (`assert`, `retract`,
+  `dispatch`, `integrate`, `query`, `allow_empty`, `canonicalize`,
+  `amend`, `version`, `revision`, `induced`, `shares`, `claims`,
+  `select`); a signature that named `Transaction<&Branch>` for a stack
+  transaction names `StackTransaction<&Branch>`. Their `perform` takes
+  a `StackEnv`, as `Invocation::perform` does.
+- `report.effect().perform(&env)` after a stack transaction runs the
+  providers over its commands, as after an invocation; before, a
+  command asserted through a stack transaction landed on `control:`
+  but no report named it, so no provider answered it.
+- `dialog-stack` re-exports the five new types.
+
+Why: tonk's evaluate route and its "absent branch" transact path build
+the transaction themselves, resolved against a head they chose, and
+published it with `.commit().publish()`, which answered a `Revision`
+and nothing more, so a command asserted that way was never answered by
+a provider. Only its route through `Stack::assert(..).perform(&env)`
+got a report. A stack transaction's publish now reports what it landed
+the same way, so every route runs the providers.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: the publish writes what it wrote
+  before, and the report is computed in memory from the staged chain.
+  Nothing is rewritten on upgrade, and an older release reads what this
+  one writes.
+
+### A stack shares one evaluation of a query among its readers, and delivers to them after a dispatch
+
+[#819](https://github.com/dialog-db/dialog-db/pull/819).
+
+`Stack::subscribe(query)` now registers the stack's subscription to a
+query, or attaches to the one it holds, and returns a `Subscriber`: a
+second reader of the same query reads the same evaluation instead of
+running its own. A subscription is keyed by `QueryHash`, a new hash of
+the query's canonical encoding in `dialog-query`, and its type. A
+dispatch through the stack that published or wrote into a memory layer
+schedules a poll; `Stack::settle(&env)` polls every subscription once
+when one is scheduled, delivers each reader the `Delta` the poll made,
+and clears the mark, so the writes of one request cost one
+evaluation. `Effect::perform` settles after its answer dispatch. The
+evaluation is still dialog's demand-gated `Subscription`, unchanged.
+
+What this changes for you:
+
+- `Stack::subscribe` returns a `Subscriber<Q>`, not a `Subscription<Q>`,
+  and asks `Q: Serialize`. The unshared evaluation it returned is now
+  `Stack::subscription(query)`; `Branch::subscribe` is unchanged.
+- `Subscriber` has `poll()` (the deltas delivered since the last read,
+  without waiting), `next().await` (waits for a delivery), `hash()`,
+  `results()` (the whole current set), `evaluated()`, `recomputes()`,
+  `maintenances()` and `close()`. A reader's first delivery is the whole
+  result set as `asserted`; each later one is what a poll changed, and a
+  poll that changed nothing delivers nothing.
+- `Stack::settle`, `Stack::schedule_poll`, `Stack::poll_scheduled` and
+  `Stack::subscriptions_held` are new. A write the stack does not see,
+  into `Branch::overlay()` among them, is scheduled with
+  `schedule_poll`. A sync that moved the primary, `Stack::channel`
+  creating a channel and `Stack::provide` schedule one too; a write into
+  a channel does not.
+- A subscription lives as long as a reader of it: the stack holds it
+  weakly, and it goes when its last `Subscriber` is dropped or closed.
+- `Stack::settle` and `Effect::perform` need a `Clone` environment.
+- `Effect::perform` settles the stack, with or without commands to
+  perform. A failed poll does not fail the effect: it is reported by
+  `EffectReport::unsettled()` and stays scheduled.
+- `dialog_query::QueryHash` is new: `QueryHash::of(&query)` hashes the
+  query's DAG-CBOR encoding with its fresh variables (`__<n>`) named
+  again by where they first occur, so two queries built alike hash
+  alike.
+- `dialog-stack` re-exports `Subscriber`, `Subscription`, `Delta` and
+  `QueryHash`, and `dialog-repository` re-exports `QueryHash`.
+
+Why: tonk kept this registry, the fan-out and the poll scheduling in a
+reactive layer of its own over dialog, keyed by a query hash it
+computed itself. They are generic: one evaluation per query, delivery
+to every reader, and polls scheduled by writes and drained once per
+turn belong beside the stack's channels, so an embedder keeps only its
+transport.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: subscriptions and their deliveries
+  live in memory, and the stack writes no fact for them.
+- A caller of `Stack::subscribe` that polled the returned
+  `Subscription` itself calls `Stack::subscription` instead, or moves
+  to the `Subscriber` and `Stack::settle`.
+
+### The stack has a crate of its own, `dialog-stack`, which re-exports it from `dialog-repository`
+
+[#818](https://github.com/dialog-db/dialog-db/pull/818), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+point 1).
+
+The maintainer decided that the stack gets a separate crate later and
+its name now. `dialog-stack` is that crate's seam: it re-exports the
+stack from `dialog-repository` under one roof, and its README is the
+crate's front page, a guide for an embedder, with every example
+compiled as a doc test. No code moved. When it does, an embedder that
+imports from `dialog_stack` changes no import.
+
+What this changes for you:
+
+- `dialog-stack` is a new workspace crate, released with the others at
+  the workspace version. It re-exports `Stack`, `OpenStack`,
+  `StackEnv`, `OpenStackEnv`, `SyncStack`, `SyncEnv`, `SyncError`,
+  `Layer`, `LayerType`, `LayerDeclaration`, `Durable`, `Ephemeral`,
+  `Channel`, `Arrivals`, `Invocation`, `Attempt`, `InvocationReport`,
+  `MAX_RERUNS`, `Effect`, `EffectReport`, `Provider`, `Command`,
+  `Failure`, `Backup`, `LayerBackup`, `CommitError`, `Download`, the
+  layer names (`MEMORY`, `SESSION`, `CONTROL`, `memory_layer`,
+  `session_layer`, `control_layer`) and the attribute functions of the
+  facts a stack writes (`layer_type_attr`, `layer_branch_attr`,
+  `revision_attr`, `selection_attr`, `invoked_attr`, `answered_attr`,
+  `failed_attr`, `unhandled_attr`, `progress_attr`, `provided_attr`).
+- Nothing in `dialog-repository` changes: every name above is still
+  exported there.
+
+Why: the stack is moving into its own crate, and an embedder (tonk is
+the first) should take its imports from where the stack will live, so
+the move does not touch them. The README gives the stack one place
+that explains it from opening to backup.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes. `dialog_repository::Stack` and
+  `dialog_stack::Stack` are the same type, as is every other name the
+  crate re-exports, so the two imports mix freely.
+
+### A stack's `session:` is its own store, apart from `Branch::overlay`, and `Stack::backup` and `OpenStack::restore` carry it to another stack
+
+[#817](https://github.com/dialog-db/dialog-db/pull/817), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+point 8).
+
+A stack's own layer, `session:`, was the primary's session overlay,
+`Branch::overlay()`, so everything the stack records (revision rows,
+`dialog.layer/*` facts, the selection, `dialog.provider/command`
+discovery) landed in the store an embedder keeps its own session facts
+in, and an embedder that snapshots, clears or prunes the overlay had to
+filter dialog's rows out by hand. A stack now mints its own store for
+`session:` when it opens. `Branch::overlay()` is the embedder's: the
+stack writes nothing into it, and a read through the stack binds its
+rows to the primary, `memory:`. `session:` is the stack's own rows and
+the branch metadata (`dialog.branch/*`, `dialog.replica/*`,
+`dialog.peer/*`), and holds one row per cell: the primary's
+`dialog.branch/revision` is the metadata's row alone, where the stack
+used to record a second one that read differently between a head move
+and the next dispatch. `Stack::backup()` takes `session:` and every
+declared session layer as a serializable `Backup`, and
+`branch.stack().restore(backup)` opens a stack holding them again.
+
+What this changes for you:
+
+- `Backup` and `LayerBackup` (`Serialize + Deserialize + Clone +
+  Debug`), `Stack::backup()` and `OpenStack::restore(backup)` are new. A
+  backup holds each session layer's rows (tombstones too), the revision
+  it stood at, the primary's branch entity, and the revision the stack
+  last recorded the primary at. It leaves out channels, durable layers
+  and `Branch::overlay()`. Restoring replays the rows, records again the
+  layers that stood where their rows said, and leaves a layer that had
+  moved unrecorded, like a primary committed or pulled through another
+  handle while the backup was away, to be the first dispatch's stimulus,
+  so a rule premised on its revision fires once. Providers' discovery
+  rows and channels created at run time are not restored: register and
+  create them again. A layer the schema no longer declares is dropped
+  and the rest is restored.
+- `CommitError::ForeignBackup` is new: a backup restored on a stack of
+  another branch, refused before any layer is built, with nothing
+  written.
+- `Branch::overlay()` holds none of dialog's rows: `Stack::layer` of
+  `session_layer()` returns the stack's own store, a write
+  `.at(session_layer())` through a stack lands there, and
+  `Stack::channel` and `Stack::provide` write there. A row of the
+  overlay is read through a stack as `in: memory:`, not `session:`. A
+  branch read or committed without a stack is unchanged.
+- A second stack opened on a branch has a `session:` of its own, with
+  its own revision rows, selection and created channels; it no longer
+  sees what the first one wrote there. Restore a backup to carry them.
+- The stack records no `dialog.branch/revision` row of the primary in
+  `session:`: the metadata's row is the one, reading the head the read
+  stands at. A rule premised on it needs no `dialog.layer/branch` join
+  to tell a stack from a plain branch, and fires once per move. Since
+  the metadata row is read on a plain branch too, such a rule fires
+  when installed on one; install it through the stack.
+- Tonk's overlay operations map onto the stack: `export_overlays` /
+  `import_overlays` is `stack.backup()` / `branch.stack().restore(..)`;
+  `retain_overlay_entities` and `clear_overlay` stay
+  `Branch::overlay().retain_entities` and `Branch::overlay().clear()`,
+  which now meet only the embedder's rows and leave `session:` intact.
+
+Why: the embedder's session store and dialog's bookkeeping were one
+cell, so neither could be exported, cleared or pruned without the
+other, and the primary's revision cell held two rows. Tonk needed to
+carry a session across workers, which `backup` and `restore` provide.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten:
+  `session:` and a `Backup` are process-local, held and carried by the
+  embedder. An embedder that filtered `dialog.*` rows out of
+  `Branch::overlay()` can stop; one that read its overlay rows through a
+  stack with `in: session:` reads them with `in: memory:`, or writes
+  them `.at(session_layer())` through the stack instead.
+
+### A stack transacts through a closure re-run on a moved head, an invocation reports what it landed, and providers run as a separate effect
+
+[#816](https://github.com/dialog-db/dialog-db/pull/816), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+points 6 and 7).
+
+`Stack::transact` took the facts to write, so a write computed from a
+read was published against whatever head the dispatch re-ran on. It now
+takes a closure, run once per attempt against an `Attempt` that reads
+the stack at the head the attempt begins at and stages writes and
+commands; a lost compare-and-swap runs the closure again from the new
+head and drops what the lost attempt staged. The public verb is
+*invoke*: nothing in the API is "dispatched" any more (a dispatch is
+the unit of publication an invocation runs). `Invocation::perform`
+returns an `InvocationReport` instead of the bare revision: the head it
+left the primary at, the ticks it ran and the commands it landed on
+`control:`'s outside end. Its `effect()` is the next step, performed
+when the embedder chooses (a worker's `waitUntil`): it runs the
+providers registered with `Stack::provide` over those commands, writes
+their answers in one more dispatch with each command's lifecycle rows,
+and says whether that dispatch landed commands of its own. Every change
+in a command's life is a row of the command's entity in `control:` for
+one tick, which a rule copies into a layer that keeps it, and a
+registered provider is recorded in `session:`.
+
+What this changes for you:
+
+- `Stack::transact(|tx| async move { .. })` replaces
+  `Stack::transact(facts)`: the closure returns `Result<(),
+  CommitError>`, is `ConditionalSend + ConditionalSync + 'static`, and
+  its future `ConditionalSend`. `Attempt` (`query`, `assert`,
+  `retract`, `invoke`, `number`, `stack`) is new; `.at(layer)` on a
+  statement places it as before. `Stack::assert(facts)` is the
+  one-statement shorthand, for writes with no read.
+- `Invocation::dispatch` is renamed `Invocation::invoke`.
+- `Invocation::perform` returns `InvocationReport` (`revision()`,
+  `ticks()`, `commands()`, `effect()`) instead of `Revision`: take
+  `report.revision()` where the revision was used. `commands()` leaves
+  out lifecycle rows.
+- `CommitError::Read` (a read in a transact body failed, converted from
+  `EvaluationError`) and `CommitError::Aborted(reason)` (the body gave
+  up) are new; either fails the invocation with nothing written.
+- `Stack::provide(Provider)`, `Provider::new(&concept, handler)`,
+  `Command` (`entity`, `rows`, `progress`), `Failure`, `Effect`
+  (`perform`, `commands`, `is_empty`) and `EffectReport` (`invocation`,
+  `answered`, `failed`, `unhandled`, `remaining`, `effect`) are new. A
+  provider claims a command whose rows carry an attribute of its
+  concept; the first registered claiming one runs. Its answer is
+  written as a transact body's writes are, and a statement it places
+  `.at(control_layer())` is a command the next effect runs. A provider
+  that fails answers with the failure and does not stop the others; a
+  command no provider claims is answered `unhandled`, not an error.
+  `Invocation::perform` runs no provider.
+- Lifecycle rows, each of the command's entity in `control:` for one
+  tick: `dialog.command/invoked` (the tick of its dispatch it is
+  stimulus of, from 1, written beside the command's own rows),
+  `dialog.command/answered` (the provider's concept),
+  `dialog.command/failed` (the reason), `dialog.command/unhandled`
+  (`true`), all three by the effect's answer dispatch, and
+  `dialog.command/progress` (`Command::progress`). Their attributes
+  are exported (`invoked_attr` and the rest).
+- `session: dialog.provider/command <concept>`, cardinality-many, is
+  written when a concept is first provided; providing it again
+  replaces the handler and writes nothing (`provided_attr`).
+- The corpus write gate admits `dialog.command/*` and
+  `dialog.provider/*` from application writes, as it admits
+  `dialog.layer/*`.
+
+Why: a write that depends on a read must be computed again when the head
+it read moved, which only a closure can be. An embedder answering
+commands in a request cannot block the response on every provider, so
+running them is a step it performs later, and it needs to know whether
+anything is left; a command's life written as rows lets rules keep what
+an embedder wants to show, and the discovery rows say what this
+process can perform.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: the lifecycle rows live one tick on
+  `control:`, which is process-local, and the discovery rows are in
+  `session:`, which is too. A tree written by this release holds them
+  only if an application asserts them durably, which an older release
+  refuses with `ReservedRelation`.
+
+### A channel is a layer of its own type, with two ends, whose rows live one tick
+
+[#815](https://github.com/dialog-db/dialog-db/pull/815), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+point 5).
+
+A channel was an `Ephemeral` layer like a session layer: a table whose
+rows stayed until its consumer retracted them, with an instant chain a
+reader followed. It is now a `Channel`, simpler than `Ephemeral`: it
+keeps no table, and a row of it lives one tick. It has two ends. What
+the outside end sends (`Channel::send`) is read by the next dispatch
+through the stack at its first tick, as rows of the channel, and by no
+tick after; a send while a dispatch runs is the next dispatch's. What a
+dispatch writes into the channel, `.at(channel)` or through a rule head
+naming it, is the next tick's stimulus inside the dispatch, and once its
+publish has won lands on the outside end as one tick of a log, each
+tick a sequence and its rows. A lost publish lands nothing. `control:`
+is the built-in channel, the loopback: `Stack::invoke` sends its
+command into it and runs a dispatch, and what lands on its outside end
+is what the stack's providers read. The log keeps every tick some
+reader has not passed and drops a tick every reader has; while no
+reader exists, it keeps the latest tick alone. A channel is any entity
+but one under `memory:` or `session:`, and `Stack::channel` creates one
+at run time.
+
+What this changes for you:
+
+- `Channel` is new (`dialog_repository::Channel`): `send`,
+  `send_changes`, `entity`, `sequence`, `revision` (a hash over the
+  sequence of the last tick that landed), `is_waiting`.
+- `Stack::channel(&entity)` is new: it returns the stack's channel of
+  that name, the loopback for `control_layer()`, creating one if the
+  stack holds none and asserting `<entity> dialog.layer/type channel:`
+  into `session:` as one instant. It returns `Result<Channel,
+  CommitError>`: a name under `memory:` or `session:` is refused with
+  `CommitError::InvalidPlacement` and nothing is written. `layers()`
+  lists a channel it created after the durable layers.
+- `Stack::layer(&entity)` returns `Option<Layer<'_>>` instead of
+  `Option<&Ephemeral>`: `Layer::Ephemeral(&Ephemeral)` for `session:`
+  and the declared session layers, `Layer::Durable(Durable)` (its
+  `name()` and the `revision()` it stands at) for `memory:` and the
+  declared durable layers, and `Layer::Channel(Channel)` for
+  `control:` and every other channel. `Layer::ephemeral()`,
+  `durable()` and `channel()` pick one out.
+- A channel is no longer required to be named `control:<name>`: any
+  entity outside `memory:` and `session:` names one. A declared
+  channel named under either is refused at open with
+  `CommitError::InvalidPlacement`.
+- The rows-until-retracted model is gone: a channel's rows are no rows
+  of any layer after their tick, a query through the stack reads none
+  of them, and a consumer retracts nothing. A reader built late reads
+  every tick the log holds, once.
+- `Arrivals` keeps its API (`poll`, `next`, `rows`, `next_rows`,
+  `layer`); it reads the channel's log from its position, and
+  `Stack::arrivals` returns `None` for a layer that is no channel.
+- `Stack::invoke` and `Invocation::invoke` (`Invocation::dispatch`
+  before #816) send into `control:`,
+  and every dispatch takes what each channel's outside end was sent;
+  what a caller observes of `invoke` is unchanged. A dispatch that
+  fails puts back what the channels were sent, not its own commands.
+- A channel's `dialog.layer/revision` row in `session:` names the
+  channel's revision, the base58 of the hash over its last tick's
+  sequence, and moves when a tick lands in it.
+
+Why: a channel is state of one tick with a transport, so the place it
+lives is a layer with two ends, and the simplest one: nothing to
+rewind, nothing to retract. A log read from each reader's own position
+gives a reader that was not reading every tick, which the retained
+rows gave before, without keeping rows in a layer a query reads.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: a channel's declaration is still
+  `dialog.layer/type channel:` on its entity, and its rows were never
+  stored. A schema declaring `control:<name>` channels keeps working.
+  A schema declaring a channel under `memory:` or `session:`, which no
+  earlier build could have used as a channel either, now fails the
+  open with `CommitError::InvalidPlacement`.
+
+### A durable layer is the tree the primary points at, with no head of its own, and a pull merges a layer two replicas moved
+
+[#814](https://github.com/dialog-db/dialog-db/pull/814), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+point 4).
+
+A durable layer `memory:<name>` was a branch with a head of its own
+beside the primary's pointer to it, so the two could disagree: a
+partial publish moved one and not the other, and a pull could race
+them. Now the primary's pointer is the only head. The layer is the
+tree named by two facts of the layer's own entity in the primary,
+`memory:<name> dialog.branch/revision <revision entity>` and
+`memory:<name> dialog.branch/tree "<tree hash, base58>"`, written
+together under `last`. A dispatch that writes into the layer mints
+the layer's next tree on the one the primary pointed at, uploads its
+blocks to the local store, and names it in the same commit of the
+primary: one compare-and-swap, the primary's. A lost one leaves the
+minted tree an orphan nothing names, and the dispatch re-runs from the
+new head, reading the layer where that head points it. The pointer is
+keyed by the layer's entity because a branch entity is derived from
+the replica, so a pointer keyed by one is never the same cell on two
+replicas.
+
+`Stack::sync` pulls and pushes the primary alone. Its pull downloads
+the trees the incoming primary points the layers at, to the
+`Download` given, before the primary's head moves, as it downloads
+the primary's own tree, so a replica that goes offline after a pull
+reads every layer. When the pull merged two primaries that each moved
+a layer, the pointer cells hold a claim of each; rather than `last`
+picking one, the sync replays this replica's changes to the layer
+since the two met onto the other's tree, as a branch pull rebases
+local commits: our writes win on the cells they touch (a write that
+succeeded a cell's claims replaces theirs there), theirs stand
+elsewhere. The merged tree is minted locally and the primary pointed
+at it alone. The push uploads the pointed trees' blocks before the
+primary's head.
+
+What this changes for you:
+
+- `LayerType::Branch` carries no entity: declare a durable layer with
+  `LayerDeclaration::new("memory:notes".parse()?, LayerType::Branch)`,
+  which writes `dialog.layer/type branch:` alone. `LayerType` is
+  `Copy`. `LayerType::branch()` is gone.
+- `Stack::durable(name)` and `Stack::durables()` are gone: a durable
+  layer has no branch to hand out, and no upstreams of its own; the
+  primary's `dialog.branch/pull` and `dialog.branch/push` carry it.
+  `Stack::layers()` still lists it, and `Stack::layer` still answers
+  `None` for it.
+- `Stack::branch_of(name)` answers for `memory:` alone; `None` for a
+  durable layer.
+- The `dialog.layer/branch` refusal of a durable layer naming another
+  branch's entity, and the acceptance of one naming another replica's,
+  are gone with the fact. A durable layer named outside `memory:`
+  still fails the open with `CommitError::InvalidPlacement`.
+- A write into a durable layer no longer commits on a branch `<name>`:
+  no such branch is opened or written. A rule premised on the layer's
+  `dialog.branch/revision` reads the fact of the layer's entity.
+- A `Stack::query` reads a durable layer at the tree the primary
+  pointed it at when the stack last read the primary (at open, after
+  each dispatch and sync through it, and before a dispatch that finds
+  the primary moved). A transaction from `Stack::transaction` whose
+  primary moved since the stack last read the pointers is refused with
+  `PublishError::VersionMismatch`, after reading them again, so its
+  retry builds on fresh ones.
+- `SyncError::Upstreams` and `SyncError::Pull` and `SyncError::Push`
+  now speak of the primary alone; `SyncError::Commit` also covers
+  minting a merged layer.
+- The corpus write gate admits `dialog.branch/tree` from an application
+  write, beside `dialog.branch/revision`.
+
+Why: two heads for one layer can disagree, and nothing can say which
+is right; one head cannot. A pull of the primary already downloads
+what it adopts before moving, so the trees it points at are part of
+that download, and a merge of the primary that leaves two pointers has
+to rebase the layer the way a branch pull rebases commits, not drop
+one replica's writes.
+
+#### Compatibility and migration
+
+- A primary written by an earlier pre-release build of this line
+  holds `dialog.branch/revision` facts of its layer branches' entities,
+  and those branches have heads. This build reads the pointer facts of
+  the layer's own entity and ignores the branch heads: such a primary
+  opens its durable layers empty until a dispatch writes into them,
+  and the rows on the old branches stay there, unread. Nothing is
+  rewritten. A build from before this change refuses a durable layer
+  declared by this one, which names no `dialog.layer/branch`, with
+  `CommitError::InvalidPlacement` when it opens a stack.
+- Nothing already released is affected: no release carries durable
+  layers.
+
+### A `Session` is a `Stack`, every stack lists and records its three implied layers from open, and a layer is declared by its type
+
+[#813](https://github.com/dialog-db/dialog-db/pull/813), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+points 1 to 3).
+
+The layers an embedder opens on a branch are a `Stack`, opened with
+`branch.stack()`: `schema::Session` (`db:session`) already names
+something else. Every stack has three layers whatever its schema
+says, `memory:` (the primary), `session:` (its own) and `control:`
+(the loopback), and now lists all three; their revision rows exist
+from the moment it opens, written with the facts that describe the
+three layers. A layer is declared by its type, a bare-scheme entity,
+`dialog.layer/type session:`, `channel:` or `branch:`, in place of
+`dialog.layer/store "memory"`, `"control"` or `"durable"`. A branch's
+revision is the meta branch's `dialog.branch/revision`, naming the
+revision entity: the primary's row in `session:` is that attribute of
+the primary's branch entity (the branch metadata's row, since the entry
+above that separates `session:` from `Branch::overlay`), the one the meta branch derives from
+`(replica, name)`, where it was `dialog.layer/revision` of `memory:`
+with the tree's hash as text. A durable layer's pointer facts are the
+same attribute of the layer's own entity (see the entry above).
+
+What this changes for you:
+
+- Renamed: `Session` to `Stack`, `OpenSession` to `OpenStack`,
+  `OpenSessionEnv` to `OpenStackEnv`, `SessionEnv` to `StackEnv`,
+  `SyncSession` to `SyncStack`, `Branch::session()` to
+  `Branch::stack()`, and the module `session` to `stack`
+  (`dialog_repository::stack::invoke`, `stack::arrivals`,
+  `stack::sync`). `Store` is `LayerType`: `Store::Memory` is
+  `LayerType::Session`, `Store::Control` is `LayerType::Channel`, and
+  `Store::Durable` is `LayerType::Branch`. `LayerDeclaration`'s
+  `store` field is `kind`.
+  `CommitError::UnboundLayer` says "stack" where it said "session".
+- `LayerDeclaration::new(layer, kind)` writes `dialog.layer/type`, under
+  `last`. `layer_type_attr()` and `layer_branch_attr()` are new, the
+  latter naming the primary's branch entity of `memory:`;
+  `LayerType::entity` is the type's bare-scheme entity. `dialog.layer/store` is no longer
+  read: a schema declaring its layers that way opens a stack with the
+  three implied layers alone.
+- `Stack::branch_of(layer)` is new: the branch entity of `memory:`.
+- `Stack::layers()` lists `memory:`, `session:` and `control:` first,
+  then the session layers and channels the schema declares, then its
+  durable layers. It used to list `session:` first and leave the other
+  two out.
+- Opening a stack writes, as one instant of `session:`, the revision
+  row of the primary, `session:`, `control:` and each declared memory
+  layer, and the implied layers' facts: `control: dialog.layer/type
+  channel:`, `session: dialog.layer/type session:`, `memory:
+  dialog.layer/type branch:` and `memory: dialog.layer/branch <the
+  primary's branch entity>`. Each stack writes them into a `session:`
+  of its own, which a second stack on the branch does not share. A
+  rule premised on a layer's revision therefore no longer fires on a
+  stack's first dispatch; it fires when the layer moved since the row
+  was written.
+- The primary's revision row is `<the primary's branch entity>
+  dialog.branch/revision <the revision's entity>` in `session:`, the
+  branch metadata's row of that cell, in place of `memory: dialog.layer/revision "<tree, base58>"`, and the
+  stimulus a dispatch takes of it changes the same way. A memory
+  layer's row (`session:`, `control:`, a declared session layer or
+  channel) stays `<layer> dialog.layer/revision "<chain hash,
+  base58>"`: an in-memory layer's revision has no entity form yet.
+- A durable layer's pointer fact in the primary is
+  `dialog.branch/revision` naming the revision's entity, in place of
+  `memory:<name> dialog.layer/revision "<tree, base58>"` (its form is
+  in the entry above). `session:` holds no row for a durable layer any
+  more: the primary's pointer fact is the record. A rule premised on a
+  durable layer's revision reads the pointer fact.
+- `control:` is recorded like any memory layer, after the dispatch's
+  commands land in it: a dispatch whose commands land there rewrites
+  `control:`'s row, as one instant of `session:`.
+- `OpenStackEnv` also requires `Provider<Identify>`: the stack derives
+  the primary's branch entity from the operator's profile when it
+  opens. Every env that attests already provides it.
+- The corpus write gate admits `dialog.branch/revision` from an
+  application write, as it admits `dialog.layer/*`: the pointer fact is
+  written by the stack's dispatch.
+
+Why: the thing an embedder opens is a stack of layers, and naming it
+a session collided with the session the schema already has. A layer's
+revision row is where it stands, so it exists as soon as the stack
+does. A revision is the meta branch's `dialog.branch/revision`, the
+fact a pull and a push already read, rather than a second vocabulary
+of layer facts and base58 text.
+
+#### Compatibility and migration
+
+- The `dialog.layer/store` declarations and the `dialog.layer/revision`
+  pointer facts that earlier pre-release builds of this line stored
+  are no longer read: a primary holding them opens a stack with the
+  three implied layers alone, and its durable layers' pointer facts
+  are written afresh under `dialog.branch/revision` by the next
+  dispatch that moves them. Re-declare the layers with
+  `LayerDeclaration` to keep them. Nothing is rewritten. A build from
+  before this change reads the new declarations as facts it does not
+  understand and opens no layer from them.
+- Nothing already released is affected: no release carries layers, and
+  0.4.0 and earlier read every fact this change writes as an ordinary
+  one. The rows a stack writes into `session:` are process-local and
+  never stored or synced.
+
+### A stack writes a layer's revision row only when the layer moved, and `Stack::sync` writes the rows its pulls moved
+
+[#810](https://github.com/dialog-db/dialog-db/pull/810).
+
+A stack's own layer, `session:`, holds a revision row for each of its
+layers. Every dispatch used to rewrite all of them
+after it published, so `session:` minted an instant on every dispatch
+even when no layer had moved, and its own row moved every time, since
+the recording itself moved it. Now a dispatch writes only the rows of
+the layers whose revision is not the one `session:` holds, and writes
+nothing when none moved. Writing the rows is no longer a move of
+`session:`: its own row names the revision it stood at before the
+recordings that followed its last change, and moves only when
+something was written into it. `Stack::sync` did not write the rows
+at all; it now writes those its pulls moved, and after its pushes
+those the pushes moved, through a dispatch that takes them as
+stimulus.
+
+What this changes for you:
+
+- A dispatch that writes nothing into `session:` and moves no other
+  layer (an empty transaction) writes no revision row and mints no
+  instant in `session:`. One that moves the primary alone rewrites the
+  primary's row alone. A command landing in `control:` moves that
+  layer, so its row is rewritten (see the entry above).
+- A rule premised on the `dialog.layer/revision` of `session:` fires on
+  a stack's first dispatch and when something wrote into `session:`
+  outside a dispatch, no longer on every dispatch after the first.
+- A rule premised on the primary's `dialog.branch/revision` in
+  `session:`, or on a durable layer's pointer fact, fires when a
+  `Stack::sync` pull moved it, as it does when a commit did. A sync that moves nothing dispatches nothing.
+
+Why: a revision row says where a layer stands, so it changes when the
+layer moves, by a commit, a pull or a push, and not on every dispatch.
+A reader of `session:`'s instants, and a rule premised on a revision,
+then sees one change per move.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten: the rows
+  live in `session:`, which is process-local. `session:` mints fewer
+  instants.
+
+### A stack's transaction lands its commands when it publishes, a stack opens through a read-only environment, and a whole layer is a legal scan
+
+[#809](https://github.com/dialog-db/dialog-db/pull/809).
+
+Three gaps an embedder met moving onto stacks. A transaction a
+stack hands out (`Stack::transaction`), committed and published
+through the transaction API, never landed what it dispatched in
+`control:`: only `Invocation::perform` did. Now its publish lands them,
+as an invocation's does. Opening a stack asked for an environment
+that can commit, though opening only reads the primary and opens
+branches; it now asks for what a read needs. And a scan whose every
+term is a variable but a constant `in` was refused as an empty
+selector; a constant layer now constrains a scan, so it reads every row
+of that layer, and `Arrivals` can yield the arrived facts themselves,
+without a query.
+
+What this changes for you:
+
+- A transaction from `Stack::transaction`, published with
+  `.commit().publish().perform(env)` or staged and then
+  `TransactionBatch::publish`, lands the commands it dispatched (with
+  `Transaction::dispatch`, or written `.at(control_layer())`) and the
+  ones its rules dispatched in the stack's `control:` once the publish
+  wins, as one instant gone in the next, and wakes every `Arrivals`
+  waiting. A publish that loses its compare-and-swap lands nothing. It
+  is still not re-run on a moved head; `Stack::invoke` and
+  `Stack::transact` are.
+- `OpenStackEnv` is new: the providers opening a stack and reading
+  through it need, with nothing that commits. `OpenStack::perform`,
+  `Arrivals::poll` and `Arrivals::next` are bounded on it rather than on
+  `StackEnv`, which now extends it with what a commit needs (`Attest`,
+  `Publish`, `Import`, blob import and size). Every environment that
+  met the old bounds meets the new ones.
+- A scan with a constant `in` and every other term a variable, an
+  `AttributeQuery` with `.with_layer(Term::from(layer))`, reads every
+  row of that layer: of a memory layer, `control:` or a channel, its
+  rows alone; of the primary or a durable layer, the whole tree, which
+  is legal and costs what reading the whole tree costs. Before, it
+  failed with `EvaluationError::EmptySelector`. A scan with nothing
+  constant at all, the layer included, still does.
+- `Selector::only_in(layer)` is new: a selector the layer alone
+  constrains. A tree reads it as its whole entity index.
+- `Arrivals::rows` and `Arrivals::next_rows` are new: every fact the
+  layer's assertions since the last read assert, each once, oldest
+  first, with no query; `Stack::arrivals_rows(layer)` builds a reader
+  for them. Rows and `poll` read the same arrivals, so a row one yields
+  the other does not. `Arrivals` takes its query type as a default
+  parameter, `Arrivals<Q = ()>`.
+
+Why: an embedder resolves its commands with its own transactions, so
+the commands a stack's transaction dispatched must reach the
+stack's providers whichever way it was published; it opens branches
+with an environment that only reads, and the stack beside them needs
+no more; and its providers tell a command apart by the attributes its
+entity carries, so they need every row of the arrived instant, not one
+concept's.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten:
+  `control:` is process-local, and a scan of a whole layer reads what
+  is already stored.
+
+### A durable layer is a tree the primary points at, and `Stack::sync` carries it with the primary
+
+[#808](https://github.com/dialog-db/dialog-db/pull/808), argued in
+[notes/layers.md](./notes/layers.md) (points 1, 11 and 13, and
+"Durable layers" under "Open"); the model is the one
+[#814](https://github.com/dialog-db/dialog-db/pull/814) settled (see
+the first entry above).
+
+A stack's layers were all in memory. A layer can now be durable,
+declared in the primary as `memory:<name> dialog.layer/type branch:`
+(`LayerType::Branch`): a tree the primary points at. A stack reads it
+as a line whose rows bind `in` to `memory:<name>`. A write `in:
+memory:<name>`, a rule head whose descriptor names it, and a write
+while it is selected are minted as the layer's next tree as part of
+the dispatch, and nothing of them lives in memory. The primary records
+the tree each durable layer stands at as pointer facts of the layer's
+entity, `dialog.branch/revision <its revision's entity>` and
+`dialog.branch/tree "<its tree, base58>"`, under `last`, written by
+the dispatch that moved the layer, so the primary's history says which
+tree of each layer goes with each of its own, and the primary's
+compare-and-swap is the layer's. `Stack::sync` pulls the primary,
+downloading the trees it points at, and pushes it, uploading them.
+
+What this changes for you:
+
+- `LayerType::Branch` is new; `LayerDeclaration::new("memory:notes".parse()?,
+  LayerType::Branch)` declares one. A durable layer named under another
+  store (`session:notes`) or with no name (`memory:`) fails the
+  stack's open with `CommitError::InvalidPlacement`.
+- `Stack::layers` lists the durable layers after the memory layers.
+  `Stack::layer` answers `None` for a durable layer, which holds no
+  memory cell.
+- A dispatch that writes a durable layer publishes on the primary,
+  with the pointer facts, even when it wrote nothing else there. A
+  rule premised on a durable layer's pointer fact fires when the
+  dispatch that moved the layer writes it.
+- `CommitError::UnboundLayer` refuses a write into `memory:<name>` the
+  primary does not declare, before anything is minted.
+- `Stack::sync(download)` and `SyncStack`, `SyncEnv` and
+  `SyncError` are new. A sync names its `Download`, as every pull does.
+- A query through a stack, `Stack::query`, a transaction through
+  it, and `Stack::subscribe` read the durable layers too. A
+  subscription re-evaluates when a durable layer moved.
+
+Why: a device-local or replicated table beside the primary is a layer,
+not a separate mechanism, and its history has to be tied to the
+primary's, the way a submodule pointer ties a submodule to its
+superproject, so one revision of the primary names the whole
+composite.
+
+#### Compatibility and migration
+
+- `dialog.layer/type branch:` and the pointer facts
+  `dialog.branch/revision` and `dialog.branch/tree` of the layer's
+  entity are new stored facts in the primary, replicated with it; the
+  layer's rows are in the tree they name, synced with the primary.
+  0.4.0 and earlier know no layer declarations and read them as
+  ordinary facts, and read the primary without the layer's rows.
+  Nothing already stored is rewritten, and nothing has to be run.
+- What a durable layer syncs to is the primary's upstreams. The
+  declaration carries no upstream.
+
+### `control:` is the layer a command lives in for one tick, a channel is a layer whose rows live one tick, and a provider reads what arrives in either
+
+[#807](https://github.com/dialog-db/dialog-db/pull/807), argued in
+[notes/layers.md](./notes/layers.md) (points 7 to 18, and "Open").
+
+A command used to be a fact apart: dispatched into a transaction, read
+by the rules of one tick, then kept by the stack in a command feed
+that handlers and readers drained. It is now a row of a layer.
+`control:`, the loopback every stack has, holds what a dispatch
+writes into it for one tick: a command dispatched, a write
+`.at(control_layer())`, and a rule head landing there. Each is the
+next tick's stimulus, read as a row of `control:`, and is gone after
+that tick. Once a dispatch has published, its commands stand in the
+stack's `control:` layer for one instant and leave it in the next, so
+the layer's instants are every command, in order, once, and nothing of
+them stays. A channel is a layer for a consumer outside the invoke
+loop or the process; since #815 (see its entry above),
+its rows live one tick too, and what a dispatch writes into it lands
+on its outside end as one tick of a log every reader reads in full. A
+provider reads either through `Stack::arrivals`, which yields each
+row of its query that arrived, once, and answers by invoking.
+
+What this changes for you:
+
+- A rule premise whose descriptor names `in: control:` reads the
+  tick's commands alone; one binding `in` to a variable binds a
+  command's to `control:`. A transaction's query reads its dispatched
+  transients as rows of `control:` too. A premise naming no layer reads
+  them as before.
+- A rule head cell whose descriptor names `in: control:`, and a write
+  `.at(control_layer())`, are dispatches: the next tick's stimulus, in
+  no layer and never committed, whether or not the concept carries the
+  `dialog.concept/transient` marker. A command head (one whose concept
+  carries the marker) lands its cells that name no layer in `control:`
+  as before, and now lands a cell that names another layer, a channel
+  say, in that layer, where before the layer it named was ignored.
+- `LayerType::Channel` is new: `LayerDeclaration::new(entity,
+  LayerType::Channel)` declares a channel, stored as `dialog.layer/type
+  channel:`. A stack builds it as a `Channel` (see #815 below):
+  a write into it is the next tick's stimulus, read as a row of the
+  channel, and lands on its outside end once the dispatch has
+  published. Declaring bare `control:` builds nothing apart.
+- `Stack::arrivals(layer, query)` and `Arrivals` are new: a reader
+  of what arrives in `control:` or a channel. `poll` yields the rows of
+  the query the ticks landed since the last read make, evaluated over
+  those rows alone; `next` waits for the stack's next dispatch while
+  there are none. `Stack::layer(&control_layer())` hands out the
+  loopback, which holds nothing between dispatches.
+- `Stack::commands()`, `Commands`, `Dispatched`, `Lost` and
+  `FEED_CAPACITY` are gone: read `control:` with
+  `Stack::arrivals(&control_layer(), query)` instead, or a channel with
+  `Stack::arrivals(&channel, query)`. A reader loses nothing: the log
+  keeps every tick some reader has not passed.
+- `Handler`, `HandlerError`, `Answering`, `Stack::handle` and
+  `MAX_ANSWERS` are gone: a provider reads its commands with
+  `Stack::arrivals` and answers with `Stack::invoke`, a dispatch
+  with its own compare-and-swap. `Invocation::perform` publishes once
+  and no longer chains answers. Since #816 a provider is registered
+  with `Stack::provide` and run by a report's effect, a step apart
+  from the invocation; `Stack::arrivals` stays for a consumer that
+  reads the log itself.
+- `CommitError::AnswerDivergence` and `CommitError::Handler` are gone:
+  nothing runs an answer inside an invocation, so neither can happen.
+  A provider's own failure is the provider's to report.
+
+Why: a command is state of one tick, so the place it lives is a layer,
+and observing it is reading that layer, not a mechanism apart. A
+channel's log keeps every tick for a reader that was not polling, where
+a view polled after a one-tick row came and went sees nothing. Commands reach `control:`
+only after their dispatch has published, so a dispatch re-run from a
+moved head re-runs no effect, and an answer needs no isolation of its
+own.
+
+#### Compatibility and migration
+
+- A channel's declaration, `dialog.layer/type channel:` on the
+  channel's entity, is a new stored value, replicated with the
+  primary like every layer declaration. 0.4.0 and earlier know no
+  layer declarations and read it as an ordinary fact. A build of this
+  release line from before this change opens no stack on a primary
+  that declares a channel: it refuses the declaration with
+  `CommitError::InvalidPlacement`. Nothing already stored is
+  rewritten, and nothing has to be run.
+- Commands were never stored and still are not: `control:` and every
+  channel are process-local, as memory layers are.
+
+### A memory layer mints one instant per tick that changed it
+
+[#805](https://github.com/dialog-db/dialog-db/pull/805), argued in
+[notes/layers.md](./notes/layers.md) (point 12).
+
+A dispatch through a stack runs in ticks: the transaction's own
+writes are the first, and each induction round after it is one more.
+A memory layer used to take a dispatch's writes as one instant holding
+the merged result, so a reader of its instants could not see the states
+the rules saw in between. It now takes each tick's writes as an
+instant of its own, in tick order. The instants are still minted only
+once the primary's commit publishes: a dispatch is one unit of
+publication, and a refused publish shows in no layer.
+
+What this changes for you:
+
+- A dispatch whose rules write a memory layer in several rounds mints
+  that many instants there, and `Ephemeral::since` yields each
+  intermediate state in order. A tick that writes no layer mints
+  nothing in it.
+- `TransactionBatch::shares` returns the shares tick by tick,
+  `&[Vec<(Entity, Changes)>]`, one entry per tick that wrote a layer,
+  in place of one merged entry per layer.
+- An induction round now reads what the rounds before it wrote into a
+  layer, as that layer will hold it once the ticks land: a rule
+  premised on a memory layer's row fires on an earlier round's head
+  there, and a head under `last` succeeds the layer's own row of the
+  cell. Before, a round read only the layer as the dispatch began, so
+  such a rule did not fire within the dispatch.
+- The transaction's own writes into a layer are read the same way and
+  are stimulus of the first round: a rule premised on the layer's row
+  fires on them in the same dispatch. Before, they were routed away
+  before induction and no rule saw them until the next dispatch.
+- A write under `last` into `session:`, the transaction's own or a
+  rule's head, succeeds the row the layer already holds within the
+  dispatch, so a chain of rules over `session:` runs as one over a
+  declared layer does. Before, the held row stood above the write and
+  the next round read it instead.
+- A maintained subscription over a stack reads the several instants
+  in order and still equals a fresh evaluation.
+
+Why: a subscriber, or a rule premised on a layer's revision, should see
+the ticks the rules ran through, so a maintained view equals a fresh
+evaluation after any sequence of ticks.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten: memory
+  layers are process-local. A stack's memory layers mint more
+  instants per dispatch, which a reader pinned to an older sequence
+  sees as more instants, not a different state.
+
+### Every stack has its own layer, `session:`, which records the layers' revisions and which layer is selected
+
+[#803](https://github.com/dialog-db/dialog-db/pull/803), argued in
+[notes/layers.md](./notes/layers.md) ("The `session:` layer").
+
+A stack now holds its own layer, `session:`, whether or not the
+primary's schema declares it: a process-local store of the stack's
+own, apart from `Branch::overlay`. After each dispatch publishes, the
+stack writes into it, under `last`, the `dialog.layer/revision` hash
+of the instant chain of each declared memory layer and of `session:`
+itself; the primary's revision is read there too, as the branch
+metadata's `dialog.branch/revision` of its branch entity. Of the same rows, as the layers stood when
+the dispatch began, those the stack has not recorded are the
+dispatch's stimulus, so a rule premised on a layer's revision fires
+when the layer moved (and on the first dispatch, which finds nothing
+recorded). A row
+`session: dialog.session/layer <layer>` selects a layer: while one is
+selected, a write with no layer named, and a rule head whose descriptor
+names none, lands in it instead of the primary. Machinery under
+`dialog.` (rules, layer declarations, the revision rows) never follows
+the selection.
+
+What this changes for you:
+
+- `Stack::layers()` lists `session:` first, and `Stack::layer` of
+  `session_layer()` returns the stack's own store. A declaration of
+  `session:` in the schema no longer builds a second store.
+- `Stack::select(Option<Entity>)` and `Stack::selected()` are new.
+  A selection takes effect from the next dispatch; selecting a layer the
+  stack does not hold makes a commit that would land a write in it
+  fail with `CommitError::UnboundLayer`, and nothing is written.
+- `revision_attr()` (`dialog.layer/revision`) and `selection_attr()`
+  (`dialog.session/layer`) are new.
+- Every dispatch through a stack now mints one instant in `session:`
+  and runs induction even when it writes nothing else. A commit on a
+  branch outside a stack writes no revision rows and ignores the
+  selection.
+
+Why: the stack's own layer is addressed like any other layer, so a
+layer's revision becomes a row a rule or a subscription
+reads like any other, and the layer a write lands in becomes data a
+rule or the embedder sets, the way an image editor's stroke lands on
+the selected layer.
+
+#### Compatibility and migration
+
+- The `session:` rows are process-local: they live in the stack's own
+  store, which is never committed or synced. Nothing stored or synced
+  changes, and nothing is rewritten.
+
+### A stack's handlers answer a dispatch's commands
+
+[#797](https://github.com/dialog-db/dialog-db/pull/797), argued in
+[notes/layers.md](./notes/layers.md) ("Handlers").
+
+A command is scratch: it lives one tick and lands on no layer, so
+nothing could react to it with an effect. Now a stack holds
+handlers (`Stack::handle`), built into dialog or registered by the
+embedder through the same `Handler` trait. Once a dispatch has
+published, every command of it, the one invoked and the ones its rules
+dispatched in any tick, is offered to each handler; what they answer is
+dispatched as the next tick's stimulus, where a rule captures what it
+wants of the answer on the layer its attribute is placed on, and a
+subscription through the stack sees the capture. The chain ends when
+no handler answers.
+
+What this changes for you:
+
+- `Handler`, `HandlerError`, `Answering` (a handler over a function) and
+  `Stack::handle` are new. A handler sees commands as `Changes` and
+  answers with `Changes`; an answer names the command it answers by that
+  command's entity.
+- `Invocation::perform` now runs the handlers after each publish and
+  chains their answers, so one `invoke` can publish several times. It
+  still returns the head the last dispatch left the primary at.
+- `Stack::commands()` is new: a reader of the stack's command feed,
+  the control channel. Each `poll` yields every dispatch since the last,
+  in order and once, as `Dispatched { sequence, revision, commands }`.
+  A consumer outside the stack's process, or one that answers in its
+  own time, reads it and answers by invoking through the stack; the
+  feed holds `FEED_CAPACITY` dispatches, and a reader it moved past is
+  told with `Lost` and starts over with `catch_up`.
+- `CommitError::AnswerDivergence` is new: handlers that keep answering
+  are stopped after `MAX_ANSWERS` dispatches. `CommitError::Handler` is
+  new: a handler's failure fails the invocation. Both come after the
+  dispatch they follow has published; what it wrote stands.
+- A stack with no handler behaves as before.
+
+Why: an embedder's command handlers (tonk's command providers) and
+dialog's own effects, such as fetching a tree node a page asked for,
+need one way to observe a command and answer it, and the answer has to
+enter the stack as a fact on a pinned layer rather than as something
+a query could observe outside any revision. Running handlers after the
+publish keeps a dispatch a function of head and stimulus, so a lost
+compare-and-swap re-runs no effect.
+
+### A row has a layer, `in`, and a stack reads and writes its layers as one
+
+[#795](https://github.com/dialog-db/dialog-db/pull/795) and
+[#800](https://github.com/dialog-db/dialog-db/pull/800), argued in
+[notes/layers.md](./notes/layers.md).
+
+Where a fact lies is now a dimension of the row, beside `the`, `of` and
+`is`: its layer, `in`. An attribute descriptor may name it (`in:`), a
+constant layer or a variable a concept field binds; a statement may
+name it for every fact it writes (`Statement::at`). A read with `in`
+unbound reads every layer and binds each row's layer as `in` in the
+match, `memory:` for the primary's rows; one with `in` bound reads that
+layer alone; a write lands in the layer named, the primary with none. A
+claim carries no layer: a reader that asks where a row lies names `in`
+and reads the binding. `LayerDeclaration` (`dialog.layer/type`) declares a layer
+beside the primary, backed for now by memory. `Branch::stack()` opens
+a `Stack` over the primary: it mints a memory layer for every declared
+layer, reads the composite, and commits a transaction by routing each
+write to its layer. `Stack::invoke` drives it: one dispatch is one
+publication, re-run from the new head when the head moved under it.
+The primary's share is minted and published as before; a layer's share
+is applied only after the publish wins its compare-and-swap, so a lost
+head leaves no layer changed. A rule head whose descriptor names a
+layer lands there, keeping its pick, and succeeds no claim of the
+primary. The layers every stack has are named: `memory:` is the
+primary, `session:` the stack's own process-local store, `control:`
+the loopback a command lands in.
+
+What this changes for you:
+
+- `AttributeDescriptor::in_layer` and `layer`, the descriptor's `in` on
+  the wire, `Attribution::layer`, and `Statement::at` are new. `Claim`
+  is unchanged: the layer a row was read from is the match's `in`
+  binding, bound only when the scan names `in:`. `AttributeQuery::with_layer` reads a layer by a term.
+  `Selector::in_layer` reads one layer of a store that reads several,
+  and `SelectIn` reads every row with the layer it came from, for a
+  scan that binds `in`; a `Select` reads the rows bare, as before, and
+  a `FactView` carries no layer.
+- `Changes` keeps writes into layers apart (`associate_in`,
+  `dissociate_in`, `take_shares`, `iter_in`, `into_layer`), serialized
+  under an `in` key beside `facts` and `assets`. `into_instructions`
+  yields the writes bound for the primary alone.
+- `Branch::stack()`, `OpenStack::declare`, `Stack::{query,
+  transaction, layer, layers, declare, declared}` are new. A branch
+  read or committed directly, with no stack, behaves as before, and
+  a write `.at(session:)` through it lands in the branch's overlay
+  (through a stack, in the stack's own `session:`).
+- `Stack::invoke(command)` and `Stack::transact(facts)` drive a
+  session (since #816, `Stack::transact` takes a closure and
+  `Stack::assert(facts)` takes the facts): each returns an
+  `Invocation` whose `perform` commits and publishes as one unit, and re-runs the whole dispatch from the new
+  head when the publish loses its compare-and-swap, up to `MAX_RERUNS`
+  times before reporting `PublishError::VersionMismatch`. A dispatch
+  that writes only to memory layers publishes nothing and returns the
+  unchanged head.
+- `Stack::subscribe(query)` is new: a standing query over the primary
+  and every layer the stack holds. A commit to the primary, a share a
+  dispatch lands in a memory layer, and a write to the primary's session
+  overlay each propagate as a result delta on the next poll, maintained
+  incrementally from the layer's instants as an overlay change is. A
+  maintained subscription through a stack equals a fresh evaluation
+  after any sequence of dispatches (pinned by a seeded churn test).
+- `CommitError::UnboundLayer` is new: a write named for a layer the
+  stack does not hold is refused before anything is settled or
+  minted. `CommitError::InvalidPlacement` is new: a layer declaration
+  whose value names no store is refused.
+- The corpus write gate admits `dialog.layer/*` from an application
+  write, as it admits `dialog.rule/*`.
+
+Why: local state that moves at frame rate, replicated state and
+ephemeral state peers learn of are different layers, not different
+kinds of fact. A row's layer being a term lets one set of rules act
+across layers and choose where a write lands from data, the way a
+stroke lands on the layer an editor's tool is on, and lets a stack
+recreate every layer from the primary's declarations when it opens.
+
+#### Compatibility and migration
+
+- A replica that declares no layer stores and syncs exactly what it did.
+  Layer declarations are ordinary facts under `dialog.layer/`; an older
+  release reads them as facts it does not understand and ignores them.
+  A batch of `Changes` that writes into a layer serializes with an `in`
+  key an older release does not read; one that writes into none
+  serializes as before. Nothing is rewritten.
 
 ### A rule that leaves a premise's subject unnamed fires for the entity a commit wrote
 
@@ -192,14 +1679,12 @@ transaction again computes them over the head that won.
 `Chronicle` provides the memory effects (`Resolve`, `Publish`,
 `Retract`, `List`), so a `Space` can name it as its memory as well as its
 archive: `Space<Chronicle, Chronicle, ...>` keeps a space's blocks and
-its cells, branch heads among them, in one file. A cell is kept as SQLite
-keeps a commit in its write-ahead log: each update appends a record with
-the cell's value, in the writer's turn, and the cells' own index files the
-cell at its newest record. The record names the writer's extents that
+its cells, branch heads among them, in one file. A cell is kept as a
+log: each update appends a record with the cell's value, in the writer's
+turn, and the cells' own index files the cell at its newest record. The record names the writer's extents that
 still hold blocks, and recovery takes it as whole only with those
 extents' frames, so a power loss can undo the last updates (synced at the
-next sync point, as SQLite's `synchronous=NORMAL`), never leave a head
-naming what is gone.
+next sync point), never leave a head naming what is gone.
 
 What this changes for you:
 
@@ -210,9 +1695,8 @@ What this changes for you:
   cell already holds succeeds whatever edition the writer expected, as on
   every memory store.
 - A cell's update takes the writer's turn for the append of one small
-  record, as a SQLite commit takes its write lock: an update waits while
-  another process holds the turn, for its own appends' laying out and
-  writing. Splitting and encoding an append, folding extents in and
+  record: an update waits while another process holds the turn, for its
+  own appends' laying out and writing. Splitting and encoding an append, folding extents in and
   syncing are done before or after the turn, not in it.
   A `Resolve` takes no lock, and reads the newest update another process
   made.
@@ -386,8 +1870,11 @@ What this changes for you:
   (opening a `Chronicle` creates one). With `remove_source` it deletes
   the `fs` archive after, unless a block's bytes did not match its name
   or a file in it was not a block (`chronicle::strays`): then it fails and
-  keeps the `fs` archive. It is a conversion an
-  application opts into, not an upgrade every replica needs. Every block
+  keeps the `fs` archive. It moves blocks only: a space's cells, branch
+  heads among them, stay in its `memory` directory, so a migrated space
+  names `Chronicle` as its archive and not as its memory. It is a
+  conversion an application opts into, not an upgrade every replica
+  needs. Every block
   reads back as the bytes it was; nodes in an older layout are kept whole.
   `dialog-migrate [--dry-run] [--step <id>] [--remove-source] <replica>`
   runs the steps; `--source`, `--target` and `--catalog` move one store.

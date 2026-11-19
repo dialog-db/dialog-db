@@ -17,7 +17,8 @@ pub use estimate::Estimate;
 
 mod query;
 pub use query::{
-    FactStream, FetchBudget, Likelihood, Preload, PreloadQueue, PreloadRequest, Select, Speculation,
+    FactStream, FetchBudget, LayerIndex, Layered, LayeredStream, Likelihood, Preload, PreloadQueue,
+    PreloadRequest, Select, SelectIn, Speculation,
 };
 
 mod asset;
@@ -40,6 +41,9 @@ pub use value::*;
 
 mod composite;
 pub use composite::*;
+
+mod view;
+pub use view::*;
 
 mod ordkey;
 pub use ordkey::*;

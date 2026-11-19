@@ -5,7 +5,7 @@
 //! cargo run -p dialog-chronicle --example guide_bytes
 //! ```
 //!
-//! Alice's repository gets four commits: two facts, then *the
+//! Alice's repository gets seven commits, among them two facts, then *the
 //! `demo.grocery/name` of `item:1` is "Oat milk"*, then that name changed
 //! to "Oat milk, 2 L", then a fact committed while a helper process holds
 //! the writer's turn, as another process in the middle of an append would.

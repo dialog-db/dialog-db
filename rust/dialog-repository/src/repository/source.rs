@@ -478,6 +478,18 @@ impl Source {
     }
 }
 
+impl Source {
+    /// `snapshot` pinned at `revision`, whatever head it holds: how a
+    /// durable layer, a [`Snapshot::detached`] line, is read at the
+    /// revision its primary points at. `None` reads the empty tree.
+    pub(crate) fn detached(snapshot: Snapshot, revision: Option<Revision>) -> Self {
+        Source {
+            held: Held::Snapshot(Arc::new(snapshot)),
+            revision,
+        }
+    }
+}
+
 impl From<Branch> for Source {
     /// Pin `branch` at the head it stands at now (see [`Live::pin`]).
     fn from(branch: Branch) -> Self {

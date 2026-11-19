@@ -5,22 +5,51 @@ use crate::attribute::query::pipelined;
 use crate::corpus::{Constrained, CorpusRelation, Selector, decode_value};
 use crate::environment::Environment;
 use crate::formula::number::Numeric;
+#[cfg(feature = "trace-hydration")]
+use crate::hydration;
 use crate::query::Application;
 use crate::query::Output;
-use crate::selection::{Match, Selection, Standing};
+use crate::selection::{Match, Part, Scanned, Selection, Standing};
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::{Any, Record};
 use crate::{
-    Binding, Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value,
-    try_stream,
+    Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value, try_stream,
 };
 use dialog_capability::Provider;
 use dialog_corpus::history::Edition;
-use dialog_corpus::{Cause, DialogCorpusError, Fact, Select};
+use dialog_corpus::{
+    Cause, CheckedRow, DialogCorpusError, Fact, FactView, Layered, Select, SelectIn, memory_layer,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::pin::Pin;
+
+/// A scan's binding policy ([`AttributeQueryAll::placement`]).
+pub(crate) struct Placement {
+    /// Whether rows may be bound in place: not when the attribute is
+    /// refined, as a refinement is checked against the materialized
+    /// attribute.
+    in_place: bool,
+    the: Option<Kind>,
+    of: Option<Kind>,
+    is: Option<Kind>,
+    the_admitted: bool,
+    of_admitted: bool,
+}
+
+/// How [`AttributeQueryAll::place`] binds a scanned row.
+pub(crate) enum Placed {
+    /// In place, checked, with the standing the scan read from it, and
+    /// the value as the scan's kind reads it when that is not the stored
+    /// value (a natural read as a float): the one part hydrated.
+    InPlace(CheckedRow, Option<(Edition, [u8; 32])>, Option<Value>),
+    /// Eagerly, as main binds it.
+    Eager(FactView),
+    /// Not at all: its stored bytes are corrupt, or its value is not one
+    /// the scan's kind reads.
+    Corrupt,
+}
 
 /// Base EAV scan query that yields all matching facts.
 ///
@@ -38,6 +67,14 @@ pub struct AttributeQueryAll {
     is: Term<Any>,
     /// The cause/provenance
     cause: Term<Cause>,
+    /// The layer the facts are read from (`in:`): a constant reads one
+    /// layer, a named variable reads every layer and binds the one each
+    /// row came from, blank reads every layer. Boxed, and `None` for the
+    /// blank term every read without `in:` carries, so the common scan
+    /// stays the size it was before layers: a scan is cloned into every
+    /// plan and every evaluation's state.
+    #[serde(with = "boxed_layer")]
+    layer: Option<Box<Term<Entity>>>,
     /// Internal handle for claim storage.
     source: Term<Record>,
 }
@@ -85,7 +122,43 @@ impl AttributeQueryAll {
             of,
             is,
             cause,
+            layer: None,
             source,
+        }
+    }
+
+    /// This scan over `layer` (`in:`). See the field.
+    pub fn with_layer(mut self, layer: Term<Entity>) -> Self {
+        self.layer = boxed_layer::boxed(layer);
+        self
+    }
+
+    /// The layer term (`in:`).
+    pub fn layer(&self) -> &Term<Entity> {
+        self.layer.as_deref().unwrap_or(&boxed_layer::BLANK)
+    }
+
+    /// Whether this scan binds each row's layer to a named variable: a
+    /// read that asks which layer a row came from, and so reads the same
+    /// cell on two layers as two rows.
+    pub(crate) fn binds_layer(&self) -> bool {
+        self.bound_layer().is_some()
+    }
+
+    /// The named layer term a scan that [binds each row's
+    /// layer](Self::binds_layer) binds it to: the variable a row's `in`
+    /// is read back from.
+    pub(crate) fn bound_layer(&self) -> Option<&Term<Entity>> {
+        self.layer.as_deref().filter(|layer| layer.name().is_some())
+    }
+
+    /// The one layer this scan reads, when it names one (`in:` a
+    /// constant): what a row read by it binds `in` to, the selector
+    /// having read that layer alone.
+    pub(crate) fn pinned_layer(&self) -> Option<&Entity> {
+        match self.layer.as_deref() {
+            Some(Term::Constant(Value::Entity(layer))) => Some(layer),
+            _ => None,
         }
     }
 
@@ -162,15 +235,66 @@ impl AttributeQueryAll {
     /// Takes the fact by value: its fields move into the cited
     /// claim, and each slot is bound by name, so a row pays for one
     /// copy of each bound value and none of the terms' names.
+    ///
+    /// `layer` is where the row was read from, `None` for the primary.
+    /// It is bound, and so cloned, only by a scan naming `in` with a
+    /// variable; any other scan never looks at it.
     pub(crate) fn merge(
         &self,
         candidate: &mut Match,
         fact: Fact,
         version: Option<(Edition, [u8; 32])>,
+        layer: Option<&Entity>,
     ) -> Result<(), EvaluationError> {
         let claim = Claim::from(fact);
         let standing = Standing::new(version, claim.cause().clone());
-        candidate.reserve(4);
+        self.bind_claim(candidate, &claim, layer)?;
+        candidate.cite_owned(&self.source, claim);
+        // The fact's standing is cited once, under the variable its
+        // value bound when the scan names one, so a value derived from
+        // it stands as it does; under the scan's own source otherwise.
+        match self.is.shared_name() {
+            Some(name) => candidate.cite_variable_standing(name, standing),
+            None => candidate.cite_standing(&self.source, standing),
+        }
+        Ok(())
+    }
+
+    /// The bindings a row this scan read `claim` into holds: what
+    /// [`merge`](Self::merge) binds, without the claim it cites.
+    /// `None` for a scan that binds each row's layer, which a claim
+    /// does not carry.
+    pub(crate) fn bindings(&self, claim: &Claim) -> Option<Match> {
+        if self.binds_layer() {
+            return None;
+        }
+        let mut row = Match::new();
+        self.bind_claim(&mut row, claim, None).ok()?;
+        Some(row)
+    }
+
+    /// Bind the `the`, `of`, `is` and `cause` of `claim`, and the
+    /// layer it was read from where the scan binds it, to this scan's
+    /// named terms.
+    fn bind_claim(
+        &self,
+        candidate: &mut Match,
+        claim: &Claim,
+        layer: Option<&Entity>,
+    ) -> Result<(), EvaluationError> {
+        // A slot for each of `the`, `of`, `is` and `cause`, and one for
+        // `in` only when the scan binds it: a row's bindings are reserved
+        // per row, so a scan without `in:` reserves what it did before.
+        let binds = self
+            .layer
+            .as_deref()
+            .and_then(|term| term.shared_name().map(|name| (term, name)));
+        candidate.reserve(4 + usize::from(binds.is_some()));
+        // The layer a row was read from lives only in this binding.
+        if let Some((term, name)) = binds {
+            let layer = layer.cloned().unwrap_or_else(memory_layer);
+            candidate.bind_variable(name, term.binding_kind(), Value::Entity(layer))?;
+        }
         if let Some(name) = self.the.shared_name() {
             candidate.bind_variable(name, self.the.binding_kind(), Value::from(claim.the()))?;
         }
@@ -191,14 +315,6 @@ impl AttributeQueryAll {
                 Value::Bytes(claim.cause().clone().0.into()),
             )?;
         }
-        candidate.cite_owned(&self.source, claim);
-        // The fact's standing is cited once, under the variable its
-        // value bound when the scan names one, so a value derived from
-        // it stands as it does; under the scan's own source otherwise.
-        match self.is.shared_name() {
-            Some(name) => candidate.cite_variable_standing(name, standing),
-            None => candidate.cite_standing(&self.source, standing),
-        }
         Ok(())
     }
 
@@ -211,28 +327,173 @@ impl AttributeQueryAll {
     /// to have no value", produced upstream by a
     /// [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery) left-join.
     pub(crate) fn absent_blocked(&self, base: &Match) -> bool {
-        let absent = |name: Option<&str>| {
-            matches!(name.and_then(|name| base.get(name)), Some(Binding::Absent))
-        };
+        let absent = |name: Option<&str>| name.is_some_and(|name| base.absent(name));
         absent(self.the.name())
             || absent(self.of.name())
             || absent(self.is.name())
             || absent(self.cause.name())
+            || absent(self.layer().name())
     }
 
-    /// True when a fact inhabits the scan's typed slots: the value
-    /// against the `is` term's kind, and the attribute against the
-    /// `the` term's kind. Typed slots are constraints: attribute
-    /// values are dynamically typed in the store (one attribute may
-    /// hold values of several types across facts), and a domain
-    /// scan sweeps attributes of both name shapes, so a fact
-    /// falling outside a term's kind is a non-match to be filtered,
-    /// never an error. This filter is [`Match::bind`]'s contract:
-    /// binding treats a kind mismatch as a violation, on the
-    /// premise that scans never feed one.
-    /// `fact` as this query's typed slots read it, or `None` when they
-    /// do not admit it: a number reaches a slot of another number type
-    /// through its view ([`Kind::view`]).
+    /// How this scan binds the rows it reads, decided once per scan: a
+    /// term's kind is built each time it is asked for, and a refined one
+    /// (a range) allocates.
+    pub(crate) fn placement(&self) -> Placement {
+        // Whether a kind admits every value of a part's type, so binding
+        // the part need not read it: an attribute is a symbol, an entity an
+        // entity.
+        let admits = |kind: &Option<Kind>, stored: Type| match kind {
+            None => true,
+            Some(Kind::Primitive(primitive)) => primitive.contains(stored),
+            Some(_) => false,
+        };
+        let the = self.the.binding_kind();
+        let of = self.of.binding_kind();
+        Placement {
+            in_place: !self
+                .the
+                .kind()
+                .is_some_and(|kind| kind.refinement().is_some()),
+            the_admitted: admits(&the, Type::Symbol),
+            of_admitted: admits(&of, Type::Entity),
+            the,
+            of,
+            is: self.is.kind(),
+        }
+    }
+
+    /// How a scanned row is bound: in place ([`Self::merge_scanned`]) when
+    /// the scan's kinds admit the row as it is
+    /// stored, without reading its value through another type's view or
+    /// checking a refinement; eagerly, as main binds it, otherwise. A row
+    /// bound in place is checked once, and a corrupt one is passed over as
+    /// main passes it over.
+    pub(crate) fn place(
+        &self,
+        placement: &Placement,
+        base: &Match,
+        row: FactView,
+    ) -> Result<Placed, DialogCorpusError> {
+        if !placement.in_place || base.binds_eagerly() {
+            #[cfg(feature = "trace-hydration")]
+            hydration::here("eager: refined attribute or eager rows");
+            return Ok(Placed::Eager(row));
+        }
+        // The value as the scan's kind reads it, when that differs from the
+        // stored value; `None` when the stored value is what it reads.
+        let mut viewed = None;
+        match &placement.is {
+            None => {}
+            // The key records the stored type; only the number band, which
+            // does not record which number wrote it, is read to tell.
+            Some(kind @ Kind::Primitive(primitive)) => {
+                let admitted = match row.stored_type().map(Type::storage) {
+                    Some(stored) if stored != Type::Number => primitive.contains(stored),
+                    _ => row
+                        .value_view()
+                        .map_or(true, |view| primitive.contains(view.data_type())),
+                };
+                if !admitted {
+                    // A number the kind reads through its view (a natural
+                    // as a float): hydrate the value alone, read through
+                    // it, and keep the rest of the row in place. A value
+                    // the kind does not read is passed over, as `admit`
+                    // passes it over.
+                    let Ok(value) = row.value() else {
+                        #[cfg(feature = "trace-hydration")]
+                        hydration::here("eager: value does not decode");
+                        return Ok(Placed::Eager(row));
+                    };
+                    #[cfg(feature = "trace-hydration")]
+                    hydration::here("is (read through the kind's view)");
+                    match kind.view(value) {
+                        Some(value) => viewed = Some(value),
+                        None => return Ok(Placed::Corrupt),
+                    }
+                }
+            }
+            Some(_) => {
+                #[cfg(feature = "trace-hydration")]
+                hydration::here("eager: refined value kind");
+                return Ok(Placed::Eager(row));
+            }
+        }
+        // The standing reads the payload's versions: taken here, once, as
+        // the checked row keeps only the key and the cause.
+        let standing = row.standing();
+        match row.checked() {
+            Ok(row) => Ok(Placed::InPlace(row, standing, viewed)),
+            Err(DialogCorpusError::CorruptEntry(reason)) => {
+                tracing::warn!(%reason, "ignoring corrupt stored row");
+                Ok(Placed::Corrupt)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// [`Self::merge`] for a row bound in place: its slots and its claim
+    /// share the scanned row, and nothing is materialized until something
+    /// reads it. [`Self::place`] decided the row is bound in place.
+    /// `layer` is where the row was read from, `None` for the primary.
+    pub(crate) fn merge_scanned(
+        &self,
+        placement: &Placement,
+        candidate: &mut Match,
+        row: CheckedRow,
+        version: Option<(Edition, [u8; 32])>,
+        viewed: Option<Value>,
+        layer: Option<&Entity>,
+    ) -> Result<(), EvaluationError> {
+        let cause = row.cause().cloned().unwrap_or(Cause([0; 32]));
+        let standing = Standing::new(version, cause.clone());
+        let row = Scanned::new(row, viewed);
+        // `in` is bound as `merge` binds it: only by a scan naming it.
+        let binds = self
+            .layer
+            .as_deref()
+            .and_then(|term| term.shared_name().map(|name| (term, name)));
+        candidate.reserve(4 + usize::from(binds.is_some()));
+        if let Some((term, name)) = binds {
+            let layer = layer.cloned().unwrap_or_else(memory_layer);
+            candidate.bind_variable(name, term.binding_kind(), Value::Entity(layer))?;
+        }
+        if let Some(name) = self.the.shared_name() {
+            candidate.bind_scanned(
+                name,
+                placement.the.as_ref(),
+                &row,
+                Part::The,
+                placement.the_admitted,
+            )?;
+        }
+        if let Some(name) = self.of.shared_name() {
+            candidate.bind_scanned(
+                name,
+                placement.of.as_ref(),
+                &row,
+                Part::Of,
+                placement.of_admitted,
+            )?;
+        }
+        if let Some(name) = self.is.shared_name() {
+            // `place` checked the value against the scan's kind.
+            candidate.bind_scanned(name, placement.is.as_ref(), &row, Part::Is, true)?;
+        }
+        if let Some(name) = self.cause.shared_name() {
+            candidate.bind_variable(
+                name,
+                self.cause.binding_kind(),
+                Value::Bytes(cause.0.into()),
+            )?;
+        }
+        candidate.cite_scanned(&self.source, &row);
+        match self.is.shared_name() {
+            Some(name) => candidate.cite_variable_standing(name, standing),
+            None => candidate.cite_standing(&self.source, standing),
+        }
+        Ok(())
+    }
+
     pub(crate) fn admit(&self, mut fact: Fact) -> Option<Fact> {
         if let Some(kind) = self.is.kind() {
             fact.is = kind.view(fact.is)?;
@@ -269,12 +530,17 @@ impl AttributeQueryAll {
             Err(_) => self.is.clone(),
         };
         let cause = self.cause.resolve(source);
+        let layer = self
+            .layer
+            .as_deref()
+            .and_then(|layer| boxed_layer::boxed(layer.resolve(source)));
 
         Self {
             the,
             of,
             is,
             cause,
+            layer,
             source: self.source.clone(),
         }
     }
@@ -339,6 +605,18 @@ impl AttributeQueryAll {
             },
         );
 
+        // The layer never constrains the lookup by itself: bound, it
+        // narrows the read to one layer; unbound, the scan binds it.
+        schema.insert(
+            "in".to_string(),
+            Field {
+                description: "The layer the relation is read from".to_string(),
+                content_type: Some(Kind::from(Type::Entity)),
+                requirement: Requirement::Optional,
+                cardinality: Cardinality::One,
+            },
+        );
+
         schema
     }
 
@@ -362,6 +640,7 @@ impl AttributeQueryAll {
         params.insert("of".to_string(), Term::<Any>::from(&self.of));
         params.insert("is".to_string(), self.is.clone());
         params.insert("cause".to_string(), Term::<Any>::from(&self.cause));
+        params.insert("in".to_string(), Term::<Any>::from(self.layer()));
         params
     }
 
@@ -396,6 +675,9 @@ impl AttributeQueryAll {
         // so an unboxed input sat in its state twice, and returning the
         // generator unboxed copied the whole state again at every layer
         // that wrapped or boxed it (several KiB per scan step, per row).
+        // Decided on the first row, not per invocation: a scan probed once
+        // per row of the step before it often yields nothing at all.
+        let mut placement: Option<Placement> = None;
         Box::pin(try_stream! {
             for await candidate in selection {
                 let mut base = candidate?;
@@ -409,36 +691,115 @@ impl AttributeQueryAll {
                 }
 
                 let selection = selector.resolve(&base);
+                let input: Selector<Constrained> = (&selection).try_into()?;
 
-                let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;
-                for await fact in stream {
-                    // Every admitted row becomes a binding, so each one
-                    // materializes exactly once here — the merge and
-                    // tombstone layers upstream never did. A row whose
-                    // stored bytes fail validation (`CorruptEntry`) is a
-                    // corrupt or foreign-written tree entry: ignore it
-                    // rather than failing the query.
-                    let fact = fact?;
-                    let standing = fact.standing();
-                    let fact = match fact.to_owned() {
-                        Ok(fact) => fact,
-                        Err(DialogCorpusError::CorruptEntry(reason)) => {
-                            tracing::warn!(%reason, "ignoring corrupt stored row");
-                            continue;
+                // A scan still binding each row's layer, `in` a variable
+                // the row leaves unbound, reads each row with where it
+                // came from, in a stream of its own (see
+                // `extend_layered`). Any other scan reads its rows bare,
+                // and pays nothing for the layer: with `in` a constant
+                // the selector reads that layer alone, so every row is
+                // its.
+                if selection.binds_layer() {
+                    let layered = Box::pin(selector.extend_layered(env, &base, input));
+                    for await extension in layered {
+                        yield extension?;
+                    }
+                } else {
+                    let pinned = selection.pinned_layer();
+                    let stream = Provider::<Select<'_>>::execute(env, input).await?;
+                    for await fact in stream {
+                        if let Some(extension) = selector.extend(&mut placement, &base, fact?, pinned)? {
+                            yield extension;
                         }
-                        Err(error) => Err(error)?,
-                    };
-                    // Typed `is`/`the` slots filter facts falling
-                    // outside their kinds.
-                    let Some(fact) = selector.admit(fact) else {
-                        continue;
-                    };
-                    let mut extension = base.clone();
-                    selector.merge(&mut extension, fact, standing)?;
-                    yield extension;
+                    }
                 }
             }
         })
+    }
+
+    /// `base` extended by each row of `input`, read with its layer: the
+    /// read of a scan binding each row's layer, `in` a variable.
+    ///
+    /// A stream of its own, boxed by the caller, so that the layers and
+    /// the row with its index are this stream's state and not the
+    /// plain read's: `evaluate`'s generator is built per scan and holds
+    /// its locals for every row of its input, and a generator holds
+    /// every branch's locals at once, so the layered read's sat in the
+    /// plain read's state, which pays for them though it never takes
+    /// this branch. Held through a box, they cost it a pointer.
+    fn extend_layered<'a, 'b, Env>(
+        &'b self,
+        env: &'a Env,
+        base: &'b Match,
+        input: Selector<Constrained>,
+    ) -> impl Selection + 'b
+    where
+        Env: crate::Scope<'a>,
+        'a: 'b,
+    {
+        try_stream! {
+            let Layered { layers, rows } = Provider::<SelectIn<'_>>::execute(env, input).await?;
+            let mut placement: Option<Placement> = None;
+            for await row in rows {
+                let (fact, at) = row?;
+                let layer = &layers[usize::from(at)];
+                if let Some(extension) = self.extend(&mut placement, base, fact, Some(layer))? {
+                    yield extension;
+                }
+            }
+        }
+    }
+
+    /// `base` extended by the row `fact`, read from `layer` (`None` is
+    /// the primary); `None` for a row the scan does not admit.
+    ///
+    /// A row the scan's kinds admit as stored is bound in place
+    /// ([`Self::place`]), and materializes only when something reads it;
+    /// any other admitted row materializes exactly once here: the merge
+    /// and tombstone layers upstream never did. A row whose stored bytes
+    /// fail validation (`CorruptEntry`) is a corrupt or foreign-written
+    /// tree entry: ignored rather than failing the query. `placement` is
+    /// decided on the scan's first row. Inlined, as it was before it was
+    /// written once for both kinds of row: called per row, with the row
+    /// moved in.
+    #[inline(always)]
+    fn extend(
+        &self,
+        placement: &mut Option<Placement>,
+        base: &Match,
+        fact: FactView,
+        layer: Option<&Entity>,
+    ) -> Result<Option<Match>, EvaluationError> {
+        let placement = placement.get_or_insert_with(|| self.placement());
+        let fact = match self.place(placement, base, fact)? {
+            Placed::InPlace(row, standing, viewed) => {
+                let mut extension = base.clone();
+                self.merge_scanned(placement, &mut extension, row, standing, viewed, layer)?;
+                return Ok(Some(extension));
+            }
+            Placed::Corrupt => return Ok(None),
+            Placed::Eager(fact) => fact,
+        };
+        let standing = fact.standing();
+        #[cfg(feature = "trace-hydration")]
+        hydration::here("fact (eager)");
+        let fact = match fact.to_owned() {
+            Ok(fact) => fact,
+            Err(DialogCorpusError::CorruptEntry(reason)) => {
+                tracing::warn!(%reason, "ignoring corrupt stored row");
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        // Typed `is`/`the` slots filter facts falling outside their
+        // kinds.
+        let Some(fact) = self.admit(fact) else {
+            return Ok(None);
+        };
+        let mut extension = base.clone();
+        self.merge(&mut extension, fact, standing, layer)?;
+        Ok(Some(extension))
     }
 
     /// Execute this query, returning a stream of claims.
@@ -463,6 +824,10 @@ impl Application for AttributeQueryAll {
 
     fn realize(&self, input: Match) -> Result<Claim, EvaluationError> {
         input.prove(&self.source)
+    }
+
+    fn bindings(&self, claim: &Claim) -> Option<Match> {
+        AttributeQueryAll::bindings(self, claim)
     }
 }
 
@@ -618,9 +983,23 @@ impl TryFrom<&AttributeQueryAll> for Selector<Constrained> {
             }
         }
 
-        selector.ok_or_else(|| EvaluationError::EmptySelector {
-            message: "At least one field must be constrained".to_string(),
-        })
+        // A constant layer constrains the scan too: with every other term
+        // a variable, the scan reads the whole layer.
+        match (from.layer(), selector) {
+            (Term::Constant(layer), selector) => {
+                let layer = Entity::try_from(layer.clone()).map_err(|_| {
+                    EvaluationError::Store("Could not convert value to Entity".to_string())
+                })?;
+                Ok(match selector {
+                    Some(selector) => selector.in_layer(layer),
+                    None => Selector::new().only_in(layer),
+                })
+            }
+            (Term::Variable { .. }, Some(selector)) => Ok(selector),
+            (Term::Variable { .. }, None) => Err(EvaluationError::EmptySelector {
+                message: "At least one field, or the layer, must be constrained".to_string(),
+            }),
+        }
     }
 }
 
@@ -710,6 +1089,9 @@ impl Display for AttributeQueryAll {
         write!(f, "of: {},", self.of)?;
         write!(f, "is: {},", self.is)?;
         write!(f, "cause: {},", self.cause)?;
+        if !self.layer().is_blank() {
+            write!(f, "in: {},", self.layer())?;
+        }
         write!(f, "}}")
     }
 }
@@ -1449,6 +1831,80 @@ mod tests {
         Ok(())
     }
 
+    /// A constant layer constrains a scan whose every other term is a
+    /// variable: it converts to a selector reading that layer alone,
+    /// where without it there is nothing to scan by.
+    #[dialog_common::test]
+    fn it_constrains_a_scan_by_a_constant_layer_alone() -> anyhow::Result<()> {
+        let control: Entity = "control:".parse()?;
+        let everything = AttributeQueryAll::new(
+            Term::var("the"),
+            Term::var("of"),
+            Term::var("is"),
+            Term::var("cause"),
+        );
+        assert!(matches!(
+            Selector::<Constrained>::try_from(&everything),
+            Err(EvaluationError::EmptySelector { .. })
+        ));
+        let layer = everything.with_layer(Term::from(control.clone()));
+        let selector = Selector::<Constrained>::try_from(&layer)?;
+        assert_eq!(selector.layer(), Some(&control));
+        assert_eq!(selector.entity(), None);
+        assert_eq!(selector.attribute(), None);
+        assert_eq!(selector.value(), None);
+        Ok(())
+    }
+
+    /// A scan with every term a variable but a constant layer reads every
+    /// row of that layer and nothing of any other: of the primary, every
+    /// fact the tree holds; of a layer the store does not hold, nothing.
+    #[dialog_common::test]
+    async fn it_scans_a_whole_layer() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/age").of(alice.clone()).is(42u32))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let scan = |layer: &str| -> anyhow::Result<AttributeQueryAll> {
+            Ok(AttributeQueryAll::new(
+                Term::var("the"),
+                Term::var("of"),
+                Term::var("is"),
+                Term::blank(),
+            )
+            .with_layer(Term::from(layer.parse::<Entity>()?)))
+        };
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let rows = scan("memory:")?.perform(&source).try_vec().await?;
+        let mut read: Vec<String> = rows
+            .iter()
+            .filter(|row| row.of() == &alice)
+            .map(|row| row.the().to_string())
+            .collect();
+        read.sort();
+        assert_eq!(
+            read,
+            vec!["person/age".to_string(), "person/name".to_string()]
+        );
+
+        let rows = scan("control:")?.perform(&source).try_vec().await?;
+        assert!(rows.is_empty(), "the primary holds no row of control:");
+        Ok(())
+    }
+
     /// An *optional* `is` whose variable was pre-bound to a value the
     /// entity does not have must not emit an Absent fallback. The
     /// value-keyed scan finds nothing equal to the pinned value, but
@@ -1684,5 +2140,43 @@ mod tests {
             is.content_type().is_none(),
             "untyped `is` term should yield unknown content_type"
         );
+    }
+}
+
+/// The layer term of a scan, held boxed and only when it is not blank,
+/// and read and written on the wire as the term itself, blank included.
+mod boxed_layer {
+    use crate::types::EntityType;
+    use crate::{Entity, Term};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::LazyLock;
+
+    /// The blank layer term a scan without `in:` reads as.
+    pub(super) static BLANK: LazyLock<Term<Entity>> = LazyLock::new(Term::blank);
+
+    /// `layer` as a scan holds it: `None` for the blank term.
+    /// Asked each time a scan is resolved against a row, so it matches
+    /// the blank term's shape rather than comparing with [`BLANK`].
+    pub(super) fn boxed(layer: Term<Entity>) -> Option<Box<Term<Entity>>> {
+        match &layer {
+            Term::Variable {
+                name: None,
+                descriptor,
+            } if *descriptor == EntityType::default() => None,
+            _ => Some(Box::new(layer)),
+        }
+    }
+
+    pub(super) fn serialize<S: Serializer>(
+        layer: &Option<Box<Term<Entity>>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        layer.as_deref().unwrap_or(&BLANK).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Box<Term<Entity>>>, D::Error> {
+        Term::<Entity>::deserialize(deserializer).map(boxed)
     }
 }
