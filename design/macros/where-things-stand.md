@@ -19,19 +19,15 @@ A handoff note, written so the work can be picked up from the files alone. It is
 
 ## Running when this was written
 
-| thread | doing | where its work lands |
-|---|---|---|
-| build | the engine's folding query, the `distinct` aggregator, the notation lowered onto them, and the cost measured again | commits on `feat/notation-poc`; engine commits there must move to a pull request of their own below #773 |
-| research | the literature on incremental aggregation | a report to be filed under `design/fold-maintenance/` on #837 |
-| research | how tonk keeps a view current today | the same |
+One thread, building: the engine's folding query (`rust/dialog-query/src/query/fold.rs`), the aggregator for a set of values, a subscription of a fold (`dialog-repository/.../subscription/fold.rs`), the notation lowered onto them, and the cost measured again. It was unfinished, and not through fmt, clippy or tests. A snapshot of it is the branch `wip/engine-fold` (`6e37807`, one commit over `c3959fe`). If `feat/notation-poc` has `query/fold.rs`, the thread finished and the snapshot is stale. Either way the engine's part must move to a pull request of its own below #773.
 
-Reported and filed: how a subscription is kept current today (`design/fold-maintenance/subscriptions-as-built.md` on #837), and [definitions on the branch](definitions-on-the-branch.md).
+Reported and filed on #837 (`design/fold-maintenance/`): how a subscription is kept current today (`subscriptions-as-built.md`), how tonk keeps a view current (`tonk-as-built.md`), and what the literature asks of each fold when facts are retracted (`literature.md`). Here: [definitions on the branch](definitions-on-the-branch.md).
 
 ## Open, in the order to take them
 
 1. The numbers from the build thread, against the bars in the ledger.
-2. #837: a problem statement and an approach for keeping a fold current. What is known: a poll returns a change, but a subscription keeps a flat answer and nothing for a group, learns a row stopped holding only by deriving the entity again, and asks the whole query again when a fold is in reach. So folding the changes needs signed changes of a rule's rows, which nothing produces today.
-3. Definitions on the branch, for concepts, macros and queries together ([definitions-on-the-branch.md](definitions-on-the-branch.md)). Decided by the maintainer: a name is an attribute pointing at the definition's entity, as in tonk and roughly as in Unison. He had taken the build to be option C already and it is not; he is fine starting with A. A is built with every definition keyed by its content and the name pointing at it, not as the report wrote it. Open: whether a stored definition refers to what it uses by entity or by name.
+2. #837: keeping a fold current. A problem statement is proposed and not confirmed. The hypothesis (`direction.md` there): a folding query's subscription is a subscription of its inner query, whose poll already says what stopped and started holding, with a state for each group beside it. It holds for `count`, integer `sum` and a set of values; `min`, `max` and anything else fold the touched group again. Open there: whether a float sum folded from changes equals one folded from the rows.
+3. Definitions on the branch, for concepts, macros and queries together ([definitions-on-the-branch.md](definitions-on-the-branch.md)). Decided by the maintainer: a name is an attribute pointing at the definition's entity, as in tonk and roughly as in Unison. He had taken the build to be option C already and it is not; he is fine starting with A. A is built with every definition keyed by its content and the name pointing at it, not as the report wrote it. Asked and not answered: whether it is acceptable to start with stored forms that refer to what they use by name, so a name bound again changes what a stored query means on the next open while an installed rule keeps what it was lowered with.
 4. Rows of one head: Datomic gives a row for each; the maintainer leaned to aggregating. Not decided.
 5. What two entries of one key leave when a set of entries becomes a map.
 6. A bar for "lightning fast": proposed as not growing with the page and within 2 times a plain subscription on a release build. Not answered.
