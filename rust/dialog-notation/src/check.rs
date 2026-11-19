@@ -38,6 +38,11 @@ pub struct Checked {
     pub declaration_forms: Vec<usize>,
     /// What the trees of the document leave out of its text.
     pub written: Written,
+    /// The definitions the document made, compiled, with where each is
+    /// bound and its source map: what is written to a branch for them
+    /// ([`definition::statements`](crate::definition::statements)).
+    /// Nothing when any part of the document is refused.
+    pub defined: Vec<crate::definition::Defined>,
     /// Everything there is to say about the document, each with where
     /// in the text it is.
     pub diagnostics: Vec<Diagnostic>,
@@ -60,6 +65,7 @@ impl Checked {
                 declarations: Vec::new(),
                 declaration_forms: Vec::new(),
                 written: parsed.written,
+                defined: Vec::new(),
                 diagnostics: parsed.diagnostics,
             },
             parsed.trees,
@@ -141,6 +147,7 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
         checked.analyzed = analyzed;
         checked.steps = steps;
         checked.step_forms = forms;
+        checked.defined = analysis.defined;
         *analyzer = trial;
     }
     checked
@@ -158,6 +165,7 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
 pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
     let (mut checked, trees) = Checked::of(parse_document(text));
     let analysis = analyzer.analyze_forms(&trees);
+    checked.defined = analysis.defined.clone();
     checked
         .diagnostics
         .extend(analysis.diagnostics.iter().cloned());

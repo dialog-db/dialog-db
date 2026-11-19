@@ -38,20 +38,23 @@ use std::collections::BTreeMap;
 
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
-use dialog_corpus::Value;
 use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Entity, Value};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
+use dialog_query::concept::descriptor::ConceptStatement;
 use dialog_query::error::EvaluationError;
 use dialog_query::query::Output as _;
-use dialog_query::{ConceptConclusion, ConceptQuery, FoldConclusion};
+use dialog_query::{Any, ConceptConclusion, ConceptQuery, DeductiveRule, FoldConclusion, Term};
 use dialog_repository::{Branch, Delta, FoldSubscription, RemoteSite, Subscription};
 use dialog_search_tree::nodes;
 
+use crate::analyze::Analyzer;
+use crate::definition::{self, Binding, Defined, Definition, Kind as DefinitionKind};
 use crate::select::Selection;
 use crate::syntax::Syntax;
 use crate::view::plan::{FoldedCount, Plan};
@@ -100,6 +103,58 @@ impl<T> Reader for T where
 {
 }
 
+/// What a branch keeps of the notation's definitions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Kept {
+    /// The local namespace: the profile the branch is read under.
+    pub mine: Entity,
+    /// Every definition, as kept.
+    pub definitions: Vec<Definition>,
+    /// Every namespace's bindings.
+    pub bindings: Vec<Binding>,
+}
+
+/// What a document's definitions write to a branch: for each, the
+/// definition, its source map and its two bindings
+/// ([`definition::statements`]); and the rule `Name` is derived by,
+/// which a branch keeps once however often it is written.
+pub fn written(
+    defined: &[Defined],
+) -> Result<(Vec<ConceptStatement>, Option<DeductiveRule>), Error> {
+    let mut statements = Vec::new();
+    for made in defined {
+        statements.extend(definition::statements(made)?);
+    }
+    let rule = if defined.is_empty() {
+        None
+    } else {
+        Some(name_rule()?)
+    };
+    Ok((statements, rule))
+}
+
+/// The rule `Name` is derived by ([`definition::NAME_RULE`]), compiled.
+pub fn name_rule() -> Result<DeductiveRule, Error> {
+    let trees = crate::parse(definition::NAME_RULE)?;
+    let analysis = Analyzer::new()?.analyze(&trees);
+    if let Some(error) = analysis
+        .refusals()
+        .find_map(|refused| refused.refusal.clone())
+    {
+        return Err(error);
+    }
+    for tree in &analysis.analyzed {
+        for step in crate::compile(tree)? {
+            if let crate::Step::Deduce(rule) = step {
+                return Ok(*rule);
+            }
+        }
+    }
+    Err(Error::Refused(
+        "the rule of Name compiles to no rule".into(),
+    ))
+}
+
 /// Why a selection or a view could not be kept.
 #[derive(Debug, thiserror::Error)]
 pub enum LiveError {
@@ -142,6 +197,167 @@ impl Live {
                 .map_err(|error| LiveError::Rule(error.to_string()))?;
         }
         Ok(())
+    }
+
+    /// What the branch keeps of the notation's definitions: the local
+    /// namespace, which is the profile the session reads the branch
+    /// under (the authority every query of a branch is given, on
+    /// `db:session` as `dialog.session/profile`), every definition and
+    /// every namespace's bindings.
+    pub async fn kept<E: Reader>(&self, env: &E) -> Result<Kept, LiveError> {
+        let rows = self
+            .read(&[("profile", "dialog.session/profile", "entity:")], env)
+            .await?;
+        let mine = rows
+            .iter()
+            .find_map(|(this, values)| {
+                (this.as_str() == "db:session")
+                    .then(|| match values.get("profile") {
+                        Some(Value::Entity(profile)) => Some(profile.clone()),
+                        _ => None,
+                    })
+                    .flatten()
+            })
+            .ok_or_else(|| Error::Read("the branch is read under no profile".into()))?;
+        let mut definitions = Vec::new();
+        for (this, values) in self
+            .read(
+                &[
+                    ("is", definition::attribute::IS, "record:"),
+                    ("kind", definition::attribute::KIND, "text:"),
+                ],
+                env,
+            )
+            .await?
+        {
+            let (Some(form), Some(Value::String(kind))) = (values.get("is"), values.get("kind"))
+            else {
+                continue;
+            };
+            let kind: DefinitionKind = kind.parse()?;
+            definitions.push(Definition {
+                entity: this,
+                kind,
+                form: Syntax::try_from(form)?,
+            });
+        }
+        let mut bindings = Vec::new();
+        for (_, values) in self
+            .read(
+                &[
+                    (
+                        "namespace",
+                        definition::attribute::BINDING_NAMESPACE,
+                        "entity:",
+                    ),
+                    ("key", definition::attribute::BINDING_KEY, "text:"),
+                    (
+                        "referent",
+                        definition::attribute::BINDING_REFERENT,
+                        "entity:",
+                    ),
+                ],
+                env,
+            )
+            .await?
+        {
+            if let (
+                Some(Value::Entity(namespace)),
+                Some(Value::String(key)),
+                Some(Value::Entity(referent)),
+            ) = (
+                values.get("namespace"),
+                values.get("key"),
+                values.get("referent"),
+            ) {
+                bindings.push(Binding {
+                    namespace: namespace.clone(),
+                    key: key.clone(),
+                    referent: referent.clone(),
+                });
+            }
+        }
+        Ok(Kept {
+            mine,
+            definitions,
+            bindings,
+        })
+    }
+
+    /// An analyzer for the branch: the core forms, every definition the
+    /// branch keeps under every name a namespace binds it to, and the
+    /// session's profile as mine. A selection, a macro and a view
+    /// defined in an earlier document answer with nothing submitted
+    /// again.
+    pub async fn analyzer<E: Reader>(&self, env: &E) -> Result<Analyzer, LiveError> {
+        let kept = self.kept(env).await?;
+        Ok(Analyzer::load(kept.mine, kept.definitions, kept.bindings)?)
+    }
+
+    /// Take into `analyzer` what the branch keeps that it does not know:
+    /// what a pull brought.
+    pub async fn refresh<E: Reader>(
+        &self,
+        analyzer: &mut Analyzer,
+        env: &E,
+    ) -> Result<(), LiveError> {
+        let kept = self.kept(env).await?;
+        Ok(analyzer.take(kept.definitions, kept.bindings)?)
+    }
+
+    /// Every entity with each of `fields`, a field an attribute of a
+    /// type, and what each is.
+    async fn read<E: Reader>(
+        &self,
+        fields: &[(&str, &str, &str)],
+        env: &E,
+    ) -> Result<Vec<(Entity, BTreeMap<String, Value>)>, LiveError> {
+        let mut with = serde_json::Map::new();
+        let mut terms = serde_json::Map::new();
+        terms.insert(
+            "this".into(),
+            serde_json::json!({ "?": { "name": "this" } }),
+        );
+        for (field, attribute, kind) in fields {
+            with.insert(
+                field.to_string(),
+                serde_json::json!({ "the": attribute, "as": kind }),
+            );
+            terms.insert(
+                field.to_string(),
+                serde_json::json!({ "?": { "name": field } }),
+            );
+        }
+        let query: ConceptQuery = serde_json::from_value(serde_json::json!({
+            "assert": { "with": with },
+            "where": terms,
+        }))
+        .map_err(|error| Error::Read(format!("a query of what is kept: {error}")))?;
+        let found: Vec<ConceptConclusion> = self
+            .branch
+            .query()
+            .select(query)
+            .perform(env)
+            .try_vec()
+            .await?;
+        let mut rows = Vec::new();
+        for conclusion in &found {
+            let value = |name: &str| -> Result<Value, LiveError> {
+                Ok(conclusion
+                    .source()
+                    .lookup(&Term::<Any>::var(name))?
+                    .content()?)
+            };
+            let Value::Entity(this) = value("this")? else {
+                continue;
+            };
+            let mut values = BTreeMap::new();
+            for (field, _, _) in fields {
+                values.insert(field.to_string(), value(field)?);
+            }
+            rows.push((this, values));
+        }
+        Ok(rows)
     }
 
     /// The answers of `selection` as the branch stands, asked once: each

@@ -32,9 +32,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use dialog_corpus::Value;
+use dialog_corpus::{Entity, Value};
 
 use crate::Error;
+use crate::definition::{self, Defined, Kind as DefinitionKind, Namespaces, Reference, SELF};
 use crate::diagnostic::Diagnostic;
 use crate::form::Kind;
 use crate::kernel::QUOTE;
@@ -82,6 +83,9 @@ struct Definition {
     /// The command whose entity this definition reads, where it is the
     /// one a command's declaration adds for `of:` in a premise.
     entity_of: Option<String>,
+    /// The definition it is, and the name it is bound under, where a
+    /// document defined it: the core forms are no definition of anyone's.
+    defined: Option<(Entity, String)>,
 }
 
 /// One form that several definitions take, and which of them stands
@@ -725,8 +729,20 @@ pub struct Expander {
     /// How many rules about syntax have been kept, ever: what tells a
     /// pass over a document that it declared something.
     declared: usize,
-    /// The queries defined, each as it was written, by name.
-    queries: BTreeMap<String, Syntax>,
+    /// Every definition known, by its entity: what a document defined,
+    /// and what was loaded.
+    definitions: BTreeMap<Entity, definition::Definition>,
+    /// Every namespace's bindings, and which is mine.
+    spaces: Namespaces,
+    /// The definitions the last document made, in the order made.
+    made: Vec<Defined>,
+    /// Whether what is installed is a definition of the core forms,
+    /// which no namespace binds.
+    core: bool,
+    /// The references met while a definition is analyzed, where one is.
+    referenced: Option<Vec<Reference>>,
+    /// The revision names are resolved at, where the caller gave one.
+    revision: Option<String>,
     /// The concepts that hold a collection, each with the label of the
     /// field that is one entry of it, `block: {?k ?b}`.
     entries: BTreeMap<String, String>,
@@ -755,9 +771,90 @@ pub struct Expander {
 impl Expander {
     /// A walker that knows the core forms.
     pub fn new() -> Result<Self, Error> {
-        let mut expander = Expander::default();
+        let mut expander = Expander {
+            core: true,
+            ..Expander::default()
+        };
         expander.submit(PRELUDE)?;
+        expander.core = false;
+        expander.made.clear();
         Ok(expander)
+    }
+
+    /// The same walker with `mine` as the local namespace, what it binds
+    /// the definitions it makes in.
+    pub fn with_namespace(mut self, mine: Entity) -> Self {
+        let mut spaces = Namespaces::new(mine);
+        for binding in self.spaces.bindings() {
+            spaces.bind(binding);
+        }
+        self.spaces = spaces;
+        self
+    }
+
+    /// The revision the names of what is defined next are resolved at,
+    /// which a source map then holds.
+    pub fn resolve_at(&mut self, revision: Option<String>) {
+        self.revision = revision;
+    }
+
+    /// Every namespace's bindings.
+    pub fn namespaces(&self) -> &Namespaces {
+        &self.spaces
+    }
+
+    /// Every definition known, by its entity.
+    pub fn definitions(&self) -> &BTreeMap<Entity, definition::Definition> {
+        &self.definitions
+    }
+
+    /// The definitions the last document made, in the order made.
+    pub fn defined(&self) -> &[Defined] {
+        &self.made
+    }
+
+    /// Take in definitions and bindings kept elsewhere, as a branch keeps
+    /// them: each definition a name of some namespace is bound to stands
+    /// under that name, as it was kept. Nothing is analyzed again.
+    pub fn load(
+        &mut self,
+        definitions: impl IntoIterator<Item = definition::Definition>,
+        bindings: impl IntoIterator<Item = definition::Binding>,
+    ) -> Result<(), Error> {
+        for definition in definitions {
+            self.definitions
+                .insert(definition.entity.clone(), definition);
+        }
+        for binding in bindings {
+            self.spaces.bind(binding);
+        }
+        let mut rows = self.spaces.rows();
+        rows.sort_by_key(|row| row.definition.clone());
+        for row in rows {
+            self.stand(&row.definition, &row.name)?;
+        }
+        Ok(())
+    }
+
+    /// Install the kept definition `entity` under `name`, where it is a
+    /// rule about syntax and is not installed under it already.
+    fn stand(&mut self, entity: &Entity, name: &str) -> Result<(), Error> {
+        let Some(kept) = self.definitions.get(entity).cloned() else {
+            return Ok(());
+        };
+        if kept.kind == DefinitionKind::Query
+            || self
+                .syntax
+                .iter()
+                .any(|rule| rule.defined.as_ref() == Some(&(entity.clone(), name.to_string())))
+        {
+            return Ok(());
+        }
+        let rule = definition::named(&kept.form, SELF, name);
+        let core = std::mem::replace(&mut self.core, true);
+        let installed = self.install_as(rule, Some((entity.clone(), name.to_string())));
+        self.core = core;
+        installed.map(|_| ())
     }
 
     /// Parse `text` and expand every tree of it. A rule about syntax is
@@ -789,6 +886,7 @@ impl Expander {
     pub fn check(&mut self, trees: Vec<Syntax>) -> (Vec<Syntax>, Vec<Diagnostic>) {
         self.asked.clear();
         self.origin.clear();
+        self.made.clear();
         self.document = trees.clone();
         // The order of a document's forms does not matter. What declares
         // a name, a concept or a rule about syntax, is expanded before
@@ -921,6 +1019,17 @@ impl Expander {
 
     /// Keep a rule about syntax, and note what any other rule reads.
     fn install(&mut self, rule: Syntax) -> Result<Option<Syntax>, Error> {
+        self.install_as(rule, None)
+    }
+
+    /// Keep a rule about syntax as the definition `defined` names, or,
+    /// where none does and it is no core form, as a definition of the
+    /// document's own: kept, compiled and bound in mine.
+    fn install_as(
+        &mut self,
+        rule: Syntax,
+        defined: Option<(Entity, String)>,
+    ) -> Result<Option<Syntax>, Error> {
         let clauses = Clauses::of(&rule);
         let answer = match clauses.head.as_ref() {
             Some(head) if head.applies() == Some("syntax") => match items(head) {
@@ -992,6 +1101,39 @@ impl Expander {
             }
             _ => None,
         };
+        // A document's own definition: a macro's template resolved where
+        // it names a definition, the whole kept in canonical form under
+        // the entity that is made of it, and bound in mine.
+        let (answer, defined) = match defined {
+            Some(defined) => (answer, Some(defined)),
+            None if self.core => (answer, None),
+            None => {
+                let kind = if signature.is_some() {
+                    DefinitionKind::Concept
+                } else {
+                    DefinitionKind::Macro
+                };
+                let outer = self.referenced.replace(Vec::new());
+                let answer = match (kind, answer) {
+                    (DefinitionKind::Macro, Answer::Syntax(template)) => {
+                        Answer::Syntax(self.resolve_template(&template, &pattern))
+                    }
+                    (_, answer) => answer,
+                };
+                let references = std::mem::replace(&mut self.referenced, outer).unwrap_or_default();
+                let made = self.define_syntax(
+                    kind,
+                    &answer,
+                    &pattern,
+                    position,
+                    &when,
+                    &clauses.unless,
+                    signature.as_ref(),
+                    references,
+                )?;
+                (answer, Some(made))
+            }
+        };
         if let Some(declared) = &signature {
             // The field that is one entry of a collection, `block: {?k ?b}`.
             let entry = pattern.operand().and_then(|operand| {
@@ -1006,10 +1148,6 @@ impl Expander {
                 Some(label) => self.entries.insert(declared.name.clone(), label),
                 None => self.entries.remove(&declared.name),
             };
-            self.syntax.retain(|rule| {
-                rule.signature.as_ref() != Some(declared)
-                    && rule.entity_of.as_ref() != Some(&declared.name)
-            });
             self.concepts.insert(declared.name.clone());
             match &answer {
                 Answer::Syntax(template) if items(&pattern).is_empty() && on_control(template) => {
@@ -1049,6 +1187,7 @@ impl Expander {
                             unless: clauses.unless.clone(),
                             signature: None,
                             entity_of: Some(declared.name.clone()),
+                            defined: defined.clone(),
                         })
                     }
                     _ => None,
@@ -1056,17 +1195,263 @@ impl Expander {
             }
             _ => None,
         };
-        self.syntax.push(Definition {
-            answer,
-            pattern,
-            position,
-            when,
-            unless: clauses.unless,
-            signature,
-            entity_of: None,
-        });
-        self.syntax.extend(read);
+        if defined.is_none()
+            || !self
+                .syntax
+                .iter()
+                .any(|rule| rule.defined == defined && rule.entity_of.is_none())
+        {
+            self.syntax.push(Definition {
+                answer,
+                pattern,
+                position,
+                when,
+                unless: clauses.unless,
+                signature,
+                entity_of: None,
+                defined,
+            });
+            self.syntax.extend(read);
+        }
         Ok(None)
+    }
+
+    /// Make a document's rule about syntax a definition: kept in
+    /// canonical form, its own name [`SELF`], under the entity made of
+    /// it; bound in mine under its name and signature. What it is
+    /// installed as is named by what this gives.
+    #[allow(clippy::too_many_arguments)]
+    fn define_syntax(
+        &mut self,
+        kind: DefinitionKind,
+        answer: &Answer,
+        pattern: &Syntax,
+        position: Option<Position>,
+        when: &[Syntax],
+        unless: &[Syntax],
+        signature: Option<&Signature>,
+        references: Vec<Reference>,
+    ) -> Result<(Entity, String), Error> {
+        let name = pattern.applies().unwrap_or("_").to_string();
+        let mut expand = vec![definition::operated(pattern, SELF)];
+        let mut terms = BTreeMap::new();
+        if let Some(position) = position {
+            terms.insert(
+                "in".to_string(),
+                Syntax::Constant(syntax::entity(match position {
+                    Position::Head => "head:",
+                    Position::Premise => "premise:",
+                })?),
+            );
+        }
+        let expand = Syntax::Application(
+            Box::new(Syntax::Reference("expand".into())),
+            Parameters {
+                items: std::mem::take(&mut expand),
+                terms,
+            },
+        );
+        let mut fixed = vec![expand];
+        let mut set: Vec<Syntax> = when.to_vec();
+        set.extend(
+            unless
+                .iter()
+                .map(|absent| apply("unless", vec![absent.clone()])),
+        );
+        match (kind, answer) {
+            (DefinitionKind::Concept, Answer::Syntax(template)) => set.extend(
+                members(template.clone())
+                    .into_iter()
+                    .map(|read| apply("syntax", vec![read])),
+            ),
+            (_, Answer::Syntax(template)) => fixed.push(apply("syntax", vec![template.clone()])),
+            (_, Answer::Warning(message)) => fixed.push(apply(
+                "warning",
+                vec![Syntax::Constant(crate::data::text(message))],
+            )),
+        }
+        let build = |fixed: &[Syntax], set: Vec<Syntax>| -> Result<Syntax, Error> {
+            let mut reads = Vec::new();
+            let mut premises = Vec::new();
+            let mut absent = Vec::new();
+            for part in set {
+                match part.applies() {
+                    Some("syntax") => reads.extend(items(&part).iter().cloned()),
+                    Some("unless") => absent.extend(items(&part).iter().cloned()),
+                    _ => premises.push(part),
+                }
+            }
+            let [expand, rest @ ..] = fixed else {
+                return Err(Error::Refused(format!("{pattern} keeps no pattern")));
+            };
+            let head = match rest.first() {
+                Some(head) => head.clone(),
+                None => apply(
+                    "syntax",
+                    vec![if reads.len() == 1 {
+                        reads.remove(0)
+                    } else {
+                        apply("all", reads)
+                    }],
+                ),
+            };
+            let mut parts = vec![head, expand.clone()];
+            parts.extend(premises);
+            if !absent.is_empty() {
+                parts.push(apply("unless", absent));
+            }
+            Ok(apply("rule", parts))
+        };
+        let (canonical_fixed, canonical_set) = definition::canonical(&fixed, &set)?;
+        let canonical = build(&canonical_fixed, canonical_set)?;
+        let kept = definition::Definition::new(kind, build(&fixed, set)?, &canonical)?;
+        let entity = kept.entity.clone();
+        let key = definition::signature(
+            kind,
+            match signature {
+                Some(signature) => signature.parameters.iter().cloned().collect::<Vec<_>>(),
+                None => pattern
+                    .operand()
+                    .map(|operand| operand.terms.keys().cloned().collect())
+                    .unwrap_or_default(),
+            },
+        );
+        self.record(kept, name.clone(), key, references)?;
+        Ok((entity, name))
+    }
+
+    /// Keep a definition a document made, bound in mine under `name` and
+    /// `signature`, with its source map.
+    fn record(
+        &mut self,
+        kept: definition::Definition,
+        name: String,
+        signature: String,
+        references: Vec<Reference>,
+    ) -> Result<(), Error> {
+        let made = Defined {
+            definition: kept.clone(),
+            name,
+            signature,
+            namespace: self.spaces.mine().clone(),
+            source: definition::Source {
+                written: self
+                    .document
+                    .get(self.tree)
+                    .cloned()
+                    .unwrap_or(Syntax::Blank),
+                references,
+                revision: self.revision.clone(),
+            },
+        };
+        for binding in made.bindings()? {
+            self.spaces.bind(binding);
+        }
+        self.definitions.insert(kept.entity.clone(), kept);
+        self.made.retain(|other| {
+            other.definition.entity != made.definition.entity || other.name != made.name
+        });
+        self.made.push(made);
+        Ok(())
+    }
+
+    /// A macro's template, every part of it that applies a definition
+    /// expanded until none does: the pattern's variables are holes,
+    /// filled where the macro is used. A part that applies one only once
+    /// its holes are filled, or that several definitions take, is left
+    /// as written, and expanded where the macro is used.
+    fn resolve_template(&mut self, template: &Syntax, pattern: &Syntax) -> Syntax {
+        let _ = pattern;
+        let asked = self.asked.len();
+        let choices = std::mem::take(&mut self.choices);
+        let resolved = self.resolve_part(template, Position::Head);
+        self.asked.truncate(asked);
+        self.choices = choices;
+        resolved
+    }
+
+    fn resolve_part(&mut self, tree: &Syntax, position: Position) -> Syntax {
+        let word = tree.applies();
+        // What is inside a directive or a quote is syntax.
+        if word.is_some_and(|word| DIRECTIVES.contains(&word) || word == QUOTE) {
+            return tree.clone();
+        }
+        let mut tree = match tree {
+            Syntax::Application(operator, operand) => {
+                let heads = matches!(word, Some(word) if HEAD_WORDS.contains(&word));
+                let rule = word == Some("rule");
+                Syntax::Application(
+                    operator.clone(),
+                    Parameters {
+                        items: operand
+                            .items
+                            .iter()
+                            .enumerate()
+                            .map(|(at, item)| {
+                                let position = if heads || (rule && at == 0) {
+                                    Position::Head
+                                } else {
+                                    Position::Premise
+                                };
+                                self.resolve_part(item, position)
+                            })
+                            .collect(),
+                        terms: operand
+                            .terms
+                            .iter()
+                            .map(|(label, term)| {
+                                (label.clone(), self.resolve_part(term, Position::Premise))
+                            })
+                            .collect(),
+                    },
+                )
+            }
+            Syntax::Map(entries) => Syntax::Map(
+                entries
+                    .iter()
+                    .map(|(key, value)| {
+                        (
+                            self.resolve_part(key, Position::Premise),
+                            self.resolve_part(value, Position::Premise),
+                        )
+                    })
+                    .collect(),
+            ),
+            Syntax::Tuple(parts) => Syntax::Tuple(
+                parts
+                    .iter()
+                    .map(|part| self.resolve_part(part, Position::Premise))
+                    .collect(),
+            ),
+            other => return other.clone(),
+        };
+        // A definition's own expansion is kept resolved, so one step
+        // reaches what it stands for; a chain of them is followed.
+        for _ in 0..16 {
+            let (said, _) = open(&tree);
+            let resolved = match said.applies() {
+                Some(name) => self.spaces.resolve(name).unwrap_or_default(),
+                None => return tree,
+            };
+            let applying = self
+                .syntax
+                .iter()
+                .filter(|rule| {
+                    rule.defined.as_ref().is_some_and(|(entity, _)| {
+                        resolved.iter().any(|row| &row.definition == entity)
+                    }) && matches!(rule.answer, Answer::Syntax(_))
+                        && self.applies(rule, &said, position).is_some()
+                })
+                .count();
+            if applying != 1 {
+                return tree;
+            }
+            match self.ask(&tree, position) {
+                Ok(expanded) => tree = expanded,
+                Err(_) => return tree,
+            }
+        }
+        tree
     }
 
     /// A concept maps facts to itself and back. So what it stands for is
@@ -1320,9 +1705,32 @@ impl Expander {
         // A part a read leaves out matches anything, so a trailing
         // `...` adds nothing to one and is taken off.
         let (said, _) = open(tree);
-        let mut found: Vec<(Syntax, Option<Signature>)> = Vec::new();
+        // The definitions a name may mean are those the namespaces walk
+        // to from how it is written; a qualified name means nothing of
+        // the core forms, which no namespace binds.
+        let written = said.applies().map(str::to_string);
+        let resolved = match &written {
+            Some(name) => Some(self.spaces.resolve(name)?),
+            None => None,
+        };
+        let qualified = written.as_deref().is_some_and(definition::qualified);
+        let said = match (&written, qualified) {
+            (Some(name), true) => definition::operated(&said, definition::bare(name)),
+            _ => said,
+        };
+        let mut found: Vec<(Syntax, Option<Signature>, Option<Entity>)> = Vec::new();
+        let mut fitting: Vec<(Signature, Entity)> = Vec::new();
         let mut least = usize::MAX;
         for rule in &self.syntax {
+            match (&rule.defined, &resolved) {
+                (Some((entity, _)), Some(rows))
+                    if !rows.iter().any(|row| &row.definition == entity) =>
+                {
+                    continue;
+                }
+                (None, _) if qualified => continue,
+                _ => {}
+            }
             if let (Answer::Syntax(template), Some(bindings)) =
                 (&rule.answer, self.applies(rule, &said, position))
             {
@@ -1340,39 +1748,77 @@ impl Expander {
                 if left < least {
                     least = left;
                     found.clear();
+                    fitting.clear();
+                }
+                let entity = rule.defined.as_ref().map(|(entity, _)| entity.clone());
+                if let (Some(signature), Some(entity)) = (&rule.signature, &entity)
+                    && !fitting.iter().any(|(_, other)| other == entity)
+                {
+                    fitting.push((signature.clone(), entity.clone()));
                 }
                 let answer = fill(template, &bindings, &site)?;
                 let same = unnamed(&answer, &site);
-                if !found.iter().any(|(other, _)| unnamed(other, &site) == same) {
-                    found.push((answer, rule.signature.clone()));
+                if !found
+                    .iter()
+                    .any(|(other, _, _)| unnamed(other, &site) == same)
+                {
+                    found.push((answer, rule.signature.clone(), entity));
                 }
             }
         }
+        // Two definitions of one signature, from two namespaces, are
+        // refused: which is meant, a namespace or a hash says.
+        for (at, (signature, _)) in fitting.iter().enumerate() {
+            let several: Vec<&Entity> = fitting
+                .iter()
+                .skip(at)
+                .filter(|(other, _)| {
+                    other.subject == signature.subject && other.parameters == signature.parameters
+                })
+                .map(|(_, entity)| entity)
+                .collect();
+            if several.len() > 1 {
+                let mut candidates = Vec::new();
+                for entity in several {
+                    for row in resolved.iter().flatten() {
+                        if &row.definition == entity {
+                            candidates.push((row.namespace.to_string(), entity.to_string()));
+                        }
+                    }
+                }
+                candidates.sort();
+                candidates.dedup();
+                return Err(Error::Several(Box::new(crate::Candidates {
+                    name: written.clone().unwrap_or_else(|| tree.to_string()),
+                    candidates,
+                })));
+            }
+        }
         self.asked.push((tree.clone(), position, self.tree));
-        let ambiguous = |found: &[(Syntax, Option<Signature>)]| {
+        let ambiguous = |found: &[(Syntax, Option<Signature>, Option<Entity>)]| {
             Error::Ambiguous(
                 tree.to_string(),
                 found
                     .iter()
-                    .map(|(answer, _)| answer.to_string())
+                    .map(|(answer, _, _)| answer.to_string())
                     .collect::<Vec<_>>()
                     .join(" | "),
             )
         };
-        match found.len() {
-            0 => Err(Error::Unknown(tree.to_string())),
-            1 => Ok(found.remove(0).0),
-            _ if self.negating => Err(ambiguous(&found)),
+        let taken = match found.len() {
+            0 => return Err(Error::Unknown(tree.to_string())),
+            1 => found.remove(0),
+            _ if self.negating => return Err(ambiguous(&found)),
             _ if position == Position::Head && !self.reporting => {
                 let written = Signature::of(&said, "concept");
-                let mut exact = found.iter().filter(|(_, signature)| {
+                let mut exact = found.iter().filter(|(_, signature, _)| {
                     signature.is_some()
                         && signature.as_ref().map(|signature| &signature.parameters)
                             == written.as_ref().map(|written| &written.parameters)
                 });
                 match (exact.next(), exact.next()) {
-                    (Some((answer, _)), None) => Ok(answer.clone()),
-                    _ => Err(ambiguous(&found)),
+                    (Some(answer), None) => answer.clone(),
+                    _ => return Err(ambiguous(&found)),
                 }
             }
             of => {
@@ -1387,12 +1833,19 @@ impl Expander {
                         0
                     }
                 };
-                found
-                    .get(taken)
-                    .map(|(answer, _)| answer.clone())
-                    .ok_or_else(|| ambiguous(&found))
+                found.get(taken).cloned().ok_or_else(|| ambiguous(&found))?
+            }
+        };
+        let (answer, _, entity) = taken;
+        if let (Some(referenced), Some(entity), Some(name)) =
+            (self.referenced.as_mut(), entity, written)
+        {
+            let reference = Reference { name, entity };
+            if !referenced.contains(&reference) {
+                referenced.push(reference);
             }
         }
+        Ok(answer)
     }
 
     /// What the rules say about the forms they were asked about, now that
@@ -1444,7 +1897,7 @@ impl Expander {
             // A query's answer is read by whoever asks and by a query,
             // never where rows are.
             if let Some(word) = word.as_deref()
-                && self.queries.contains_key(word)
+                && self.is_query(word)
             {
                 let call = tree.clone();
                 return self.about(&call, |this| Err(this.read_where_rows_are(&call)));
@@ -1470,10 +1923,11 @@ impl Expander {
                 ));
             }
             // A concept declared under a name that holds a `/` is the
-            // concept, not an attribute.
+            // concept, not an attribute. A name qualified by a namespace
+            // or a hash is a definition's, and nothing else.
             let declared = word
                 .as_deref()
-                .is_some_and(|word| self.concepts.contains(word));
+                .is_some_and(|word| definition::qualified(word) || self.concepts.contains(word));
             // An attribute named under a declared concept is one a rule
             // concludes about that concept's entities: `list/count-open`.
             if !declared
@@ -2420,6 +2874,73 @@ mod tests {
             assert!(rules[0].contains(")) (abc.task ?t "), "{rules:?}");
             assert!(!rules[0].contains("xyz.todo"), "{rules:?}");
         }
+    }
+
+    /// A macro is resolved when it is defined: a part of its template
+    /// that applies a definition is expanded then, the pattern's
+    /// variables holes in it. The concept it names defined again changes
+    /// nothing the macro expands to, and the source map says which name
+    /// was resolved to which definition.
+    #[test]
+    fn it_resolves_a_macro_when_it_is_defined() {
+        let mut expander = Expander::new().unwrap();
+        expander
+            .submit(
+                "(concept (note ?n text: ?x) (xyz.note/text of: ?n is: ?x as: :text))
+                 (rule (syntax (note ?n text: ?x)) (expand (memo ?n ?x)))",
+            )
+            .unwrap();
+        let concept = expander.defined()[0].definition.entity.clone();
+        let made = expander.defined()[1].clone();
+        assert_eq!(made.definition.kind, DefinitionKind::Macro);
+        assert_eq!(
+            made.source.references,
+            vec![Reference {
+                name: "note".into(),
+                entity: concept
+            }]
+        );
+        assert!(
+            !made.definition.form.to_string().contains("(note "),
+            "{}",
+            made.definition.form
+        );
+        let asked = "(select (memo ?n ?x))";
+        let (before, _) = expander.submit(asked).unwrap();
+        expander
+            .submit("(concept (note ?n text: ?x) (xyz.memo/body of: ?n is: ?x as: :text))")
+            .unwrap();
+        let (after, _) = expander.submit(asked).unwrap();
+        assert_eq!(after, before);
+        assert!(before[0].to_string().contains("xyz.note"), "{before:?}");
+    }
+
+    /// What cannot be expanded where a macro is defined is left to where
+    /// it is used: a part that applies a concept with the labels a hole
+    /// stands for, `(note ?n ... ?fields)`, is told which definition it
+    /// is only by the labels the use writes. That part follows the
+    /// concept as it is where the macro is used.
+    #[test]
+    fn it_leaves_a_part_a_hole_decides_to_where_the_macro_is_used() {
+        let mut expander = Expander::new().unwrap();
+        expander
+            .submit(
+                "(concept (note ?n text: ?x) (xyz.note/text of: ?n is: ?x as: :text))
+                 (rule (syntax (note ?n ... ?fields)) (expand (memo ?n ... ?fields)))",
+            )
+            .unwrap();
+        let made = expander.defined()[1].clone();
+        assert!(made.source.references.is_empty(), "{made:?}");
+        assert!(
+            made.definition.form.to_string().contains("(note "),
+            "{}",
+            made.definition.form
+        );
+        expander
+            .submit("(concept (note ?n text: ?x) (xyz.memo/body of: ?n is: ?x as: :text))")
+            .unwrap();
+        let (after, _) = expander.submit("(select (memo ?n text: ?x))").unwrap();
+        assert!(after[0].to_string().contains("xyz.memo"), "{after:?}");
     }
 
     /// Where the labels written fit several definitions, a read is of

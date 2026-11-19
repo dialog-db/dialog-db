@@ -56,6 +56,7 @@ pub mod check;
 pub mod compile;
 pub mod data;
 pub mod declare;
+pub mod definition;
 pub mod diagnostic;
 pub mod expand;
 pub mod form;
@@ -74,6 +75,7 @@ pub use analyze::{Analysis, Analyzer};
 pub use check::{Checked, check, check_forms};
 pub use compile::{Query, Step, Write, compile};
 pub use declare::{Concept, Declaration, Key, Line};
+pub use definition::{Binding, Defined, Definition, Namespaces};
 pub use diagnostic::{Diagnostic, Severity};
 pub use expand::{Expander, Position};
 pub use form::{Form, Part, read};
@@ -88,6 +90,25 @@ pub use view::tree::{
 };
 pub use view::{Attribute, CALLED, Element, Event, Input, Node, Piece};
 pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};
+
+/// A name several definitions of one signature stand under, and each of
+/// them, by its namespace and its definition's entity, in that order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidates {
+    /// The name as written.
+    pub name: String,
+    /// Each candidate: its namespace, and its definition.
+    pub candidates: Vec<(String, String)>,
+}
+
+/// Candidates of a name, each its definition and its namespace.
+fn candidates(candidates: &[(String, String)]) -> String {
+    candidates
+        .iter()
+        .map(|(namespace, definition)| format!("{definition} in {namespace}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// Why a document was not read, expanded or compiled.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
@@ -107,4 +128,10 @@ pub enum Error {
     /// A kernel form has no counterpart in Dialog-DB yet.
     #[error("not supported yet: {0}")]
     Unsupported(String),
+    /// A name that several definitions of one signature stand under, in
+    /// more than one namespace: which is meant is said by a namespace,
+    /// `@cdata/todo`, or a hash, `todo#3fa9`. Each candidate is its
+    /// namespace and its definition.
+    #[error("{} is defined more than once under one signature: {}", .0.name, candidates(&.0.candidates))]
+    Several(Box<Candidates>),
 }

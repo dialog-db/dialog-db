@@ -37,8 +37,9 @@ thiserror = { workspace = true }
 # repository's helpers build.
 dialog-common = { workspace = true, features = ["helpers"] }
 dialog-peer = { workspace = true, features = ["helpers"] }
-dialog-storage = { workspace = true }
+dialog-storage = { workspace = true, features = ["helpers"] }
 dialog-repository = { workspace = true, features = ["helpers"] }
+dialog-credentials = { workspace = true }
 anyhow = { workspace = true }
 futures-util = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }

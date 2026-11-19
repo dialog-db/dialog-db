@@ -20,7 +20,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use dialog_corpus::Entity;
+
 use crate::Error;
+use crate::definition::{self, Kind as DefinitionKind, Reference, SELF};
 use crate::form::Kind;
 use crate::select::{
     COLLECT, COUNT, DISTINCT, PART, ROW, ROW_FIELD, SELECTED, collected, unknown_function,
@@ -192,20 +195,15 @@ impl Expander {
                     });
                 }
                 match items(tree) {
-                    [call]
-                        if call
-                            .applies()
-                            .is_some_and(|name| self.queries.contains_key(name)) =>
-                    {
+                    [call] if call.applies().is_some_and(|name| self.is_query(name)) => {
                         let call = call.clone();
                         self.about(&call, |this| this.selected(&call))
                             .map(|selected| Some(vec![selected]))
                     }
                     parts
-                        if parts.iter().any(|part| {
-                            part.applies()
-                                .is_some_and(|name| self.queries.contains_key(name))
-                        }) =>
+                        if parts
+                            .iter()
+                            .any(|part| part.applies().is_some_and(|name| self.is_query(name))) =>
                     {
                         Err(Error::Refused(format!(
                             "{tree} asks a query with something beside it: a query is asked \
@@ -254,10 +252,10 @@ impl Expander {
                     });
                 }
                 if word == "concept"
-                    && let Some(call) = items(tree).iter().skip(1).find(|line| {
-                        line.applies()
-                            .is_some_and(|name| self.queries.contains_key(name))
-                    })
+                    && let Some(call) = items(tree)
+                        .iter()
+                        .skip(1)
+                        .find(|line| line.applies().is_some_and(|name| self.is_query(name)))
                 {
                     let call = call.clone();
                     return self.about(&call, |this| Err(this.read_where_rows_are(&call)));
@@ -310,21 +308,250 @@ impl Expander {
                 "{head} names more than one entity: a query's head is a concept's"
             )));
         }
-        let body = self.body(&name, body)?;
-        self.safe(head, &body)?;
+        let sorted = self.body(&name, body)?;
+        self.safe(head, &sorted)?;
         // It answers, as far as walking it can tell: every read in it
-        // expands, and every query it calls is known.
-        let before = self.queries.insert(name.clone(), tree.clone());
-        let checked = self.analyzed(&name, &mut Vec::new());
-        if let Err(error) = checked {
-            match before {
-                Some(before) => self.queries.insert(name, before),
-                None => self.queries.remove(&name),
-            };
-            return Err(error);
-        }
+        // expands, and every query it calls is known. What is refused
+        // is said of what was written.
+        let outer = self.referenced.replace(Vec::new());
+        let analyzed = self.analyze_query(&name, tree);
+        let references = std::mem::replace(&mut self.referenced, outer).unwrap_or_default();
+        analyzed?;
+        // What is kept is the query analyzed: every reference resolved
+        // and written out, every query it reaches beside it, each named
+        // by its entity, and its own name `@`. Its entity is made of the
+        // same, analyzed from its canonical form.
+        let (own, mut reached) = self.analyze_query(&name, tree)?;
+        let canonical = canonical_query(tree)?;
+        // A callee is in it by its entity, which its calls name: what it
+        // was kept as is no part of the caller's.
+        let (identity, _) = self.analyze_query(&name, &canonical)?;
+        reached.push(own);
+        let kept = definition::Definition::new(
+            DefinitionKind::Query,
+            apply(REACHED, reached),
+            &apply(REACHED, vec![identity]),
+        )?;
+        let key = definition::signature(DefinitionKind::Query, operand.terms.keys().cloned());
+        self.record(kept, name, key, references)?;
         self.declared += 1;
         Ok(())
+    }
+
+    /// Whether `name` names a query some namespace binds.
+    pub(super) fn is_query(&self, name: &str) -> bool {
+        self.spaces.resolve(name).is_ok_and(|rows| {
+            rows.iter().any(|row| {
+                self.definitions
+                    .get(&row.definition)
+                    .is_some_and(|kept| kept.kind == DefinitionKind::Query)
+            })
+        })
+    }
+
+    /// The query `name` names, applied as `call` is: its entity and what
+    /// it was kept as, every query it reaches and then its own, last,
+    /// named `@`. Resolved by the labels the call writes among the
+    /// queries the namespaces walk to; several of one signature, or
+    /// several the labels fit, are refused, the candidates listed.
+    pub(super) fn query_named(
+        &self,
+        name: &str,
+        call: &Syntax,
+    ) -> Result<Option<(Entity, Vec<Syntax>)>, Error> {
+        let written: BTreeSet<String> = call
+            .operand()
+            .map(|operand| operand.terms.keys().cloned().collect())
+            .unwrap_or_default();
+        let rows: Vec<definition::Name> = self
+            .spaces
+            .resolve(name)?
+            .into_iter()
+            .filter(|row| {
+                self.definitions
+                    .get(&row.definition)
+                    .is_some_and(|kept| kept.kind == DefinitionKind::Query)
+                    && definition::labels_of(&row.signature).is_some_and(|(_, labels)| {
+                        written.iter().all(|label| labels.contains(label))
+                    })
+            })
+            .collect();
+        let mut entities: Vec<&Entity> = rows.iter().map(|row| &row.definition).collect();
+        entities.sort();
+        entities.dedup();
+        match entities.as_slice() {
+            [] => Ok(None),
+            [entity] => {
+                let kept = &self.definitions[*entity];
+                Ok(Some(((*entity).clone(), items(&kept.form).to_vec())))
+            }
+            _ => {
+                let mut candidates: Vec<(String, String)> = rows
+                    .iter()
+                    .map(|row| (row.namespace.to_string(), row.definition.to_string()))
+                    .collect();
+                candidates.sort();
+                candidates.dedup();
+                Err(Error::Several(Box::new(crate::Candidates {
+                    name: name.to_string(),
+                    candidates,
+                })))
+            }
+        }
+    }
+
+    /// The query `name` that `tree` defines, analyzed: its own tree, its
+    /// name `@` and each call naming its callee by entity, and the trees
+    /// of every query it reaches, as each was kept.
+    fn analyze_query(&mut self, name: &str, tree: &Syntax) -> Result<(Syntax, Vec<Syntax>), Error> {
+        let [head, conditions @ ..] = items(tree) else {
+            return Err(asks(tree));
+        };
+        let head = head.clone();
+        let body = self.body(name, conditions)?;
+        let mut reached: Vec<Syntax> = Vec::new();
+        // Each query called, by the name written: the name it is kept
+        // under in what reaches it, its entity, and its head.
+        let mut callees: BTreeMap<String, (String, Syntax)> = BTreeMap::new();
+        for called in body.calls.iter().chain(
+            body.collects
+                .iter()
+                .filter(|collect| collect.call)
+                .map(|collect| &collect.condition),
+        ) {
+            let callee = called.applies().unwrap_or_default().to_string();
+            if callees.contains_key(&callee) {
+                continue;
+            }
+            let (entity, kept) = self
+                .about(called, |this| this.query_named(&callee, called))?
+                .ok_or_else(|| Error::Unknown(callee.clone()))?;
+            if let Some(referenced) = self.referenced.as_mut() {
+                let reference = Reference {
+                    name: callee.clone(),
+                    entity: entity.clone(),
+                };
+                if !referenced.contains(&reference) {
+                    referenced.push(reference);
+                }
+            }
+            let own = entity.to_string();
+            let mut callee_head = Syntax::Blank;
+            for (at, kept_tree) in kept.iter().enumerate() {
+                let kept_tree = if at + 1 == kept.len() {
+                    let renamed = renamed_head(kept_tree, &own);
+                    callee_head = items(&renamed).first().cloned().unwrap_or(Syntax::Blank);
+                    renamed
+                } else {
+                    kept_tree.clone()
+                };
+                let named = items(&kept_tree)
+                    .first()
+                    .and_then(Syntax::applies)
+                    .map(str::to_string);
+                if !reached.iter().any(|done| {
+                    items(done)
+                        .first()
+                        .and_then(Syntax::applies)
+                        .map(str::to_string)
+                        == named
+                }) {
+                    reached.push(kept_tree);
+                }
+            }
+            callees.insert(callee, (own, callee_head));
+        }
+        let called = |call: &Syntax| match call.applies().and_then(|name| callees.get(name)) {
+            Some((own, _)) => definition::operated(call, own),
+            None => call.clone(),
+        };
+        let mut parts = vec![definition::operated(&head, SELF)];
+        if !body.required.is_empty() {
+            let columns = variables(
+                body.required
+                    .iter()
+                    .filter(|condition| condition.applies() != Some("unless")),
+            );
+            let rules = self.reported(&columns, &body.required)?;
+            let mut required = vec![Syntax::Tuple(
+                columns.iter().cloned().map(Syntax::Variable).collect(),
+            )];
+            required.extend(rules);
+            parts.push(apply("required", required));
+        }
+        for call in &body.calls {
+            parts.push(apply("call", vec![called(call)]));
+        }
+        for (index, collect) in body.collects.iter().enumerate() {
+            if self.missing(collect, &body) {
+                let source = self.about(&collect.condition, |this| this.source(collect))?;
+                parts.push(apply(
+                    DISTINCT,
+                    vec![
+                        Syntax::Variable(collect.target.clone()),
+                        Syntax::Blank,
+                        source,
+                    ],
+                ));
+                continue;
+            }
+            let keyed = if collect.call {
+                let callee = collect.condition.applies().unwrap_or_default();
+                callees
+                    .get(callee)
+                    .and_then(|(_, head)| at(head, &collect.place))
+                    .is_some_and(entry)
+            } else {
+                match (&collect.place, collect.condition.applies()) {
+                    (Place::Term(label), Some(concept)) => self.entries.get(concept) == Some(label),
+                    _ => false,
+                }
+            };
+            let item = if keyed {
+                Syntax::Map(vec![(
+                    Syntax::Variable(format!("distinct-{index}-key")),
+                    Syntax::Variable(format!("distinct-{index}-value")),
+                )])
+            } else {
+                Syntax::Variable(format!("distinct-{index}"))
+            };
+            let condition = replaced(&collect.condition, &collect.place, item.clone());
+            let source = if collect.call {
+                apply("call", vec![called(&condition)])
+            } else {
+                let mut shared = Vec::new();
+                replaced(&collect.condition, &collect.place, Syntax::Blank).variables(&mut shared);
+                let mut columns = variables(std::iter::once(&Syntax::Tuple(
+                    shared.into_iter().map(Syntax::Variable).collect(),
+                )));
+                columns.extend(variables([&item]));
+                let rules = self.about(&collect.condition, |this| {
+                    this.reported(&columns, std::slice::from_ref(&condition))
+                })?;
+                let mut rows = vec![Syntax::Tuple(
+                    columns.iter().cloned().map(Syntax::Variable).collect(),
+                )];
+                rows.extend(rules);
+                apply("rows", rows)
+            };
+            parts.push(apply(
+                DISTINCT,
+                vec![Syntax::Variable(collect.target.clone()), item, source],
+            ));
+        }
+        for (target, shape) in &body.shapes {
+            parts.push(apply(
+                "is",
+                vec![Syntax::Variable(target.clone()), shape.clone()],
+            ));
+        }
+        if let Some((target, template)) = &body.view {
+            parts.push(apply(
+                "view",
+                vec![Syntax::Variable(target.clone()), template.clone()],
+            ));
+        }
+        Ok((apply("query", parts), reached))
     }
 
     /// A query's body sorted: what every answer needs, what collects,
@@ -397,7 +624,7 @@ impl Expander {
                  shape)`"
             )));
         };
-        let call = self.queries.contains_key(called) || called == name;
+        let call = self.is_query(called) || called == name;
         if called == name {
             return Err(Error::Refused(format!(
                 "{condition}: the query {name} calls itself, and a query that calls itself is \
@@ -576,180 +803,43 @@ impl Expander {
         held && !collect.call
             && matches!(&collect.place, Place::Term(label) if label == "is")
             && !self.concepts.contains(name)
-            && !self.queries.contains_key(name)
+            && !self.is_query(name)
             && name
                 .split_once('/')
                 .is_some_and(|(concept, _)| self.concepts.contains(concept))
     }
 
     /// `(select CALL)` of a query: the query and every query it reaches,
-    /// analyzed.
+    /// as each was kept when it was defined. Nothing is analyzed again,
+    /// so a query defined again under a callee's name changes nothing a
+    /// query kept before it answers.
     fn selected(&mut self, call: &Syntax) -> Result<Syntax, Error> {
         let name = call.applies().unwrap_or_default().to_string();
-        // What the call gives by value is put into the query it asks,
-        // so its reads are of that and not of every answer: one card is
-        // not every card. A query whose answer is markup is laid out for
-        // whatever entity it is rendered for, and is not.
-        let written = self.queries.get(&name).cloned();
-        if let Some(tree) = &written
-            && !items(tree)
-                .iter()
-                .skip(1)
-                .any(|condition| condition.applies() == Some("view"))
-        {
-            let given = bound_by(call, items(tree).first());
-            if !given.is_empty() {
-                self.queries
-                    .insert(name.clone(), crate::pattern::replaced(tree, &given));
-            }
-        }
-        let mut reached = Vec::new();
-        let analyzed = self.analyzed(&name, &mut reached);
-        if let Some(tree) = written {
-            self.queries.insert(name.clone(), tree);
-        }
-        analyzed?;
-        let mut parts = vec![call.clone()];
-        parts.extend(reached.into_iter().map(|(_, analyzed)| analyzed));
-        Ok(apply(SELECTED, parts))
-    }
-
-    /// The analyzed tree of the query `name`, added to `reached` with the
-    /// analyzed trees of the queries it calls, each once. A query met
-    /// again on the way to itself is refused.
-    fn analyzed(&mut self, name: &str, reached: &mut Vec<(String, Syntax)>) -> Result<(), Error> {
-        self.reach(name, reached, &mut Vec::new())
-    }
-
-    fn reach(
-        &mut self,
-        name: &str,
-        reached: &mut Vec<(String, Syntax)>,
-        path: &mut Vec<String>,
-    ) -> Result<(), Error> {
-        if path.iter().any(|on| on == name) {
-            path.push(name.to_string());
-            return Err(Error::Refused(format!(
-                "the query {name} calls itself, through {}: a query that calls itself is not \
-                 answered yet",
-                path.join(" and ")
-            )));
-        }
-        if reached.iter().any(|(done, _)| done == name) {
-            return Ok(());
-        }
-        let tree = self
-            .queries
-            .get(name)
-            .cloned()
-            .ok_or_else(|| Error::Unknown(name.to_string()))?;
-        let [head, conditions @ ..] = items(&tree) else {
-            return Err(asks(&tree));
+        let (_, mut kept) = self
+            .query_named(&name, call)?
+            .ok_or_else(|| Error::Unknown(name.clone()))?;
+        let Some(own) = kept.pop() else {
+            return Err(Error::Unknown(name));
         };
-        let head = head.clone();
-        let body = self.body(name, conditions)?;
-        path.push(name.to_string());
-        for called in body.calls.iter().chain(
-            body.collects
-                .iter()
-                .filter(|collect| collect.call)
-                .map(|collect| &collect.condition),
-        ) {
-            let callee = called.applies().unwrap_or_default().to_string();
-            self.reach(&callee, reached, path)?;
-        }
-        path.pop();
-        let mut parts = vec![head.clone()];
-        if !body.required.is_empty() {
-            let columns = variables(
-                body.required
-                    .iter()
-                    .filter(|condition| condition.applies() != Some("unless")),
-            );
-            let rules = self.reported(&columns, &body.required)?;
-            let mut required = vec![Syntax::Tuple(
-                columns.iter().cloned().map(Syntax::Variable).collect(),
-            )];
-            required.extend(rules);
-            parts.push(apply("required", required));
-        }
-        for call in &body.calls {
-            parts.push(apply("call", vec![call.clone()]));
-        }
-        for (index, collect) in body.collects.iter().enumerate() {
-            if self.missing(collect, &body) {
-                let source = self.about(&collect.condition, |this| this.source(collect))?;
-                parts.push(apply(
-                    DISTINCT,
-                    vec![
-                        Syntax::Variable(collect.target.clone()),
-                        Syntax::Blank,
-                        source,
-                    ],
-                ));
-                continue;
+        let mut own = renamed_head(&own, &name);
+        // What the call gives by value narrows the query it asks, so its
+        // reads are of that and not of every answer: one card is not
+        // every card. A query whose answer is markup is laid out for
+        // whatever entity it is rendered for, and is not.
+        if !items(&own)
+            .iter()
+            .skip(1)
+            .any(|part| part.applies() == Some("view"))
+        {
+            let given = bound_by(call, items(&own).first());
+            if !given.is_empty() {
+                own = narrowed(&own, &given);
             }
-            let keyed = if collect.call {
-                let callee = collect.condition.applies().unwrap_or_default();
-                let head = self
-                    .queries
-                    .get(callee)
-                    .and_then(|tree| items(tree).first().cloned());
-                head.as_ref()
-                    .and_then(|head| at(head, &collect.place))
-                    .is_some_and(entry)
-            } else {
-                match (&collect.place, collect.condition.applies()) {
-                    (Place::Term(label), Some(concept)) => self.entries.get(concept) == Some(label),
-                    _ => false,
-                }
-            };
-            let item = if keyed {
-                Syntax::Map(vec![(
-                    Syntax::Variable(format!("distinct-{index}-key")),
-                    Syntax::Variable(format!("distinct-{index}-value")),
-                )])
-            } else {
-                Syntax::Variable(format!("distinct-{index}"))
-            };
-            let condition = replaced(&collect.condition, &collect.place, item.clone());
-            let source = if collect.call {
-                apply("call", vec![condition])
-            } else {
-                let mut shared = Vec::new();
-                replaced(&collect.condition, &collect.place, Syntax::Blank).variables(&mut shared);
-                let mut columns = variables(std::iter::once(&Syntax::Tuple(
-                    shared.into_iter().map(Syntax::Variable).collect(),
-                )));
-                columns.extend(variables([&item]));
-                let rules = self.about(&collect.condition, |this| {
-                    this.reported(&columns, std::slice::from_ref(&condition))
-                })?;
-                let mut rows = vec![Syntax::Tuple(
-                    columns.iter().cloned().map(Syntax::Variable).collect(),
-                )];
-                rows.extend(rules);
-                apply("rows", rows)
-            };
-            parts.push(apply(
-                DISTINCT,
-                vec![Syntax::Variable(collect.target.clone()), item, source],
-            ));
         }
-        for (target, shape) in &body.shapes {
-            parts.push(apply(
-                "is",
-                vec![Syntax::Variable(target.clone()), shape.clone()],
-            ));
-        }
-        if let Some((target, template)) = &body.view {
-            parts.push(apply(
-                "view",
-                vec![Syntax::Variable(target.clone()), template.clone()],
-            ));
-        }
-        reached.push((name.to_string(), apply("query", parts)));
-        Ok(())
+        let mut parts = vec![call.clone()];
+        parts.extend(kept);
+        parts.push(own);
+        Ok(apply(SELECTED, parts))
     }
 
     /// What shows a query no document defines as its source: the
@@ -995,4 +1085,139 @@ fn functions(shape: &Syntax) -> Result<(), Error> {
         Syntax::Tuple(items) => items.iter().try_for_each(functions),
         _ => Ok(()),
     }
+}
+
+/// What a query is kept as: every query it reaches, then its own.
+const REACHED: &str = "reached";
+
+/// A kept query's tree with its head named `name` for `@`.
+fn renamed_head(tree: &Syntax, name: &str) -> Syntax {
+    let Syntax::Application(operator, operand) = tree else {
+        return tree.clone();
+    };
+    let mut operand = operand.clone();
+    if let Some(head) = operand.items.first_mut()
+        && head.applies() == Some(SELF)
+    {
+        *head = definition::operated(head, name);
+    }
+    Syntax::Application(operator.clone(), operand)
+}
+
+/// A query's tree with each rule its rows are read by narrowed to what
+/// a call gives: `(== ?v is: value)` among its premises, where `?v`
+/// stands in it.
+fn narrowed(query: &Syntax, given: &BTreeMap<String, Syntax>) -> Syntax {
+    fn rule(tree: &Syntax, given: &BTreeMap<String, Syntax>) -> Syntax {
+        let Syntax::Application(operator, operand) = tree else {
+            return tree.clone();
+        };
+        let mut names = Vec::new();
+        tree.variables(&mut names);
+        let mut operand = operand.clone();
+        for (variable, value) in given {
+            if names.contains(variable) {
+                let mut terms = BTreeMap::new();
+                terms.insert("is".to_string(), value.clone());
+                operand.items.push(Syntax::Application(
+                    Box::new(Syntax::Reference("==".into())),
+                    Parameters {
+                        items: vec![Syntax::Variable(variable.clone())],
+                        terms,
+                    },
+                ));
+            }
+        }
+        Syntax::Application(operator.clone(), operand)
+    }
+    fn rows(part: &Syntax, given: &BTreeMap<String, Syntax>) -> Syntax {
+        let Syntax::Application(operator, operand) = part else {
+            return part.clone();
+        };
+        let mut operand = operand.clone();
+        for item in operand.items.iter_mut().skip(1) {
+            if item.applies() == Some("rule") {
+                *item = rule(item, given);
+            }
+        }
+        Syntax::Application(operator.clone(), operand)
+    }
+    let Syntax::Application(operator, operand) = query else {
+        return query.clone();
+    };
+    let mut operand = operand.clone();
+    for part in operand.items.iter_mut().skip(1) {
+        match part.applies() {
+            Some("required") => *part = rows(part, given),
+            Some(DISTINCT) => {
+                if let Syntax::Application(_, inner) = part
+                    && let Some(source) = inner.items.get_mut(2)
+                    && source.applies() == Some("rows")
+                {
+                    *source = rows(source, given);
+                }
+            }
+            _ => {}
+        }
+    }
+    Syntax::Application(operator.clone(), operand)
+}
+
+/// A query's definition in canonical form: its own name `@`, its
+/// variables named by the engine's labelling, its conditions in the
+/// order of their encoding and each `is` after what it is made of.
+fn canonical_query(tree: &Syntax) -> Result<Syntax, Error> {
+    let [head, conditions @ ..] = items(tree) else {
+        return Err(asks(tree));
+    };
+    let head = definition::operated(head, SELF);
+    let (fixed, set) = definition::canonical(std::slice::from_ref(&head), conditions)?;
+    let mut ordered: Vec<Syntax> = set
+        .iter()
+        .filter(|part| !matches!(part.applies(), Some("is" | "view")))
+        .cloned()
+        .collect();
+    let mut shapes: Vec<Syntax> = set
+        .iter()
+        .filter(|part| part.applies() == Some("is"))
+        .cloned()
+        .collect();
+    let target = |shape: &Syntax| match items(shape).first() {
+        Some(Syntax::Variable(name)) => Some(name.clone()),
+        _ => None,
+    };
+    while !shapes.is_empty() {
+        let waiting: Vec<String> = shapes.iter().filter_map(target).collect();
+        let ready = shapes
+            .iter()
+            .position(|shape| {
+                let own = target(shape);
+                let mut needs = Vec::new();
+                if let Some(made) = items(shape).get(1) {
+                    made.variables(&mut needs);
+                }
+                needs
+                    .iter()
+                    .all(|name| Some(name) == own.as_ref() || !waiting.contains(name))
+            })
+            .unwrap_or(0);
+        ordered.push(shapes.remove(ready));
+    }
+    ordered.extend(
+        set.iter()
+            .filter(|part| part.applies() == Some("view"))
+            .cloned(),
+    );
+    let mut parts = fixed;
+    parts.extend(ordered);
+    Ok(Syntax::Application(
+        Box::new(Syntax::Reference("query".into())),
+        Parameters {
+            items: parts,
+            terms: tree
+                .operand()
+                .map(|operand| operand.terms.clone())
+                .unwrap_or_default(),
+        },
+    ))
 }

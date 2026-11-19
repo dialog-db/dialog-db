@@ -1011,6 +1011,80 @@ async fn it_refuses_a_rule_or_a_concept_that_applies_a_query() -> Result<()> {
     Ok(())
 }
 
+/// The definition `name` is bound to in mine, under its one signature.
+fn bound(notebook: &Notebook, name: &str) -> (String, String) {
+    let analyzer = notebook.analyzer();
+    let rows = analyzer.namespaces().resolve(name).expect("resolved");
+    let [row] = rows.as_slice() else {
+        panic!("one definition of {name}: {rows:?}");
+    };
+    let kept = analyzer
+        .definitions()
+        .find(|kept| kept.entity == row.definition)
+        .expect("kept");
+    (row.definition.to_string(), kept.form.to_string())
+}
+
+/// A query is kept with every query it calls resolved and written out
+/// where it is defined. A callee defined again changes nothing kept of
+/// its caller: neither what it is, nor its entity, nor its answers,
+/// until the caller is defined again, which then reads the new callee.
+#[dialog_common::test]
+async fn it_keeps_a_caller_as_it_was_when_its_callee_is_defined_again() -> Result<()> {
+    let mut notebook = todos().await?;
+    notebook
+        .submit(
+            "(query (todo/label ?t is: ?label)
+               (todo ?t title: ?title)
+               (is ?label ?title))
+             (query (todo/badge ?t is: ?badge)
+               (todo/label ?t is: ?label)
+               (is ?badge {:label ?label}))",
+        )
+        .await?;
+    let asked = "(select (todo/badge todo:1 is: ?badge))";
+    let before = report(&mut notebook, asked).await?;
+    assert_eq!(
+        before,
+        vec![r#"(todo/badge todo:1 is: {:label "Buy milk"})"#]
+    );
+    let kept = bound(&notebook, "todo/badge");
+
+    notebook
+        .submit(
+            "(query (todo/label ?t is: ?label)
+               (todo ?t title: ?title)
+               (is ?label {:was ?title}))",
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(select (todo/label todo:1 is: ?label))").await?,
+        vec![r#"(todo/label todo:1 is: {:was "Buy milk"})"#],
+        "the callee is defined again"
+    );
+    assert_eq!(
+        bound(&notebook, "todo/badge"),
+        kept,
+        "the caller is kept as it was"
+    );
+    assert_eq!(report(&mut notebook, asked).await?, before);
+
+    // Defined again, the caller reads the callee as it now is.
+    notebook
+        .submit(
+            "(query (todo/badge ?t is: ?badge)
+               (todo/label ?t is: ?label)
+               (is ?badge {:label ?label}))",
+        )
+        .await?;
+    assert_ne!(bound(&notebook, "todo/badge").0, kept.0);
+    assert_eq!(
+        report(&mut notebook, asked).await?,
+        vec![r#"(todo/badge todo:1 is: {:label {:was "Buy milk"}})"#]
+    );
+    Ok(())
+}
+
 /// A query that calls itself, directly, is refused.
 #[dialog_common::test]
 async fn it_refuses_a_query_that_calls_itself() -> Result<()> {

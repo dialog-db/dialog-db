@@ -64,6 +64,11 @@ const OPERATOR: &str = "+-*/<>=!";
 impl Kind {
     /// The kind of thing the symbol `name` names.
     pub fn of(name: &str) -> Kind {
+        // A name qualified by a namespace, `@cdata/todo`, or by a hash,
+        // `todo#3fa9`, is a definition's name.
+        if (name.starts_with('@') && name.len() > 1) || name.contains('#') {
+            return Kind::Name;
+        }
         if !name.is_empty() && name.chars().all(|c| OPERATOR.contains(c)) {
             Kind::Operator
         } else if name.contains(':') {

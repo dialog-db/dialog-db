@@ -8,7 +8,7 @@
 #![allow(deprecated)]
 
 use anyhow::Result;
-use dialog_notation::live::{Live, LiveError};
+use dialog_notation::live::{Live, LiveError, written};
 use dialog_notation::{Analyzer, Diagnostic, Step, check};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_peer::{Peer, Session};
@@ -17,23 +17,75 @@ use dialog_query::query::Output as _;
 use dialog_repository::{Branch, Transient};
 use dialog_storage::provider::storage::VolatileSpace;
 
-/// A branch and the syntax submitted to it so far.
-pub struct Notebook {
-    pub operator: Peer<VolatileSpace, Session>,
+/// A notebook over the storage space `$space`: a branch of a repository,
+/// and an analyzer that knows every definition the branch keeps.
+macro_rules! notebook {
+    ($(#[$meta:meta])* $name:ident, $space:ty) => {
+$(#[$meta])*
+pub struct $name {
+    pub operator: Peer<$space, Session>,
     pub branch: Branch,
+    pub repository: std::sync::Arc<dialog_repository::Repository<dialog_credentials::Credential>>,
     analyzer: Analyzer,
 }
 
-impl Notebook {
-    pub async fn open() -> Result<Self> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-        Ok(Notebook {
+#[allow(dead_code)]
+impl $name {
+    /// A notebook on `branch`, its analyzer loaded from what the branch
+    /// keeps: the definitions every earlier document wrote.
+    pub async fn on(
+        operator: Peer<$space, Session>,
+        repository: std::sync::Arc<dialog_repository::Repository<dialog_credentials::Credential>>,
+        branch: Branch,
+    ) -> Result<Self> {
+        let analyzer = Live::new(branch.clone())
+            .analyzer(&operator)
+            .await
+            .map_err(unwrapped)?;
+        Ok($name {
             operator,
             branch,
-            analyzer: Analyzer::new()?,
+            repository,
+            analyzer,
         })
+    }
+
+    /// Another notebook on the branch `name` of the same repository.
+    pub async fn branch(&self, name: &str) -> Result<Self> {
+        let branch = self
+            .repository
+            .branch(name)
+            .open()
+            .perform(&self.operator)
+            .await?;
+        Self::on(self.operator.clone(), self.repository.clone(), branch).await
+    }
+
+    /// Forget every definition submitted, and load the analyzer again
+    /// from what the branch keeps, as a notebook opened anew would.
+    pub async fn reload(&mut self) -> Result<()> {
+        self.branch.refresh(&self.operator).await?;
+        self.analyzer = Live::new(self.branch.clone())
+            .analyzer(&self.operator)
+            .await
+            .map_err(unwrapped)?;
+        Ok(())
+    }
+
+    /// Take into the analyzer what the branch keeps that it does not
+    /// know, as after a pull.
+    pub async fn refreshed(&mut self) -> Result<()> {
+        self.branch.refresh(&self.operator).await?;
+        Live::new(self.branch.clone())
+            .refresh(&mut self.analyzer, &self.operator)
+            .await
+            .map_err(unwrapped)?;
+        Ok(())
+    }
+
+    /// The analyzer, with every definition submitted so far.
+    pub fn analyzer(&self) -> &Analyzer {
+        &self.analyzer
     }
 
     /// Submit a document: one transaction for what it writes, installs
@@ -62,6 +114,17 @@ impl Notebook {
         let diagnostics = checked.diagnostics;
         let mut transaction = self.branch.transaction();
         let mut writes = false;
+        // What the document defines is written with what it writes: each
+        // definition, its source map and its bindings, and the rule
+        // `Name` is derived by.
+        let (defined, name) = written(&checked.defined)?;
+        for statement in defined {
+            transaction = transaction.assert(statement);
+            writes = true;
+        }
+        if let Some(rule) = name {
+            transaction = transaction.assert(rule);
+        }
         let mut queries = Vec::new();
         let mut selections = Vec::new();
         let mut views = Vec::new();
@@ -175,6 +238,60 @@ impl Notebook {
         report.sort();
         report.dedup();
         Ok((report, diagnostics))
+    }
+}
+    };
+}
+
+notebook!(
+    /// A branch and the syntax submitted to it so far, in memory.
+    Notebook,
+    VolatileSpace
+);
+
+impl Notebook {
+    pub async fn open() -> Result<Self> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repository = test_repo(&operator, &profile).await;
+        let branch = repository.branch("main").open().perform(&operator).await?;
+        Notebook::on(operator, std::sync::Arc::new(repository), branch).await
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+notebook!(
+    /// A notebook whose repository is kept on the filesystem, in a
+    /// directory of its own.
+    #[allow(dead_code)]
+    FileNotebook,
+    dialog_storage::NativeTempSpace
+);
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+impl FileNotebook {
+    pub async fn open() -> Result<Self> {
+        use dialog_capability::Subject;
+        use dialog_peer::helpers::{open_peer, test_owned, unique_name};
+        use dialog_repository::RepositoryExt as _;
+        let storage = test_owned(dialog_storage::provider::Storage::temp()).await;
+        let peer = open_peer(
+            storage,
+            dialog_effects::storage::Location::profile(unique_name("notebook")),
+        )
+        .await?;
+        let operator = peer
+            .session(b"notebook")
+            .space(peer.state())
+            .allow(Subject::any())
+            .await?;
+        let repository = peer
+            .space(unique_name("repo"))
+            .open()
+            .perform(&operator)
+            .await?;
+        let branch = repository.branch("main").open().perform(&operator).await?;
+        FileNotebook::on(operator, std::sync::Arc::new(repository), branch).await
     }
 }
 

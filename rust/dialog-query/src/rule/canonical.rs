@@ -94,11 +94,16 @@ pub struct Identity {
 
 /// One place a variable may occur: a premise, a reduce entry or a
 /// head field, with the variables it names under their keys.
-struct Atom {
+///
+/// It is what [`labelling`] reads, and anything that names variables
+/// apart from their spelling may give it its own: the notation's
+/// definitions are labelled by it too.
+#[derive(Debug, Clone)]
+pub struct Atom {
     /// The atom with every variable replaced by the hole, encoded.
-    shape: Vec<u8>,
+    pub shape: Vec<u8>,
     /// The variables it names, by key, in key order.
-    slots: Vec<(String, String)>,
+    pub slots: Vec<(String, String)>,
 }
 
 /// What the labeling works over: the rule's parts, the variables to
@@ -270,34 +275,66 @@ pub(crate) fn canonicalize(
 /// smallest encoding among those the search visits. A key operand is
 /// named after its field, so the labeling's name for it is replaced.
 fn label(rule: &Rule<'_>) -> Result<Rename, TypeError> {
-    if rule.locals.is_empty() {
+    labelling(
+        &rule.locals,
+        &rule.atoms,
+        |classes| names(classes, rule),
+        |names| spell(rule, names).map(|(encoded, _)| encoded),
+    )
+}
+
+/// The canonical names of `locals`, which occur in `atoms`: colour
+/// refinement, then individualisation, as a rule's are named.
+///
+/// `name` gives the names a partition into classes induces, the
+/// classes in colour order, and `spell` encodes the whole under a
+/// naming; of the namings the search visits, the one whose encoding is
+/// smallest wins. With no local, nothing is renamed.
+pub fn labelling<E>(
+    locals: &[String],
+    atoms: &[Atom],
+    mut name: impl FnMut(&[Vec<String>]) -> BTreeMap<String, String>,
+    mut spell: impl FnMut(&BTreeMap<String, String>) -> Result<Vec<u8>, E>,
+) -> Result<BTreeMap<String, String>, E> {
+    if locals.is_empty() {
         return Ok(Rename::new());
     }
-    let colours = refine(initial(rule), rule);
+    let colours = refine(initial(locals, atoms), locals, atoms);
     let mut best: Option<(Vec<u8>, Rename)> = None;
     let mut leaves = 0usize;
-    search(colours, rule, &mut best, &mut leaves)?;
+    search(
+        colours,
+        locals,
+        atoms,
+        &mut name,
+        &mut spell,
+        &mut best,
+        &mut leaves,
+    )?;
     Ok(best.map(|(_, names)| names).unwrap_or_default())
 }
 
 /// Individualise and refine: at a leaf every variable has its own
 /// colour and the spelling it induces is a candidate; elsewhere the
 /// first shared colour class is split by trying each member first.
-fn search(
+fn search<E>(
     colours: BTreeMap<String, Vec<u8>>,
-    rule: &Rule<'_>,
+    locals: &[String],
+    atoms: &[Atom],
+    name: &mut impl FnMut(&[Vec<String>]) -> Rename,
+    spell: &mut impl FnMut(&Rename) -> Result<Vec<u8>, E>,
     best: &mut Option<(Vec<u8>, Rename)>,
     leaves: &mut usize,
-) -> Result<(), TypeError> {
+) -> Result<(), E> {
     if *leaves >= SEARCH_BOUND {
         return Ok(());
     }
-    let classes = classes(&colours, &rule.locals);
+    let classes = classes(&colours, locals);
     match classes.iter().find(|members| members.len() > 1) {
         None => {
             *leaves += 1;
-            let names = names(&classes, rule);
-            let (encoded, _) = spell(rule, &names)?;
+            let names = name(&classes);
+            let encoded = spell(&names)?;
             if best.as_ref().is_none_or(|(known, _)| encoded < *known) {
                 *best = Some((encoded, names));
             }
@@ -307,8 +344,8 @@ fn search(
                 let mut split = colours.clone();
                 let colour = split.get_mut(member).expect("every variable is coloured");
                 *colour = hash(&[b"!", colour.as_slice()]);
-                let refined = refine(split, rule);
-                search(refined, rule, best, leaves)?;
+                let refined = refine(split, locals, atoms);
+                search(refined, locals, atoms, name, spell, best, leaves)?;
                 if *leaves >= SEARCH_BOUND {
                     break;
                 }
@@ -320,12 +357,11 @@ fn search(
 
 /// Each variable's starting colour: the shapes and keys it occurs
 /// under.
-fn initial(rule: &Rule<'_>) -> BTreeMap<String, Vec<u8>> {
-    rule.locals
+fn initial(locals: &[String], atoms: &[Atom]) -> BTreeMap<String, Vec<u8>> {
+    locals
         .iter()
         .map(|local| {
-            let mut occurrences: Vec<Vec<u8>> = rule
-                .atoms
+            let mut occurrences: Vec<Vec<u8>> = atoms
                 .iter()
                 .flat_map(|atom| {
                     atom.slots
@@ -343,15 +379,17 @@ fn initial(rule: &Rule<'_>) -> BTreeMap<String, Vec<u8>> {
 /// Refine colours by the colours of the variables each occurrence
 /// sits beside, until the partition stops splitting. A colour only
 /// ever folds its own history in, so classes never merge.
-fn refine(mut colours: BTreeMap<String, Vec<u8>>, rule: &Rule<'_>) -> BTreeMap<String, Vec<u8>> {
+fn refine(
+    mut colours: BTreeMap<String, Vec<u8>>,
+    locals: &[String],
+    atoms: &[Atom],
+) -> BTreeMap<String, Vec<u8>> {
     let mut distinct = count(&colours);
     loop {
-        let next: BTreeMap<String, Vec<u8>> = rule
-            .locals
+        let next: BTreeMap<String, Vec<u8>> = locals
             .iter()
             .map(|local| {
-                let mut occurrences: Vec<Vec<u8>> = rule
-                    .atoms
+                let mut occurrences: Vec<Vec<u8>> = atoms
                     .iter()
                     .flat_map(|atom| {
                         atom.slots
