@@ -42,3 +42,13 @@ The agent had feared that folding the changes needed something the engine does n
 
 **Decided.** Not decided. The hypothesis stands for `count`, integer `sum` and a set of values, and falls back to folding the group again for the rest. Rests on the open hypothesis about float sums.
 
+
+## 2026-11-19, Delimiting: the fold measured, and delta queries read
+
+**Asked.** The maintainer: he had meant to build DBSP whole and left it because it assumes a full replica and because dialog's machinery looked like enough. He wants an engine that keeps a view current at the cost of the change and works on a partial replica, and asked that delta queries and 3DF be read again and the code be read for what it can do.
+
+**Learned.** The fold costs every group: 138 ms for one tag among 1000 to-dos, where a view's rows cost 4 to 5 ms and a plain subscription 0.24. Dialog already has the hard parts of a delta query: a signed diff scoped to what the query read, which works on a partial replica, and the rest of a body asked with a changed fact's bindings. It throws the rows away and keeps the entities ([delta-queries.md](delta-queries.md)). The papers' rule counts derivations and dialog's rows are a set; the backward/forward check answers that without counts. No source read handles negation or, Noria apart, partial input.
+
+The agent proposed a wider problem, "a subscriber pays for the unit derived again, not for the change", and withdraws it on this evidence: for a join the unit is within a factor of the change. The order is lost in the fold, as the topic says, and in the scan of the kept answer.
+
+**Decided.** Not decided. The statement still waits on the maintainer.
