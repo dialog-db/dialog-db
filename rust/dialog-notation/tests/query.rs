@@ -1011,18 +1011,29 @@ async fn it_refuses_a_rule_or_a_concept_that_applies_a_query() -> Result<()> {
     Ok(())
 }
 
-/// The definition `name` is bound to in mine, under its one signature.
-fn bound(notebook: &Notebook, name: &str) -> (String, String) {
-    let analyzer = notebook.analyzer();
-    let rows = analyzer.namespaces().resolve(name).expect("resolved");
+/// The definition `name` is bound to in mine, under its one signature,
+/// as the branch keeps it.
+async fn bound(notebook: &Notebook, name: &str) -> Result<(String, String)> {
+    let kept = dialog_notation::live::Live::new(notebook.branch.clone())
+        .kept(&notebook.operator)
+        .await?;
+    let mut spaces =
+        dialog_notation::Namespaces::new(notebook.analyzer().namespaces().mine().clone());
+    for binding in kept.bindings {
+        spaces.bind(binding);
+    }
+    let rows = spaces.resolve(name)?;
     let [row] = rows.as_slice() else {
         panic!("one definition of {name}: {rows:?}");
     };
-    let kept = analyzer
-        .definitions()
+    let form = kept
+        .definitions
+        .iter()
         .find(|kept| kept.entity == row.definition)
-        .expect("kept");
-    (row.definition.to_string(), kept.form.to_string())
+        .expect("kept")
+        .form
+        .to_string();
+    Ok((row.definition.to_string(), form))
 }
 
 /// A query is kept with every query it calls resolved and written out
@@ -1048,7 +1059,7 @@ async fn it_keeps_a_caller_as_it_was_when_its_callee_is_defined_again() -> Resul
         before,
         vec![r#"(todo/badge todo:1 is: {:label "Buy milk"})"#]
     );
-    let kept = bound(&notebook, "todo/badge");
+    let kept = bound(&notebook, "todo/badge").await?;
 
     notebook
         .submit(
@@ -1063,7 +1074,7 @@ async fn it_keeps_a_caller_as_it_was_when_its_callee_is_defined_again() -> Resul
         "the callee is defined again"
     );
     assert_eq!(
-        bound(&notebook, "todo/badge"),
+        bound(&notebook, "todo/badge").await?,
         kept,
         "the caller is kept as it was"
     );
@@ -1077,7 +1088,7 @@ async fn it_keeps_a_caller_as_it_was_when_its_callee_is_defined_again() -> Resul
                (is ?badge {:label ?label}))",
         )
         .await?;
-    assert_ne!(bound(&notebook, "todo/badge").0, kept.0);
+    assert_ne!(bound(&notebook, "todo/badge").await?.0, kept.0);
     assert_eq!(
         report(&mut notebook, asked).await?,
         vec![r#"(todo/badge todo:1 is: {:label {:was "Buy milk"}})"#]

@@ -298,6 +298,7 @@ impl Expander {
             return Err(asks(tree));
         }
         let name = name.to_string();
+        let _ = self.rows(&name);
         if self.concepts.contains(&name) {
             return Err(Error::Refused(format!(
                 "{head}: {name} is a concept, and a query is named apart from what it reads"
@@ -340,7 +341,7 @@ impl Expander {
 
     /// Whether `name` names a query some namespace binds.
     pub(super) fn is_query(&self, name: &str) -> bool {
-        self.spaces.resolve(name).is_ok_and(|rows| {
+        self.rows(name).is_ok_and(|rows| {
             rows.iter().any(|row| {
                 self.definitions
                     .get(&row.definition)
@@ -751,6 +752,8 @@ impl Expander {
     /// field of it and no other.
     fn events(&self, node: &crate::view::Node) -> Result<(), Error> {
         for event in crate::view::events(node) {
+            // The command is looked up, so a driver reads it.
+            let _ = self.rows(&event.command);
             if !self.commands.contains_key(&event.command) {
                 return Err(Error::Refused(format!(
                     ":on/{} posts {}, which is no command declared",
@@ -800,6 +803,9 @@ impl Expander {
                 .map(|node| crate::view::variables(&node).contains(&collect.target))
                 .unwrap_or(false)
         });
+        if let Some((concept, _)) = name.split_once('/') {
+            let _ = self.rows(concept);
+        }
         held && !collect.call
             && matches!(&collect.place, Place::Term(label) if label == "is")
             && !self.concepts.contains(name)

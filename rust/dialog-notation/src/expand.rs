@@ -792,6 +792,44 @@ impl Expander {
         self
     }
 
+    /// The rows of `Name` a reference as written walks to, each
+    /// definition among them not known yet asked for.
+    pub(crate) fn rows(&self, written: &str) -> Result<Vec<definition::Name>, Error> {
+        let rows = self.spaces.resolve(written)?;
+        for row in &rows {
+            if !self.definitions.contains_key(&row.definition) {
+                self.spaces
+                    .want(definition::Want::Definition(row.definition.clone()));
+            }
+        }
+        Ok(rows)
+    }
+
+    /// What resolving names asked for that has not been answered: what a
+    /// driver reads next, from wherever the definitions are kept.
+    pub fn wanted(&self) -> Vec<definition::Want> {
+        self.spaces.wanted()
+    }
+
+    /// Take in what a driver read for `wants`, found or not: the
+    /// definitions and bindings found, each definition installed under
+    /// every name a known namespace binds it to.
+    pub fn answer(
+        &mut self,
+        wants: Vec<definition::Want>,
+        definitions: Vec<definition::Definition>,
+        bindings: Vec<definition::Binding>,
+    ) -> Result<(), Error> {
+        self.spaces.answer(wants);
+        self.load(definitions, bindings)
+    }
+
+    /// Forget every binding read, so the next analysis reads them again
+    /// and sees what moved. Definitions are kept: each is its content.
+    pub fn forget(&mut self) {
+        self.spaces.forget();
+    }
+
     /// The revision the names of what is defined next are resolved at,
     /// which a source map then holds.
     pub fn resolve_at(&mut self, revision: Option<String>) {
@@ -821,9 +859,12 @@ impl Expander {
         definitions: impl IntoIterator<Item = definition::Definition>,
         bindings: impl IntoIterator<Item = definition::Binding>,
     ) -> Result<(), Error> {
+        // A definition already known is kept as it is: one entity is
+        // one meaning, and one this walker made keeps how it was spelled.
         for definition in definitions {
             self.definitions
-                .insert(definition.entity.clone(), definition);
+                .entry(definition.entity.clone())
+                .or_insert(definition);
         }
         for binding in bindings {
             self.spaces.bind(binding);
@@ -1345,7 +1386,7 @@ impl Expander {
             },
         };
         for binding in made.bindings()? {
-            self.spaces.bind(binding);
+            self.spaces.bind_here(binding);
         }
         self.definitions.insert(kept.entity.clone(), kept);
         self.made.retain(|other| {
@@ -1430,7 +1471,7 @@ impl Expander {
         for _ in 0..16 {
             let (said, _) = open(&tree);
             let resolved = match said.applies() {
-                Some(name) => self.spaces.resolve(name).unwrap_or_default(),
+                Some(name) => self.rows(name).unwrap_or_default(),
                 None => return tree,
             };
             let applying = self
@@ -1710,7 +1751,7 @@ impl Expander {
         // the core forms, which no namespace binds.
         let written = said.applies().map(str::to_string);
         let resolved = match &written {
-            Some(name) => Some(self.spaces.resolve(name)?),
+            Some(name) => Some(self.rows(name)?),
             None => None,
         };
         let qualified = written.as_deref().is_some_and(definition::qualified);
@@ -1866,7 +1907,7 @@ impl Expander {
                 .is_some_and(|(_, held)| labels.iter().all(|label| held.contains(label)))
         };
         let elsewhere = self.spaces.elsewhere(name);
-        let mine = self.spaces.resolve(name).unwrap_or_default();
+        let mine = self.rows(name).unwrap_or_default();
         if mine.is_empty() {
             if elsewhere.is_empty() {
                 return unknown;
@@ -1968,9 +2009,20 @@ impl Expander {
             // A concept declared under a name that holds a `/` is the
             // concept, not an attribute. A name qualified by a namespace
             // or a hash is a definition's, and nothing else.
-            let declared = word
-                .as_deref()
-                .is_some_and(|word| definition::qualified(word) || self.concepts.contains(word));
+            // A name of no stored domain is looked up before it is read as
+            // an attribute: one a namespace binds is a definition's.
+            let stored = |word: &str| {
+                word.split_once('/')
+                    .is_some_and(|(domain, _)| domain.contains('.'))
+            };
+            let declared = word.as_deref().is_some_and(|word| {
+                definition::qualified(word)
+                    || self.concepts.contains(word)
+                    || (Kind::of(word) != Kind::Domain
+                        && !stored(word)
+                        && (!self.rows(word).unwrap_or_default().is_empty()
+                            || !self.spaces.elsewhere(word).is_empty()))
+            });
             // An attribute named under a declared concept is one a rule
             // concludes about that concept's entities: `list/count-open`.
             if !declared

@@ -62,8 +62,8 @@ macro_rules! round_trip {
         notebook.reload().await?;
         assert_eq!(
             notebook.analyzer().definitions().count(),
-            4,
-            "the concept, the macro and the two queries are loaded"
+            0,
+            "nothing is loaded"
         );
         for (asked, answered) in ASKED.iter().zip(ANSWERED) {
             assert_eq!(
@@ -223,7 +223,6 @@ async fn it_sees_a_definition_a_pull_brought() -> Result<()> {
         .from(&main.branch)
         .perform(&other.operator)
         .await?;
-    other.refreshed().await?;
     assert_eq!(other.submit(ASKED[0]).await?.0, vec![ANSWERED[0]]);
     Ok(())
 }
@@ -322,5 +321,240 @@ async fn it_reads_every_rule_that_concludes_one_concept() -> Result<()> {
             r#"(xyz.seen b:1 text: "from b")"#,
         ]
     );
+    Ok(())
+}
+
+/// What is stored on the branch for the analysis below: a concept, a
+/// query and a second query that calls it, a macro and a second macro
+/// the first expands to only once its holes are filled, and two
+/// definitions nothing asks for.
+const STORED: &str = r#"
+    (concept (todo ?t title: ?title)
+      (xyz.todo/title of: ?t is: ?title as: :text cardinality: :one))
+    (concept (spare ?s text: ?x) (xyz.spare/text of: ?s is: ?x as: :text))
+    (concept (other ?o text: ?x) (xyz.other/text of: ?o is: ?x as: :text))
+    (query (todo/label ?t is: ?label)
+      (todo ?t title: ?title)
+      (is ?label ?title))
+    (query (todo/badge ?t is: ?badge)
+      (todo/label ?t is: ?label)
+      (is ?badge {:label ?label}))
+    (rule (syntax (todo ?t title: ?x)) (expand (task ?t ?x)))
+    (rule (syntax (task ?t ... ?rest)) (expand (chore ?t ... ?rest)))
+    (assert (todo todo:1 title: "Buy milk"))
+"#;
+
+/// A document that uses the concept, the calling query and the first
+/// macro.
+const USING: &str = r#"
+    (select (todo ?t title: ?x))
+    (select (todo/badge ?t is: ?badge))
+    (select (chore ?t ?x))
+"#;
+
+/// A notebook with nothing in memory analyzes a document whose
+/// definitions are all on the branch, reading in rounds only what it
+/// reaches: the concept, the query it asks (whose callee is inlined in
+/// it) and the two macros, the second asked for once the first is
+/// expanded. Of the seven stored, the two spares and the callee are not
+/// read.
+macro_rules! reached {
+    ($notebook:expr) => {{
+        let mut notebook = $notebook;
+        notebook.submit(STORED).await?;
+        notebook.reload().await?;
+        assert_eq!(notebook.analyzer().definitions().count(), 0);
+        let (answers, _) = notebook.submit(USING).await?;
+        assert_eq!(
+            answers,
+            vec![
+                r#"(todo/badge todo:1 is: {:label "Buy milk"})"#,
+                r#"(xyz.todo todo:1 title: "Buy milk")"#,
+            ]
+        );
+        let rounds = notebook.rounds;
+        assert_eq!(rounds.definitions, 4, "{rounds:?}");
+        assert_eq!(rounds.rounds, 3, "{rounds:?}");
+        let known: Vec<String> = notebook
+            .analyzer()
+            .namespaces()
+            .bindings()
+            .map(|binding| binding.key)
+            .collect();
+        // Mine's own keys are listed, to find its petnames; the spares'
+        // signatures, and so their definitions, are never read.
+        assert!(
+            !known.iter().any(|key| key == "concept (text:)"),
+            "{known:?}"
+        );
+    }};
+}
+
+#[dialog_common::test]
+async fn it_reads_only_the_definitions_a_document_reaches() -> Result<()> {
+    reached!(Notebook::open().await?);
+    Ok(())
+}
+
+/// On the filesystem provider, which a browser does not have: there
+/// `it_reads_only_the_definitions_a_document_reaches` covers it.
+#[cfg(not(target_arch = "wasm32"))]
+#[dialog_common::test]
+async fn it_reads_only_the_definitions_a_document_reaches_on_the_filesystem() -> Result<()> {
+    reached!(session::FileNotebook::open().await?);
+    Ok(())
+}
+
+/// A definition in the session's overlay, which no commit keeps, and
+/// one in the durable tree are both read: the overlay's query calls the
+/// durable one.
+macro_rules! layered {
+    ($notebook:expr) => {{
+        let mut notebook = $notebook;
+        notebook
+            .submit(
+                r#"(concept (todo ?t title: ?title)
+                     (xyz.todo/title of: ?t is: ?title as: :text cardinality: :one))
+                   (query (todo/label ?t is: ?label) (todo ?t title: ?title) (is ?label ?title))
+                   (assert (todo todo:1 title: "Buy milk"))"#,
+            )
+            .await?;
+        // The calling query, made where nothing is written, and laid on
+        // the overlay alone.
+        let mine = notebook.analyzer().namespaces().mine().clone();
+        let mut writer = notebook.analyzer().clone();
+        let checked = check(
+            &mut writer,
+            "(query (todo/badge ?t is: ?badge) (todo/label ?t is: ?label) (is ?badge {:label ?label}))",
+        );
+        let [badge] = checked.defined.as_slice() else {
+            panic!("one definition: {:?}", checked.diagnostics);
+        };
+        assert_eq!(badge.namespace, mine);
+        for statement in definition::statements(badge)? {
+            notebook.branch.overlay().assert(statement)?;
+        }
+        notebook.reload().await?;
+        let (answers, _) = notebook
+            .submit("(select (todo/badge ?t is: ?badge))")
+            .await?;
+        assert_eq!(
+            answers,
+            vec![r#"(todo/badge todo:1 is: {:label "Buy milk"})"#]
+        );
+    }};
+}
+
+#[dialog_common::test]
+async fn it_reads_definitions_from_the_overlay_and_the_durable_tree() -> Result<()> {
+    layered!(Notebook::open().await?);
+    Ok(())
+}
+
+/// On the filesystem provider; in a browser,
+/// `it_reads_definitions_from_the_overlay_and_the_durable_tree` covers
+/// it.
+#[cfg(not(target_arch = "wasm32"))]
+#[dialog_common::test]
+async fn it_reads_definitions_from_the_overlay_and_the_durable_tree_on_the_filesystem() -> Result<()>
+{
+    layered!(session::FileNotebook::open().await?);
+    Ok(())
+}
+
+/// A name nothing holds is unknown once the rounds stop asking, and a
+/// bare name only a petname's namespace holds is refused naming it,
+/// both read from the branch by an analyzer that held nothing.
+#[dialog_common::test]
+async fn it_refuses_what_the_rounds_do_not_find() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook.submit(DOCUMENT).await?;
+    theirs(&mut notebook).await?;
+    notebook.reload().await?;
+    let unknown = notebook
+        .submit("(select (nonesuch ?t title: ?x))")
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&unknown, Err(Ok(Error::Unknown(_)))),
+        "{unknown:?}"
+    );
+    notebook.reload().await?;
+    let elsewhere = notebook
+        .submit("(select (chore ?t title: ?x))")
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&elsewhere, Err(Ok(Error::Elsewhere(_)))),
+        "{elsewhere:?}"
+    );
+    Ok(())
+}
+
+/// What the suggestions read from the branch are: the names that start
+/// so, in mine and where a petname of mine points.
+#[dialog_common::test]
+async fn it_suggests_names_read_from_the_branch() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook.submit(DOCUMENT).await?;
+    theirs(&mut notebook).await?;
+    let mine = notebook.analyzer().namespaces().mine().clone();
+    let live = Live::new(notebook.branch.clone());
+    let said: Vec<String> = live
+        .suggest(&mine, "", &notebook.operator)
+        .await?
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(
+        said.contains(&"@theirs/chore (concept (title:))".to_string()),
+        "{said:?}"
+    );
+    assert!(
+        said.contains(&"todo/card (query (is:))".to_string()),
+        "{said:?}"
+    );
+    let todo: Vec<String> = live
+        .suggest(&mine, "todo/c", &notebook.operator)
+        .await?
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(todo, vec!["todo/card (query (is:))"]);
+    Ok(())
+}
+
+/// How many rounds each sketch takes, submitted in order to a notebook
+/// that holds nothing of the documents before it: each reads what it
+/// reaches from the branch. Printed for the report; bounded here.
+#[dialog_common::test]
+async fn it_analyzes_each_sketch_in_a_few_rounds() -> Result<()> {
+    let sketches: [(&str, &str); 5] = [
+        ("core.clj", include_str!("../sketches/core.clj")),
+        ("notebook.clj", include_str!("../sketches/notebook.clj")),
+        (
+            "notebook-views.clj",
+            include_str!("../sketches/notebook-views.clj"),
+        ),
+        ("table.clj", include_str!("../sketches/table.clj")),
+        (
+            "table-views.clj",
+            include_str!("../sketches/table-views.clj"),
+        ),
+    ];
+    let mut notebook = Notebook::open().await?;
+    for (name, text) in sketches {
+        notebook.reload().await?;
+        notebook.submit(text).await?;
+        let rounds = notebook.rounds;
+        println!(
+            "{name}: {} rounds, {} definitions and {} bindings read",
+            rounds.rounds, rounds.definitions, rounds.bindings
+        );
+        assert!(
+            rounds.rounds < dialog_notation::live::ROUNDS,
+            "{name}: {rounds:?}"
+        );
+    }
     Ok(())
 }

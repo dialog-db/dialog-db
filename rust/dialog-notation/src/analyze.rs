@@ -139,6 +139,58 @@ impl Analyzer {
         self.expander.load(definitions, bindings)
     }
 
+    /// What resolving the names of the last document asked for that has
+    /// not been answered: the bindings and definitions a driver reads
+    /// next, from wherever they are kept, before analyzing it again.
+    pub fn wanted(&self) -> Vec<crate::definition::Want> {
+        self.expander.wanted()
+    }
+
+    /// Ask for every name `trees` write, before they are analyzed: what
+    /// a driver reads in its first round, so that a name that stands
+    /// behind another in a tree is not found a round later.
+    pub fn ask_for(&self, trees: &[Syntax]) {
+        fn walk(tree: &Syntax, names: &mut Vec<String>) {
+            match tree {
+                Syntax::Reference(name) => names.push(name.clone()),
+                Syntax::Application(operator, operand) => {
+                    walk(operator, names);
+                    operand.items.iter().for_each(|item| walk(item, names));
+                    operand.terms.values().for_each(|term| walk(term, names));
+                }
+                Syntax::Map(entries) => entries.iter().for_each(|(key, value)| {
+                    walk(key, names);
+                    walk(value, names);
+                }),
+                Syntax::Tuple(items) => items.iter().for_each(|item| walk(item, names)),
+                _ => {}
+            }
+        }
+        let mut names = Vec::new();
+        trees.iter().for_each(|tree| walk(tree, &mut names));
+        names.sort();
+        names.dedup();
+        for name in names {
+            let _ = self.expander.rows(&name);
+        }
+    }
+
+    /// Take in what a driver read for `wants`, found or not.
+    pub fn answer(
+        &mut self,
+        wants: Vec<crate::definition::Want>,
+        definitions: Vec<Definition>,
+        bindings: Vec<Binding>,
+    ) -> Result<(), Error> {
+        self.expander.answer(wants, definitions, bindings)
+    }
+
+    /// Forget every binding read, so they are read again: a name bound
+    /// anew since is seen. Definitions are kept, each its own content.
+    pub fn forget(&mut self) {
+        self.expander.forget();
+    }
+
     /// The revision the names of what is defined next are resolved at,
     /// which each source map then holds. None unless the caller says.
     pub fn resolve_at(&mut self, revision: Option<String>) {

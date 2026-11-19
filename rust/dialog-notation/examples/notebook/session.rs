@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use dialog_notation::live::{Live, LiveError, written};
-use dialog_notation::{Analyzer, Diagnostic, Step, check};
+use dialog_notation::{Analyzer, Diagnostic, Step};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_peer::{Peer, Session};
 use dialog_query::ConceptConclusion;
@@ -23,6 +23,8 @@ macro_rules! notebook {
     ($(#[$meta:meta])* $name:ident, $space:ty) => {
 $(#[$meta])*
 pub struct $name {
+    /// How the last document submitted was analyzed from the branch.
+    pub rounds: dialog_notation::live::Rounds,
     pub operator: Peer<$space, Session>,
     pub branch: Branch,
     pub repository: std::sync::Arc<dialog_repository::Repository<dialog_credentials::Credential>>,
@@ -42,11 +44,11 @@ impl $name {
         // which stands for the person on every device, and not the
         // device's profile.
         let mine: dialog_corpus::Entity = operator.authority().await?.to_string().parse()?;
-        let analyzer = Live::new(branch.clone())
-            .analyzer(mine, &operator)
-            .await
-            .map_err(unwrapped)?;
+        // Nothing is loaded: what a document reaches is read from the
+        // branch as it is analyzed.
+        let analyzer = Analyzer::new()?.with_namespace(mine);
         Ok($name {
+            rounds: Default::default(),
             operator,
             branch,
             repository,
@@ -65,26 +67,12 @@ impl $name {
         Self::on(self.operator.clone(), self.repository.clone(), branch).await
     }
 
-    /// Forget every definition submitted, and load the analyzer again
-    /// from what the branch keeps, as a notebook opened anew would.
+    /// Forget every definition submitted, as a notebook opened anew
+    /// would: what a later document reaches is read from the branch.
     pub async fn reload(&mut self) -> Result<()> {
         self.branch.refresh(&self.operator).await?;
         let mine = self.analyzer.namespaces().mine().clone();
-        self.analyzer = Live::new(self.branch.clone())
-            .analyzer(mine, &self.operator)
-            .await
-            .map_err(unwrapped)?;
-        Ok(())
-    }
-
-    /// Take into the analyzer what the branch keeps that it does not
-    /// know, as after a pull.
-    pub async fn refreshed(&mut self) -> Result<()> {
-        self.branch.refresh(&self.operator).await?;
-        Live::new(self.branch.clone())
-            .refresh(&mut self.analyzer, &self.operator)
-            .await
-            .map_err(unwrapped)?;
+        self.analyzer = Analyzer::new()?.with_namespace(mine);
         Ok(())
     }
 
@@ -101,7 +89,11 @@ impl $name {
         // analyzed tree to what Dialog-DB runs. A document with a
         // refusal in it is refused whole. The first one is the error,
         // said with where it is.
-        let checked = check(&mut self.analyzer, text);
+        let (checked, rounds) = Live::new(self.branch.clone())
+            .analyze(&mut self.analyzer, text, &self.operator)
+            .await
+            .map_err(unwrapped)?;
+        self.rounds = rounds;
         if let Some((refused, error)) = checked
             .refusals()
             .find_map(|refused| Some((refused, refused.refusal.clone()?)))

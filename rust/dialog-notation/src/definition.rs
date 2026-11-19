@@ -26,9 +26,10 @@
 //! and, for each reference, the name it was written under and the
 //! entity it resolved to.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
 use base58::ToBase58;
 use dialog_corpus::{Entity, Value};
@@ -688,10 +689,37 @@ pub struct Name {
 /// namespace's bindings ([`rows`](Self::rows)), the namespace a field
 /// of it. A name in mine bound to another namespace is a petname:
 /// `@cdata/todo` walks through what `cdata` in mine is bound to.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Namespaces {
     mine: Entity,
     bound: BTreeMap<Entity, BTreeMap<String, Entity>>,
+    /// What has been read from where the bindings are kept, found or
+    /// not: a lookup of these is answered here.
+    answered: BTreeSet<Want>,
+    /// What a lookup asked for that was not answered: what a driver
+    /// reads next. Shared by every copy, so what a trial that was
+    /// refused asked for is still asked.
+    wanted: Arc<Mutex<BTreeSet<Want>>>,
+}
+
+/// What resolving a name asks of where the bindings and definitions are
+/// kept, which a driver reads and answers ([`Namespaces::answer`]).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Want {
+    /// What `key` in a namespace is bound to.
+    Key(Entity, String),
+    /// Every binding of a namespace.
+    Keys(Entity),
+    /// A definition, by its entity.
+    Definition(Entity),
+}
+
+impl PartialEq for Namespaces {
+    /// Two are equal when they bind alike: what was asked and answered
+    /// is how they came to.
+    fn eq(&self, other: &Self) -> bool {
+        self.mine == other.mine && self.bound == other.bound
+    }
 }
 
 impl Default for Namespaces {
@@ -706,7 +734,62 @@ impl Namespaces {
         Namespaces {
             mine,
             bound: BTreeMap::new(),
+            answered: BTreeSet::new(),
+            wanted: Arc::new(Mutex::new(BTreeSet::new())),
         }
+    }
+
+    fn asked(&self) -> std::sync::MutexGuard<'_, BTreeSet<Want>> {
+        self.wanted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Ask for `want` unless it is answered.
+    pub(crate) fn want(&self, want: Want) {
+        let answered = match &want {
+            Want::Key(namespace, _) => {
+                self.answered.contains(&want)
+                    || self.answered.contains(&Want::Keys(namespace.clone()))
+            }
+            _ => self.answered.contains(&want),
+        };
+        if !answered {
+            self.asked().insert(want);
+        }
+    }
+
+    /// Whether `want` has been answered.
+    pub fn is_answered(&self, want: &Want) -> bool {
+        match want {
+            Want::Key(namespace, _) => {
+                self.answered.contains(want)
+                    || self.answered.contains(&Want::Keys(namespace.clone()))
+            }
+            _ => self.answered.contains(want),
+        }
+    }
+
+    /// What lookups asked for that has not been answered.
+    pub fn wanted(&self) -> Vec<Want> {
+        self.asked()
+            .iter()
+            .filter(|want| !self.is_answered(want))
+            .cloned()
+            .collect()
+    }
+
+    /// Note `wants` answered, whatever was found for them.
+    pub fn answer(&mut self, wants: impl IntoIterator<Item = Want>) {
+        self.answered.extend(wants);
+    }
+
+    /// Forget every binding and every answer: what is bound is read
+    /// again, so what moved since is seen.
+    pub fn forget(&mut self) {
+        self.bound.clear();
+        self.answered.clear();
+        self.wanted = Arc::new(Mutex::new(BTreeSet::new()));
     }
 
     /// The local namespace: what stands for "you".
@@ -731,7 +814,26 @@ impl Namespaces {
 
     /// What `key` in `namespace` is bound to.
     pub fn get(&self, namespace: &Entity, key: &str) -> Option<&Entity> {
+        self.want(Want::Key(namespace.clone(), key.to_string()));
         self.bound.get(namespace)?.get(key)
+    }
+
+    /// Every key of `namespace` and what it is bound to.
+    fn keys(&self, namespace: &Entity) -> Vec<(String, Entity)> {
+        self.want(Want::Keys(namespace.clone()));
+        self.bound
+            .get(namespace)
+            .into_iter()
+            .flatten()
+            .map(|(key, referent)| (key.clone(), referent.clone()))
+            .collect()
+    }
+
+    /// Bind as the analysis itself does: what it binds needs no reading.
+    pub(crate) fn bind_here(&mut self, binding: Binding) {
+        self.answered
+            .insert(Want::Key(binding.namespace.clone(), binding.key.clone()));
+        self.bind(binding);
     }
 
     /// Every binding.
@@ -750,9 +852,17 @@ impl Namespaces {
         let Some(named) = self
             .get(namespace, name)
             .filter(|named| is_name_space(named))
+            .cloned()
         else {
             return Vec::new();
         };
+        self.want(Want::Keys(named.clone()));
+        self.known_in(namespace, name, &named)
+    }
+
+    /// The rows of `name` in `namespace`, bound to `named`, from what is
+    /// known: nothing is asked for.
+    fn known_in(&self, namespace: &Entity, name: &str, named: &Entity) -> Vec<Name> {
         self.bound
             .get(named)
             .into_iter()
@@ -772,8 +882,10 @@ impl Namespaces {
     pub fn rows(&self) -> Vec<Name> {
         let mut rows = Vec::new();
         for (namespace, keys) in &self.bound {
-            for name in keys.keys() {
-                rows.extend(self.named_in(namespace, name));
+            for (name, named) in keys {
+                if is_name_space(named) {
+                    rows.extend(self.known_in(namespace, name, named));
+                }
             }
         }
         rows
@@ -782,12 +894,9 @@ impl Namespaces {
     /// The petnames in mine: each name bound to something that is no
     /// name's namespace and no definition, a namespace of someone's.
     pub fn petnames(&self) -> Vec<(String, Entity)> {
-        self.bound
-            .get(&self.mine)
+        self.keys(&self.mine)
             .into_iter()
-            .flatten()
             .filter(|(_, referent)| !is_name_space(referent) && !is_definition(referent))
-            .map(|(petname, referent)| (petname.clone(), referent.clone()))
             .collect()
     }
 
@@ -847,12 +956,8 @@ impl Namespaces {
                 .map(|(petname, namespace)| (Some(petname), namespace)),
         );
         for (petname, namespace) in from {
-            for name in self
-                .bound
-                .get(&namespace)
-                .into_iter()
-                .flat_map(|keys| keys.keys())
-            {
+            for (name, _) in self.keys(&namespace) {
+                let name = &name;
                 if !name.starts_with(prefix) {
                     continue;
                 }
@@ -875,10 +980,20 @@ impl Namespaces {
     /// mine does not hold, or holds under other signatures, may have
     /// meant.
     pub fn elsewhere(&self, name: &str) -> Vec<Suggestion> {
-        self.suggest(name)
-            .into_iter()
-            .filter(|suggestion| suggestion.petname.is_some() && suggestion.name == name)
-            .collect()
+        let mut found = Vec::new();
+        for (petname, namespace) in self.petnames() {
+            for row in self.named_in(&namespace, name) {
+                found.push(Suggestion {
+                    petname: Some(petname.clone()),
+                    namespace: row.namespace,
+                    name: row.name,
+                    signature: row.signature,
+                    definition: row.definition,
+                });
+            }
+        }
+        found.sort();
+        found
     }
 }
 
