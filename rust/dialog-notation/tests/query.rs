@@ -1017,12 +1017,11 @@ async fn bound(notebook: &Notebook, name: &str) -> Result<(String, String)> {
     let kept = dialog_notation::live::Live::new(notebook.branch.clone())
         .kept(&notebook.operator)
         .await?;
-    let mut spaces =
-        dialog_notation::Namespaces::new(notebook.analyzer().namespaces().mine().clone());
+    let mut names = dialog_notation::Names::default();
     for binding in kept.bindings {
-        spaces.bind(binding);
+        names.bind(binding);
     }
-    let rows = spaces.resolve(name)?;
+    let rows = names.resolve(name);
     let [row] = rows.as_slice() else {
         panic!("one definition of {name}: {rows:?}");
     };

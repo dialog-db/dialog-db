@@ -40,15 +40,9 @@ impl $name {
         repository: std::sync::Arc<dialog_repository::Repository<dialog_credentials::Credential>>,
         branch: Branch,
     ) -> Result<Self> {
-        // Whose the definitions are: the authority the branch is opened
-        // under, the DID the peer writes as.
-        let mine = Live::new(branch.clone())
-            .authority(&operator)
-            .await
-            .map_err(unwrapped)?;
         // Nothing is loaded: what a document reaches is read from the
         // branch as it is analyzed.
-        let analyzer = Analyzer::new()?.with_namespace(mine);
+        let analyzer = Analyzer::new()?;
         Ok($name {
             rounds: Default::default(),
             operator,
@@ -73,8 +67,7 @@ impl $name {
     /// would: what a later document reaches is read from the branch.
     pub async fn reload(&mut self) -> Result<()> {
         self.branch.refresh(&self.operator).await?;
-        let mine = self.analyzer.namespaces().mine().clone();
-        self.analyzer = Analyzer::new()?.with_namespace(mine);
+        self.analyzer = Analyzer::new()?;
         Ok(())
     }
 
@@ -110,9 +103,9 @@ impl $name {
             };
             return Err(anyhow::Error::new(error).context(place));
         }
-        // What the document defines and names is written with what it
-        // writes: each definition, its source map and its bindings, each
-        // petname, each name taken away, and the rule `Name` is derived by.
+        // What the document defines is written with what it writes: each
+        // definition, its source map and its binding, each binding taken
+        // away, and the rule `Name` is derived by.
         let kept = written(&checked)?;
         let diagnostics = checked.diagnostics;
         let mut transaction = self.branch.transaction();

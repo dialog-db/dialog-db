@@ -1261,6 +1261,18 @@ impl Scope {
                 cells.insert("is".into(), is);
                 Ok(json!({ "assert": "dialog/position", "where": cells }))
             }
+            // A text that begins so: what a range of the value index is
+            // read by, where it stands beside the read of the value.
+            "starts-with" if result.is_none() => {
+                let of = self.term(subject()?, None)?;
+                let prefix = self.term(
+                    formula
+                        .at("prefix")
+                        .ok_or_else(|| missing("`prefix:` part"))?,
+                    None,
+                )?;
+                Ok(json!({ "assert": "starts-with", "where": { "of": of, "prefix": prefix } }))
+            }
             "value" | "==" if result.is_none() => {
                 let this = self.term(subject()?, None)?;
                 let is = self.term(formula.at("is").ok_or_else(|| missing("`is:` part"))?, None)?;
@@ -1272,7 +1284,7 @@ impl Scope {
             }
             _ => Err(Error::Unsupported(format!(
                 "the formula {name}: this proof of concept knows + - * / < <= > >= == != \
-                 :value, dialog/position and the types"
+                 :value, :starts-with, dialog/position and the types"
             ))),
         }
     }

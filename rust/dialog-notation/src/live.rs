@@ -49,13 +49,13 @@ use dialog_effects::memory::Resolve;
 use dialog_query::concept::descriptor::ConceptStatement;
 use dialog_query::error::EvaluationError;
 use dialog_query::query::Output as _;
-use dialog_query::{Any, ConceptConclusion, ConceptQuery, DeductiveRule, FoldConclusion, Term};
+use dialog_query::{ConceptConclusion, ConceptQuery, DeductiveRule, FoldConclusion};
 use dialog_repository::{Branch, Delta, FoldSubscription, RemoteSite, Subscription};
 use dialog_search_tree::nodes;
 
 use crate::analyze::Analyzer;
 use crate::check::{Checked, check};
-use crate::definition::{self, Binding, Definition, Kind as DefinitionKind, Want};
+use crate::definition::{self, Binding, Definition, Want};
 use crate::select::Selection;
 use crate::syntax::Syntax;
 use crate::view::plan::{FoldedCount, Plan};
@@ -104,6 +104,61 @@ impl<T> Reader for T where
 {
 }
 
+/// An analyzer of the core forms alone, made once: what the driver's own
+/// reads are analyzed by.
+fn core_forms() -> Result<Analyzer, Error> {
+    static CORE: std::sync::OnceLock<Result<Analyzer, Error>> = std::sync::OnceLock::new();
+    CORE.get_or_init(Analyzer::new).clone()
+}
+
+/// The read of every binding of the space.
+const EVERY_BINDING: &str = "(select (syntax.binding ?b key: (:text ?key) name: (:text ?name) \
+     signature: (:text ?signature) definition: (:last (:entity ?definition))))";
+
+/// The scan of the bindings whose key begins with `prefix`: one attribute,
+/// `syntax.binding/key`, its value refined to begin so, which the engine
+/// reads as one range of the value index. The rest of each binding it
+/// finds is read by its entity.
+///
+/// It is built here and not written in the notation, whose reads compile
+/// to concept premises: a concept premise is read whole and then
+/// filtered, and only a scan of one attribute takes a range.
+pub fn binding_range(prefix: &str) -> Result<dialog_query::AttributeQuery, Error> {
+    use dialog_query::{AttributeQuery, Cardinality, Entity as Of, Term};
+    let kind = dialog_query::type_system::Type::from(dialog_query::corpus::Type::String)
+        .with_prefix(prefix)
+        .ok_or_else(|| Error::Refused(format!("no key begins with {prefix:?}")))?;
+    Ok(AttributeQuery::new(
+        Term::from(dialog_query::the!("syntax.binding/key")),
+        Term::<Of>::var("this"),
+        Term::<dialog_query::Any>::var("key").with_kind(kind),
+        Term::blank(),
+        Some(Cardinality::One),
+    ))
+}
+
+/// A text as the notation writes it.
+fn quoted(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The definition a row of `syntax.definition` says, its entity under
+/// `this`.
+fn kept_definition(values: &BTreeMap<String, Value>) -> Result<Option<Definition>, Error> {
+    let (Some(form), Some(Value::String(kind))) = (values.get("is"), values.get("kind")) else {
+        return Ok(None);
+    };
+    let entity = match values.get("this") {
+        Some(Value::Entity(entity)) => entity.clone(),
+        _ => return Ok(None),
+    };
+    Ok(Some(Definition {
+        entity,
+        kind: kind.parse()?,
+        form: Syntax::try_from(form)?,
+    }))
+}
+
 /// What a branch keeps of the notation's definitions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Kept {
@@ -132,11 +187,6 @@ pub fn written(checked: &Checked) -> Result<Written, Error> {
     let mut written = Written::default();
     for made in &checked.defined {
         written.asserted.extend(definition::statements(made)?);
-    }
-    for binding in &checked.named {
-        written
-            .asserted
-            .push(definition::binding_statement(binding)?);
     }
     for binding in &checked.unnamed {
         written
@@ -233,103 +283,24 @@ impl Live {
         Ok(())
     }
 
-    /// The authority the branch is opened under: the DID a peer is built
-    /// to write as (`PeerBuilder::profile`, the home by default, a
-    /// persona's for a device of that persona), which every revision it
-    /// commits names as `dialog.revision/authority` and every query of
-    /// the branch is given on `db:session` as `dialog.session/profile`.
-    /// It is the local namespace a caller that acts as that authority
-    /// gives [`Analyzer::with_namespace`].
-    pub async fn authority<E: Reader>(&self, env: &E) -> Result<Entity, LiveError> {
-        let rows = self
-            .read(
-                &[("profile", "dialog.session/profile", "entity:")],
-                &[],
-                env,
-            )
-            .await?;
-        rows.into_iter()
-            .find_map(|(this, values)| match values.get("profile") {
-                Some(Value::Entity(profile)) if this.as_str() == "db:session" => {
-                    Some(profile.clone())
-                }
-                _ => None,
-            })
-            .ok_or_else(|| {
-                LiveError::Notation(Error::Read("the branch is read under no authority".into()))
-            })
-    }
-
     /// What the branch keeps of the notation's definitions: every
-    /// definition and every namespace's bindings.
-    ///
-    /// Which namespace is mine is not among them: it is the authority the
-    /// branch is opened under ([`authority`](Self::authority)), which the
-    /// caller gives the analyzer.
+    /// definition and every binding of the space.
     pub async fn kept<E: Reader>(&self, env: &E) -> Result<Kept, LiveError> {
         let mut definitions = Vec::new();
-        for (this, values) in self
-            .read(
-                &[
-                    ("is", definition::attribute::IS, "record:"),
-                    ("kind", definition::attribute::KIND, "text:"),
-                ],
-                &[],
+        for values in self
+            .selected(
+                "(select (syntax.definition ?d is: ?form kind: (:text ?kind)))",
                 env,
             )
             .await?
         {
-            let (Some(form), Some(Value::String(kind))) = (values.get("is"), values.get("kind"))
-            else {
-                continue;
-            };
-            let kind: DefinitionKind = kind.parse()?;
-            definitions.push(Definition {
-                entity: this,
-                kind,
-                form: Syntax::try_from(form)?,
-            });
-        }
-        let mut bindings = Vec::new();
-        for (_, values) in self
-            .read(
-                &[
-                    (
-                        "namespace",
-                        definition::attribute::BINDING_NAMESPACE,
-                        "entity:",
-                    ),
-                    ("key", definition::attribute::BINDING_KEY, "text:"),
-                    (
-                        "referent",
-                        definition::attribute::BINDING_REFERENT,
-                        "entity:",
-                    ),
-                ],
-                &[],
-                env,
-            )
-            .await?
-        {
-            if let (
-                Some(Value::Entity(namespace)),
-                Some(Value::String(key)),
-                Some(Value::Entity(referent)),
-            ) = (
-                values.get("namespace"),
-                values.get("key"),
-                values.get("referent"),
-            ) {
-                bindings.push(Binding {
-                    namespace: namespace.clone(),
-                    key: key.clone(),
-                    referent: referent.clone(),
-                });
+            if let Some(found) = kept_definition(&values)? {
+                definitions.push(found);
             }
         }
         Ok(Kept {
             definitions,
-            bindings,
+            bindings: self.bindings("", env).await?,
         })
     }
 
@@ -366,7 +337,11 @@ impl Live {
             let (definitions, bindings, answered) = self.answer(&wants, &mut rounds, env).await?;
             // Found nothing, the trial already read what is there: as if
             // none of it were bound, which it is not.
-            let nothing = definitions.is_empty() && bindings.is_empty();
+            // A refused trial runs again with what was not found known
+            // as not found, so its refusal says what an error reads.
+            let nothing = definitions.is_empty()
+                && bindings.is_empty()
+                && checked.refusals().next().is_none();
             analyzer.answer(answered.clone(), definitions, bindings)?;
             if nothing {
                 trial.answer(answered, Vec::new(), Vec::new())?;
@@ -377,16 +352,15 @@ impl Live {
         Err(LiveError::Rounds(ROUNDS))
     }
 
-    /// Read what `wants` ask for. A binding to a name's namespace brings
-    /// that namespace's signatures, and a signature its definition, so a
-    /// name takes one round.
+    /// Read what `wants` ask for. A name's bindings bring the definitions
+    /// they are bound to, so a name takes one round.
     async fn answer<E: Reader>(
         &self,
         wants: &[Want],
         rounds: &mut Rounds,
         env: &E,
     ) -> Result<(Vec<Definition>, Vec<Binding>, Vec<Want>), LiveError> {
-        let mut definitions = Vec::new();
+        let mut definitions: Vec<Definition> = Vec::new();
         let mut bindings = Vec::new();
         let mut answered = Vec::new();
         let mut pending: Vec<Want> = wants.to_vec();
@@ -396,28 +370,35 @@ impl Live {
             }
             match &want {
                 Want::Definition(entity) => {
-                    if let Some(found) = self.definition(entity, env).await? {
+                    if !definitions.iter().any(|known| &known.entity == entity)
+                        && let Some(found) = self.definition(entity, env).await?
+                    {
                         rounds.definitions += 1;
                         definitions.push(found);
                     }
                 }
-                Want::Key(namespace, key) => {
-                    for binding in self.bindings(namespace, Some(key), env).await? {
+                Want::Hash(prefix) => {
+                    for found in self.hashed(prefix, env).await? {
+                        rounds.definitions += 1;
+                        definitions.push(found);
+                    }
+                }
+                Want::Name(name) => {
+                    for binding in self.bindings(&definition::range(name), env).await? {
                         rounds.bindings += 1;
-                        if definition::is_name_space(&binding.referent) {
-                            pending.push(Want::Keys(binding.referent.clone()));
-                        }
+                        pending.push(Want::Definition(binding.definition.clone()));
                         bindings.push(binding);
                     }
                 }
-                Want::Keys(namespace) => {
-                    for binding in self.bindings(namespace, None, env).await? {
+                Want::Prefix(prefix) => {
+                    for binding in self.bindings(prefix, env).await? {
                         rounds.bindings += 1;
-                        if definition::is_name_space(namespace)
-                            && definition::is_definition(&binding.referent)
-                        {
-                            pending.push(Want::Definition(binding.referent.clone()));
-                        }
+                        bindings.push(binding);
+                    }
+                }
+                Want::All => {
+                    for binding in self.bindings("", env).await? {
+                        rounds.bindings += 1;
                         bindings.push(binding);
                     }
                 }
@@ -427,45 +408,55 @@ impl Live {
         Ok((definitions, bindings, answered))
     }
 
-    /// The bindings of `namespace`, of `key` alone where one is given.
-    async fn bindings<E: Reader>(
+    /// The bindings whose key begins with `prefix`: one range of the
+    /// value index over `syntax.binding/key`, every binding for the empty
+    /// prefix.
+    pub async fn bindings<E: Reader>(
         &self,
-        namespace: &Entity,
-        key: Option<&str>,
+        prefix: &str,
         env: &E,
     ) -> Result<Vec<Binding>, LiveError> {
-        let mut given = vec![("namespace", Value::Entity(namespace.clone()))];
-        if let Some(key) = key {
-            given.push(("key", Value::String(key.to_string())));
-        }
-        let mut bindings = Vec::new();
-        for (_, values) in self
-            .read(
-                &[
-                    (
-                        "namespace",
-                        definition::attribute::BINDING_NAMESPACE,
-                        "entity:",
-                    ),
-                    ("key", definition::attribute::BINDING_KEY, "text:"),
-                    (
-                        "referent",
-                        definition::attribute::BINDING_REFERENT,
-                        "entity:",
-                    ),
-                ],
-                &given,
-                env,
-            )
-            .await?
-        {
-            if let (Some(Value::String(key)), Some(Value::Entity(referent))) =
-                (values.get("key"), values.get("referent"))
+        let rows: Vec<BTreeMap<String, Value>> = if prefix.is_empty() {
+            self.selected(EVERY_BINDING, env).await?
+        } else {
+            let found = self
+                .branch
+                .query()
+                .select(binding_range(prefix)?)
+                .perform(env)
+                .try_vec()
+                .await?;
+            let mut rows = Vec::new();
+            // The range holds what begins so; anything else is no key of
+            // it, and is left out whatever the read gave.
+            for claim in found
+                .iter()
+                .filter(|claim| matches!(claim.is(), Value::String(key) if key.starts_with(prefix)))
             {
+                let text = format!(
+                    "(select (syntax.binding {} name: (:text ?name) signature: (:text ?signature) \
+                       definition: (:last (:entity ?definition))))",
+                    claim.of()
+                );
+                rows.extend(self.selected(&text, env).await?);
+            }
+            rows
+        };
+        let mut bindings = Vec::new();
+        for values in rows {
+            if let (
+                Some(Value::String(name)),
+                Some(Value::String(signature)),
+                Some(Value::Entity(definition)),
+            ) = (
+                values.get("name"),
+                values.get("signature"),
+                values.get("definition"),
+            ) {
                 bindings.push(Binding {
-                    namespace: namespace.clone(),
-                    key: key.clone(),
-                    referent: referent.clone(),
+                    name: name.clone(),
+                    signature: signature.clone(),
+                    definition: definition.clone(),
                 });
             }
         }
@@ -478,132 +469,77 @@ impl Live {
         entity: &Entity,
         env: &E,
     ) -> Result<Option<Definition>, LiveError> {
-        let rows = self
-            .read(
-                &[
-                    ("is", definition::attribute::IS, "record:"),
-                    ("kind", definition::attribute::KIND, "text:"),
-                ],
-                &[("this", Value::Entity(entity.clone()))],
-                env,
-            )
-            .await?;
-        let Some((_, values)) = rows.into_iter().next() else {
-            return Ok(None);
-        };
-        let (Some(form), Some(Value::String(kind))) = (values.get("is"), values.get("kind")) else {
-            return Ok(None);
-        };
-        Ok(Some(Definition {
-            entity: entity.clone(),
-            kind: kind.parse()?,
-            form: Syntax::try_from(form)?,
-        }))
+        let text = format!("(select (syntax.definition {entity} is: ?form kind: (:text ?kind)))");
+        for values in self.selected(&text, env).await? {
+            if let Some(found) = kept_definition(&values)? {
+                return Ok(Some(found));
+            }
+        }
+        Ok(None)
     }
 
-    /// The names a prefix may be the start of, read from the branch: in
-    /// mine and in each namespace a petname of mine points at, each name
-    /// starting with `prefix`, under each of its signatures.
+    /// The definitions whose hash begins with `prefix`: one range of the
+    /// entity index.
+    async fn hashed<E: Reader>(&self, prefix: &str, env: &E) -> Result<Vec<Definition>, LiveError> {
+        let read = "(syntax.definition ?d is: ?form kind: (:text ?kind))";
+        let text = format!(
+            "(select {read} {read} (:starts-with ?d prefix: {}))",
+            quoted(&definition::definitions_starting(prefix))
+        );
+        let mut found = Vec::new();
+        for values in self.selected(&text, env).await? {
+            found.extend(kept_definition(&values)?);
+        }
+        Ok(found)
+    }
+
+    /// The names a prefix may be the start of, read from the branch:
+    /// every name of the space starting with `prefix`, under each of its
+    /// signatures. One range.
     pub async fn suggest<E: Reader>(
         &self,
-        mine: &Entity,
         prefix: &str,
         env: &E,
     ) -> Result<Vec<definition::Suggestion>, LiveError> {
-        let mut spaces = definition::Namespaces::new(mine.clone());
-        let mut from = vec![mine.clone()];
-        for binding in self.bindings(mine, None, env).await? {
-            if !definition::is_name_space(&binding.referent)
-                && !definition::is_definition(&binding.referent)
-            {
-                from.push(binding.referent.clone());
-            }
-            spaces.bind(binding);
+        let mut names = definition::Names::default();
+        for binding in self.bindings(prefix, env).await? {
+            names.bind(binding);
         }
-        for namespace in from.iter().skip(1) {
-            for binding in self.bindings(namespace, None, env).await? {
-                spaces.bind(binding);
-            }
-        }
-        let named: Vec<Entity> = spaces
-            .bindings()
-            .filter(|binding| binding.key.starts_with(prefix) && from.contains(&binding.namespace))
-            .map(|binding| binding.referent)
-            .filter(definition::is_name_space)
-            .collect();
-        for namespace in named {
-            for binding in self.bindings(&namespace, None, env).await? {
-                spaces.bind(binding);
-            }
-        }
-        Ok(spaces.suggest(prefix))
+        Ok(names.suggest(prefix))
     }
 
-    /// Every entity with each of `fields`, a field an attribute of a
-    /// type, and what each is; those of `given` fixed.
-    async fn read<E: Reader>(
+    /// The rows `text`, a `(select …)` of the core forms, answers on the
+    /// branch, each field of its head by label.
+    async fn selected<E: Reader>(
         &self,
-        fields: &[(&str, &str, &str)],
-        given: &[(&str, Value)],
+        text: &str,
         env: &E,
-    ) -> Result<Vec<(Entity, BTreeMap<String, Value>)>, LiveError> {
-        let constant = |name: &str| {
-            given
-                .iter()
-                .find(|(field, _)| *field == name)
-                .map(|(_, value)| match value {
-                    Value::Entity(entity) => serde_json::json!({ "entity:": entity.as_str() }),
-                    Value::String(text) => serde_json::json!(text),
-                    _ => serde_json::Value::Null,
-                })
-        };
-        let mut with = serde_json::Map::new();
-        let mut terms = serde_json::Map::new();
-        terms.insert(
-            "this".into(),
-            constant("this").unwrap_or_else(|| serde_json::json!({ "?": { "name": "this" } })),
-        );
-        for (field, attribute, kind) in fields {
-            with.insert(
-                field.to_string(),
-                serde_json::json!({ "the": attribute, "as": kind }),
-            );
-            terms.insert(
-                field.to_string(),
-                constant(field).unwrap_or_else(|| serde_json::json!({ "?": { "name": field } })),
-            );
+    ) -> Result<Vec<BTreeMap<String, Value>>, LiveError> {
+        let analysis = core_forms()?.analyze(&crate::parse(text)?);
+        if let Some(error) = analysis
+            .refusals()
+            .find_map(|refused| refused.refusal.clone())
+        {
+            return Err(error.into());
         }
-        let query: ConceptQuery = serde_json::from_value(serde_json::json!({
-            "assert": { "with": with },
-            "where": terms,
-        }))
-        .map_err(|error| Error::Read(format!("a query of what is kept: {error}")))?;
-        let found: Vec<ConceptConclusion> = self
-            .branch
-            .query()
-            .select(query)
-            .perform(env)
-            .try_vec()
-            .await?;
         let mut rows = Vec::new();
-        for conclusion in &found {
-            let value = |name: &str| -> Result<Value, LiveError> {
-                if let Some((_, value)) = given.iter().find(|(field, _)| *field == name) {
-                    return Ok(value.clone());
+        for tree in &analysis.analyzed {
+            for step in crate::compile(tree)? {
+                if let crate::Step::Query(query) = step {
+                    for conclusion in self.conclusions(&query, env).await? {
+                        let mut values = query.values(&conclusion)?;
+                        // The entity the row is of, which no field names.
+                        if let Some(Syntax::Constant(Value::Entity(entity))) = query
+                            .row(&conclusion)?
+                            .operand()
+                            .and_then(|operand| operand.items.first())
+                        {
+                            values.insert("this".into(), Value::Entity(entity.clone()));
+                        }
+                        rows.push(values);
+                    }
                 }
-                Ok(conclusion
-                    .source()
-                    .lookup(&Term::<Any>::var(name))?
-                    .content()?)
-            };
-            let Value::Entity(this) = value("this")? else {
-                continue;
-            };
-            let mut values = BTreeMap::new();
-            for (field, _, _) in fields {
-                values.insert(field.to_string(), value(field)?);
             }
-            rows.push((this, values));
         }
         Ok(rows)
     }

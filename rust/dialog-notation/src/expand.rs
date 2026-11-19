@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use dialog_corpus::{Entity, Value};
 
 use crate::Error;
-use crate::definition::{self, Defined, Kind as DefinitionKind, Namespaces, Reference, SELF};
+use crate::definition::{self, Defined, Kind as DefinitionKind, Names, Reference, SELF};
 use crate::diagnostic::Diagnostic;
 use crate::form::Kind;
 use crate::kernel::QUOTE;
@@ -732,13 +732,12 @@ pub struct Expander {
     /// Every definition known, by its entity: what a document defined,
     /// and what was loaded.
     definitions: BTreeMap<Entity, definition::Definition>,
-    /// Every namespace's bindings, and which is mine.
-    spaces: Namespaces,
+    /// The space's bindings read so far.
+    spaces: Names,
     /// The canonical form of each definition this walker made, which is
     /// what is written of it; what it runs is its working spelling.
     canonical: BTreeMap<Entity, Syntax>,
-    /// The petnames the last document bound, and the names it took away.
-    named: Vec<definition::Binding>,
+    /// The bindings the last document took away.
     unnamed: Vec<definition::Binding>,
     /// The definitions the last document made, in the order made.
     made: Vec<Defined>,
@@ -787,21 +786,30 @@ impl Expander {
         Ok(expander)
     }
 
-    /// The same walker with `mine` as the local namespace, what it binds
-    /// the definitions it makes in.
-    pub fn with_namespace(mut self, mine: Entity) -> Self {
-        let mut spaces = Namespaces::new(mine);
-        for binding in self.spaces.bindings() {
-            spaces.bind(binding);
-        }
-        self.spaces = spaces;
-        self
-    }
-
     /// The rows of `Name` a reference as written walks to, each
     /// definition among them not known yet asked for.
     pub(crate) fn rows(&self, written: &str) -> Result<Vec<definition::Name>, Error> {
-        let rows = self.spaces.resolve(written)?;
+        let mut rows = self.spaces.resolve(written);
+        // `todo#3fa9` with no binding of `todo` whose hash starts so: a
+        // definition that lost its name to another, still kept and still
+        // reached by its hash.
+        if let Some((name, prefix)) = written.split_once('#')
+            && rows.is_empty()
+            && !prefix.is_empty()
+        {
+            self.spaces.want(definition::Want::Hash(prefix.to_string()));
+            for (entity, kept) in &self.definitions {
+                if definition::hash_of(entity).starts_with(prefix)
+                    && let Some(signature) = definition::signature_of(kept)
+                {
+                    rows.push(definition::Name {
+                        name: name.to_string(),
+                        signature,
+                        definition: entity.clone(),
+                    });
+                }
+            }
+        }
         for row in &rows {
             if !self.definitions.contains_key(&row.definition) {
                 self.spaces
@@ -842,8 +850,8 @@ impl Expander {
         self.revision = revision;
     }
 
-    /// Every namespace's bindings.
-    pub fn namespaces(&self) -> &Namespaces {
+    /// The space's bindings read so far.
+    pub fn names(&self) -> &Names {
         &self.spaces
     }
 
@@ -857,13 +865,8 @@ impl Expander {
         &self.made
     }
 
-    /// The petnames the last document bound in mine.
-    pub fn named(&self) -> &[definition::Binding] {
-        &self.named
-    }
-
-    /// The names the last document took away from mine, each with what
-    /// it was bound to.
+    /// The bindings the last document took away, each with what it was
+    /// bound to.
     pub fn unnamed(&self) -> &[definition::Binding] {
         &self.unnamed
     }
@@ -876,49 +879,20 @@ impl Expander {
             .or_else(|| self.definitions.get(entity).map(|kept| kept.form.clone()))
     }
 
-    /// `(name cdata did:key:…)` binds the petname `cdata` in mine to that
-    /// namespace; `(unname todo)` takes `todo` away from mine, leaving
-    /// what it was bound to. `None` for any other tree.
+    /// `(unname todo)` takes every binding of `todo` away, leaving what
+    /// each was bound to. `None` for any other tree.
     fn naming(&mut self, tree: &Syntax) -> Result<Option<()>, Error> {
         match (tree.applies(), items(tree)) {
-            (
-                Some("name"),
-                [
-                    Syntax::Reference(petname),
-                    Syntax::Constant(Value::Entity(namespace)),
-                ],
-            ) if Kind::of(petname) == Kind::Name && !definition::qualified(petname) => {
-                let binding = definition::Binding {
-                    namespace: self.spaces.mine().clone(),
-                    key: petname.clone(),
-                    referent: namespace.clone(),
-                };
-                self.spaces.bind_here(binding.clone());
-                self.named.push(binding);
-                self.declared += 1;
-                Ok(Some(()))
-            }
-            (Some("name"), _) => Err(Error::Refused(format!(
-                "{tree}: a petname is a name and a namespace, `(name cdata did:key:z6Mk…)`"
-            ))),
             (Some("unname"), [Syntax::Reference(name)]) if !definition::qualified(name) => {
-                let mine = self.spaces.mine().clone();
-                let referent = self
-                    .spaces
-                    .get(&mine, name)
-                    .cloned()
-                    .ok_or_else(|| Error::Unknown(name.clone()))?;
-                self.spaces.unbind(&mine, name);
-                self.unnamed.push(definition::Binding {
-                    namespace: mine,
-                    key: name.clone(),
-                    referent,
-                });
+                if self.spaces.named(name).is_empty() {
+                    return Err(Error::Unknown(name.clone()));
+                }
+                self.unnamed.extend(self.spaces.unbind(name));
                 self.declared += 1;
                 Ok(Some(()))
             }
             (Some("unname"), _) => Err(Error::Refused(format!(
-                "{tree}: a name of mine is taken away by itself, `(unname todo)`"
+                "{tree}: a name is taken away by itself, `(unname todo)`"
             ))),
             _ => Ok(None),
         }
@@ -1001,14 +975,13 @@ impl Expander {
         self.asked.clear();
         self.origin.clear();
         self.made.clear();
-        self.named.clear();
         self.unnamed.clear();
         self.document = trees.clone();
         // The order of a document's forms does not matter. What declares
         // a name, a concept or a rule about syntax, is expanded before
         // anything that may use it.
         let declares = |tree: &Syntax| match tree.applies() {
-            Some("concept" | "query" | "name" | "unname") => true,
+            Some("concept" | "query" | "unname") => true,
             Some("rule") => items(tree)
                 .first()
                 .and_then(Syntax::applies)
@@ -1463,7 +1436,6 @@ impl Expander {
             },
             name,
             signature,
-            namespace: self.spaces.mine().clone(),
             source: definition::Source {
                 written: self
                     .document
@@ -1474,9 +1446,7 @@ impl Expander {
                 revision: self.revision.clone(),
             },
         };
-        for binding in made.bindings()? {
-            self.spaces.bind_here(binding);
-        }
+        self.spaces.bind_here(made.binding());
         self.definitions.insert(kept.entity.clone(), kept);
         self.made.retain(|other| {
             other.definition.entity != made.definition.entity || other.name != made.name
@@ -1835,14 +1805,18 @@ impl Expander {
         // A part a read leaves out matches anything, so a trailing
         // `...` adds nothing to one and is taken off.
         let (said, _) = open(tree);
-        // The definitions a name may mean are those the namespaces walk
-        // to from how it is written; a qualified name means nothing of
-        // the core forms, which no namespace binds.
+        // The definitions a name may mean are those the space binds it
+        // to; one qualified by a hash means nothing of the core forms,
+        // which nothing binds. Each is installed under the name, where it
+        // is not yet: one read for this, or one reached by its hash.
         let written = said.applies().map(str::to_string);
         let resolved = match &written {
             Some(name) => Some(self.rows(name)?),
             None => None,
         };
+        for row in resolved.iter().flatten() {
+            self.stand(&row.definition, &row.name)?;
+        }
         let qualified = written.as_deref().is_some_and(definition::qualified);
         let said = match (&written, qualified) {
             (Some(name), true) => definition::operated(&said, definition::bare(name)),
@@ -1912,7 +1886,7 @@ impl Expander {
                 for entity in several {
                     for row in resolved.iter().flatten() {
                         if &row.definition == entity {
-                            candidates.push((row.namespace.to_string(), entity.to_string()));
+                            candidates.push((row.signature.clone(), entity.to_string()));
                         }
                     }
                 }
@@ -1995,28 +1969,42 @@ impl Expander {
             definition::labels_of(signature)
                 .is_some_and(|(_, held)| labels.iter().all(|label| held.contains(label)))
         };
-        let elsewhere = self.spaces.elsewhere(name);
-        let mine = self.rows(name).unwrap_or_default();
-        if mine.is_empty() {
-            if elsewhere.is_empty() {
+        let bound = self.rows(name).unwrap_or_default();
+        // Which other names it may have meant is read once the name is
+        // known to be bound to nothing, or to nothing that fits: a wider
+        // read, which only an error makes.
+        if !self
+            .spaces
+            .is_answered(&definition::Want::Name(name.to_string()))
+        {
+            return unknown;
+        }
+        if bound.is_empty() {
+            let ending = self.spaces.ending_as(name);
+            if ending.is_empty() {
                 return unknown;
             }
-            return Error::Elsewhere(Box::new(crate::Suggested {
+            return Error::Unbound(Box::new(crate::Suggested {
                 name: name.to_string(),
                 labels,
-                suggestions: elsewhere,
+                signatures: Vec::new(),
+                suggestions: ending,
             }));
         }
-        let fitting: Vec<definition::Suggestion> = elsewhere
+        // A signature the labels fit is refused for some other reason.
+        if bound.iter().any(|row| fits(&row.signature)) {
+            return unknown;
+        }
+        let fitting: Vec<definition::Suggestion> = self
+            .spaces
+            .ending_as(name)
             .into_iter()
             .filter(|suggestion| fits(&suggestion.signature))
             .collect();
-        if fitting.is_empty() {
-            return unknown;
-        }
         Error::Unfitting(Box::new(crate::Suggested {
             name: name.to_string(),
             labels,
+            signatures: bound.into_iter().map(|row| row.signature).collect(),
             suggestions: fitting,
         }))
     }
@@ -2109,8 +2097,7 @@ impl Expander {
                     || self.concepts.contains(word)
                     || (Kind::of(word) != Kind::Domain
                         && !stored(word)
-                        && (!self.rows(word).unwrap_or_default().is_empty()
-                            || !self.spaces.elsewhere(word).is_empty()))
+                        && !self.rows(word).unwrap_or_default().is_empty())
             });
             // An attribute named under a declared concept is one a rule
             // concludes about that concept's entities: `list/count-open`.

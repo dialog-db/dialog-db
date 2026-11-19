@@ -358,8 +358,8 @@ impl Expander {
     /// The query `name` names, applied as `call` is: its entity and what
     /// it was kept as, every query it reaches and then its own, last,
     /// named `@`. Resolved by the labels the call writes among the
-    /// queries the namespaces walk to; several of one signature, or
-    /// several the labels fit, are refused, the candidates listed.
+    /// queries the space binds the name to; several the labels fit are
+    /// refused, the candidates listed.
     pub(super) fn query_named(
         &self,
         name: &str,
@@ -370,8 +370,7 @@ impl Expander {
             .map(|operand| operand.terms.keys().cloned().collect())
             .unwrap_or_default();
         let rows: Vec<definition::Name> = self
-            .spaces
-            .resolve(name)?
+            .rows(name)?
             .into_iter()
             .filter(|row| {
                 self.definitions
@@ -394,7 +393,7 @@ impl Expander {
             _ => {
                 let mut candidates: Vec<(String, String)> = rows
                     .iter()
-                    .map(|row| (row.namespace.to_string(), row.definition.to_string()))
+                    .map(|row| (row.signature.clone(), row.definition.to_string()))
                     .collect();
                 candidates.sort();
                 candidates.dedup();

@@ -48,9 +48,6 @@ pub const SELF: &str = "@";
 /// The scheme of a definition's entity.
 pub const DEFINITION: &str = "definition";
 
-/// The scheme of a name's namespace, apart from a person's `did:`.
-pub const NAMESPACE: &str = "namespace";
-
 /// The scheme of a source map's entity.
 pub const SOURCE: &str = "source";
 
@@ -72,12 +69,15 @@ pub mod attribute {
     pub const SOURCE_REFERENCES: &str = "syntax.source/references";
     /// The revision the names were resolved at, where one was given.
     pub const SOURCE_REVISION: &str = "syntax.source/revision";
-    /// The namespace a binding is in.
-    pub const BINDING_NAMESPACE: &str = "syntax.binding/namespace";
-    /// The key a binding is under.
+    /// A binding's key: its name, a space, its signature. What a name's
+    /// bindings are read by, as one range of the value index.
     pub const BINDING_KEY: &str = "syntax.binding/key";
-    /// What a binding's key is bound to.
-    pub const BINDING_REFERENT: &str = "syntax.binding/referent";
+    /// A binding's name.
+    pub const BINDING_NAME: &str = "syntax.binding/name";
+    /// A binding's signature.
+    pub const BINDING_SIGNATURE: &str = "syntax.binding/signature";
+    /// The definition a binding is bound to.
+    pub const BINDING_DEFINITION: &str = "syntax.binding/definition";
 }
 
 /// Which kind of thing a definition defines.
@@ -186,84 +186,89 @@ pub struct Source {
     pub revision: Option<String>,
 }
 
-/// A definition a document made, and where it is bound.
+/// A definition a document made, and the name it is bound under.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Defined {
     /// What is kept.
     pub definition: Definition,
-    /// The name it was written under.
+    /// The name it was written under: a path, `todo` or `cdata/todo`.
     pub name: String,
-    /// The key it is bound under in its name's namespace: its kind and
-    /// its labels in canonical order, `concept (text: title:)`.
+    /// Its signature: its kind and its labels in canonical order,
+    /// `concept (text: title:)`.
     pub signature: String,
-    /// The namespace its name is bound in.
-    pub namespace: Entity,
     /// What was written.
     pub source: Source,
 }
 
 impl Defined {
-    /// The bindings that put it under its name: the name in its
-    /// namespace bound to the name's own namespace, and in that the
-    /// signature bound to the definition.
-    pub fn bindings(&self) -> Result<[Binding; 2], Error> {
-        let named = name_space(&self.namespace, &self.name)?;
-        Ok([
-            Binding {
-                namespace: self.namespace.clone(),
-                key: self.name.clone(),
-                referent: named.clone(),
-            },
-            Binding {
-                namespace: named,
-                key: self.signature.clone(),
-                referent: self.definition.entity.clone(),
-            },
-        ])
+    /// The binding that puts it under its name and signature.
+    pub fn binding(&self) -> Binding {
+        Binding {
+            name: self.name.clone(),
+            signature: self.signature.clone(),
+            definition: self.definition.entity.clone(),
+        }
     }
 }
 
-/// A key in a namespace bound to one referent.
+/// What separates a name from its signature in a binding's key. A name
+/// is a token and never holds whitespace, so a name followed by it is a
+/// prefix of no other name's key.
+pub const SEPARATOR: char = ' ';
+
+/// A name and signature of the space bound to one definition.
+///
+/// It is kept as one fact keyed by the whole of name and signature: two
+/// signatures of one name are two keys, which is overloading, and one key
+/// has one definition.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Binding {
-    /// The namespace.
-    pub namespace: Entity,
-    /// The key.
-    pub key: String,
-    /// What it is bound to.
-    pub referent: Entity,
+    /// The name, a path.
+    pub name: String,
+    /// The signature.
+    pub signature: String,
+    /// The definition it is bound to.
+    pub definition: Entity,
 }
 
 impl Binding {
-    /// The entity the binding is kept under: made of its namespace and
-    /// its key, so a key is bound to one referent and binding it again
-    /// replaces it.
+    /// Its key: the name, [`SEPARATOR`], the signature.
+    pub fn key(&self) -> String {
+        key(&self.name, &self.signature)
+    }
+
+    /// The entity the binding is kept under: made of its key, so binding
+    /// a key again replaces what it was bound to.
     pub fn entity(&self) -> Result<Entity, Error> {
-        binding_entity(&self.namespace, &self.key)
+        binding_entity(&self.key())
     }
 }
 
-/// The entity of the binding of `key` in `namespace`.
-pub fn binding_entity(namespace: &Entity, key: &str) -> Result<Entity, Error> {
-    let made = data::list([Value::Entity(namespace.clone()), data::text(key)]);
-    schemed(BINDING, &made)
+/// The key of `name` under `signature`.
+pub fn key(name: &str, signature: &str) -> String {
+    format!("{name}{SEPARATOR}{signature}")
 }
 
-/// The namespace the name `key` in `namespace` is bound to: made of the
-/// two, under a scheme of its own.
-pub fn name_space(namespace: &Entity, key: &str) -> Result<Entity, Error> {
-    let made = data::list([Value::Entity(namespace.clone()), data::text(key)]);
-    schemed(NAMESPACE, &made)
+/// The range every key of `name` begins with, and no key of any other
+/// name does.
+pub fn range(name: &str) -> String {
+    format!("{name}{SEPARATOR}")
 }
 
-/// Whether an entity is a name's namespace.
-pub fn is_name_space(entity: &Entity) -> bool {
-    entity.as_str().starts_with(&format!("{NAMESPACE}:"))
+/// The entity of the binding of `key`.
+pub fn binding_entity(key: &str) -> Result<Entity, Error> {
+    schemed(BINDING, &data::text(key))
 }
 
 /// Whether an entity is a definition.
 pub fn is_definition(entity: &Entity) -> bool {
     entity.as_str().starts_with(&format!("{DEFINITION}:"))
+}
+
+/// The prefix of the entities of the definitions whose hash starts with
+/// `hash`.
+pub fn definitions_starting(hash: &str) -> String {
+    format!("{DEFINITION}:{hash}")
 }
 
 fn schemed(scheme: &str, value: &Value) -> Result<Entity, Error> {
@@ -563,36 +568,38 @@ pub fn definition_statement(definition: &Definition) -> Result<ConceptStatement,
     })
 }
 
-/// What a binding is kept as on a branch: under the entity its namespace
-/// and key make, the three of it, each of cardinality one.
+/// What a binding is kept as on a branch: under the entity its key
+/// makes, its key, name and signature, and its definition, each of
+/// cardinality one.
 pub fn binding_statement(binding: &Binding) -> Result<ConceptStatement, Error> {
     Ok(ConceptStatement {
         this: binding.entity()?,
         with: vec![
+            attributed(attribute::BINDING_KEY, "text:", data::text(binding.key()))?,
+            attributed(attribute::BINDING_NAME, "text:", data::text(&binding.name))?,
             attributed(
-                attribute::BINDING_NAMESPACE,
-                "entity:",
-                Value::Entity(binding.namespace.clone()),
+                attribute::BINDING_SIGNATURE,
+                "text:",
+                data::text(&binding.signature),
             )?,
-            attributed(attribute::BINDING_KEY, "text:", data::text(&binding.key))?,
             attributed(
-                attribute::BINDING_REFERENT,
+                attribute::BINDING_DEFINITION,
                 "entity:",
-                Value::Entity(binding.referent.clone()),
+                Value::Entity(binding.definition.clone()),
             )?,
         ],
     })
 }
 
-/// What taking a binding away retracts: its referent. The definition it
-/// was bound to stays.
+/// What taking a binding away retracts: its definition. The definition
+/// itself stays.
 pub fn unbinding_statement(binding: &Binding) -> Result<ConceptStatement, Error> {
     Ok(ConceptStatement {
         this: binding.entity()?,
         with: vec![attributed(
-            attribute::BINDING_REFERENT,
+            attribute::BINDING_DEFINITION,
             "entity:",
-            Value::Entity(binding.referent.clone()),
+            Value::Entity(binding.definition.clone()),
         )?],
     })
 }
@@ -641,132 +648,106 @@ pub fn source_statement(defined: &Defined) -> Result<ConceptStatement, Error> {
 }
 
 /// Everything a definition a document made writes: the definition, its
-/// source map, and the two bindings that put it under its name.
+/// source map, and the binding that puts it under its name.
 pub fn statements(defined: &Defined) -> Result<Vec<ConceptStatement>, Error> {
-    let mut statements = vec![
+    Ok(vec![
         definition_statement(&defined.definition)?,
         source_statement(defined)?,
-    ];
-    for binding in defined.bindings()? {
-        statements.push(binding_statement(&binding)?);
-    }
-    Ok(statements)
+        binding_statement(&defined.binding())?,
+    ])
 }
 
-/// The rule `Name` is derived by, in the notation: a name in any
-/// namespace, bound to a name's namespace whose entries are signatures,
-/// each bound to a definition. Its entity is the second binding, so a
-/// row is one signature of one name in one namespace.
-pub const NAME_RULE: &str = "(rule (syntax.name ?entry namespace: ?namespace is: ?name signature: ?signature definition: ?definition)
-  (syntax.binding ?bound namespace: ?namespace key: ?name referent: ?named)
-  (syntax.binding ?entry namespace: ?named key: ?signature referent: ?definition))";
+/// The rule `Name` is derived by, in the notation: each binding of the
+/// space, by its name and signature.
+pub const NAME_RULE: &str =
+    "(rule (syntax.name ?binding is: ?name signature: ?signature definition: ?definition)
+  (syntax.binding ?binding name: ?name signature: ?signature definition: ?definition))";
 
-/// The local namespace when none is given: an analyzer that is not
-/// opened on a branch has no authority to stand for, and binds what it
-/// defines here.
-pub const MINE: &str = "namespace:mine";
-
-/// One row of `Name`: a name in a namespace, one of its signatures, and
-/// the definition bound under it.
+/// One row of `Name`: a name, one of its signatures, and the definition
+/// bound under it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Name {
-    /// The namespace the name is bound in.
-    pub namespace: Entity,
     /// The name.
     pub name: String,
-    /// The signature, the key in the name's own namespace.
+    /// The signature.
     pub signature: String,
     /// The definition bound under it.
     pub definition: Entity,
 }
 
-/// Every namespace's bindings, and which is mine: what a reference is
-/// resolved by.
-///
-/// A namespace is a key bound to one referent, and nothing else. A name
-/// is itself a namespace, whose keys are its signatures, so a name in a
-/// namespace is two lookups and `Name` is the walk over every
-/// namespace's bindings ([`rows`](Self::rows)), the namespace a field
-/// of it. A name in mine bound to another namespace is a petname:
-/// `@cdata/todo` walks through what `cdata` in mine is bound to.
-#[derive(Clone, Debug)]
-pub struct Namespaces {
-    mine: Entity,
-    bound: BTreeMap<Entity, BTreeMap<String, Entity>>,
-    /// What has been read from where the bindings are kept, found or
-    /// not: a lookup of these is answered here.
-    answered: BTreeSet<Want>,
-    /// What a lookup asked for that was not answered: what a driver
-    /// reads next. Shared by every copy, so what a trial that was
-    /// refused asked for is still asked.
-    wanted: Arc<Mutex<BTreeSet<Want>>>,
-}
-
 /// What resolving a name asks of where the bindings and definitions are
-/// kept, which a driver reads and answers ([`Namespaces::answer`]).
+/// kept, which a driver reads and answers ([`Names::answer`]).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Want {
-    /// What `key` in a namespace is bound to.
-    Key(Entity, String),
-    /// Every binding of a namespace.
-    Keys(Entity),
+    /// Every binding of a name: one range, [`range`].
+    Name(String),
+    /// Every binding of every name that begins with a prefix, a path's
+    /// for instance: one range too.
+    Prefix(String),
+    /// Every binding of the space: what an error reads, to say which
+    /// other names end as the one not found.
+    All,
+    /// The definitions whose hash begins so.
+    Hash(String),
     /// A definition, by its entity.
     Definition(Entity),
 }
 
-impl PartialEq for Namespaces {
-    /// Two are equal when they bind alike: what was asked and answered
-    /// is how they came to.
+/// The space's bindings this walker has read, and what it has asked for:
+/// what a reference is resolved by.
+///
+/// A name is a path, `todo` or `cdata/todo`; the slash is a convention of
+/// the name and nothing walks it. Each binding is keyed by the whole of
+/// its name and signature, so a name's signatures are one range of keys.
+#[derive(Clone, Debug, Default)]
+pub struct Names {
+    bound: BTreeMap<String, Binding>,
+    /// What has been read, found or not: a lookup of these is answered.
+    answered: BTreeSet<Want>,
+    /// What a lookup asked for that was not answered: what a driver reads
+    /// next. Shared by every copy, so what a trial that was refused asked
+    /// for is still asked.
+    wanted: Arc<Mutex<BTreeSet<Want>>>,
+}
+
+impl PartialEq for Names {
+    /// Two are equal when they bind alike: what was asked and answered is
+    /// how they came to.
     fn eq(&self, other: &Self) -> bool {
-        self.mine == other.mine && self.bound == other.bound
+        self.bound == other.bound
     }
 }
 
-impl Default for Namespaces {
-    fn default() -> Self {
-        Namespaces::new(Entity::from_str(MINE).expect("namespace:mine is an entity"))
-    }
-}
-
-impl Namespaces {
-    /// No binding, `mine` the local namespace.
-    pub fn new(mine: Entity) -> Self {
-        Namespaces {
-            mine,
-            bound: BTreeMap::new(),
-            answered: BTreeSet::new(),
-            wanted: Arc::new(Mutex::new(BTreeSet::new())),
-        }
-    }
-
+impl Names {
     fn asked(&self) -> std::sync::MutexGuard<'_, BTreeSet<Want>> {
         self.wanted
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Ask for `want` unless it is answered.
-    pub(crate) fn want(&self, want: Want) {
-        let answered = match &want {
-            Want::Key(namespace, _) => {
-                self.answered.contains(&want)
-                    || self.answered.contains(&Want::Keys(namespace.clone()))
-            }
-            _ => self.answered.contains(&want),
+    /// Whether `want` has been answered: by itself, or by a read that
+    /// covers it.
+    pub fn is_answered(&self, want: &Want) -> bool {
+        if self.answered.contains(want) {
+            return true;
+        }
+        let every = self.answered.contains(&Want::All);
+        let under = |covered: &str| {
+            self.answered.iter().any(|answered| {
+                matches!(answered, Want::Prefix(prefix) if covered.starts_with(prefix.as_str()))
+            })
         };
-        if !answered {
-            self.asked().insert(want);
+        match want {
+            Want::Name(name) => every || under(&range(name)),
+            Want::Prefix(prefix) => every || under(prefix),
+            _ => false,
         }
     }
 
-    /// Whether `want` has been answered.
-    pub fn is_answered(&self, want: &Want) -> bool {
-        match want {
-            Want::Key(namespace, _) => {
-                self.answered.contains(want)
-                    || self.answered.contains(&Want::Keys(namespace.clone()))
-            }
-            _ => self.answered.contains(want),
+    /// Ask for `want` unless it is answered.
+    pub(crate) fn want(&self, want: Want) {
+        if !self.is_answered(&want) {
+            self.asked().insert(want);
         }
     }
 
@@ -792,219 +773,103 @@ impl Namespaces {
         self.wanted = Arc::new(Mutex::new(BTreeSet::new()));
     }
 
-    /// The local namespace: what stands for "you".
-    pub fn mine(&self) -> &Entity {
-        &self.mine
-    }
-
-    /// Bind `binding.key` in `binding.namespace` to its referent, in
-    /// place of what it was bound to.
+    /// Bind `binding`'s key to its definition, in place of what it was
+    /// bound to.
     pub fn bind(&mut self, binding: Binding) {
-        self.bound
-            .entry(binding.namespace)
-            .or_default()
-            .insert(binding.key, binding.referent);
-    }
-
-    /// Take the binding of `key` in `namespace` away. What it was bound
-    /// to stays.
-    pub fn unbind(&mut self, namespace: &Entity, key: &str) -> Option<Entity> {
-        self.bound.get_mut(namespace)?.remove(key)
-    }
-
-    /// What `key` in `namespace` is bound to.
-    pub fn get(&self, namespace: &Entity, key: &str) -> Option<&Entity> {
-        self.want(Want::Key(namespace.clone(), key.to_string()));
-        self.bound.get(namespace)?.get(key)
-    }
-
-    /// Every key of `namespace` and what it is bound to.
-    fn keys(&self, namespace: &Entity) -> Vec<(String, Entity)> {
-        self.want(Want::Keys(namespace.clone()));
-        self.bound
-            .get(namespace)
-            .into_iter()
-            .flatten()
-            .map(|(key, referent)| (key.clone(), referent.clone()))
-            .collect()
+        self.bound.insert(binding.key(), binding);
     }
 
     /// Bind as the analysis itself does: what it binds needs no reading.
     pub(crate) fn bind_here(&mut self, binding: Binding) {
-        self.answered
-            .insert(Want::Key(binding.namespace.clone(), binding.key.clone()));
+        self.answered.insert(Want::Name(binding.name.clone()));
         self.bind(binding);
     }
 
-    /// Every binding.
-    pub fn bindings(&self) -> impl Iterator<Item = Binding> + '_ {
-        self.bound.iter().flat_map(|(namespace, keys)| {
-            keys.iter().map(move |(key, referent)| Binding {
-                namespace: namespace.clone(),
-                key: key.clone(),
-                referent: referent.clone(),
-            })
-        })
-    }
-
-    /// The rows of `Name` for `name` in `namespace`.
-    fn named_in(&self, namespace: &Entity, name: &str) -> Vec<Name> {
-        let Some(named) = self
-            .get(namespace, name)
-            .filter(|named| is_name_space(named))
-            .cloned()
-        else {
-            return Vec::new();
-        };
-        self.want(Want::Keys(named.clone()));
-        self.known_in(namespace, name, &named)
-    }
-
-    /// The rows of `name` in `namespace`, bound to `named`, from what is
-    /// known: nothing is asked for.
-    fn known_in(&self, namespace: &Entity, name: &str, named: &Entity) -> Vec<Name> {
-        self.bound
-            .get(named)
-            .into_iter()
-            .flatten()
-            .filter(|(_, definition)| is_definition(definition))
-            .map(|(signature, definition)| Name {
-                namespace: namespace.clone(),
-                name: name.to_string(),
-                signature: signature.clone(),
-                definition: definition.clone(),
-            })
+    /// Take every binding of `name` away, giving what each was bound to.
+    pub fn unbind(&mut self, name: &str) -> Vec<Binding> {
+        let keys: Vec<String> = self
+            .bound
+            .range(range(name)..)
+            .take_while(|(key, _)| key.starts_with(&range(name)))
+            .map(|(key, _)| key.clone())
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| self.bound.remove(&key))
             .collect()
     }
 
-    /// Every row of `Name`: each name in each namespace bound to a
-    /// name's namespace, and each of its signatures.
+    /// Every binding known.
+    pub fn bindings(&self) -> impl Iterator<Item = Binding> + '_ {
+        self.bound.values().cloned()
+    }
+
+    fn row(binding: &Binding) -> Name {
+        Name {
+            name: binding.name.clone(),
+            signature: binding.signature.clone(),
+            definition: binding.definition.clone(),
+        }
+    }
+
+    /// The rows of `name`: one range of keys, asked for unless read.
+    pub fn named(&self, name: &str) -> Vec<Name> {
+        self.want(Want::Name(name.to_string()));
+        self.bound
+            .range(range(name)..)
+            .take_while(|(key, _)| key.starts_with(&range(name)))
+            .map(|(_, binding)| Self::row(binding))
+            .collect()
+    }
+
+    /// Every row known, asking for nothing.
     pub fn rows(&self) -> Vec<Name> {
-        let mut rows = Vec::new();
-        for (namespace, keys) in &self.bound {
-            for (name, named) in keys {
-                if is_name_space(named) {
-                    rows.extend(self.known_in(namespace, name, named));
-                }
-            }
+        self.bound.values().map(Self::row).collect()
+    }
+
+    /// What a reference as written means: the rows of its name, and of
+    /// `todo#3fa9` those whose definition's hash starts so. A name is the
+    /// space's; a path is a longer name.
+    pub fn resolve(&self, written: &str) -> Vec<Name> {
+        let (name, prefix) = match written.split_once('#') {
+            Some((name, prefix)) => (name, Some(prefix)),
+            None => (written, None),
+        };
+        let mut rows = self.named(name);
+        if let Some(prefix) = prefix {
+            rows.retain(|row| hash_of(&row.definition).starts_with(prefix));
         }
         rows
     }
 
-    /// The petnames in mine: each name bound to something that is no
-    /// name's namespace and no definition, a namespace of someone's.
-    pub fn petnames(&self) -> Vec<(String, Entity)> {
-        self.keys(&self.mine)
-            .into_iter()
-            .filter(|(_, referent)| !is_name_space(referent) && !is_definition(referent))
+    /// What may be meant by what is being typed: every name of the space
+    /// that starts with `prefix`, each signature of it a suggestion.
+    pub fn suggest(&self, prefix: &str) -> Vec<Suggestion> {
+        self.want(Want::Prefix(prefix.to_string()));
+        self.bound
+            .range(prefix.to_string()..)
+            .take_while(|(key, _)| key.starts_with(prefix))
+            .map(|(_, binding)| Suggestion::of(binding))
             .collect()
     }
 
-    /// What a reference as written means: the rows of `Name` it walks
-    /// to. `todo` is mine and nothing else; `@cdata/todo` is the `todo`
-    /// of what `cdata` in mine is bound to, and `@a/@b/todo` walks on
-    /// from there; `todo#3fa9` keeps the rows of `todo`, in mine or in a
-    /// namespace a petname of mine points at, whose definition's hash
-    /// starts so. A petname bound to nothing is refused as unknown.
-    pub fn resolve(&self, written: &str) -> Result<Vec<Name>, Error> {
-        let (path, prefix) = match written.split_once('#') {
-            Some((path, prefix)) => (path, Some(prefix)),
-            None => (written, None),
-        };
-        let mut rows = match path.strip_prefix('@') {
-            None if prefix.is_some() => {
-                let mut rows = self.named_in(&self.mine, path);
-                for (_, namespace) in self.petnames() {
-                    rows.extend(self.named_in(&namespace, path));
-                }
-                rows
-            }
-            None => self.named_in(&self.mine, path),
-            Some(qualified) => {
-                let mut namespace = self.mine.clone();
-                let mut rest = qualified;
-                loop {
-                    let Some((petname, after)) = rest.split_once('/') else {
-                        return Err(Error::Unknown(written.to_string()));
-                    };
-                    namespace = self
-                        .get(&namespace, petname)
-                        .cloned()
-                        .ok_or_else(|| Error::Unknown(written.to_string()))?;
-                    match after.strip_prefix('@') {
-                        Some(next) => rest = next,
-                        None => break self.named_in(&namespace, after),
-                    }
-                }
-            }
-        };
-        if let Some(prefix) = prefix {
-            rows.retain(|row| hash_of(&row.definition).starts_with(prefix));
-        }
-        Ok(rows)
-    }
-
-    /// What may be meant by what is being typed: every name in mine, and
-    /// in each namespace a petname of mine points at, that starts with
-    /// `prefix`, each signature of it a suggestion.
-    pub fn suggest(&self, prefix: &str) -> Vec<Suggestion> {
-        let mut found = Vec::new();
-        let mut from = vec![(None, self.mine.clone())];
-        from.extend(
-            self.petnames()
-                .into_iter()
-                .map(|(petname, namespace)| (Some(petname), namespace)),
-        );
-        for (petname, namespace) in from {
-            for (name, _) in self.keys(&namespace) {
-                let name = &name;
-                if !name.starts_with(prefix) {
-                    continue;
-                }
-                for row in self.named_in(&namespace, name) {
-                    found.push(Suggestion {
-                        petname: petname.clone(),
-                        namespace: row.namespace,
-                        name: row.name,
-                        signature: row.signature,
-                        definition: row.definition,
-                    });
-                }
-            }
-        }
-        found.sort();
-        found
-    }
-
-    /// `name` where a petname of mine points: what a bare `name` that
-    /// mine does not hold, or holds under other signatures, may have
-    /// meant.
-    pub fn elsewhere(&self, name: &str) -> Vec<Suggestion> {
-        let mut found = Vec::new();
-        for (petname, namespace) in self.petnames() {
-            for row in self.named_in(&namespace, name) {
-                found.push(Suggestion {
-                    petname: Some(petname.clone()),
-                    namespace: row.namespace,
-                    name: row.name,
-                    signature: row.signature,
-                    definition: row.definition,
-                });
-            }
-        }
-        found.sort();
-        found
+    /// The other names of the space whose last segment is `name`'s:
+    /// `cdata/todo` for `todo`. What a name not found may have meant. It
+    /// reads every binding, which only an error does.
+    pub fn ending_as(&self, name: &str) -> Vec<Suggestion> {
+        self.want(Want::All);
+        let last = name.rsplit('/').next().unwrap_or(name);
+        self.bound
+            .values()
+            .filter(|binding| binding.name != name && binding.name.rsplit('/').next() == Some(last))
+            .map(Suggestion::of)
+            .collect()
     }
 }
 
-/// A name that may be meant: where it is, under which signature, and
-/// the definition it is bound to.
+/// A name that may be meant: under which signature, and the definition
+/// it is bound to.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Suggestion {
-    /// The petname in mine of the namespace it is in; `None` for mine.
-    pub petname: Option<String>,
-    /// The namespace it is in.
-    pub namespace: Entity,
     /// The name.
     pub name: String,
     /// Its signature.
@@ -1014,38 +879,57 @@ pub struct Suggestion {
 }
 
 impl Suggestion {
-    /// How it is written: `todo` in mine, `@cdata/todo` elsewhere.
-    pub fn written(&self) -> String {
-        match &self.petname {
-            Some(petname) => format!("@{petname}/{}", self.name),
-            None => self.name.clone(),
+    fn of(binding: &Binding) -> Self {
+        Suggestion {
+            name: binding.name.clone(),
+            signature: binding.signature.clone(),
+            definition: binding.definition.clone(),
         }
     }
 }
 
 impl Display for Suggestion {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({})", self.written(), self.signature)
+        write!(f, "{} ({})", self.name, self.signature)
     }
 }
 
 /// The name a reference applies once it is resolved: `todo` of
-/// `@cdata/todo`, `@a/@b/todo` and `todo#3fa9`.
+/// `todo#3fa9`.
 pub fn bare(written: &str) -> &str {
-    let path = written.split_once('#').map_or(written, |(path, _)| path);
-    let mut rest = path;
-    while let Some(qualified) = rest.strip_prefix('@') {
-        match qualified.split_once('/') {
-            Some((_, after)) => rest = after,
-            None => return rest,
-        }
-    }
-    rest
+    written.split_once('#').map_or(written, |(name, _)| name)
 }
 
-/// Whether a reference is qualified: it names a namespace or a hash.
+/// Whether a reference is qualified by a hash.
 pub fn qualified(written: &str) -> bool {
-    written.contains('#') || (written.starts_with('@') && written.len() > 1)
+    written.contains('#')
+}
+
+/// The signature a definition is bound under, read off what it was kept
+/// as: a rule about syntax's pattern, or a query's head.
+pub fn signature_of(definition: &Definition) -> Option<String> {
+    let labels = |tree: &Syntax| -> Vec<String> {
+        tree.operand()
+            .map(|operand| operand.terms.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    let form = &definition.form;
+    let operand = form.operand()?;
+    match definition.kind {
+        Kind::Query => {
+            let own = operand.items.last()?;
+            let head = own.operand()?.items.first()?;
+            Some(signature(Kind::Query, labels(head)))
+        }
+        kind => {
+            let expand = operand
+                .items
+                .iter()
+                .find(|part| part.applies() == Some("expand"))?;
+            let pattern = expand.operand()?.items.first()?;
+            Some(signature(kind, labels(pattern)))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1157,6 +1041,70 @@ mod tests {
         assert_eq!(fixed, other_fixed);
         assert_eq!(set, other_set);
         Ok(())
+    }
+
+    /// A name's range holds every key of that name and no key of any
+    /// other: not of a longer name it is a prefix of, not of a path under
+    /// it, not of a name it is under. A path's prefix is a range too.
+    #[test]
+    fn it_keys_a_name_so_that_its_range_is_its_own() {
+        let names = [
+            "todo",
+            "todo-list",
+            "todo/model",
+            "todo.x",
+            "todox",
+            "tod",
+            "cdata/todo",
+            "cdata/todo/model",
+            "cdata",
+            "cdatax/todo",
+            "t",
+            "todo!",
+        ];
+        let signatures = ["concept (title:)", "concept ()", "query (is:)", "macro ()"];
+        let mut keys: Vec<(String, &str)> = Vec::new();
+        for name in names {
+            for signature in signatures {
+                keys.push((key(name, signature), name));
+            }
+        }
+        keys.sort();
+        for name in names {
+            let inside: Vec<&str> = keys
+                .iter()
+                .filter(|(key, _)| key.starts_with(&range(name)))
+                .map(|(_, of)| *of)
+                .collect();
+            assert_eq!(inside, vec![name; signatures.len()], "{name}");
+            // The range is contiguous in key order.
+            let at: Vec<usize> = keys
+                .iter()
+                .enumerate()
+                .filter(|(_, (key, _))| key.starts_with(&range(name)))
+                .map(|(at, _)| at)
+                .collect();
+            assert!(at.windows(2).all(|pair| pair[1] == pair[0] + 1), "{name}");
+        }
+        let under: Vec<&str> = keys
+            .iter()
+            .filter(|(key, _)| key.starts_with("cdata/"))
+            .map(|(_, of)| *of)
+            .collect();
+        assert!(under.iter().all(|name| name.starts_with("cdata/")));
+        assert_eq!(under.len(), 2 * signatures.len());
+        assert_eq!(
+            [
+                key("todo", "concept (done: title:)"),
+                key("cdata/todo", "query (is:)"),
+                key("todo-list", "macro ()"),
+            ],
+            [
+                "todo concept (done: title:)".to_string(),
+                "cdata/todo query (is:)".to_string(),
+                "todo-list macro ()".to_string(),
+            ]
+        );
     }
 
     #[test]

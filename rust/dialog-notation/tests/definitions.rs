@@ -3,17 +3,16 @@
 //! A document's concepts, macros and queries are written to the branch
 //! it is submitted to, each compiled with every reference resolved, under
 //! the entity its canonical form makes, with a source map beside it and
-//! the bindings that put it under its name in the local namespace. A
+//! the binding that puts it under its name and signature in the space. A
 //! notebook opened anew on the branch loads them and answers with
 //! nothing submitted again.
 
 #![allow(deprecated)]
 
 use anyhow::Result;
-use dialog_notation::definition::{self, Binding, Defined};
+use dialog_notation::definition;
 use dialog_notation::live::Live;
 use dialog_notation::{Analyzer, Error, check};
-use std::str::FromStr;
 
 #[path = "../examples/notebook/session.rs"]
 mod session;
@@ -87,6 +86,16 @@ macro_rules! round_trip {
     }};
 }
 
+/// The definitions the branch binds `name` to, read from it.
+async fn bound_to(notebook: &Notebook, name: &str) -> Result<Vec<String>> {
+    Ok(Live::new(notebook.branch.clone())
+        .bindings(&definition::range(name), &notebook.operator)
+        .await?
+        .into_iter()
+        .map(|binding| binding.definition.to_string())
+        .collect())
+}
+
 /// On the volatile provider.
 #[dialog_common::test]
 async fn it_answers_from_a_fresh_analyzer_on_the_same_branch() -> Result<()> {
@@ -106,27 +115,23 @@ async fn it_answers_from_a_fresh_analyzer_on_the_filesystem() -> Result<()> {
 
 /// What a small document writes: the definition under its entity, with
 /// its kind; a source map that says what was written and what each name
-/// resolved to; and two bindings, the name in mine, the authority the
-/// notebook's operator acts for, and the signature in the name's namespace.
+/// resolved to; and one binding of the space, its key the name, a space
+/// and the signature.
 #[dialog_common::test]
-async fn it_writes_a_definition_its_source_map_and_its_bindings() -> Result<()> {
+async fn it_writes_a_definition_its_source_map_and_its_binding() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook.submit(DOCUMENT).await?;
     let kept = Live::new(notebook.branch.clone())
         .kept(&notebook.operator)
         .await?;
-    let mine = notebook.analyzer().namespaces().mine().clone();
-    assert!(mine.as_str().starts_with("did:"), "{mine}");
-    let card = notebook
-        .analyzer()
-        .namespaces()
-        .resolve("todo/card")
-        .map_err(anyhow::Error::new)?;
-    let [card] = card.as_slice() else {
-        panic!("one todo/card: {card:?}");
-    };
-    assert_eq!(card.namespace, mine);
+    let card = kept
+        .bindings
+        .iter()
+        .find(|binding| binding.name == "todo/card")
+        .expect("todo/card is bound")
+        .clone();
     assert_eq!(card.signature, "query (is:)");
+    assert_eq!(card.key(), "todo/card query (is:)");
     let stored = kept
         .definitions
         .iter()
@@ -143,17 +148,6 @@ async fn it_writes_a_definition_its_source_map_and_its_bindings() -> Result<()> 
         "{form}"
     );
     assert!(form.contains("xyz.todo"), "{form}");
-    let named = definition::name_space(&mine, "todo/card")?;
-    assert!(kept.bindings.contains(&Binding {
-        namespace: mine.clone(),
-        key: "todo/card".into(),
-        referent: named.clone(),
-    }));
-    assert!(kept.bindings.contains(&Binding {
-        namespace: named,
-        key: "query (is:)".into(),
-        referent: card.definition.clone(),
-    }));
     // `Name` is derived on the branch, by a rule over the bindings.
     let names = notebook
         .submit(r#"(select (syntax.name ?e is: "todo/card" definition: ?d))"#)
@@ -163,10 +157,7 @@ async fn it_writes_a_definition_its_source_map_and_its_bindings() -> Result<()> 
         names,
         vec![format!(
             r#"(syntax.name {} definition: {} is: "todo/card")"#,
-            definition::binding_entity(
-                &definition::name_space(&mine, "todo/card")?,
-                "query (is:)"
-            )?,
+            card.entity()?,
             card.definition
         )]
     );
@@ -189,19 +180,14 @@ async fn it_keeps_one_definition_under_one_entity_on_two_branches() -> Result<()
                  (todo ?e title: ?named))"#,
         )
         .await?;
-    let entities = |notebook: &Notebook, name: &str| -> Result<Vec<String>> {
-        Ok(notebook
-            .analyzer()
-            .namespaces()
-            .resolve(name)?
-            .into_iter()
-            .map(|row| row.definition.to_string())
-            .collect())
-    };
-    assert_eq!(entities(&one, "todo")?, entities(&other, "todo")?);
-    assert_eq!(entities(&one, "todo/card")?, entities(&other, "todo/card")?);
-    let mine = |notebook: &Notebook| notebook.analyzer().namespaces().mine().clone();
-    assert_ne!(mine(&one), mine(&other), "two authorities, two namespaces");
+    assert_eq!(
+        bound_to(&one, "todo").await?,
+        bound_to(&other, "todo").await?
+    );
+    assert_eq!(
+        bound_to(&one, "todo/card").await?,
+        bound_to(&other, "todo/card").await?
+    );
     Ok(())
 }
 
@@ -247,54 +233,29 @@ async fn it_writes_the_canonical_form_whatever_the_spelling() -> Result<()> {
     Ok(())
 }
 
-/// `(name cdata did:…)` binds a petname in mine, and `@cdata/…` walks
-/// through it; `(unname todo)` takes `todo` away from mine, which is then
-/// refused as unknown, and its definition stays kept.
+/// `(unname todo/card)` takes every binding of `todo/card` away: its
+/// binding is retracted, its definition stays kept, and the name is then
+/// bound to nothing: read again, it is what it is with no binding, the
+/// derived attribute `card` of the concept `todo`, which nothing
+/// concludes.
 #[dialog_common::test]
-async fn it_binds_a_petname_and_takes_a_name_away() -> Result<()> {
+async fn it_takes_a_name_away() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook.submit(DOCUMENT).await?;
-    let made = theirs(&mut notebook).await?;
-    let mine = notebook.analyzer().namespaces().mine().clone();
-    notebook
-        .submit(&format!("(name ours {})", made.namespace))
-        .await?;
     let live = Live::new(notebook.branch.clone());
     let kept = live.kept(&notebook.operator).await?;
-    assert!(kept.bindings.contains(&Binding {
-        namespace: mine.clone(),
-        key: "ours".into(),
-        referent: made.namespace.clone(),
-    }));
-    notebook
-        .submit(r#"(assert (@ours/chore task:3 title: "Ours"))"#)
-        .await?;
-    assert_eq!(
-        notebook
-            .submit("(select (abc.task task:3 name: ?x))")
-            .await?
-            .0,
-        vec![r#"(abc.task task:3 name: "Ours")"#]
-    );
-
     let card = kept
         .bindings
         .iter()
-        .find(|binding| binding.namespace == mine && binding.key == "todo/card")
+        .find(|binding| binding.name == "todo/card")
         .cloned()
         .expect("todo/card is bound");
     notebook.submit("(unname todo/card)").await?;
     let after = live.kept(&notebook.operator).await?;
     assert!(!after.bindings.contains(&card), "the binding is retracted");
     assert_eq!(after.definitions, kept.definitions, "the definitions stay");
-    let refused = notebook
-        .submit(ASKED[0])
-        .await
-        .map_err(|error| error.downcast::<Error>());
-    assert!(
-        matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("applies no relation")),
-        "{refused:?}"
-    );
+    let (answers, _) = notebook.submit(ASKED[0]).await?;
+    assert!(answers.is_empty(), "{answers:?}");
     let unknown = notebook
         .submit("(unname nonesuch)")
         .await
@@ -329,71 +290,48 @@ async fn it_sees_a_definition_a_pull_brought() -> Result<()> {
     Ok(())
 }
 
-/// A definition of another namespace, as a branch both write to would
-/// hold it: `chore`, which mine does not define, and `theirs` in mine
-/// bound to their namespace.
-async fn theirs(notebook: &mut Notebook) -> Result<Defined> {
-    let theirs = dialog_corpus::Entity::from_str("did:key:theirs")?;
-    let mut analyzer = Analyzer::new()?.with_namespace(theirs.clone());
-    let checked = check(
-        &mut analyzer,
-        "(concept (chore ?t title: ?title) (abc.task/name of: ?t is: ?title as: :text))",
-    );
-    let made = checked.defined[0].clone();
-    let mut transaction = notebook.branch.transaction();
-    for statement in definition::statements(&made)? {
-        transaction = transaction.assert(statement);
-    }
-    transaction = transaction.assert(definition::binding_statement(&Binding {
-        namespace: notebook.analyzer().namespaces().mine().clone(),
-        key: "theirs".into(),
-        referent: theirs,
-    })?);
-    transaction
-        .commit()
-        .publish()
-        .perform(&notebook.operator)
-        .await?;
-    notebook.reload().await?;
-    Ok(made)
-}
+/// `cdata/chore`, defined in the space.
+const CHORE: &str =
+    "(concept (cdata/chore ?t title: ?title) (abc.task/name of: ?t is: ?title as: :text))";
 
-/// A bare name is mine and nothing else. One mine does not hold is
-/// refused, naming the `@theirs/chore` that is, and nothing of the
-/// document is written; written `@theirs/chore`, it is theirs.
+/// A name the space binds to nothing is refused, naming the other names
+/// that end as it does, and nothing of the document is written; the path
+/// it named answers.
 #[dialog_common::test]
-async fn it_refuses_a_bare_name_that_is_not_mine_and_writes_nothing() -> Result<()> {
+async fn it_refuses_a_name_bound_to_nothing_and_writes_nothing() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook.submit(DOCUMENT).await?;
-    let made = theirs(&mut notebook).await?;
+    notebook.submit(CHORE).await?;
+    notebook.reload().await?;
     let live = Live::new(notebook.branch.clone());
     let kept = live.kept(&notebook.operator).await?;
     let revision = notebook.branch.revision();
     let refused = notebook
         .submit(
             r#"(assert (todo todo:2 title: "Call mum"))
-               (assert (chore task:2 title: "Mine?"))"#,
+               (assert (chore task:2 title: "Whose?"))"#,
         )
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(
-        matches!(&refused, Err(Ok(Error::Elsewhere(_)))),
+        matches!(&refused, Err(Ok(Error::Unbound(_)))),
         "{refused:?}"
     );
-    let Err(Ok(Error::Elsewhere(elsewhere))) = &refused else {
+    let Err(Ok(Error::Unbound(unbound))) = &refused else {
         unreachable!()
     };
-    assert_eq!(elsewhere.name, "chore");
-    let [suggestion] = elsewhere.suggestions.as_slice() else {
-        panic!("one suggestion: {elsewhere:?}");
-    };
-    assert_eq!(suggestion.to_string(), "@theirs/chore (concept (title:))");
-    assert_eq!(suggestion.definition, made.definition.entity);
+    assert_eq!(unbound.name, "chore");
+    let said: Vec<String> = unbound
+        .suggestions
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(said, vec!["cdata/chore (concept (title:))"]);
     assert_eq!(notebook.branch.revision(), revision, "nothing is written");
     assert_eq!(live.kept(&notebook.operator).await?, kept);
 
     notebook
-        .submit(r#"(assert (@theirs/chore task:1 title: "Theirs"))"#)
+        .submit(r#"(assert (cdata/chore task:1 title: "Theirs"))"#)
         .await?;
     assert_eq!(
         notebook.submit("(select (abc.task ?t name: ?x))").await?.0,
@@ -479,14 +417,13 @@ macro_rules! reached {
         assert_eq!(rounds.rounds, 3, "{rounds:?}");
         let known: Vec<String> = notebook
             .analyzer()
-            .namespaces()
+            .names()
             .bindings()
-            .map(|binding| binding.key)
+            .map(|binding| binding.name)
             .collect();
-        // Mine's own keys are listed, to find its petnames; the spares'
-        // signatures, and so their definitions, are never read.
+        // Only the ranges of the names reached are read.
         assert!(
-            !known.iter().any(|key| key == "concept (text:)"),
+            !known.iter().any(|name| name == "spare" || name == "other"),
             "{known:?}"
         );
     }};
@@ -523,7 +460,6 @@ macro_rules! layered {
             .await?;
         // The calling query, made where nothing is written, and laid on
         // the overlay alone.
-        let mine = notebook.analyzer().namespaces().mine().clone();
         let mut writer = notebook.analyzer().clone();
         let checked = check(
             &mut writer,
@@ -532,7 +468,6 @@ macro_rules! layered {
         let [badge] = checked.defined.as_slice() else {
             panic!("one definition: {:?}", checked.diagnostics);
         };
-        assert_eq!(badge.namespace, mine);
         for statement in definition::statements(badge)? {
             notebook.branch.overlay().assert(statement)?;
         }
@@ -565,13 +500,13 @@ async fn it_reads_definitions_from_the_overlay_and_the_durable_tree_on_the_files
 }
 
 /// A name nothing holds is unknown once the rounds stop asking, and a
-/// bare name only a petname's namespace holds is refused naming it,
+/// name bound to nothing that another path ends as is refused naming it,
 /// both read from the branch by an analyzer that held nothing.
 #[dialog_common::test]
 async fn it_refuses_what_the_rounds_do_not_find() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook.submit(DOCUMENT).await?;
-    theirs(&mut notebook).await?;
+    notebook.submit(CHORE).await?;
     notebook.reload().await?;
     let unknown = notebook
         .submit("(select (nonesuch ?t title: ?x))")
@@ -582,34 +517,33 @@ async fn it_refuses_what_the_rounds_do_not_find() -> Result<()> {
         "{unknown:?}"
     );
     notebook.reload().await?;
-    let elsewhere = notebook
+    let unbound = notebook
         .submit("(select (chore ?t title: ?x))")
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(
-        matches!(&elsewhere, Err(Ok(Error::Elsewhere(_)))),
-        "{elsewhere:?}"
+        matches!(&unbound, Err(Ok(Error::Unbound(_)))),
+        "{unbound:?}"
     );
     Ok(())
 }
 
-/// What the suggestions read from the branch are: the names that start
-/// so, in mine and where a petname of mine points.
+/// What the suggestions read from the branch are: the names of the
+/// space under a prefix, one range.
 #[dialog_common::test]
 async fn it_suggests_names_read_from_the_branch() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook.submit(DOCUMENT).await?;
-    theirs(&mut notebook).await?;
-    let mine = notebook.analyzer().namespaces().mine().clone();
+    notebook.submit(CHORE).await?;
     let live = Live::new(notebook.branch.clone());
     let said: Vec<String> = live
-        .suggest(&mine, "", &notebook.operator)
+        .suggest("", &notebook.operator)
         .await?
         .iter()
         .map(ToString::to_string)
         .collect();
     assert!(
-        said.contains(&"@theirs/chore (concept (title:))".to_string()),
+        said.contains(&"cdata/chore (concept (title:))".to_string()),
         "{said:?}"
     );
     assert!(
@@ -617,12 +551,19 @@ async fn it_suggests_names_read_from_the_branch() -> Result<()> {
         "{said:?}"
     );
     let todo: Vec<String> = live
-        .suggest(&mine, "todo/c", &notebook.operator)
+        .suggest("todo/c", &notebook.operator)
         .await?
         .iter()
         .map(ToString::to_string)
         .collect();
     assert_eq!(todo, vec!["todo/card (query (is:))"]);
+    let cdata: Vec<String> = live
+        .suggest("cdata/", &notebook.operator)
+        .await?
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(cdata, vec!["cdata/chore (concept (title:))"]);
     Ok(())
 }
 
@@ -661,41 +602,162 @@ async fn it_analyzes_each_sketch_in_a_few_rounds() -> Result<()> {
     Ok(())
 }
 
-/// Mine is the authority the branch is opened under: the one every
-/// revision the notebook commits names as its authority.
+/// A name's bindings are one range of the value index: reading `todo`'s
+/// among 10 or 1000 bindings of other names, many of them its neighbours
+/// in key order (`todo-0`, `todo/0`, `todox0`), the scan of the key gives
+/// `todo`'s one key either way, with nothing after it to filter.
 #[dialog_common::test]
-async fn it_binds_in_the_authority_the_branch_is_opened_under() -> Result<()> {
-    let mut notebook = Notebook::open().await?;
-    notebook.submit(DOCUMENT).await?;
-    let mine = notebook.analyzer().namespaces().mine().clone();
+async fn it_reads_a_names_bindings_as_one_range() -> Result<()> {
+    async fn read(unrelated: usize) -> Result<(Vec<String>, usize, usize)> {
+        let mut notebook = Notebook::open().await?;
+        notebook.submit(DOCUMENT).await?;
+        let card = Live::new(notebook.branch.clone())
+            .bindings(&definition::range("todo/card"), &notebook.operator)
+            .await?;
+        let mut transaction = notebook.branch.transaction();
+        for at in 0..unrelated {
+            let name = match at % 3 {
+                0 => format!("todo-{at}"),
+                1 => format!("todo/{at}"),
+                _ => format!("todox{at}"),
+            };
+            transaction =
+                transaction.assert(definition::binding_statement(&definition::Binding {
+                    name,
+                    signature: "concept (title:)".into(),
+                    definition: card[0].definition.clone(),
+                })?);
+        }
+        transaction
+            .commit()
+            .publish()
+            .perform(&notebook.operator)
+            .await?;
+        notebook.branch.refresh(&notebook.operator).await?;
+        // The scan alone, with nothing after it to filter: what the index
+        // range gives.
+        use dialog_query::query::Output as _;
+        let scanned = notebook
+            .branch
+            .query()
+            .select(dialog_notation::live::binding_range(&definition::range(
+                "todo",
+            ))?)
+            .perform(&notebook.operator)
+            .try_vec()
+            .await?
+            .len();
+        let found: Vec<String> = Live::new(notebook.branch.clone())
+            .bindings(&definition::range("todo"), &notebook.operator)
+            .await?
+            .into_iter()
+            .map(|binding| binding.key())
+            .collect();
+        let every = Live::new(notebook.branch.clone())
+            .bindings("", &notebook.operator)
+            .await?
+            .len();
+        Ok((found, scanned, every))
+    }
+    let (few, few_scanned, few_all) = read(10).await?;
+    let (many, many_scanned, many_all) = read(1000).await?;
+    println!(
+        "keys the range scan gives: {few_scanned} of {few_all} bindings, {many_scanned} of {many_all}"
+    );
+    assert_eq!(few, vec!["todo concept (title:)"]);
+    assert_eq!(many, few);
     assert_eq!(
-        Live::new(notebook.branch.clone())
-            .authority(&notebook.operator)
-            .await?,
-        mine
+        (few_scanned, many_scanned),
+        (1, 1),
+        "the scan gives the range alone"
     );
-    use dialog_query::query::Output as _;
-    use dialog_query::{Query, Term};
-    use dialog_repository::schema;
-    let revisions: Vec<schema::Revision> = notebook
-        .branch
-        .query()
-        .select(Query::<schema::Revision> {
-            this: Term::var("this"),
-            branch: Term::var("branch"),
-            issuer: Term::var("issuer"),
-            authority: Term::var("authority"),
-            edition: Term::var("edition"),
-        })
-        .perform(&notebook.operator)
-        .try_vec()
+    assert!(many_all > 1000, "{many_all}");
+    Ok(())
+}
+
+/// Two replicas bind one key to two definitions. After a pull one is
+/// elected, the key reads as it; the other is still kept and reached by
+/// its hash.
+#[dialog_common::test]
+async fn it_elects_one_definition_of_a_key_two_replicas_bound() -> Result<()> {
+    let mut main = Notebook::open().await?;
+    main.submit(DOCUMENT).await?;
+    let mut other = main.branch("other").await?;
+    other
+        .submit("(concept (todo ?t title: ?title) (abc.task/name of: ?t is: ?title as: :text))")
         .await?;
-    assert!(!revisions.is_empty());
-    assert!(
-        revisions
-            .iter()
-            .all(|revision| revision.authority.0 == mine),
-        "the revisions' authority is mine"
+    let ours = bound_to(&main, "todo").await?;
+    let theirs = bound_to(&other, "todo").await?;
+    assert_ne!(ours, theirs);
+    other
+        .branch
+        .pull(dialog_repository::Download::MinimalRanges)
+        .from(&main.branch)
+        .perform(&other.operator)
+        .await?;
+    let elected = bound_to(&other, "todo").await?;
+    assert_eq!(elected.len(), 1, "one key, one definition: {elected:?}");
+    let kept = Live::new(other.branch.clone())
+        .kept(&other.operator)
+        .await?;
+    let both: Vec<String> = [&ours[0], &theirs[0]]
+        .into_iter()
+        .filter(|entity| {
+            kept.definitions
+                .iter()
+                .any(|kept| &kept.entity.to_string() == *entity)
+        })
+        .cloned()
+        .collect();
+    assert_eq!(both.len(), 2, "both definitions are kept");
+    let loser = if elected[0] == ours[0] {
+        &theirs[0]
+    } else {
+        &ours[0]
+    };
+    let hash = loser.split_once(':').map(|(_, hash)| hash).unwrap_or(loser);
+    other.reload().await?;
+    other
+        .submit(&format!(
+            r#"(assert (todo#{} todo:7 title: "By hash"))"#,
+            &hash[..10]
+        ))
+        .await?;
+    let (domain, attribute) = if loser == &ours[0] {
+        ("xyz.todo", "title")
+    } else {
+        ("abc.task", "name")
+    };
+    assert_eq!(
+        other
+            .submit(&format!("(select ({domain} todo:7 {attribute}: ?x))"))
+            .await?
+            .0,
+        vec![format!(r#"({domain} todo:7 {attribute}: "By hash")"#)]
     );
+    Ok(())
+}
+
+/// The read of a name's bindings is planned as one range: the prefix of
+/// its keys is stamped on the value the scan of `syntax.binding/key`
+/// reads, which the value index is ranged by.
+#[test]
+fn it_plans_a_names_bindings_as_a_range_of_the_value_index() -> Result<()> {
+    use dialog_query::{Premise, Proposition};
+    let scan = dialog_notation::live::binding_range(&definition::range("todo"))?;
+    let premise: Premise = scan.into();
+    let steps = dialog_query::Planner::from(vec![premise])
+        .plan(&dialog_query::Environment::new())?
+        .steps;
+    let first = steps.first().expect("a step").as_premise();
+    let Premise::Assert(Proposition::Attribute(scan)) = &first else {
+        panic!("the step scans the key: {first:?}");
+    };
+    assert!(format!("{scan:?}").contains("syntax.binding/key"));
+    let prefix = scan
+        .is()
+        .kind()
+        .and_then(|kind| kind.refinement().and_then(|refined| refined.prefix.clone()));
+    assert_eq!(prefix.as_deref(), Some("todo "));
     Ok(())
 }

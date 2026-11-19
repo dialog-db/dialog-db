@@ -75,7 +75,7 @@ pub use analyze::{Analysis, Analyzer};
 pub use check::{Checked, check, check_forms};
 pub use compile::{Query, Step, Write, compile};
 pub use declare::{Concept, Declaration, Key, Line};
-pub use definition::{Binding, Defined, Definition, Namespaces, Suggestion};
+pub use definition::{Binding, Defined, Definition, Names, Suggestion};
 pub use diagnostic::{Diagnostic, Severity};
 pub use expand::{Expander, Position};
 pub use form::{Form, Part, read};
@@ -91,13 +91,13 @@ pub use view::tree::{
 pub use view::{Attribute, CALLED, Element, Event, Input, Node, Piece};
 pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};
 
-/// A name several definitions of one signature stand under, and each of
-/// them, by its namespace and its definition's entity, in that order.
+/// A reference several definitions of one signature stand under, and
+/// each of them, by its signature and its definition's entity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidates {
     /// The name as written.
     pub name: String,
-    /// Each candidate: its namespace, and its definition.
+    /// Each candidate: its signature, and its definition.
     pub candidates: Vec<(String, String)>,
 }
 
@@ -105,7 +105,7 @@ pub struct Candidates {
 fn candidates(candidates: &[(String, String)]) -> String {
     candidates
         .iter()
-        .map(|(namespace, definition)| format!("{definition} in {namespace}"))
+        .map(|(signature, definition)| format!("{definition} ({signature})"))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -128,21 +128,26 @@ pub enum Error {
     /// A kernel form has no counterpart in Dialog-DB yet.
     #[error("not supported yet: {0}")]
     Unsupported(String),
-    /// A name that several definitions of one signature stand under, in
-    /// more than one namespace: which is meant is said by a namespace,
-    /// `@cdata/todo`, or a hash, `todo#3fa9`. Each candidate is its
-    /// namespace and its definition.
+    /// A hash prefix, `todo#3f`, that several definitions of one
+    /// signature begin with: a longer one says which.
     #[error("{} is defined more than once under one signature: {}", .0.name, candidates(&.0.candidates))]
     Several(Box<Candidates>),
-    /// A bare name that is not mine: a namespace one of my petnames
-    /// points at has it, and it is written `@petname/name`.
-    #[error("{} is no name of yours: {}", .0.name, suggested(&.0.suggestions))]
-    Elsewhere(Box<Suggested>),
-    /// A bare name of mine whose signatures the labels written fit none
-    /// of, where a namespace one of my petnames points at has the name
-    /// under one they fit.
-    #[error("{} of yours takes no {}: {} does, perhaps it is meant", .0.name, labelled(&.0.labels), suggested(&.0.suggestions))]
+    /// A name the space binds to nothing, where other names end as it
+    /// does: `cdata/todo` for `todo`.
+    #[error("{} is bound to nothing: {} is", .0.name, suggested(&.0.suggestions))]
+    Unbound(Box<Suggested>),
+    /// A name none of whose signatures the labels written fit: each it
+    /// has, and another name ending as it does whose signature fits, if
+    /// one does.
+    #[error("{} takes {}, not {}{}", .0.name, .0.signatures.join(" or "), labelled(&.0.labels), fitting(&.0.suggestions))]
     Unfitting(Box<Suggested>),
+}
+
+fn fitting(suggestions: &[definition::Suggestion]) -> String {
+    if suggestions.is_empty() {
+        return String::new();
+    }
+    format!(": {} does", suggested(suggestions))
 }
 
 /// A name that was not resolved, the labels it was written with, and
@@ -153,6 +158,8 @@ pub struct Suggested {
     pub name: String,
     /// The labels written.
     pub labels: Vec<String>,
+    /// The signatures the name has, where it has any.
+    pub signatures: Vec<String>,
     /// What may have been meant, each where it is and under which
     /// signature.
     pub suggestions: Vec<definition::Suggestion>,
