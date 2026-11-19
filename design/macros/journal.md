@@ -1849,3 +1849,21 @@ The measurement that came in after (next entry but one above) bears on this: wha
 
 **Decided.** What reaches the branch for a definition is its compiled form, inlined, and a source map beside it. Nothing stored follows a name.
 
+
+## 2026-11-19, Measuring: rows under their entity, and the fold under a subscription
+
+**Question.** The ledger's second hypothesis: with rows reported under the entity they are about and `select` pushed into its reads, does one change cost the same at 10 and 1000? And what does the engine's `Fold` cost under a subscription?
+
+**Method.** `cargo run -p dialog-notation --example cost -- 5` on `wip/engine-fold` at `144ddf8`, dev profile. [Output](rounds/cost-2026-11-19.txt).
+
+| one change | N=10 | N=100 | N=1000 | growth | plain at 1000 | times plain | bar |
+|---|---|---|---|---|---|---|---|
+| rename | 2.5 ms | 1.1 | 4.5 | 1.8 | 0.73 ms | 6.1 | between |
+| tag added | 2.6 | 1.4 | 4.3 | 1.7 | 0.24 | 18 | between |
+| to-do added | 2.4 | 1.3 | 5.4 | 2.2 | 0.61 | 8.8 | between |
+| `select` one card | 3.7 | 3.7 | 4.4 | 1.2 | | | confirmed |
+| tags folded by the engine, tag added (B8) | 2.5 | 11.7 | 138 | 55 | 0.24 | 575 | grows with every group |
+
+**Learned.** The 140 ms was the row's made-up entity; keyed by the entity it is 4.5 ms. Several rows of one head are not slow when carried as one record under their entity, so cost does not decide rows against one answer for a head. The fold is the cost that remains, and it now has a number. Reads are flat in the three changes; time is not, from 100 to 1000.
+
+**Decided.** Not decided. A release build and N=10000 are needed before the remaining growth is called anything.
