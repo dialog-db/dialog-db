@@ -143,6 +143,76 @@ fn it_asks_dialog_db_to_fold_a_collected_read() -> Result<()> {
     Ok(())
 }
 
+/// The selection a document compiles to.
+fn selection(text: &str) -> Result<dialog_notation::Selection> {
+    let analysis = dialog_notation::Analyzer::new()?.analyze(&dialog_notation::parse(text)?);
+    for tree in &analysis.analyzed {
+        if let [dialog_notation::Step::Select(selection)] =
+            dialog_notation::compile(tree)?.as_slice()
+        {
+            return Ok((**selection).clone());
+        }
+    }
+    Err(anyhow::anyhow!("no selection: {:?}", analysis.diagnostics))
+}
+
+/// The card's tags, the fold of two concept queries whose rules are laid
+/// on the branch's session overlay, kept by a standing fold: after a tag
+/// added, a tag taken away and a to-do added, what it has reported is
+/// what a select of the fold gives, and neither query was asked again
+/// whole.
+#[dialog_common::test]
+async fn it_keeps_a_collected_read_folded_under_a_subscription() -> Result<()> {
+    use dialog_query::query::Output as _;
+    let mut notebook = todos().await?;
+    let selection = selection(&format!("{TODOS}{CARD}(select (todo/card ?t is: ?card))"))?;
+    let folded = &selection.folds[0];
+    for rule in &folded.rules {
+        notebook.branch.overlay().assert(rule.clone())?;
+    }
+    let mut standing = notebook.branch.subscribe_fold(folded.fold.clone());
+    let mut answer = Vec::new();
+    for write in [
+        None,
+        Some(r#"(assert (todo/tag todo:2 tag: "call"))"#),
+        Some(r#"(retract (todo/tag todo:1 tag: "home"))"#),
+        Some(r#"(assert (todo todo:3 title: "Water plants"))"#),
+    ] {
+        if let Some(write) = write {
+            let (_, diagnostics) = notebook.submit(write).await?;
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        }
+        let delta = standing
+            .poll(&notebook.operator)
+            .await?
+            .expect("each write moves a card");
+        for row in &delta.retracted {
+            let at = answer.iter().position(|held| held == row).expect("held");
+            answer.swap_remove(at);
+        }
+        answer.extend(delta.asserted);
+        let selected = notebook
+            .branch
+            .query()
+            .select(folded.fold.clone())
+            .perform(&notebook.operator)
+            .try_vec()
+            .await?;
+        let rows = |rows: &[dialog_query::FoldConclusion]| {
+            let mut rows: Vec<String> = rows
+                .iter()
+                .map(|row| format!("{:?}", folded.values(row)))
+                .collect();
+            rows.sort();
+            rows
+        };
+        assert_eq!(rows(&answer), rows(&selected), "after {write:?}");
+    }
+    assert_eq!(answer.len(), 3);
+    assert_eq!(standing.recomputes(), 2);
+    Ok(())
+}
+
 /// A fold is a function of what was collected: `count` of the tags is 2
 /// and 0. A function other than `count` is refused.
 #[dialog_common::test]

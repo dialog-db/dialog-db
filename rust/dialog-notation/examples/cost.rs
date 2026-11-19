@@ -556,8 +556,14 @@ async fn baseline(n: usize, results: &mut Results) -> Result<()> {
     for rule in &folded.rules {
         notebook.branch.overlay().assert(rule.clone())?;
     }
-    let mut counted = notebook.branch.subscribe(folded.fold.clone());
+    let mut counted = notebook.branch.subscribe_fold(folded.fold.clone());
     counted.poll(&env).await?;
+    // The fold's two queries subscribed alone, beside it: what the
+    // standing fold costs beyond keeping them is the difference.
+    let mut groups = notebook.branch.subscribe(folded.fold.groups().clone());
+    let mut inputs = notebook.branch.subscribe(folded.fold.inputs().clone());
+    groups.poll(&env).await?;
+    inputs.poll(&env).await?;
     notebook
         .submit(&format!(r#"(assert (todo/tag todo:{k} tag: "newest"))"#))
         .await?;
@@ -579,6 +585,33 @@ async fn baseline(n: usize, results: &mut Results) -> Result<()> {
                 .map(|delta| delta.asserted.len() + delta.retracted.len())
                 .unwrap_or_default(),
             patches: usize::from(counted.recomputes() > recomputed),
+        },
+    );
+    let recomputed = groups.recomputes() + inputs.recomputes();
+    let from = mark(&env);
+    let start = Instant::now();
+    let moved = [
+        groups
+            .poll(&env)
+            .await?
+            .map(|delta| delta.asserted.len() + delta.retracted.len()),
+        inputs
+            .poll(&env)
+            .await?
+            .map(|delta| delta.asserted.len() + delta.retracted.len()),
+    ];
+    let micros = start.elapsed().as_micros();
+    let (nodes, blobs) = since(&env, from);
+    record(
+        results,
+        "B8b tags folded, inner subscriptions alone",
+        n,
+        Sample {
+            micros,
+            nodes,
+            blobs,
+            rows: moved.into_iter().flatten().sum(),
+            patches: usize::from(groups.recomputes() + inputs.recomputes() > recomputed),
         },
     );
     let one = query_of(
