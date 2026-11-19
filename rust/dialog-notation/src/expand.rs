@@ -789,7 +789,7 @@ impl Expander {
     /// The rows of `Name` a reference as written walks to, each
     /// definition among them not known yet asked for.
     pub(crate) fn rows(&self, written: &str) -> Result<Vec<definition::Name>, Error> {
-        let mut rows = self.spaces.resolve(written);
+        let mut rows = self.spaces.resolve(written)?;
         // `todo#3fa9` with no binding of `todo` whose hash starts so: a
         // definition that lost its name to another, still kept and still
         // reached by its hash.
@@ -803,7 +803,8 @@ impl Expander {
                     && let Some(signature) = definition::signature_of(kept)
                 {
                     rows.push(definition::Name {
-                        name: name.to_string(),
+                        name: definition::bare(name).to_string(),
+                        repository: self.spaces.repository().clone(),
                         signature,
                         definition: entity.clone(),
                     });
@@ -853,6 +854,17 @@ impl Expander {
     /// The space's bindings read so far.
     pub fn names(&self) -> &Names {
         &self.spaces
+    }
+
+    /// Analyze in `repository`: a bare name is its, and what is defined is
+    /// bound in it.
+    pub fn in_repository(&mut self, repository: Entity) {
+        self.spaces = std::mem::take(&mut self.spaces).in_repository(repository);
+    }
+
+    /// Know `repository` by `who`, so `@who/name` is its `name`.
+    pub fn know(&mut self, who: impl Into<String>, repository: Entity) {
+        self.spaces.know(who, repository);
     }
 
     /// Every definition known, by its entity.
@@ -1435,6 +1447,7 @@ impl Expander {
                 ..kept.clone()
             },
             name,
+            repository: self.spaces.repository().clone(),
             signature,
             source: definition::Source {
                 written: self
@@ -1941,10 +1954,17 @@ impl Expander {
             }
         };
         let (answer, _, entity) = taken;
-        if let (Some(referenced), Some(entity), Some(name)) =
-            (self.referenced.as_mut(), entity, written)
+        let repository = resolved.iter().flatten().find_map(|row| {
+            (Some(&row.definition) == entity.as_ref()).then(|| row.repository.clone())
+        });
+        if let (Some(referenced), Some(entity), Some(name), Some(repository)) =
+            (self.referenced.as_mut(), entity, written, repository)
         {
-            let reference = Reference { name, entity };
+            let reference = Reference {
+                name,
+                repository,
+                entity,
+            };
             if !referenced.contains(&reference) {
                 referenced.push(reference);
             }
@@ -3068,6 +3088,7 @@ mod tests {
             made.source.references,
             vec![Reference {
                 name: "note".into(),
+                repository: definition::LOCAL.parse().unwrap(),
                 entity: concept
             }]
         );

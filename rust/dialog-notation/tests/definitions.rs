@@ -131,7 +131,12 @@ async fn it_writes_a_definition_its_source_map_and_its_binding() -> Result<()> {
         .expect("todo/card is bound")
         .clone();
     assert_eq!(card.signature, "query (is:)");
-    assert_eq!(card.key(), "todo/card query (is:)");
+    let repository = Live::new(notebook.branch.clone()).repository()?;
+    assert_eq!(
+        card.repository, repository,
+        "bound in the branch's repository"
+    );
+    assert_eq!(card.key(), format!("todo/card {repository} query (is:)"));
     let stored = kept
         .definitions
         .iter()
@@ -624,6 +629,7 @@ async fn it_reads_a_names_bindings_as_one_range() -> Result<()> {
             transaction =
                 transaction.assert(definition::binding_statement(&definition::Binding {
                     name,
+                    repository: card[0].repository.clone(),
                     signature: "concept (title:)".into(),
                     definition: card[0].definition.clone(),
                 })?);
@@ -664,8 +670,12 @@ async fn it_reads_a_names_bindings_as_one_range() -> Result<()> {
     println!(
         "keys the range scan gives: {few_scanned} of {few_all} bindings, {many_scanned} of {many_all}"
     );
-    assert_eq!(few, vec!["todo concept (title:)"]);
-    assert_eq!(many, few);
+    assert_eq!(few.len(), 1);
+    assert!(
+        few[0].starts_with("todo did:") && few[0].ends_with(" concept (title:)"),
+        "{few:?}"
+    );
+    assert_eq!(many.len(), 1, "{many:?}");
     assert_eq!(
         (few_scanned, many_scanned),
         (1, 1),
@@ -759,5 +769,148 @@ fn it_plans_a_names_bindings_as_a_range_of_the_value_index() -> Result<()> {
         .kind()
         .and_then(|kind| kind.refinement().and_then(|refined| refined.prefix.clone()));
     assert_eq!(prefix.as_deref(), Some("todo "));
+    Ok(())
+}
+
+/// Their `todo`: same name and labels as ours, over other attributes.
+const THEIR_TODO: &str =
+    "(concept (todo ?t title: ?title) (abc.task/name of: ?t is: ?title as: :text))";
+
+/// A notebook of our repository and one of theirs, on the same peer,
+/// theirs known to ours as `theirs`, with their `todo` received into our
+/// tree; with `ours_first`, ours defines its `todo` before theirs
+/// arrives, otherwise after.
+async fn two_repositories(ours_first: bool) -> Result<(Notebook, Notebook)> {
+    let mut ours = Notebook::open().await?;
+    let mut theirs = ours.repository("theirs").await?;
+    theirs.submit(THEIR_TODO).await?;
+    if ours_first {
+        ours.submit(DOCUMENT).await?;
+    }
+    ours.receive(&theirs, THEIR_TODO).await?;
+    if !ours_first {
+        ours.submit(DOCUMENT).await?;
+    }
+    let repository = Live::new(theirs.branch.clone()).repository()?;
+    ours.knowing.push(("theirs".into(), repository));
+    ours.reload().await?;
+    Ok((ours, theirs))
+}
+
+/// A name is a repository's. Their bindings in our tree sit beside ours
+/// and override none of them: a bare `todo` is ours, `@theirs/todo` is
+/// theirs, whichever arrived first.
+#[dialog_common::test]
+async fn it_resolves_a_bare_name_in_this_repository_and_another_by_its_name() -> Result<()> {
+    for ours_first in [true, false] {
+        let (mut ours, theirs) = two_repositories(ours_first).await?;
+        let bound = Live::new(ours.branch.clone())
+            .bindings(&definition::range("todo"), &ours.operator)
+            .await?;
+        assert_eq!(
+            bound.len(),
+            2,
+            "both repositories' todo in one tree: {bound:?}"
+        );
+        let mine = Live::new(ours.branch.clone()).repository()?;
+        let their = Live::new(theirs.branch.clone()).repository()?;
+        assert_ne!(mine, their);
+        ours.submit(
+            r#"(assert (todo todo:9 title: "Ours"))
+               (assert (@theirs/todo task:9 title: "Theirs"))"#,
+        )
+        .await?;
+        assert_eq!(
+            ours.submit("(select (xyz.todo ?t title: ?x))").await?.0,
+            vec![
+                r#"(xyz.todo todo:1 title: "Buy milk")"#,
+                r#"(xyz.todo todo:9 title: "Ours")"#,
+            ],
+            "ours_first: {ours_first}"
+        );
+        assert_eq!(
+            ours.submit("(select (abc.task ?t name: ?x))").await?.0,
+            vec![r#"(abc.task task:9 name: "Theirs")"#],
+            "ours_first: {ours_first}"
+        );
+    }
+    Ok(())
+}
+
+/// `@nobody/…`, where this notebook knows no repository as `nobody`, is
+/// its own refusal, and nothing is written.
+#[dialog_common::test]
+async fn it_refuses_a_repository_it_does_not_know() -> Result<()> {
+    let (mut ours, _) = two_repositories(true).await?;
+    let revision = ours.branch.revision();
+    let refused = ours
+        .submit(r#"(assert (@nobody/todo task:1 title: "x"))"#)
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&refused, Err(Ok(Error::NoRepository(who))) if who == "nobody"),
+        "{refused:?}"
+    );
+    assert_eq!(ours.branch.revision(), revision, "nothing is written");
+    Ok(())
+}
+
+/// A bare name the current repository does not bind, which another
+/// repository this notebook knows does, is refused naming
+/// `@theirs/chore`, and nothing is written.
+#[dialog_common::test]
+async fn it_names_another_repositorys_definition_of_a_name_not_bound_here() -> Result<()> {
+    let mut ours = Notebook::open().await?;
+    ours.submit(DOCUMENT).await?;
+    let theirs = ours.repository("theirs").await?;
+    let chore = "(concept (chore ?c title: ?title) (abc.chore/title of: ?c is: ?title as: :text))";
+    ours.receive(&theirs, chore).await?;
+    ours.knowing.push((
+        "theirs".into(),
+        Live::new(theirs.branch.clone()).repository()?,
+    ));
+    let revision = ours.branch.revision();
+    let refused = ours
+        .submit(r#"(assert (chore task:1 title: "x"))"#)
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    let Err(Ok(Error::Unbound(unbound))) = &refused else {
+        panic!("refused as unbound: {refused:?}");
+    };
+    let said: Vec<String> = unbound
+        .suggestions
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(said, vec!["@theirs/chore (concept (title:))"]);
+    assert_eq!(ours.branch.revision(), revision, "nothing is written");
+    Ok(())
+}
+
+/// A query written against `@theirs/todo` keeps what it meant: once this
+/// notebook no longer knows `theirs`, the query still answers, while
+/// `@theirs/todo` written anew is refused.
+#[dialog_common::test]
+async fn it_keeps_what_another_repositorys_name_meant() -> Result<()> {
+    let (mut ours, _) = two_repositories(true).await?;
+    ours.submit(
+        r#"(query (task/title ?t is: ?title) (@theirs/todo ?t title: ?title) (is ?title ?title))
+           (assert (@theirs/todo task:1 title: "Theirs"))"#,
+    )
+    .await?;
+    ours.knowing.clear();
+    ours.reload().await?;
+    assert_eq!(
+        ours.submit("(select (task/title ?t is: ?x))").await?.0,
+        vec![r#"(task/title task:1 is: "Theirs")"#]
+    );
+    let refused = ours
+        .submit("(select (@theirs/todo ?t title: ?x))")
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&refused, Err(Ok(Error::NoRepository(who))) if who == "theirs"),
+        "{refused:?}"
+    );
     Ok(())
 }

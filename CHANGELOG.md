@@ -14,7 +14,7 @@ says how to cut a release.
 
 ## Unreleased
 
-### The notation keeps its definitions compiled on the branch, each under the entity its canonical form makes, and a name is the space's
+### The notation keeps its definitions compiled on the branch, each under the entity its canonical form makes, and a name is its repository's
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
 `design/macros/definitions-plan.md` on `feat/notation-poc`.
@@ -30,16 +30,22 @@ the description are no part of it. Beside it a source map keeps the
 form as written and, for each reference, the name it was written under
 and the definition it resolved to.
 
-A name is the space's: the same text means the same thing to everyone
-in it. A path, `cdata/todo`, is a longer name, and nothing walks it. A
-definition is bound by one fact, keyed by the whole of its name and
-signature (`todo concept (done: title:)`: the name, a space, its kind
-and labels in order), so two signatures of one name are two keys and a
-key has one definition. A name never holds a space, so a name's keys
-are one range that holds no other name's, and resolving a reference is
-one read of that range, then the choice by the labels written. `Name`
-is a rule over the bindings. `todo#3fa9` is the definition whose hash
-starts so, bound or not.
+A name is its repository's: the same text means the same thing to
+everyone writing in that repository. A path, `cdata/todo`, is a longer
+name, and nothing walks it. A definition is bound by one fact, keyed by
+the whole of its name, the repository it was bound in and its signature
+(`todo did:key:z6Mk… concept (done: title:)`: the name, a space, the
+repository's DID, a space, its kind and labels in order), so two
+repositories' `todo` are two keys, two signatures of one name are two
+keys, and a key has one definition. A name never holds a space, so a
+name's keys are one range that holds no other name's, and a name's keys
+in one repository a range inside it; resolving a bare reference is one
+read of the current repository's range, then the choice by the labels
+written. `@who/todo` resolves `todo` in the repository the caller knows
+as `who`: a remote of the branch, by its name, or one the embedder
+names with `Live::knowing`. `Name` is a rule over the bindings.
+`todo#3fa9` is the definition whose hash starts so, bound or not, in
+any repository.
 
 Analysis reads what it reaches from the branch it runs on.
 `Live::analyze` analyzes a document, reads the bindings and definitions
@@ -64,10 +70,16 @@ What this changes for you:
   a name none of whose signatures the labels written fit with
   `Error::Unfitting`, listing the signatures it has and another such name
   whose signature fits; a name nothing holds is `Error::Unknown` as
-  before. Nothing of the document is kept or written. A hash prefix two
+  before. Both list the `@who/todo` another known repository binds.
+  `@who/…` where `who` names no repository the caller knows is the new
+  `Error::NoRepository`. Nothing of the document is kept or written. A hash prefix two
   definitions share is `Error::Several`.
-- `(unname todo)` takes every binding of `todo` away, retracting it and
-  leaving its definitions.
+- `(unname todo)` takes every binding of `todo` in the current
+  repository away, retracting it and leaving its definitions.
+- Bindings of another repository, in this tree after a pull from a
+  remote of it, override none of this repository's: a bare `todo` stays
+  this repository's. A definition written against `@who/todo` keeps
+  the callee's entity, and answers after `who` is no longer known.
 - A later definition under the name and signature of an earlier one
   binds the key to it in place of the earlier, which stays kept. Two
   replicas binding one key differently end, after a pull, with one
@@ -78,8 +90,10 @@ What this changes for you:
   `Want`, the attributes under `definition::attribute`, `statements`,
   `NAME_RULE`); `Analysis` and `Checked` gain `defined` and `unnamed`;
   `Analyzer::load`, `take`, `ask_for`, `wanted`, `answer`, `forget`,
-  `resolve_at`, `names` and `definitions`; `Live::analyze` (with `Rounds`
-  and `ROUNDS`), `Live::kept`, `Live::bindings`, `Live::suggest`,
+  `resolve_at`, `names`, `definitions`, `in_repository`,
+  `set_repository` and `know`; `Live::analyze` (with `Rounds` and
+  `ROUNDS`), `Live::kept`, `Live::bindings`, `Live::suggest`,
+  `Live::repository`, `Live::known`, `Live::knowing`,
   `live::binding_range`, `live::written` (a `Written`) and
   `live::name_rule`; `LiveError::Rounds`; the formula `:starts-with`.
 - New in `dialog-query`: `rule::canonical::labelling` and
@@ -102,8 +116,10 @@ a branch, so every document was submitted again to every analyzer.
   `syntax.source/definition`, `syntax.source/form` and
   `syntax.source/references` (and `syntax.source/revision` where the
   caller gave one) under `source:<hash>`; a binding,
-  `syntax.binding/key`, `syntax.binding/name`, `syntax.binding/signature`
-  and `syntax.binding/definition` under `binding:<hash of the key>`; and
+  `syntax.binding/key`, `syntax.binding/name`,
+  `syntax.binding/repository` (the repository's DID as an entity),
+  `syntax.binding/signature` and `syntax.binding/definition` under
+  `binding:<hash of the key>`, the key holding the repository; and
   the deductive rule that concludes `syntax.name`. Nothing older is
   rewritten: a replica that holds documents' rules and facts and no
   definitions resolves none of their names, and a document is submitted

@@ -1014,14 +1014,13 @@ async fn it_refuses_a_rule_or_a_concept_that_applies_a_query() -> Result<()> {
 /// The definition `name` is bound to in mine, under its one signature,
 /// as the branch keeps it.
 async fn bound(notebook: &Notebook, name: &str) -> Result<(String, String)> {
-    let kept = dialog_notation::live::Live::new(notebook.branch.clone())
-        .kept(&notebook.operator)
-        .await?;
-    let mut names = dialog_notation::Names::default();
+    let live = dialog_notation::live::Live::new(notebook.branch.clone());
+    let kept = live.kept(&notebook.operator).await?;
+    let mut names = dialog_notation::Names::new(live.repository()?);
     for binding in kept.bindings {
         names.bind(binding);
     }
-    let rows = names.resolve(name);
+    let rows = names.resolve(name)?;
     let [row] = rows.as_slice() else {
         panic!("one definition of {name}: {rows:?}");
     };

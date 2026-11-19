@@ -132,10 +132,14 @@ pub enum Error {
     /// signature begin with: a longer one says which.
     #[error("{} is defined more than once under one signature: {}", .0.name, candidates(&.0.candidates))]
     Several(Box<Candidates>),
-    /// A name the space binds to nothing, where other names end as it
-    /// does: `cdata/todo` for `todo`.
-    #[error("{} is bound to nothing: {} is", .0.name, suggested(&.0.suggestions))]
+    /// A bare name the current repository binds to nothing, where another
+    /// name of it ends as it does (`lib/todo` for `todo`), or another
+    /// repository this stack knows binds it (`@cdata/todo`).
+    #[error("{} is bound to nothing here: {} is", .0.name, suggested(&.0.suggestions))]
     Unbound(Box<Suggested>),
+    /// `@who/…` where this stack knows no repository as `who`.
+    #[error("@{0} is no repository this stack knows")]
+    NoRepository(String),
     /// A name none of whose signatures the labels written fit: each it
     /// has, and another name ending as it does whose signature fits, if
     /// one does.

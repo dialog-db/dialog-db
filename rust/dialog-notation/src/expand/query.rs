@@ -440,9 +440,16 @@ impl Expander {
                 Some(form) => items(&form).to_vec(),
                 None => kept,
             };
+            let repository = self
+                .rows(&callee)?
+                .into_iter()
+                .find(|row| row.definition == entity)
+                .map(|row| row.repository)
+                .unwrap_or_else(|| self.spaces.repository().clone());
             if let Some(referenced) = self.referenced.as_mut() {
                 let reference = Reference {
                     name: callee.clone(),
+                    repository,
                     entity: entity.clone(),
                 };
                 if !referenced.contains(&reference) {

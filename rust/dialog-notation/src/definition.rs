@@ -69,11 +69,14 @@ pub mod attribute {
     pub const SOURCE_REFERENCES: &str = "syntax.source/references";
     /// The revision the names were resolved at, where one was given.
     pub const SOURCE_REVISION: &str = "syntax.source/revision";
-    /// A binding's key: its name, a space, its signature. What a name's
-    /// bindings are read by, as one range of the value index.
+    /// A binding's key: its name, its repository and its signature, a
+    /// space between each. What a name's bindings are read by, as one
+    /// range of the value index.
     pub const BINDING_KEY: &str = "syntax.binding/key";
     /// A binding's name.
     pub const BINDING_NAME: &str = "syntax.binding/name";
+    /// The repository a binding's name is of.
+    pub const BINDING_REPOSITORY: &str = "syntax.binding/repository";
     /// A binding's signature.
     pub const BINDING_SIGNATURE: &str = "syntax.binding/signature";
     /// The definition a binding is bound to.
@@ -164,12 +167,15 @@ pub fn hash_of(entity: &Entity) -> &str {
         .map_or(entity.as_str(), |(_, hash)| hash)
 }
 
-/// One reference in a definition: the name it was written under and the
-/// entity it resolved to, and inlined as.
+/// One reference in a definition: the name it was written under, the
+/// repository it was resolved in, and the definition it resolved to and
+/// was inlined as. Nothing of it is what this stack calls the repository.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Reference {
     /// The name as written: `todo`, `@cdata/todo`, `todo#3fa9`.
     pub name: String,
+    /// The repository whose binding it was resolved by.
+    pub repository: Entity,
     /// The definition it resolved to.
     pub entity: Entity,
 }
@@ -191,8 +197,10 @@ pub struct Source {
 pub struct Defined {
     /// What is kept.
     pub definition: Definition,
-    /// The name it was written under: a path, `todo` or `cdata/todo`.
+    /// The name it was written under.
     pub name: String,
+    /// The repository it is bound in: the one it was defined in.
+    pub repository: Entity,
     /// Its signature: its kind and its labels in canonical order,
     /// `concept (text: title:)`.
     pub signature: String,
@@ -205,26 +213,31 @@ impl Defined {
     pub fn binding(&self) -> Binding {
         Binding {
             name: self.name.clone(),
+            repository: self.repository.clone(),
             signature: self.signature.clone(),
             definition: self.definition.entity.clone(),
         }
     }
 }
 
-/// What separates a name from its signature in a binding's key. A name
-/// is a token and never holds whitespace, so a name followed by it is a
-/// prefix of no other name's key.
+/// What separates a binding key's parts. A name is a token and an entity
+/// a URI, and neither holds whitespace, so a name followed by it is a
+/// prefix of no other name's key, and a name and a repository followed by
+/// it of no other repository's.
 pub const SEPARATOR: char = ' ';
 
-/// A name and signature of the space bound to one definition.
+/// A name of a repository, under one signature, bound to one definition.
 ///
-/// It is kept as one fact keyed by the whole of name and signature: two
-/// signatures of one name are two keys, which is overloading, and one key
-/// has one definition.
+/// It is kept as one fact keyed by the whole of name, repository and
+/// signature: two repositories binding one name are two facts, which a
+/// tree or a stack holds side by side, two signatures of one name are two
+/// keys, which is overloading, and one key has one definition.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Binding {
-    /// The name, a path.
+    /// The name.
     pub name: String,
+    /// The repository the name is of.
+    pub repository: Entity,
     /// The signature.
     pub signature: String,
     /// The definition it is bound to.
@@ -232,28 +245,38 @@ pub struct Binding {
 }
 
 impl Binding {
-    /// Its key: the name, [`SEPARATOR`], the signature.
+    /// Its key: the name, the repository and the signature, each after a
+    /// [`SEPARATOR`].
     pub fn key(&self) -> String {
-        key(&self.name, &self.signature)
+        key(&self.name, &self.repository, &self.signature)
     }
 
     /// The entity the binding is kept under: made of its key, so binding
-    /// a key again replaces what it was bound to.
+    /// a key again replaces what it was bound to, in that repository
+    /// alone.
     pub fn entity(&self) -> Result<Entity, Error> {
         binding_entity(&self.key())
     }
 }
 
-/// The key of `name` under `signature`.
-pub fn key(name: &str, signature: &str) -> String {
-    format!("{name}{SEPARATOR}{signature}")
+/// The key of `name` in `repository` under `signature`.
+pub fn key(name: &str, repository: &Entity, signature: &str) -> String {
+    format!("{name}{SEPARATOR}{repository}{SEPARATOR}{signature}")
 }
 
-/// The range every key of `name` begins with, and no key of any other
-/// name does.
+/// The range every key of `name` begins with, in every repository, and
+/// no key of any other name does.
 pub fn range(name: &str) -> String {
     format!("{name}{SEPARATOR}")
 }
+
+/// The range of the keys of `name` in `repository`.
+pub fn range_in(name: &str, repository: &Entity) -> String {
+    format!("{name}{SEPARATOR}{repository}{SEPARATOR}")
+}
+
+/// The repository an analyzer is in when no driver says which.
+pub const LOCAL: &str = "repository:local";
 
 /// The entity of the binding of `key`.
 pub fn binding_entity(key: &str) -> Result<Entity, Error> {
@@ -578,6 +601,11 @@ pub fn binding_statement(binding: &Binding) -> Result<ConceptStatement, Error> {
             attributed(attribute::BINDING_KEY, "text:", data::text(binding.key()))?,
             attributed(attribute::BINDING_NAME, "text:", data::text(&binding.name))?,
             attributed(
+                attribute::BINDING_REPOSITORY,
+                "entity:",
+                Value::Entity(binding.repository.clone()),
+            )?,
+            attributed(
                 attribute::BINDING_SIGNATURE,
                 "text:",
                 data::text(&binding.signature),
@@ -614,6 +642,7 @@ pub fn source_statement(defined: &Defined) -> Result<ConceptStatement, Error> {
             .map(|reference| {
                 data::record([
                     ("name", data::text(&reference.name)),
+                    ("repository", Value::Entity(reference.repository.clone())),
                     ("entity", Value::Entity(reference.entity.clone())),
                 ])
             })
@@ -669,6 +698,8 @@ pub const NAME_RULE: &str =
 pub struct Name {
     /// The name.
     pub name: String,
+    /// The repository it is a name of.
+    pub repository: Entity,
     /// The signature.
     pub signature: String,
     /// The definition bound under it.
@@ -699,8 +730,13 @@ pub enum Want {
 /// A name is a path, `todo` or `cdata/todo`; the slash is a convention of
 /// the name and nothing walks it. Each binding is keyed by the whole of
 /// its name and signature, so a name's signatures are one range of keys.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Names {
+    /// The repository a bare name is of: the one being analyzed in.
+    repository: Entity,
+    /// The other repositories this stack knows, by the name it knows each
+    /// by: what `@who/` picks.
+    known: BTreeMap<String, Entity>,
     bound: BTreeMap<String, Binding>,
     /// What has been read, found or not: a lookup of these is answered.
     answered: BTreeSet<Want>,
@@ -718,7 +754,45 @@ impl PartialEq for Names {
     }
 }
 
+impl Default for Names {
+    fn default() -> Self {
+        Names::new(Entity::from_str(LOCAL).expect("repository:local is an entity"))
+    }
+}
+
 impl Names {
+    /// No binding read, a bare name of `repository`.
+    pub fn new(repository: Entity) -> Self {
+        Names {
+            repository,
+            known: BTreeMap::new(),
+            bound: BTreeMap::new(),
+            answered: BTreeSet::new(),
+            wanted: Arc::new(Mutex::new(BTreeSet::new())),
+        }
+    }
+
+    /// The repository a bare name is of.
+    pub fn repository(&self) -> &Entity {
+        &self.repository
+    }
+
+    /// The same names, a bare name of `repository`.
+    pub fn in_repository(mut self, repository: Entity) -> Self {
+        self.repository = repository;
+        self
+    }
+
+    /// Know `repository` by `who`, so `@who/name` is its `name`.
+    pub fn know(&mut self, who: impl Into<String>, repository: Entity) {
+        self.known.insert(who.into(), repository);
+    }
+
+    /// The other repositories known, by the name each is known by.
+    pub fn known(&self) -> &BTreeMap<String, Entity> {
+        &self.known
+    }
+
     fn asked(&self) -> std::sync::MutexGuard<'_, BTreeSet<Want>> {
         self.wanted
             .lock()
@@ -785,12 +859,14 @@ impl Names {
         self.bind(binding);
     }
 
-    /// Take every binding of `name` away, giving what each was bound to.
+    /// Take every binding of `name` in the current repository away,
+    /// giving what each was bound to.
     pub fn unbind(&mut self, name: &str) -> Vec<Binding> {
+        let range = range_in(name, &self.repository);
         let keys: Vec<String> = self
             .bound
-            .range(range(name)..)
-            .take_while(|(key, _)| key.starts_with(&range(name)))
+            .range(range.clone()..)
+            .take_while(|(key, _)| key.starts_with(&range))
             .map(|(key, _)| key.clone())
             .collect();
         keys.into_iter()
@@ -806,6 +882,7 @@ impl Names {
     fn row(binding: &Binding) -> Name {
         Name {
             name: binding.name.clone(),
+            repository: binding.repository.clone(),
             signature: binding.signature.clone(),
             definition: binding.definition.clone(),
         }
@@ -826,52 +903,122 @@ impl Names {
         self.bound.values().map(Self::row).collect()
     }
 
-    /// What a reference as written means: the rows of its name, and of
-    /// `todo#3fa9` those whose definition's hash starts so. A name is the
-    /// space's; a path is a longer name.
-    pub fn resolve(&self, written: &str) -> Vec<Name> {
-        let (name, prefix) = match written.split_once('#') {
-            Some((name, prefix)) => (name, Some(prefix)),
+    /// The rows of `name` in `repository`.
+    pub fn named_in(&self, name: &str, repository: &Entity) -> Vec<Name> {
+        self.named(name)
+            .into_iter()
+            .filter(|row| &row.repository == repository)
+            .collect()
+    }
+
+    /// What a reference as written means. A bare `todo` is the current
+    /// repository's; `@cdata/todo` is the `todo` of the repository this
+    /// stack knows as `cdata`, refused where it knows none so; and of
+    /// `todo#3fa9` the rows, in any repository, whose definition's hash
+    /// starts so.
+    pub fn resolve(&self, written: &str) -> Result<Vec<Name>, Error> {
+        let (path, prefix) = match written.split_once('#') {
+            Some((path, prefix)) => (path, Some(prefix)),
             None => (written, None),
         };
-        let mut rows = self.named(name);
+        let (repository, name) = match path.strip_prefix('@').and_then(|rest| rest.split_once('/'))
+        {
+            Some((who, name)) => (
+                Some(
+                    self.known
+                        .get(who)
+                        .cloned()
+                        .ok_or_else(|| Error::NoRepository(who.to_string()))?,
+                ),
+                name,
+            ),
+            None => (None, path),
+        };
+        let mut rows = match (&repository, prefix) {
+            (Some(repository), _) => self.named_in(name, repository),
+            (None, Some(_)) => self.named(name),
+            (None, None) => self.named_in(name, &self.repository),
+        };
         if let Some(prefix) = prefix {
             rows.retain(|row| hash_of(&row.definition).starts_with(prefix));
         }
-        rows
+        Ok(rows)
     }
 
-    /// What may be meant by what is being typed: every name of the space
-    /// that starts with `prefix`, each signature of it a suggestion.
+    /// `name` in each other repository this stack knows: what a bare name
+    /// of the current repository may have meant, written `@who/name`.
+    pub fn elsewhere(&self, name: &str) -> Vec<Suggestion> {
+        let mut found = Vec::new();
+        for (who, repository) in &self.known {
+            for row in self.named_in(name, repository) {
+                found.push(Suggestion::of_row(&row, Some(who.clone())));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// What may be meant by what is being typed: every name of the
+    /// current repository, and of each other one this stack knows, that
+    /// starts with `prefix`, each signature of it a suggestion.
     pub fn suggest(&self, prefix: &str) -> Vec<Suggestion> {
         self.want(Want::Prefix(prefix.to_string()));
-        self.bound
+        let mut found: Vec<Suggestion> = self
+            .bound
             .range(prefix.to_string()..)
             .take_while(|(key, _)| key.starts_with(prefix))
-            .map(|(_, binding)| Suggestion::of(binding))
-            .collect()
+            .filter_map(|(_, binding)| self.suggestion(binding))
+            .collect();
+        found.sort();
+        found
     }
 
-    /// The other names of the space whose last segment is `name`'s:
-    /// `cdata/todo` for `todo`. What a name not found may have meant. It
-    /// reads every binding, which only an error does.
+    /// How a binding is written from here, where it can be: bare in the
+    /// current repository, `@who/` in another this stack knows.
+    fn suggestion(&self, binding: &Binding) -> Option<Suggestion> {
+        let row = Self::row(binding);
+        if binding.repository == self.repository {
+            return Some(Suggestion::of_row(&row, None));
+        }
+        self.known
+            .iter()
+            .find(|(_, repository)| **repository == binding.repository)
+            .map(|(who, _)| Suggestion::of_row(&row, Some(who.clone())))
+    }
+
+    /// The other names of the current repository whose last segment is
+    /// `name`'s, `lib/todo` for `todo`, and `name` where another
+    /// repository this stack knows binds it. It reads every binding, which
+    /// only an error does.
     pub fn ending_as(&self, name: &str) -> Vec<Suggestion> {
         self.want(Want::All);
         let last = name.rsplit('/').next().unwrap_or(name);
-        self.bound
+        let mut found: Vec<Suggestion> = self
+            .bound
             .values()
-            .filter(|binding| binding.name != name && binding.name.rsplit('/').next() == Some(last))
-            .map(Suggestion::of)
-            .collect()
+            .filter(|binding| {
+                let ends = binding.name.rsplit('/').next() == Some(last);
+                (binding.repository == self.repository && binding.name != name && ends)
+                    || (binding.repository != self.repository && binding.name == name)
+            })
+            .filter_map(|binding| self.suggestion(binding))
+            .collect();
+        found.sort();
+        found
     }
 }
 
-/// A name that may be meant: under which signature, and the definition
-/// it is bound to.
+/// A name that may be meant: in which repository, under which
+/// signature, and the definition it is bound to.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Suggestion {
+    /// How this stack knows the repository it is in; `None` for the
+    /// current one.
+    pub via: Option<String>,
     /// The name.
     pub name: String,
+    /// Its repository.
+    pub repository: Entity,
     /// Its signature.
     pub signature: String,
     /// The definition it is bound to.
@@ -879,30 +1026,46 @@ pub struct Suggestion {
 }
 
 impl Suggestion {
-    fn of(binding: &Binding) -> Self {
+    fn of_row(row: &Name, via: Option<String>) -> Self {
         Suggestion {
-            name: binding.name.clone(),
-            signature: binding.signature.clone(),
-            definition: binding.definition.clone(),
+            via,
+            name: row.name.clone(),
+            repository: row.repository.clone(),
+            signature: row.signature.clone(),
+            definition: row.definition.clone(),
+        }
+    }
+
+    /// How it is written: `todo` in the current repository, `@cdata/todo`
+    /// in another.
+    pub fn written(&self) -> String {
+        match &self.via {
+            Some(who) => format!("@{who}/{}", self.name),
+            None => self.name.clone(),
         }
     }
 }
 
 impl Display for Suggestion {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({})", self.name, self.signature)
+        write!(f, "{} ({})", self.written(), self.signature)
     }
 }
 
 /// The name a reference applies once it is resolved: `todo` of
-/// `todo#3fa9`.
+/// `@cdata/todo` and of `todo#3fa9`.
 pub fn bare(written: &str) -> &str {
-    written.split_once('#').map_or(written, |(name, _)| name)
+    let name = written.split_once('#').map_or(written, |(name, _)| name);
+    match name.strip_prefix('@').and_then(|rest| rest.split_once('/')) {
+        Some((_, name)) => name,
+        None => name,
+    }
 }
 
-/// Whether a reference is qualified by a hash.
+/// Whether a reference is qualified: by a repository, `@cdata/todo`, or by
+/// a hash, `todo#3fa9`.
 pub fn qualified(written: &str) -> bool {
-    written.contains('#')
+    written.contains('#') || (written.starts_with('@') && written.contains('/'))
 }
 
 /// The signature a definition is bound under, read off what it was kept
@@ -1063,10 +1226,13 @@ mod tests {
             "todo!",
         ];
         let signatures = ["concept (title:)", "concept ()", "query (is:)", "macro ()"];
+        let ours = Entity::from_str("did:key:ours").unwrap();
+        let theirs = Entity::from_str("did:key:ours2").unwrap();
         let mut keys: Vec<(String, &str)> = Vec::new();
         for name in names {
             for signature in signatures {
-                keys.push((key(name, signature), name));
+                keys.push((key(name, &ours, signature), name));
+                keys.push((key(name, &theirs, signature), name));
             }
         }
         keys.sort();
@@ -1076,7 +1242,16 @@ mod tests {
                 .filter(|(key, _)| key.starts_with(&range(name)))
                 .map(|(_, of)| *of)
                 .collect();
-            assert_eq!(inside, vec![name; signatures.len()], "{name}");
+            assert_eq!(inside, vec![name; 2 * signatures.len()], "{name}");
+            // Within it, each repository's is a range of its own, though
+            // one repository's entity begins the other's.
+            for repository in [&ours, &theirs] {
+                let own = keys
+                    .iter()
+                    .filter(|(key, _)| key.starts_with(&range_in(name, repository)))
+                    .count();
+                assert_eq!(own, signatures.len(), "{name} in {repository}");
+            }
             // The range is contiguous in key order.
             let at: Vec<usize> = keys
                 .iter()
@@ -1092,17 +1267,17 @@ mod tests {
             .map(|(_, of)| *of)
             .collect();
         assert!(under.iter().all(|name| name.starts_with("cdata/")));
-        assert_eq!(under.len(), 2 * signatures.len());
+        assert_eq!(under.len(), 4 * signatures.len());
         assert_eq!(
             [
-                key("todo", "concept (done: title:)"),
-                key("cdata/todo", "query (is:)"),
-                key("todo-list", "macro ()"),
+                key("todo", &ours, "concept (done: title:)"),
+                key("lib/todo", &ours, "query (is:)"),
+                key("todo-list", &theirs, "macro ()"),
             ],
             [
-                "todo concept (done: title:)".to_string(),
-                "cdata/todo query (is:)".to_string(),
-                "todo-list macro ()".to_string(),
+                "todo did:key:ours concept (done: title:)".to_string(),
+                "lib/todo did:key:ours query (is:)".to_string(),
+                "todo-list did:key:ours2 macro ()".to_string(),
             ]
         );
     }

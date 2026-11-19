@@ -23,6 +23,10 @@ macro_rules! notebook {
     ($(#[$meta:meta])* $name:ident, $space:ty) => {
 $(#[$meta])*
 pub struct $name {
+    /// The peer the repository is held by.
+    pub peer: Peer<$space>,
+    /// Other repositories this notebook knows, each by a name of its own.
+    pub knowing: Vec<(String, dialog_corpus::Entity)>,
     /// How the last document submitted was analyzed from the branch.
     pub rounds: dialog_notation::live::Rounds,
     pub operator: Peer<$space, Session>,
@@ -36,6 +40,7 @@ impl $name {
     /// A notebook on `branch`, its analyzer loaded from what the branch
     /// keeps: the definitions every earlier document wrote.
     pub async fn on(
+        peer: Peer<$space>,
         operator: Peer<$space, Session>,
         repository: std::sync::Arc<dialog_repository::Repository<dialog_credentials::Credential>>,
         branch: Branch,
@@ -44,6 +49,8 @@ impl $name {
         // branch as it is analyzed.
         let analyzer = Analyzer::new()?;
         Ok($name {
+            peer,
+            knowing: Vec::new(),
             rounds: Default::default(),
             operator,
             branch,
@@ -60,7 +67,71 @@ impl $name {
             .open()
             .perform(&self.operator)
             .await?;
-        Self::on(self.operator.clone(), self.repository.clone(), branch).await
+        Self::on(
+            self.peer.clone(),
+            self.operator.clone(),
+            self.repository.clone(),
+            branch,
+        )
+        .await
+    }
+
+    /// A notebook on the main branch of another repository of the same
+    /// peer, named `name`.
+    pub async fn repository(&self, name: &str) -> Result<Self> {
+        use dialog_repository::RepositoryExt as _;
+        let repository = self
+            .peer
+            .space(dialog_peer::helpers::unique_name(name))
+            .open()
+            .perform(&self.operator)
+            .await?;
+        let branch = repository.branch("main").open().perform(&self.operator).await?;
+        Self::on(
+            self.peer.clone(),
+            self.operator.clone(),
+            std::sync::Arc::new(repository),
+            branch,
+        )
+        .await
+    }
+
+    /// Write into this branch what `text` defines in `other`'s
+    /// repository: its definitions and its bindings, keyed by that
+    /// repository, as a pull from a remote of it would leave them. A
+    /// branch of another repository on this peer is no upstream this
+    /// branch can pull from (a pull takes a local branch by name in its
+    /// own repository), and a remote needs a site to reach it by.
+    pub async fn receive(&self, other: &Self, text: &str) -> Result<()> {
+        let mut analyzer = Analyzer::new()?;
+        let (checked, _) = Live::new(other.branch.clone())
+            .analyze(&mut analyzer, text, &other.operator)
+            .await
+            .map_err(unwrapped)?;
+        let kept = written(&checked)?;
+        let mut transaction = self.branch.transaction();
+        for statement in kept.asserted {
+            transaction = transaction.assert(statement);
+        }
+        if let Some(rule) = kept.rule {
+            transaction = transaction.assert(rule);
+        }
+        for step in checked.steps {
+            transaction = match step {
+                Step::Assert(statement) => transaction.assert(statement),
+                Step::Deduce(rule) => transaction.assert(*rule),
+                Step::Induce(rule) => transaction.assert(*rule),
+                Step::Transient(concept) => transaction.assert(Transient(concept)),
+                _ => transaction,
+            };
+        }
+        transaction
+            .commit()
+            .publish()
+            .perform(&self.operator)
+            .await?;
+        self.branch.refresh(&self.operator).await?;
+        Ok(())
     }
 
     /// Forget every definition submitted, as a notebook opened anew
@@ -84,7 +155,11 @@ impl $name {
         // analyzed tree to what Dialog-DB runs. A document with a
         // refusal in it is refused whole. The first one is the error,
         // said with where it is.
-        let (checked, rounds) = Live::new(self.branch.clone())
+        let mut live = Live::new(self.branch.clone());
+        for (who, repository) in &self.knowing {
+            live = live.knowing(who.clone(), repository.clone());
+        }
+        let (checked, rounds) = live
             .analyze(&mut self.analyzer, text, &self.operator)
             .await
             .map_err(unwrapped)?;
@@ -250,7 +325,7 @@ impl Notebook {
         let (operator, profile) = test_session_with_peer().await;
         let repository = test_repo(&operator, &profile).await;
         let branch = repository.branch("main").open().perform(&operator).await?;
-        Notebook::on(operator, std::sync::Arc::new(repository), branch).await
+        Notebook::on(profile, operator, std::sync::Arc::new(repository), branch).await
     }
 }
 
@@ -287,7 +362,7 @@ impl FileNotebook {
             .perform(&operator)
             .await?;
         let branch = repository.branch("main").open().perform(&operator).await?;
-        FileNotebook::on(operator, std::sync::Arc::new(repository), branch).await
+        FileNotebook::on(peer, operator, std::sync::Arc::new(repository), branch).await
     }
 }
 

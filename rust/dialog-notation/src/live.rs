@@ -35,6 +35,7 @@
 //! ```
 
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -113,6 +114,7 @@ fn core_forms() -> Result<Analyzer, Error> {
 
 /// The read of every binding of the space.
 const EVERY_BINDING: &str = "(select (syntax.binding ?b key: (:text ?key) name: (:text ?name) \
+     repository: (:last (:entity ?repository)) \
      signature: (:text ?signature) definition: (:last (:entity ?definition))))";
 
 /// The scan of the bindings whose key begins with `prefix`: one attribute,
@@ -257,12 +259,26 @@ pub struct Rounds {
 #[derive(Clone)]
 pub struct Live {
     branch: Branch,
+    /// Repositories the caller knows by a name of its own, beside the
+    /// branch's remotes.
+    knowing: Vec<(String, Entity)>,
 }
 
 impl Live {
     /// Keep selections and views on `branch`.
     pub fn new(branch: Branch) -> Live {
-        Live { branch }
+        Live {
+            branch,
+            knowing: Vec::new(),
+        }
+    }
+
+    /// The same, knowing `repository` as `who`: `@who/name` is its `name`.
+    /// For a repository the branch reads some other way than as a remote
+    /// it pulls from.
+    pub fn knowing(mut self, who: impl Into<String>, repository: Entity) -> Live {
+        self.knowing.push((who.into(), repository));
+        self
     }
 
     /// The branch.
@@ -281,6 +297,32 @@ impl Live {
                 .map_err(|error| LiveError::Rule(error.to_string()))?;
         }
         Ok(())
+    }
+
+    /// The repository this branch belongs to, which a bare name is of: its
+    /// subject.
+    pub fn repository(&self) -> Result<Entity, LiveError> {
+        Ok(Entity::from_str(self.branch.of().as_ref())
+            .map_err(|error| Error::Read(format!("a repository that is no entity: {error}")))?)
+    }
+
+    /// The other repositories this branch knows, each by the name it
+    /// knows it by: each remote it pulls from, by its peer's local name,
+    /// with the repository's subject.
+    pub fn known(&self) -> Vec<(String, Entity)> {
+        let mut known = self.knowing.clone();
+        known.extend(
+            self.branch
+                .pulls()
+                .iter()
+                .filter_map(|upstream| match upstream {
+                    dialog_repository::Upstream::Remote { remote, .. } => {
+                        Some((remote.name(), Entity::from_str(remote.did().as_ref()).ok()?))
+                    }
+                    _ => None,
+                }),
+        );
+        known
     }
 
     /// What the branch keeps of the notation's definitions: every
@@ -321,6 +363,12 @@ impl Live {
         env: &E,
     ) -> Result<(Checked, Rounds), LiveError> {
         analyzer.forget();
+        // A bare name is the repository's this branch belongs to; another
+        // repository is known by the name its remote goes by.
+        analyzer.set_repository(self.repository()?);
+        for (who, repository) in self.known() {
+            analyzer.know(who, repository);
+        }
         if let Ok(trees) = crate::parse(text) {
             analyzer.ask_for(&trees);
         }
@@ -434,7 +482,8 @@ impl Live {
                 .filter(|claim| matches!(claim.is(), Value::String(key) if key.starts_with(prefix)))
             {
                 let text = format!(
-                    "(select (syntax.binding {} name: (:text ?name) signature: (:text ?signature) \
+                    "(select (syntax.binding {} name: (:text ?name) \
+                       repository: (:last (:entity ?repository)) signature: (:text ?signature) \
                        definition: (:last (:entity ?definition))))",
                     claim.of()
                 );
@@ -446,15 +495,18 @@ impl Live {
         for values in rows {
             if let (
                 Some(Value::String(name)),
+                Some(Value::Entity(repository)),
                 Some(Value::String(signature)),
                 Some(Value::Entity(definition)),
             ) = (
                 values.get("name"),
+                values.get("repository"),
                 values.get("signature"),
                 values.get("definition"),
             ) {
                 bindings.push(Binding {
                     name: name.clone(),
+                    repository: repository.clone(),
                     signature: signature.clone(),
                     definition: definition.clone(),
                 });
@@ -501,7 +553,10 @@ impl Live {
         prefix: &str,
         env: &E,
     ) -> Result<Vec<definition::Suggestion>, LiveError> {
-        let mut names = definition::Names::default();
+        let mut names = definition::Names::new(self.repository()?);
+        for (who, repository) in self.known() {
+            names.know(who, repository);
+        }
         for binding in self.bindings(prefix, env).await? {
             names.bind(binding);
         }

@@ -188,6 +188,24 @@ impl Analyzer {
         self.expander.resolve_at(revision);
     }
 
+    /// Analyze in `repository`, the one the branch analyzed on belongs
+    /// to: a bare name is its, and what is defined is bound in it.
+    pub fn in_repository(mut self, repository: dialog_corpus::Entity) -> Self {
+        self.expander.in_repository(repository);
+        self
+    }
+
+    /// Analyze in `repository` from now on.
+    pub fn set_repository(&mut self, repository: dialog_corpus::Entity) {
+        self.expander.in_repository(repository);
+    }
+
+    /// Know `repository` by `who`, so `@who/name` is its `name`: what a
+    /// driver says of the other repositories its stack reads.
+    pub fn know(&mut self, who: impl Into<String>, repository: dialog_corpus::Entity) {
+        self.expander.know(who, repository);
+    }
+
     /// The space's bindings this analyzer has read.
     pub fn names(&self) -> &Names {
         self.expander.names()
@@ -296,7 +314,7 @@ mod tests {
         assert!(matches!(&refusal, Some(Error::Unbound(_))), "{refusal:?}");
         assert_eq!(
             refusal.unwrap().to_string(),
-            "todo is bound to nothing: cdata/todo (concept (title:)) is"
+            "todo is bound to nothing here: cdata/todo (concept (title:)) is"
         );
         assert!(analysis.defined.is_empty() && analysis.analyzed.is_empty());
         assert_eq!(analyzer.names(), &before, "nothing of the document is kept");
