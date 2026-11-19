@@ -27,7 +27,7 @@ Folds in rules, stratified, as Datalogs with aggregates have them, would let a r
 (query (todo/tagged ?t is: ?pair)       ; the head: a name, an entity, fields, and what it answers
   (todo ?t title: ?title)               ; the body: conditions
   (todo/tag ?t tag: ?g)
-  (is ?pair {title: ?title tag: ?g}))   ; and what the answer is
+  (is ?pair {:title ?title :tag ?g}))   ; and what the answer is
 ```
 
 - **The head** is a concept's head. `is:` is the field that holds the answer. A field passed bound is a parameter, as with any relation.
@@ -57,7 +57,7 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 - The spread is the pattern's own rest, which already takes what is not named, as a collection, and already may take nothing. Here nothing is named, so it takes all.
 - Key and value are paired because they were never apart: an entry is one term.
 - What comes out is a map either way. A keyed collection's has its keys. Many plain values have none, and a map with no names is a set: `{: "errand" : "home"}`. No list: many values have no order, and a sequence's order is in its keys.
-- On a stored record `{... ?r}` binds what `?r` alone would, so nobody writes it there, and the spelling is in effect unused. In a condition it takes; in `is` or a template the same spelling puts, `{title: ?title ... ?more}`.
+- On a stored record `{... ?r}` binds what `?r` alone would, so nobody writes it there, and the spelling is in effect unused. In a condition it takes; in `is` or a template the same spelling puts, `{:title ?title ... ?more}`.
 - **A read of the whole never gates**, as `unless` never binds. So every other term in it is bound by a required condition, a constant, or blank, and a query of such reads alone is refused: nothing would say which entities.
 - It is a fold, so it is refused in a `rule`.
 - A write goes through one entry: `(assert (notebook/blocks ?n block: {"N3" block:x}))`. The whole is not written.
@@ -70,8 +70,8 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 
 | `?t` | `?pair` |
 |---|---|
-| Buy milk | `{title: "Buy milk" tag: "errand"}` |
-| Buy milk | `{title: "Buy milk" tag: "home"}` |
+| Buy milk | `{:title "Buy milk" :tag "errand"}` |
+| Buy milk | `{:title "Buy milk" :tag "home"}` |
 
 **The whole:**
 
@@ -79,13 +79,13 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 (query (todo/card ?t is: ?card)
   (todo ?t title: ?title)
   (todo/tag ?t tag: {... ?tags})
-  (is ?card {title: ?title tags: ?tags}))
+  (is ?card {:title ?title :tags ?tags}))
 ```
 
 | `?t` | `?card` |
 |---|---|
-| Buy milk | `{title: "Buy milk" tags: {: "errand" : "home"}}` |
-| Call mum | `{title: "Call mum" tags: {}}` |
+| Buy milk | `{:title "Buy milk" :tags {: "errand" : "home"}}` |
+| Call mum | `{:title "Call mum" :tags {}}` |
 
 **Folded:** `tags: (count ?tags)` is 2 and 0. A fold is a function of what was collected.
 
@@ -114,13 +114,13 @@ Written `(todo/chip ?t is: ?chip)`, one at a time, "Call mum" has no `li`.
 (query (notebook/outline ?n is: ?outline)
   (notebook/named ?n title: ?title)
   (notebook/blocks ?n block: {... ?blocks})
-  (is ?outline {title: ?title blocks: ?blocks}))
+  (is ?outline {:title ?title :blocks ?blocks}))
 ```
 
 | `?n` | `?outline` |
 |---|---|
-| Field notes | `{title: "Field notes" blocks: {"N1" block:a "N2" block:b}}` |
-| Untitled | `{title: "Untitled" blocks: {}}` |
+| Field notes | `{:title "Field notes" :blocks {"N1" block:a "N2" block:b}}` |
+| Untitled | `{:title "Untitled" :blocks {}}` |
 
 With each block's source, which is a join for each entry. The item is a query whose answer is an entry, and its whole is a map again:
 
@@ -132,13 +132,13 @@ With each block's source, which is a join for each entry. The item is a query wh
 (query (notebook/outline ?n is: ?outline)
   (notebook/named ?n title: ?title)
   (notebook/source ?n is: {... ?sources})
-  (is ?outline {title: ?title blocks: ?sources}))
+  (is ?outline {:title ?title :blocks ?sources}))
 ```
 
 | `?n` | `?outline` |
 |---|---|
-| Field notes | `{title: "Field notes" blocks: {"N1" "# Monday" "N2" "Rained."}}` |
-| Untitled | `{title: "Untitled" blocks: {}}` |
+| Field notes | `{:title "Field notes" :blocks {"N1" "# Monday" "N2" "Rained."}}` |
+| Untitled | `{:title "Untitled" :blocks {}}` |
 
 **The page.** Markup under keys stands in the order of the keys:
 
