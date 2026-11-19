@@ -14,7 +14,7 @@ says how to cut a release.
 
 ## Unreleased
 
-### The notation keeps its definitions compiled on the branch, each under the entity its canonical form makes, and a name is a namespace
+### The notation keeps its definitions compiled on the branch, each under the entity its canonical form makes, and a name is the space's
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
 `design/macros/definitions-plan.md` on `feat/notation-poc`.
@@ -30,18 +30,16 @@ the description are no part of it. Beside it a source map keeps the
 form as written and, for each reference, the name it was written under
 and the definition it resolved to.
 
-A name is a namespace: a key bound to one referent. A document binds
-what it defines in mine: the authority the branch is opened under, the
-DID a peer is built to write as (`PeerBuilder::profile`), which its
-revisions name as `dialog.revision/authority` and a query reads as
-`dialog.session/profile`; `Live::authority` reads it and the caller gives
-it to `Analyzer::with_namespace`. In mine the name is bound to the name's own namespace, and in
-that the signature, its kind and labels in order
-(`concept (done: title:)`), to the definition. `Name` is a rule over
-every namespace's bindings. A bare `todo` is mine and nothing else,
-resolved by the labels written; `@cdata/todo` is the `todo` of what
-`cdata` in mine is bound to; `todo#3fa9` is the one, in mine or where a
-petname of mine points, whose hash starts so.
+A name is the space's: the same text means the same thing to everyone
+in it. A path, `cdata/todo`, is a longer name, and nothing walks it. A
+definition is bound by one fact, keyed by the whole of its name and
+signature (`todo concept (done: title:)`: the name, a space, its kind
+and labels in order), so two signatures of one name are two keys and a
+key has one definition. A name never holds a space, so a name's keys
+are one range that holds no other name's, and resolving a reference is
+one read of that range, then the choice by the labels written. `Name`
+is a rule over the bindings. `todo#3fa9` is the definition whose hash
+starts so, bound or not.
 
 Analysis reads what it reaches from the branch it runs on.
 `Live::analyze` analyzes a document, reads the bindings and definitions
@@ -61,33 +59,34 @@ What this changes for you:
   pattern's variables holes. A part that applies a definition only once
   a hole is filled, as `(note ?n ... ?fields)` does, or that several
   definitions take, is left as written and expanded where it is used.
-- A bare name mine does not hold is refused with the new
-  `Error::Elsewhere`, naming each `@petname/name` that holds it with its
-  signature; a bare name of mine written with labels none of my
-  signatures take, where another's does, with `Error::Unfitting`; a name
-  nothing holds is `Error::Unknown` as before. Nothing of the document is
-  kept or written. A hash prefix two definitions share is
-  `Error::Several`.
-- `(name cdata did:key:…)` binds a petname in mine; `(unname todo)`
-  takes a name away from mine, retracting its binding and leaving its
-  definitions.
-- A later definition under the signature of an earlier one in mine binds
-  the name to it in place of the earlier, which stays kept.
+- A name bound to nothing is refused with the new `Error::Unbound`,
+  naming the other names that end as it does (`cdata/todo` for `todo`);
+  a name none of whose signatures the labels written fit with
+  `Error::Unfitting`, listing the signatures it has and another such name
+  whose signature fits; a name nothing holds is `Error::Unknown` as
+  before. Nothing of the document is kept or written. A hash prefix two
+  definitions share is `Error::Several`.
+- `(unname todo)` takes every binding of `todo` away, retracting it and
+  leaving its definitions.
+- A later definition under the name and signature of an earlier one
+  binds the key to it in place of the earlier, which stays kept. Two
+  replicas binding one key differently end, after a pull, with one
+  elected; the other is reached by its hash.
 - New: the module `dialog_notation::definition` (`Definition`, `Defined`,
-  `Source`, `Reference`, `Binding`, `Namespaces` with `resolve`,
-  `suggest`, `elsewhere` and `petnames`, `Suggestion`, `Name`, `Want`, the
-  attributes under `definition::attribute`, `statements`, `NAME_RULE`);
-  `Analysis` and `Checked` gain `defined`, `named` and `unnamed`;
-  `Analyzer::with_namespace`, `load`, `take`, `ask_for`, `wanted`,
-  `answer`, `forget`, `resolve_at`, `namespaces` and `definitions`;
-  `Live::analyze` (with `Rounds` and `ROUNDS`), `Live::authority`, `Live::kept`,
-  `Live::suggest`, `live::written` (a `Written`) and `live::name_rule`;
-  `LiveError::Rounds`.
+  `Source`, `Reference`, `Binding` and its `key`, `range`, `Names` with
+  `named`, `resolve`, `suggest` and `ending_as`, `Suggestion`, `Name`,
+  `Want`, the attributes under `definition::attribute`, `statements`,
+  `NAME_RULE`); `Analysis` and `Checked` gain `defined` and `unnamed`;
+  `Analyzer::load`, `take`, `ask_for`, `wanted`, `answer`, `forget`,
+  `resolve_at`, `names` and `definitions`; `Live::analyze` (with `Rounds`
+  and `ROUNDS`), `Live::kept`, `Live::bindings`, `Live::suggest`,
+  `live::binding_range`, `live::written` (a `Written`) and
+  `live::name_rule`; `LiveError::Rounds`; the formula `:starts-with`.
 - New in `dialog-query`: `rule::canonical::labelling` and
   `rule::canonical::Atom`, the labelling a rule's identity is made by,
   for anything else that names its variables apart from their spelling.
-- A symbol that starts with `@` or holds a `#` reads as a name, never as
-  an attribute or a domain.
+- A symbol that holds a `#` reads as a name, never as an attribute or a
+  domain.
 
 Why: a query kept as written and analyzed again at each `select`, and a
 macro expanded again against the table at each use, answered by
@@ -102,16 +101,16 @@ a branch, so every document was submitted again to every analyzer.
   `syntax.definition/kind` under `definition:<hash>`;
   `syntax.source/definition`, `syntax.source/form` and
   `syntax.source/references` (and `syntax.source/revision` where the
-  caller gave one) under `source:<hash>`; two bindings, each
-  `syntax.binding/namespace`, `syntax.binding/key` and
-  `syntax.binding/referent` under `binding:<hash>`, and one more for each
-  petname; and the deductive rule that concludes `syntax.name`. Nothing
-  older is rewritten: a replica that holds documents' rules and facts and
-  no definitions resolves none of their names, and a document is
-  submitted once more for its definitions to be kept. An older release
-  reads these as facts and a rule like any other. An embedder writes
-  `live::written(&checked)` with a document's transaction, gives the
-  analyzer the authority it acts for, and analyzes with `Live::analyze`.
+  caller gave one) under `source:<hash>`; a binding,
+  `syntax.binding/key`, `syntax.binding/name`, `syntax.binding/signature`
+  and `syntax.binding/definition` under `binding:<hash of the key>`; and
+  the deductive rule that concludes `syntax.name`. Nothing older is
+  rewritten: a replica that holds documents' rules and facts and no
+  definitions resolves none of their names, and a document is submitted
+  once more for its definitions to be kept. An older release reads these
+  as facts and a rule like any other. An embedder writes
+  `live::written(&checked)` with a document's transaction and analyzes
+  with `Live::analyze`.
 
 ### The notation keeps a selection or a view current on a branch itself
 
