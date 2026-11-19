@@ -35,11 +35,16 @@ Corrected by the maintainer, 2026-11-20:
 - Names, as the maintainer shaped them on 2026-11-20:
 
 ```
- stored    namespace N ── binds "todo" ──▶ definition:<hash>        one referent for a name in a namespace
- derived   Name(name, namespace, definition)                        a rule over every namespace's bindings
- written   todo          every row of Name for "todo": one, or several to choose from
-           @cdata/todo   the row whose namespace is cdata's
-           todo#3fa9     the row whose definition's hash starts so
+ a namespace: a key bound to one referent, and nothing else
+
+ mine ── "cdata" ──▶ cdata's namespace                    a petname
+ mine ── "todo"  ──▶ a namespace ── "concept (title: done:)" ──▶ definition:<hash>
+                                 └─ "concept (title:)"       ──▶ definition:<hash>
+
+ derived   Name(path, signature, definition)                 a rule walking every namespace
+ written   todo           the walk from mine, then every other's; resolved by the labels written
+           @cdata/todo    the walk through cdata
+           todo#3fa9      the entry whose definition's hash starts so
 ```
 
   A reference is resolved by the labels written among the rows it finds; several of one signature left over are refused, the candidates listed by namespace and hash. Several rules concluding one concept are all read, as now. A definition's entity never holds a name or a namespace.
