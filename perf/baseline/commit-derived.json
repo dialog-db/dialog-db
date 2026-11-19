@@ -21,13 +21,13 @@
     "span.settle_cell": 1,
     "span.write_instructions": 1
   },
-  "instructions": 118494289,
-  "instructions_outside_allocator": 93820247,
+  "instructions": 117881427,
+  "instructions_outside_allocator": 93862589,
   "allocations": {
-    "alloc.bytes": 51782692,
-    "alloc.calls": 77505,
-    "free.calls": 77034,
+    "alloc.bytes": 51220260,
+    "alloc.calls": 76531,
+    "free.calls": 76062,
     "realloc.calls": 3202,
-    "realloc.from.bytes": 2815258
+    "realloc.from.bytes": 2815450
   }
 }

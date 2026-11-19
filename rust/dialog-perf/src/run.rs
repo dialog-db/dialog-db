@@ -29,9 +29,17 @@ pub fn run(scenario: &str, size: Option<usize>) -> Result<Report> {
 
     let started = Instant::now();
     let mut outcome = Err(anyhow!("the measured phase did not run"));
+    #[cfg(feature = "trace-hydration")]
+    let _ = dialog_query::hydration::take();
     crate::allocator::start();
     crate::measured(|| outcome = runtime.block_on(prepared.measure()));
     let allocations = crate::allocator::stop();
+    // What the measured phase hydrated, by the line that asked, to stderr.
+    #[cfg(feature = "trace-hydration")]
+    for ((site, what), count) in dialog_query::hydration::take() {
+        let site = site.rsplit("rust/").next().unwrap_or(&site).to_string();
+        eprintln!("hydrated {count:>8}  {what} @ {site}");
+    }
     let elapsed = started.elapsed();
     let outcome = outcome.with_context(|| format!("measuring {scenario}"))?;
 
