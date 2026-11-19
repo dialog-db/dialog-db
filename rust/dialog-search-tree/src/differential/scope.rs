@@ -1,9 +1,7 @@
 //! The key ranges a scoped difference is confined to, sorted and disjoint.
 
-use std::borrow::{Borrow, Cow};
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
-use std::ops::{Bound, RangeInclusive};
+use std::borrow::Cow;
+use std::ops::RangeInclusive;
 
 use crate::Key;
 
@@ -110,57 +108,29 @@ impl<'s, K: Key> Scope<'s, K> {
     }
 }
 
-/// A range's start as a [`KeyRanges`] map orders it: by its bytes, so the map
-/// can be searched by a key's bytes without building a key from them.
-#[derive(Clone, Debug)]
-struct Start<K>(K);
-
-impl<K: Key> PartialEq for Start<K> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.as_ref() == other.0.as_ref()
-    }
-}
-
-impl<K: Key> Eq for Start<K> {}
-
-impl<K: Key> PartialOrd for Start<K> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<K: Key> Ord for Start<K> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0.as_ref().cmp(other.0.as_ref())
-    }
-}
-
-impl<K: Key> Borrow<[u8]> for Start<K> {
-    fn borrow(&self) -> &[u8] {
-        self.0.as_ref()
-    }
-}
-
 /// A set of inclusive key ranges kept sorted and disjoint as ranges are
 /// added: a range that overlaps others is merged with them, and one that a
-/// range already holds changes nothing. Every operation is a search, so
-/// adding a range, removing ranges or testing a key or a span costs the log
-/// of the ranges held, and a scoped difference over a set
-/// ([`differentiate_covered`](crate::PersistentTree::differentiate_covered))
-/// borrows it without copying a range.
+/// range already holds changes nothing. Testing a key or a span is a binary
+/// search, as it is over a sorted slice, and a scoped difference over
+/// sets ([`differentiate_covered`](crate::PersistentTree::differentiate_covered))
+/// borrows them without copying a range.
+///
+/// The ranges are one sorted list, so a search costs what it does over a
+/// slice: a cover is searched once per node, op and entry a difference
+/// walks, far more often than it grows. Adding a range that changes the
+/// set is a search and a shift of the ranges after it; one the set holds
+/// already is a search alone.
 ///
 /// Ranges are compared by the bytes of their keys, which agree with the
 /// keys' [`Ord`].
 #[derive(Clone, Debug)]
 pub struct KeyRanges<K> {
-    ranges: BTreeMap<Start<K>, K>,
+    ranges: Vec<RangeInclusive<K>>,
 }
 
 impl<K> Default for KeyRanges<K> {
     fn default() -> Self {
-        KeyRanges {
-            ranges: BTreeMap::new(),
-        }
+        KeyRanges { ranges: Vec::new() }
     }
 }
 
@@ -174,38 +144,33 @@ impl<K: Key> KeyRanges<K> {
     /// set changed: `false` when a range held already contains it, or when it
     /// holds no key (its start sorts after its end).
     pub fn insert(&mut self, range: RangeInclusive<K>) -> bool {
-        let (mut start, mut end) = range.into_inner();
-        if start.as_ref() > end.as_ref() {
+        if self.contains_range(&range) {
             return false;
         }
-        // The range starting at or before the new one is the only one that
-        // can reach into it from below.
-        if let Some((existing_start, existing_end)) = self.before(start.as_ref()) {
-            if existing_end.as_ref() >= end.as_ref() {
-                return false;
-            }
-            if existing_end.as_ref() >= start.as_ref() {
-                start = existing_start.0.clone();
-            }
-        }
-        // Every range starting inside the new one is absorbed, the one found
-        // above included.
-        while let Some((absorbed, _)) = self
+        let (start, end) = range.into_inner();
+        // The ranges it overlaps: from the first that ends at or after its
+        // start to the last that starts at or before its end.
+        let from = self
             .ranges
-            .range::<[u8], _>((
-                Bound::Included(start.as_ref()),
-                Bound::Included(end.as_ref()),
-            ))
-            .next()
-        {
-            let absorbed = absorbed.0.clone();
-            if let Some(absorbed_end) = self.ranges.remove(absorbed.as_ref())
-                && absorbed_end.as_ref() > end.as_ref()
-            {
-                end = absorbed_end;
-            }
+            .partition_point(|held| held.end().as_ref() < start.as_ref());
+        let to = self
+            .ranges
+            .partition_point(|held| held.start().as_ref() <= end.as_ref());
+        if from == to {
+            self.ranges.insert(from, start..=end);
+            return true;
         }
-        self.ranges.insert(Start(start), end);
+        let start = if self.ranges[from].start().as_ref() < start.as_ref() {
+            self.ranges[from].start().clone()
+        } else {
+            start
+        };
+        let end = if self.ranges[to - 1].end().as_ref() > end.as_ref() {
+            self.ranges[to - 1].end().clone()
+        } else {
+            end
+        };
+        self.ranges.splice(from..to, [start..=end]);
         true
     }
 
@@ -216,66 +181,62 @@ impl<K: Key> KeyRanges<K> {
         range.start().as_ref() > range.end().as_ref()
             || self
                 .before(range.start().as_ref())
-                .is_some_and(|(_, end)| end.as_ref() >= range.end().as_ref())
+                .is_some_and(|held| held.end().as_ref() >= range.end().as_ref())
     }
 
     /// Remove every range that lies wholly inside `within`, leaving any that
     /// reaches past it. Returns how many were removed.
     pub fn remove_within(&mut self, within: &RangeInclusive<K>) -> usize {
-        let inside: Vec<K> = self
+        let (lower, upper) = (within.start().as_ref(), within.end().as_ref());
+        let from = self
             .ranges
-            .range::<[u8], _>((
-                Bound::Included(within.start().as_ref()),
-                Bound::Included(within.end().as_ref()),
-            ))
-            .filter(|(_, end)| end.as_ref() <= within.end().as_ref())
-            .map(|(start, _)| start.0.clone())
-            .collect();
-        for start in &inside {
-            self.ranges.remove(start.as_ref());
-        }
-        inside.len()
+            .partition_point(|held| held.start().as_ref() < lower);
+        // Disjoint and sorted, so the ranges inside are the run from `from`
+        // up to the first that ends past `within`.
+        let to = from
+            + self.ranges[from..]
+                .iter()
+                .take_while(|held| held.end().as_ref() <= upper)
+                .count();
+        self.ranges.drain(from..to);
+        to - from
     }
 
     /// The range that starts at or before `key`: the only one that can hold
     /// it.
-    fn before(&self, key: &[u8]) -> Option<(&Start<K>, &K)> {
-        self.ranges
-            .range::<[u8], _>((Bound::Unbounded, Bound::Included(key)))
-            .next_back()
+    fn before(&self, key: &[u8]) -> Option<&RangeInclusive<K>> {
+        let at = self.ranges.partition_point(|held| {
+            probed();
+            held.start().as_ref() <= key
+        });
+        at.checked_sub(1).map(|at| &self.ranges[at])
     }
 
     /// Whether `key` falls inside a range.
     pub fn contains(&self, key: &[u8]) -> bool {
-        self.before(key).is_some_and(|(_, end)| {
+        self.before(key).is_some_and(|held| {
             probed();
-            end.as_ref() >= key
+            key <= held.end().as_ref()
         })
     }
 
     /// Whether the span from `lower` (inclusive) to `upper` (exclusive, or
-    /// open above when `None`) meets a range: the range starting at or before
-    /// `lower` when it reaches it, or else the first one starting after it,
-    /// when that starts below `upper`.
+    /// open above when `None`) meets a range: the first range that ends at or
+    /// after `lower`, when it starts below `upper`.
     pub fn intersects(&self, lower: &[u8], upper: Option<&[u8]>) -> bool {
-        if let Some((_, end)) = self.before(lower) {
+        let at = self.ranges.partition_point(|held| {
             probed();
-            if end.as_ref() >= lower {
-                return true;
-            }
-        }
-        self.ranges
-            .range::<[u8], _>((Bound::Excluded(lower), Bound::Unbounded))
-            .next()
-            .is_some_and(|(start, _)| {
-                probed();
-                upper.is_none_or(|upper| upper > start.0.as_ref())
-            })
+            held.end().as_ref() < lower
+        });
+        self.ranges.get(at).is_some_and(|held| {
+            probed();
+            upper.is_none_or(|upper| upper > held.start().as_ref())
+        })
     }
 
     /// The ranges, in order.
     pub fn iter(&self) -> impl Iterator<Item = (&K, &K)> {
-        self.ranges.iter().map(|(start, end)| (&start.0, end))
+        self.ranges.iter().map(|range| (range.start(), range.end()))
     }
 
     /// How many ranges the set holds.
