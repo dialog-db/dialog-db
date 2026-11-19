@@ -6,7 +6,8 @@ use std::borrow::Cow;
 use std::str::from_utf8;
 
 use crate::{
-    DialogCorpusError, Uri, Value, ValueDataType, decode_value, model::ordkey::decode_bytes_cow,
+    Composite, DialogCorpusError, Uri, Value, ValueDataType, decode_value,
+    model::ordkey::decode_bytes_cow,
 };
 
 /// A [`Value`] borrowed from the bytes that store it: a scanned key's
@@ -33,6 +34,8 @@ pub enum ValueView<'a> {
     Record(Cow<'a, [u8]>),
     /// A symbol (an attribute used as a value), as its name.
     Symbol(Cow<'a, str>),
+    /// A composite, sharing the buffer that holds it.
+    Composite(Composite),
 }
 
 impl<'a> From<&'a Value> for ValueView<'a> {
@@ -47,6 +50,7 @@ impl<'a> From<&'a Value> for ValueView<'a> {
             Value::Float(number) => ValueView::Float(*number),
             Value::Record(bytes) => ValueView::Record(Cow::Borrowed(bytes)),
             Value::Symbol(relation) => ValueView::Symbol(Cow::Borrowed(relation.as_str())),
+            Value::Composite(composite) => ValueView::Composite(composite.clone()),
         }
     }
 }
@@ -64,6 +68,7 @@ impl ValueView<'_> {
             ValueView::Float(_) => ValueDataType::Float,
             ValueView::Record(_) => ValueDataType::Record,
             ValueView::Symbol(_) => ValueDataType::Symbol,
+            ValueView::Composite(_) => ValueDataType::Composite,
         }
     }
 
@@ -81,6 +86,7 @@ impl ValueView<'_> {
             ValueView::Float(number) => Value::Float(*number),
             ValueView::Record(bytes) => Value::Record(bytes.to_vec()),
             ValueView::Symbol(name) => Value::Symbol(name.to_string().try_into()?),
+            ValueView::Composite(composite) => Value::Composite(composite.clone()),
         })
     }
 }
@@ -148,6 +154,7 @@ pub fn decode_value_view(
                 Value::SignedInt(number) => ValueView::SignedInt(number),
                 Value::Float(number) => ValueView::Float(number),
                 Value::Boolean(boolean) => ValueView::Boolean(boolean),
+                Value::Composite(composite) => ValueView::Composite(composite),
                 other => {
                     return Err(corrupt(format!(
                         "a scalar type decoded as {:?}",
@@ -188,6 +195,7 @@ pub fn spilled_value_view(
                 Value::String(string) => ValueView::String(Cow::Owned(string)),
                 Value::Bytes(bytes) => ValueView::Bytes(Cow::Owned(bytes)),
                 Value::Record(bytes) => ValueView::Record(Cow::Owned(bytes)),
+                Value::Composite(composite) => ValueView::Composite(composite),
             }
         }
     })

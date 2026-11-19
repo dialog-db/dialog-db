@@ -41,7 +41,6 @@ pub use value::*;
 
 mod composite;
 pub use composite::*;
-pub(crate) use composite::{NAMED_DEPTH, type_and_bytes};
 
 mod view;
 pub use view::*;

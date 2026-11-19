@@ -159,6 +159,7 @@ fn encoded_len_lower_bound(value: &Value) -> usize {
     match value {
         Value::Bytes(bytes) => bytes.len(),
         Value::Record(bytes) => bytes.len(),
+        Value::Composite(composite) => composite.to_bytes().len(),
         Value::String(string) => string.len(),
         Value::Entity(entity) => entity.as_str().len(),
         // A number in the one band takes at least its class byte; the
@@ -689,10 +690,19 @@ mod tests {
             Value::Float(1783112056217.0),
             Value::Record(vec![1, 2, 3]),
             Value::Symbol(Relation::from_str("open/status")?),
+            Value::Composite(crate::Composite::new([
+                (Relation::from_str("geo/lat")?, Value::Float(37.77)),
+                (Relation::from_str("geo/lon")?, Value::Float(-122.42)),
+            ])?),
+            Value::Composite(crate::Composite::new([])?),
         ];
         for length in [0, 1, 15, 16, 17, 63, 64, 65, 300] {
             values.push(Value::String("x".repeat(length)));
             values.push(Value::Bytes(vec![0; length]));
+            values.push(Value::Composite(crate::Composite::new([(
+                Relation::from_str("doc/body")?,
+                Value::String("x".repeat(length)),
+            )])?));
         }
         for manifest in [Manifest::default(), narrow] {
             for value in &values {
@@ -742,6 +752,11 @@ mod tests {
             Value::Float(1783112056217.0),
             Value::Record(vec![1, 2, 3]),
             Value::Symbol(Relation::from_str("open/status")?),
+            Value::Composite(crate::Composite::new([
+                (Relation::from_str("geo/lat")?, Value::Float(37.77)),
+                (Relation::from_str("geo/lon")?, Value::Float(-122.42)),
+            ])?),
+            Value::Composite(crate::Composite::new([])?),
         ];
         for value in values {
             let fact = fact(value.clone());

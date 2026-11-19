@@ -373,6 +373,8 @@ impl SelectOwned<'_> {
 }
 
 #[cfg(test)]
+mod composite_tests;
+#[cfg(test)]
 mod number_tests;
 #[cfg(test)]
 mod tests;

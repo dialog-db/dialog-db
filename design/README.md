@@ -55,6 +55,11 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 
 ## Topics
 
+- [A composite value that holds a syntax tree and is read in place](composite-value.md):
+  **Building.** A map, a record (the map whose keys are attributes) or a
+  list, one canonical encoding with keys once, a size on every nested
+  body and offsets on a long sequence, read as a view of its buffer, and
+  named by its merkle reference.
 - [A read follows the head it should have pinned](query-isolation.md):
   **Building.** Every unit of isolation (a query, a select, a poll, a
   transaction) reads one revision, and the types make a live read

@@ -110,60 +110,83 @@ takes a form apart needs a value made of values where a term stands.
 One pattern that both builds and takes apart lets the planner order the
 premises, as it does for every other premise.
 
-### A record can hold a map or a list of values
+### A value can be a composite: a map, a record or a list, held as one value and read in place
 
-[#778](https://github.com/dialog-db/dialog-db/pull/778),
-[design/patterns.md](./design/patterns.md),
-[design/patterns/design-composite-bytes.md](./design/patterns/design-composite-bytes.md)
+[#843](https://github.com/dialog-db/dialog-db/pull/843).
 
-A value was a scalar or a `Record`, bytes dialog did not look into. A
-`Composite` is a value made of values: a map from a text to a value
-that holds no key twice, or a list, nested as deep as it is written,
-as the IPLD data model has them. There is no tuple: a notation that has
-one writes it as a list. It is kept whole as a `Value::Record`: one
-version byte, `0x01`, then plain dag-cbor. A value dag-cbor has a kind
-for is written as that kind, a nested composite as the map or the list
-it is, and a value it has no kind for (an entity, a symbol, a whole
-number past 64 bits) as a link that holds the value: a CID hashed by
-the identity, under a codec that says the value's type. So anything
-that reads dag-cbor reads what follows the version byte, and a
-composite is a claim's value like any other: it is stored, keyed,
-compared, spilled and synced as the bytes it is. Its name is not a hash
-of those bytes. A composite is named by the merkle reference of its
-parts, a map under `map:` and a list under `list:`, each part by its
-own reference and a key as the text it is, so a later layout of the
-bytes moves no name.
+From the record values research ([#748](https://github.com/dialog-db/dialog-db/pull/748)),
+replacing the draft [#812](https://github.com/dialog-db/dialog-db/pull/812);
+the layout and its measurements are in
+[design/composite-value.md](design/composite-value.md).
+
+A value that is compound but atomic (a location's latitude and longitude, a
+table a view resolved, a syntax tree) had nowhere to go but an opaque
+`record:`, each writer inventing its own encoding and its own tag. A
+composite is a value type of its own, written and replaced whole like any
+value. It is a map, whose keys are any values but composites (text the
+usual one) and whose key may hold several values, or a list, whose items
+keep their order and repeats. A record is the map whose every key is an
+attribute: the same kind, told by its keys, as a natural is a number. Two
+composites are equal exactly when they hold the same content, whatever
+order it was given in, and the natural `3` and the float `3.0` are one value
+in a composite as anywhere.
+
+A composite has one canonical encoding: a table of every key it and the
+maps nested in it use, once, then its body; a sequence of more than
+`SCAN_LIMIT` items carries a table of offsets, and every nested body says
+its size. Bytes that are not that encoding are refused, so equal composites
+have equal bytes and a composite is keyed in the tree by them. A
+`Composite` is a view, its buffer shared and the place of its body, so a
+nested composite, a field or an item is read where it sits: the length,
+a field by key, an item by index and iteration decode only what they
+return. Its identity is its merkle reference: for a map, a map under
+`composite:` from each key's reference to its value's (or to the `set:` of
+its values'); for a list, the `list:` of its items' references. No part of
+the layout enters it.
 
 What this changes for you:
 
-- `dialog_corpus::Composite`, `CompositeMap` and `CompositeItems` build
-  one, and `Value::from` keeps it as a record. `Value::composite` reads
-  one back: `Ok(None)` for a scalar and for a record that starts with
-  no version byte, the composite for a record this release wrote, and
-  `Err(CompositeError::UnknownVersion { version })` for a record under a
-  version this release does not read.
-- One value has one byte string. A map's entries are written in one
-  order whatever order they were given in (dag-cbor's: the shorter key
-  first), a key given twice is refused (`CompositeError::DuplicateKey`),
-  bytes that hold a composite any other way are refused
-  (`CompositeError::NotCanonical`), and a number is kept under the
-  narrowest type that holds it, as a tree under the number band reads
-  one back: the natural `3`, the integer `3` and the float `3.0` are
-  one part, and read back as the natural `3`.
-- A link holds a value of any length. A reader built on the `cid`
-  crate's `Cid` reads one of 64 bytes at most, so it reads every symbol
-  and refuses an entity longer than that.
-- `Value::reference` of a record that holds a composite is the
-  reference of its parts. Of any other record it is what it was,
-  `RECORD.reference_of(bytes)`.
-- Equality, ordering, `Value::to_bytes`, `Value::to_reference` (the
-  address a spilled value is stored under) and the key encoding treat a
-  record as its bytes, as before.
+- `Value` has a new variant, `Composite`, keyed with type byte 22.
+  `ValueDataType` (the query layer's `Type`) has `Composite`
+  (`composite:`, any composite, the band every composite is keyed under),
+  and in its band `CompositeMap` (`composite:map`), `CompositeRecord`
+  (`composite:record`) and `CompositeList` (`composite:list`), which type
+  slots and never keys, as the sized number types do. A composite value's
+  `data_type()` is `CompositeMap` or `CompositeList`. A `match` over either
+  enum needs arms. `Value::Record` and `record:` are unchanged, identities
+  included.
+- Build with `Composite::map`, `Composite::record` (`Composite::new` is the
+  same) and `Composite::list`; read with `len`, `kind`, `is_record`, `get`
+  and `first` by key, `field` by attribute, `item` by index, `entries`,
+  `items` and `fields`, and `first_view` and `item_view` for a value whose
+  text borrows from the buffer. `Composite::from_bytes` refuses any bytes
+  but the canonical ones with a `CompositeError` saying why;
+  `Composite::to_bytes` gives them; `Composite::reference` gives the
+  identity. Refused on construction: a composite as a key
+  (`CompositeError::CompositeKey`), NaN (`NotANumber`) and nesting past
+  `MAX_DEPTH`, 128 (`TooDeep`).
+- `ValueView` has a `Composite` variant: a scanned row holding a composite
+  binds in place, as every other value does.
+- An attribute declared `as: composite:`, `composite:map`,
+  `composite:record` or `composite:list` holds what its type says; a write
+  of a list where a record is declared is refused. The query layer's
+  `Primitive` gives maps and lists a bit each (a record is on the map's),
+  `Primitive::ALL` includes both, and the wire names them `map` and `list`.
+  A query cannot yet read a field out of a composite it bound; that comes
+  with destructuring.
+- In JSON a composite is `{"composite:map": {"map": [[key, value], ...]}}`
+  or `{"composite:list": {"list": [...]}}`, its entries in canonical order;
+  in a binary format, its canonical bytes; in a CSV export, `composite` with
+  its bytes in base58.
+- `ValueDataType::max()`, the largest type a key carries, is now
+  `Composite`, so a scan bound from it covers composites.
 
-Why: a rule could not hold a value made of other values, and everything
-that needed one waited on the layout of a record's bytes. A name that is
-a function of the parts does not depend on that layout, and the version
-byte leaves the layout free to change.
+Why: a value that has to change as a whole was either split into claims,
+which concurrent writers can leave half updated, or packed into opaque
+bytes no query could read and no two writers spelled alike. The notation
+keeps its syntax trees as maps and lists, and a composite that is read
+without decoding all of it is what lets a rule reach one node of one.
+
 
 ### A subscription's poll costs the entities it touched, not its whole answer
 
@@ -2029,22 +2052,13 @@ most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
   here and by its bytes in an older release, so each release finds the
   body the other stored under an entity it does not derive and leaves
   it inert. No release before this one could write such a constant.
-- A composite is a new kind of bytes under the existing `record:` value
-  type, so nothing is rewritten on upgrade and no tree, key or wire
-  format changes. What an older replica holds under `record:` is a
-  revision's record, a bare dag-cbor map whose first byte is `0xa7`, and
-  whatever bytes an embedder stored. This release reads a record as a
-  composite only when its first byte is `0x01` and the rest is exactly
-  the bytes a composite is written in; every other record reads,
-  compares, verifies and is named as before. An older release makes of a
-  versioned record what it makes of any record: bytes it stores, syncs
-  and compares, and names by a hash of the bytes, which is not the name
-  this release gives it. It cannot look inside. A record under a later
-  version than `0x01` is carried the same way by this release and refused
-  by its number when something looks into it. An embedder runs nothing.
-  One that stored records of its own starting with a byte from `0x01` to
-  `0x17` should say so before upgrading
-  ([design/patterns/design-version-byte.md](./design/patterns/design-version-byte.md)).
+- Composites: nothing an existing space holds is rewritten or read
+  differently, and opaque `record:` values keep their encoding and identity.
+  No release before this one wrote a composite (the draft #812 was never
+  released), so there is nothing to migrate. A space that stores a
+  composite cannot be read by an older release, which takes a key with type
+  byte 22 for corruption: once a replica writes one, every replica reading
+  that space needs this release. Nothing an embedder has to run.
 - Nothing an existing space holds changes or is read differently for the
   single-file archive: it is a new provider a space opts into. A space
   opened with `Chronicle` does not read an `fs` archive's directory of
