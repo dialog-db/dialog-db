@@ -980,3 +980,45 @@ fn it_is_one_value_built_as_a_map_or_as_a_record() {
         Value::Composite(record).identity_key()
     );
 }
+
+/// Keyed in the tree, maps, records and lists order as composites do, the
+/// order is total, and no key's value slot is a prefix of another's: a
+/// composite is escaped and terminated as a byte string is, so a shorter
+/// one never reads as the front of a longer.
+#[dialog_common::test]
+fn it_orders_as_a_tree_key_without_prefixes_colliding() {
+    let mut composites: Vec<Composite> = (1..=400)
+        .map(|seed| generate(&mut Seeded(seed), 2, seed % 3 == 0).1)
+        .collect();
+    // A composite whose bytes are a prefix of another's.
+    composites.push(Composite::list([text("a")]).unwrap());
+    composites.push(Composite::list([text("a"), text("b")]).unwrap());
+    composites.push(Composite::map([]).unwrap());
+    composites.push(Composite::list([]).unwrap());
+    let slot = |composite: &Composite| {
+        let mut slot = Vec::new();
+        crate::encode_key_value(&Value::Composite(composite.clone()), NUMBER_BAND, &mut slot);
+        slot
+    };
+    let mut keyed: Vec<(Vec<u8>, Composite)> =
+        composites.iter().map(|c| (slot(c), c.clone())).collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    for pair in keyed.windows(2) {
+        let ((a_key, a), (b_key, b)) = (&pair[0], &pair[1]);
+        assert_eq!(
+            a.cmp(b),
+            a_key.cmp(b_key),
+            "the key orders as the composite"
+        );
+        if a != b {
+            assert!(!b_key.starts_with(a_key), "{a:?} keys as a prefix of {b:?}");
+        }
+    }
+    for (key, composite) in &keyed {
+        let mut tail = key.clone();
+        tail.extend_from_slice(b"\x05rest");
+        let (read, rest) = crate::decode_value(ValueDataType::Composite, &tail).unwrap();
+        assert_eq!(read, Value::Composite(composite.clone()));
+        assert_eq!(rest, b"\x05rest");
+    }
+}

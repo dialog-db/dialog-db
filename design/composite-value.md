@@ -170,6 +170,31 @@ uses, offsets present, absent or too wide, a number not in the band's
 encoding); a composite as a key (`CompositeKey`); NaN (`NotANumber`);
 nesting past 128 (`TooDeep`). Random and mutated bytes never panic.
 
+## Tests
+
+In `dialog-corpus` (`model/composite/tests.rs`, 35, and `tree.rs`, 1):
+against a plain model of maps and lists over 3,000 generated composites
+(construction in any order and with repeats, every key and item, length,
+identity); every layout read alike and only the canonical one accepted;
+order total, equal to the canonical bytes and to the key's bytes in the
+tree, no key a prefix of another; a nested view equal to, hashing and
+ordering as its copy, sharing the buffer; a read decoding only what it
+returns (a counter); the record told by its keys and typed by the band;
+a map of attributes and a record one value; the bytes the drawing shows;
+every refusal by its variant; 20,000 random and mutated byte strings
+without a panic; every serde form; a tree storing records, maps and lists,
+one spilled. In `dialog-repository` (`branch/select/composite_tests.rs`,
+3): a round trip through a branch loaded afresh, by entity, attribute and
+value, on the volatile provider and on the filesystem provider; and the
+syntax tree below.
+
+**The syntax tree.** `(todo ?t [1 2] state: :open tags: {"errand" _ "home" _}
+where: {:author ?who})`, built from plain data in the shape `syntax.rs`
+writes, is stored in a branch and read back; `operand.terms.where.entries[0][1].name`
+is reached five composites down with one decode, the name returned; built
+with every map's fields and the labels in the other order, it is one value
+with one reference.
+
 ## What bytes allowed to vary would take
 
 Identity is already apart from the bytes. To accept other layouts (offsets
@@ -214,9 +239,23 @@ have to canonicalize first.
 ## Left for the patterns and the notation
 
 They will call `Composite::map`, `Composite::record`, `Composite::list`,
-`kind`, `is_record`, `len`, `first`, `get`, `item`, `entries`, `items`,
-`first_view`, `item_view` and `reference`, and `Value::Composite`. To do
-there: refuse a key twice in the notation's maps; read a call's `terms`
-by text key and its `items` by index; keep a struct's entries as a list of
-pairs or move them to a map with node keys made text; and move a
-definition's entity to the new reference.
+`kind`, `is_map`, `is_list`, `is_record`, `len`, `first`, `get`, `item`,
+`entries`, `items`, `first_view`, `item_view`, `reference` and
+`to_bytes`, `Value::Composite` and `ValueDataType::{CompositeMap,
+CompositeRecord, CompositeList}`. To do there:
+
+- replace `data.rs`'s `Composite::{Map, List}` in `Value::Record` with
+  `Value::Composite`, and `entries`/`items` with `first` and `item`;
+- refuse a key twice in the notation's own maps, since a composite map
+  keeps a repeated key's values as a set;
+- spell a set so `Syntax::value` keeps it (today `{: a : b}` repeats the
+  empty key and is refused);
+- move a definition's entity, made of its signature's reference, to the
+  new reference;
+- keep a struct's entries as a list of `[key, value]` pairs (a key is a
+  node, and a composite's key is a scalar), as `syntax.rs` does now.
+
+Not done here: a composite in a key is still its canonical bytes escaped
+as one string, so a key cannot be read in place and a tree's node does not
+split a composite into the archive's tokens (#748, design sections 1 and
+4).

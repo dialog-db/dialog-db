@@ -1966,10 +1966,10 @@ mod spill_cache_tests {
         Ok(())
     }
 
-    /// Composite values go into a tree and come out whole, by attribute,
-    /// by entity and by value, a composite past the inline threshold
-    /// through its spilled block, and a composite nesting another as it
-    /// was written.
+    /// Composite values (records, a map of other keys, lists) go into a
+    /// tree and come out whole, by attribute, by entity and by value, one
+    /// past the inline threshold through its spilled block, and one
+    /// nesting another as it was written.
     #[dialog_common::test]
     async fn it_stores_and_finds_composite_values() -> anyhow::Result<()> {
         use crate::selector::Constrained;
@@ -1992,16 +1992,38 @@ mod spill_cache_tests {
             ("place/name".parse()?, Value::String("home".into())),
             ("place/at".parse()?, at(37.77)?),
         ])?);
-        let facts: Vec<Fact> = [at(1.0)?, at(2.5)?, big.clone(), nested.clone()]
-            .into_iter()
-            .enumerate()
-            .map(|(index, is)| Fact {
-                the: "x/where".parse().unwrap(),
-                of: format!("x:{index}").parse().unwrap(),
-                is,
-                cause: None,
-            })
-            .collect();
+        let keyed = Value::Composite(Composite::map([
+            (
+                Value::String("type".into()),
+                Value::Entity("tuple:".parse()?),
+            ),
+            (Value::UnsignedInt(7), nested.clone()),
+        ])?);
+        let short = Value::Composite(Composite::list([
+            Value::String("a".into()),
+            Value::String("a".into()),
+        ])?);
+        let long = Value::Composite(Composite::list(
+            (0..inline_n).map(|n| Value::String(format!("item {n}"))),
+        )?);
+        let facts: Vec<Fact> = [
+            at(1.0)?,
+            at(2.5)?,
+            big.clone(),
+            nested.clone(),
+            keyed,
+            short,
+            long,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, is)| Fact {
+            the: "x/where".parse().unwrap(),
+            of: format!("x:{index}").parse().unwrap(),
+            is,
+            cause: None,
+        })
+        .collect();
         let store = CountingBlocks::new();
         let mut delta = ArchiveDelta::zero();
         let mut tree = Corpus::empty_in(test_catalog());

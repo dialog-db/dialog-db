@@ -132,23 +132,24 @@ pub struct Composite {
     body: usize,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "helpers"))]
 use std::cell::Cell;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "helpers"))]
 thread_local! {
     /// How many scalars this thread has decoded out of composites, so a test
     /// can say that a read decoded only what it returned.
     static DECODED: Cell<usize> = const { Cell::new(0) };
 }
 
-#[cfg(test)]
+/// How many scalars this thread has decoded out of composites so far.
+#[cfg(any(test, feature = "helpers"))]
 pub(crate) fn decoded() -> usize {
     DECODED.with(Cell::get)
 }
 
 fn counted() {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "helpers"))]
     DECODED.with(|count| count.set(count.get() + 1));
 }
 
