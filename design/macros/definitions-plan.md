@@ -34,17 +34,18 @@ Corrected by the maintainer, 2026-11-20:
 - The form hashed is canonical: conditions and anything else whose order does not matter are put in the order the rule's canonical labelling gives, and variables named by it. Two spellings of one definition are one entity.
 - Names, as the maintainer shaped them on 2026-11-20:
 
+Replaced on 2026-11-20 by the maintainer: no namespace entities.
+
 ```
- a namespace: a key bound to one referent, and nothing else
+ the space's bindings: a key bound to one definition
 
- mine ── "cdata" ──▶ cdata's namespace                    a petname
- mine ── "todo"  ──▶ a namespace ── "concept (title: done:)" ──▶ definition:<hash>
-                                 └─ "concept (title:)"       ──▶ definition:<hash>
+   "todo · concept (title:)"            ──▶ definition:<hash>     a bare name is the space's
+   "todo · concept (title: done:)"      ──▶ definition:<hash>     a second signature is a second key
+   "cdata/todo · concept (title:)"      ──▶ definition:<hash>     a namespace is a prefix, by convention
 
- derived   Name(path, signature, definition)                 a rule walking every namespace
- written   todo           the walk from mine, then every other's; resolved by the labels written
-           @cdata/todo    the walk through cdata
-           todo#3fa9      the entry whose definition's hash starts so
+ written   todo          one read of the range of keys that start "todo ·", then the labels written choose
+           cdata/todo    the same, of a longer name
+           todo#3fa9     the definition whose hash starts so
 ```
 
   A reference is resolved by the labels written among the rows it finds; several of one signature left over are refused, the candidates listed by namespace and hash. Several rules concluding one concept are all read, as now. A definition's entity never holds a name or a namespace.
