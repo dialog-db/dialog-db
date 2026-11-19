@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A subscription's cover records no read that a range it holds already covers
 
-(pull request to be opened)
+[#844](https://github.com/dialog-db/dialog-db/pull/844).
 
 A concept whose rule scans an attribute for its candidates and reads it
 again of each entity it derives recorded a range for every one of those
@@ -46,7 +46,7 @@ maintains, and ranges inside ranges it holds bought no precision.
 
 ### A poll scopes its diff to the cover as it stands, copying none of it
 
-(pull request to be opened)
+[#844](https://github.com/dialog-db/dialog-db/pull/844).
 
 A subscription's cover was kept sorted and disjoint, but every poll
 merged its fact and rule ranges into a new list to scope the diff, the
@@ -76,6 +76,7 @@ dropping that scope.
 #### Compatibility and migration
 
 - Nothing stored or synced changes.
+
 
 ### A subscription's poll costs the entities it touched, not its whole answer
 
@@ -184,7 +185,7 @@ inner polls and the groups a change moved.
 
 ### A concept read binds stored values in place, and reads optional fields in one pass
 
-Research: [zero-copy answers](research/zero-copy-answers.md)
+[#825](https://github.com/dialog-db/dialog-db/pull/825). Research: [zero-copy answers](research/zero-copy-answers.md)
 
 A concept read used to turn every row it scanned into owned values (an
 entity with a hash of its URI, an attribute, a value, a claim) and copy
