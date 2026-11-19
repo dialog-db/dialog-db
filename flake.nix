@@ -277,18 +277,22 @@
           # that too, writing every row to target/perf-delta/table.md.
           # Fails if either comparison regresses. Rows that beat their
           # baseline file past the allowance go to target/perf-delta/stale.md
-          # (and a warning annotation in CI): flagged, never failed.
+          # (and a warning annotation in CI): flagged, never failed. Why
+          # either comparison fails goes to target/perf-delta/failures.md
+          # and failures-base.md, and to error annotations in CI.
           "perf:check" = {
             description = "Gate target/perf-current against perf/baseline and, if present, target/perf-base";
             command = ''
               status=0
               mkdir -p target/perf-delta
               cargo run -p dialog-perf --release -- compare perf/baseline target/perf-current \
-                --stale target/perf-delta/stale.md || status=1
+                --stale target/perf-delta/stale.md \
+                --failures target/perf-delta/failures.md || status=1
               if [ -d target/perf-base ]; then
                 rebaselined=$(paste -sd, target/perf-delta/rebaselined 2>/dev/null || true)
                 cargo run -p dialog-perf --release -- compare --base target/perf-base target/perf-current \
                   --markdown target/perf-delta/table.md \
+                  --failures target/perf-delta/failures-base.md \
                   ''${rebaselined:+--rebaselined "$rebaselined"} || status=1
               fi
               exit $status
