@@ -1885,3 +1885,13 @@ The measurement that came in after (next entry but one above) bears on this: wha
 **Learned.** "By authority" in the entry of 2026-11-11 was petnames, not yet named so. The overnight choice of a name's entity from its signature with one definition is overruled ([decisions-overnight.md](decisions-overnight.md), row 4). The worry about a merge is half answered already: what is compiled holds what its names meant, so a merge that adds a definition under a name is met only at the next compile.
 
 **Decided.** By the maintainer: many definitions under one name; a signature tells them apart; where it does not, `#hash`, until petnames. Not decided: the qualifier's spelling, and what an unqualified reference that fits several does.
+
+## 2026-11-20, Designing, backtracking: whose a bare name is
+
+**Asked.** Nothing; the maintainer came back to it. An hour after deciding that a bare name is mine alone, he thought it should be the repository's, the consensus of the space, with mine written `~/todo` or `@/todo`; then doubted the `@` prefix, which runs into `todo/model`; and saw that if a bare name is the writer's, source cannot be copied between people, which an editor might mend and an agent might not.
+
+**Learned.** Three positions in one day: resolved over every namespace and refused when several fit; mine alone; the space's. What moved him each time was a different criterion: a merge repointing a name unseen, then meaning what I wrote, then text that means the same to whoever reads it. The first is already softened, since nothing compiled follows a name. The third is the one the notation's own method cares most about, agents writing it.
+
+**Backtracked.** From built to Designing, for what a bare name means. The build's other parts stand: content entities, source maps, bindings, the walk.
+
+**Decided.** Not decided. The agent's hypothesis: a bare name is the space's and "mine" is not in the language; a person's namespace is a name in the space like any other. Spellings by a reader round.
