@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### A coverage entry spills nothing
 
+[#833](https://github.com/dialog-db/dialog-db/pull/833).
+
 A coverage key carries a hash of the covered value in the spilled form,
 whatever the value's size, so claims can be matched by it; no value is
 stored under that hash. `tree/entry` read it as a spilled value, so an
@@ -38,6 +40,8 @@ none.
 - Nothing stored changes.
 
 ### An index node's buffered operations are its entries, and a separator reads as the key it is
+
+[#832](https://github.com/dialog-db/dialog-db/pull/832).
 
 An index node buffers writes headed for its children (`novelty`), and
 `tree/entry` gave no rows for an index, so a query could count them but
@@ -73,6 +77,8 @@ buffers and where its boundaries fall are part of that.
 - Nothing stored changes: both read blocks as they are.
 
 ### A revision is named by `revision:`, not by a `did:key:`
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829).
 
 A revision's entity was `did:key:z6Mk<base58(hash)>`: the shape of a key
 DID around a blake3 hash of the revision's version. It read as a
@@ -127,7 +133,7 @@ as one.
 
 ### A tree node is a handle, and five resolvers read it
 
-Argued in [design/tree-exploration.md](./design/tree-exploration.md).
+[#829](https://github.com/dialog-db/dialog-db/pull/829), argued in [design/tree-exploration.md](./design/tree-exploration.md).
 
 The seven `tree/*` resolvers each loaded a node's block and decoded one
 part of it, so a query asking three things of one node decoded it three
@@ -213,7 +219,7 @@ an entry the subject of a concept.
 
 ### A stack learns what its replica holds of a tree by command
 
-Argued in [design/tree-exploration.md](./design/tree-exploration.md).
+[#829](https://github.com/dialog-db/dialog-db/pull/829), argued in [design/tree-exploration.md](./design/tree-exploration.md).
 Built on the stack's providers
 ([#816](https://github.com/dialog-db/dialog-db/pull/816)).
 
