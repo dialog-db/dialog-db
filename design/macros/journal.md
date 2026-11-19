@@ -1877,3 +1877,11 @@ The measurement that came in after (next entry but one above) bears on this: wha
 **Backtracked.** From Building to Delimiting for views: the prototype was built with no problem written.
 
 **Decided.** Not decided. The statement is put to him.
+
+## 2026-11-20, Designing: many definitions under a name, told apart by hash for now
+
+**Asked.** What had been agreed about names. The maintainer: tonk's `name` is of cardinality one. An agent pointed out a merge could then point a name elsewhere unseen, and he wants overloading, so one referent is not kept. Petnames make most sense to him: the name I gave, else the name someone I name uses. That is too much to build now, so a `#hash` qualifier tells several apart in the meantime.
+
+**Learned.** "By authority" in the entry of 2026-11-11 was petnames, not yet named so. The overnight choice of a name's entity from its signature with one definition is overruled ([decisions-overnight.md](decisions-overnight.md), row 4). The worry about a merge is half answered already: what is compiled holds what its names meant, so a merge that adds a definition under a name is met only at the next compile.
+
+**Decided.** By the maintainer: many definitions under one name; a signature tells them apart; where it does not, `#hash`, until petnames. Not decided: the qualifier's spelling, and what an unqualified reference that fits several does.
