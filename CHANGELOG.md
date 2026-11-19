@@ -180,7 +180,7 @@ previous entry). A listed `as: [a, b]` stays, as an enumerated type
 ordered best first.
 
 An attribute spelled with a ranking pick, `select`, the entity spelling
-0.3 and 0.4 wrote (`"pick": "top:"`), or a list of relations under
+0.3 to 0.5 wrote (`"pick": "top:"`), or a list of relations under
 `the` is refused by name, so a definition in the format those releases
 wrote is never read with another meaning. A rule
 those releases stored is inert until `Branch::upgrade_rules` rewrites
@@ -197,7 +197,7 @@ What this changes for you:
   `Cardinality::newer`, the one order the tree, a transaction's
   settlement, a cardinality-one read and the selective aggregators share, and
   `Cardinality::elect` is what `Pick::Last.elect` was. A batch spells
-  the cardinality `one` or `many`, and reads the picks 0.3 and 0.4 wrote
+  the cardinality `one` or `many`, and reads the picks 0.3 to 0.5 wrote
   there (`last` and `max`, `min`, `top` as one, `all` as many).
 - `Cardinality::estimate` is `dialog_query::estimate_cost(cardinality,
   ..)`.
@@ -221,7 +221,7 @@ What this changes for you:
   and its listed values, where it hashed the list of relations it read
   and its pick. Every attribute's identity moved, and every concept's
   and every rule's with it. `dialog_query::migration` reproduces the
-  identities of 0.3 and 0.4 (`attribute_reference_v1`,
+  identities of 0.3 to 0.5 (`attribute_reference_v1`,
   `attribute_uri_v1`, `concept_reference_v1`, `concept_identity_v1`).
 - A rule body is stored in format 4, which spells cardinalities.
 - `RulesUpgraded::unmapped` lists the rules the upgrade left inert, with
@@ -357,6 +357,52 @@ same body gave a different answer when an unrelated rule closed a cycle
 around it, with nothing reported. Setting the rule aside is reported,
 and names the rule.
 
+### Compatibility and migration
+
+- A rule an older release stored spells its attributes under picks (0.3 to 0.5) or under the older `cardinality` (0.2), and sits under an
+  identity that hashed them. This release reads a rule body only in its
+  own format and only under the identity it gives it now,
+  so every such rule is inert: it derives nothing, fires at no commit,
+  and no read fails over it. Nothing is rewritten on upgrade.
+  `Branch::upgrade_rules` (or `Branch::migrate`) is what an embedder
+  runs: it rewrites each rule whose attributes read under `last` or
+  `all` (spelled, or implied by a plain attribute) into cardinality one
+  or many, asserts it in format 4 under its identity now, and retracts
+  every rule fact the older release wrote for it. An attribute read
+  under `max`, `min` or `top` (including a listed `as` without a pick,
+  which read as `top`) is rewritten into a field with that pick over a
+  cardinality-many attribute, a `top`'s list kept in its order, best
+  first. A rule
+  over a chain of relations has no rewriting with the same meaning: it
+  is left as it is, inert, and listed in `RulesUpgraded::unmapped` with
+  why. Its author replaces it with a rule deriving one relation from
+  each, read by a field with a selective aggregator. When to run the upgrade,
+  once after a full replication or on every pull, is the embedder's
+  decision, as before.
+- The upgrade also moves a `dialog.concept/transient` marker keyed by a
+  concept's 0.3 to 0.5 identity, as it moves one keyed by its 0.2
+  identity. An application that keyed its own facts by an attribute or
+  concept identity moves them with `dialog_query::migration`.
+- An older release cannot read what this one writes: a rule body in
+  format 4 is refused by name, and a rule stored under its new identity
+  is inert there, as an older release's rules are here. A batch this
+  release encodes spells `one` and `many`, which an older release does
+  not read; this release reads the batches an older one encoded.
+- What the tree stores is unchanged: a cell's claims, and how a
+  cardinality-one write elects the claim it succeeds, are as `last`
+  left them. A write a 0.3 to 0.5 replica made under `max`, `min` or
+  `top` succeeded the claim that pick elected; those claims stay as
+  written. A field the upgrade rewrote to read with that pick's aggregator
+  reads the same claim; any other read under cardinality one returns the
+  cell's newest.
+- A rule the analysis sets aside for deciding on a cardinality-one value
+  in its own cycle stays installed and is evaluated again once the cycle
+  it closed is gone. Replicas on releases either side of this one can
+  answer a query over such a cycle differently.
+
+
+## 0.5.0 (2026-11-19)
+
 ### A subscription's poll costs the entities it touched, not its whole answer
 
 [#838](https://github.com/dialog-db/dialog-db/pull/838).
@@ -464,7 +510,7 @@ inner polls and the groups a change moved.
 
 ### A concept read binds stored values in place, and reads optional fields in one pass
 
-Research: [zero-copy answers](research/zero-copy-answers.md)
+[#825](https://github.com/dialog-db/dialog-db/pull/825). Research: [zero-copy answers](research/zero-copy-answers.md)
 
 A concept read used to turn every row it scanned into owned values (an
 entity with a hash of its URI, an attribute, a value, a claim) and copy
@@ -1811,7 +1857,7 @@ publication, re-run from the new head when the head moved under it.
 The primary's share is minted and published as before; a layer's share
 is applied only after the publish wins its compare-and-swap, so a lost
 head leaves no layer changed. A rule head whose descriptor names a
-layer lands there, keeping its cardinality, and succeeds no claim of the
+layer lands there, keeping its pick, and succeeds no claim of the
 primary. The layers every stack has are named: `memory:` is the
 primary, `session:` the stack's own process-local store, `control:`
 the loopback a command lands in.
@@ -2210,47 +2256,6 @@ most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
 
 ### Compatibility and migration
 
-- A rule an older release stored spells its attributes under picks (0.3
-  and 0.4) or under the older `cardinality` (0.2), and sits under an
-  identity that hashed them. This release reads a rule body only in its
-  own format and only under the identity it gives it now,
-  so every such rule is inert: it derives nothing, fires at no commit,
-  and no read fails over it. Nothing is rewritten on upgrade.
-  `Branch::upgrade_rules` (or `Branch::migrate`) is what an embedder
-  runs: it rewrites each rule whose attributes read under `last` or
-  `all` (spelled, or implied by a plain attribute) into cardinality one
-  or many, asserts it in format 4 under its identity now, and retracts
-  every rule fact the older release wrote for it. An attribute read
-  under `max`, `min` or `top` (including a listed `as` without a pick,
-  which read as `top`) is rewritten into a field with that pick over a
-  cardinality-many attribute, a `top`'s list kept in its order, best
-  first. A rule
-  over a chain of relations has no rewriting with the same meaning: it
-  is left as it is, inert, and listed in `RulesUpgraded::unmapped` with
-  why. Its author replaces it with a rule deriving one relation from
-  each, read by a field with a selective aggregator. When to run the upgrade,
-  once after a full replication or on every pull, is the embedder's
-  decision, as before.
-- The upgrade also moves a `dialog.concept/transient` marker keyed by a
-  concept's 0.3 or 0.4 identity, as it moves one keyed by its 0.2
-  identity. An application that keyed its own facts by an attribute or
-  concept identity moves them with `dialog_query::migration`.
-- An older release cannot read what this one writes: a rule body in
-  format 4 is refused by name, and a rule stored under its new identity
-  is inert there, as an older release's rules are here. A batch this
-  release encodes spells `one` and `many`, which an older release does
-  not read; this release reads the batches an older one encoded.
-- What the tree stores is unchanged: a cell's claims, and how a
-  cardinality-one write elects the claim it succeeds, are as `last`
-  left them. A write a 0.3 or 0.4 replica made under `max`, `min` or
-  `top` succeeded the claim that pick elected; those claims stay as
-  written. A field the upgrade rewrote to read with that pick's aggregator
-  reads the same claim; any other read under cardinality one returns the
-  cell's newest.
-- A rule the analysis sets aside for deciding on a cardinality-one value
-  in its own cycle stays installed and is evaluated again once the cycle
-  it closed is gone. Replicas on releases either side of this one can
-  answer a query over such a cycle differently.
 - Nothing an existing space holds changes or is read differently for the
   single-file archive: it is a new provider a space opts into. A space
   opened with `Chronicle` does not read an `fs` archive's directory of
