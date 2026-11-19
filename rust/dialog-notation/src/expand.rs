@@ -734,6 +734,12 @@ pub struct Expander {
     definitions: BTreeMap<Entity, definition::Definition>,
     /// Every namespace's bindings, and which is mine.
     spaces: Namespaces,
+    /// The canonical form of each definition this walker made, which is
+    /// what is written of it; what it runs is its working spelling.
+    canonical: BTreeMap<Entity, Syntax>,
+    /// The petnames the last document bound, and the names it took away.
+    named: Vec<definition::Binding>,
+    unnamed: Vec<definition::Binding>,
     /// The definitions the last document made, in the order made.
     made: Vec<Defined>,
     /// Whether what is installed is a definition of the core forms,
@@ -851,6 +857,73 @@ impl Expander {
         &self.made
     }
 
+    /// The petnames the last document bound in mine.
+    pub fn named(&self) -> &[definition::Binding] {
+        &self.named
+    }
+
+    /// The names the last document took away from mine, each with what
+    /// it was bound to.
+    pub fn unnamed(&self) -> &[definition::Binding] {
+        &self.unnamed
+    }
+
+    /// The canonical form of a definition: what is written of it.
+    pub(crate) fn canonical_of(&self, entity: &Entity) -> Option<Syntax> {
+        self.canonical
+            .get(entity)
+            .cloned()
+            .or_else(|| self.definitions.get(entity).map(|kept| kept.form.clone()))
+    }
+
+    /// `(name cdata did:key:…)` binds the petname `cdata` in mine to that
+    /// namespace; `(unname todo)` takes `todo` away from mine, leaving
+    /// what it was bound to. `None` for any other tree.
+    fn naming(&mut self, tree: &Syntax) -> Result<Option<()>, Error> {
+        match (tree.applies(), items(tree)) {
+            (
+                Some("name"),
+                [
+                    Syntax::Reference(petname),
+                    Syntax::Constant(Value::Entity(namespace)),
+                ],
+            ) if Kind::of(petname) == Kind::Name && !definition::qualified(petname) => {
+                let binding = definition::Binding {
+                    namespace: self.spaces.mine().clone(),
+                    key: petname.clone(),
+                    referent: namespace.clone(),
+                };
+                self.spaces.bind_here(binding.clone());
+                self.named.push(binding);
+                self.declared += 1;
+                Ok(Some(()))
+            }
+            (Some("name"), _) => Err(Error::Refused(format!(
+                "{tree}: a petname is a name and a namespace, `(name cdata did:key:z6Mk…)`"
+            ))),
+            (Some("unname"), [Syntax::Reference(name)]) if !definition::qualified(name) => {
+                let mine = self.spaces.mine().clone();
+                let referent = self
+                    .spaces
+                    .get(&mine, name)
+                    .cloned()
+                    .ok_or_else(|| Error::Unknown(name.clone()))?;
+                self.spaces.unbind(&mine, name);
+                self.unnamed.push(definition::Binding {
+                    namespace: mine,
+                    key: name.clone(),
+                    referent,
+                });
+                self.declared += 1;
+                Ok(Some(()))
+            }
+            (Some("unname"), _) => Err(Error::Refused(format!(
+                "{tree}: a name of mine is taken away by itself, `(unname todo)`"
+            ))),
+            _ => Ok(None),
+        }
+    }
+
     /// Take in definitions and bindings kept elsewhere, as a branch keeps
     /// them: each definition a name of some namespace is bound to stands
     /// under that name, as it was kept. Nothing is analyzed again.
@@ -928,12 +1001,14 @@ impl Expander {
         self.asked.clear();
         self.origin.clear();
         self.made.clear();
+        self.named.clear();
+        self.unnamed.clear();
         self.document = trees.clone();
         // The order of a document's forms does not matter. What declares
         // a name, a concept or a rule about syntax, is expanded before
         // anything that may use it.
         let declares = |tree: &Syntax| match tree.applies() {
-            Some("concept" | "query") => true,
+            Some("concept" | "query" | "name" | "unname") => true,
             Some("rule") => items(tree)
                 .first()
                 .and_then(Syntax::applies)
@@ -1007,6 +1082,9 @@ impl Expander {
         // definition's each time.
         if let Err((part, error)) = valid(tree) {
             return self.about(&part, |_| Err(error));
+        }
+        if self.naming(tree)?.is_some() {
+            return Ok(());
         }
         if let Some(rules) = self.query_forms(tree)? {
             kernel.extend(rules);
@@ -1346,6 +1424,7 @@ impl Expander {
         let (canonical_fixed, canonical_set) = definition::canonical(&fixed, &set)?;
         let canonical = build(&canonical_fixed, canonical_set)?;
         let kept = definition::Definition::new(kind, build(&fixed, set)?, &canonical)?;
+        self.canonical.insert(kept.entity.clone(), canonical);
         let entity = kept.entity.clone();
         let key = definition::signature(
             kind,
@@ -1370,8 +1449,18 @@ impl Expander {
         signature: String,
         references: Vec<Reference>,
     ) -> Result<(), Error> {
+        // What is written is the canonical form, so two spellings write
+        // one value; what runs here is the spelling it was written in.
+        let canonical = self
+            .canonical
+            .get(&kept.entity)
+            .cloned()
+            .unwrap_or_else(|| kept.form.clone());
         let made = Defined {
-            definition: kept.clone(),
+            definition: definition::Definition {
+                form: canonical,
+                ..kept.clone()
+            },
             name,
             signature,
             namespace: self.spaces.mine().clone(),

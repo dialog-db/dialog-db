@@ -108,18 +108,22 @@ impl $name {
             };
             return Err(anyhow::Error::new(error).context(place));
         }
+        // What the document defines and names is written with what it
+        // writes: each definition, its source map and its bindings, each
+        // petname, each name taken away, and the rule `Name` is derived by.
+        let kept = written(&checked)?;
         let diagnostics = checked.diagnostics;
         let mut transaction = self.branch.transaction();
         let mut writes = false;
-        // What the document defines is written with what it writes: each
-        // definition, its source map and its bindings, and the rule
-        // `Name` is derived by.
-        let (defined, name) = written(&checked.defined)?;
-        for statement in defined {
+        for statement in kept.asserted {
             transaction = transaction.assert(statement);
             writes = true;
         }
-        if let Some(rule) = name {
+        for statement in kept.retracted {
+            transaction = transaction.retract(statement);
+            writes = true;
+        }
+        if let Some(rule) = kept.rule {
             transaction = transaction.assert(rule);
         }
         let mut queries = Vec::new();

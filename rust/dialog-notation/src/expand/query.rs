@@ -315,24 +315,29 @@ impl Expander {
         // expands, and every query it calls is known. What is refused
         // is said of what was written.
         let outer = self.referenced.replace(Vec::new());
-        let analyzed = self.analyze_query(&name, tree);
+        let analyzed = self.analyze_query(&name, tree, false);
         let references = std::mem::replace(&mut self.referenced, outer).unwrap_or_default();
         analyzed?;
         // What is kept is the query analyzed: every reference resolved
         // and written out, every query it reaches beside it, each named
         // by its entity, and its own name `@`. Its entity is made of the
         // same, analyzed from its canonical form.
-        let (own, mut reached) = self.analyze_query(&name, tree)?;
+        let (own, mut reached) = self.analyze_query(&name, tree, false)?;
         let canonical = canonical_query(tree)?;
         // A callee is in it by its entity, which its calls name: what it
         // was kept as is no part of the caller's.
-        let (identity, _) = self.analyze_query(&name, &canonical)?;
+        let (identity, mut written) = self.analyze_query(&name, &canonical, true)?;
         reached.push(own);
         let kept = definition::Definition::new(
             DefinitionKind::Query,
             apply(REACHED, reached),
-            &apply(REACHED, vec![identity]),
+            &apply(REACHED, vec![identity.clone()]),
         )?;
+        // What is written of it is its canonical form, each callee in it
+        // as that callee is written.
+        written.push(identity);
+        self.canonical
+            .insert(kept.entity.clone(), apply(REACHED, written));
         let key = definition::signature(DefinitionKind::Query, operand.terms.keys().cloned());
         self.record(kept, name, key, references)?;
         self.declared += 1;
@@ -404,7 +409,12 @@ impl Expander {
     /// The query `name` that `tree` defines, analyzed: its own tree, its
     /// name `@` and each call naming its callee by entity, and the trees
     /// of every query it reaches, as each was kept.
-    fn analyze_query(&mut self, name: &str, tree: &Syntax) -> Result<(Syntax, Vec<Syntax>), Error> {
+    fn analyze_query(
+        &mut self,
+        name: &str,
+        tree: &Syntax,
+        canonical: bool,
+    ) -> Result<(Syntax, Vec<Syntax>), Error> {
         let [head, conditions @ ..] = items(tree) else {
             return Err(asks(tree));
         };
@@ -427,6 +437,10 @@ impl Expander {
             let (entity, kept) = self
                 .about(called, |this| this.query_named(&callee, called))?
                 .ok_or_else(|| Error::Unknown(callee.clone()))?;
+            let kept = match self.canonical_of(&entity).filter(|_| canonical) {
+                Some(form) => items(&form).to_vec(),
+                None => kept,
+            };
             if let Some(referenced) = self.referenced.as_mut() {
                 let reference = Reference {
                     name: callee.clone(),

@@ -43,6 +43,11 @@ pub struct Checked {
     /// ([`definition::statements`](crate::definition::statements)).
     /// Nothing when any part of the document is refused.
     pub defined: Vec<crate::definition::Defined>,
+    /// The petnames the document bound in mine.
+    pub named: Vec<crate::definition::Binding>,
+    /// The names the document took away from mine, each with what it
+    /// was bound to.
+    pub unnamed: Vec<crate::definition::Binding>,
     /// Everything there is to say about the document, each with where
     /// in the text it is.
     pub diagnostics: Vec<Diagnostic>,
@@ -66,6 +71,8 @@ impl Checked {
                 declaration_forms: Vec::new(),
                 written: parsed.written,
                 defined: Vec::new(),
+                named: Vec::new(),
+                unnamed: Vec::new(),
                 diagnostics: parsed.diagnostics,
             },
             parsed.trees,
@@ -148,6 +155,8 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
         checked.steps = steps;
         checked.step_forms = forms;
         checked.defined = analysis.defined;
+        checked.named = analysis.named;
+        checked.unnamed = analysis.unnamed;
         *analyzer = trial;
     }
     checked
@@ -166,6 +175,8 @@ pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
     let (mut checked, trees) = Checked::of(parse_document(text));
     let analysis = analyzer.analyze_forms(&trees);
     checked.defined = analysis.defined.clone();
+    checked.named = analysis.named.clone();
+    checked.unnamed = analysis.unnamed.clone();
     checked
         .diagnostics
         .extend(analysis.diagnostics.iter().cloned());

@@ -133,10 +133,11 @@ async fn it_writes_a_definition_its_source_map_and_its_bindings() -> Result<()> 
         .find(|kept| kept.entity == card.definition)
         .expect("the query is kept");
     assert_eq!(stored.kind, definition::Kind::Query);
-    // Kept with no name: its own is `@`, and the concept it reads is
-    // written out as the attribute it is.
+    // Kept canonical and with no name: its own is `@`, its variables
+    // named by the labelling, and the concept it reads written out as
+    // the attribute it is.
     let form = stored.form.to_string();
-    assert!(form.contains("(@ ?t is: ?card)"), "{form}");
+    assert!(form.contains("(@ ?v") && !form.contains("?card"), "{form}");
     assert!(
         !form.contains("todo/card") && !form.contains("(todo "),
         "{form}"
@@ -204,8 +205,109 @@ async fn it_keeps_one_definition_under_one_entity_on_two_branches() -> Result<()
     Ok(())
 }
 
-/// A pull brings what another branch defined, and the analyzer, told to
-/// take what the branch now keeps, answers by it.
+/// Two spellings of one definition write one value under its entity:
+/// its canonical form. Each source map keeps its own spelling.
+#[dialog_common::test]
+async fn it_writes_the_canonical_form_whatever_the_spelling() -> Result<()> {
+    let spelled = [
+        r#"(concept (todo ?t title: ?title)
+             (xyz.todo/title of: ?t is: ?title as: :text cardinality: :one))
+           (query (todo/card ?t is: ?card) (todo ?t title: ?title) (is ?card {:title ?title}))"#,
+        r#"(concept (todo ?e title: ?named)
+             (xyz.todo/title of: ?e is: ?named as: :text cardinality: :one))
+           (query (todo/card ?e is: ?made) (is ?made {:title ?named}) (todo ?e title: ?named))"#,
+    ];
+    let mut forms = Vec::new();
+    let mut written = Vec::new();
+    for text in spelled {
+        let mut notebook = Notebook::open().await?;
+        notebook.submit(text).await?;
+        let kept = Live::new(notebook.branch.clone())
+            .kept(&notebook.operator)
+            .await?;
+        let mut kept: Vec<(String, String)> = kept
+            .definitions
+            .iter()
+            .map(|kept| (kept.entity.to_string(), kept.form.to_string()))
+            .collect();
+        kept.sort();
+        forms.push(kept);
+        let checked = check(&mut Analyzer::new()?, text);
+        written.push(
+            checked
+                .defined
+                .iter()
+                .map(|made| made.source.written.to_string())
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(forms[0], forms[1]);
+    assert_ne!(written[0], written[1], "each source map keeps its spelling");
+    assert!(written[1][0].contains("?named"), "{:?}", written[1]);
+    Ok(())
+}
+
+/// `(name cdata did:…)` binds a petname in mine, and `@cdata/…` walks
+/// through it; `(unname todo)` takes `todo` away from mine, which is then
+/// refused as unknown, and its definition stays kept.
+#[dialog_common::test]
+async fn it_binds_a_petname_and_takes_a_name_away() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook.submit(DOCUMENT).await?;
+    let made = theirs(&mut notebook).await?;
+    let mine = notebook.analyzer().namespaces().mine().clone();
+    notebook
+        .submit(&format!("(name ours {})", made.namespace))
+        .await?;
+    let live = Live::new(notebook.branch.clone());
+    let kept = live.kept(&notebook.operator).await?;
+    assert!(kept.bindings.contains(&Binding {
+        namespace: mine.clone(),
+        key: "ours".into(),
+        referent: made.namespace.clone(),
+    }));
+    notebook
+        .submit(r#"(assert (@ours/chore task:3 title: "Ours"))"#)
+        .await?;
+    assert_eq!(
+        notebook
+            .submit("(select (abc.task task:3 name: ?x))")
+            .await?
+            .0,
+        vec![r#"(abc.task task:3 name: "Ours")"#]
+    );
+
+    let card = kept
+        .bindings
+        .iter()
+        .find(|binding| binding.namespace == mine && binding.key == "todo/card")
+        .cloned()
+        .expect("todo/card is bound");
+    notebook.submit("(unname todo/card)").await?;
+    let after = live.kept(&notebook.operator).await?;
+    assert!(!after.bindings.contains(&card), "the binding is retracted");
+    assert_eq!(after.definitions, kept.definitions, "the definitions stay");
+    let refused = notebook
+        .submit(ASKED[0])
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("applies no relation")),
+        "{refused:?}"
+    );
+    let unknown = notebook
+        .submit("(unname nonesuch)")
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&unknown, Err(Ok(Error::Unknown(_)))),
+        "{unknown:?}"
+    );
+    Ok(())
+}
+
+/// A pull brings what another branch defined, and the analyzer, which
+/// reads what each document reaches, answers by it with no refresh.
 #[dialog_common::test]
 async fn it_sees_a_definition_a_pull_brought() -> Result<()> {
     let mut main = Notebook::open().await?;

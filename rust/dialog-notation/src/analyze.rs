@@ -36,6 +36,11 @@ pub struct Analysis {
     /// and signature it is bound under in mine and its source map: what
     /// is written to a branch for it. None when any tree is refused.
     pub defined: Vec<Defined>,
+    /// The petnames the document bound in mine, `(name cdata did:…)`.
+    pub named: Vec<Binding>,
+    /// The names the document took away from mine, `(unname todo)`,
+    /// each with what it was bound to.
+    pub unnamed: Vec<Binding>,
 }
 
 impl Analysis {
@@ -77,12 +82,16 @@ impl Analyzer {
             origin: trial.origin().to_vec(),
             diagnostics,
             defined: trial.defined().to_vec(),
+            named: trial.named().to_vec(),
+            unnamed: trial.unnamed().to_vec(),
         };
         if analysis.refusals().next().is_some() {
             return Analysis {
                 analyzed: Vec::new(),
                 origin: Vec::new(),
                 defined: Vec::new(),
+                named: Vec::new(),
+                unnamed: Vec::new(),
                 ..analysis
             };
         }
@@ -102,6 +111,8 @@ impl Analyzer {
             origin: self.expander.origin().to_vec(),
             diagnostics,
             defined: self.expander.defined().to_vec(),
+            named: self.expander.named().to_vec(),
+            unnamed: self.expander.unnamed().to_vec(),
         }
     }
 

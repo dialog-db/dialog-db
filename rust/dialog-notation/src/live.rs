@@ -55,7 +55,7 @@ use dialog_search_tree::nodes;
 
 use crate::analyze::Analyzer;
 use crate::check::{Checked, check};
-use crate::definition::{self, Binding, Defined, Definition, Kind as DefinitionKind, Want};
+use crate::definition::{self, Binding, Definition, Kind as DefinitionKind, Want};
 use crate::select::Selection;
 use crate::syntax::Syntax;
 use crate::view::plan::{FoldedCount, Plan};
@@ -113,23 +113,40 @@ pub struct Kept {
     pub bindings: Vec<Binding>,
 }
 
-/// What a document's definitions write to a branch: for each, the
-/// definition, its source map and its two bindings
-/// ([`definition::statements`]); and the rule `Name` is derived by,
-/// which a branch keeps once however often it is written.
-pub fn written(
-    defined: &[Defined],
-) -> Result<(Vec<ConceptStatement>, Option<DeductiveRule>), Error> {
-    let mut statements = Vec::new();
-    for made in defined {
-        statements.extend(definition::statements(made)?);
+/// What a document writes to a branch for its definitions and names.
+#[derive(Debug, Default)]
+pub struct Written {
+    /// Asserted: each definition, its source map and its two bindings
+    /// ([`definition::statements`]), and each petname bound.
+    pub asserted: Vec<ConceptStatement>,
+    /// Retracted: the binding of each name taken away. What it was bound
+    /// to stays.
+    pub retracted: Vec<ConceptStatement>,
+    /// The rule `Name` is derived by, which a branch keeps once however
+    /// often it is written; none where the document defines nothing.
+    pub rule: Option<DeductiveRule>,
+}
+
+/// What `checked` writes to a branch beside its steps.
+pub fn written(checked: &Checked) -> Result<Written, Error> {
+    let mut written = Written::default();
+    for made in &checked.defined {
+        written.asserted.extend(definition::statements(made)?);
     }
-    let rule = if defined.is_empty() {
-        None
-    } else {
-        Some(name_rule()?)
-    };
-    Ok((statements, rule))
+    for binding in &checked.named {
+        written
+            .asserted
+            .push(definition::binding_statement(binding)?);
+    }
+    for binding in &checked.unnamed {
+        written
+            .retracted
+            .push(definition::unbinding_statement(binding)?);
+    }
+    if !checked.defined.is_empty() {
+        written.rule = Some(name_rule()?);
+    }
+    Ok(written)
 }
 
 /// The rule `Name` is derived by ([`definition::NAME_RULE`]), compiled.
