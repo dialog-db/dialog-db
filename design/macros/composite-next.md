@@ -93,3 +93,20 @@ The agent's reading of what depends on what:
 | a syntax tree's sequence is a list of one kind, syntax nodes, though the nodes are of several shapes | fact | `syntax.rs` `Parameters.items`, `Tuple` |
 
 To measure before 4: how many fields, how many bytes and how deep the composites of the sketches' syntax trees are; whether the analyzer and the patterns reach a field by its key or walk the whole; and what a scan costs against a table of offsets at those sizes.
+
+## 2026-11-20, decided: lists are in, and the composite is built before anything stands on dag-cbor
+
+**The maintainer:** lists are in, and an agent pursues the composite so that it is what is used, in place of going with CBOR first and replacing it.
+
+What the agent takes as the brief, each its own to be overruled:
+
+| | chosen | why |
+|---|---|---|
+| a composite is a value | replaced whole, never edited in place | he took lists after the argument that fractional indexes, a HAMT and a tree answer a place and not a value; not said in so many words |
+| kinds | a map of arbitrary keys; a record its sub-band, every key an attribute; a list, a kind of its own | the map and the record are his. The list as a sub-band of the map was offered and not taken up, and a list apart is what every data model read does and what the merkle reference already has |
+| a key of a map | any value, text the usual one; canonical order by the key's bytes | "arbitrary keys" |
+| identity | the merkle reference: a map of key to reference, a list of references | his |
+| bytes | canonical, as #812 has them, so that a composite can be a key of the tree; offsets and views by what the sizes measured ask for | identity apart from bytes makes this reversible |
+| where | a new branch on #812's head, for a pull request against main that takes #812's place | #812 belongs to another session, idle |
+
+Then, in order: the patterns (#778) moved onto it, and the notation.
