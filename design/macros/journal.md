@@ -1766,3 +1766,12 @@ Restating the table's views turned up what a directory is: a query whose head ha
 **Learned.** The layered maintainer needed little: a query's markup is one template once each query it collects is put in its place, and each query's required conditions are a layer. What the old plan worked out by rule, which element takes which condition, the query now says. Three things needed a rule of the agent's: what tells an answer from another (its head, a hypothesis), a count (a layer counted and not shown), and a layer that reads with `_` (it takes the conditions above it). An index stands as one container, where tonk's notebook directory was one a notebook.
 
 **Decided.** The maintainer's, from the brief: the view form goes, and the views are restated as the note writes them. The agent's: the rules above, refusing a required call in markup, and taking the view forms out of `notebook.clj` and `table.clj` so the measures read the views' files.
+
+## 2026-11-18, Building: what it costs is not known
+
+**Asked.** The maintainer, on the stage 2 report: several of these sound serious, cost above all, and if it cannot be lightning fast it will not fly. On rows of one head: aggregation makes more sense to him than several rows, though he was not sure he had the issue.
+
+**Learned.** Nothing about cost is measured. The report's account of it (a layer is read again when a change touches it, and a layer joined to it too) is a reading of the code. The hypothesis and its bars are in the ledger, written before any number: one change costs the same at 10, 100 and 1000.
+
+**Decided.** Not decided. The agent's: measure before anything is made faster or built further on it.
+
