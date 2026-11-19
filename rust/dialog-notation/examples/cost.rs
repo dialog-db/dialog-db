@@ -63,17 +63,17 @@ const QUERIES: &str = r#"
       (view ?chip [:span {:class "tag"} ?g]))
     (query (todo/row ?t list: ?l is: ?row)
       (todo ?t list: ?l title: ?title)
-      (todo/chip ?t is: (collect ?chips))
+      (todo/chip ?t is: (distinct ?chips))
       (view ?row [:li ?title ?chips]))
     (query (list/card ?l is: ?card)
       (list ?l name: ?name)
-      (todo (collect ?open) list: ?l state: :open)
-      (todo/row _ list: ?l is: (collect ?rows))
+      (todo (distinct ?open) list: ?l state: :open)
+      (todo/row _ list: ?l is: (distinct ?rows))
       (is ?count (count ?open))
       (view ?card [:article [:h2 ?name] [:p ?count " open"] [:ul ?rows]]))
     (query (todo/card ?t is: ?card)
       (todo ?t title: ?title)
-      (todo/tag ?t tag: (collect ?tags))
+      (todo/tag ?t tag: (distinct ?tags))
       (is ?card {:title ?title :tags ?tags}))"#;
 
 /// The seed: one list of `n` to-dos, each open, each with two tags.

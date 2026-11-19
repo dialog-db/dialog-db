@@ -6,7 +6,7 @@
 //! `(is ?x shape)` for what a variable is. A condition is one of:
 //!
 //! - a read or a call of another query, which every answer needs;
-//! - a read or a call with `(collect ?x)` for one of its terms, which
+//! - a read or a call with `(distinct ?x)` for one of its terms, which
 //!   binds `?x` to the whole of that term, `{}` for none, and never
 //!   keeps a row from being an answer.
 //!
@@ -22,12 +22,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Error;
 use crate::form::Kind;
-use crate::select::{COLLECT, COUNT, PART, ROW, ROW_FIELD, SELECTED, collected, unknown_function};
+use crate::select::{
+    COLLECT, COUNT, DISTINCT, PART, ROW, ROW_FIELD, SELECTED, collected, unknown_function,
+};
 use crate::syntax::{Parameters, Syntax};
 
 use super::{Expander, apply, items};
 
-/// Where in a condition its `(collect ?x)` stands.
+/// Where in a condition its `(distinct ?x)` stands.
 #[derive(Clone, Debug)]
 enum Place {
     /// The part with no label at this index: the entity.
@@ -63,30 +65,50 @@ struct Body {
 /// of their row.
 const ROW_ENTITY: &str = "query-row";
 
-/// Every `(collect …)` in a tree, wherever it stands.
+/// Every `(distinct …)` in a tree, wherever it stands.
 fn collects_in(tree: &Syntax) -> Vec<&Syntax> {
+    applications_of(tree, DISTINCT)
+}
+
+/// Every application of `word` in a tree, wherever it stands.
+fn applications_of<'a>(tree: &'a Syntax, word: &str) -> Vec<&'a Syntax> {
     let mut found = Vec::new();
-    fn walk<'a>(tree: &'a Syntax, found: &mut Vec<&'a Syntax>) {
-        if tree.applies() == Some(COLLECT) {
+    fn walk<'a>(tree: &'a Syntax, word: &str, found: &mut Vec<&'a Syntax>) {
+        if tree.applies() == Some(word) {
             found.push(tree);
             return;
         }
         match tree {
             Syntax::Application(operator, operand) => {
-                walk(operator, found);
-                operand.items.iter().for_each(|item| walk(item, found));
-                operand.terms.values().for_each(|term| walk(term, found));
+                walk(operator, word, found);
+                operand
+                    .items
+                    .iter()
+                    .for_each(|item| walk(item, word, found));
+                operand
+                    .terms
+                    .values()
+                    .for_each(|term| walk(term, word, found));
             }
             Syntax::Map(entries) => entries.iter().for_each(|(key, value)| {
-                walk(key, found);
-                walk(value, found);
+                walk(key, word, found);
+                walk(value, word, found);
             }),
-            Syntax::Tuple(items) => items.iter().for_each(|item| walk(item, found)),
+            Syntax::Tuple(items) => items.iter().for_each(|item| walk(item, word, found)),
             _ => {}
         }
     }
-    walk(tree, &mut found);
+    walk(tree, word, &mut found);
     found
+}
+
+/// What `(collect ?x)` is refused with: the word is `distinct`.
+fn collect_refused(found: &Syntax) -> Error {
+    Error::Refused(format!(
+        "{found}: the whole of a field is written `(distinct ?x)`, not `collect`: \
+         `(todo/tag ?t tag: (distinct ?tags))` gives the set of its values, and of a keyed \
+         field the set of its entries, which `{{... ?entries}}` pours into one map"
+    ))
 }
 
 /// Every variable of `trees`, each once, in the order they first stand.
@@ -142,9 +164,17 @@ fn asks(tree: &Syntax) -> Error {
 
 impl Expander {
     /// What the forms of the query layer are: a definition kept, a
-    /// question of a query analyzed, and the refusals of `collect`
+    /// question of a query analyzed, and the refusals of `distinct`
     /// and of a query read where rows are. `None` for any other tree.
     pub(super) fn query_forms(&mut self, tree: &Syntax) -> Result<Option<Vec<Syntax>>, Error> {
+        if matches!(
+            tree.applies(),
+            Some("query" | "select" | "rule" | "concept" | "assert" | "retract")
+        ) && let Some(found) = applications_of(tree, COLLECT).first()
+        {
+            let found = (*found).clone();
+            return self.about(&found, |_| Err(collect_refused(&found)));
+        }
         match tree.applies() {
             Some("query") => {
                 self.define(tree)?;
@@ -157,7 +187,7 @@ impl Expander {
                         Err(Error::Refused(format!(
                             "{found} stands in what is asked: the whole of a field is collected \
                              in a query's body, `(query (todo/card ?t is: ?card) … (todo/tag ?t \
-                             tag: (collect ?tags)) …)`, and the query is asked"
+                             tag: (distinct ?tags)) …)`, and the query is asked"
                         )))
                     });
                 }
@@ -189,7 +219,7 @@ impl Expander {
             Some("view") => Err(Error::Refused(format!(
                 "{tree}: a view is a query whose answer is markup, `(query (todo/row ?t is: \
                  ?row) (todo ?t title: ?title) (view ?row [:li ?title]))`, and a view in a \
-                 template is a query collected, `(todo/chip ?t is: (collect ?chips))`"
+                 template is a query collected, `(todo/chip ?t is: (distinct ?chips))`"
             ))),
             Some(word @ ("rule" | "concept" | "assert" | "retract")) => {
                 let word = word.to_string();
@@ -218,7 +248,7 @@ impl Expander {
                     };
                     return self.about(&found, |_| {
                         Err(Error::Refused(format!(
-                            "{found} stands in a {word}, and collect stands only in a query: \
+                            "{found} stands in a {word}, and distinct stands only in a query: \
                              {why}"
                         )))
                     });
@@ -389,8 +419,8 @@ impl Expander {
         let all = collects_in(condition);
         if all.len() > places.len() {
             return Err(Error::Refused(format!(
-                "{} stands inside a term: collect is a term of a read, `(todo/tag ?t tag: \
-                 (collect ?tags))`",
+                "{} stands inside a term: distinct is a term of a read, `(todo/tag ?t tag: \
+                 (distinct ?tags))`",
                 all[0]
             )));
         }
@@ -650,7 +680,7 @@ impl Expander {
             if self.missing(collect, &body) {
                 let source = self.about(&collect.condition, |this| this.source(collect))?;
                 parts.push(apply(
-                    COLLECT,
+                    DISTINCT,
                     vec![
                         Syntax::Variable(collect.target.clone()),
                         Syntax::Blank,
@@ -676,11 +706,11 @@ impl Expander {
             };
             let item = if keyed {
                 Syntax::Map(vec![(
-                    Syntax::Variable(format!("collect-{index}-key")),
-                    Syntax::Variable(format!("collect-{index}-value")),
+                    Syntax::Variable(format!("distinct-{index}-key")),
+                    Syntax::Variable(format!("distinct-{index}-value")),
                 )])
             } else {
-                Syntax::Variable(format!("collect-{index}"))
+                Syntax::Variable(format!("distinct-{index}"))
             };
             let condition = replaced(&collect.condition, &collect.place, item.clone());
             let source = if collect.call {
@@ -702,7 +732,7 @@ impl Expander {
                 apply("rows", rows)
             };
             parts.push(apply(
-                COLLECT,
+                DISTINCT,
                 vec![Syntax::Variable(collect.target.clone()), item, source],
             ));
         }

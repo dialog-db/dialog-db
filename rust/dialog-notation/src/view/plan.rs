@@ -5,7 +5,7 @@
 //! The query's required conditions are the root's layer, and its
 //! instances are told apart by the query's entity, or stand once for a
 //! query of no entity. A query it collects into its markup,
-//! `(todo/chip ?t is: (collect ?chips))` put where `?chips` stands, is
+//! `(todo/chip ?t is: (distinct ?chips))` put where `?chips` stands, is
 //! that query's template put in its place, its variables named apart, and
 //! its required conditions a layer of their own under the element it
 //! stands in. Its instances are told apart by its head: the terms of the
@@ -32,7 +32,7 @@ use dialog_query::ConceptConclusion;
 
 use crate::Error;
 use crate::compile::{Query, Step, compile};
-use crate::select::{COLLECT, COUNT, Folded, ROW, SELECTED, Selection};
+use crate::select::{COUNT, DISTINCT, Folded, ROW, SELECTED, Selection};
 use crate::syntax::{Parameters, Syntax};
 use crate::view::{Attribute, Element, Input, Node, Piece};
 
@@ -344,7 +344,7 @@ impl Defined {
             match (part.applies(), items(part)) {
                 (Some("required"), [_, rules @ ..]) => defined.required = premises(rules)?,
                 (Some("call"), [call]) => defined.calls.push(call.clone()),
-                (Some(COLLECT), [Syntax::Variable(target), item, source]) => {
+                (Some(DISTINCT), [Syntax::Variable(target), item, source]) => {
                     let from = match (source.applies(), items(source)) {
                         (Some("rows"), [_, rules @ ..]) => From::Rows(premises(rules)?),
                         (Some("call"), [call]) => From::Call(call.clone()),
@@ -499,7 +499,7 @@ impl Builder<'_> {
         if !defined.calls.is_empty() {
             return Err(Error::Unsupported(format!(
                 "the query {name} calls another query that every answer needs: a view of one is \
-                 not built yet; collect it, or read what it reads"
+                 not built yet; take its whole with `(distinct ?x)`, or read what it reads"
             )));
         }
         let rename = |tree: &Syntax| renamed(tree, prefix, given);
@@ -1276,7 +1276,7 @@ fn folding(
     for part in parts {
         let keep = match (part.applies(), items(part)) {
             (Some("required"), _) => true,
-            (Some(COLLECT), [Syntax::Variable(target), _, source]) => {
+            (Some(DISTINCT), [Syntax::Variable(target), _, source]) => {
                 wholes.contains(target) && source.applies() == Some("rows")
             }
             _ => false,

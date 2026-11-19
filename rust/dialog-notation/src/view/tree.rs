@@ -1038,7 +1038,7 @@ mod tests {
               (view ?item [:li ?title]))
             (query (list/card ?l is: ?card)
               (list ?l name: ?name)
-              (todo/item _ list: ?l is: (collect ?items))
+              (todo/item _ list: ?l is: (distinct ?items))
               (view ?card [:article [:h2 ?name] [:ul ?items]]))
             (select (list/card ?l is: ?card))"#;
         let analysis = Analyzer::new().unwrap().analyze(&parse(document).unwrap());

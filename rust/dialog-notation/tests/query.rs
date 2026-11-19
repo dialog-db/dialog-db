@@ -1,8 +1,9 @@
 //! Queries, the second layer, asked on a real branch.
 //!
 //! A query reads rows from concepts and rules, nests, and collects: the
-//! whole of a field is `(collect ?x)` on the term of a read, one row with
-//! a map, `{}` for none. Asking is `(select …)`. Each test is a claim of
+//! whole of a field is `(distinct ?x)` on the term of a read, one row with
+//! a set, of its values or of its entries, `{}` for none; `{... ?x}` pours
+//! a set of entries into a map. Asking is `(select …)`. Each test is a claim of
 //! design/macros/design-queries.md, with the answers its tables give.
 
 #![allow(deprecated)]
@@ -50,7 +51,7 @@ const TODOS: &str = r#"
 const CARD: &str = r#"
     (query (todo/card ?t is: ?card)
       (todo ?t title: ?title)
-      (todo/tag ?t tag: (collect ?tags))
+      (todo/tag ?t tag: (distinct ?tags))
       (is ?card {:title ?title :tags ?tags}))
 "#;
 
@@ -137,7 +138,7 @@ fn it_asks_dialog_db_to_fold_a_collected_read() -> Result<()> {
     );
     let outline = "(query (notebook/outline ?n is: ?outline)
            (notebook/named ?n title: ?title)
-           (notebook/blocks ?n block: (collect ?blocks))
+           (notebook/blocks ?n block: (distinct ?blocks))
            (is ?outline {:title ?title :blocks ?blocks}))
          (select (notebook/outline ?n is: ?outline))";
     assert_eq!(folds(&format!("{NOTEBOOK}{outline}"))?, 1);
@@ -343,7 +344,7 @@ async fn it_counts_what_was_collected() -> Result<()> {
         .submit(
             "(query (todo/counted ?t is: ?card)
                (todo ?t title: ?title)
-               (todo/tag ?t tag: (collect ?tags))
+               (todo/tag ?t tag: (distinct ?tags))
                (is ?card {:title ?title :tags (count ?tags)}))",
         )
         .await?;
@@ -358,7 +359,7 @@ async fn it_counts_what_was_collected() -> Result<()> {
         &mut notebook,
         "(query (todo/summed ?t is: ?n)
            (todo ?t title: ?title)
-           (todo/tag ?t tag: (collect ?tags))
+           (todo/tag ?t tag: (distinct ?tags))
            (is ?n (sum ?tags)))",
     )
     .await;
@@ -395,17 +396,41 @@ async fn notebooks() -> Result<Notebook> {
     Ok(notebook)
 }
 
-/// The whole of a keyed collection is a map of key to value, and `{}`
-/// for a notebook with no block.
+/// The whole of a keyed collection is the set of its entries, each a map
+/// of one key, and `{}` for a notebook with no block.
 #[dialog_common::test]
-async fn it_collects_a_keyed_collection_as_a_map() -> Result<()> {
+async fn it_gives_the_entries_of_a_keyed_field_as_a_set() -> Result<()> {
+    let mut notebook = notebooks().await?;
+    notebook
+        .submit(
+            "(query (notebook/entries ?n is: ?outline)
+               (notebook/named ?n title: ?title)
+               (notebook/blocks ?n block: (distinct ?entries))
+               (is ?outline {:title ?title :entries ?entries}))",
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(select (notebook/entries ?n is: ?outline))").await?,
+        vec![
+            r#"(notebook/entries notebook:1 is: {:title "Field notes" :entries {: {"N1" block:a} : {"N2" block:b} : {"N3" block:c}}})"#,
+            r#"(notebook/entries notebook:2 is: {:title "Untitled" :entries {}})"#,
+        ]
+    );
+    Ok(())
+}
+
+/// A map is built where the answer is: `{... ?entries}` pours a set of
+/// entries into one map, of key to value, `{}` for a notebook with no
+/// block.
+#[dialog_common::test]
+async fn it_builds_a_map_from_a_set_of_entries_by_a_spread() -> Result<()> {
     let mut notebook = notebooks().await?;
     notebook
         .submit(
             "(query (notebook/outline ?n is: ?outline)
                (notebook/named ?n title: ?title)
-               (notebook/blocks ?n block: (collect ?blocks))
-               (is ?outline {:title ?title :blocks ?blocks}))",
+               (notebook/blocks ?n block: (distinct ?entries))
+               (is ?outline {:title ?title :blocks {... ?entries}}))",
         )
         .await?;
     assert_eq!(
@@ -418,11 +443,68 @@ async fn it_collects_a_keyed_collection_as_a_map() -> Result<()> {
     Ok(())
 }
 
-/// The outline: a notebook's title and the whole of its blocks, a map.
+/// A spread of a set of values copies the set, a spread beside a written
+/// entry pours in after it, and a spread of what is not a collection, or
+/// one that would mix a set's members with a map's entries, is refused.
+#[dialog_common::test]
+async fn it_copies_a_set_of_values_by_a_spread() -> Result<()> {
+    let mut notebook = todos().await?;
+    notebook
+        .submit(
+            "(query (todo/copied ?t is: ?card)
+               (todo ?t title: ?title)
+               (todo/tag ?t tag: (distinct ?tags))
+               (is ?card {:title ?title :tags {... ?tags}}))",
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(select (todo/copied ?t is: ?card))").await?,
+        vec![
+            r#"(todo/copied todo:1 is: {:title "Buy milk" :tags {: "errand" : "home"}})"#,
+            r#"(todo/copied todo:2 is: {:title "Call mum" :tags {}})"#,
+        ]
+    );
+    notebook
+        .submit(
+            "(query (todo/mixed ?t is: ?card)
+               (todo ?t title: ?title)
+               (todo/tag ?t tag: (distinct ?tags))
+               (is ?card {:title ?title ... ?tags}))",
+        )
+        .await?;
+    let mixed = notebook
+        .submit("(select (todo/mixed todo:1 is: ?card))")
+        .await
+        .expect_err("a set's members beside a map's entries");
+    assert!(
+        matches!(mixed.downcast_ref::<Error>(), Some(Error::Refused(why)) if why.contains("both")),
+        "{mixed:?}"
+    );
+    notebook
+        .submit(
+            "(query (todo/spread ?t is: ?card)
+               (todo ?t title: ?title)
+               (is ?card {... ?title}))",
+        )
+        .await?;
+    let plain = notebook
+        .submit("(select (todo/spread todo:1 is: ?card))")
+        .await
+        .expect_err("a title is no collection");
+    assert!(
+        matches!(plain.downcast_ref::<Error>(), Some(Error::Refused(why))
+            if why.contains("a spread pours one")),
+        "{plain:?}"
+    );
+    Ok(())
+}
+
+/// The outline: a notebook's title, its blocks a map built from the set
+/// of its entries, and how many entries there are.
 const OUTLINE: &str = "(query (notebook/outline ?n is: ?outline)
        (notebook/named ?n title: ?title)
-       (notebook/blocks ?n block: (collect ?blocks))
-       (is ?outline {:title ?title :blocks ?blocks :count (count ?blocks)}))";
+       (notebook/blocks ?n block: (distinct ?blocks))
+       (is ?outline {:title ?title :blocks {... ?blocks} :count (count ?blocks)}))";
 
 /// The answers of a selection, its rows asked once and its folds kept
 /// standing: each fold polled after its rules are laid, its rows those a
@@ -471,9 +553,10 @@ async fn standing(
 
 /// A collected entry `{?k ?v}` is folded by Dialog-DB as the record of
 /// the row it was read from, so its key stays beside its value: two
-/// blocks of one source under two keys are two entries, and two blocks
-/// under one key are one, the first in the order of their values, as
-/// what is put together in memory keeps. It is counted by its keys.
+/// blocks of one source under two keys are two entries. Two blocks under
+/// one key are two entries of the set, and the spread keeps one of them
+/// in the map, the first in the order of their values, as what is put
+/// together in memory keeps. The set is counted by its entries.
 #[dialog_common::test]
 async fn it_folds_a_collected_entry_keeping_its_key_beside_its_value() -> Result<()> {
     let mut notebook = notebooks().await?;
@@ -495,13 +578,64 @@ async fn it_folds_a_collected_entry_keeping_its_key_beside_its_value() -> Result
         r#"(notebook/outline notebook:1 is: {:title "Field notes" :blocks {"N1" block:a "N2" block:b "N3" block:c} :count 3})"#,
         r#"(notebook/outline notebook:2 is: {:title "Untitled" :blocks {} :count 0})"#,
         r#"(notebook/outline notebook:3 is: {:title "Shared" :blocks {"N1" block:a "N2" block:a} :count 2})"#,
-        r#"(notebook/outline notebook:4 is: {:title "Keyed" :blocks {"N1" block:a} :count 1})"#,
+        r#"(notebook/outline notebook:4 is: {:title "Keyed" :blocks {"N1" block:a} :count 2})"#,
     ];
     assert_eq!(standing(&notebook, &selection).await?, expected);
     notebook.submit(OUTLINE).await?;
     assert_eq!(
         report(&mut notebook, "(select (notebook/outline ?n is: ?outline))").await?,
         expected
+    );
+    Ok(())
+}
+
+/// The outline kept standing by the driver, `Live::standing`: its map
+/// built by a spread of the set Dialog-DB folds is, after each write, the
+/// map a select gives then, an entry added and an entry removed, and the
+/// last removed leaves `{}`.
+#[dialog_common::test]
+async fn it_keeps_a_map_built_by_a_spread_standing() -> Result<()> {
+    let mut notebook = notebooks().await?;
+    notebook.submit(OUTLINE).await?;
+    let selection = selection(&format!(
+        "{NOTEBOOK}{OUTLINE}(select (notebook/outline ?n is: ?outline))"
+    ))?;
+    let live = dialog_notation::live::Live::new(notebook.branch.clone());
+    let mut standing = live.standing(selection)?;
+    assert_eq!(standing.folds().len(), 1, "the blocks are folded");
+    let answers = |answers: Vec<dialog_notation::Syntax>| -> Vec<String> {
+        answers.iter().map(ToString::to_string).collect()
+    };
+    let first = standing
+        .poll(&notebook.operator)
+        .await?
+        .expect("the first poll answers");
+    assert_eq!(
+        answers(first),
+        report(&mut notebook, "(select (notebook/outline ?n is: ?outline))").await?
+    );
+    for change in [
+        r#"(assert (notebook/blocks notebook:2 block: {"N1" block:d}))"#,
+        r#"(retract (notebook/blocks notebook:1 block: {"N2" block:b}))"#,
+        r#"(retract (notebook/blocks notebook:2 block: {"N1" block:d}))"#,
+    ] {
+        notebook.submit(change).await?;
+        let now = standing
+            .poll(&notebook.operator)
+            .await?
+            .expect("an outline moved");
+        assert_eq!(
+            answers(now),
+            report(&mut notebook, "(select (notebook/outline ?n is: ?outline))").await?,
+            "after {change}"
+        );
+    }
+    assert_eq!(
+        report(&mut notebook, "(select (notebook/outline ?n is: ?outline))").await?,
+        vec![
+            r#"(notebook/outline notebook:1 is: {:title "Field notes" :blocks {"N1" block:a "N3" block:c} :count 2})"#,
+            r#"(notebook/outline notebook:2 is: {:title "Untitled" :blocks {} :count 0})"#,
+        ]
     );
     Ok(())
 }
@@ -518,7 +652,7 @@ const LABELLED: &str = r#"
       (xyz.item/source of: ?t is: ?s as: :text cardinality: :one))
     (query (item/card ?t is: ?card)
       (item ?t title: ?title)
-      (item/tag ?t tag: (collect ?tags) ...)
+      (item/tag ?t tag: (distinct ?tags) ...)
       (is ?card {:title ?title :tags ?tags}))"#;
 
 /// A collected read through two definitions is one query: each
@@ -566,7 +700,7 @@ fn it_puts_a_collected_call_together_in_memory() -> Result<()> {
            (is ?chip {:tag ?g}))
          (query (todo/chips ?t is: ?card)
            (todo ?t title: ?title)
-           (todo/chip ?t is: (collect ?chips))
+           (todo/chip ?t is: (distinct ?chips))
            (is ?card {:title ?title :chips ?chips}))
          (select (todo/chips ?t is: ?card))";
     assert_eq!(folds(&format!("{TODOS}{chips}"))?, 0);
@@ -587,7 +721,7 @@ async fn it_puts_a_read_grouped_beside_its_entity_together_in_memory() -> Result
         (query (todo/day ?t is: ?card)
           (todo ?t title: ?title)
           (todo/note ?t day: ?d)
-          (todo/note ?t day: ?d text: (collect ?texts))
+          (todo/note ?t day: ?d text: (distinct ?texts))
           (is ?card {:title ?title :day ?d :texts ?texts}))"#;
     assert_eq!(
         folds(&format!("{TODOS}{noted}(select (todo/day ?t is: ?card))"))?,
@@ -605,9 +739,10 @@ async fn it_puts_a_read_grouped_beside_its_entity_together_in_memory() -> Result
     Ok(())
 }
 
-/// A query whose answer is an entry, collected by another, gives a map
-/// again: each block's source by its position. A block with no source is
-/// no answer of the item, so it is absent from the map.
+/// A query whose answer is an entry, collected by another, gives a set
+/// of entries again, and a spread a map: each block's source by its
+/// position. A block with no source is no answer of the item, so it is
+/// absent from the map.
 #[dialog_common::test]
 async fn it_collects_a_query_whose_answer_is_an_entry_as_a_map() -> Result<()> {
     let mut notebook = notebooks().await?;
@@ -618,8 +753,8 @@ async fn it_collects_a_query_whose_answer_is_an_entry_as_a_map() -> Result<()> {
                (notebook/block ?b source: ?s))
              (query (notebook/outline ?n is: ?outline)
                (notebook/named ?n title: ?title)
-               (notebook/source ?n is: (collect ?sources))
-               (is ?outline {:title ?title :blocks ?sources}))",
+               (notebook/source ?n is: (distinct ?sources))
+               (is ?outline {:title ?title :blocks {... ?sources}}))",
         )
         .await?;
     assert_eq!(
@@ -639,7 +774,7 @@ async fn it_collects_a_query_whose_answer_is_an_entry_as_a_map() -> Result<()> {
     Ok(())
 }
 
-/// `collect` in the entity position: the to-dos of a list that are open,
+/// `distinct` in the entity position: the to-dos of a list that are open,
 /// a set of entities, and `{}` for a list with none.
 #[dialog_common::test]
 async fn it_collects_in_the_entity_position() -> Result<()> {
@@ -653,7 +788,7 @@ async fn it_collects_in_the_entity_position() -> Result<()> {
                  (xyz.task/state of: ?t is: ?s as: [:open :done] cardinality: :one))
                (query (list/open ?l is: ?open)
                  (list ?l name: ?name)
-                 (task (collect ?open) list: ?l state: :open))
+                 (task (distinct ?open) list: ?l state: :open))
 
                (assert (list list:home name: "Home"))
                (assert (list list:work name: "Work"))
@@ -680,9 +815,9 @@ async fn it_collects_in_the_entity_position() -> Result<()> {
 async fn it_answers_an_index_once_whatever_there_is() -> Result<()> {
     let index = r#"
         (query (todo/titles is: ?titles)
-          (todo _ title: (collect ?titles)))
+          (todo _ title: (distinct ?titles)))
         (query (todo/deck is: ?deck)
-          (todo/card _ is: (collect ?deck)))
+          (todo/card _ is: (distinct ?deck)))
     "#;
     let mut notebook = todos().await?;
     notebook.submit(&format!("{CARD} {index}")).await?;
@@ -723,7 +858,7 @@ async fn it_refuses_a_query_of_an_entity_that_only_collects() -> Result<()> {
     let error = refused(
         &mut notebook,
         "(query (todo/bag ?t is: ?tags)
-           (todo/tag ?t tag: (collect ?tags)))",
+           (todo/tag ?t tag: (distinct ?tags)))",
     )
     .await;
     assert!(
@@ -749,7 +884,7 @@ async fn it_refuses_an_unbound_term_in_a_collecting_read() -> Result<()> {
         &mut notebook,
         "(query (todo/loose ?t is: ?tags)
            (todo ?t title: ?title)
-           (todo/tag ?u tag: (collect ?tags)))",
+           (todo/tag ?u tag: (distinct ?tags)))",
     )
     .await;
     assert!(
@@ -759,15 +894,43 @@ async fn it_refuses_an_unbound_term_in_a_collecting_read() -> Result<()> {
     Ok(())
 }
 
-/// `collect` stands in a query and nowhere else: not in a rule, not in a
+/// The whole of a field is written `(distinct ?x)`: `collect`, the word
+/// it replaced, is refused with a message that names `distinct`, in a
+/// query and in what is asked, and nothing of the document is kept.
+#[dialog_common::test]
+async fn it_refuses_collect_naming_distinct() -> Result<()> {
+    let mut notebook = todos().await?;
+    for text in [
+        "(query (todo/old ?t is: ?card)
+           (todo ?t title: ?title)
+           (todo/tag ?t tag: (collect ?tags))
+           (is ?card {:title ?title :tags ?tags}))",
+        "(select (todo/tag ?t tag: (collect ?tags)))",
+    ] {
+        let error = refused(&mut notebook, text).await;
+        assert!(
+            matches!(&error, Error::Refused(why)
+                if why.contains("`(distinct ?x)`") && why.contains("not `collect`")),
+            "{error:?}"
+        );
+    }
+    assert_eq!(
+        report(&mut notebook, "(select (todo/old ?t is: ?card))").await?,
+        Vec::<String>::new(),
+        "the refused query is not kept"
+    );
+    Ok(())
+}
+
+/// `distinct` stands in a query and nowhere else: not in a rule, not in a
 /// concept, and the whole of a field is never written.
 #[dialog_common::test]
-async fn it_refuses_collect_outside_a_query() -> Result<()> {
+async fn it_refuses_distinct_outside_a_query() -> Result<()> {
     let mut notebook = notebooks().await?;
     let in_rule = refused(
         &mut notebook,
         "(rule (xyz.tagged ?t tags: ?tags)
-           (todo/tag ?t tag: (collect ?tags)))",
+           (todo/tag ?t tag: (distinct ?tags)))",
     )
     .await;
     assert!(
@@ -778,7 +941,7 @@ async fn it_refuses_collect_outside_a_query() -> Result<()> {
     let in_concept = refused(
         &mut notebook,
         "(concept (todo/tags ?t tags: ?tags)
-           (xyz.todo/tag of: ?t is: (collect ?tags) as: :text cardinality: :many))",
+           (xyz.todo/tag of: ?t is: (distinct ?tags) as: :text cardinality: :many))",
     )
     .await;
     assert!(
@@ -788,7 +951,7 @@ async fn it_refuses_collect_outside_a_query() -> Result<()> {
     );
     let whole = refused(
         &mut notebook,
-        "(assert (notebook/blocks notebook:1 block: (collect ?blocks)))",
+        "(assert (notebook/blocks notebook:1 block: (distinct ?blocks)))",
     )
     .await;
     assert!(
@@ -798,7 +961,7 @@ async fn it_refuses_collect_outside_a_query() -> Result<()> {
     );
     let in_head = refused(
         &mut notebook,
-        "(rule (assert (notebook/blocks ?n block: (collect ?blocks)))
+        "(rule (assert (notebook/blocks ?n block: (distinct ?blocks)))
            (notebook/named ?n title: \"x\"))",
     )
     .await;
@@ -856,7 +1019,7 @@ async fn it_refuses_a_query_that_calls_itself() -> Result<()> {
         &mut notebook,
         "(query (todo/loop ?t is: ?x)
            (todo ?t title: ?title)
-           (todo/loop ?t is: (collect ?x)))",
+           (todo/loop ?t is: (distinct ?x)))",
     )
     .await;
     assert!(

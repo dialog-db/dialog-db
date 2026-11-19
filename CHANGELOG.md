@@ -109,7 +109,7 @@ again whole, one changed fact cost a fold of every group (105 ms among
 [design/macros/design-queries.md](./design/macros/design-queries.md).
 
 `(view ?x template)` in a query's body says its answer is markup. A query
-it collects, `(todo/chip ?t is: (collect ?chips))`, stands where its
+it collects, `(todo/chip ?t is: (distinct ?chips))`, stands where its
 variable is put in the template, as children in the order of their keys.
 `(select …)` of such a query compiles to a `Plan` of layers, each a
 Dialog-DB query, and the `Maintainer` keeps it current from their rows as
@@ -132,9 +132,9 @@ What this changes for you:
 
 Why: one form for what is asked and what is shown, and the empty case
 that the view form could not give, a to-do with no tag and a list with
-nothing on it, follows from `collect`.
+nothing on it, follows from `distinct`.
 
-### The notation asks with `select`, and `query` defines a query that collects
+### The notation asks with `select`, `query` defines a query, and `(distinct ?x)` gives the whole of a field as a set
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
 [design/macros/design-queries.md](./design/macros/design-queries.md).
@@ -142,8 +142,19 @@ nothing on it, follows from `collect`.
 `dialog-notation` has a second layer above concepts and rules. `(query
 (todo/card ?t is: ?card) condition… (is ?card shape))` defines a query:
 a head like a concept's, its answer under `is:`, and conditions. A term
-of a read written `(collect ?x)` binds `?x` to the whole of that field,
-one row with a map, `{}` for none. Asking is `(select …)`.
+of a read written `(distinct ?x)` binds `?x` to the whole of that field,
+one row with a set, `{}` for none: a set of its values, or, of a keyed
+field, a set of its entries, each a map of one key. A map is built where
+the answer is, with a spread: `{... ?entries}` pours a set of entries
+into one map, and of two entries under one key keeps the first in the
+order of values. Asking is `(select …)`.
+
+```clj
+(query (notebook/outline ?n is: ?outline)
+  (notebook/named ?n title: ?title)
+  (notebook/blocks ?n block: (distinct ?entries))
+  (is ?outline {:title ?title :blocks {... ?entries}}))
+```
 
 What this changes for you:
 
@@ -154,7 +165,17 @@ What this changes for you:
   refused.
 - `{: 1 : 2}` reads: a set is a map with no names. A record keeps it as a
   list, its members in order, each once.
-- `collect` in a rule, a concept or a write, and a rule or concept that
+- `(collect ?x)` is refused, in a query, in what is asked, in a rule, a
+  concept and a write, with a message that names `(distinct ?x)`.
+- `{... ?x}` in a shape pours `?x` in where it stands: a set's members
+  that are maps give their entries, its other members stand as they are,
+  so `{... ?tags}` copies a set of values, and a map gives its entries. A
+  spread of what is no set or map, and a shape that would hold both a
+  set's members and a map's entries, are refused.
+- `(count ?x)` counts the members of the set, so of a keyed field it
+  counts the distinct entries, two under one key counted twice; a map a
+  spread built counts its keys.
+- `distinct` in a rule, a concept or a write, and a rule or concept that
   applies a query, are refused.
 - `Step::Select` holds a `Selection`: the Dialog-DB queries to run, the
   `Fold`s it asks Dialog-DB for (`Selection::folds`), and
@@ -162,7 +183,7 @@ What this changes for you:
 - A read that collects is folded by Dialog-DB where its read and the
   conditions every answer needs are each one query: the whole of a
   variable as its distinct values, and of an entry `{?k ?v}` as the
-  distinct records of the rows it was read from, counted by their keys.
+  distinct records of the rows it was read from, counted by them.
   A part read through several definitions is one query too: each
   definition's rule derives the one relation the part is named by. What
   is not folded is put together in memory from the rows: a collected

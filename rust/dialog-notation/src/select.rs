@@ -6,7 +6,7 @@
 //! ```clj
 //! (query (todo/card ?t is: ?card)
 //!   (todo ?t title: ?title)
-//!   (todo/tag ?t tag: (collect ?tags))
+//!   (todo/tag ?t tag: (distinct ?tags))
 //!   (is ?card {:title ?title :tags ?tags}))
 //!
 //! (select (todo/card ?t is: ?card))
@@ -29,8 +29,8 @@
 //!   (query HEAD
 //!     (required [?t ?title] RULE…)       ; every answer needs these
 //!     (call CALL)                         ; and a row of this query
-//!     (collect ?tags ?g (rows [?t ?g] RULE…))       ; the whole of a read
-//!     (collect ?chips ?c (call (todo/chip ?t is: ?c))) ; of a call
+//!     (distinct ?tags ?g (rows [?t ?g] RULE…))       ; the whole of a read
+//!     (distinct ?chips ?c (call (todo/chip ?t is: ?c))) ; of a call
 //!     (is ?card SHAPE)))
 //! ```
 //!
@@ -68,8 +68,16 @@ pub const PART: &str = "part";
 /// The one function of a collection there is yet.
 pub const COUNT: &str = "count";
 
-/// What collects the whole of a field.
+/// What gives the whole of a field: a set, of its values or of its
+/// entries, each entry a map of one key.
+pub const DISTINCT: &str = "distinct";
+
+/// The word `distinct` stands in for, which is refused.
 pub const COLLECT: &str = "collect";
+
+/// The key of a map's entry that pours a set or a map into it, `{...
+/// ?entries}`.
+pub const SPREAD: &str = "...";
 
 /// A row: what each variable was bound to.
 pub type Row = BTreeMap<String, Syntax>;
@@ -98,20 +106,20 @@ pub fn order(a: &Syntax, b: &Syntax) -> Ordering {
     a.to_string().cmp(&b.to_string())
 }
 
-/// Whether `tree` is `(collect ?x)`, and the variable if so.
+/// Whether `tree` is `(distinct ?x)`, and the variable if so.
 pub fn collected(tree: &Syntax) -> Option<Result<&str, Error>> {
-    if tree.applies() != Some(COLLECT) {
+    if tree.applies() != Some(DISTINCT) {
         return None;
     }
     Some(match tree.operand() {
         Some(Parameters { items, terms }) if terms.is_empty() => match items.as_slice() {
             [Syntax::Variable(name)] => Ok(name.as_str()),
             _ => Err(Error::Refused(format!(
-                "{tree}: collect takes one variable, what the whole of the field is bound to"
+                "{tree}: distinct takes one variable, what the whole of the field is bound to"
             ))),
         },
         _ => Err(Error::Refused(format!(
-            "{tree}: collect takes one variable, what the whole of the field is bound to"
+            "{tree}: distinct takes one variable, what the whole of the field is bound to"
         ))),
     })
 }
@@ -287,7 +295,7 @@ impl Selection {
                         defined.required = Some(selection.rows(columns, rules)?);
                     }
                     (Some("call"), [call]) => defined.calls.push(call.clone()),
-                    (Some("collect"), [Syntax::Variable(target), item, source]) => {
+                    (Some(DISTINCT), [Syntax::Variable(target), item, source]) => {
                         let source = match (source.applies(), items(source)) {
                             (Some("rows"), [columns, rules @ ..]) => {
                                 Source::Rows(selection.rows(columns, rules)?)
@@ -338,7 +346,8 @@ impl Selection {
     /// query with no record. A member is the field of the variable
     /// collected, folded to its distinct values, which crossing leaves
     /// as they are. An entry `{?k ?v}` is the record, which keeps its
-    /// key beside its value, and is counted by its distinct keys.
+    /// key beside its value, and is counted by its distinct records: in
+    /// a group, its distinct entries.
     fn fold(&mut self, required: &Rows, collect: &Collect) -> Option<Lowered> {
         let Source::Rows(rows) = &collect.source else {
             return None;
@@ -391,7 +400,7 @@ impl Selection {
                     read.push((ROW_FIELD.to_string(), record.clone()));
                     read.push((label(&rows.columns, key)?, key.clone()));
                     let fields = (label(&rows.columns, key)?, label(&rows.columns, value)?);
-                    (record, key.clone(), Some(fields))
+                    (record.clone(), record, Some(fields))
                 }
                 _ => return None,
             },
@@ -778,23 +787,25 @@ impl Evaluation<'_> {
         let entries = members
             .iter()
             .filter_map(|member| match &lowered.entry {
-                // An entry is the record of the row it was read from.
+                // An entry is the record of the row it was read from, a
+                // member of the set a map of one key.
                 Some((key, value)) => {
                     let record = data::entries(member).ok().flatten()?;
-                    Some((
+                    Some(member_of(Syntax::Map(vec![(
                         written(data::field(&record, key)?),
                         written(data::field(&record, value)?),
-                    ))
+                    )])))
                 }
-                None => Some((Syntax::Reference(String::new()), written(member))),
+                None => Some(member_of(written(member))),
             })
             .collect();
         (Syntax::Map(gathered(entries)), Syntax::Constant(count))
     }
 
-    /// The whole of what a collecting read gives for `row`: a map of
-    /// key to value for entries, a set otherwise. Nothing is `{}`. A
-    /// read's rows are grouped once by the terms it shares with the rest.
+    /// The whole of what a collecting read gives for `row`: a set, of its
+    /// values, or of its entries, each a map of one key. Nothing is `{}`.
+    /// A read's rows are grouped once by the terms it shares with the
+    /// rest.
     fn whole(&mut self, collect: &Collect, row: &Row) -> Result<Syntax, Error> {
         let matched: Vec<Row> = match &collect.source {
             Source::Rows(rows) => {
@@ -832,15 +843,52 @@ impl Evaluation<'_> {
         for found in &matched {
             let entry = match &collect.item {
                 Syntax::Map(pair) => match pair.as_slice() {
-                    [(key, value)] => (fill(key, found), fill(value, found)),
+                    [(key, value)] => {
+                        member_of(Syntax::Map(vec![(fill(key, found), fill(value, found))]))
+                    }
                     _ => return Err(malformed(&collect.item)),
                 },
-                member => (Syntax::Reference(String::new()), fill(member, found)),
+                member => member_of(fill(member, found)),
             };
             entries.push(entry);
         }
         Ok(Syntax::Map(gathered(entries)))
     }
+}
+
+/// A member of a set: an entry under the empty label.
+fn member_of(member: Syntax) -> (Syntax, Syntax) {
+    (Syntax::Reference(String::new()), member)
+}
+
+/// Whether a key is the empty label, a set's member's.
+fn unnamed(key: &Syntax) -> bool {
+    matches!(key, Syntax::Reference(name) if name.is_empty())
+}
+
+/// What a map's spread, `{... ?x}`, pours into it: of a set, each member
+/// that is a map, its entries, and each other member as it is; of a map,
+/// its entries. The entries a set's maps pour are in the order of their
+/// keys, and of two under one key the first in the order of values is
+/// kept.
+fn poured(spread: &Syntax, whole: Syntax) -> Result<Vec<(Syntax, Syntax)>, Error> {
+    let Syntax::Map(entries) = whole else {
+        return Err(Error::Refused(format!(
+            "{{... {spread}}}: {whole} is not a set or a map, and a spread pours one"
+        )));
+    };
+    let mut members = Vec::new();
+    let mut named = Vec::new();
+    for (key, value) in entries {
+        match (unnamed(&key), value) {
+            (true, Syntax::Map(inner)) => named.extend(inner),
+            (true, value) => members.push(member_of(value)),
+            (false, value) => named.push((key, value)),
+        }
+    }
+    let mut poured = gathered(named);
+    poured.extend(gathered(members));
+    Ok(poured)
 }
 
 /// Entries put in order, each once: a map by its keys, and a set, whose
@@ -926,12 +974,36 @@ fn build(shape: &Syntax, row: &Row) -> Result<Syntax, Error> {
             .get(name)
             .cloned()
             .ok_or_else(|| Error::Refused(format!("?{name} is bound by nothing the query says")))?,
-        Syntax::Map(entries) => Syntax::Map(
-            entries
-                .iter()
-                .map(|(key, value)| Ok((build(key, row)?, build(value, row)?)))
-                .collect::<Result<_, Error>>()?,
-        ),
+        Syntax::Map(entries) => {
+            // A spread pours a set or a map in where it stands; of two
+            // entries under one key, the first is kept.
+            let mut built: Vec<(Syntax, Syntax)> = Vec::new();
+            for (key, value) in entries {
+                let more = match key {
+                    Syntax::Reference(spread) if spread == SPREAD => {
+                        poured(value, build(value, row)?)?
+                    }
+                    key => vec![(build(key, row)?, build(value, row)?)],
+                };
+                for (key, value) in more {
+                    let set = unnamed(&key);
+                    if !built
+                        .iter()
+                        .any(|(known, was)| known == &key && (!set || was == &value))
+                    {
+                        built.push((key, value));
+                    }
+                }
+            }
+            let members = built.iter().filter(|(key, _)| unnamed(key)).count();
+            if members > 0 && members < built.len() {
+                return Err(Error::Refused(format!(
+                    "{shape}: a map's entries each have a key, and a set's members none; \
+                     this one would hold both"
+                )));
+            }
+            Syntax::Map(built)
+        }
         Syntax::Tuple(items) => Syntax::Tuple(
             items
                 .iter()

@@ -8,8 +8,9 @@
 ; variable in a template is the template's own, fresh at each expansion.
 
 ; Asking is a rule whose head lands in the report. With no premise it
-; reads what it reports. A query, which collects, is defined with
-; `(query …)` and asked the same way; the walker reads both.
+; reads what it reports. A query, which takes the whole of a field with
+; `(distinct ?x)`, is defined with `(query …)` and asked the same way;
+; the walker reads both.
 (rule (syntax (rule (report ?head) ?head))
   (expand (select ?head)))
 (rule (syntax (rule (report ?head) ?premise ... ?more))

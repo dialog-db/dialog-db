@@ -23,8 +23,8 @@
 ; 308-331.
 (query (notebook/ui ?n is: ?ui)
   (notebook/named ?n title: ?title)
-  (notebook/order-item ?n is: (collect ?order))
-  (notebook/block-row _ notebook: ?n is: (collect ?rows))
+  (notebook/order-item ?n is: (distinct ?order))
+  (notebook/block-row _ notebook: ?n is: (distinct ?rows))
   (view ?ui
     [:notebook-save {:style "display: block;"}
       [:tonk-notebook {:data-subject ?n
@@ -55,7 +55,7 @@
 
 ; Every notebook: one index, which stands empty when there is none.
 (query (notebook/directory is: ?directory)
-  (notebook/index-item _ is: (collect ?items))
+  (notebook/index-item _ is: (distinct ?items))
   (view ?directory [:div {:class "notebook-index"} ?items]))
 
 ; The index route: the draft notebook and the directory.
@@ -63,7 +63,7 @@
 ; nested display. A query collected reads this branch. YAML 434.
 (query (notebook/index-page ?site is: ?page)
   (notebook/index-route ?site repo: ?repo branch: ?branch)
-  (notebook/directory is: (collect ?directory))
+  (notebook/directory is: (distinct ?directory))
   (view ?page
     [:tonk-notebook-index {:class "notebook-index"}
       [:notebook-save {:style "display: block;"}
@@ -88,5 +88,5 @@
 ; GAP: read from another branch and space, as above. YAML 463.
 (query (notebook/page ?site is: ?page)
   (notebook/route ?site entity: ?entity repo: ?repo branch: ?branch)
-  (notebook/ui ?entity is: (collect ?ui))
+  (notebook/ui ?entity is: (distinct ?ui))
   (view ?page [:div {:class "notebook-space"} ?ui]))
