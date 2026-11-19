@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### An ephemeral line can be read as it stood, at no cost to take: `Ephemeral::frozen`
 
-(pull request to be opened)
+[#841](https://github.com/dialog-db/dialog-db/pull/841).
 
 `Ephemeral::frozen` returns a `Frozen`: the line's facts, tombstones and
 revision as they stood when it was taken, answering the reads the line
