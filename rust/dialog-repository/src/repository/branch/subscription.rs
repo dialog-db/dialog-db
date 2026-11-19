@@ -337,11 +337,32 @@ impl Demand {
     /// shape is searched as it is, where one in any other would be sorted
     /// first.
     pub(crate) fn ranges(&self) -> Vec<RangeInclusive<Key>> {
-        let mut ranges = self.facts.lock().expect("demand lock").clone();
-        for (start, end) in self.rules.lock().expect("demand lock").iter() {
-            merge_range(&mut ranges, start.clone()..=end.clone());
+        let facts = self.facts.lock().expect("demand lock");
+        let rules = self.rules.lock().expect("demand lock");
+        // Both covers are sorted and disjoint: walk them side by side,
+        // taking the range that starts first and folding into the last
+        // range taken any range it reaches, so each key is cloned once,
+        // nothing is sorted and one list is allocated.
+        let mut ranges: Vec<RangeInclusive<Key>> = Vec::with_capacity(facts.len() + rules.len());
+        let (mut facts, mut rules) = (facts.iter().peekable(), rules.iter().peekable());
+        loop {
+            let next = match (facts.peek(), rules.peek()) {
+                (Some(fact), Some(rule)) if rule.0 < fact.0 => rules.next(),
+                (Some(_), _) => facts.next(),
+                (None, Some(_)) => rules.next(),
+                (None, None) => break,
+            };
+            let Some((start, end)) = next else { break };
+            match ranges.last_mut() {
+                Some(last) if start <= last.end() => {
+                    if end > last.end() {
+                        *last = last.start().clone()..=end.clone();
+                    }
+                }
+                _ => ranges.push(start.clone()..=end.clone()),
+            }
         }
-        ranges.into_iter().map(|(start, end)| start..=end).collect()
+        ranges
     }
 
     /// Number of distinct recorded ranges.
@@ -2902,6 +2923,46 @@ mod tests {
         assert_eq!(retained, expected);
         assert_eq!(subscription.maintenances(), 1);
         Ok(())
+    }
+
+    /// The scope a cover-gated diff walks is the facts' and the rules'
+    /// ranges merged into one sorted, disjoint list, as recording every
+    /// range into one cover would leave it, whether the two interleave,
+    /// overlap, nest, touch or keep to themselves.
+    #[dialog_common::test]
+    fn it_merges_the_fact_and_rule_ranges_into_one_cover() {
+        use dialog_corpus::Key;
+        let key = |at: u8| Key::from(vec![at]);
+        type Cover = &'static [(u8, u8)];
+        let cases: [(Cover, Cover); 6] = [
+            (&[], &[]),
+            (&[(1, 2), (5, 6)], &[]),
+            (&[], &[(3, 4)]),
+            (&[(1, 2), (7, 9)], &[(3, 4), (10, 11)]),
+            (&[(1, 5), (8, 9)], &[(2, 3), (4, 8), (12, 12)]),
+            (&[(2, 4)], &[(1, 2), (4, 6)]),
+        ];
+        for (facts, rules) in cases {
+            let demand = super::Demand::new();
+            let mut expected = super::Ranges::new();
+            for (start, end) in facts {
+                super::record_range(&demand.facts, key(*start)..=key(*end));
+                super::merge_range(&mut expected, key(*start)..=key(*end));
+            }
+            for (start, end) in rules {
+                super::record_range(&demand.rules, key(*start)..=key(*end));
+                super::merge_range(&mut expected, key(*start)..=key(*end));
+            }
+            let expected: Vec<_> = expected
+                .into_iter()
+                .map(|(start, end)| start..=end)
+                .collect();
+            assert_eq!(
+                demand.ranges(),
+                expected,
+                "facts {facts:?}, rules {rules:?}"
+            );
+        }
     }
 
     /// A maintained poll compares each entity it re-derived with the rows

@@ -2608,8 +2608,12 @@ where
         scope: &'a [core::ops::RangeInclusive<Key>],
     ) -> impl Differential<Key, Value> + 'a {
         let changes = self.changes();
-        let scope = Scope::new(scope);
         try_stream! {
+            // Built inside the stream, not captured by it: captured, it
+            // made the stream of `differentiate_within` copy its state
+            // twice more per difference, which cost a subscription's poll
+            // more than the search saved (subscribe-fanout in dialog-perf).
+            let scope = Scope::new(scope);
             futures_util::pin_mut!(changes);
             for await change in changes {
                 let change = change?;
