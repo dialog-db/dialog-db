@@ -28,12 +28,10 @@ use std::time::Instant;
 
 use anyhow::Result;
 use dialog_corpus::Value;
-use dialog_notation::{
-    Analyzer, Change, Maintainer, Patch, Plan, Query, Selection, Step, check, parse,
-};
+use dialog_notation::live::Live;
+use dialog_notation::{Analyzer, Plan, Query, Selection, Step, check, parse};
+use dialog_query::ConceptConclusion;
 use dialog_query::query::Output as _;
-use dialog_query::{ConceptConclusion, ConceptQuery};
-use dialog_repository::Subscription;
 use dialog_repository::helpers::Interposing;
 
 #[path = "notebook/session.rs"]
@@ -134,105 +132,6 @@ fn selection(asked: &str) -> Result<Selection> {
     Err(anyhow::anyhow!("no selection: {:?}", analysis.diagnostics))
 }
 
-/// A plan's layers, each a subscription, and its maintainer.
-struct Driven {
-    plan: Plan,
-    entity: Option<Value>,
-    queries: Vec<Option<Query>>,
-    feeds: Vec<Option<Subscription<ConceptQuery>>>,
-    maintainer: Maintainer,
-}
-
-impl Driven {
-    fn new(notebook: &Notebook, plan: Plan, entity: Option<Value>) -> Result<Driven> {
-        let mut queries = Vec::new();
-        let mut feeds = Vec::new();
-        for layer in 0..plan.layers.len() {
-            if plan.layers[layer].conditions.is_empty() {
-                queries.push(None);
-                feeds.push(None);
-                continue;
-            }
-            let query = plan.query(layer, entity.as_ref())?;
-            if let Some(rule) = &query.rule {
-                notebook.branch.overlay().assert(rule.clone())?;
-            }
-            feeds.push(Some(notebook.branch.subscribe(query.select.clone())));
-            queries.push(Some(query));
-        }
-        Ok(Driven {
-            maintainer: Maintainer::new(plan.clone(), entity.clone()),
-            plan,
-            entity,
-            queries,
-            feeds,
-        })
-    }
-
-    /// Poll every layer and apply what came and went: the patches, the
-    /// rows delivered each layer, and the reads each layer's poll took.
-    async fn step(&mut self, env: &Env) -> Result<(Vec<Patch>, Vec<Layered>)> {
-        let mut changes = Vec::new();
-        let mut layers = Vec::new();
-        for (layer, feed) in self.feeds.iter_mut().enumerate() {
-            let (Some(feed), Some(query)) = (feed, &self.queries[layer]) else {
-                layers.push(Layered::default());
-                continue;
-            };
-            let from = mark(env);
-            let recomputed = feed.recomputes();
-            let start = Instant::now();
-            let delta = feed.poll(env).await?;
-            let micros = start.elapsed().as_micros();
-            let (nodes, _) = since(env, from);
-            let recomputed = feed.recomputes() > recomputed;
-            let (arrived, left) = match delta {
-                Some(delta) => (
-                    delta
-                        .asserted
-                        .iter()
-                        .map(|row| self.plan.row(layer, query, row, self.entity.as_ref()))
-                        .collect::<Result<Vec<_>, _>>()?,
-                    delta
-                        .retracted
-                        .iter()
-                        .map(|row| self.plan.row(layer, query, row, self.entity.as_ref()))
-                        .collect::<Result<Vec<_>, _>>()?,
-                ),
-                None => (Vec::new(), Vec::new()),
-            };
-            layers.push(Layered {
-                rows: arrived.len() + left.len(),
-                nodes,
-                micros,
-                recomputed,
-            });
-            changes.push(Change {
-                layer,
-                arrived,
-                left,
-            });
-        }
-        let start = Instant::now();
-        let patches = self.maintainer.apply(&changes);
-        let micros = start.elapsed().as_micros();
-        layers.push(Layered {
-            micros,
-            ..Layered::default()
-        });
-        Ok((patches, layers))
-    }
-}
-
-/// What one layer's poll took, and, last, the maintainer's apply.
-#[derive(Clone, Debug, Default)]
-struct Layered {
-    rows: usize,
-    nodes: u64,
-    micros: u128,
-    recomputed: bool,
-}
-
 /// A fresh branch with the schema and `n` to-dos, and the reading env.
 async fn branch(n: usize) -> Result<(Notebook, Env)> {
     let mut notebook = Notebook::open().await?;
@@ -280,14 +179,15 @@ async fn notation(
 ) -> Result<()> {
     let (mut notebook, env) = branch(n).await?;
     let card = plan("(select (list/card ?l is: ?card))")?;
-    let mut driven = Driven::new(&notebook, card, Some(entity("list:home")))?;
+    let live = Live::new(notebook.branch.clone());
+    let mut watched = live.watch(card, Some(entity("list:home")))?;
 
     let from = mark(&env);
     let start = Instant::now();
-    let (patches, per) = driven.step(&env).await?;
+    let patches = watched.poll(&env).await?;
     let micros = start.elapsed().as_micros();
     let (nodes, blobs) = since(&env, from);
-    layers.insert(n, per.iter().map(|layer| layer.rows).collect());
+    layers.insert(n, watched.delivered().to_vec());
     record(
         results,
         "1 first render",
@@ -296,7 +196,7 @@ async fn notation(
             micros,
             nodes,
             blobs,
-            rows: per.iter().map(|layer| layer.rows).sum(),
+            rows: watched.delivered().iter().sum(),
             patches: patches.len(),
         },
     );
@@ -317,9 +217,10 @@ async fn notation(
         ),
     ] {
         notebook.submit(&write).await?;
+        let recomputed = watched.recomputes();
         let from = mark(&env);
         let start = Instant::now();
-        let (patches, per) = driven.step(&env).await?;
+        let patches = watched.poll(&env).await?;
         let micros = start.elapsed().as_micros();
         let (nodes, blobs) = since(&env, from);
         record(
@@ -330,35 +231,28 @@ async fn notation(
                 micros,
                 nodes,
                 blobs,
-                rows: per.iter().map(|layer| layer.rows).sum(),
+                rows: watched.delivered().iter().sum(),
                 patches: patches.len(),
             },
         );
-        let last = per.len() - 1;
-        for (layer, part) in per.iter().enumerate() {
-            let label = if layer == last {
-                format!("{name}, maintainer apply")
-            } else {
-                format!("{name}, layer {layer} poll")
-            };
-            record(
-                results,
-                &label,
-                n,
-                Sample {
-                    micros: part.micros,
-                    nodes: part.nodes,
-                    rows: part.rows,
-                    // A layer evaluated whole again, not maintained from
-                    // the change.
-                    patches: usize::from(part.recomputed),
-                    ..Sample::default()
-                },
-            );
-        }
+        // A layer evaluated whole again, not maintained from the change.
+        record(
+            results,
+            &format!("{name}, layers recomputed"),
+            n,
+            Sample {
+                patches: watched
+                    .recomputes()
+                    .iter()
+                    .zip(&recomputed)
+                    .filter(|(now, before)| now > before)
+                    .count(),
+                ..Sample::default()
+            },
+        );
     }
 
-    // Stage 1's evaluation in memory, timed apart from the queries.
+    // A selection asked once through the driver.
     for (name, asked_for) in [
         (
             "5 select one card",
@@ -372,31 +266,7 @@ async fn notation(
         let selection = selection(&asked_for)?;
         let from = mark(&env);
         let start = Instant::now();
-        let mut results_of = Vec::new();
-        let mut rows = 0;
-        for query in &selection.queries {
-            let found = asked(&notebook, &env, query).await?;
-            rows += found.len();
-            results_of.push(found);
-        }
-        let mut folded = Vec::new();
-        for fold in &selection.folds {
-            let mut layer = notebook.branch.query();
-            for rule in &fold.rules {
-                layer = layer.with(rule.clone());
-            }
-            let found = layer
-                .select(fold.fold.clone())
-                .perform(&env)
-                .try_vec()
-                .await?;
-            rows += found.len();
-            folded.push(found.iter().map(|row| fold.values(row)).collect());
-        }
-        let queried = start.elapsed().as_micros();
-        let answering = Instant::now();
-        let answers = selection.answer(&results_of, &folded)?;
-        let answered = answering.elapsed().as_micros();
+        let answers = live.select(&selection, &env).await?;
         let micros = start.elapsed().as_micros();
         let (nodes, blobs) = since(&env, from);
         record(
@@ -407,29 +277,8 @@ async fn notation(
                 micros,
                 nodes,
                 blobs,
-                rows,
+                rows: 0,
                 patches: answers.len(),
-            },
-        );
-        record(
-            results,
-            &format!("{name}, queries"),
-            n,
-            Sample {
-                micros: queried,
-                nodes,
-                rows,
-                ..Sample::default()
-            },
-        );
-        record(
-            results,
-            &format!("{name}, answer in memory"),
-            n,
-            Sample {
-                micros: answered,
-                patches: answers.len(),
-                ..Sample::default()
             },
         );
     }
@@ -741,7 +590,9 @@ async fn main() -> Result<()> {
         eprintln!("run {} of {runs} done", run + 1);
     }
     println!("the card's layers: 0 the list, 1 the rows, 2 the chips, 3 the open to-dos counted");
-    println!("in a layer's line, `patches` is 1 where its poll evaluated it whole again");
+    println!(
+        "in a `layers recomputed` line, `patches` is how many layers were evaluated whole again"
+    );
     println!("rows each layer of the card delivers at its first render, by N:");
     for (n, rows) in &layers {
         println!("  N={n}: {rows:?}");

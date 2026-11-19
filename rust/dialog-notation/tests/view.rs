@@ -663,6 +663,111 @@ async fn it_maintains_a_row_whose_chips_are_collected() -> Result<()> {
     Ok(())
 }
 
+/// The rows with their chips collected, kept by the crate's driver,
+/// `Live::watch`, beside the subscriptions driven by this file: through
+/// an item added, a member added to its collected part, a member
+/// removed, the last member removed and the item removed, the driver
+/// gives the patches driven here give. The last chip removed leaves the
+/// row, with no chip; the row removed is one remove.
+#[dialog_common::test]
+async fn it_drives_a_view_with_a_collected_part_as_the_layers_do() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    write(
+        &mut notebook,
+        &dialog_notation::read(TAGGED)?
+            .iter()
+            .filter(|form| form.head() == Some("concept"))
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .await?;
+    write(
+        &mut notebook,
+        r#"(assert (task task:1 title: "Buy milk"))
+           (assert (task/tag task:1 tag: "errand"))"#,
+    )
+    .await?;
+    let plan = plan_of(&[TAGGED], "(select (task/row ?t is: ?row))")?;
+    let mut here = Driven::new(&notebook, plan.clone(), None, How::Subscribed).await?;
+    let live = dialog_notation::live::Live::new(notebook.branch.clone());
+    let mut watched = live.watch(plan, None)?;
+    assert_eq!(
+        watched.poll(&notebook.operator).await?,
+        here.step(&notebook).await?
+    );
+    let three = || vec![(0, vec![entity("task:3")])];
+    let steps: Vec<(&str, Vec<Patch>)> = vec![
+        (
+            r#"(assert (task task:3 title: "Water plants"))"#,
+            vec![Patch::Insert {
+                parent: Vec::new(),
+                slot: 0,
+                index: 1,
+                instance: row("task:3", "Water plants", Vec::new()),
+            }],
+        ),
+        (
+            r#"(assert (task/tag task:3 tag: "home"))"#,
+            vec![Patch::Insert {
+                parent: three(),
+                slot: 1,
+                index: 0,
+                instance: chip("home"),
+            }],
+        ),
+        (
+            r#"(assert (task/tag task:3 tag: "garden"))"#,
+            vec![Patch::Insert {
+                parent: three(),
+                slot: 1,
+                index: 0,
+                instance: chip("garden"),
+            }],
+        ),
+        (
+            r#"(retract (task/tag task:3 tag: "garden"))"#,
+            vec![Patch::Remove {
+                at: vec![
+                    (0, vec![entity("task:3")]),
+                    (1, vec![Value::String("garden".into())]),
+                ],
+            }],
+        ),
+        (
+            r#"(retract (task/tag task:3 tag: "home"))"#,
+            vec![Patch::Remove {
+                at: vec![
+                    (0, vec![entity("task:3")]),
+                    (1, vec![Value::String("home".into())]),
+                ],
+            }],
+        ),
+        (
+            r#"(retract (task task:3 title: "Water plants"))"#,
+            vec![Patch::Remove { at: three() }],
+        ),
+    ];
+    for (change, expected) in steps {
+        write(&mut notebook, change).await?;
+        let driven = watched.poll(&notebook.operator).await?;
+        assert_eq!(driven, here.step(&notebook).await?, "after {change}");
+        assert_eq!(driven, expected, "after {change}");
+        if change.contains(r#"tag: "home""#) && change.starts_with("(retract") {
+            assert_eq!(
+                watched.tree().roots,
+                [
+                    row("task:1", "Buy milk", vec![chip("errand")]),
+                    row("task:3", "Water plants", Vec::new()),
+                ],
+                "the last chip removed leaves the row, with none"
+            );
+        }
+    }
+    assert_eq!(watched.tree(), here.tree);
+    Ok(())
+}
+
 /// The list card with a count of what is open: `0 open` and an empty
 /// `ul` for a list with nothing on it. Adding a to-do is one insert under
 /// the `ul` and the count's text set.

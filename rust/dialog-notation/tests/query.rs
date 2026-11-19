@@ -271,6 +271,69 @@ async fn it_maintains_a_folded_read_for_the_entity_that_changed() -> Result<()> 
     Ok(())
 }
 
+/// The card kept standing by the crate's driver, `Live::standing`: the
+/// tags are a standing fold, which alone reads the tags' query, and each
+/// poll after a write gives what a select gives then, with no query
+/// evaluated whole again. The last tag removed is the empty set.
+#[dialog_common::test]
+async fn it_keeps_a_selection_standing_through_the_driver() -> Result<()> {
+    let mut notebook = todos().await?;
+    notebook.submit(CARD).await?;
+    let selection = selection(&format!("{TODOS}{CARD}(select (todo/card ?t is: ?card))"))?;
+    let live = dialog_notation::live::Live::new(notebook.branch.clone());
+    let mut standing = live.standing(selection.clone())?;
+    assert_eq!(standing.folds().len(), 1);
+    assert_eq!(
+        standing
+            .feeds()
+            .iter()
+            .filter(|feed| feed.is_some())
+            .count(),
+        1,
+        "the tags are read by the fold alone"
+    );
+    let answers = |answers: Vec<dialog_notation::Syntax>| -> Vec<String> {
+        answers.iter().map(ToString::to_string).collect()
+    };
+    let first = standing
+        .poll(&notebook.operator)
+        .await?
+        .expect("the first poll answers");
+    assert_eq!(
+        answers(first),
+        report(&mut notebook, "(select (todo/card ?t is: ?card))").await?
+    );
+    assert_eq!(
+        answers(live.select(&selection, &notebook.operator).await?),
+        report(&mut notebook, "(select (todo/card ?t is: ?card))").await?
+    );
+    let evaluated = standing.recomputes();
+    for change in [
+        r#"(assert (todo/tag todo:2 tag: "call"))"#,
+        r#"(retract (todo/tag todo:1 tag: "home"))"#,
+        r#"(retract (todo/tag todo:2 tag: "call"))"#,
+        r#"(assert (todo todo:3 title: "Water plants"))"#,
+    ] {
+        notebook.submit(change).await?;
+        let now = standing
+            .poll(&notebook.operator)
+            .await?
+            .expect("a card moved");
+        assert_eq!(
+            answers(now),
+            report(&mut notebook, "(select (todo/card ?t is: ?card))").await?,
+            "after {change}"
+        );
+    }
+    assert_eq!(standing.recomputes(), evaluated);
+    assert!(
+        report(&mut notebook, "(select (todo/card todo:2 is: ?card))")
+            .await?
+            .contains(&r#"(todo/card todo:2 is: {:title "Call mum" :tags {}})"#.to_string())
+    );
+    Ok(())
+}
+
 /// A fold is a function of what was collected: `count` of the tags is 2
 /// and 0. A function other than `count` is refused.
 #[dialog_common::test]

@@ -14,6 +14,36 @@ says how to cut a release.
 
 ## Unreleased
 
+### The notation keeps a selection or a view current on a branch itself
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773).
+
+`dialog_notation::live` is a driver: `Live::new(branch)` lays the rules
+a selection's or a view's queries read on the branch's session overlay,
+subscribes to each, polls them, and hands back the answers or the
+view's patches. A read Dialog-DB folds is a `FoldSubscription`, every
+other query a `Subscription`. It is behind the crate's `repository`
+feature, on by default; without it the crate does not depend on
+`dialog-repository`.
+
+What this changes for you:
+
+- New: `Live::select(&selection, env)`, the answers asked once, each
+  query with its rules laid for it alone; `Live::render(&plan, entity,
+  env)`, a view rendered once.
+- New: `Live::standing(selection)`, a `Standing` whose `poll(env)` gives
+  the answers again when a row moved, and `Live::watch(plan, entity)`, a
+  `Watched` whose `poll(env)` gives the view's patches, the first poll
+  each root inserted first. `recomputes()` on both says how often a query
+  was evaluated whole.
+- New: the `Reader` trait, the env a poll reads through, and `LiveError`.
+- A view's counts are still kept by the `Maintainer` from its layers'
+  rows.
+
+Why: each caller laid the rules, created and polled the subscriptions and
+fed the maintainer by hand, and the notation is the interface that knows
+which queries a selection or a view is made of.
+
 ### A query can fold, and `distinct` gives the set of a group's values
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773), argued in

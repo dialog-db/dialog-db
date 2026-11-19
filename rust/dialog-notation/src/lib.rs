@@ -60,6 +60,8 @@ pub mod diagnostic;
 pub mod expand;
 pub mod form;
 pub mod kernel;
+#[cfg(feature = "repository")]
+pub mod live;
 pub mod parse;
 pub mod pattern;
 pub mod print;
