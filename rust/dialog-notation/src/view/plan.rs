@@ -165,8 +165,8 @@ pub const SOURCE_TAG: &str = "view-source";
 /// The relation a layer's rows are reported in.
 const LAYER: &str = "view.layer";
 
-/// The variable a layer's row is the entity of.
-const LAYER_ROW: &str = "view-row";
+/// The field a layer's row is reported under, as one record.
+const ROW_FIELD: &str = "row";
 
 /// A premise, with what it holds and what it binds.
 struct Info {
@@ -1061,29 +1061,36 @@ impl Plan {
             )));
             items.extend(premises);
         } else {
-            let terms: BTreeMap<String, Syntax> = row
-                .iter()
-                .enumerate()
-                .map(|(at, name)| (format!("c{at}"), Syntax::Variable(name.clone())))
-                .collect();
-            let subject = Syntax::Variable(LAYER_ROW.into());
+            // A row is reported under the entity it is about, so a change
+            // to that entity's facts is maintained for that entity alone,
+            // and its values as one record, so they stay together: a
+            // record is one value, and two rows of one entity are two
+            // values, never crossed.
+            let record = Syntax::Map(
+                row.iter()
+                    .enumerate()
+                    .map(|(at, name)| {
+                        (
+                            Syntax::Reference(format!("c{at}")),
+                            Syntax::Variable(name.clone()),
+                        )
+                    })
+                    .collect(),
+            );
+            let subject = about(&premises).or(given.clone()).ok_or_else(|| {
+                Error::Refused(format!(
+                    "layer {layer} of the query {} reads no entity",
+                    self.name
+                ))
+            })?;
             items.push(report(Syntax::Application(
                 Box::new(Syntax::Reference(LAYER.into())),
                 Parameters {
-                    items: vec![subject.clone()],
-                    terms: terms.clone(),
+                    items: vec![subject],
+                    terms: BTreeMap::from([(ROW_FIELD.to_string(), record)]),
                 },
             )));
             items.extend(premises);
-            let mut identity = terms;
-            identity.insert("is".into(), subject);
-            items.push(Syntax::Application(
-                Box::new(Syntax::Constant(crate::syntax::entity("id:")?)),
-                Parameters {
-                    items: vec![Syntax::Reference(LAYER.into())],
-                    terms: identity,
-                },
-            ));
         }
         let rule = Syntax::Application(
             Box::new(Syntax::Reference("rule".into())),
@@ -1124,10 +1131,20 @@ impl Plan {
     ) -> Result<BTreeMap<String, Value>, Error> {
         let values = query.values(conclusion)?;
         let names = self.columns(layer, entity.is_some());
+        let record = values
+            .get(ROW_FIELD)
+            .map(crate::data::entries)
+            .transpose()?
+            .flatten();
         let mut row = BTreeMap::new();
         for (at, name) in names.iter().enumerate() {
-            if let Some(value) = values.get(&format!("c{at}")) {
-                row.insert(name.clone(), value.clone());
+            let label = format!("c{at}");
+            let value = match &record {
+                Some(record) => crate::data::field(record, &label).cloned(),
+                None => values.get(&label).cloned(),
+            };
+            if let Some(value) = value {
+                row.insert(name.clone(), value);
             }
         }
         if let Some(entity) = entity
@@ -1161,6 +1178,28 @@ impl Plan {
             .filter(|at| self.elements[*at].layer == layer)
             .collect()
     }
+}
+
+/// The entity a layer's reads are about: the variable most of its reads
+/// are of, the first of those that tie.
+fn about(premises: &[Syntax]) -> Option<Syntax> {
+    let mut counted: Vec<(String, usize)> = Vec::new();
+    for premise in premises {
+        if !premise.is_read() {
+            continue;
+        }
+        if let Some(Syntax::Variable(entity)) = items(premise).first() {
+            match counted.iter_mut().find(|(name, _)| name == entity) {
+                Some((_, count)) => *count += 1,
+                None => counted.push((entity.clone(), 1)),
+            }
+        }
+    }
+    let most = counted.iter().map(|(_, count)| *count).max()?;
+    counted
+        .into_iter()
+        .find(|(_, count)| *count == most)
+        .map(|(name, _)| Syntax::Variable(name))
 }
 
 /// `(report head)`.

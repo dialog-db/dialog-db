@@ -38,7 +38,7 @@
 //! the vector names, in its order, under `c0`, `c1` and on.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use dialog_corpus::Value;
 
@@ -271,6 +271,9 @@ impl Selection {
             selection: self,
             results,
             done: BTreeMap::new(),
+            read: BTreeMap::new(),
+            grouped: BTreeMap::new(),
+            indexed: BTreeMap::new(),
         };
         let mut answers: Vec<Syntax> = evaluation
             .called(&self.call, &Row::new())?
@@ -283,17 +286,41 @@ impl Selection {
     }
 }
 
-/// One answering: the rows each query gives, worked out once.
+/// What tells rows apart, and groups them: how each value is written.
+fn keyed<'a>(values: impl Iterator<Item = Option<&'a Syntax>>) -> String {
+    values
+        .map(|value| value.map(ToString::to_string).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\u{1f}")
+}
+
+/// One answering: the rows each query gives, worked out once, and the
+/// indexes they are looked up by.
 struct Evaluation<'a> {
     selection: &'a Selection,
     results: &'a [Vec<BTreeMap<String, Value>>],
     done: BTreeMap<String, Vec<Row>>,
+    /// The rows of each part's queries, by its first query.
+    read: BTreeMap<usize, Vec<Row>>,
+    /// The rows of a collecting read grouped by the terms it shares, by
+    /// its first query.
+    grouped: BTreeMap<usize, HashMap<String, Vec<usize>>>,
+    /// The answers of a query by the value of its entity.
+    indexed: BTreeMap<String, HashMap<String, Vec<usize>>>,
 }
 
 impl Evaluation<'_> {
-    /// The rows of a part's queries, each column as its variable.
-    fn rows(&self, rows: &Rows) -> Vec<Row> {
+    /// The rows of a part's queries, each column as its variable, each
+    /// once; worked out once a part.
+    fn rows(&mut self, rows: &Rows) -> Vec<Row> {
+        let Some(first) = rows.runs.first() else {
+            return Vec::new();
+        };
+        if let Some(read) = self.read.get(first) {
+            return read.clone();
+        }
         let mut all: Vec<Row> = Vec::new();
+        let mut seen = HashSet::new();
         for run in &rows.runs {
             for values in &self.results[*run] {
                 let row: Row = rows
@@ -306,19 +333,20 @@ impl Evaluation<'_> {
                             .map(|value| (name.clone(), written(value)))
                     })
                     .collect();
-                if !all.contains(&row) {
+                if seen.insert(format!("{row:?}")) {
                     all.push(row);
                 }
             }
         }
+        self.read.insert(*first, all.clone());
         all
     }
 
     /// Every row of the query named `name`: what each variable of its
     /// head and body is bound to.
-    fn query(&mut self, name: &str) -> Result<Vec<Row>, Error> {
-        if let Some(rows) = self.done.get(name) {
-            return Ok(rows.clone());
+    fn query(&mut self, name: &str) -> Result<(), Error> {
+        if self.done.contains_key(name) {
+            return Ok(());
         }
         let defined = self
             .selection
@@ -349,17 +377,42 @@ impl Evaluation<'_> {
             }
         }
         let mut kept: Vec<Row> = Vec::new();
+        let mut seen = HashSet::new();
         for row in rows {
-            if !kept.contains(&row) {
+            if seen.insert(format!("{row:?}")) {
                 kept.push(row);
             }
         }
-        self.done.insert(name.to_string(), kept.clone());
-        Ok(kept)
+        self.done.insert(name.to_string(), kept);
+        Ok(())
+    }
+
+    /// The answers of the query `name` whose entity is `entity`, by an
+    /// index made once.
+    fn answers_of(&mut self, name: &str, head: &Syntax, entity: &Syntax) -> Vec<usize> {
+        let answers = self.done.get(name).map(Vec::as_slice).unwrap_or_default();
+        let index = self.indexed.entry(name.to_string()).or_insert_with(|| {
+            let mut index: HashMap<String, Vec<usize>> = HashMap::new();
+            let own = head.operand().and_then(|operand| operand.items.first());
+            for (at, answer) in answers.iter().enumerate() {
+                let value = own.map(|own| fill(own, answer));
+                index
+                    .entry(keyed(std::iter::once(value.as_ref())))
+                    .or_default()
+                    .push(at);
+            }
+            index
+        });
+        index
+            .get(&keyed(std::iter::once(Some(entity))))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The rows `row` extends to where `call` holds: one for each answer
     /// of the query it applies whose head agrees with the call's terms.
+    /// Where the call's entity is bound, only the answers of that entity
+    /// are looked at.
     fn called(&mut self, call: &Syntax, row: &Row) -> Result<Vec<Row>, Error> {
         let name = call.applies().ok_or_else(|| malformed(call))?;
         let head = self
@@ -368,12 +421,23 @@ impl Evaluation<'_> {
             .get(name)
             .map(|defined| defined.head.clone())
             .ok_or_else(|| Error::Unknown(name.to_string()))?;
-        let answers = self.query(name)?;
+        self.query(name)?;
         let (Some(wanted), Some(given)) = (call.operand(), head.operand()) else {
             return Err(malformed(call));
         };
+        let bound = wanted.items.first().and_then(|term| match term {
+            Syntax::Variable(variable) => row.get(variable).cloned(),
+            Syntax::Constant(_) => Some(term.clone()),
+            _ => None,
+        });
+        let candidates: Vec<usize> = match (&bound, given.items.first()) {
+            (Some(entity), Some(Syntax::Variable(_))) => self.answers_of(name, &head, entity),
+            _ => (0..self.done.get(name).map(Vec::len).unwrap_or_default()).collect(),
+        };
+        let answers = self.done.get(name).map(Vec::as_slice).unwrap_or_default();
         let mut extended = Vec::new();
-        'answers: for answer in &answers {
+        'answers: for at in candidates {
+            let answer = &answers[at];
             let mut joined = row.clone();
             for (at, term) in wanted.items.iter().enumerate() {
                 let Some(value) = given.items.get(at) else {
@@ -401,21 +465,38 @@ impl Evaluation<'_> {
     }
 
     /// The whole of what a collecting read gives for `row`: a map of
-    /// key to value for entries, a set otherwise. Nothing is `{}`.
+    /// key to value for entries, a set otherwise. Nothing is `{}`. A
+    /// read's rows are grouped once by the terms it shares with the rest.
     fn whole(&mut self, collect: &Collect, row: &Row) -> Result<Syntax, Error> {
         let matched: Vec<Row> = match &collect.source {
             Source::Rows(rows) => {
                 let mut wanted = Vec::new();
                 collect.item.variables(&mut wanted);
-                self.rows(rows)
-                    .into_iter()
-                    .filter(|found| {
-                        rows.columns
-                            .iter()
-                            .filter(|column| !wanted.contains(column))
-                            .all(|column| row.get(column) == found.get(column))
-                    })
-                    .collect()
+                let shared: Vec<String> = rows
+                    .columns
+                    .iter()
+                    .filter(|column| !wanted.contains(column))
+                    .cloned()
+                    .collect();
+                let first = rows.runs.first().copied().unwrap_or_default();
+                if !self.read.contains_key(&first) {
+                    self.rows(rows);
+                }
+                let read = self.read.get(&first).map(Vec::as_slice).unwrap_or_default();
+                let groups = self.grouped.entry(first).or_insert_with(|| {
+                    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+                    for (at, found) in read.iter().enumerate() {
+                        groups
+                            .entry(keyed(shared.iter().map(|column| found.get(column))))
+                            .or_default()
+                            .push(at);
+                    }
+                    groups
+                });
+                groups
+                    .get(&keyed(shared.iter().map(|column| row.get(column))))
+                    .map(|found| found.iter().map(|at| read[*at].clone()).collect())
+                    .unwrap_or_default()
             }
             Source::Call(call) => self.called(call, row)?,
         };

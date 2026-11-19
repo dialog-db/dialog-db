@@ -932,6 +932,9 @@ struct Scope {
     /// read by Dialog-DB, and a pattern is put in after: this was built
     /// before a pattern had a written form (format 4 of a rule body).
     shapes: Vec<(String, Syntax, Pattern)>,
+    /// The records a head builds, each from what its premises bind, under
+    /// the field it concludes.
+    built: Vec<(String, Pattern)>,
 }
 
 impl Scope {
@@ -1266,6 +1269,15 @@ impl Scope {
                         field.attribute
                     )));
                 }
+                // A record the head concludes is built of what the
+                // premises bind: the field is that record.
+                Term::Struct(form) if read.domain.starts_with("report.") => {
+                    let pattern = shape(form, false, &mut |name| match name {
+                        Some(name) => Variable::var(self.name(name)),
+                        None => Variable::blank(),
+                    })?;
+                    self.built.push((field.label.clone(), pattern));
+                }
                 Term::Formula(formula)
                     if formula.name != "id" && !TYPES.contains(&formula.name.as_str()) =>
                 {
@@ -1320,6 +1332,12 @@ impl Scope {
     /// handed to Dialog-DB written out, and a pattern has no written
     /// form, so these join its premises once the rest is read.
     fn equalities(&self) -> Vec<Proposition> {
+        let built = self.built.iter().filter_map(|(field, pattern)| {
+            match pattern.clone().is(Variable::<Any>::var(field.clone())) {
+                DialogPremise::Assert(proposition) => Some(proposition),
+                DialogPremise::Unless(_) => None,
+            }
+        });
         self.shapes
             .iter()
             .filter_map(|(place, _, pattern)| {
@@ -1328,6 +1346,7 @@ impl Scope {
                     DialogPremise::Unless(_) => None,
                 }
             })
+            .chain(built)
             .collect()
     }
 

@@ -290,6 +290,38 @@ pub fn fill(template: &Syntax, bindings: &Bindings, fresh: &str) -> Result<Synta
     })
 }
 
+/// `tree` with each variable `given` names put in by what it names.
+pub(crate) fn replaced(tree: &Syntax, given: &BTreeMap<String, Syntax>) -> Syntax {
+    match tree {
+        Syntax::Variable(name) => given.get(name).cloned().unwrap_or_else(|| tree.clone()),
+        Syntax::Application(operator, operand) => Syntax::Application(
+            Box::new(replaced(operator, given)),
+            Parameters {
+                items: operand
+                    .items
+                    .iter()
+                    .map(|item| replaced(item, given))
+                    .collect(),
+                terms: operand
+                    .terms
+                    .iter()
+                    .map(|(label, term)| (label.clone(), replaced(term, given)))
+                    .collect(),
+            },
+        ),
+        Syntax::Map(entries) => Syntax::Map(
+            entries
+                .iter()
+                .map(|(key, value)| (replaced(key, given), replaced(value, given)))
+                .collect(),
+        ),
+        Syntax::Tuple(items) => {
+            Syntax::Tuple(items.iter().map(|item| replaced(item, given)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

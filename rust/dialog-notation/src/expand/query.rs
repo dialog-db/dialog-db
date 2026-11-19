@@ -556,8 +556,29 @@ impl Expander {
     /// analyzed.
     fn selected(&mut self, call: &Syntax) -> Result<Syntax, Error> {
         let name = call.applies().unwrap_or_default().to_string();
+        // What the call gives by value is put into the query it asks,
+        // so its reads are of that and not of every answer: one card is
+        // not every card. A query whose answer is markup is laid out for
+        // whatever entity it is rendered for, and is not.
+        let written = self.queries.get(&name).cloned();
+        if let Some(tree) = &written
+            && !items(tree)
+                .iter()
+                .skip(1)
+                .any(|condition| condition.applies() == Some("view"))
+        {
+            let given = bound_by(call, items(tree).first());
+            if !given.is_empty() {
+                self.queries
+                    .insert(name.clone(), crate::pattern::replaced(tree, &given));
+            }
+        }
         let mut reached = Vec::new();
-        self.analyzed(&name, &mut reached)?;
+        let analyzed = self.analyzed(&name, &mut reached);
+        if let Some(tree) = written {
+            self.queries.insert(name.clone(), tree);
+        }
+        analyzed?;
         let mut parts = vec![call.clone()];
         parts.extend(reached.into_iter().map(|(_, analyzed)| analyzed));
         Ok(apply(SELECTED, parts))
@@ -815,6 +836,29 @@ impl Expander {
         self.each(&rule, &mut rules)?;
         Ok(rules)
     }
+}
+
+/// The head's variables a call gives a value for: its entity and each
+/// field, where the call writes a constant.
+fn bound_by(call: &Syntax, head: Option<&Syntax>) -> BTreeMap<String, Syntax> {
+    let mut given = BTreeMap::new();
+    let (Some(wanted), Some(own)) = (call.operand(), head.and_then(Syntax::operand)) else {
+        return given;
+    };
+    let mut pair = |term: &Syntax, own: &Syntax| {
+        if let (Syntax::Constant(_), Syntax::Variable(variable)) = (term, own) {
+            given.insert(variable.clone(), term.clone());
+        }
+    };
+    for (term, own) in wanted.items.iter().zip(&own.items) {
+        pair(term, own);
+    }
+    for (label, term) in &wanted.terms {
+        if let Some(own) = own.terms.get(label) {
+            pair(term, own);
+        }
+    }
+    given
 }
 
 /// Refuse a function of what was collected other than `count`.
