@@ -40,10 +40,12 @@ impl $name {
         repository: std::sync::Arc<dialog_repository::Repository<dialog_credentials::Credential>>,
         branch: Branch,
     ) -> Result<Self> {
-        // Whose the definitions are: the account the operator acts for,
-        // which stands for the person on every device, and not the
-        // device's profile.
-        let mine: dialog_corpus::Entity = operator.authority().await?.to_string().parse()?;
+        // Whose the definitions are: the authority the branch is opened
+        // under, the DID the peer writes as.
+        let mine = Live::new(branch.clone())
+            .authority(&operator)
+            .await
+            .map_err(unwrapped)?;
         // Nothing is loaded: what a document reaches is read from the
         // branch as it is analyzed.
         let analyzer = Analyzer::new()?.with_namespace(mine);

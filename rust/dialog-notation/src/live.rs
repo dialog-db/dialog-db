@@ -233,13 +233,39 @@ impl Live {
         Ok(())
     }
 
+    /// The authority the branch is opened under: the DID a peer is built
+    /// to write as (`PeerBuilder::profile`, the home by default, a
+    /// persona's for a device of that persona), which every revision it
+    /// commits names as `dialog.revision/authority` and every query of
+    /// the branch is given on `db:session` as `dialog.session/profile`.
+    /// It is the local namespace a caller that acts as that authority
+    /// gives [`Analyzer::with_namespace`].
+    pub async fn authority<E: Reader>(&self, env: &E) -> Result<Entity, LiveError> {
+        let rows = self
+            .read(
+                &[("profile", "dialog.session/profile", "entity:")],
+                &[],
+                env,
+            )
+            .await?;
+        rows.into_iter()
+            .find_map(|(this, values)| match values.get("profile") {
+                Some(Value::Entity(profile)) if this.as_str() == "db:session" => {
+                    Some(profile.clone())
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                LiveError::Notation(Error::Read("the branch is read under no authority".into()))
+            })
+    }
+
     /// What the branch keeps of the notation's definitions: every
     /// definition and every namespace's bindings.
     ///
-    /// Which namespace is mine is not among them: a query of a branch is
-    /// given the device's profile and its operator (`db:session`), and
-    /// nothing that stands for the person across their devices. The
-    /// caller says whose it is ([`analyzer`](Self::analyzer)).
+    /// Which namespace is mine is not among them: it is the authority the
+    /// branch is opened under ([`authority`](Self::authority)), which the
+    /// caller gives the analyzer.
     pub async fn kept<E: Reader>(&self, env: &E) -> Result<Kept, LiveError> {
         let mut definitions = Vec::new();
         for (this, values) in self

@@ -31,10 +31,11 @@ form as written and, for each reference, the name it was written under
 and the definition it resolved to.
 
 A name is a namespace: a key bound to one referent. A document binds
-what it defines in mine, the authority its caller acts for, which the
-caller gives (`Analyzer::with_namespace`): a query of a branch is given
-the device's profile, and nothing that stands for a person across their
-devices. In mine the name is bound to the name's own namespace, and in
+what it defines in mine: the authority the branch is opened under, the
+DID a peer is built to write as (`PeerBuilder::profile`), which its
+revisions name as `dialog.revision/authority` and a query reads as
+`dialog.session/profile`; `Live::authority` reads it and the caller gives
+it to `Analyzer::with_namespace`. In mine the name is bound to the name's own namespace, and in
 that the signature, its kind and labels in order
 (`concept (done: title:)`), to the definition. `Name` is a rule over
 every namespace's bindings. A bare `todo` is mine and nothing else,
@@ -79,7 +80,7 @@ What this changes for you:
   `Analysis` and `Checked` gain `defined`, `named` and `unnamed`;
   `Analyzer::with_namespace`, `load`, `take`, `ask_for`, `wanted`,
   `answer`, `forget`, `resolve_at`, `namespaces` and `definitions`;
-  `Live::analyze` (with `Rounds` and `ROUNDS`), `Live::kept`,
+  `Live::analyze` (with `Rounds` and `ROUNDS`), `Live::authority`, `Live::kept`,
   `Live::suggest`, `live::written` (a `Written`) and `live::name_rule`;
   `LiveError::Rounds`.
 - New in `dialog-query`: `rule::canonical::labelling` and

@@ -106,7 +106,7 @@ async fn it_answers_from_a_fresh_analyzer_on_the_filesystem() -> Result<()> {
 
 /// What a small document writes: the definition under its entity, with
 /// its kind; a source map that says what was written and what each name
-/// resolved to; and two bindings, the name in mine, the account the
+/// resolved to; and two bindings, the name in mine, the authority the
 /// notebook's operator acts for, and the signature in the name's namespace.
 #[dialog_common::test]
 async fn it_writes_a_definition_its_source_map_and_its_bindings() -> Result<()> {
@@ -201,7 +201,7 @@ async fn it_keeps_one_definition_under_one_entity_on_two_branches() -> Result<()
     assert_eq!(entities(&one, "todo")?, entities(&other, "todo")?);
     assert_eq!(entities(&one, "todo/card")?, entities(&other, "todo/card")?);
     let mine = |notebook: &Notebook| notebook.analyzer().namespaces().mine().clone();
-    assert_ne!(mine(&one), mine(&other), "two accounts, two namespaces");
+    assert_ne!(mine(&one), mine(&other), "two authorities, two namespaces");
     Ok(())
 }
 
@@ -658,5 +658,44 @@ async fn it_analyzes_each_sketch_in_a_few_rounds() -> Result<()> {
             "{name}: {rounds:?}"
         );
     }
+    Ok(())
+}
+
+/// Mine is the authority the branch is opened under: the one every
+/// revision the notebook commits names as its authority.
+#[dialog_common::test]
+async fn it_binds_in_the_authority_the_branch_is_opened_under() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook.submit(DOCUMENT).await?;
+    let mine = notebook.analyzer().namespaces().mine().clone();
+    assert_eq!(
+        Live::new(notebook.branch.clone())
+            .authority(&notebook.operator)
+            .await?,
+        mine
+    );
+    use dialog_query::query::Output as _;
+    use dialog_query::{Query, Term};
+    use dialog_repository::schema;
+    let revisions: Vec<schema::Revision> = notebook
+        .branch
+        .query()
+        .select(Query::<schema::Revision> {
+            this: Term::var("this"),
+            branch: Term::var("branch"),
+            issuer: Term::var("issuer"),
+            authority: Term::var("authority"),
+            edition: Term::var("edition"),
+        })
+        .perform(&notebook.operator)
+        .try_vec()
+        .await?;
+    assert!(!revisions.is_empty());
+    assert!(
+        revisions
+            .iter()
+            .all(|revision| revision.authority.0 == mine),
+        "the revisions' authority is mine"
+    );
     Ok(())
 }
