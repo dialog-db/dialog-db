@@ -1660,3 +1660,17 @@ It leaves the view where it was. Splitting the concept does not keep a to-do's `
 
 **Decided.** The maintainer's: no entry, no row; split the concept. So a read of an entry with both halves blank says there is one, and the fix in #835 stands as it is. Not decided: how a view reads the second concept without losing the first, and the aggregate.
 
+## 2026-11-18, Designing: a query nests
+
+**Asked.** What a view does with a to-do that has no tag, which the agent put as a yes or no about one inferred rule. The maintainer could not read the example, which was written from memory in no form the design has, and answered the question behind it.
+
+**Learned.** His: the view says what it needs by its shape. One query needs everything; a nested part or an aggregate may be empty. A nested part is passed its parent and repeats n times, none included. Aggregation belongs at the outside, where nothing can read it back, which is why he kept it out of rule heads; and that outside thing and a rendered view are about the same thing. He asked for a recommendation and for prior art, Datomic's pull and GraphQL.
+
+The prior art draws his line already: Datomic folds in `:find` only and trees in `pull`. The agent had two things wrong by voice: pull does not give an empty list for a missing attribute, it leaves the key out; and `query` is not a free word, it is the design's question form, which makes it the unnamed case of the same thing and not a rival to `view`.
+
+The agent's inferred rule is withdrawn. So, if the sketch holds, are the design's fold over an entity and tonk's marker, the second of which was taken this morning.
+
+**Backtracked.** From Building to Designing on views: what repeats is being decided a third time today.
+
+**Decided.** Not decided. [design-queries.md](design-queries.md) is the sketch to align on; nothing is built from it. Open and his: whether a concept is needed at all once a condition may be a line.
+
