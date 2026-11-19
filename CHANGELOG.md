@@ -14,6 +14,8 @@ says how to cut a release.
 
 ## Unreleased
 
+## 0.5.0 (2026-11-19)
+
 ### A subscription's poll costs the entities it touched, not its whole answer
 
 [#838](https://github.com/dialog-db/dialog-db/pull/838).
