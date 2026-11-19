@@ -60,3 +60,36 @@ Whichever is taken, the pairs form needs a table of offsets too, or the first go
 ## Cost
 
 About 6 to 8 days: lists and offsets in the composite 2 to 3, the notation 2, patterns and their tests 2, a day more for K2. `data.rs` does not isolate the encoding: `syntax.rs` and `compile.rs` match the old value directly. Patterns assume text keys in dag-cbor's order and a `get` that gives one value where the composite gives several. A definition's entity is made of its signature's reference, so it moves with the encoding; nothing is known to be stored yet.
+
+## 2026-11-20, the maintainer's positions, and the order to decide in
+
+Said by him:
+
+- A map that holds arbitrary keys makes sense. A record is a subtype of it whose keys are all attributes, as a natural is a sub-band of the numbers.
+- A composite is identified by its merkle reference, a canonical identity even where the bytes on the wire or on disk differ.
+- Lists are not clear to him. Dialog orders relations by fractional indexes, which suits a distributed system, and a list is problematic there; whether that applies to a composite or is overkill he does not know. What are called lists may be tuples, the elements being of several kinds.
+- A HAMT, or dialog's own tree as dialog-chronicle uses a form of it without hashes, might be what a collection should be; or it is overengineering.
+- It should be measured.
+
+The agent's reading of what depends on what:
+
+```
+ 1 a value, or a place?         a value is whole and never edited; a place is edited and merged
+     │ a value
+ 2 its identity                 the merkle reference, apart from its bytes (his)
+     │                          so an encoding can be changed later without moving any identity
+ 3 its kinds                    a map of arbitrary keys; a record its sub-band (his); a sequence ?
+     │
+ 4 its bytes                    the least that the sizes measured ask for
+     │
+ 5 a large or edited collection not a composite: facts, ordered by fractional index, as now
+```
+
+| claim | kind | backing |
+|---|---|---|
+| fractional indexes, a HAMT and a tree each answer a collection that is edited in place, merged, or too large to hold whole; a composite that is a value has none of those | hypothesis, the agent's | refuted if a composite is ever changed other than by replacing it whole, or if composites in use are large |
+| with identity apart from bytes, the choice of bytes is reversible, but a composite used as a key of the tree has to be ordered by something canonical, its reference or canonical bytes | hypothesis, the agent's | #812 keys a composite as its escaped bytes and refuses bytes that are not canonical (`varkey.rs`, `composite.rs` 90-96); to be read |
+| a sequence can be a sub-band of the map as a record is: the map whose keys are the whole numbers from 0 with none missing | hypothesis, the agent's, offered as a column | against it: a list and a map are told apart by every data model read (IPLD, JSON, EDN), and the merkle reference has `list:` |
+| a syntax tree's sequence is a list of one kind, syntax nodes, though the nodes are of several shapes | fact | `syntax.rs` `Parameters.items`, `Tuple` |
+
+To measure before 4: how many fields, how many bytes and how deep the composites of the sketches' syntax trees are; whether the analyzer and the patterns reach a field by its key or walk the whole; and what a scan costs against a table of offsets at those sizes.
