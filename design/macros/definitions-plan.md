@@ -34,17 +34,18 @@ Corrected by the maintainer, 2026-11-20:
 - The form hashed is canonical: conditions and anything else whose order does not matter are put in the order the rule's canonical labelling gives, and variables named by it. Two spellings of one definition are one entity.
 - Names, as the maintainer shaped them on 2026-11-20:
 
-Replaced on 2026-11-20 by the maintainer: no namespace entities.
+As decided on 2026-11-20, last of five shapes that day: a name is of a repository.
 
 ```
- the space's bindings: a key bound to one definition
+ a binding: a repository and a key, bound to one definition
 
-   "todo · concept (title:)"            ──▶ definition:<hash>     a bare name is the space's
-   "todo · concept (title: done:)"      ──▶ definition:<hash>     a second signature is a second key
-   "cdata/todo · concept (title:)"      ──▶ definition:<hash>     a namespace is a prefix, by convention
+   this repository · "todo · concept (title:)"        ──▶ definition:<hash>
+   this repository · "todo · concept (title: done:)"  ──▶ definition:<hash>    a second signature, a second key
+   cdata's         · "todo · concept (title:)"        ──▶ definition:<hash>    theirs, beside mine, overriding nothing
 
- written   todo          one read of the range of keys that start "todo ·", then the labels written choose
-           cdata/todo    the same, of a longer name
+ written   todo          this repository's: one read of the range of its keys that start "todo ·"
+           @cdata/todo   the same read in the repository this stack knows as cdata, a layer or a remote
+           lib/todo      one name with a prefix in it, by convention
            todo#3fa9     the definition whose hash starts so
 ```
 
