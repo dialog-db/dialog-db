@@ -16,7 +16,7 @@
 //! | `(report A)` with one read as its premise | a [`ConceptQuery`] |
 //! | `(report A)` with any other premises | a [`DeductiveRule`] deriving the report, and a [`ConceptQuery`] of it |
 //! | `description: "…"` on a rule Dialog-DB keeps | a [`ConceptStatement`] asserting `syntax.meta/description` of the rule's entity |
-//! | `(view …)` | a [`Plan`](crate::Plan): its layers, each a query of its own, that a back end maintains it by; nothing written |
+//! | `(select.query …)` of a query whose answer is markup | a [`Plan`](crate::Plan): its layers, each a query of its own, that a back end maintains it by; nothing written |
 //! | `(select.query …)`, a query asked | a [`Selection`](crate::select::Selection): the [`ConceptQuery`]s its rows come from, put together in memory; nothing written |
 //!
 //! A kernel rule has one head, as a Dialog-DB rule has. What Dialog-DB
@@ -371,24 +371,23 @@ pub const DESCRIBED: &str = "syntax.meta";
 /// Compile an analyzed tree: the third phase, from a rule of the
 /// kernel to what Dialog-DB runs.
 pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
-    // A view is not a rule. It is laid out in layers, each a query of
-    // its own, and maintained where it is rendered: nothing of it is
+    // A query whose answer is markup is laid out in layers, each a query
+    // of its own, and maintained where it is rendered: nothing of it is
     // folded, and nothing of it is written. It compiles when every
     // layer's query does.
-    if form.applies() == Some("view") {
-        let view = crate::view::View::describe(form)?;
-        let plan = crate::view::plan::Plan::repeating(&view)?;
-        // A layer with no condition, a view's that has none, has no query.
-        for layer in (0..plan.layers.len()).filter(|at| !plan.layers[*at].conditions.is_empty()) {
-            let said = |why: String| {
-                format!(
-                    "the view {} :{}, layer {layer}: {why}",
-                    view.concept, view.name
-                )
-            };
+    if form.applies() == Some(crate::select::SELECTED) && crate::view::plan::is_markup(form) {
+        let plan = crate::view::plan::Plan::of(form)?;
+        for layer in 0..plan.layers.len() {
+            if plan.layers[layer].conditions.is_empty() {
+                continue;
+            }
             plan.query(layer, None).map_err(|error| match error {
-                Error::Refused(why) => Error::Refused(said(why)),
-                Error::Unsupported(why) => Error::Unsupported(said(why)),
+                Error::Refused(why) => {
+                    Error::Refused(format!("the view {}, layer {layer}: {why}", plan.name))
+                }
+                Error::Unsupported(why) => {
+                    Error::Unsupported(format!("the view {}, layer {layer}: {why}", plan.name))
+                }
                 other => other,
             })?;
         }

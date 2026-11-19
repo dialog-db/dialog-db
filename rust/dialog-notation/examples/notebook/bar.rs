@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use dialog_notation::{Error, Expander, Segment, View, compile, parse_document};
+use dialog_notation::{
+    Error, Expander, Parameters, Segment, Step, Syntax, compile, parse_document,
+};
 
 /// Where a form stopped, and why.
 #[derive(Debug, Clone)]
@@ -28,8 +30,8 @@ pub struct Bar {
     pub expanded: usize,
     /// The expanded forms every kernel rule of which compiled.
     pub compiled: usize,
-    /// The views that reach a description, `View::describe`, whatever
-    /// Dialog-DB's compiler says of them.
+    /// The queries whose answer is markup that, asked, are laid out in
+    /// a plan: a view each.
     pub described: usize,
     /// The first error of each form that stopped.
     pub stops: Vec<Stop>,
@@ -80,9 +82,6 @@ impl Bar {
             if stopped.contains_key(&at) {
                 continue;
             }
-            if rule.applies() == Some("view") && View::describe(rule).is_ok() {
-                bar.described += 1;
-            }
             if let Err(error) = compile(rule) {
                 stopped.insert(
                     at,
@@ -95,6 +94,33 @@ impl Bar {
             }
         }
         bar.compiled = bar.read - stopped.len();
+        // Each query whose answer is markup, asked of its own head.
+        for (at, tree) in parsed.trees.iter().enumerate() {
+            let Some(operand) = tree.operand() else {
+                continue;
+            };
+            let markup = operand
+                .items
+                .iter()
+                .skip(1)
+                .any(|part| part.applies() == Some("view"));
+            if tree.applies() != Some("query") || !markup || stopped.contains_key(&at) {
+                continue;
+            }
+            let asked = Syntax::Application(
+                Box::new(Syntax::Reference("select".into())),
+                Parameters {
+                    items: vec![operand.items[0].clone()],
+                    ..Parameters::default()
+                },
+            );
+            let (selected, _) = expander.clone().check(vec![asked]);
+            if let [selected] = selected.as_slice()
+                && matches!(compile(selected).as_deref(), Ok([Step::View(_)]))
+            {
+                bar.described += 1;
+            }
+        }
         bar.stops.extend(stopped.into_values());
         Ok(bar)
     }

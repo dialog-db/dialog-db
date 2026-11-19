@@ -222,6 +222,12 @@ impl Selection {
                     (Some("is"), [Syntax::Variable(target), shape]) => {
                         defined.shapes.push((target.clone(), shape.clone()));
                     }
+                    (Some("view"), _) => {
+                        return Err(Error::Unsupported(format!(
+                            "the answer of {name} is markup, and a query whose answer is not \
+                             markup collects it or calls it"
+                        )));
+                    }
                     _ => return Err(malformed(part)),
                 }
             }

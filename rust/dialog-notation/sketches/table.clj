@@ -351,47 +351,19 @@
 ; view's entity when it renders. YAML 480-486.
 ; GAP: a view of a concept named by an entity, `this: tonk:table/sheet`;
 ; the design's view names its concept. YAML 481.
-(view table/sheet :directory
-  [:div {:class "table-sheet-rows"}
-    [:div {:class "table-sheet-row"
-           :subject ?s
-           :data-table ?table
-           :data-name ?name
-           :data-order ?order}]]
-  (table/sheet ?s table: ?table name: ?name order: ?order))
+; Its view, `(view table/sheet :directory …)` as it was, is a query in table-views.clj.
 
 ; GAP: a view with no entity, as above. YAML 488-494.
 ; GAP: an optional field, `data-style={style}`: the cell's style is
 ; `maybe:`, which the design leaves open, so `table/cell` has no style and
 ; the attribute is left out. YAML 493.
-(view table/cell :directory
-  [:div {:class "table-cell-rows"}
-    [:div {:class "table-cell-row"
-           :subject ?c
-           :data-sheet ?sheet
-           :data-at ?at
-           :data-content ?content}]]
-  (table/cell ?c sheet: ?sheet at: ?at content: ?content))
+; Its view, `(view table/cell :directory …)` as it was, is a query in table-views.clj.
 
 ; GAP: a view with no entity, as above. YAML 496-502.
-(view table/column :directory
-  [:div {:class "table-column-rows"}
-    [:div {:class "table-column-row"
-           :subject ?k
-           :data-sheet ?sheet
-           :data-at ?at
-           :data-width ?width}]]
-  (table/column ?k sheet: ?sheet at: ?at width: ?width))
+; Its view, `(view table/column :directory …)` as it was, is a query in table-views.clj.
 
 ; GAP: a view with no entity, as above. YAML 504-510.
-(view table/row :directory
-  [:div {:class "table-rowsize-rows"}
-    [:div {:class "table-rowsize-row"
-           :subject ?r
-           :data-sheet ?sheet
-           :data-at ?at
-           :data-height ?height}]]
-  (table/row ?r sheet: ?sheet at: ?at height: ?height))
+; Its view, `(view table/row :directory …)` as it was, is a query in table-views.clj.
 
 ; Views: the live grid. `subject` selects the element's claims mode; the
 ; nested hidden displays materialize this branch's sheet and cell claims
@@ -404,39 +376,7 @@
 ; four times. The design's reference names an entity, `{:view :row :of ?t}`;
 ; `:model` naming the concept whose view it is, by its name and not its
 ; pinned entity, is the managing agent's opinion. YAML 535-538.
-(view table :ui
-  [:tonk-table {:subject ?t
-                :on/createsheet (table/create-sheet table: .detail.sheetTable
-                                                    name: .detail.sheetName
-                                                    order: .detail.sheetOrder
-                                                    time: .detail.time)
-                :on/renamesheet (table/rename-sheet sheet: .detail.renameSheet
-                                                    name: .detail.renameName)
-                :on/createcell (table/create-cell sheet: .detail.cellSheet
-                                                  at: .detail.cellAt
-                                                  content: .detail.cellContent
-                                                  time: .detail.time)
-                :on/editcell (table/edit-cell cell: .detail.editCell
-                                              content: .detail.editContent)
-                :on/clearcell (table/clear-cell cell: .detail.clearCell)
-                :on/createcolumn (table/create-column sheet: .detail.columnSheet
-                                                      at: .detail.columnAt
-                                                      width: .detail.columnWidth
-                                                      time: .detail.time)
-                :on/resizecolumn (table/resize-column column: .detail.resizeColumn
-                                                      width: .detail.resizeWidth)
-                :on/createrow (table/create-row sheet: .detail.rowSheet
-                                                at: .detail.rowAt
-                                                height: .detail.rowHeight
-                                                time: .detail.time)
-                :on/resizerow (table/resize-row row: .detail.resizeRow
-                                                height: .detail.resizeHeight)}
-    [:div {:hidden true}
-      {:view :directory :model table/sheet}
-      {:view :directory :model table/cell}
-      {:view :directory :model table/column}
-      {:view :directory :model table/row}]]
-  (table ?t name: ?name))
+; Its view, `(view table :ui …)` as it was, is a query in table-views.clj.
 
 ; A directory view so `tonk render table` (list of workbooks) resolves.
 ; GAP: a view with no entity, as above. YAML 543-549.
@@ -452,10 +392,7 @@
 ; GAP: a nested view with no view named, `<tonk-display entity={this}>`:
 ; the display picks the entity's view. The design's reference names one,
 ; `{:view :row :of ?t}`; `:ui` is the nearest. YAML 548.
-(view table :directory
-  [:div {:class "table-directory"}
-    {:view :ui :of ?t :model table}]
-  (table ?t name: ?name))
+; Its view, `(view table :directory …)` as it was, is a query in table-views.clj.
 
 ; Starter content: one workbook, one sheet, and the demo cells, each cell
 ; its own claim (`tonk query table/cell` lists them; agents assert more).

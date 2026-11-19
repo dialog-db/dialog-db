@@ -236,34 +236,7 @@
 ; sequence, one `.notebook-order__item` per entry in position order carrying
 ; the entry's key, and the block rows carrying each block's source. Wrapped
 ; in <notebook-save> so Cmd/Ctrl+S saves it.
-(view notebook :ui
-  [:notebook-save {:style "display: block;"}
-    [:tonk-notebook {:data-subject ?n
-                     :data-notebook ?n
-                     :title ?title
-                     :on/blockedit (block/edit subject: .currentTarget.dataset.subject
-                                               source: .detail.source
-                                               notebook: .detail.notebook)
-                     :on/place (block/place subject: .currentTarget.dataset.subject
-                                            notebook: .detail.notebook
-                                            key: .detail.key)
-                     :on/remove (block/remove subject: .currentTarget.dataset.subject
-                                              notebook: .detail.notebook
-                                              key: .detail.removed)
-                     :on/titlechange (notebook/retitle subject: .detail.notebook
-                                                       title: .detail.title)
-                     :style "display: block;"}
-      ; GAP: a valueless HTML attribute. The design has no boolean term;
-      ; this is Hiccup's `true`. YAML 323.
-      [:div {:class "notebook-data" :hidden true}
-        [:div {:class "notebook-order"}
-          [:span {:class "notebook-order__item" :data-block ?b :data-key ?k}]]
-        ; GAP: a nested view with no entity. `<tonk-display
-        ; model=notebook/block>` renders every block's `directory` view; the
-        ; design's reference names an entity, `{:view :row :of ?t}`, and
-        ; not a concept. YAML 327.
-        {:view :directory :model notebook/block}]]]
-  (notebook ?n title: ?title block: {?k ?b}))
+; Its view, `(view notebook :ui …)` as it was, is a query in notebook-views.clj.
 
 ; Every notebook: the directory view, what core's `/{*model}` route renders
 ; at `/space/{repo}/notebook`, one link per notebook. These rows are also the
@@ -272,31 +245,11 @@
 ; GAP: a view with no entity. A `directory` view renders every instance,
 ; its markup outside the per-entity element once; the design binds the
 ; view's entity when it renders. YAML 343-356.
-(view notebook :directory
-  [:div {:class "notebook-index"}
-    ; GAP: an HTML comment in a template, which Hiccup has no form for; it
-    ; is a source comment here. YAML 348-352.
-    ; Absolute, like every other link in the library. The guest believes it
-    ; is at a fake origin (`https://{label}.tonk.network/`), so a relative
-    ; `notebook/{this}` resolves against that origin's root rather than the
-    ; current path.
-    ; GAP: an attribute value built of several parts, `href="/notebook/{this}"`.
-    ; The design shows text children joined, `[:p ?count " open"]`, and no
-    ; attribute so built. YAML 353.
-    [:a {:class "notebook-index__item" :href ["/notebook/" ?n]}
-      [:span {:class "notebook-index__title"} ?title]]]
-  (notebook ?n title: ?title))
+; Its view, `(view notebook :directory …)` as it was, is a query in notebook-views.clj.
 
 ; The block rows the element reads: one per block, its source on the row.
 ; GAP: a view with no entity, as above. YAML 359-369.
-(view notebook/block :directory
-  [:div {:class "notebook-block-rows"}
-    [:div {:class "notebook-block-row"
-           :subject ?b
-           :data-block ?b
-           :data-notebook ?n
-           :data-source ?s}]]
-  (notebook/block ?b notebook: ?n source: ?s))
+; Its view, `(view notebook/block :directory …)` as it was, is a query in notebook-views.clj.
 
 ; The index, `/space/{repo}/notebook`, with no entity: its own route and its
 ; own concept, not the entity route with an optional field. A literal path
@@ -330,32 +283,7 @@
 ; notebook's real body, so nothing changes shape when the draft becomes a
 ; notebook. The nested display renders the notebook rows the switcher
 ; matches against.
-(view notebook/index-route :ui
-  [:tonk-notebook-index {:class "notebook-index"}
-    [:notebook-save {:style "display: block;"}
-      ; GAP: a valueless HTML attribute, `draft`. YAML 425.
-      ; GAP: an attribute value built of several parts, `with="{branch}@{repo}"`.
-      ; YAML 426.
-      [:tonk-notebook {:draft true
-                       :with [?branch "@" ?repo]
-                       :on/blockedit (block/edit subject: .currentTarget.dataset.subject
-                                                 source: .detail.source
-                                                 notebook: .detail.notebook)
-                       :on/place (block/place subject: .currentTarget.dataset.subject
-                                              notebook: .detail.notebook
-                                              key: .detail.key)
-                       :on/remove (block/remove subject: .currentTarget.dataset.subject
-                                                notebook: .detail.notebook
-                                                key: .detail.removed)
-                       :on/titlechange (notebook/retitle subject: .detail.notebook
-                                                         title: .detail.title)
-                       :style "display: block;"}]]
-    ; GAP: a nested view with no entity, of a named concept, read from
-    ; another branch and space, `<tonk-display with="{branch}@{repo}"
-    ; model=notebook>`. The design's reference names neither the concept
-    ; nor where to read. YAML 434.
-    {:view :directory :model notebook :with [?branch "@" ?repo]}]
-  (notebook/index-route ?site repo: ?repo branch: ?branch))
+; Its view, `(view notebook/index-route :ui …)` as it was, is a query in notebook-views.clj.
 
 ; One notebook, `/space/{repo}/notebook/{entity}`.
 ; GAP: a concept named by an entity, `tonk:notebook/route`, as above. YAML 439.
@@ -372,14 +300,7 @@
   ; The space branch, picked off the site entity.
   (xyz.tonk.site/branch of: ?site is: ?branch as: :text cardinality: :one))
 
-(view notebook/route :ui
-  [:div {:class "notebook-space"}
-    ; GAP: a nested view of a named concept, read from another branch and
-    ; space, `<tonk-display with="{branch}@{repo}" entity={entity}
-    ; model=notebook>`. The design's reference names the entity and the view
-    ; name, not the concept or where to read. YAML 463.
-    {:view :ui :of ?entity :model notebook :with [?branch "@" ?repo]}]
-  (notebook/route ?site entity: ?entity repo: ?repo branch: ?branch))
+; Its view, `(view notebook/route :ui …)` as it was, is a query in notebook-views.clj.
 
 ; Insert one block. The element names no entity: a block's identity derives
 ; from this command's body. It used to be minted from the document's block

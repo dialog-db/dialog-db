@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use dialog_corpus::Value;
 
-use crate::view::plan::Plan;
+use crate::view::plan::{Placed, Plan};
 use crate::view::{Attribute, Input, Node, Piece};
 
 /// A row of a layer: each variable and what it was bound to.
@@ -49,23 +49,6 @@ pub struct Posted {
     pub fields: Vec<(String, Given)>,
 }
 
-/// A nested view, where it is mounted: which view, of which entity.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Mount {
-    /// The view's name.
-    pub view: String,
-    /// The concept whose view it is, when the reference names one.
-    pub model: Option<String>,
-    /// The entity it renders, when the reference names one.
-    pub of: Option<Value>,
-    /// The reference's other entries, their parts joined; a call's
-    /// labels, each term as the notation writes it.
-    pub entries: Vec<(String, String)>,
-    /// What the variables a call holds are bound to here: what its
-    /// narrowing reads with.
-    pub given: Vec<(String, Value)>,
-}
-
 /// What an instance is.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Content {
@@ -80,8 +63,6 @@ pub enum Content {
         /// What it holds: a slot for each child the template writes.
         slots: Vec<Slot>,
     },
-    /// A nested view, mounted here.
-    View(Mount),
 }
 
 /// What a child of the template is in an instance.
@@ -156,13 +137,6 @@ pub enum Patch {
         /// The event now.
         event: Posted,
     },
-    /// A nested view's reference changes.
-    SetView {
-        /// The instance.
-        at: Address,
-        /// The reference now.
-        mount: Mount,
-    },
 }
 
 /// The rows of one layer that arrived and that left.
@@ -227,13 +201,10 @@ pub fn text(value: &Value) -> String {
 
 /// What an instance shows of itself, its children's instances apart.
 #[derive(Clone, Debug, PartialEq)]
-enum Own {
-    Element {
-        attributes: Vec<(String, String)>,
-        events: Vec<Posted>,
-        texts: Vec<Option<String>>,
-    },
-    View(Mount),
+struct Own {
+    attributes: Vec<(String, String)>,
+    events: Vec<Posted>,
+    texts: Vec<Option<String>>,
 }
 
 /// The instances of a view, kept from the rows of its layers.
@@ -248,6 +219,9 @@ pub struct Maintainer {
     lineage: Vec<Vec<usize>>,
     /// For each place, the variables it and every place below it show.
     shows: Vec<BTreeSet<String>>,
+    /// While a change is applied: each count an instance showed before
+    /// it, by the counted place and the instance's chain.
+    counted: BTreeMap<(usize, Chain), u64>,
 }
 
 impl Maintainer {
@@ -301,6 +275,7 @@ impl Maintainer {
             plan,
             lineage,
             shows,
+            counted: BTreeMap::new(),
         }
     }
 
@@ -377,25 +352,65 @@ impl Maintainer {
                 values.insert(name, value.0);
             }
         }
-        // A view not found shows its entity as the notation writes it.
-        if let (Some(fields), Some(entity)) = (&self.plan.source, values.get(&self.plan.entity)) {
-            use crate::syntax::{Parameters, Syntax};
-            let written = Syntax::Application(
-                Box::new(Syntax::Reference(self.plan.concept.clone())),
-                Parameters {
-                    items: vec![Syntax::Constant(entity.clone())],
-                    terms: fields
-                        .iter()
-                        .filter_map(|(label, name)| {
-                            Some((label.clone(), Syntax::Constant(values.get(name)?.clone())))
-                        })
-                        .collect(),
-                },
-            );
-            values.insert(
-                crate::view::plan::SOURCE.into(),
-                Value::String(written.to_string()),
-            );
+        for (depth, at) in self.lineage[element].iter().enumerate() {
+            let prefix: Chain = chain[..=depth].to_vec();
+            // A count it shows: the instances counted under it.
+            for count in self.plan.counts.iter().filter(|count| count.host == *at) {
+                let number =
+                    match before.and_then(|_| self.counted.get(&(count.place, prefix.clone()))) {
+                        Some(number) => *number,
+                        None => self.under(count.place, &prefix).len() as u64,
+                    };
+                values.insert(count.variable.clone(), Value::UnsignedInt(number.into()));
+            }
+            // A query not found shows the concept applied to its entity
+            // with its fields, as the notation writes it.
+            for source in self
+                .plan
+                .sources
+                .iter()
+                .filter(|source| source.place == *at)
+            {
+                use crate::syntax::{Parameters, Syntax};
+                let filled = |term: &Syntax| -> Syntax {
+                    match term {
+                        Syntax::Variable(name) => values
+                            .get(name)
+                            .cloned()
+                            .map(Syntax::Constant)
+                            .unwrap_or_else(|| term.clone()),
+                        Syntax::Map(entries) => Syntax::Map(
+                            entries
+                                .iter()
+                                .map(|(key, value)| {
+                                    let fill = |part: &Syntax| match part {
+                                        Syntax::Variable(name) => values
+                                            .get(name)
+                                            .cloned()
+                                            .map(Syntax::Constant)
+                                            .unwrap_or_else(|| part.clone()),
+                                        other => other.clone(),
+                                    };
+                                    (fill(key), fill(value))
+                                })
+                                .collect(),
+                        ),
+                        other => other.clone(),
+                    }
+                };
+                let written = Syntax::Application(
+                    Box::new(Syntax::Reference(source.concept.clone())),
+                    Parameters {
+                        items: vec![filled(&source.entity)],
+                        terms: source
+                            .fields
+                            .iter()
+                            .map(|(label, term)| (label.clone(), filled(term)))
+                            .collect(),
+                    },
+                );
+                values.insert(source.text.clone(), Value::String(written.to_string()));
+            }
         }
         values
     }
@@ -427,7 +442,7 @@ impl Maintainer {
                 .collect::<String>()
         };
         match self.plan.node(element) {
-            Node::Element(node) => Own::Element {
+            Node::Element(node) => Own {
                 attributes: node
                     .attributes
                     .iter()
@@ -472,54 +487,11 @@ impl Maintainer {
                         Node::Text(text) => Some(text.clone()),
                         Node::Value(value) => Some(value.to_string()),
                         Node::Variable(name) => Some(value_text(name)),
-                        Node::Element(_) | Node::View(_) | Node::Call(_) => None,
+                        Node::Element(_) => None,
                     })
                     .collect(),
             },
-            Node::View(nested) => Own::View(Mount {
-                view: nested.view.clone(),
-                model: nested.model.clone(),
-                of: nested
-                    .of
-                    .as_ref()
-                    .and_then(|name| values.get(name).cloned()),
-                entries: nested
-                    .entries
-                    .iter()
-                    .map(|(name, pieces)| (name.clone(), parts(pieces)))
-                    .collect(),
-                given: Vec::new(),
-            }),
-            Node::Call(call) => {
-                let bound = |term: &crate::syntax::Syntax| match term {
-                    crate::syntax::Syntax::Variable(name) => values.get(name).cloned(),
-                    crate::syntax::Syntax::Constant(value) => Some(value.clone()),
-                    _ => None,
-                };
-                let given = self.plan.elements[element]
-                    .holds
-                    .iter()
-                    .filter_map(|name| Some((name.clone(), values.get(name)?.clone())))
-                    .collect();
-                Own::View(Mount {
-                    view: call.view.clone(),
-                    model: Some(call.concept.clone()),
-                    of: call.of.as_ref().and_then(bound),
-                    entries: call
-                        .labels
-                        .iter()
-                        .map(|(label, term)| {
-                            let shown = match bound(term) {
-                                Some(value) => crate::syntax::Syntax::Constant(value).to_string(),
-                                None => term.to_string(),
-                            };
-                            (label.clone(), shown)
-                        })
-                        .collect(),
-                    given,
-                })
-            }
-            Node::Text(_) | Node::Value(_) | Node::Variable(_) => Own::Element {
+            Node::Text(_) | Node::Value(_) | Node::Variable(_) => Own {
                 attributes: Vec::new(),
                 events: Vec::new(),
                 texts: Vec::new(),
@@ -549,38 +521,36 @@ impl Maintainer {
     /// An instance and every instance under it, as the tree has them.
     fn render(&self, element: usize, chain: &Chain) -> Shown {
         let values = self.environment(element, chain, None);
-        let content = match self.own(element, &values) {
-            Own::View(mount) => Content::View(mount),
-            Own::Element {
+        let Own {
+            attributes,
+            events,
+            texts,
+        } = self.own(element, &values);
+        let content = {
+            let tag = match self.plan.node(element) {
+                Node::Element(node) => node.tag.clone(),
+                _ => String::new(),
+            };
+            let slots = texts
+                .into_iter()
+                .enumerate()
+                .map(|(slot, text)| match text {
+                    Some(text) => Slot::Text(text),
+                    None => Slot::Instances(match self.child(element, slot) {
+                        Some(child) => self
+                            .under(child, chain)
+                            .iter()
+                            .map(|below| self.render(child, below))
+                            .collect(),
+                        None => Vec::new(),
+                    }),
+                })
+                .collect();
+            Content::Element {
+                tag,
                 attributes,
                 events,
-                texts,
-            } => {
-                let tag = match self.plan.node(element) {
-                    Node::Element(node) => node.tag.clone(),
-                    _ => String::new(),
-                };
-                let slots = texts
-                    .into_iter()
-                    .enumerate()
-                    .map(|(slot, text)| match text {
-                        Some(text) => Slot::Text(text),
-                        None => Slot::Instances(match self.child(element, slot) {
-                            Some(child) => self
-                                .under(child, chain)
-                                .iter()
-                                .map(|below| self.render(child, below))
-                                .collect(),
-                            None => Vec::new(),
-                        }),
-                    })
-                    .collect();
-                Content::Element {
-                    tag,
-                    attributes,
-                    events,
-                    slots,
-                }
+                slots,
             }
         };
         Shown {
@@ -627,6 +597,30 @@ impl Maintainer {
                 }
             }
         }
+        // A counted place shows nothing: its instances are a count its
+        // host shows, which is looked at in the host.
+        let counted_places: Vec<bool> = self
+            .plan
+            .elements
+            .iter()
+            .map(|place| matches!(place.placed, Placed::Count(_)))
+            .collect();
+        let counting = |element: usize| counted_places[element];
+        self.counted.clear();
+        let hosts: Vec<(usize, Chain)> = touched
+            .iter()
+            .filter(|(element, _)| counting(*element))
+            .filter_map(|(element, chain)| {
+                let host = self.plan.elements[*element].parent?;
+                Some((host, chain[..chain.len() - 1].to_vec()))
+            })
+            .collect();
+        for (element, chain) in touched.iter().filter(|(element, _)| counting(*element)) {
+            let host = chain[..chain.len() - 1].to_vec();
+            let number = self.under(*element, &host).len() as u64;
+            self.counted.insert((*element, host), number);
+        }
+        touched.extend(hosts);
         let before: Before = touched
             .iter()
             .map(|(element, chain)| {
@@ -653,6 +647,9 @@ impl Maintainer {
         let mut patches = Vec::new();
         let mut moved: Vec<(usize, Chain)> = Vec::new();
         for (element, chain) in &touched {
+            if counting(*element) {
+                continue;
+            }
             let within = moved.iter().any(|(at, prefix)| {
                 at != element && self.lineage[*element].contains(at) && chain.starts_with(prefix)
             });
@@ -702,6 +699,7 @@ impl Maintainer {
                 (false, false) => {}
             }
         }
+        self.counted.clear();
         patches
     }
 
@@ -719,53 +717,44 @@ impl Maintainer {
         let then = self.environment(element, chain, Some(before));
         let now = self.environment(element, chain, None);
         let at = self.address(element, chain);
-        match (self.own(element, &then), self.own(element, &now)) {
-            (
-                Own::Element {
-                    attributes: old_attributes,
-                    events: old_events,
-                    texts: old_texts,
-                },
-                Own::Element {
-                    attributes,
-                    events,
-                    texts,
-                },
-            ) => {
-                for (old, new) in old_attributes.iter().zip(&attributes) {
-                    if old != new {
-                        patches.push(Patch::SetAttribute {
-                            at: at.clone(),
-                            name: new.0.clone(),
-                            value: new.1.clone(),
-                        });
-                    }
-                }
-                for (index, (old, new)) in old_events.iter().zip(&events).enumerate() {
-                    if old != new {
-                        patches.push(Patch::SetEvent {
-                            at: at.clone(),
-                            index,
-                            event: new.clone(),
-                        });
-                    }
-                }
-                for (slot, (old, new)) in old_texts.iter().zip(&texts).enumerate() {
-                    if let (Some(old), Some(new)) = (old, new)
-                        && old != new
-                    {
-                        patches.push(Patch::SetText {
-                            at: at.clone(),
-                            slot,
-                            text: new.clone(),
-                        });
-                    }
-                }
+        let Own {
+            attributes: old_attributes,
+            events: old_events,
+            texts: old_texts,
+        } = self.own(element, &then);
+        let Own {
+            attributes,
+            events,
+            texts,
+        } = self.own(element, &now);
+        for (old, new) in old_attributes.iter().zip(&attributes) {
+            if old != new {
+                patches.push(Patch::SetAttribute {
+                    at: at.clone(),
+                    name: new.0.clone(),
+                    value: new.1.clone(),
+                });
             }
-            (Own::View(old), Own::View(new)) if old != new => {
-                patches.push(Patch::SetView { at, mount: new });
+        }
+        for (index, (old, new)) in old_events.iter().zip(&events).enumerate() {
+            if old != new {
+                patches.push(Patch::SetEvent {
+                    at: at.clone(),
+                    index,
+                    event: new.clone(),
+                });
             }
-            _ => {}
+        }
+        for (slot, (old, new)) in old_texts.iter().zip(&texts).enumerate() {
+            if let (Some(old), Some(new)) = (old, new)
+                && old != new
+            {
+                patches.push(Patch::SetText {
+                    at: at.clone(),
+                    slot,
+                    text: new.clone(),
+                });
+            }
         }
         let changed: BTreeSet<String> = then
             .keys()
@@ -809,6 +798,41 @@ pub fn render(plan: &Plan, entity: Option<&Value>, rows: &[Vec<Row>]) -> Rendere
 }
 
 impl Rendered {
+    /// The tree written as Hiccup, its roots one after another: what a
+    /// renderer would make of it, attributes as text and events left out.
+    pub fn hiccup(&self) -> String {
+        fn write(shown: &Shown) -> String {
+            let Content::Element {
+                tag,
+                attributes,
+                slots,
+                ..
+            } = &shown.content;
+            let mut out = format!("[:{tag}");
+            if !attributes.is_empty() {
+                let written: Vec<String> = attributes
+                    .iter()
+                    .map(|(name, value)| format!(":{name} {value:?}"))
+                    .collect();
+                out.push_str(&format!(" {{{}}}", written.join(" ")));
+            }
+            for slot in slots {
+                match slot {
+                    Slot::Text(text) => out.push_str(&format!(" {text:?}")),
+                    Slot::Instances(list) => {
+                        for child in list {
+                            out.push(' ');
+                            out.push_str(&write(child));
+                        }
+                    }
+                }
+            }
+            out.push(']');
+            out
+        }
+        self.roots.iter().map(write).collect::<Vec<_>>().join(" ")
+    }
+
     /// Make a patch's change, as a renderer would: what the patches of a
     /// maintainer do to its tree before a change gives its tree after.
     pub fn apply(&mut self, patch: &Patch) -> Result<(), String> {
@@ -822,7 +846,6 @@ impl Rendered {
                 Content::Element { slots, .. } => {
                     slots.get_mut(at).ok_or_else(|| format!("no slot {at}"))
                 }
-                Content::View(_) => Err("a nested view has no slots".into()),
             }
         }
         fn instances(shown: &mut Shown, at: usize) -> Result<&mut Vec<Shown>, String> {
@@ -888,7 +911,6 @@ impl Rendered {
                         .ok_or_else(|| format!("no attribute {name}"))?;
                     attribute.1 = value.clone();
                 }
-                Content::View(_) => return Err("a nested view has no attributes".into()),
             },
             Patch::SetEvent { at, index, event } => match &mut reach(self, at)?.content {
                 Content::Element { events, .. } => {
@@ -896,11 +918,7 @@ impl Rendered {
                         .get_mut(*index)
                         .ok_or_else(|| format!("no event {index}"))? = event.clone();
                 }
-                Content::View(_) => return Err("a nested view has no events".into()),
             },
-            Patch::SetView { at, mount } => {
-                reach(self, at)?.content = Content::View(mount.clone());
-            }
         }
         Ok(())
     }
@@ -909,274 +927,95 @@ impl Rendered {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::view::plan::tests::{TODOS, view};
+    use crate::{Analyzer, compile, parse};
 
     fn entity(uri: &str) -> Value {
         crate::syntax::entity(uri).unwrap()
     }
 
-    fn text_value(text: &str) -> Value {
-        Value::String(text.into())
-    }
-
-    fn list(name: &str) -> Row {
-        Row::from([
-            ("l".into(), entity("list:home")),
-            ("name".into(), text_value(name)),
-        ])
-    }
-
-    fn todo(t: &str, title: &str, state: &str) -> Row {
-        Row::from([
-            ("l".into(), entity("list:home")),
-            ("t".into(), entity(t)),
-            ("title".into(), text_value(title)),
-            ("s".into(), text_value(state)),
-        ])
-    }
-
-    /// A card maintained by changes, checked after each against the card
-    /// rendered afresh and against the card before with the patches made.
-    struct Card {
-        plan: Plan,
-        maintainer: Maintainer,
-        rows: Vec<Vec<Row>>,
-        tree: Rendered,
-    }
-
-    impl Card {
-        fn new(plan: Plan) -> Card {
-            Card {
-                rows: vec![Vec::new(); plan.layers.len()],
-                maintainer: Maintainer::new(plan.clone(), Some(entity("list:home"))),
-                plan,
-                tree: Rendered::default(),
-            }
-        }
-
-        fn change(&mut self, layer: usize, arrived: Vec<Row>, left: Vec<Row>) -> Vec<Patch> {
-            for row in &left {
-                let at = self.rows[layer]
-                    .iter()
-                    .position(|kept| kept == row)
-                    .unwrap();
-                self.rows[layer].remove(at);
-            }
-            self.rows[layer].extend(arrived.iter().cloned());
-            let patches = self.maintainer.apply(&[Change {
-                layer,
-                arrived,
-                left,
-            }]);
-            for patch in &patches {
-                self.tree.apply(patch).unwrap();
-            }
-            let maintained = self.maintainer.tree();
-            assert_eq!(self.tree, maintained, "the patches make the tree");
-            assert_eq!(
-                maintained,
-                render(&self.plan, Some(&entity("list:home")), &self.rows),
-                "the tree maintained is the tree rendered afresh"
-            );
-            patches
-        }
-    }
-
-    fn card() -> Address {
-        vec![(0, vec![entity("list:home")])]
-    }
-
-    fn items() -> Address {
-        let mut at = card();
-        at.push((1, Vec::new()));
-        at
-    }
-
-    fn item(t: &str) -> Address {
-        let mut at = items();
-        at.push((0, vec![entity(t)]));
-        at
-    }
-
-    fn li(t: &str, title: &str, state: &str) -> Shown {
-        Shown {
-            key: vec![entity(t)],
-            content: Content::Element {
-                tag: "li".into(),
-                attributes: vec![("class".into(), state.into())],
-                events: Vec::new(),
-                slots: vec![Slot::Text(title.into())],
-            },
-        }
-    }
-
-    /// Each change is a patch of the instance it is behind and nothing
-    /// else: an item added is one insert, a list renamed one text, an
-    /// item retitled one text, completed one attribute, removed one
-    /// remove; the card stays when the last item goes.
-    #[test]
-    fn it_patches_the_smallest_part() {
-        let mut card_of = Card::new(Plan::of(&view(TODOS, "card")).unwrap());
-        let home = Row::from([("l".into(), entity("list:home"))]);
-        assert_eq!(
-            card_of.change(0, vec![home], Vec::new()),
-            [Patch::Insert {
-                parent: Vec::new(),
-                slot: 0,
-                index: 0,
-                instance: Shown {
-                    key: vec![entity("list:home")],
-                    content: Content::Element {
-                        tag: "article".into(),
-                        attributes: Vec::new(),
-                        events: Vec::new(),
-                        slots: vec![
-                            Slot::Instances(Vec::new()),
-                            Slot::Instances(vec![Shown {
-                                key: Vec::new(),
-                                content: Content::Element {
-                                    tag: "ul".into(),
-                                    attributes: Vec::new(),
-                                    events: Vec::new(),
-                                    slots: vec![Slot::Instances(Vec::new())],
-                                },
-                            }]),
-                        ],
-                    },
-                },
-            }],
-            "a card with no name yet has no heading"
+    /// The card of a list, its items a query collected.
+    fn card() -> Plan {
+        let document = r#"
+            (concept (list ?l name: ?name)
+              (xyz.list/name of: ?l is: ?name as: :text cardinality: :one))
+            (concept (todo ?t list: ?l title: ?title)
+              (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
+              (xyz.todo/title of: ?t is: ?title as: :text cardinality: :one))
+            (query (todo/item ?t list: ?l is: ?item)
+              (todo ?t list: ?l title: ?title)
+              (view ?item [:li ?title]))
+            (query (list/card ?l is: ?card)
+              (list ?l name: ?name)
+              (todo/item _ list: ?l is: (collect ?items))
+              (view ?card [:article [:h2 ?name] [:ul ?items]]))
+            (select (list/card ?l is: ?card))"#;
+        let analysis = Analyzer::new().unwrap().analyze(&parse(document).unwrap());
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "{:?}",
+            analysis.diagnostics
         );
-        let patches = card_of.change(1, vec![list("Home")], Vec::new());
-        assert!(matches!(
-            patches.as_slice(),
-            [Patch::Insert { slot: 0, .. }]
-        ));
-
-        assert_eq!(
-            card_of.change(2, vec![todo("todo:1", "Buy milk", "open")], Vec::new()),
-            [Patch::Insert {
-                parent: items(),
-                slot: 0,
-                index: 0,
-                instance: li("todo:1", "Buy milk", "open"),
-            }]
-        );
-        assert_eq!(
-            card_of.change(2, vec![todo("todo:2", "Buy milk", "open")], Vec::new()),
-            [Patch::Insert {
-                parent: items(),
-                slot: 0,
-                index: 1,
-                instance: li("todo:2", "Buy milk", "open"),
-            }],
-            "two to-dos of one title are two items"
-        );
-        let mut heading = card();
-        heading.push((0, Vec::new()));
-        assert_eq!(
-            card_of.change(1, vec![list("Chores")], vec![list("Home")]),
-            [Patch::SetText {
-                at: heading,
-                slot: 0,
-                text: "Chores".into(),
-            }]
-        );
-        assert_eq!(
-            card_of.change(
-                2,
-                vec![todo("todo:1", "Buy oat milk", "open")],
-                vec![todo("todo:1", "Buy milk", "open")]
-            ),
-            [Patch::SetText {
-                at: item("todo:1"),
-                slot: 0,
-                text: "Buy oat milk".into(),
-            }]
-        );
-        assert_eq!(
-            card_of.change(
-                2,
-                vec![todo("todo:1", "Buy oat milk", "done")],
-                vec![todo("todo:1", "Buy oat milk", "open")]
-            ),
-            [Patch::SetAttribute {
-                at: item("todo:1"),
-                name: "class".into(),
-                value: "done".into(),
-            }]
-        );
-        assert_eq!(
-            card_of.change(2, Vec::new(), vec![todo("todo:2", "Buy milk", "open")]),
-            [Patch::Remove { at: item("todo:2") }]
-        );
-        // Another list's to-do is behind no instance of this card.
-        let mut elsewhere = todo("todo:9", "Elsewhere", "open");
-        elsewhere.insert("l".into(), entity("list:work"));
-        assert_eq!(card_of.change(2, vec![elsewhere], Vec::new()), []);
-        assert_eq!(
-            card_of.change(2, Vec::new(), vec![todo("todo:1", "Buy oat milk", "done")]),
-            [Patch::Remove { at: item("todo:1") }]
-        );
-        let Content::Element { slots, .. } = &card_of.tree.roots[0].content else {
-            panic!("an article");
+        let steps = compile(&analysis.analyzed[0]).unwrap();
+        let [crate::compile::Step::View(plan)] = steps.as_slice() else {
+            panic!("a plan");
         };
-        assert_eq!(slots.len(), 2, "the card stays with its heading and list");
+        (**plan).clone()
+    }
+
+    /// A row of `layer`, each variable of its row given by `values` in
+    /// order.
+    fn row(plan: &Plan, layer: usize, values: &[Value]) -> Row {
+        plan.layers[layer]
+            .row
+            .iter()
+            .cloned()
+            .zip(values.iter().cloned())
+            .collect()
     }
 
     /// A row that arrives under an instance not yet in the tree waits:
     /// the item is inserted with the card, inside the card's insert.
     #[test]
     fn it_mounts_what_waited_with_its_parent() {
-        let mut card_of = Card::new(Plan::of(&view(TODOS, "card")).unwrap());
+        let plan = card();
+        assert_eq!(plan.layers.len(), 2);
+        let mut maintainer = Maintainer::new(plan.clone(), Some(entity("list:home")));
+        let item = row(
+            &plan,
+            1,
+            &[
+                entity("list:home"),
+                entity("todo:1"),
+                Value::String("Buy milk".into()),
+            ],
+        );
         assert_eq!(
-            card_of.change(2, vec![todo("todo:1", "Buy milk", "open")], Vec::new()),
+            maintainer.apply(&[Change {
+                layer: 1,
+                arrived: vec![item],
+                left: Vec::new(),
+            }]),
             []
         );
-        let patches = card_of.change(
+        let home = row(
+            &plan,
             0,
-            vec![Row::from([("l".into(), entity("list:home"))])],
-            Vec::new(),
+            &[entity("list:home"), Value::String("Home".into())],
         );
+        let patches = maintainer.apply(&[Change {
+            layer: 0,
+            arrived: vec![home],
+            left: Vec::new(),
+        }]);
         let [Patch::Insert { instance, .. }] = patches.as_slice() else {
             panic!("{patches:?}");
         };
-        let Content::Element { slots, .. } = &instance.content else {
-            panic!("an article");
-        };
-        let Slot::Instances(lists) = &slots[1] else {
-            panic!("the list");
-        };
-        let Content::Element { slots, .. } = &lists[0].content else {
-            panic!("a ul");
-        };
         assert_eq!(
-            slots[0],
-            Slot::Instances(vec![li("todo:1", "Buy milk", "open")])
+            Rendered {
+                roots: vec![instance.clone()]
+            }
+            .hiccup(),
+            r#"[:article [:h2 "Home"] [:ul [:li "Buy milk"]]]"#
         );
-    }
-
-    /// One query over every condition has no row for a list with no
-    /// to-dos, and so no card.
-    #[test]
-    fn it_renders_nothing_for_an_empty_list_from_one_query() {
-        let plan = Plan::single(&view(TODOS, "card")).unwrap();
-        let mut row = list("Home");
-        row.insert("l".into(), entity("list:home"));
-        assert_eq!(
-            render(&plan, Some(&entity("list:home")), &[Vec::new()]),
-            Rendered::default()
-        );
-        let layered = Plan::of(&view(TODOS, "card")).unwrap();
-        let tree = render(
-            &layered,
-            Some(&entity("list:home")),
-            &[
-                vec![Row::from([("l".into(), entity("list:home"))])],
-                vec![row],
-                Vec::new(),
-            ],
-        );
-        assert_eq!(tree.roots.len(), 1, "the layered card is there, empty");
     }
 }

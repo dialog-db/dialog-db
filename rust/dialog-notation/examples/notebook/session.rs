@@ -63,6 +63,7 @@ impl Notebook {
         let mut writes = false;
         let mut queries = Vec::new();
         let mut selections = Vec::new();
+        let mut views = Vec::new();
         {
             for step in checked.steps {
                 // A write with a `when` runs once: each match of the
@@ -107,9 +108,12 @@ impl Notebook {
                         continue;
                     }
                     Step::Write(_) => continue,
-                    // A view is maintained where it is rendered, from its
-                    // layers' queries: nothing of it is written.
-                    Step::View(_) => continue,
+                    // A query whose answer is markup is maintained where it
+                    // is rendered; asked here, it is rendered once.
+                    Step::View(plan) => {
+                        views.push(plan);
+                        continue;
+                    }
                 };
                 writes = true;
             }
@@ -162,6 +166,43 @@ impl Notebook {
             }
             for answer in selection.answer(&results)? {
                 report.push(answer.to_string());
+            }
+        }
+        // A query whose answer is markup: every layer's rows, and the
+        // tree they make, written as Hiccup.
+        for plan in views {
+            let entity = plan.given.clone();
+            let mut rows = Vec::new();
+            for layer in 0..plan.layers.len() {
+                if plan.layers[layer].conditions.is_empty() {
+                    rows.push(Vec::new());
+                    continue;
+                }
+                let query = plan.query(layer, entity.as_ref())?;
+                let mut asked = self.branch.query();
+                if let Some(rule) = &query.rule {
+                    asked = asked.with(rule.clone());
+                }
+                let found: Vec<ConceptConclusion> = asked
+                    .select(query.select.clone())
+                    .perform(&self.operator)
+                    .try_vec()
+                    .await?;
+                rows.push(
+                    found
+                        .iter()
+                        .map(|row| plan.row(layer, &query, row, entity.as_ref()))
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+            let tree = dialog_notation::render(&plan, entity.as_ref(), &rows);
+            for root in &tree.roots {
+                report.push(
+                    dialog_notation::Rendered {
+                        roots: vec![root.clone()],
+                    }
+                    .hiccup(),
+                );
             }
         }
         report.sort();

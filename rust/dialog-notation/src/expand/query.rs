@@ -55,6 +55,8 @@ struct Body {
     calls: Vec<Syntax>,
     collects: Vec<Collecting>,
     shapes: Vec<(String, Syntax)>,
+    /// `(view ?x template)`: the answer is markup.
+    view: Option<(String, Syntax)>,
 }
 
 /// The variable a query's conditions are reported under, as the entity
@@ -184,6 +186,11 @@ impl Expander {
                     _ => Ok(None),
                 }
             }
+            Some("view") => Err(Error::Refused(format!(
+                "{tree}: a view is a query whose answer is markup, `(query (todo/row ?t is: \
+                 ?row) (todo ?t title: ?title) (view ?row [:li ?title]))`, and a view in a \
+                 template is a query collected, `(todo/chip ?t is: (collect ?chips))`"
+            ))),
             Some(word @ ("rule" | "concept" | "assert" | "retract")) => {
                 let word = word.to_string();
                 // A write's head that collects is a write of the whole.
@@ -320,9 +327,27 @@ impl Expander {
                 return Ok(());
             }
             Some("view") => {
-                return Err(Error::Unsupported(format!(
-                    "{condition}: an answer that is markup, `(view ?x template)`, is not built yet"
-                )));
+                let (Some(operand), [Syntax::Variable(target), template]) =
+                    (condition.operand(), items(condition))
+                else {
+                    return Err(Error::Refused(format!(
+                        "{condition}: `view` says a variable is markup, `(view ?row [:li ?title])`"
+                    )));
+                };
+                if !operand.terms.is_empty() {
+                    return Err(Error::Refused(format!(
+                        "{condition}: `view` says a variable is markup, `(view ?row [:li ?title])`"
+                    )));
+                }
+                if body.view.is_some() {
+                    return Err(Error::Refused(format!(
+                        "{condition}: a query's answer is markup once; a part of it is a query of \
+                         its own, collected"
+                    )));
+                }
+                crate::view::template(template)?;
+                body.view = Some((target.clone(), template.clone()));
+                return Ok(());
             }
             Some("unless") => {
                 if let Some(found) = collects_in(condition).first() {
@@ -442,6 +467,19 @@ impl Expander {
             }
             given.push(target.clone());
         }
+        if let Some((target, template)) = &body.view {
+            let node = crate::view::template(template)?;
+            if let Some(free) = crate::view::variables(&node)
+                .into_iter()
+                .find(|name| !given.iter().any(|bound| bound == name))
+            {
+                return Err(Error::Refused(format!(
+                    "(view ?{target} …) holds ?{free}, which no condition of the query binds"
+                )));
+            }
+            self.events(&node)?;
+            given.push(target.clone());
+        }
         let mut held = Vec::new();
         head.variables(&mut held);
         if let Some(free) = held.iter().find(|name| !given.contains(name)) {
@@ -450,6 +488,68 @@ impl Expander {
             )));
         }
         Ok(())
+    }
+
+    /// Every event of a template posts a declared command, with every
+    /// field of it and no other.
+    fn events(&self, node: &crate::view::Node) -> Result<(), Error> {
+        for event in crate::view::events(node) {
+            if !self.commands.contains_key(&event.command) {
+                return Err(Error::Refused(format!(
+                    ":on/{} posts {}, which is no command declared",
+                    event.kind, event.command
+                )));
+            }
+            let declared = self.syntax.iter().find_map(|rule| {
+                rule.signature
+                    .as_ref()
+                    .filter(|signature| signature.name == event.command)
+            });
+            let given: BTreeSet<String> = event
+                .fields
+                .iter()
+                .map(|(label, _)| label.clone())
+                .collect();
+            if let Some(declared) = declared
+                && declared.parameters != given
+            {
+                return Err(Error::Refused(format!(
+                    ":on/{} posts {} with {}: an event gives every field of its command and no \
+                     other, {}",
+                    event.kind,
+                    event.command,
+                    given.iter().cloned().collect::<Vec<_>>().join(" "),
+                    declared
+                        .parameters
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a collecting read is of a query no document defines, named
+    /// under a declared concept, whose whole the query's markup holds: a
+    /// view not found, shown as its source.
+    fn missing(&self, collect: &Collecting, body: &Body) -> bool {
+        let Some(name) = collect.condition.applies() else {
+            return false;
+        };
+        let held = body.view.as_ref().is_some_and(|(_, template)| {
+            crate::view::template(template)
+                .map(|node| crate::view::variables(&node).contains(&collect.target))
+                .unwrap_or(false)
+        });
+        held && !collect.call
+            && matches!(&collect.place, Place::Term(label) if label == "is")
+            && !self.concepts.contains(name)
+            && !self.queries.contains_key(name)
+            && name
+                .split_once('/')
+                .is_some_and(|(concept, _)| self.concepts.contains(concept))
     }
 
     /// `(select CALL)` of a query: the query and every query it reaches,
@@ -526,6 +626,18 @@ impl Expander {
             parts.push(apply("call", vec![call.clone()]));
         }
         for (index, collect) in body.collects.iter().enumerate() {
+            if self.missing(collect, &body) {
+                let source = self.about(&collect.condition, |this| this.source(collect))?;
+                parts.push(apply(
+                    COLLECT,
+                    vec![
+                        Syntax::Variable(collect.target.clone()),
+                        Syntax::Blank,
+                        source,
+                    ],
+                ));
+                continue;
+            }
             let keyed = if collect.call {
                 let callee = collect.condition.applies().unwrap_or_default();
                 let head = self
@@ -579,8 +691,78 @@ impl Expander {
                 vec![Syntax::Variable(target.clone()), shape.clone()],
             ));
         }
+        if let Some((target, template)) = &body.view {
+            parts.push(apply(
+                "view",
+                vec![Syntax::Variable(target.clone()), template.clone()],
+            ));
+        }
         reached.push((name.to_string(), apply("query", parts)));
         Ok(())
+    }
+
+    /// What shows a query no document defines as its source: the
+    /// concept it is named under, applied to the call's entity with every
+    /// field, those the call names narrowed by what it gives:
+    /// `(missing CONCEPT ENTITY {label term …} [column…] RULE…)`.
+    fn source(&mut self, collect: &Collecting) -> Result<Syntax, Error> {
+        let name = collect.condition.applies().unwrap_or_default().to_string();
+        let concept = name
+            .split_once('/')
+            .map(|(concept, _)| concept.to_string())
+            .unwrap_or_default();
+        let operand = collect.condition.operand().cloned().unwrap_or_default();
+        let entity = match operand.items.first() {
+            Some(entity @ (Syntax::Variable(_) | Syntax::Constant(_))) => entity.clone(),
+            _ => Syntax::Variable(crate::view::CALLED.into()),
+        };
+        let fields: Vec<String> = self
+            .syntax
+            .iter()
+            .find_map(|rule| {
+                rule.signature
+                    .as_ref()
+                    .filter(|signature| signature.name == concept)
+            })
+            .map(|signature| signature.parameters.iter().cloned().collect())
+            .unwrap_or_default();
+        let mut terms = BTreeMap::new();
+        for label in &fields {
+            let term = match operand.terms.get(label) {
+                Some(term) if label != "is" => term.clone(),
+                _ => {
+                    let value = Syntax::Variable(format!("source-{label}"));
+                    if self.entries.get(&concept) == Some(label) {
+                        Syntax::Map(vec![(Syntax::Variable("source-key".into()), value)])
+                    } else {
+                        value
+                    }
+                }
+            };
+            terms.insert(label.clone(), term);
+        }
+        let read = Syntax::Application(
+            Box::new(Syntax::Reference(concept.clone())),
+            Parameters {
+                items: vec![entity.clone()],
+                terms: terms.clone(),
+            },
+        );
+        let columns = variables([&read]);
+        let rules = self.reported(&columns, std::slice::from_ref(&read))?;
+        let mut parts = vec![
+            Syntax::Reference(concept),
+            entity,
+            Syntax::Map(
+                terms
+                    .into_iter()
+                    .map(|(label, term)| (Syntax::Reference(label), term))
+                    .collect(),
+            ),
+            Syntax::Tuple(columns.into_iter().map(Syntax::Variable).collect()),
+        ];
+        parts.extend(rules);
+        Ok(apply("missing", parts))
     }
 
     /// The kernel rules that report what `conditions` bind, a column a

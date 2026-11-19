@@ -30,7 +30,7 @@ pub struct Checked {
     /// 0 among the forms read.
     pub step_forms: Vec<usize>,
     /// What the document declares, in the order written: its concepts
-    /// and commands, and its views. Given whenever analysis refused
+    /// and commands, and its queries. Given whenever analysis refused
     /// nothing, whatever Dialog-DB's compiler refuses, so a back end
     /// that renders a view still reads it.
     pub declarations: Vec<Declaration>,
@@ -68,13 +68,7 @@ impl Checked {
 
     /// The declarations of the forms `trees` analyzed to, a form in
     /// `refused` left out.
-    fn declare(
-        &mut self,
-        trees: &[Syntax],
-        analysis: &crate::analyze::Analysis,
-        analyzer: &Analyzer,
-        refused: &BTreeSet<usize>,
-    ) {
+    fn declare(&mut self, trees: &[Syntax], analyzer: &Analyzer, refused: &BTreeSet<usize>) {
         let mut declared: Vec<(usize, Declaration)> = Vec::new();
         for (at, tree) in trees.iter().enumerate() {
             if tree.applies() == Some("concept")
@@ -84,12 +78,12 @@ impl Checked {
                 declared.push((at, Declaration::Concept(concept)));
             }
         }
-        for (analyzed, origin) in analysis.analyzed.iter().zip(&analysis.origin) {
-            if analyzed.applies() == Some("view")
-                && !refused.contains(origin)
-                && let Some(view) = declare::view(analyzed, *origin, &self.written)
+        for (at, tree) in trees.iter().enumerate() {
+            if tree.applies() == Some("query")
+                && !refused.contains(&at)
+                && let Some(query) = declare::query(tree, at, &self.written)
             {
-                declared.push((*origin, view));
+                declared.push((at, query));
             }
         }
         declared.sort_by_key(|(at, _)| *at);
@@ -117,7 +111,7 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
     let analysis = trial.analyze(&trees);
     checked.diagnostics = analysis.diagnostics.clone();
     if checked.refusals().next().is_none() {
-        checked.declare(&trees, &analysis, &trial, &BTreeSet::new());
+        checked.declare(&trees, &trial, &BTreeSet::new());
     }
     let mut steps = Vec::new();
     let mut forms = Vec::new();
@@ -174,7 +168,7 @@ pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
             _ => None,
         })
         .collect();
-    checked.declare(&trees, &analysis, analyzer, &refused);
+    checked.declare(&trees, analyzer, &refused);
     let mut compiled: Vec<(usize, Syntax, Vec<Step>)> = Vec::new();
     for (tree, origin) in analysis.analyzed.iter().zip(&analysis.origin) {
         if refused.contains(origin) {

@@ -14,6 +14,37 @@ says how to cut a release.
 
 ## Unreleased
 
+### A view is a query whose answer is markup, and the `(view concept :name …)` form is gone
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
+[design/macros/design-queries.md](./design/macros/design-queries.md).
+
+`(view ?x template)` in a query's body says its answer is markup. A query
+it collects, `(todo/chip ?t is: (collect ?chips))`, stands where its
+variable is put in the template, as children in the order of their keys.
+`(select …)` of such a query compiles to a `Plan` of layers, each a
+Dialog-DB query, and the `Maintainer` keeps it current from their rows as
+before.
+
+What this changes for you:
+
+- `(view concept :name template condition…)`, its call
+  `(view concept :name of: …)` and `{:view …}` in a template are refused,
+  each with a message that names the query form.
+- `Plan::of` takes the analyzed `select.query` tree; `Plan::repeating`,
+  `Plan::single`, `Plan::called` and `Plan::source` are gone, and so are
+  `View`, `Call`, `Nested`, `Mount`, `Content::View`, `Patch::SetView` and
+  `Case`. `Plan::row` takes the layer.
+- `Declaration::View` is `Declaration::Query { description, name, markup }`.
+- A query named under a declared concept and defined by no document is
+  shown as its source, a `view-source` element.
+- A read of a collection written `key: ?k block: ?b` is no longer read as
+  the entry: write `block: {?k ?b}`.
+
+Why: one form for what is asked and what is shown, and the empty case
+that the view form could not give, a to-do with no tag and a list with
+nothing on it, follows from `collect`.
+
 ### The notation asks with `select`, and `query` defines a query that collects
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773), argued in

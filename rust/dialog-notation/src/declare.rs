@@ -4,7 +4,7 @@
 //! its declarations in the order written: each concept and command,
 //! with the comment above it, its lines as written and the comment
 //! above each, and the Dialog-DB descriptor a read of it compiles to;
-//! and each view, as [`View`] describes it.
+//! and each query, by its name, with whether its answer is markup.
 
 use dialog_query::{AttributeDescriptor, ConceptDescriptor};
 
@@ -13,7 +13,6 @@ use crate::compile::{Step, compile};
 use crate::form::Kind;
 use crate::kernel::{LAYERS, PICKS, TYPES};
 use crate::syntax::{Parameters, Syntax};
-use crate::view::View;
 use crate::written::{Comment, Segment, Written};
 
 /// One thing a document declares.
@@ -21,12 +20,14 @@ use crate::written::{Comment, Segment, Written};
 pub enum Declaration {
     /// A concept or a command.
     Concept(Concept),
-    /// A view, and the comment above it.
-    View {
-        /// What the comment right above the view says.
+    /// A query, and the comment above it.
+    Query {
+        /// What the comment right above the query says.
         description: Option<String>,
-        /// The view.
-        view: View,
+        /// Its name: `todo/row`.
+        name: String,
+        /// Whether its answer is markup: its body says `(view ?x …)`.
+        markup: bool,
     },
 }
 
@@ -303,12 +304,15 @@ pub(crate) fn concept(
     })
 }
 
-/// The view an analyzed tree describes, with the comment above the form
-/// it came of.
-pub(crate) fn view(analyzed: &Syntax, origin: usize, written: &Written) -> Option<Declaration> {
-    let view = View::describe(analyzed).ok()?;
-    Some(Declaration::View {
+/// The query a tree defines, with the comment above it.
+pub(crate) fn query(tree: &Syntax, origin: usize, written: &Written) -> Option<Declaration> {
+    let operand = tree.operand()?;
+    let (head, body) = operand.items.split_first()?;
+    Some(Declaration::Query {
         description: said(written, &[Segment::Item(origin)]),
-        view,
+        name: head.applies()?.to_string(),
+        markup: body
+            .iter()
+            .any(|condition| condition.applies() == Some("view")),
     })
 }

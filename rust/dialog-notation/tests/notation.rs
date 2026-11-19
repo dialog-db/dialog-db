@@ -668,22 +668,20 @@ async fn it_reads_the_entity_of_the_command_that_fired() -> Result<()> {
     Ok(())
 }
 
-/// A view compiles to its plan, which nothing writes: a document that
-/// holds one is written, its view left to whoever renders it. The
-/// description is read from the analyzed tree.
+/// A query whose answer is markup, asked, compiles to its plan, which
+/// nothing writes: a document that defines and asks one is written, its
+/// view left to whoever renders it.
 #[dialog_common::test]
-async fn it_compiles_a_view_to_its_plan_and_describes_it() -> Result<()> {
+async fn it_compiles_a_view_to_its_plan() -> Result<()> {
     let document = r#"(concept (todo ?t title: ?title)
                         (xyz.todo/title of: ?t is: ?title as: :text cardinality: :one))
                       (assert (todo todo:1 title: "Buy milk"))
-                      (view todo :row [:li ?title] (todo ?t title: ?title))"#;
+                      (query (todo/row ?t is: ?row) (todo ?t title: ?title) (view ?row [:li ?title]))
+                      (select (todo/row ?t is: ?row))"#;
     let mut notebook = Notebook::open().await?;
-    let (_, diagnostics) = notebook.submit(document).await?;
+    let (rows, diagnostics) = notebook.submit(document).await?;
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    assert_eq!(
-        report(&mut notebook, "(select (xyz.todo ?t title: ?x))").await?,
-        vec![r#"(xyz.todo todo:1 title: "Buy milk")"#]
-    );
+    assert_eq!(rows, vec![r#"[:li "Buy milk"]"#]);
     let checked = dialog_notation::check(&mut dialog_notation::Analyzer::new()?, document);
     let plans: Vec<&dialog_notation::Plan> = checked
         .steps
@@ -696,18 +694,13 @@ async fn it_compiles_a_view_to_its_plan_and_describes_it() -> Result<()> {
     let [plan] = plans.as_slice() else {
         panic!("one view: {:?}", checked.steps);
     };
-    assert_eq!((plan.concept.as_str(), plan.name.as_str()), ("todo", "row"));
-    assert_eq!(plan.layers.len(), 1);
-    let analysis = dialog_notation::Analyzer::new()?.analyze(&dialog_notation::parse(document)?);
-    let view = analysis
-        .analyzed
-        .iter()
-        .find(|tree| tree.applies() == Some("view"))
-        .map(dialog_notation::View::describe)
-        .transpose()?
-        .expect("a view");
     assert_eq!(
-        view.template,
+        (plan.name.as_str(), plan.entity.as_str()),
+        ("todo/row", "t")
+    );
+    assert_eq!(plan.layers.len(), 1);
+    assert_eq!(
+        plan.template,
         dialog_notation::Node::Element(dialog_notation::Element {
             tag: "li".into(),
             attributes: Vec::new(),
@@ -794,8 +787,8 @@ async fn it_gives_what_a_document_declares_as_data() -> Result<()> {
     );
     assert_eq!(add.descriptors.len(), 1);
 
-    // A line's description is the comment above it. A view is declared
-    // beside the concepts, though Dialog-DB's compiler refuses it.
+    // A line's description is the comment above it. A query is declared
+    // beside the concepts, with whether its answer is markup.
     let checked = dialog_notation::check(
         &mut dialog_notation::Analyzer::new()?,
         "; A note.
@@ -804,11 +797,15 @@ async fn it_gives_what_a_document_declares_as_data() -> Result<()> {
   (xyz.note/text of: ?n is: ?x as: :text))
 
 ; One note, as a row.
-(view note :row [:li ?x] (note ?n text: ?x))",
+(query (note/row ?n is: ?row) (note ?n text: ?x) (view ?row [:li ?x]))",
     );
     let [
         dialog_notation::Declaration::Concept(note),
-        dialog_notation::Declaration::View { description, view },
+        dialog_notation::Declaration::Query {
+            description,
+            name,
+            markup,
+        },
     ] = checked.declarations.as_slice()
     else {
         panic!("a concept and a view: {:?}", checked.declarations);
@@ -816,7 +813,7 @@ async fn it_gives_what_a_document_declares_as_data() -> Result<()> {
     assert_eq!(note.lines[0].description.as_deref(), Some("What it says."));
     assert_eq!(note.lines[0].cardinality, None);
     assert_eq!(description.as_deref(), Some("One note, as a row."));
-    assert_eq!(view.name, "row");
+    assert_eq!((name.as_str(), *markup), ("note/row", true));
     Ok(())
 }
 
@@ -2321,13 +2318,17 @@ async fn it_refuses_and_says_what_is_not_supported() -> Result<()> {
 }
 
 /// How far tonk's notebook, written in the notation as designed, gets:
-/// every form read, how many expand and compile, and how many views reach
-/// a description. A view compiles to its plan when every layer's query
-/// does, and each of the notebook's does. A step that moves these numbers
-/// moves them here on purpose.
+/// every form read, how many expand and compile, and how many queries
+/// whose answer is markup, asked, are laid out in a plan. A plan compiles
+/// when every layer's query does, and each of the notebook's does. A step
+/// that moves these numbers moves them here on purpose.
 #[dialog_common::test]
 async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
-    let measured = bar::Bar::of(include_str!("../sketches/notebook.clj"))?;
+    // Its views are queries of their own document, read after it.
+    let measured = bar::Bar::of_all(&[
+        include_str!("../sketches/notebook.clj"),
+        include_str!("../sketches/notebook-views.clj"),
+    ])?;
     let groups: Vec<String> = measured
         .groups()
         .iter()
@@ -2347,7 +2348,7 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
             measured.compiled,
             measured.described
         ),
-        (56, 56, 53, 53, 5),
+        (58, 58, 55, 55, 7),
         "{groups:#?}"
     );
     // With core in front, as tonk reads a component, the concepts the
@@ -2355,6 +2356,7 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
     let joined = bar::Bar::of_all(&[
         include_str!("../sketches/core.clj"),
         include_str!("../sketches/notebook.clj"),
+        include_str!("../sketches/notebook-views.clj"),
     ])?;
     assert_eq!(
         (
@@ -2364,20 +2366,21 @@ async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
             joined.compiled,
             joined.described
         ),
-        (60, 60, 60, 60, 5)
+        (62, 62, 62, 62, 7)
     );
     Ok(())
 }
 
 /// How far tonk's table gets, read after core as tonk reads a component:
-/// a second document, against a build fitted to the notebook. Its six
-/// views compile to their plans. A step that moves these numbers moves
+/// a second document, against a build fitted to the notebook. Its views,
+/// queries whose answer is markup, compile to their plans. A step that moves these numbers moves
 /// them here on purpose.
 #[dialog_common::test]
 async fn it_measures_how_far_the_table_gets() -> Result<()> {
     let measured = bar::Bar::of_all(&[
         include_str!("../sketches/core.clj"),
         include_str!("../sketches/table.clj"),
+        include_str!("../sketches/table-views.clj"),
     ])?;
     let groups: Vec<String> = measured
         .groups()
