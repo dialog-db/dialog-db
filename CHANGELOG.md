@@ -256,7 +256,9 @@ A deductive rule an author writes still takes no `reduce`
 [#580](https://github.com/dialog-db/dialog-db/pull/580). A computed
 value (`count`, `sum`, `avg`) is none of the claims it was computed
 from, so concluded into an attribute it would compete with the claims
-stored there; where such a value belongs is not settled.
+stored there; it belongs in a query that folds
+([#839](https://github.com/dialog-db/dialog-db/pull/839)), and is still
+refused in a deductive rule.
 
 What this changes for you:
 
@@ -281,6 +283,11 @@ What this changes for you:
   names it.
 - `Aggregator::Last` is new and `ReduceEntry::is_selective` tells a
   picking fold from a computing one. A sum of naturals is a natural.
+- A query that folds with `last` or `top`
+  (`Aggregator::orders_by_standing`) is evaluated afresh, under a
+  standing fold, on each poll that moved one of its rows: a row the
+  subscription keeps carries no standing, which those two choose by.
+  Every other fold is still maintained per group.
 
 Why: a status ranked among the cases several rules derive is the read
 tonk's library needed, and it has to answer the same on every replica
@@ -349,6 +356,56 @@ Why: a rule set has to mean one thing whatever else is installed. The
 same body gave a different answer when an unrelated rule closed a cycle
 around it, with nothing reported. Setting the rule aside is reported,
 and names the rule.
+### A query can fold, and a fold can be kept current
+
+[#839](https://github.com/dialog-db/dialog-db/pull/839).
+
+Decided in [dialog-db/dialog-db#830](https://github.com/dialog-db/dialog-db/pull/830)
+(a fold is a query type, not a rule) and
+[dialog-db/dialog-db#837](https://github.com/dialog-db/dialog-db/pull/837)
+(how it is kept current).
+
+`Fold::new(groups, inputs, reduce)` is a query in `dialog-query` that
+folds the rows of `inputs` with a `Reduce`, one row for each row of
+`groups`, joined on the grouping fields of the `Reduce`. A group no input
+joins is folded over inputs all absent, so `count` gives 0 for it. A fold
+is asked and subscribed to as any query is; it has no name and installs
+no rule, so an authored deductive rule still cannot fold.
+
+What this changes for you:
+
+- New: `Fold` and `FoldConclusion`, a folded row with the value of each
+  grouping field and each fold.
+- New: `Branch::subscribe_fold(fold)` and `Stack::fold_subscription(fold)`
+  give a `FoldSubscription`, polled as a `Subscription` is and giving
+  `Delta<FoldConclusion>`. It keeps a subscription of each of the fold's
+  two queries and the rows they report, and folds again in memory only the
+  groups a change moved a row of: a group whose row changed reports the
+  old row retracted and the new one asserted, and what it reports adds up
+  to what asking the fold whole gives. Both inner subscriptions are polled
+  at one state of the branch.
+- `Branch::subscribe(fold)` works too, and asks the whole fold again on
+  each poll that touches what it read; `Branch::subscribe_fold` is the
+  one that keeps it current.
+- New: `Application::bindings`, with a default of `None`: the bindings a
+  conclusion was realized from. Attribute queries, concept queries and
+  folds give them, and a `FoldSubscription` needs them of both its
+  queries; one over a query that gives none fails to poll.
+- New: `Fold::groups`, `Fold::inputs`, `Fold::key`, `Fold::fold_groups`
+  (the fold of a set of groups, which asking a fold and a
+  `FoldSubscription` both fold with) and `Reduce::fold_rows`.
+
+Why: a rule cannot fold, and a fold asked again whole on every change
+folds every group for a change to one. A query that folds needs no name
+and no stored value beside its own, and kept current it costs the two
+inner polls and the groups a change moved.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: a fold is a query asked in memory and
+  nothing of it is written. Nothing is rewritten on upgrade, and an older
+  release reads what this one writes.
+
 ### A concept read binds stored values in place, and reads optional fields in one pass
 
 Research: [zero-copy answers](research/zero-copy-answers.md)

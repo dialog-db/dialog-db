@@ -265,6 +265,13 @@ impl Application for DynamicAttributeQuery {
         }
     }
 
+    fn bindings(&self, claim: &Claim) -> Option<Match> {
+        match self {
+            DynamicAttributeQuery::All(q) => Application::bindings(q, claim),
+            DynamicAttributeQuery::Only(q) => Application::bindings(q, claim),
+        }
+    }
+
     fn restrict(&self, entity: &Entity) -> Restriction<Self> {
         match self.of() {
             Term::Constant(Value::Entity(this)) if this == entity => {

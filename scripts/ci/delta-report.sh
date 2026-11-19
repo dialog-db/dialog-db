@@ -8,7 +8,9 @@
 # Each delta dir holds what scripts/ci/base-sweep.sh and perf:check /
 # soak:check wrote: source.md (the base and how it was chosen), table.md
 # (every row against it) and, for perf, stale.md (rows that beat their
-# baseline file past the allowance, empty when none). A missing dir means
+# baseline file past the allowance, empty when none) and failures.md /
+# failures-base.md (why the gate fails against the files / the base,
+# empty when it passes), which the report puts first. A missing dir means
 # the gate did not get that far, and the report says so.
 #
 # The body always goes to the job summary. With a pull request number it
@@ -30,6 +32,14 @@ section() {
   local title=$1 dir=$2
   echo "### $title"
   echo
+  # Why the gate failed, first: against the baseline files, then the base.
+  local failures
+  for failures in "$dir/failures.md" "$dir/failures-base.md"; do
+    if [ -s "$failures" ]; then
+      cat "$failures"
+      echo
+    fi
+  done
   if [ -f "$dir/source.md" ]; then
     cat "$dir/source.md"
     echo

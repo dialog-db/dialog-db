@@ -160,6 +160,14 @@ pub fn catalog() -> Vec<Spec> {
             prepare: |size| Box::pin(read::join(size)),
         },
         Spec {
+            name: "concept-optional",
+            size: 1000,
+            about: "one read of every field of tonk's issue concept, three fields required and ten optional, every entity: the optional fields left-merged beside the required scans",
+            cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
+            prepare: |size| Box::pin(read::optional(size)),
+        },
+        Spec {
             name: "query-member",
             size: 2000,
             about: "on a member that tracks a remote and holds every block, one cold read of every entity's name and role, then the names of one role: the reads that warm ahead of demand",

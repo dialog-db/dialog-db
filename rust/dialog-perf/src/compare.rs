@@ -216,6 +216,54 @@ impl Comparison {
         Some(out)
     }
 
+    /// Why the gate fails, as a Markdown section for the pull request's
+    /// report: each regression of the comparison against `what` (the
+    /// baseline files, or the base sweep), with what to do about its
+    /// kind. `None` when the comparison passes.
+    pub fn failures_markdown(&self, what: &str) -> Option<String> {
+        if self.passed() {
+            return None;
+        }
+        let mut out = format!(
+            "❌ **The gate fails against {what}:** {} reason(s).\n\n",
+            self.regressions.len()
+        );
+        let (mut unrecorded, mut orphaned, mut grew) = (false, false, false);
+        for line in &self.regressions {
+            let _ = writeln!(out, "- {line}");
+            if line.ends_with(NO_BASELINE) {
+                unrecorded = true;
+            } else if line.ends_with(NO_SCENARIO) {
+                orphaned = true;
+            } else {
+                grew = true;
+            }
+        }
+        out.push('\n');
+        if unrecorded {
+            out.push_str(
+                "A scenario with no baseline file is ungated, so it fails until the file is \
+                 added: take `<scenario>.json` from this run's `perf-current` artifact into \
+                 `perf/baseline/`, with the maintainer's approval (`.claude/rules/perf-baselines.md`).\n\n",
+            );
+        }
+        if orphaned {
+            out.push_str(
+                "A baseline file no scenario answers gates nothing, so it fails until the \
+                 file goes with its scenario: a renamed scenario renames its file, a removed \
+                 one removes it.\n\n",
+            );
+        }
+        if grew {
+            out.push_str(
+                "A row that grew past the allowance is a cost the change adds: fix the change, \
+                 or, if the cost is worth paying, ask the maintainer with the before and after \
+                 numbers.\n\n",
+            );
+        }
+        Some(out)
+    }
+
     /// The comparison as one Markdown table: the rows that moved, then
     /// the rows that did not, folded into a details block.
     pub fn markdown(&self) -> String {
@@ -372,6 +420,12 @@ fn load(dir: &Path) -> Result<BTreeMap<String, Report>> {
     Ok(reports)
 }
 
+/// Why a scenario the sweep ran fails against the baseline files.
+const NO_BASELINE: &str = "no baseline (sweep into the baseline directory to add one)";
+
+/// Why a baseline file fails against a sweep that has no such scenario.
+const NO_SCENARIO: &str = "a baseline no scenario in the sweep answers";
+
 /// Compare the scenarios of two sweep directories under `tolerance`,
 /// the first being what `against` says it is.
 pub fn compare_dirs(
@@ -405,12 +459,12 @@ pub fn compare_dirs(
             // a baseline no scenario answers gates nothing: both fail,
             // so a scenario cannot drop out of the gate by being renamed
             // or by its baseline being deleted.
-            (None, Some(_), Against::Baseline) => comparison.regressions.push(format!(
-                "{name}: no baseline (sweep into the baseline directory to add one)"
-            )),
-            (Some(_), None, Against::Baseline) => comparison.regressions.push(format!(
-                "{name}: a baseline no scenario in the sweep answers"
-            )),
+            (None, Some(_), Against::Baseline) => comparison
+                .regressions
+                .push(format!("{name}: {NO_BASELINE}")),
+            (Some(_), None, Against::Baseline) => comparison
+                .regressions
+                .push(format!("{name}: {NO_SCENARIO}")),
             (None, Some(report), Against::Sweep { .. }) => {
                 comparison
                     .notes
@@ -1123,6 +1177,37 @@ mod tests {
             && row.verdict == Verdict::Ungated));
         assert!(!against_file.passed());
         Ok(())
+    }
+
+    /// A gate that fails says why in the report, with what to do about
+    /// each kind of failure: a new scenario with no file, a file with no
+    /// scenario, a row that grew. A gate that passes writes nothing.
+    #[test]
+    fn a_failing_gate_says_why_in_its_report() {
+        let passing = Comparison::default();
+        assert_eq!(passing.failures_markdown("the baseline files"), None);
+
+        let failing = Comparison {
+            regressions: vec![
+                format!("added: {NO_BASELINE}"),
+                format!("renamed: {NO_SCENARIO}"),
+                "slower: instructions.outside_allocator 100 -> 200 (+100.0%)".into(),
+            ],
+            ..Comparison::default()
+        };
+        let report = failing
+            .failures_markdown("the baseline files")
+            .expect("a failing gate reports");
+        assert!(report.contains("fails against the baseline files:** 3 reason(s)"));
+        for line in &failing.regressions {
+            assert!(report.contains(line.as_str()), "{line} in {report}");
+        }
+        assert!(report.contains("`perf-current` artifact"), "{report}");
+        assert!(
+            report.contains("renamed scenario renames its file"),
+            "{report}"
+        );
+        assert!(report.contains("fix the change"), "{report}");
     }
 }
 
