@@ -23,6 +23,11 @@
 
 use crate::nodes::{Preload, Read};
 use dialog_capability::Provider;
+
+mod scope;
+use scope::Scope;
+#[cfg(any(test, feature = "helpers"))]
+pub(crate) use scope::probes as scope_probes;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
@@ -1069,7 +1074,7 @@ where
     fn settle_shared_segments(
         source: &mut Self,
         target: &mut Self,
-        scope: Option<&[core::ops::RangeInclusive<Key>]>,
+        scope: Option<&Scope<'_, Key>>,
     ) -> Result<(), DialogSearchTreeError> {
         let (mut ours, mut theirs) = (0, 0);
         while ours < source.nodes.len() && theirs < target.nodes.len() {
@@ -1365,7 +1370,7 @@ where
     /// per-side, so the entry walk may surface spurious out-of-scope
     /// changes where only one side dropped a shared region;
     /// [`TreeDifference::changes_within`] filters those.
-    fn retain_scope(&mut self, scope: &[core::ops::RangeInclusive<Key>]) {
+    fn retain_scope(&mut self, scope: &Scope<'_, Key>) {
         let uppers: Vec<Option<Vec<u8>>> = (0..self.nodes.len())
             .map(|at| {
                 self.nodes
@@ -1377,16 +1382,9 @@ where
         let mut dropped = None;
         for (node, upper) in self.nodes.drain(..).zip(uppers) {
             let lower = node.lower_bound();
-            let intersects = scope.iter().any(|range| {
-                // [lower, upper) ∩ [start, end] is non-empty iff
-                // lower <= end and upper > start (with upper = +∞
-                // for the last node).
-                lower <= range.end().as_ref()
-                    && match &upper {
-                        Some(upper) => upper.as_slice() > range.start().as_ref(),
-                        None => true,
-                    }
-            });
+            // [lower, upper) meets a range, with upper = +∞ for the last
+            // node.
+            let intersects = scope.intersects(lower, upper.as_deref());
             // A node's bound describes its *stored* content only, deliberately:
             // the bound is also the node's routing key and the input to its
             // rank, so a pending op must not move it (see
@@ -1404,11 +1402,7 @@ where
             // expansion routes the parent's ops down into exactly the children
             // that cover them, so anything pending for this subtree is already
             // attached as routed ops.
-            let in_scope = |key: &[u8]| {
-                scope
-                    .iter()
-                    .any(|range| key >= range.start().as_ref() && key <= range.end().as_ref())
-            };
+            let in_scope = |key: &[u8]| scope.contains(key);
             let pending_in_scope = pending_ops(&node)
                 .iter()
                 .any(|entry| in_scope(entry.key.as_slice()));
@@ -1923,7 +1917,7 @@ type SettledPair<Key, Value> = (SparseTreeNode<Key, Value>, SparseTreeNode<Key, 
 fn settle_shared_segment<Key, Value>(
     ours: &SparseTreeNode<Key, Value>,
     theirs: &SparseTreeNode<Key, Value>,
-    scope: Option<&[core::ops::RangeInclusive<Key>]>,
+    scope: Option<&Scope<'_, Key>>,
 ) -> Result<Option<SettledPair<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -1968,13 +1962,7 @@ where
         .iter()
         .chain(&theirs_ops)
         .map(|(key, _)| key.as_slice())
-        .filter(|key| {
-            scope.is_none_or(|scope| {
-                scope
-                    .iter()
-                    .any(|range| *key >= range.start().as_ref() && *key <= range.end().as_ref())
-            })
-        })
+        .filter(|key| scope.is_none_or(|scope| scope.contains(key)))
         .collect();
     keys.sort_unstable();
     keys.dedup();
@@ -2259,6 +2247,9 @@ where
         D: Distribution,
     {
         let planned = reads == Reads::Planned;
+        // Sorted and merged once, so every test against it is a search.
+        let scope = scope.map(Scope::new);
+        let scope = scope.as_ref();
         let source_storage = source_tree.accessor(source_storage);
         let target_storage = target_tree.accessor(target_storage);
         // Identical trees (including two empty trees) share their root
@@ -2617,6 +2608,7 @@ where
         scope: &'a [core::ops::RangeInclusive<Key>],
     ) -> impl Differential<Key, Value> + 'a {
         let changes = self.changes();
+        let scope = Scope::new(scope);
         try_stream! {
             futures_util::pin_mut!(changes);
             for await change in changes {
@@ -2625,7 +2617,7 @@ where
                     Change::Add(entry) => &entry.key,
                     Change::Remove(entry) => &entry.key,
                 };
-                if scope.iter().any(|range| range.contains(key)) {
+                if scope.contains(key.as_ref()) {
                     yield change;
                 }
             }
@@ -3076,6 +3068,62 @@ mod tests {
                 key(change) >= 10u32.to_le_bytes() && key(change) < 20u32.to_le_bytes()
             }),
             "only the in-scope region's keys appear"
+        );
+        Ok(())
+    }
+
+    /// A subscription's cover holds a range per entity it read, so the scope
+    /// of its difference holds as many ranges as its answer has rows, while
+    /// the change it gates is one fact. The work of testing the walk against
+    /// the scope must grow with the log of the ranges, not with the ranges:
+    /// a hundred times the ranges costs a small multiple of the comparisons.
+    #[dialog_common::test]
+    async fn it_tests_a_scope_by_search_not_by_range() -> Result<()> {
+        const KEYS: u32 = 20_000;
+        let storage = CountingBackend::new();
+        let manifest = Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 0,
+            ..Manifest::default()
+        };
+        let mut edit =
+            crate::TransientTree::empty_with_manifest(crate::helpers::test_catalog(), manifest);
+        for at in 0..KEYS {
+            edit = edit.insert(at.to_be_bytes(), vec![0], &storage).await?;
+        }
+        let mut delta = Delta::zero();
+        let base = edit.persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().expect("a built node has one").clone());
+        }
+        let changed = KEYS / 2;
+        let target = base
+            .edit()
+            .insert(changed.to_be_bytes(), vec![1], &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().expect("a built node has one").clone());
+        }
+
+        let mut probes = Vec::new();
+        for ranges in [100u32, 1_000, 10_000] {
+            // One single-key range every `KEYS / ranges` keys, the changed
+            // key among them, as a cover of one range per entity is.
+            let scope: Vec<core::ops::RangeInclusive<[u8; 4]>> = (0..ranges)
+                .map(|at| (at * (KEYS / ranges)).to_be_bytes())
+                .map(|key| key..=key)
+                .collect();
+            let before = crate::helpers::scope_probes();
+            let changes = collect_scoped_changes(&base, &target, &scope, &storage).await?;
+            probes.push(crate::helpers::scope_probes() - before);
+            assert_eq!(changes.len(), 2, "the one changed key, Remove + Add");
+        }
+        let (few, many) = (probes[0], probes[2]);
+        assert!(
+            many <= few * 4,
+            "a hundred times the ranges must cost a few times the comparisons, \
+             not a hundred: {few} at 100 ranges, {many} at 10000"
         );
         Ok(())
     }

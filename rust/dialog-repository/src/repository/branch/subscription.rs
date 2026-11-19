@@ -106,6 +106,9 @@ use crate::repository::archive::erased;
 use crate::repository::source::Source;
 use crate::{Branch, Ephemeral, Index, RemoteSite, Revision, Stack};
 
+mod kept;
+use kept::Kept;
+
 /// How many touched entities a maintained poll re-derives at once.
 /// Measured on the catch-up soak's hundred-entity poll (#646): a
 /// window of 16 comes within 2% of the best modeled time on mobile,
@@ -329,24 +332,16 @@ impl Demand {
         covers_key(&self.rules, key)
     }
 
-    /// A snapshot of every recorded range (facts and rules): the
-    /// scope a cover-gated tree diff walks.
+    /// A snapshot of every recorded range (facts and rules), sorted and
+    /// disjoint: the scope a cover-gated tree diff walks. A scope in that
+    /// shape is searched as it is, where one in any other would be sorted
+    /// first.
     pub(crate) fn ranges(&self) -> Vec<RangeInclusive<Key>> {
-        let mut ranges: Vec<RangeInclusive<Key>> = self
-            .facts
-            .lock()
-            .expect("demand lock")
-            .iter()
-            .map(|(start, end)| start.clone()..=end.clone())
-            .collect();
-        ranges.extend(
-            self.rules
-                .lock()
-                .expect("demand lock")
-                .iter()
-                .map(|(start, end)| start.clone()..=end.clone()),
-        );
-        ranges
+        let mut ranges = self.facts.lock().expect("demand lock").clone();
+        for (start, end) in self.rules.lock().expect("demand lock").iter() {
+            merge_range(&mut ranges, start.clone()..=end.clone());
+        }
+        ranges.into_iter().map(|(start, end)| start..=end).collect()
     }
 
     /// Number of distinct recorded ranges.
@@ -414,8 +409,8 @@ pub struct Subscription<Q: Application> {
     /// The demand cover recorded during the last evaluation.
     demand: Demand,
     /// The last evaluation's full result, retained to compute the
-    /// next delta.
-    results: Vec<Q::Conclusion>,
+    /// next delta, indexed by the entity each row is about.
+    results: Kept<Q::Conclusion>,
     /// The retained fixpoint answer table when the subscribed
     /// concept is recursive: additions extend it semi-naively;
     /// recomputes rebuild into it.
@@ -480,7 +475,7 @@ impl<Q: Application> Subscription<Q> {
             memory_sequences: vec![0; layers],
             durable_heads: Vec::new(),
             demand: Demand::new(),
-            results: Vec::new(),
+            results: Kept::default(),
             fixpoint: Arc::new(Mutex::new(None)),
             initialized: false,
             recomputes: 0,
@@ -709,7 +704,7 @@ where
 {
     /// The retained result of the last evaluation.
     pub fn results(&self) -> &[Q::Conclusion] {
-        &self.results
+        self.results.rows()
     }
 
     /// The demand cover recorded by the last evaluation.
@@ -729,6 +724,13 @@ where
     /// whole query.
     pub fn maintenances(&self) -> usize {
         self.maintenances
+    }
+
+    /// How many kept rows the comparisons of re-derived entities and
+    /// recomputes have read so far.
+    #[cfg(test)]
+    fn kept_reads(&self) -> usize {
+        self.results.reads.load(Ordering::Relaxed)
     }
 
     /// Re-derive at most `window` touched entities at once; 1 is the
@@ -848,21 +850,7 @@ where
         let results = self.evaluate(env, &demand, &self.query).await?;
         self.recomputes += 1;
 
-        let delta = Delta {
-            asserted: results
-                .iter()
-                .filter(|row| !self.results.contains(row))
-                .cloned()
-                .collect(),
-            retracted: self
-                .results
-                .iter()
-                .filter(|row| !results.contains(row))
-                .cloned()
-                .collect(),
-        };
-
-        self.results = results;
+        let delta = self.results.replace(results);
         self.demand = demand;
         self.revision = current;
         self.overlay_sequence = sequence;
@@ -1217,21 +1205,7 @@ where
                             Arc::new(retracted.to_vec()),
                         )
                         .await?;
-                    let delta = Delta {
-                        asserted: results
-                            .iter()
-                            .filter(|row| !self.results.contains(row))
-                            .cloned()
-                            .collect(),
-                        retracted: self
-                            .results
-                            .iter()
-                            .filter(|row| !results.contains(row))
-                            .cloned()
-                            .collect(),
-                    };
-                    self.results = results;
-                    return Ok(Some(delta));
+                    return Ok(Some(self.results.replace(results)));
                 }
                 // The state the changes were applied to: the pinned
                 // revision under the session overlay as it stood at
@@ -1305,28 +1279,13 @@ where
 
             // Over-delete every retained row of each entity, then put
             // back what it re-derived, in entity order, exactly as a
-            // recompute would read.
+            // recompute would read. Each entity is compared with the rows
+            // kept for it alone.
             let mut asserted = Vec::new();
             let mut retracted = Vec::new();
             for (entity, after) in rederived {
-                let before: Vec<Q::Conclusion> = self
-                    .results
-                    .iter()
-                    .filter(|row| row.this() == entity)
-                    .cloned()
-                    .collect();
-                for row in &after {
-                    if !before.contains(row) {
-                        asserted.push(row.clone());
-                    }
-                }
-                for row in &before {
-                    if !after.contains(row) {
-                        retracted.push(row.clone());
-                    }
-                }
-                self.results.retain(|row| row.this() != entity);
-                self.results.extend(after);
+                self.results
+                    .rederive(entity, after, &mut asserted, &mut retracted);
             }
             Ok(Some(Delta {
                 asserted,
@@ -2942,6 +2901,81 @@ mod tests {
         expected.sort();
         assert_eq!(retained, expected);
         assert_eq!(subscription.maintenances(), 1);
+        Ok(())
+    }
+
+    /// A maintained poll compares each entity it re-derived with the rows
+    /// kept for that entity, and reads no other kept row: renaming one
+    /// person among many reads that person's row, and renaming a tenth of
+    /// them reads their rows, not a tenth of the people times every row.
+    /// The maintained answer still reads as a fresh evaluation does.
+    #[dialog_common::test]
+    async fn it_compares_a_rederived_entity_with_its_own_rows() -> anyhow::Result<()> {
+        const PEOPLE: usize = 400;
+        const TOUCHED: usize = 40;
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let people = (0..PEOPLE)
+            .map(|index| format!("id:person-{index:04}").parse())
+            .collect::<Result<Vec<Entity>, _>>()?;
+        let mut seed = branch.transaction();
+        for (index, person) in people.iter().enumerate() {
+            seed = seed.assert(
+                the!("person/name")
+                    .of(person.clone())
+                    .is(format!("name-{index}")),
+            );
+        }
+        seed.commit().publish().perform(&operator).await?;
+
+        let mut subscription = branch.subscribe(people_query());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(initial.asserted.len(), PEOPLE);
+
+        // Each round renames the first `touched` people from the name they
+        // hold to one no round gave them before, so every touched person's
+        // row changes: one row retracted and one asserted per person.
+        let mut names: Vec<String> = (0..PEOPLE).map(|index| format!("name-{index}")).collect();
+        let mut renamed = 0;
+        for touched in [1, TOUCHED] {
+            let mut changes = branch.transaction();
+            for (index, person) in people.iter().enumerate().take(touched) {
+                let name = format!("renamed-{renamed}-{index}");
+                changes = changes
+                    .retract(
+                        the!("person/name")
+                            .of(person.clone())
+                            .is(names[index].clone()),
+                    )
+                    .assert(the!("person/name").of(person.clone()).is(name.clone()));
+                names[index] = name;
+            }
+            changes.commit().publish().perform(&operator).await?;
+
+            let reads = subscription.kept_reads();
+            let delta = subscription.poll(&operator).await?.expect("renamed");
+            let reads = subscription.kept_reads() - reads;
+            renamed += 1;
+            assert_eq!(subscription.maintenances(), renamed, "maintained");
+            assert_eq!(subscription.recomputes(), 1, "never recomputed");
+            assert_eq!(delta.asserted.len(), touched);
+            assert_eq!(delta.retracted.len(), touched);
+            assert!(
+                reads <= 2 * touched,
+                "comparing {touched} re-derived entities must read their rows, \
+                 not every kept row: {reads} kept rows read among {PEOPLE}"
+            );
+
+            let fresh = branch
+                .query()
+                .select(people_query())
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(bindings(subscription.results()), bindings(&fresh));
+        }
         Ok(())
     }
 

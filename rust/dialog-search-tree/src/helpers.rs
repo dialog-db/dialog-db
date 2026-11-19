@@ -1467,3 +1467,10 @@ macro_rules! tree_spec {
 pub fn buffer_decodes() -> usize {
     crate::buffer_decodes::count()
 }
+
+/// How many scope ranges the calling thread's scoped differences have
+/// compared a key or a node's span against so far. Take it before and after
+/// a scoped difference to pin how its work grows with its scope.
+pub fn scope_probes() -> usize {
+    crate::differential::scope_probes::count()
+}
