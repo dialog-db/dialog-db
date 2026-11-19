@@ -518,6 +518,11 @@ impl Stack {
         &self.inner.primary
     }
 
+    /// Whether `other` is a handle of this very stack.
+    pub(crate) fn same(&self, other: &Stack) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// The layer named `name`, if the stack holds one, by its type:
     /// [`Layer::Ephemeral`] for the stack's own, [`SESSION`](crate::SESSION),
     /// which every stack has, and a session layer the schema declares;

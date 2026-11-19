@@ -15,7 +15,8 @@
 //! - the folded row each group last gave, to report it retracted when
 //!   it changes.
 //!
-//! A poll polls both subscriptions, applies what each reports to the
+//! A poll polls both subscriptions at one [`Frame`], so what both
+//! report is of one state, applies what each reports to the
 //! rows it keeps, and folds each group a moved row is of again with
 //! [`Fold::fold_groups`], the function [`Fold`]'s own evaluation folds
 //! with, over the rows it keeps: no read. A group whose folded row
@@ -55,14 +56,8 @@ use dialog_query::selection::Match;
 use dialog_query::{Conclusion, Fold, FoldConclusion};
 use dialog_search_tree::nodes;
 
-use super::{Delta, Subscription};
+use super::{Delta, Frame, PollError, Subscription};
 use crate::{Branch, RemoteSite, Stack};
-
-/// How many times one poll polls both inner subscriptions again when
-/// something they read moved while they were polled. Past it the poll
-/// reports what it folded; the move is a change the inner subscriptions
-/// report on the next poll, which folds the groups it touches again.
-const ROUNDS: usize = 8;
 
 /// The rows of one query a fold keeps, by group key: each conclusion
 /// with the bindings it was realized from.
@@ -222,7 +217,7 @@ where
         self.groups.maintenances() + self.inputs.maintenances()
     }
 
-    /// Poll the fold against the branch's current state, as
+    /// Poll the fold at a frame of where the branch stands now, as
     /// [`Subscription::poll`] polls a query.
     ///
     /// Returns `Ok(None)` when neither inner subscription reports a
@@ -230,13 +225,9 @@ where
     /// returns `Ok(Some(delta))`: the first poll asserts every group's
     /// row, and a later one reports each group whose row moved.
     ///
-    /// The two inner subscriptions read one state. Each pins what it
-    /// reads at the state it finds when its poll begins, so the poll
-    /// notes where the branch, its overlay and the stack's layers stand
-    /// before polling both and checks they stand there still after: when
-    /// something moved in between, it polls both again, and their
-    /// reports add up, until a pair of polls begins and ends at one
-    /// stamp, or for [`ROUNDS`] pairs.
+    /// Both inner subscriptions are polled at the one frame, so what
+    /// they report is of one state: a write that lands while they are
+    /// polled is in neither, and the next poll reports it.
     ///
     /// What one inner subscription reported is applied to the rows kept
     /// before the other is polled, and the groups it moved are kept until
@@ -266,34 +257,97 @@ where
             + ConditionalSync
             + 'static,
     {
+        let frame = self.groups.frame();
+        self.advance(frame, env).await
+    }
+
+    /// Poll the fold at `frame`, both inner subscriptions at it, as
+    /// [`Subscription::poll_at`] polls a query: refused with
+    /// [`PollError::Stale`] for a frame older than one either last
+    /// polled at, and with [`PollError::Foreign`] for one not of what
+    /// they read.
+    pub async fn poll_at<'a, Env>(
+        &'a mut self,
+        frame: &'a Frame,
+        env: &'a Env,
+    ) -> Result<Option<Delta<FoldConclusion>>, PollError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
+            + ConditionalSync
+            + 'static,
+    {
+        let groups = self.groups.admit(frame)?;
+        let inputs = self.inputs.admit(frame)?;
+        if groups && inputs && self.initialized && self.pending.is_empty() {
+            return Ok(None);
+        }
+        Ok(self.advance(frame.clone(), env).await?)
+    }
+
+    /// Bring both inner subscriptions to `frame` and fold again the
+    /// groups what they report moved.
+    async fn advance<'a, Env>(
+        &'a mut self,
+        frame: Frame,
+        env: &'a Env,
+    ) -> Result<Option<Delta<FoldConclusion>>, EvaluationError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
+            + ConditionalSync
+            + 'static,
+    {
         let mut reported = false;
-        for _ in 0..ROUNDS {
-            let stamp = self.groups.stamp();
-            if let Some(delta) = self.groups.poll(env).await? {
-                reported = true;
-                let (fold, groups) = (&self.fold, &self.groups);
-                apply(
-                    &mut self.held,
-                    &mut self.pending,
-                    |row| fold.key(row),
-                    |conclusion| groups.query.bindings(conclusion),
-                    delta,
-                )?;
-            }
-            if let Some(delta) = self.inputs.poll(env).await? {
-                reported = true;
-                let (fold, inputs) = (&self.fold, &self.inputs);
-                apply(
-                    &mut self.rows,
-                    &mut self.pending,
-                    |row| fold.key(row),
-                    |conclusion| inputs.query.bindings(conclusion),
-                    delta,
-                )?;
-            }
-            if self.groups.stamp() == stamp {
-                break;
-            }
+        if let Some(delta) = self.groups.advance(frame.clone(), env).await? {
+            reported = true;
+            let (fold, groups) = (&self.fold, &self.groups);
+            apply(
+                &mut self.held,
+                &mut self.pending,
+                |row| fold.key(row),
+                |conclusion| groups.query.bindings(conclusion),
+                delta,
+            )?;
+        }
+        if let Some(delta) = self.inputs.advance(frame, env).await? {
+            reported = true;
+            let (fold, inputs) = (&self.fold, &self.inputs);
+            apply(
+                &mut self.rows,
+                &mut self.pending,
+                |row| fold.key(row),
+                |conclusion| inputs.query.bindings(conclusion),
+                delta,
+            )?;
         }
         if self.initialized && !reported && self.pending.is_empty() {
             return Ok(None);

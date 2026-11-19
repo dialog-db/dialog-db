@@ -92,7 +92,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use tokio::sync::Notify;
 
-use crate::{Delta, OpenStackEnv, Stack, Subscription};
+use crate::{Delta, Frame, OpenStackEnv, PollError, Stack, Subscription};
 
 pub use dialog_query::QueryHash;
 
@@ -188,8 +188,8 @@ enum Polled {
 /// One subscription, polled by [`Stack::settle`] with its query's type
 /// erased.
 trait Poll: ConditionalSend + ConditionalSync + 'static {
-    /// Poll the evaluation and deliver what moved.
-    fn poll<'a>(&'a self, env: &'a Environment) -> Polling<'a>;
+    /// Poll the evaluation at `frame` and deliver what moved.
+    fn poll<'a>(&'a self, frame: &'a Frame, env: &'a Environment) -> Polling<'a>;
 }
 
 /// One subscription: the evaluation, and what its readers have yet to
@@ -250,12 +250,23 @@ where
     Q: Application + Clone + ConditionalSync,
     Q::Conclusion: Conclusion + PartialEq + Clone + ConditionalSync,
 {
-    fn poll<'a>(&'a self, env: &'a Environment) -> Polling<'a> {
+    fn poll<'a>(&'a self, frame: &'a Frame, env: &'a Environment) -> Polling<'a> {
         Box::pin(async move {
             let Some(mut engine) = self.engine.lock().take() else {
                 return Ok(Polled::Busy);
             };
-            let polled = engine.poll(env).await;
+            // A frame older than the one the evaluation last polled at is
+            // one another `settle` took after this one's and polled it at
+            // first: what it reads is already of a later state, which that
+            // `settle` delivered.
+            let polled = match engine.poll_at(frame, env).await {
+                Err(PollError::Stale) => Ok(None),
+                Err(PollError::Evaluation(error)) => Err(error),
+                Err(PollError::Foreign) => Err(EvaluationError::Store(
+                    "a stack's subscription was polled at a frame of another stack".into(),
+                )),
+                Ok(delta) => Ok(delta),
+            };
             let results = match &polled {
                 Ok(Some(_)) => Some(engine.results().to_vec()),
                 _ => None,
@@ -398,6 +409,11 @@ impl Stack {
     /// with none scheduled, do nothing. Returns how many subscriptions
     /// delivered.
     ///
+    /// Every subscription is polled at one [`Frame`] of the stack, taken
+    /// as the round begins, so what they deliver is of one state and
+    /// they agree: a write that lands while they are polled is in none
+    /// of them, and schedules the next round.
+    ///
     /// A subscription whose poll fails is left scheduled, so the next
     /// `settle` polls it again, and the first failure is returned once
     /// every other subscription has been polled. One another `settle` is
@@ -417,10 +433,11 @@ impl Stack {
             return Ok(0);
         }
         let env: Environment = Arc::new(env.clone());
+        let frame = self.frame();
         let mut delivered = 0;
         let mut failed = None;
         for subscription in subscriptions.live() {
-            match subscription.poll(&env).await {
+            match subscription.poll(&frame, &env).await {
                 Ok(Polled::Delivered) => delivered += 1,
                 Ok(Polled::Unchanged) => {}
                 Ok(Polled::Busy) => self.schedule_poll(),

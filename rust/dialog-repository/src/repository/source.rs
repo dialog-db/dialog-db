@@ -490,6 +490,18 @@ impl Source {
     }
 }
 
+impl Source {
+    /// `branch` pinned at `revision`, wherever its head stands: how a
+    /// [`Frame`](crate::Frame) reads the branch at the head it was taken
+    /// at. `None` reads the empty tree, as a branch with no commits does.
+    pub(crate) fn at(branch: Branch, revision: Option<Revision>) -> Self {
+        Source {
+            held: Held::Branch(Arc::new(branch)),
+            revision,
+        }
+    }
+}
+
 impl From<Branch> for Source {
     /// Pin `branch` at the head it stands at now (see [`Live::pin`]).
     fn from(branch: Branch) -> Self {

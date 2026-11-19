@@ -375,7 +375,12 @@ impl Durables {
 
     /// Each layer as a read sees it now, with its name.
     pub(crate) fn sources(&self) -> Vec<(Entity, Source)> {
-        self.lines(&self.pinned())
+        self.sources_at(&self.pinned())
+    }
+
+    /// Each layer as a read sees it at `pinned`, with its name.
+    pub(crate) fn sources_at(&self, pinned: &Pinned) -> Vec<(Entity, Source)> {
+        self.lines(pinned)
             .into_iter()
             .map(|line| (line.layer.clone(), line.source()))
             .collect()

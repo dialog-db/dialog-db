@@ -480,6 +480,17 @@ impl Branch {
         &self.overlay
     }
 
+    /// A handle of this branch whose session line is `overlay`: the
+    /// head, caches and tracking it shares with every other handle, the
+    /// line its own. What a [`Frame`](crate::Frame) reads the branch
+    /// through, with the line as the frame froze it.
+    pub(crate) fn with_overlay(&self, overlay: Ephemeral) -> Branch {
+        Branch {
+            overlay,
+            ..self.clone()
+        }
+    }
+
     /// Returns the current revision of this branch, or `None` if the branch
     /// has no commits yet (equivalent to an orphan branch in git).
     pub fn revision(&self) -> Option<Revision> {

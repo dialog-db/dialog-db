@@ -111,8 +111,8 @@ pub struct Instant {
     /// beneath by a tombstone.
     pub retracted: Vec<Fact>,
     /// How the line held each fact this instant moved, before it did,
-    /// one entry per fact: what undoing the instant restores
-    /// ([`Ephemeral::rewound`]). The readable moves above do not
+    /// one entry per fact: what undoing the instant would restore. The
+    /// readable moves above do not
     /// determine it, since a fact both stored and hidden reports a
     /// removal like one merely stored, and clearing the line reports
     /// it removed and un-hidden at once.
@@ -472,12 +472,11 @@ impl<'s> Window<'s> {
 struct Delta {
     asserted: Vec<Fact>,
     retracted: Vec<Fact>,
-    /// Whether to record how the line held each fact the write moves.
-    /// A session line records, since a subscription rewinds it by what
-    /// its instants found ([`Ephemeral::rewound`]); a line built for
+    /// Whether to record how the line held each fact the write moves
+    /// ([`Instant::found`]). A session line records; a line built for
     /// one query ([`holding`](Ephemeral::holding),
-    /// [`extending`](Ephemeral::extending)) or by a rewind is never
-    /// rewound, and a query builds one every time, so it does not.
+    /// [`extending`](Ephemeral::extending)) does not, since a query
+    /// builds one every time.
     record: bool,
     /// How the line held each fact the write touches, as of its first
     /// touch, keyed to record each fact once.
@@ -486,7 +485,7 @@ struct Delta {
 }
 
 impl Delta {
-    /// A delta for a write to a line a subscription may rewind.
+    /// A delta for a write to a session line, which records what it found.
     fn recorded() -> Self {
         Self {
             asserted: Vec::new(),
@@ -497,7 +496,7 @@ impl Delta {
         }
     }
 
-    /// A delta for a write to a line nothing rewinds.
+    /// A delta for a write to a line built for one query, which does not.
     fn unrecorded() -> Self {
         Self {
             record: false,
@@ -571,22 +570,6 @@ impl Frozen {
         self.shadowed.remove(key);
         Arc::make_mut(&mut self.tombstones).remove(key);
         delta.asserted.push(fact);
-    }
-
-    /// Hold `fact` as `hold`: store or remove it, hide or show it,
-    /// whichever of the two differ from how it is held now.
-    fn restore(&mut self, fact: &Fact, hold: Hold, delta: &mut Delta) {
-        let now = self.hold(fact, &sort_key(fact, self.facts.manifest()));
-        if hold.stored && !now.stored {
-            self.insert(fact.clone(), delta);
-        } else if !hold.stored && now.stored {
-            self.remove(fact, delta);
-        }
-        if hold.hidden && !now.hidden {
-            self.shadow(fact.clone(), delta);
-        } else if !hold.hidden && now.hidden {
-            self.lift(&sort_key(fact, self.facts.manifest()), delta);
-        }
     }
 
     fn apply(&mut self, instruction: Instruction, delta: &mut Delta) {
@@ -740,28 +723,6 @@ impl Ephemeral {
         }
     }
 
-    /// This line as it stood before `instants`, its most recent
-    /// instants oldest first (see [`since`](Self::since)): a copy with
-    /// each fact they moved held again as the instant that first moved
-    /// it found it, newest instant first. What an instant found is
-    /// recorded as it lands ([`Instant::found`]), so the copy is exact
-    /// whatever the moves were: a fact stored over its own tombstone
-    /// gets both back, one the line was cleared of gets back whatever
-    /// of the two it had. This line is left as it was.
-    pub(crate) fn rewound(&self, instants: &[Instant]) -> Self {
-        let mut state = State::from(self.frozen());
-        let mut delta = Delta::unrecorded();
-        for instant in instants.iter().rev() {
-            for (fact, hold) in &instant.found {
-                state.now.restore(fact, *hold, &mut delta);
-            }
-        }
-        state.mint(delta);
-        Self {
-            state: Arc::new(RwLock::new(state)),
-        }
-    }
-
     /// Assert a statement: its asserts and replaces land in the store
     /// with the tree's semantics, its retracts remove or tombstone.
     /// Chainable; use [`apply`](Self::apply) to get the instant minted.
@@ -841,6 +802,22 @@ impl Ephemeral {
     /// holds (see [`Frozen`]).
     pub fn frozen(&self) -> Frozen {
         self.state.read().now.clone()
+    }
+
+    /// A line that holds `frozen` and is never written: how a
+    /// [`Frame`](crate::Frame) reads a layer, as the layer stood when the
+    /// frame was taken. Costs one allocation, whatever the line holds; it
+    /// keeps no instants, so [`since`](Self::since) on it reaches nothing.
+    pub(crate) fn fixed(frozen: Frozen) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(State::from(frozen))),
+        }
+    }
+
+    /// Whether `other` is a handle of this very line, not merely one
+    /// holding the same facts.
+    pub(crate) fn same(&self, other: &Ephemeral) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
     }
 
     /// The line's hash as of its last instant that was not a record
@@ -1725,8 +1702,8 @@ mod tests {
 
     /// The ring answers across its capacity as it always has: the
     /// instants after a pin within its reach, oldest first, and `None`
-    /// past it. Within its reach, rewinding the line by them gives back
-    /// the line a frozen value taken at the pin holds.
+    /// past it. A frozen value taken at the pin, read as a fixed line,
+    /// answers what the value does.
     #[dialog_common::test]
     fn it_reaches_back_the_ring_to_the_frozen_lines() {
         let line = Ephemeral::new();
@@ -1753,11 +1730,12 @@ mod tests {
                     let sequences: Vec<u64> =
                         instants.iter().map(|instant| instant.sequence).collect();
                     assert_eq!(sequences, (sequence + 1..=head).collect::<Vec<_>>());
-                    let rewound = line.rewound(&instants);
+                    let fixed = Ephemeral::fixed(frozen.clone());
                     let tags = Selector::new().the("person/tag".parse().unwrap());
-                    assert_eq!(rewound.scan(&tags), frozen.scan(&tags));
+                    assert_eq!(fixed.scan(&tags), frozen.scan(&tags));
+                    assert_eq!(fixed.revision(), frozen.revision());
                     assert_eq!(
-                        *rewound.tombstones(&Manifest::default()),
+                        *fixed.tombstones(&Manifest::default()),
                         *frozen.tombstones(&Manifest::default())
                     );
                 }

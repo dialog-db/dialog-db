@@ -261,24 +261,6 @@ impl Branch {
             overlay: Ephemeral::default(),
         })
     }
-
-    /// This branch as it stood at `revision`, under `overlay` as its
-    /// session line: what a subscription reads the state before a
-    /// change from, with the pinned revision and the overlay rewound
-    /// to the pinned sequence. Shares the branch's caches, and reads
-    /// through the env as the branch does, so a block the replica never
-    /// fetched hydrates from where the branch's repository's blocks live.
-    pub(crate) fn view(&self, revision: Revision, overlay: Ephemeral) -> Snapshot {
-        Snapshot {
-            subject: self.subject(),
-            head: RwLock::new(Head {
-                revision,
-                lineage: None,
-            }),
-            caches: self.caches(),
-            overlay,
-        }
-    }
 }
 
 impl Snapshot {

@@ -10,7 +10,7 @@
 //!
 //! - no root change → nothing to do;
 //! - root changed but no diff entry falls inside the cover → the
-//!   result cannot have changed; the pin advances without
+//!   result cannot have changed; the frame advances without
 //!   re-evaluating (this is the point: unrelated writes are free);
 //! - a diff entry falls inside a *fact* range → maintain
 //!   incrementally when the query supports it (see below), emit the
@@ -46,12 +46,22 @@
 //! contribute delta-join heads: the changed fact bound into the
 //! premise it matches, the remaining premises joined sideways, the
 //! head variable projected. The join reads the state the derivation
-//! it looks for holds in: the branch as it is for a fact that became
-//! readable, and for one that stopped, the pinned revision under the
-//! session overlay rewound to the pinned sequence
-//! ([`Branch::view`], [`rewound`]). Recursion and shapes the
+//! it looks for holds in: the frame the poll is at for a fact that
+//! became readable, and for one that stopped, the frame the last poll
+//! was at, which the subscription holds. Recursion and shapes the
 //! discovery does not handle fall back to a full recompute, which is
 //! always sound.
+//!
+//! # One frame per poll
+//!
+//! Every read of a poll goes to one [`Frame`], a position for each
+//! layer the subscription reads taken as the poll begins (see
+//! [`frame`](self::frame)): the diff's new side, the overlay's and
+//! memory layers' changes, rule resolution, the discovery and every
+//! re-derivation alike. So a poll reports the change of the answer
+//! from one frame to the next, whatever lands while it runs, and
+//! [`Subscription::poll_at`] polls several subscriptions at one frame
+//! so they agree.
 //! [`recomputes`](Subscription::recomputes) and
 //! [`maintenances`](Subscription::maintenances) expose which path
 //! each poll took.
@@ -101,13 +111,15 @@ use dialog_storage::Blake3Hash;
 use futures_util::stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
-use super::session::{Composite, QueryEnv, QueryLayer};
+use super::session::QueryEnv;
 use crate::repository::archive::erased;
-use crate::repository::source::Source;
 use crate::{Branch, Ephemeral, Index, RemoteSite, Revision, Stack};
 
 mod kept;
 use kept::Kept;
+
+mod frame;
+pub use frame::{Frame, PollError};
 
 /// How many touched entities a maintained poll re-derives at once.
 /// Measured on the catch-up soak's hundred-entity poll (#646): a
@@ -404,29 +416,17 @@ impl<T> Delta<T> {
 pub struct Subscription<Q: Application> {
     branch: Branch,
     query: Q,
-    /// The revision the retained results were evaluated at. `None`
-    /// until the first poll.
-    revision: Option<Revision>,
-    /// The [`Ephemeral`](crate::Ephemeral) sequence the retained results
-    /// were evaluated at. The branch's session overlay is off-tree, so
-    /// its changes are invisible to the tree diff; the instants it
-    /// minted since this sequence are the delta instead
-    /// ([`Ephemeral::since`](crate::Ephemeral::since)).
-    overlay_sequence: u64,
     /// The stack the subscription reads through, if any: its memory
     /// layers are read beside the branch, each attribute from the layer
     /// it is placed on, and each layer is observed as the branch's
     /// session overlay is (see [`Stack::subscription`]).
     stack: Option<Stack>,
-    /// The sequence each of the stack's memory layers stood at when
-    /// the retained results were evaluated, parallel to the stack's
-    /// layers: what a maintained poll rewinds each layer to.
-    memory_sequences: Vec<u64>,
-    /// The head each of the stack's durable layers stood at when the
-    /// retained results were evaluated, parallel to the stack's
-    /// durable layers. A durable layer that moved re-evaluates the
-    /// query: its tree is not diffed against the demand cover.
-    durable_heads: Vec<Option<Revision>>,
+    /// The frame the retained results were evaluated at, `None` until
+    /// the first poll: what the next poll reads the state before its
+    /// changes from. Its session overlay and memory layers are frozen,
+    /// and its durable layers and head are revisions, so it reads as it
+    /// did however the branch moved since.
+    frame: Option<Frame>,
     /// The demand cover recorded during the last evaluation.
     demand: Demand,
     /// The last evaluation's full result, retained to compute the
@@ -436,7 +436,6 @@ pub struct Subscription<Q: Application> {
     /// concept is recursive: additions extend it semi-naively;
     /// recomputes rebuild into it.
     fixpoint: Arc<Mutex<Option<InMemoryAnswerTable>>>,
-    initialized: bool,
     /// Full evaluations performed (first poll + fallbacks).
     recomputes: usize,
     /// Polls maintained incrementally (per-entity re-derivation).
@@ -486,19 +485,14 @@ impl<Q: Application> Subscription<Q> {
     /// A standing query over `branch`, read through `stack` when there
     /// is one.
     fn over(branch: Branch, stack: Option<Stack>, query: Q) -> Self {
-        let layers = stack.as_ref().map_or(0, |stack| stack.memories().len());
         Subscription {
             branch,
             query,
-            revision: None,
-            overlay_sequence: 0,
             stack,
-            memory_sequences: vec![0; layers],
-            durable_heads: Vec::new(),
+            frame: None,
             demand: Demand::new(),
             results: Kept::default(),
             fixpoint: Arc::new(Mutex::new(None)),
-            initialized: false,
             recomputes: 0,
             maintenances: 0,
             window: MAINTAIN_WINDOW,
@@ -630,17 +624,13 @@ async fn widened<'a>(
     Ok((widened_asserted, widened_retracted))
 }
 
-/// `overlay` as it stood at `sequence`: a copy with every move its
-/// instants since then made undone ([`Ephemeral::rewound`]), so a
-/// read of the copy sees what a read at `sequence` saw. The handle
-/// itself when nothing moved since, and `None` when the ring no
-/// longer reaches `sequence`.
-fn rewound(overlay: &Ephemeral, sequence: u64) -> Option<Ephemeral> {
-    let instants = overlay.since(sequence)?;
-    if instants.is_empty() {
-        return Some(overlay.clone());
-    }
-    Some(overlay.rewound(&instants))
+/// The instants `line` minted after `from`, up to and including
+/// `upto`, oldest first: what changed of it from one frame to the next.
+/// `None` when the ring no longer reaches back to `from`.
+fn between(line: &Ephemeral, from: u64, upto: u64) -> Option<Vec<crate::Instant>> {
+    let mut instants = line.since(from)?;
+    instants.retain(|instant| instant.sequence <= upto);
+    Some(instants)
 }
 
 /// What the in-cover changes between two roots touched.
@@ -712,20 +702,10 @@ type EvaluationFuture<'a, T> =
 #[cfg(target_arch = "wasm32")]
 type EvaluationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, EvaluationError>> + 'a>>;
 
-/// Where everything a subscription reads stands at one moment
-/// ([`Subscription::stamp`]).
-#[derive(Clone, Debug, PartialEq)]
-struct Stamp {
-    revision: Option<Revision>,
-    overlay: u64,
-    memories: Vec<u64>,
-    durables: Vec<Option<Revision>>,
-}
-
 /// The index root a revision pins — `None` for an unborn branch,
 /// which has no tree at all.
-fn tree_hash(revision: &Option<Revision>) -> Option<Blake3Hash> {
-    revision.as_ref().map(|revision| *revision.tree.hash())
+fn tree_hash(revision: Option<&Revision>) -> Option<Blake3Hash> {
+    revision.map(|revision| *revision.tree.hash())
 }
 
 impl<Q> Subscription<Q>
@@ -772,21 +752,24 @@ where
         self
     }
 
-    /// Poll the subscription against the branch's current state.
+    /// Where everything this subscription reads stands now, as one
+    /// [`Frame`]: the branch's head and session overlay, and through a
+    /// stack each memory layer and each durable layer. Poll several
+    /// subscriptions of one branch or stack at it
+    /// ([`poll_at`](Self::poll_at)) and they read one state.
+    pub fn frame(&self) -> Frame {
+        Frame::take(&self.branch, self.stack.as_ref())
+    }
+
+    /// Poll the subscription at a frame of where the branch stands now
+    /// ([`frame`](Self::frame)), as [`poll_at`](Self::poll_at) does.
     ///
-    /// Returns `Ok(None)` when the result is known unchanged: the
-    /// branch is at the pinned revision with the session overlay at
-    /// the pinned sequence, or the tree or the overlay moved but no
-    /// change intersects the demand cover (the pins advance
-    /// silently). Returns
-    /// `Ok(Some(delta))` after a (re-)evaluation — the first poll
-    /// always evaluates, reporting the initial result as `asserted`
-    /// rows.
-    ///
-    /// The revision and overlay sequence are snapshotted before
-    /// evaluating; a commit or overlay mutation that lands
-    /// mid-evaluation re-triggers on the next poll, so changes are
-    /// never missed, at worst re-checked.
+    /// Returns `Ok(None)` when the result is known unchanged: nothing
+    /// the subscription reads moved since its last poll, or something
+    /// moved but no change intersects the demand cover (the frame
+    /// advances silently). Returns `Ok(Some(delta))` after a
+    /// (re-)evaluation: the first poll always evaluates, reporting the
+    /// initial result as `asserted` rows.
     // The `self` and `env` lifetimes are deliberately unified into
     // one named `'a`: the poll future must stay `Send` on native (an
     // axum handler drains subscription polls), and its inner
@@ -815,16 +798,104 @@ where
             + ConditionalSync
             + 'static,
     {
-        let current = self.branch.revision();
-        let sequence = self.branch.overlay().revision().sequence;
-        let sequences = self.memory_sequences_now();
-        let durables = self.durable_heads_now();
-        if self.initialized {
-            let head_moved = current != self.revision;
-            let overlay_moved = sequence != self.overlay_sequence;
-            let memories_moved = sequences != self.memory_sequences;
-            let durables_moved = durables != self.durable_heads;
-            if !head_moved && !overlay_moved && !memories_moved && !durables_moved {
+        let frame = self.frame();
+        self.advance(frame, env).await
+    }
+
+    /// Poll the subscription at `frame`: every read of the poll goes to
+    /// it, the changes since the last poll, the entities they touch, the
+    /// rules, each entity derived again and a whole evaluation alike, so
+    /// the delta reported is the change of the answer from the frame the
+    /// last poll was at to this one, of no other state. What lands while
+    /// the poll runs is not in it, and the next poll reports it.
+    ///
+    /// A frame is taken with [`frame`](Self::frame), [`Branch::frame`] or
+    /// [`Stack::frame`], and every subscription of what it was taken of
+    /// may be polled at it, so they agree.
+    ///
+    /// Returns `Ok(None)` at the frame the subscription last polled at,
+    /// and otherwise what [`poll`](Self::poll) returns. Refuses a frame
+    /// taken before the one it last polled at with
+    /// [`PollError::Stale`], since frames only move forward, and a frame
+    /// of another branch or stack than it reads with
+    /// [`PollError::Foreign`]; neither changes the subscription.
+    pub async fn poll_at<'a, Env>(
+        &'a mut self,
+        frame: &'a Frame,
+        env: &'a Env,
+    ) -> Result<Option<Delta<Q::Conclusion>>, PollError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
+            + ConditionalSync
+            + 'static,
+    {
+        if self.admit(frame)? {
+            return Ok(None);
+        }
+        Ok(self.advance(frame.clone(), env).await?)
+    }
+
+    /// Whether the subscription may be polled at `frame`: `Ok(true)` at
+    /// the frame it last polled at, which there is nothing to do at, and
+    /// refused for a frame older than that one or not of what it reads.
+    pub(super) fn admit(&self, frame: &Frame) -> Result<bool, PollError> {
+        if !frame.is_of(&self.branch, self.stack.as_ref()) {
+            return Err(PollError::Foreign);
+        }
+        match &self.frame {
+            Some(last) if last.is(frame) => Ok(true),
+            Some(last) if last.is_after(frame) => Err(PollError::Stale),
+            _ => Ok(false),
+        }
+    }
+
+    /// Bring the retained result from the frame the last poll was at to
+    /// `frame`, reading `frame` alone for what is now and the last frame
+    /// for what was.
+    async fn advance<'a, Env>(
+        &'a mut self,
+        frame: Frame,
+        env: &'a Env,
+    ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
+            + ConditionalSync
+            + 'static,
+    {
+        if let Some(last) = &self.frame {
+            let moved = frame.moved_since(last);
+            if !moved.any() {
+                self.frame = Some(frame);
                 return Ok(None);
             }
             // A head-dependent result — one that read
@@ -835,22 +906,25 @@ where
             // head moved; an overlay-only move leaves them alone.
             // A durable layer that moved is read afresh: its tree is not
             // diffed against the cover, so the query re-evaluates.
-            if !durables_moved && !(head_moved && self.demand.depends_on_head()) {
+            if !moved.durables && !(moved.head && self.demand.depends_on_head()) {
+                let pinned = last.revision().cloned();
+                let overlay = last.overlay_sequence();
+                let memories = last.memory_sequences();
                 let mut touched = Touched::Nothing;
-                if head_moved {
-                    touched = touched.merge(self.touched(env, &current).await?);
+                if moved.head {
+                    touched =
+                        touched.merge(self.touched(env, pinned.as_ref(), frame.revision()).await?);
                 }
-                if overlay_moved && !matches!(touched, Touched::Rules) {
-                    touched = touched.merge(self.touched_overlay(self.overlay_sequence));
+                if moved.overlay && !matches!(touched, Touched::Rules) {
+                    touched =
+                        touched.merge(self.touched_overlay(overlay, frame.overlay_sequence()));
                 }
-                if memories_moved && !matches!(touched, Touched::Rules) {
-                    touched = touched.merge(self.touched_memories());
+                if moved.memories && !matches!(touched, Touched::Rules) {
+                    touched = touched.merge(self.touched_memories(&memories, &frame));
                 }
                 match touched {
                     Touched::Nothing => {
-                        self.revision = current;
-                        self.overlay_sequence = sequence;
-                        self.memory_sequences = sequences;
+                        self.frame = Some(frame);
                         return Ok(None);
                     }
                     Touched::Facts {
@@ -858,13 +932,12 @@ where
                         asserted,
                         retracted,
                     } => {
-                        if let Some(delta) =
-                            self.maintain(env, &subjects, &asserted, &retracted).await?
+                        if let Some(delta) = self
+                            .maintain(env, &frame, &subjects, &asserted, &retracted)
+                            .await?
                         {
                             self.maintenances += 1;
-                            self.revision = current;
-                            self.overlay_sequence = sequence;
-                            self.memory_sequences = sequences;
+                            self.frame = Some(frame);
                             return Ok(Some(delta));
                         }
                         // Not maintainable for this query/rule shape:
@@ -878,123 +951,32 @@ where
         }
 
         let demand = Demand::new();
-        let results = self.evaluate(env, &demand, &self.query).await?;
+        let results = self.evaluate(env, &frame, &demand, &self.query).await?;
         self.recomputes += 1;
 
         let delta = self.results.replace(results);
         self.demand = demand;
-        self.revision = current;
-        self.overlay_sequence = sequence;
-        self.memory_sequences = sequences;
-        self.durable_heads = durables;
-        self.initialized = true;
+        self.frame = Some(frame);
         Ok(Some(delta))
     }
 
-    /// Where everything this subscription reads stands now: the
-    /// branch's head, its session overlay's sequence, and through a
-    /// stack each memory layer's sequence and each durable layer's head.
-    /// A poll pins what it reads at what it finds at its start, so two
-    /// polls that begin at one stamp, with the stamp unmoved after both,
-    /// read one state.
-    fn stamp(&self) -> Stamp {
-        Stamp {
-            revision: self.branch.revision(),
-            overlay: self.branch.overlay().revision().sequence,
-            memories: self.memory_sequences_now(),
-            durables: self.durable_heads_now(),
-        }
-    }
-
     /// The memory layers the subscription reads through its stack, by
-    /// name, in the stack's order; none without a stack.
+    /// name, in the stack's order, live; none without a stack.
     fn memories(&self) -> Vec<(Entity, Ephemeral)> {
         self.stack.as_ref().map(Stack::memories).unwrap_or_default()
     }
 
-    /// The sequence each memory layer stands at now, parallel to
-    /// [`memories`](Self::memories).
-    fn memory_sequences_now(&self) -> Vec<u64> {
-        self.memories()
-            .iter()
-            .map(|(_, memory)| memory.revision().sequence)
-            .collect()
-    }
-
-    /// The revision the primary points each of the stack's durable
-    /// layers at now, as the stack last read it, in the stack's order;
-    /// none without a stack.
-    fn durable_heads_now(&self) -> Vec<Option<Revision>> {
-        self.stack
-            .iter()
-            .flat_map(|stack| stack.durables().pinned().revisions)
-            .collect()
-    }
-
-    /// `primary` followed by the stack's durable layers, each at the
-    /// tree the primary points it at now, with the names their rows bind
-    /// `in` to.
-    fn lines(&self, primary: Source) -> (Vec<Source>, Vec<Option<Entity>>) {
-        let mut sources = vec![primary];
-        let mut names = vec![None];
-        for (layer, source) in self
-            .stack
-            .iter()
-            .flat_map(|stack| stack.durables().sources())
-        {
-            sources.push(source);
-            names.push(Some(layer));
-        }
-        (sources, names)
-    }
-
-    /// What the subscription reads: the branch, and through a stack
-    /// its durable layers and its memory layers.
-    fn composite(&self) -> Composite {
-        let (sources, names) = self.lines(Source::from(self.branch.clone()));
-        Composite {
-            sources,
-            memories: self.memories(),
-            names,
-            channels: Vec::new(),
-        }
-    }
-
-    /// The composite as the last evaluation read it: the branch at its
-    /// pinned revision under its session overlay rewound to the pinned
-    /// sequence, and each memory layer rewound the same way, in the same
-    /// order, so the guide still names each layer. `None` when nothing
-    /// is pinned yet, or a store's ring no longer reaches back to its
-    /// pinned sequence.
-    fn before(&self) -> Option<Composite> {
-        let pinned = self.revision.clone()?;
-        let overlay = rewound(self.branch.overlay(), self.overlay_sequence)?;
-        let memories = self
-            .memories()
-            .into_iter()
-            .zip(&self.memory_sequences)
-            .map(|((layer, memory), sequence)| Some((layer, rewound(&memory, *sequence)?)))
-            .collect::<Option<Vec<_>>>()?;
-        // The durable layers stand where they were pinned: a poll that
-        // finds one moved re-evaluates instead of maintaining.
-        let (sources, names) = self.lines(Source::from(self.branch.view(pinned, overlay)));
-        Some(Composite {
-            sources,
-            memories,
-            names,
-            channels: Vec::new(),
-        })
-    }
-
-    /// Classify what the stack's memory layers changed since their
-    /// pinned sequences, within the demand cover, as
-    /// [`touched_overlay`](Self::touched_overlay) does for the branch's
-    /// session overlay. A pin a layer's ring no longer reaches is
-    /// [`Touched::Rules`], which recomputes.
-    fn touched_memories(&self) -> Touched {
+    /// Classify what the stack's memory layers changed from the
+    /// sequences in `from` to where `frame` holds them, within the
+    /// demand cover, as [`touched_overlay`](Self::touched_overlay) does
+    /// for the branch's session overlay. A sequence a layer's ring no
+    /// longer reaches is [`Touched::Rules`], which recomputes.
+    fn touched_memories(&self, from: &[u64], frame: &Frame) -> Touched {
         let mut touched = Touched::Nothing;
-        for ((_, memory), sequence) in self.memories().iter().zip(&self.memory_sequences) {
-            let Some(instants) = memory.since(*sequence) else {
+        for (((_, memory), from), (_, _, upto)) in
+            self.memories().iter().zip(from).zip(frame.memories())
+        {
+            let Some(instants) = between(memory, *from, *upto) else {
                 return Touched::Rules;
             };
             touched = touched.merge(touched_by(&self.demand, instants));
@@ -1005,8 +987,8 @@ where
         touched
     }
 
-    /// Classify what the changes between the pinned root and
-    /// `current` touched within the demand cover.
+    /// Classify what the changes between the tree of `pinned` and that
+    /// of `current` touched within the demand cover.
     ///
     /// The diff is *scoped to the cover*
     /// ([`differentiate_within`]): subtrees whose key span misses
@@ -1027,7 +1009,8 @@ where
     async fn touched<'a, Env>(
         &'a self,
         env: &'a Env,
-        current: &'a Option<Revision>,
+        pinned: Option<&'a Revision>,
+        current: Option<&'a Revision>,
     ) -> Result<Touched, EvaluationError>
     where
         Env: Provider<BlobRead>
@@ -1048,7 +1031,7 @@ where
             + ConditionalSync
             + 'static,
     {
-        let pinned = tree_hash(&self.revision);
+        let pinned = tree_hash(pinned);
         let target = tree_hash(current);
         if pinned == target {
             return Ok(Touched::Nothing);
@@ -1141,14 +1124,14 @@ where
         }
     }
 
-    /// Classify what the session overlay changed since the pinned
-    /// `sequence`, within the demand cover: the exact facts its
+    /// Classify what the session overlay changed from the sequence
+    /// `from` to `upto`, within the demand cover: the exact facts its
     /// instants asserted and retracted, filtered by their index keys
     /// against the cover, with no diff to compute. A change inside a
     /// rule-discovery range, or a pin the overlay's ring no longer
     /// reaches, is [`Touched::Rules`], which recomputes.
-    fn touched_overlay(&self, sequence: u64) -> Touched {
-        let Some(instants) = self.branch.overlay().since(sequence) else {
+    fn touched_overlay(&self, from: u64, upto: u64) -> Touched {
+        let Some(instants) = between(self.branch.overlay(), from, upto) else {
             return Touched::Rules;
         };
         touched_by(&self.demand, instants)
@@ -1170,6 +1153,7 @@ where
     fn maintain<'a, Env>(
         &'a mut self,
         env: &'a Env,
+        frame: &'a Frame,
         subjects: &'a BTreeSet<Entity>,
         asserted: &'a [Fact],
         retracted: &'a [Fact],
@@ -1212,8 +1196,7 @@ where
                     .perform(env)
                     .await
                     .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-                let layer = QueryLayer::from(&self.branch);
-                let overlay = layer.overlay(&operator);
+                let overlay = frame.metadata(&operator);
                 self.demand
                     .anchor_metadata(self.branch.metadata(&operator).branch.this);
                 // Typed with the *named* env lifetime (owned branch
@@ -1221,7 +1204,7 @@ where
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
                 let query_env: QueryEnv<'a> =
-                    QueryEnv::over(self.composite(), overlay.clone(), env)
+                    QueryEnv::over(frame.composite(), overlay.clone(), env)
                         .with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
                 // The poll reports the rows that moved. What a rule
@@ -1247,27 +1230,25 @@ where
                     let results = self
                         .evaluate_with_continuation(
                             env,
+                            frame,
                             Arc::new(asserted.to_vec()),
                             Arc::new(retracted.to_vec()),
                         )
                         .await?;
                     return Ok(Some(self.results.replace(results)));
                 }
-                // The state the changes were applied to: the pinned
-                // revision under the session overlay as it stood at
-                // the pinned sequence. A derivation a retracted fact
-                // supported held there and nowhere else, so that is
-                // where the discovery joins it (#708). Built the first
-                // time a join asks for it, since rewinding the overlay
-                // copies it: a poll whose changes all join against the
-                // branch as it is never pays for it. A pin from before
-                // the branch's first commit, or one the overlay's ring
-                // no longer reaches, has no such view, and the poll
-                // recomputes.
+                // The state the changes were applied to: the frame the
+                // last poll was at, which the subscription holds. A
+                // derivation a retracted fact supported held there and
+                // nowhere else, so that is where the discovery joins it
+                // (#708). Built the first time a join asks for it: a
+                // poll whose changes all join against the new frame
+                // never pays for it.
                 let before: OnceLock<Option<QueryEnv<'a>>> = OnceLock::new();
                 let view = || {
+                    let last = self.frame.as_ref()?;
                     Some(
-                        QueryEnv::over(self.before()?, overlay.clone(), env)
+                        QueryEnv::over(last.composite(), overlay.clone(), env)
                             .with_demand(self.demand.clone()),
                     )
                 };
@@ -1308,7 +1289,7 @@ where
             let this = &*self;
             let mut evaluations = Vec::with_capacity(scoped.len());
             for (_, query) in &scoped {
-                evaluations.push(this.evaluate(env, &demand, query));
+                evaluations.push(this.evaluate(env, frame, &demand, query));
             }
             let derived: Vec<Vec<Q::Conclusion>> = stream::iter(evaluations)
                 .buffered(self.window)
@@ -1340,13 +1321,15 @@ where
         })
     }
 
-    /// Evaluate the query against the branch, recording every
-    /// demanded range into `demand`. Mirrors the ordinary
+    /// Evaluate the query at `frame`, recording every demanded range
+    /// into `demand`. Mirrors the ordinary
     /// `branch.select(query).perform(env)` path with a
-    /// demand-recording environment.
+    /// demand-recording environment, reading the frame where that path
+    /// reads the branch as it stands.
     fn evaluate<'a, Env>(
         &'a self,
         env: &'a Env,
+        frame: &'a Frame,
         demand: &'a Demand,
         query: &'a Q,
     ) -> EvaluationFuture<'a, Vec<Q::Conclusion>>
@@ -1375,13 +1358,12 @@ where
                 .perform(env)
                 .await
                 .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-            let layer = QueryLayer::from(&self.branch);
-            let overlay = layer.overlay(&operator);
+            let overlay = frame.metadata(&operator);
             demand.anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
             let mut query_env: QueryEnv<'a> =
-                QueryEnv::over(self.composite(), overlay, env).with_demand(demand.clone());
+                QueryEnv::over(frame.composite(), overlay, env).with_demand(demand.clone());
             // Recursive concept subscriptions retain their fixpoint
             // across polls: a recompute rebuilds into the retained
             // table so a later additions-only poll can extend it.
@@ -1395,7 +1377,7 @@ where
             // does (see `crate::repository::fetch`).
             let queue = Provider::<Speculation>::execute(env, ()).await;
             let results = Box::pin(query.clone().perform(&query_env));
-            Driven::new(results, vec![Source::from(self.branch.clone())], env, queue)
+            Driven::new(results, vec![frame.primary().clone()], env, queue)
                 .try_vec()
                 .await
         })
@@ -1408,6 +1390,7 @@ where
     fn evaluate_with_continuation<'a, Env>(
         &'a self,
         env: &'a Env,
+        frame: &'a Frame,
         additions: Arc<Vec<Fact>>,
         deletions: Arc<Vec<Fact>>,
     ) -> EvaluationFuture<'a, Vec<Q::Conclusion>>
@@ -1440,13 +1423,12 @@ where
                 .perform(env)
                 .await
                 .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-            let layer = QueryLayer::from(&self.branch);
-            let overlay = layer.overlay(&operator);
+            let overlay = frame.metadata(&operator);
             self.demand
                 .anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let query_env: QueryEnv<'a> = QueryEnv::over(self.composite(), overlay, env)
+            let query_env: QueryEnv<'a> = QueryEnv::over(frame.composite(), overlay, env)
                 .with_demand(self.demand.clone())
                 .with_fixpoint(
                     concept.this(),
@@ -1456,7 +1438,7 @@ where
             // continuation's reads warm through the ambient queue.
             let queue = Provider::<Speculation>::execute(env, ()).await;
             let results = Box::pin(self.query.clone().perform(&query_env));
-            Driven::new(results, vec![Source::from(self.branch.clone())], env, queue)
+            Driven::new(results, vec![frame.primary().clone()], env, queue)
                 .try_vec()
                 .await
         })
@@ -1474,13 +1456,13 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::Delta;
+    use crate::RemoteSite;
     use crate::helpers::test_repo;
-    use crate::{Ephemeral, RemoteSite};
     use dialog_capability::Command;
     use dialog_capability::{Fork, Provider};
     use dialog_common::Held;
     use dialog_common::{ConditionalSend, ConditionalSync, Holds};
-    use dialog_corpus::{Changes, Entity, Selector, Value};
+    use dialog_corpus::{Changes, Entity, Value};
     use dialog_corpus::{NameShape, Relation as CorpusRelation, Symbol};
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::authority::AuthorityError;
@@ -3065,7 +3047,7 @@ mod tests {
         Ok(())
     }
 
-    mod concepts {
+    pub(super) mod concepts {
         //! Derived concepts + attributes shared by the incremental
         //! maintenance tests below.
 
@@ -3502,8 +3484,8 @@ mod tests {
 
     /// The same two facts retracted together through the session
     /// overlay, as tombstones over the committed badges: the state
-    /// before the change is the pinned revision under the overlay
-    /// rewound to the pinned sequence, where both badges still hold.
+    /// before the change is the frame the last poll was at, its overlay
+    /// frozen before the tombstones, where both badges still hold.
     #[dialog_common::test]
     async fn it_retracts_a_row_when_two_supporting_facts_go_together_in_the_overlay()
     -> anyhow::Result<()> {
@@ -3575,162 +3557,16 @@ mod tests {
         Ok(())
     }
 
-    /// Rewinding a session overlay to an earlier sequence undoes what
-    /// its instants since then changed: facts they added are gone and
-    /// facts they removed are back. The overlay itself is left as it
-    /// is.
-    #[dialog_common::test]
-    fn it_rewinds_an_overlay_to_a_pinned_sequence() -> anyhow::Result<()> {
-        let alice = Entity::new()?;
-        let bob = Entity::new()?;
-        let overlay = Ephemeral::new();
-        overlay
-            .assert(
-                the!("person/name")
-                    .of(alice.clone())
-                    .is("Alice".to_string()),
-            )?
-            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))?;
-        let pinned = overlay.revision().sequence;
-
-        // Three instants: a second name beside alice's, a new entity,
-        // a removal.
-        overlay.assert(
-            the!("person/name")
-                .of(alice.clone())
-                .is("Alicia".to_string()),
-        )?;
-        let carol = Entity::new()?;
-        overlay.assert(
-            the!("person/name")
-                .of(carol.clone())
-                .is("Carol".to_string()),
-        )?;
-        overlay.retract(the!("person/name").of(bob.clone()).is("Bob".to_string()))?;
-
-        let names = |line: &Ephemeral| -> anyhow::Result<Vec<(String, Value)>> {
-            let selector =
-                Selector::new().the(CorpusRelation::try_from("person/name".to_string())?);
-            let mut names: Vec<(String, Value)> = line
-                .scan(&selector)
-                .into_iter()
-                .map(|fact| (fact.of.to_string(), fact.is))
-                .collect();
-            names.sort_by(|left, right| left.0.cmp(&right.0));
-            Ok(names)
-        };
-        let named = |who: &Entity, name: &str| (who.to_string(), Value::String(name.to_string()));
-        let rewound = super::rewound(&overlay, pinned).expect("the ring reaches the pin");
-        let mut expected = vec![named(&alice, "Alice"), named(&bob, "Bob")];
-        expected.sort_by(|left, right| left.0.cmp(&right.0));
-        assert_eq!(
-            names(&rewound)?,
-            expected,
-            "the rewound line reads as it did"
-        );
-        let mut now = vec![
-            named(&alice, "Alice"),
-            named(&alice, "Alicia"),
-            named(&carol, "Carol"),
-        ];
-        now.sort_by(|left, right| left.0.cmp(&right.0));
-        assert_eq!(names(&overlay)?, now, "the overlay is left as it is");
-
-        assert!(
-            super::rewound(&overlay, overlay.revision().sequence)
-                .is_some_and(|same| same.revision() == overlay.revision()),
-            "an up-to-date pin rewinds to the line itself"
-        );
-        Ok(())
-    }
-
-    /// Rewinding undoes a tombstone the way it was laid: a committed
-    /// fact the overlay hid since the pin is readable again beneath
-    /// the rewound line, not stored in it, so it stands at its own
-    /// edition; and a tombstone the overlay lifted since the pin is
-    /// laid again. The rewound line's export is the pinned line's.
-    #[dialog_common::test]
-    fn it_rewinds_tombstones_as_they_were_laid() -> anyhow::Result<()> {
-        let alice = Entity::new()?;
-        let bob = Entity::new()?;
-        let committed =
-            |who: &Entity, name: &str| the!("person/name").of(who.clone()).is(name.to_string());
-        let overlay = Ephemeral::new();
-        // Bob's committed name is hidden at the pin; alice's is not.
-        overlay.retract(committed(&bob, "Bob"))?;
-        let pinned = overlay.export();
-        let sequence = overlay.revision().sequence;
-
-        overlay.retract(committed(&alice, "Alice"))?;
-        overlay.assert(committed(&bob, "Bob"))?;
-        // A fact hidden and shown again in one instant stands as it did.
-        let mut churn = Changes::new();
-        churn.retract(committed(&alice, "Alice"));
-        churn.assert(committed(&alice, "Alice"));
-        overlay.apply(churn)?;
-
-        let rewound = super::rewound(&overlay, sequence).expect("the ring reaches the pin");
-        assert_eq!(
-            rewound.export(),
-            pinned,
-            "the rewound line is the pinned line"
-        );
-        Ok(())
-    }
-
-    /// A fact asserted over its own tombstone is stored and hidden at
-    /// once. Rewinding past an instant that moved such a fact gets
-    /// both back: a commit that takes the stored copy out leaves the
-    /// tombstone, which must not be mistaken for the tombstone having
-    /// been laid; and clearing the line lists the fact as removed and
-    /// un-hidden at once, which must not be mistaken for no move.
-    #[dialog_common::test]
-    fn it_rewinds_a_fact_stored_over_its_own_tombstone() -> anyhow::Result<()> {
-        let alice = Entity::new()?;
-        let committed = the!("person/name")
-            .of(alice.clone())
-            .is("Alice".to_string());
-        let overlay = Ephemeral::new();
-        overlay
-            .retract(committed.clone())?
-            .assert(committed.clone())?;
-        let pinned = overlay.export();
-        let sequence = overlay.revision().sequence;
-
-        // The stored copy goes, as a commit retracting the fact takes
-        // it out; the tombstone stays.
-        overlay.retract(committed.clone())?;
-        let rewound = super::rewound(&overlay, sequence).expect("the ring reaches the pin");
-        assert_eq!(
-            rewound.export(),
-            pinned,
-            "the stored copy is back, the tombstone kept"
-        );
-
-        // Back to both, then everything goes at once.
-        overlay.assert(committed)?;
-        let sequence = overlay.revision().sequence;
-        overlay.clear();
-        assert!(overlay.export().is_empty(), "the line is clear");
-        let rewound = super::rewound(&overlay, sequence).expect("the ring reaches the pin");
-        assert_eq!(
-            rewound.export(),
-            pinned,
-            "both the copy and the tombstone are back"
-        );
-        Ok(())
-    }
-
     /// A concept subscription first polled before the branch's first
-    /// commit has no revision to read the state before a change from.
-    /// A poll whose changes all join against the branch as it is
-    /// still maintains; one that needs the state before, here a
-    /// retraction through the session overlay, recomputes instead,
-    /// with the same result. Once the branch has a revision, the same
-    /// retraction maintains, under the overlay rewound to the pin.
+    /// commit reads the state before a change from the frame its last
+    /// poll was at: the empty tree under the session overlay as that
+    /// poll froze it. A poll whose changes all join against the new
+    /// frame maintains, and so does one that needs the state before,
+    /// here a retraction through the session overlay; once the branch
+    /// has a revision, the same retraction maintains as well.
     #[dialog_common::test]
-    async fn it_recomputes_when_a_join_needs_the_state_before_an_unborn_branch()
-    -> anyhow::Result<()> {
+    async fn it_maintains_a_join_that_needs_the_state_before_an_unborn_branch() -> anyhow::Result<()>
+    {
         use concepts::{Badge, Manager, Name, Report};
         use dialog_query::Query;
 
@@ -3773,8 +3609,8 @@ mod tests {
         assert_eq!(delta.retracted, vec![row.clone()]);
         assert_eq!(
             (subscription.recomputes(), subscription.maintenances()),
-            (2, 1),
-            "a retraction needs the state before, and an unborn branch has none to view"
+            (1, 2),
+            "a retraction joins the state before, the frame of the unborn branch"
         );
 
         // A first commit gives the branch a revision to view.
@@ -3806,7 +3642,7 @@ mod tests {
         assert_eq!(
             (subscription.recomputes(), subscription.maintenances()),
             (recomputes, maintenances + 2),
-            "pinned to a revision, the retraction maintains under the rewound overlay"
+            "at a revision, the retraction maintains against the last frame"
         );
         Ok(())
     }
