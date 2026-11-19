@@ -39,6 +39,9 @@ pub use symbol::*;
 mod value;
 pub use value::*;
 
+mod view;
+pub use view::*;
+
 mod ordkey;
 pub use ordkey::*;
 

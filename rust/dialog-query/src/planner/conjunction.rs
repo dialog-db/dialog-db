@@ -1,16 +1,20 @@
 use super::Plan;
 use crate::attribute::query::DynamicAttributeQuery;
 use crate::concept::query::ConceptQuery;
-use crate::query::Application as _;
+use crate::merge_join::left_merge_join;
+use crate::optional::OptionalAttributeQuery;
+use crate::query::Application;
 use crate::selection::{Match, Selection};
-use crate::{Environment, SortOrder, multi_merge_join};
+use crate::types::Any;
+use crate::{Environment, EvaluationError, SortOrder, Term, multi_merge_join};
 use core::pin::Pin;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_corpus::selector::Constrained;
-use dialog_corpus::{Estimate, Likelihood, Preload, PreloadRequest, Selector, encode_value_owned};
+use dialog_corpus::{Estimate, Likelihood, Preload, PreloadRequest, Selector};
 use futures_util::{StreamExt, stream};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Largest ratio of the widest to narrowest scan range estimate that still
 /// takes the merge path. Above it, one scan is selective enough that a nested
@@ -118,9 +122,20 @@ impl Conjunction {
         }
 
         let mut shared: Option<String> = None;
+        let mut required = false;
         for step in &self.steps {
             let variable = match step {
                 Plan::Scan(_, query) => match query.sort_order() {
+                    SortOrder::On(name) => {
+                        required = true;
+                        name
+                    }
+                    SortOrder::None => return None,
+                },
+                // An optional field whose scan is sorted on the same
+                // variable is left-merged: read once in order, an entity it
+                // lacks bound Absent, instead of probed once per entity.
+                Plan::OptionalScan(_, optional) => match optional.query().sort_order() {
                     SortOrder::On(name) => name,
                     SortOrder::None => return None,
                 },
@@ -128,7 +143,10 @@ impl Conjunction {
                 // its rows sorted on the entity, stored and derived alike
                 // (see `ConceptQuery::evaluate`), so it merges on that
                 // variable like a scan of the attribute would.
-                Plan::Concept(_, query) => MergeInput::relation_variable(query)?,
+                Plan::Concept(_, query) => {
+                    required = true;
+                    MergeInput::relation_variable(query)?
+                }
                 _ => return None,
             };
             match &shared {
@@ -137,7 +155,9 @@ impl Conjunction {
                 Some(_) => return None,
             }
         }
-        shared
+        // Something must say which entities there are: optional fields
+        // alone only widen.
+        if required { shared } else { None }
     }
 
     /// Whether the scans are balanced enough to merge, given a row's
@@ -169,7 +189,19 @@ impl Conjunction {
             .steps
             .iter()
             .filter_map(|step| match step {
-                Plan::Scan(_, query) => Some((query, query.resolved_selector(base))),
+                Plan::Scan(_, query) => Some((query.as_ref(), query.resolved_selector(base))),
+                _ => None,
+            })
+            .collect();
+        // A left-merged optional field reads its whole range, where the
+        // fold probes it once per entity the required scans admit. A
+        // narrow optional range is cheap to read either way, so it is
+        // weighed against the required scans' size, not as one of them.
+        let optional: Vec<_> = self
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Plan::OptionalScan(_, optional) => Some(optional.query().resolved_selector(base)),
                 _ => None,
             })
             .collect();
@@ -180,7 +212,7 @@ impl Conjunction {
         // the tree to estimate each range would only confirm it -- a second
         // walk per scan, per row, on the lookups rules are made of.
         let point = selectors.iter().all(|(query, selector)| {
-            matches!(query.as_ref(), DynamicAttributeQuery::Only(_))
+            matches!(query, DynamicAttributeQuery::Only(_))
                 && selector.as_ref().is_ok_and(|selector| {
                     selector.entity().is_some() && selector.attribute().is_some()
                 })
@@ -189,6 +221,33 @@ impl Conjunction {
             return true;
         }
 
+        // A required scan pinned to a value or an entity admits a handful of
+        // entities: a left merge would read every optional field's whole
+        // range for them, and the fold probes each once. Decided without
+        // estimating, as it was decided before optional fields could merge:
+        // on a cold replica an estimate is a walk of the range's edges.
+        let pinned = selectors.iter().any(|(_, selector)| {
+            selector.as_ref().is_ok_and(|selector| {
+                selector.entity().is_some()
+                    || selector.value().is_some()
+                    || selector.value_prefix().is_some()
+                    || selector.value_lower().is_some()
+                    || selector.value_upper().is_some()
+            })
+        });
+        if !optional.is_empty() && pinned {
+            return false;
+        }
+
+        let estimate =
+            async |selector: Result<Selector<Constrained>, EvaluationError>| match selector {
+                Ok(selector) => Provider::<Estimate>::execute(env, selector)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(u64::MAX),
+                Err(_) => u64::MAX,
+            };
         let mut min_size = u64::MAX;
         let mut max_size = 0u64;
         for (_, selector) in selectors {
@@ -207,7 +266,15 @@ impl Conjunction {
             min_size = min_size.min(size);
             max_size = max_size.max(size);
         }
-        min_size != 0 && max_size <= min_size.saturating_mul(MERGE_COST_BALANCE as u64)
+        if min_size == 0 || max_size > min_size.saturating_mul(MERGE_COST_BALANCE as u64) {
+            return false;
+        }
+        for selector in optional {
+            if estimate(selector).await > min_size.saturating_mul(MERGE_COST_BALANCE as u64) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Evaluate a structurally merge-eligible conjunction, choosing per query
@@ -270,11 +337,20 @@ impl Conjunction {
             let scans: Vec<MergeInput> = self
                 .steps
                 .iter()
-                .map(|step| match step {
-                    Plan::Scan(_, query) => MergeInput::Scan(query.clone()),
-                    Plan::Concept(_, query) => MergeInput::Relation(query.clone()),
+                .filter_map(|step| match step {
+                    Plan::Scan(_, query) => Some(MergeInput::Scan(query.clone())),
+                    Plan::Concept(_, query) => Some(MergeInput::Relation(query.clone())),
+                    Plan::OptionalScan(..) => None,
                     // merge_variable already proved every step merges.
                     _ => unreachable!("merge eligibility guarantees every step merges"),
+                })
+                .collect();
+            let optional: Vec<OptionalAttributeQuery> = self
+                .steps
+                .iter()
+                .filter_map(|step| match step {
+                    Plan::OptionalScan(_, query) => Some((**query).clone()),
+                    _ => None,
                 })
                 .collect();
 
@@ -322,7 +398,19 @@ impl Conjunction {
                     run.push(next?);
                 }
 
-                if !balanced {
+                // An optional field merges only when the row leaves its
+                // value, cause and layer free: a pinned or Absent-claimed
+                // one is a check of one entity's fact, which the fold makes.
+                let free = run.iter().all(|row| {
+                    optional.iter().all(|optional| {
+                        let query = optional.query();
+                        !row.contains(query.is())
+                            && !row.contains(&Term::<Any>::from(query.cause()))
+                            && !row.contains(&Term::<Any>::from(query.layer()))
+                    })
+                });
+
+                if !balanced || !free {
                     // A selective attribute is pinned: the nested-loop fold
                     // reads fewer blocks by driving from the narrow scan.
                     let run = stream::iter(run.into_iter().map(Ok));
@@ -383,11 +471,44 @@ impl Conjunction {
                     }
 
                     let variable = variable.clone();
-                    let key = move |m: &Match| -> Option<Vec<u8>> {
-                        m.value_of(&variable).map(encode_value_owned)
+                    // The key reads a scanned entity in place: ordering rows
+                    // by an encoding of a materialized entity built one, and
+                    // hashed its URI, for every row of every input.
+                    let key = Arc::new(move |m: &Match| m.join_key(&variable));
+                    let key = {
+                        let key = key.clone();
+                        move |m: &Match| key(m)
                     };
 
-                    for await row in multi_merge_join(inputs, key) {
+                    let merged: Pin<Box<dyn Selection + 'a>> = if optional.is_empty() {
+                        Box::pin(multi_merge_join(inputs, key))
+                    } else {
+                        let sides = optional
+                            .iter()
+                            .map(|optional| {
+                                let query = optional.query();
+                                // The terms the probe's fallback binds
+                                // Absent, the value first (see
+                                // `left_merge_join`).
+                                let absent = vec![
+                                    query.is().clone(),
+                                    Term::<Any>::from(query.cause()),
+                                    Term::<Any>::from(query.layer()),
+                                ];
+                                let side: Pin<Box<dyn Selection + 'a>> = Box::pin(
+                                    Application::evaluate(query.clone(), base.clone().seed(), env),
+                                );
+                                (side, absent)
+                            })
+                            .collect();
+                        let left_key = key.clone();
+                        Box::pin(left_merge_join(
+                            multi_merge_join(inputs, key),
+                            sides,
+                            left_key,
+                        ))
+                    };
+                    for await row in merged {
                         let row = row?;
                         // Fold the joined bindings back onto the incoming row
                         // so the caller's context (and provenance) is
@@ -455,22 +576,28 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::attribute::Relation;
     use crate::attribute::query::AttributeQuery;
     use crate::formula::math::Sum;
     use crate::formula::string::Uppercase;
     use crate::optional::OptionalAttributeQuery;
-    use crate::planner::Planner;
+    use crate::planner::{Plan, Planner};
+    use crate::query::Application;
     use crate::selection::Match;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
     use crate::types::Any;
     use crate::{
-        AttributeDescriptor, Cardinality, ConceptDescriptor, ConceptFieldDescriptor, ConceptQuery,
-        Environment, Formula, Negation, Parameters, Premise, Proposition, Term, Type, Value,
+        AttributeDescriptor, Binding, Cardinality, ConceptDescriptor, ConceptFieldDescriptor,
+        ConceptQuery, Environment, EvaluationError, Formula, Negation, Parameters, Premise,
+        Proposition, Term, Type, Value,
     };
     use dialog_corpus::Entity;
     use dialog_peer::helpers::{test_repo, test_session_with_peer};
+    use dialog_peer::{Peer, Session};
+    use dialog_repository::{Branch, Transaction};
+    use dialog_storage::provider::storage::VolatileSpace;
     use futures_util::{TryStreamExt, stream};
 
     /// A two-attribute conjunction over a shared entity is structurally merge
@@ -1254,6 +1381,493 @@ mod tests {
             Some(26),
             "the formula computed over the Present value"
         );
+        Ok(())
+    }
+
+    /// A required scan of `the` over `?e`, its value in `value` and its
+    /// cause in `cause`.
+    fn required(the: Term<Relation>, value: &str, cause: &str) -> Premise {
+        Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
+            the,
+            Term::<Entity>::var("e"),
+            Term::<Any>::var(value),
+            Term::var(cause),
+            Some(Cardinality::Many),
+        ))))
+    }
+
+    /// An optional field `the` of `?e`, its value in `value` and its cause
+    /// in `cause`, of the given cardinality.
+    fn optional(
+        the: Term<Relation>,
+        value: &str,
+        cause: &str,
+        cardinality: Cardinality,
+    ) -> OptionalAttributeQuery {
+        OptionalAttributeQuery::new(
+            the,
+            Term::<Entity>::var("e"),
+            Term::<Any>::var(value),
+            Term::var(cause),
+            Some(cardinality),
+        )
+    }
+
+    /// How many filler entities, each with a `person/name` and nothing
+    /// else, the fixtures below add: enough that the name range's
+    /// estimate is not zero, so the balance check admits the merge.
+    const FILLER: usize = 400;
+
+    type TestPeer = Peer<VolatileSpace, Session>;
+
+    /// A branch holding `FILLER` named entities plus what `facts` adds.
+    async fn fixture<F>(facts: F) -> anyhow::Result<(TestPeer, Branch)>
+    where
+        F: for<'b> FnOnce(Transaction<&'b Branch>) -> Transaction<&'b Branch>,
+    {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let mut tx = branch.transaction();
+        for i in 0..FILLER {
+            let entity: Entity = format!("id:filler-{i:04}").parse()?;
+            tx = tx.assert(the!("person/name").of(entity).is(format!("filler-{i}")));
+        }
+        facts(tx).commit().publish().perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        Ok((operator, branch))
+    }
+
+    /// What evaluating one selection through the chosen path and through
+    /// the fold gave, with the plan's optional steps.
+    struct Outcomes {
+        optional: Vec<OptionalAttributeQuery>,
+        merge: Result<Vec<Match>, EvaluationError>,
+        fold: Result<Vec<Match>, EvaluationError>,
+    }
+
+    /// Plan `premises`, check `optionals` optional steps survive planning
+    /// and that `rows` take the left merge (merge eligible on `?e`,
+    /// balanced, and the `free` check holds since `rows` bind none of the
+    /// optional fields' terms), then evaluate `rows` through the chosen path
+    /// and through the fold.
+    async fn merge_and_fold<'a, Env>(
+        premises: Vec<Premise>,
+        optionals: usize,
+        rows: Vec<Match>,
+        env: &'a Env,
+    ) -> anyhow::Result<Outcomes>
+    where
+        Env: crate::Scope<'a>,
+    {
+        let plan = Planner::from(premises).plan(&Environment::new())?;
+        let optional: Vec<OptionalAttributeQuery> = plan
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Plan::OptionalScan(_, query) => Some((**query).clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            optional.len(),
+            optionals,
+            "expected {optionals} optional steps to survive planning, got {}",
+            optional.len()
+        );
+        assert_eq!(
+            plan.merge_variable().as_deref(),
+            Some("e"),
+            "expected the conjunction to be left-merge eligible on ?e"
+        );
+        for row in &rows {
+            assert!(
+                plan.scans_balanced_for(row, env).await,
+                "expected the scans to be balanced so the left merge is taken"
+            );
+        }
+        let merge = plan
+            .clone()
+            .evaluate(stream::iter(rows.clone().into_iter().map(Ok)), env)
+            .try_collect::<Vec<_>>()
+            .await;
+        let fold = plan
+            .into_fold(stream::iter(rows.into_iter().map(Ok)), env)
+            .try_collect::<Vec<_>>()
+            .await;
+        Ok(Outcomes {
+            optional,
+            merge,
+            fold,
+        })
+    }
+
+    /// Each row's `names`, `Absent` and unbound told apart, in row order.
+    fn shown(rows: &[Match], names: &[&str]) -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|row| {
+                names
+                    .iter()
+                    .map(|name| match row.get(name) {
+                        Some(Binding::Present(value)) => format!("{value:?}"),
+                        Some(Binding::Absent) => "Absent".to_string(),
+                        None => "unbound".to_string(),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// [`shown`], then each name's standing and each optional field's
+    /// claim, so a difference in citations shows too.
+    fn detailed(
+        rows: &[Match],
+        names: &[&str],
+        optional: &[OptionalAttributeQuery],
+    ) -> Vec<Vec<String>> {
+        shown(rows, names)
+            .into_iter()
+            .zip(rows)
+            .map(|(mut shown, row)| {
+                for name in names {
+                    shown.push(format!("{:?}", row.standing_of(name)));
+                }
+                for query in optional {
+                    shown.push(format!("{:?}", Application::realize(query, row.clone())));
+                }
+                shown
+            })
+            .collect()
+    }
+
+    /// The rows of `shown` whose first column is not a filler entity.
+    fn named(rows: Vec<Vec<String>>) -> Vec<Vec<String>> {
+        rows.into_iter()
+            .filter(|row| !row[0].contains("filler"))
+            .collect()
+    }
+
+    /// Assert the merge path gave exactly the fold's rows, in the fold's
+    /// order, with the same standings and claims.
+    fn assert_same(outcomes: &Outcomes, names: &[&str]) {
+        let fold = match &outcomes.fold {
+            Ok(rows) => detailed(rows, names, &outcomes.optional),
+            Err(error) => panic!("the fold failed: {error:?}"),
+        };
+        match &outcomes.merge {
+            Ok(rows) => assert_eq!(
+                detailed(rows, names, &outcomes.optional),
+                fold,
+                "expected the left merge to yield the fold's rows"
+            ),
+            Err(error) => panic!(
+                "expected the left merge to yield the fold's {} rows, \
+                 got an error instead: {error:?}",
+                fold.len()
+            ),
+        }
+    }
+
+    /// Two optional fields share one value variable, `maybe (person/nick
+    /// ?e ?x)` and `maybe (person/alias ?e ?x)`, beside a required
+    /// `(person/name ?e ?n)`. Alice has a nick and no alias, Bob neither.
+    ///
+    /// The fold (what `main` evaluates) drops Alice, whose alias probe has
+    /// `?x` pinned to her nick and finds no such alias (a mismatch, not
+    /// absence), and yields Bob with `?x` Absent. The left merge binds
+    /// Alice's `?x` Absent where her nick already bound it Present, and the
+    /// whole query fails with `EvaluationError::Assignment`.
+    #[dialog_common::test]
+    async fn it_left_merges_optional_fields_sharing_a_value_as_the_fold_does() -> anyhow::Result<()>
+    {
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let (operator, branch) = fixture(|tx| {
+            tx.assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/nick").of(alice.clone()).is("Al".to_string()))
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+        })
+        .await?;
+        let env = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let outcomes = merge_and_fold(
+            vec![
+                required(Term::from(the!("person/name")), "n", "c1"),
+                optional(
+                    Term::from(the!("person/nick")),
+                    "x",
+                    "c2",
+                    Cardinality::Many,
+                )
+                .into(),
+                optional(
+                    Term::from(the!("person/alias")),
+                    "x",
+                    "c3",
+                    Cardinality::Many,
+                )
+                .into(),
+            ],
+            2,
+            vec![Match::new()],
+            &env,
+        )
+        .await?;
+
+        let names = ["e", "n", "x"];
+        let fold = match &outcomes.fold {
+            Ok(rows) => named(shown(rows, &names)),
+            Err(error) => panic!("the fold failed: {error:?}"),
+        };
+        assert_eq!(
+            fold,
+            vec![vec![
+                format!("{:?}", Value::Entity(bob.clone())),
+                format!("{:?}", Value::String("Bob".into())),
+                "Absent".to_string(),
+            ]],
+            "the fold drops Alice (alias mismatch) and yields Bob with ?x Absent"
+        );
+        if let Err(error) = &outcomes.merge {
+            assert!(
+                !matches!(error, EvaluationError::Assignment { .. }),
+                "expected the left merge to yield the fold's rows {fold:?}, \
+                 got EvaluationError::Assignment instead: {error:?}"
+            );
+        }
+        assert_same(&outcomes, &names);
+        Ok(())
+    }
+
+    /// An optional field whose layer is a named variable, `maybe
+    /// (person/nick ?e ?k in: ?where)`, beside a required `(person/name ?e
+    /// ?n)`. Bob has no nick.
+    ///
+    /// The fold (what `main` evaluates) binds Bob's `?k`, its cause and
+    /// `?where` Absent. The left merge binds only `?k` and the cause
+    /// Absent and leaves `?where` unbound.
+    #[dialog_common::test]
+    async fn it_binds_an_absent_fields_layer_absent_under_the_left_merge() -> anyhow::Result<()> {
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let (operator, branch) = fixture(|tx| {
+            tx.assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/nick").of(alice.clone()).is("Al".to_string()))
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+        })
+        .await?;
+        let env = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let outcomes = merge_and_fold(
+            vec![
+                required(Term::from(the!("person/name")), "n", "c1"),
+                optional(
+                    Term::from(the!("person/nick")),
+                    "k",
+                    "c2",
+                    Cardinality::Many,
+                )
+                .with_layer(Term::var("where"))
+                .into(),
+            ],
+            1,
+            vec![Match::new()],
+            &env,
+        )
+        .await?;
+
+        let names = ["e", "n", "k", "where"];
+        let bob_row = |rows: &[Match]| -> Vec<String> {
+            named(shown(rows, &names))
+                .into_iter()
+                .find(|row| row[0].contains("id:bob"))
+                .expect("a row for Bob")
+        };
+        let fold = bob_row(outcomes.fold.as_ref().expect("the fold succeeds"));
+        assert_eq!(
+            fold[3], "Absent",
+            "the fold binds Bob's ?where Absent: {fold:?}"
+        );
+        let merge = bob_row(outcomes.merge.as_ref().expect("the merge succeeds"));
+        assert_eq!(
+            merge, fold,
+            "expected Bob's left-merged row to bind ?where as the fold does (Absent)"
+        );
+        assert_same(&outcomes, &names);
+        Ok(())
+    }
+
+    /// A cardinality-many required field gives several left rows per
+    /// entity (Alice has two names), and a cardinality-many optional field
+    /// several side rows (Alice two nicks, Bob one, Carol none). The left
+    /// merge yields the fold's rows, in its order, with its standings and
+    /// claims.
+    #[dialog_common::test]
+    async fn it_left_merges_a_many_valued_required_field_as_the_fold_does() -> anyhow::Result<()> {
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let carol: Entity = "id:carol".parse()?;
+        let (operator, branch) = fixture(|tx| {
+            tx.assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alicia".to_string()),
+            )
+            .assert(the!("person/nick").of(alice.clone()).is("Al".to_string()))
+            .assert(the!("person/nick").of(alice.clone()).is("Ally".to_string()))
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .assert(the!("person/nick").of(bob.clone()).is("Bobby".to_string()))
+            .assert(
+                the!("person/name")
+                    .of(carol.clone())
+                    .is("Carol".to_string()),
+            )
+        })
+        .await?;
+        let env = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let outcomes = merge_and_fold(
+            vec![
+                required(Term::from(the!("person/name")), "n", "c1"),
+                optional(
+                    Term::from(the!("person/nick")),
+                    "k",
+                    "c2",
+                    Cardinality::Many,
+                )
+                .into(),
+            ],
+            1,
+            vec![Match::new()],
+            &env,
+        )
+        .await?;
+        let names = ["e", "n", "k"];
+        assert_eq!(
+            named(shown(
+                outcomes.fold.as_ref().expect("the fold succeeds"),
+                &names
+            ))
+            .len(),
+            2 * 2 + 1 + 1,
+            "Alice's two names by two nicks, Bob's one, Carol's Absent"
+        );
+        assert_same(&outcomes, &names);
+        Ok(())
+    }
+
+    /// A cardinality-one optional field elects one value per entity: Alice
+    /// has two nicks, Bob one, Carol none. The left merge elects as the
+    /// per-entity probe does.
+    #[dialog_common::test]
+    async fn it_left_merges_a_cardinality_one_optional_field_as_the_fold_does() -> anyhow::Result<()>
+    {
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let carol: Entity = "id:carol".parse()?;
+        let (operator, branch) = fixture(|tx| {
+            tx.assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/nick").of(alice.clone()).is("Al".to_string()))
+            .assert(the!("person/nick").of(alice.clone()).is("Ally".to_string()))
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .assert(the!("person/nick").of(bob.clone()).is("Bobby".to_string()))
+            .assert(
+                the!("person/name")
+                    .of(carol.clone())
+                    .is("Carol".to_string()),
+            )
+        })
+        .await?;
+        let env = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let outcomes = merge_and_fold(
+            vec![
+                required(Term::from(the!("person/name")), "n", "c1"),
+                optional(Term::from(the!("person/nick")), "k", "c2", Cardinality::One).into(),
+            ],
+            1,
+            vec![Match::new()],
+            &env,
+        )
+        .await?;
+        let names = ["e", "n", "k"];
+        assert_eq!(
+            named(shown(
+                outcomes.fold.as_ref().expect("the fold succeeds"),
+                &names
+            ))
+            .len(),
+            3,
+            "one row per entity"
+        );
+        assert_same(&outcomes, &names);
+        Ok(())
+    }
+
+    /// An incoming selection of several rows, binding a variable no premise
+    /// reads, runs the left merge once per row; every row yields what the
+    /// fold yields for it, in order.
+    #[dialog_common::test]
+    async fn it_left_merges_each_incoming_row_as_the_fold_does() -> anyhow::Result<()> {
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let (operator, branch) = fixture(|tx| {
+            tx.assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/nick").of(alice.clone()).is("Al".to_string()))
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+        })
+        .await?;
+        let env = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let tagged = |tag: i64| -> anyhow::Result<Match> {
+            let mut row = Match::new();
+            row.bind(&Term::<Any>::var("tag"), Value::SignedInt(tag.into()))?;
+            Ok(row)
+        };
+        let outcomes = merge_and_fold(
+            vec![
+                required(Term::from(the!("person/name")), "n", "c1"),
+                optional(
+                    Term::from(the!("person/nick")),
+                    "k",
+                    "c2",
+                    Cardinality::Many,
+                )
+                .into(),
+            ],
+            1,
+            vec![tagged(1)?, tagged(2)?, tagged(1)?],
+            &env,
+        )
+        .await?;
+        let names = ["e", "tag", "n", "k"];
+        assert_eq!(
+            outcomes.fold.as_ref().expect("the fold succeeds").len(),
+            3 * (FILLER + 2),
+            "every entity once per incoming row"
+        );
+        assert_same(&outcomes, &names);
         Ok(())
     }
 }
