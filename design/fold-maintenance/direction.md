@@ -56,4 +56,22 @@ It asks nothing new of the engine's maintenance and nothing of storage. The stat
 - **Refuted if** the inner query's own maintenance grows with the page for the bodies views have (a join through another entity, a collection read), in which case the fold is not what costs; or if holding the inner answer for every subscriber is more memory than a page can afford.
 - **What it leaves:** the first read still folds every row once; a fold of a fold feeds changes upward and is not worked out; the answer is scanned whole for each touched entity (`subscription.rs` 1312), which is nothing at a thousand rows and something at a hundred thousand.
 
+**What the reading adds** ([literature.md](literature.md), read from the papers and docs, nothing measured here). Systems that fold changes sort a fold by what one retraction asks of it, and C is not one cost but three:
+
+| fold | state for a group | one change costs | after |
+|---|---|---|---|
+| `count`, `sum` and `avg` of integers | a number or two | a step | linear in DBSP; accumulable in Materialize; Feldera's docs give space by groups and work by the change |
+| a set of values, `count-distinct` | a count for each value in the group | a step; it reports only a value whose count crossed zero | DBSP's `distinct`; Feldera's docs give space by the input |
+| `min`, `max` | 🟡 every value of the group, in order, or the group read again when the least is retracted | the logarithm of the group with the order kept, the group without | Gray and others, 1997: "holistic" under delete; Noria refuses them; Materialize keeps a tree of partial results |
+| `sum` and `avg` of floats | 🟡 a number, but taking a value away is not the inverse of adding it | a step, with an answer that depends on the order changes arrived in | Feldera treats a float sum as not linear |
+| anything else | none | the group, folded again (B) | differential dataflow's `reduce`; Skip's `remove` returning null |
+
+Three things follow for the hypothesis above.
+
+- It said a retracted least "is found again in memory". The answer a subscription keeps is a flat list, so finding a group's rows is a scan of the whole answer unless the state indexes rows by group. Corrected: `min` and `max` are B inside C, at the cost of the group, until someone needs better.
+- 🟡 A float `sum` folded from changes can differ from one folded from the rows, and two replicas holding the same facts can then show different totals. dialog's `sum` adds floats in `f64` (`reduce.rs` 459-500). Either a float sum is folded again (B), or it is summed in a way that does not depend on order. Not decided.
+- Every system that keeps a fold through recursion pays for it: delete too much and derive again (Gupta and others; Szabó and others for lattices), or state for each round (DBSP, differential dataflow). A query that no rule reads has no recursion through a fold, so none of that is needed here.
+
+The reading found no system that keeps folds in the nodes of a content-addressed tree whose entries hold or not by cause, which is what D would be. GroveDB hashes a count into each node, over entries that are present or absent.
+
 B is the fallback and needs less: let a fold be asked for one group when the restriction is on a field of the group's key, and derive that group again. It costs the group's rows on each change, which is what C saves.
