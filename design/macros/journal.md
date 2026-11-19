@@ -1674,3 +1674,13 @@ The agent's inferred rule is withdrawn. So, if the sketch holds, are the design'
 
 **Decided.** Not decided. [design-queries.md](design-queries.md) is the sketch to align on; nothing is built from it. Open and his: whether a concept is needed at all once a condition may be a line.
 
+## 2026-11-18, Designing: a head, a body, and where a collection gets its rows
+
+**Asked.** In the first sketch, which part is the parameters, which the answer and which the body. By voice the maintainer and the agent went through four forms: the answer in the head under `is:`, too big there; a marked form between head and body, which muddies conclusion and conditions; the shape as a head field, which hides the parameters; and the one he took: the head a concept's, the answer a variable under `is:`, and `(is ?x shape)` in the body. A view says `(view ?x template)` there.
+
+**Learned.** Written out with its answers, the form as agreed does not give the empty case. The tags' read is a condition of the query that collects them, so a to-do with no tag has no `?tags`, and the card that calls it has no row. That is the design's own rule for a fold and his rule from this afternoon, and nobody said it on the call. Three ways out are in the note; the agent proposes that a collection carry its conditions.
+
+`query` cannot be both the word for what is defined and the design's word for asking.
+
+**Decided.** The form, his. Not decided: where a collection gets its rows, and the word for asking. Nothing is built.
+
