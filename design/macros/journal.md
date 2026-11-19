@@ -1775,3 +1775,46 @@ Restating the table's views turned up what a directory is: a query whose head ha
 
 **Decided.** Not decided. The agent's: measure before anything is made faster or built further on it.
 
+
+## 2026-11-18, Measuring: what one change costs as the page grows
+
+**Question.** Does the work one change causes stay in proportion to what it touches, the same among 10, 100 and 1000 to-dos (the ledger's hypothesis and bars)?
+
+**Method.** `rust/dialog-notation/examples/cost.rs`, run as `cargo run -p dialog-notation --example cost -- 5` (5 runs, N = 10, 100, 1000 interleaved, the notation and the baseline alternated, a fresh branch each). One list of N open to-dos, two tags each. The card of the design note: rows with collected chips, the open ones counted. Reads are tree node reads through dialog-repository's `Interposing` env; time is from after the write lands to the patches. Dev profile: the workspace's crates at opt-level 1, dependencies at 3; nothing else built during the runs. Blob loads were 0 throughout.
+
+**Results.** Medians of 5; spread in the harness's output, under 15% but for single outliers.
+
+| measurement | N=10 | N=100 | N=1000 | ×time | ×nodes | bar |
+|---|---|---|---|---|---|---|
+| 1 first render, card | 13.1 ms, 491 nodes | 29.6 ms, 1767 | 232 ms, 16202 | 17.7 | 33.0 | refuted |
+| 2 rename one to-do | 6.7 ms, 715, 1 patch | 16.4 ms, 2302 | 140 ms, 20332 | 21.0 | 28.4 | refuted |
+| 3 tag added | 4.8 ms, 116, 1 patch | 14.7 ms, 144 | 145 ms, 166 | 30.0 | 1.4 | refuted on time; reads within |
+| 4 to-do added | 4.9 ms, 511, 2 patches | 12.4 ms, 1803 | 111 ms, 16234 | 22.5 | 31.8 | refuted |
+| 5 select one card | 10.0 ms | 86 ms | 57.1 s | 5759 | 0.5 | refuted |
+| 5 select all cards | 2.7 ms | 79 ms | 57.8 s | 21484 | 0.5 | refuted |
+| B rename, plain subscription | 0.85 ms, 17 | 0.45 ms, 21 | 0.68 ms, 19 | 0.8 | 1.1 | within |
+| B tag added | 0.56 ms, 4 | 0.16 ms, 10 | 0.29 ms, 6 | 0.5 | 1.5 | within |
+| B to-do added | 0.86 ms, 17 | 0.45 ms, 23 | 0.64 ms, 25 | 0.7 | 1.5 | within |
+| B one title by entity | 0.40 ms, 13 | 0.42 ms, 13 | 0.47 ms, 13 | 1.2 | 1.0 | within |
+
+**Where.**
+
+| step | N=10 | N=1000 | what shows it |
+|---|---|---|---|
+| rename, layer 1 (the rows) poll | 3.4 ms, 507 nodes | 98.7 ms, 12207 | the row-identity rule |
+| rename, layer 3 (the open ones counted) poll | 2.1 ms, 200 | 40.4 ms, 8111 | the same rule; the count's read keeps `title: _` |
+| tag added, layer 2 (the chips) poll | 3.1 ms, 104 | 140.5 ms, 144 | the same rule, in CPU, not reads |
+| to-do added, layers 1 and 3 | 2.4 and 1.4 ms | 67.2 and 41.5 ms | the same rule |
+| to-do added, maintainer apply | 0.05 ms | 1.37 ms | the notation's own tree |
+| select, answer in memory | 0.34 ms | 57.7 s | the whole-then-narrow and its joins |
+| select, the queries | 2.4 ms | 127 ms | the required group's rows, through the same rule |
+| the same reads as rules keyed by the to-do (B6 rename, B7 tag) | 0.95 and 1.9 ms, 17 and 82 nodes | 2.2 and 4.6 ms, 23 and 86 | what the layers would read without it |
+
+- **The row-identity rule.** Every layer reports its row under `(:id view.layer c0: … )`, an entity made of the row's values, so a row's values stay together. The subscription maintains a rule per entity it touches. The changed fact's subject is a to-do, the rule's head is a row id, so the rule is not entity-local and the discovery joins the change sideways through the layer's premises: thousands of node reads for the rows and the count, and for the chips 140 ms of work with almost no reads. The same premises under a rule whose head is the to-do read 23 and 86 nodes at N=1000, flat.
+- **The joined layers** are not in this card: no layer here reads with `_` without binding the list.
+- **`select`'s whole-then-narrow.** The queries grow 53 times, and answering in memory grows 168,000 times: `Evaluation::whole` and `called` filter every row of a collected read for every row of the query, and `rows()` builds the read's rows again each time it is asked, deduplicating by `contains`. Asking one card answers every card first.
+- **Not the notation's tree.** The maintainer's apply is under 1.4 ms at N=1000 in every case.
+
+**Could not measure.** Rows read is node reads, not rows: counting the rows a scan visits needs a counter in dialog-query or dialog-repository, which this measurement does not change. Time is the dev build, not release.
+
+**Decision.** Not decided. Nothing is made faster.
