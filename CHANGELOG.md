@@ -34,11 +34,28 @@ What this changes for you:
 - New: `Fold`, `FoldConclusion` and `Aggregator::Distinct`, shown as
   `distinct`, typed a record.
 - A match on `Aggregator` must name `Distinct`.
-- A subscription over a fold asks it again whole on each poll that
-  touches what it read: a fold cannot yet be restricted to one entity.
+- New: `Branch::subscribe_fold(fold)` and `Stack::fold_subscription(fold)`
+  give a `FoldSubscription`, polled as a `Subscription` is and giving
+  `Delta<FoldConclusion>`. It keeps a subscription of each of the fold's
+  two queries and the rows they report, and folds again in memory only the
+  groups a change moved a row of: a group whose row changed reports the
+  old row retracted and the new one asserted, and what it reports adds up
+  to what a select of the fold gives. Both inner subscriptions are polled
+  at one state of the branch.
+- `Branch::subscribe(fold)` still works, and still asks the whole fold
+  again on each poll that touches what it read.
+- New: `Application::bindings`, with a default of `None`: the bindings a
+  conclusion was realized from. Attribute queries, concept queries and
+  folds give them, and a `FoldSubscription` needs them of both its
+  queries; one over a query that gives none fails to poll.
+- New: `Fold::groups`, `Fold::inputs`, `Fold::key`, `Fold::fold_groups`
+  (the fold of a set of groups, which a select and a `FoldSubscription`
+  both fold with) and `Reduce::fold_rows`.
 
 Why: a fold the notation asks for is Dialog-DB's to give, and a query
-that has no name cannot have a stored value read beside its own.
+that has no name cannot have a stored value read beside its own. Asked
+again whole, one changed fact cost a fold of every group (105 ms among
+1000 groups); kept, it costs the two inner polls and the one group.
 
 #### Compatibility and migration
 
