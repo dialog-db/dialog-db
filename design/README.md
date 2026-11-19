@@ -90,3 +90,8 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 - [A commit that lost its branch's race replays even when nothing it read changed](replay-avoidance.md):
   **Describing.** Split out of file-writers: capturing what a transaction
   considered, so a replay is skipped when nothing it read overlaps.
+- [A value computed over many facts cannot be given a name](named-fold.md):
+  **Building.** A fold lives in a form of its own that no rule reads, a
+  query: an application over an inner query and a reduce. An authored rule
+  still cannot fold. Being built on #773; keeping it current under a
+  subscription is [its own topic](https://github.com/dialog-db/dialog-db/pull/837).
