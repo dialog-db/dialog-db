@@ -9,4 +9,4 @@
 ; A command is declared, so one misspelled, `(todo/compleet …)`, is
 ; refused as unknown and nothing of its document is written.
 
-(query (xyz.pending ?t text: ?x))
+(select (xyz.pending ?t text: ?x))

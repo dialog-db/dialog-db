@@ -103,7 +103,7 @@ mod tests {
     #[dialog_common::test]
     fn it_prints_a_text_that_spans_lines_as_it_was_written() -> Result<(), Error> {
         back("(assert (xyz.el el:1 source: \"one\n  \\\"two\\\" \\\\ three\n\"\n  name: \"x\"))")?;
-        back("(assert (xyz.el el:1 source: \"one\ntwo\")) ; after\n(query (xyz.el ?e source: ?s))")
+        back("(assert (xyz.el el:1 source: \"one\ntwo\")) ; after\n(select (xyz.el ?e source: ?s))")
     }
 
     #[dialog_common::test]
@@ -150,16 +150,16 @@ mod tests {
     /// comment above it.
     #[dialog_common::test]
     fn it_prints_the_rest_of_a_struct_where_it_was_written() -> Result<(), Error> {
-        back("(query (xyz.note ?n about: {:author ?who   ... ?others}))")?;
+        back("(select (xyz.note ?n about: {:author ?who   ... ?others}))")?;
         back("{... ?all}")?;
         // A key the struct ends on is printed as it was written, with
         // no value.
-        back("(query (xyz.note ?n about: {:author ?who ...}))")?;
+        back("(select (xyz.note ?n about: {:author ?who ...}))")?;
         back("{:author ?who\n  ... }")?;
         back("{:pinned}")?;
         // `...` is a part like any other, wherever it stands, and a
         // quote is printed as it was written.
-        back("(rule (syntax (all ?first   ... ?more))\n  (expand (query ?head ...)))")?;
+        back("(rule (syntax (all ?first   ... ?more))\n  (expand (select ?head ...)))")?;
         back("(assert (xyz.note note:1 tags: '(1 2   (3 4))))")?;
         back("(assert (xyz.note note:1 tags: (quote (1 2))))")?;
         back("{:author ?who\n ; and whatever else\n ... ?others }")?;
@@ -352,7 +352,7 @@ mod tests {
 (xyz.todo ?t text: ?x
           text: ?y)
 (f [... ?a])
-(g {: 1})
+(g {:a 1 : 2})
 (xyz.todo todo:1 n: 5)
 (h \"never ends";
         let parsed = parse_document(text);
@@ -388,11 +388,13 @@ mod tests {
                     19
                 ),
                 (
-                    "cannot read: a map key with no name".to_string(),
+                    "cannot read: a map that names some keys and not others: a set is a map \
+                     with no names, `{: 1 : 2}`, and a record names every key"
+                        .to_string(),
                     5,
-                    4,
+                    9,
                     5,
-                    5
+                    10
                 ),
                 (
                     "cannot read: a form that never closes".to_string(),

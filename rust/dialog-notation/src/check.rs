@@ -373,7 +373,7 @@ mod tests {
 
         let unsupported = check(
             &mut analyzer,
-            "\n  (query (xyz.a ?a n: ?n) (xyz.a ?a n: ?n) (:like ?n : \"x\"))",
+            "\n  (select (xyz.a ?a n: ?n) (xyz.a ?a n: ?n) (:like ?n : \"x\"))",
         );
         let [refused] = unsupported.diagnostics.as_slice() else {
             panic!("one refusal: {:?}", unsupported.diagnostics);
@@ -393,19 +393,19 @@ mod tests {
         let mut analyzer = Analyzer::new()?;
         for (text, says, at) in [
             (
-                "(query (xyz.a ?a n: ?n)\n  (xyz.a ?a ?extra n: ?n))",
+                "(select (xyz.a ?a n: ?n)\n  (xyz.a ?a ?extra n: ?n))",
                 "has 2 parts with no label beside its labelled parts",
                 (1, 2),
             ),
             (
-                "(query (xyz.a ?a n: ?n)\n  (xyz.a ?a of: ?b))",
+                "(select (xyz.a ?a n: ?n)\n  (xyz.a ?a of: ?b))",
                 "says `of:` twice",
                 (1, 2),
             ),
             (
-                "(query (xyz.a ?a n: ?n ...?others))",
+                "(select (xyz.a ?a n: ?n ...?others))",
                 "`...` stands apart from what follows it, `... ?others`",
-                (0, 23),
+                (0, 24),
             ),
         ] {
             let checked = check(&mut analyzer, text);
@@ -422,7 +422,7 @@ mod tests {
         }
         // `...` and what follows it are no part of their own, and a
         // form with no label is a list of any number of parts.
-        let several = "(query (xyz.a ?a n: ?n) (xyz.a ?a n: ?n) \
+        let several = "(select (xyz.a ?a n: ?n) (xyz.a ?a n: ?n) \
                        (unless (xyz.b ?a n: ?n) (xyz.c ?a n: ?n)))";
         assert_eq!(check(&mut analyzer, several).refusals().count(), 0);
         Ok(())
@@ -435,7 +435,7 @@ mod tests {
         let mut analyzer = Analyzer::new()?;
         let refused = check(
             &mut analyzer,
-            "(concept (item ?i n: ?n) (xyz.a ?i n: ?n))\n(query (xyz.a ?a n: ?n) (xyz.a ?a n: ?n) (:like ?n : \"x\"))",
+            "(concept (item ?i n: ?n) (xyz.a ?i n: ?n))\n(select (xyz.a ?a n: ?n) (xyz.a ?a n: ?n) (:like ?n : \"x\"))",
         );
         assert!(matches!(
             refused
@@ -445,7 +445,7 @@ mod tests {
             Some(Error::Unsupported(_))
         ));
         assert!(refused.steps.is_empty());
-        let after = check(&mut analyzer, "(query (item ?i n: ?n))");
+        let after = check(&mut analyzer, "(select (item ?i n: ?n))");
         assert!(matches!(
             after
                 .refusals()
@@ -460,7 +460,7 @@ mod tests {
   (xyz.todo/text of: ?t is: ?x as: :text cardinality: :one)
   (xyz.todo ?t list: (:last ?l)))
 
-(concept (list ?l at: ?k item: ?i)
+(concept (list ?l item: {?k ?i})
   (xyz.list/?k of: ?l is: ?i by: :position))
 ";
 
@@ -494,9 +494,10 @@ mod tests {
             panic!("one line: {:?}", list.lines);
         };
         assert_eq!(entries.label.as_deref(), Some("item"));
+        // The key stands in the entry, and has no label of its own.
         assert_eq!(
             entries.key.as_ref().and_then(|key| key.label.as_deref()),
-            Some("at")
+            None
         );
         assert_eq!(the(entries)["domain"], serde_json::json!("xyz.list"));
         Ok(())
@@ -564,7 +565,7 @@ mod tests {
         );
         assert_eq!(checked.analyzed.len(), 1);
         // The analyzer keeps what the other forms defined.
-        let after = check(&mut analyzer, "(query (todo ?t text: ?x list: ?l))");
+        let after = check(&mut analyzer, "(select (todo ?t text: ?x list: ?l))");
         assert_eq!(after.refusals().count(), 0);
         Ok(())
     }
@@ -575,7 +576,7 @@ mod tests {
     fn it_keeps_the_other_forms_of_a_document_the_compiler_refuses_a_form_of() -> Result<(), Error>
     {
         let text = "(concept (item ?i n: ?n) (xyz.a ?i n: ?n))
-(query (xyz.a ?a n: ?n) (xyz.a ?a n: ?n) (:like ?n : \"x\"))
+(select (xyz.a ?a n: ?n) (xyz.a ?a n: ?n) (:like ?n : \"x\"))
 (assert (item item:1 n: 1))
 ";
         let checked = check_forms(&mut Analyzer::new()?, text);

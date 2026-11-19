@@ -62,6 +62,7 @@ impl Notebook {
         let mut transaction = self.branch.transaction();
         let mut writes = false;
         let mut queries = Vec::new();
+        let mut selections = Vec::new();
         {
             for step in checked.steps {
                 // A write with a `when` runs once: each match of the
@@ -101,6 +102,10 @@ impl Notebook {
                         queries.push(query);
                         continue;
                     }
+                    Step::Select(selection) => {
+                        selections.push(selection);
+                        continue;
+                    }
                     Step::Write(_) => continue,
                     // A view is maintained where it is rendered, from its
                     // layers' queries: nothing of it is written.
@@ -133,6 +138,30 @@ impl Notebook {
                 .await?;
             for row in &rows {
                 report.push(query.row(row)?.to_string());
+            }
+        }
+        // A query asked: every query its rows come from runs on the
+        // branch, and the rows are put together into its answers.
+        for selection in selections {
+            let mut results = Vec::new();
+            for query in &selection.queries {
+                let mut layer = self.branch.query();
+                if let Some(rule) = &query.rule {
+                    layer = layer.with(rule.clone());
+                }
+                let rows: Vec<ConceptConclusion> = layer
+                    .select(query.select.clone())
+                    .perform(&self.operator)
+                    .try_vec()
+                    .await?;
+                results.push(
+                    rows.iter()
+                        .map(|row| query.values(row))
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+            for answer in selection.answer(&results)? {
+                report.push(answer.to_string());
             }
         }
         report.sort();

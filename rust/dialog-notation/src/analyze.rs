@@ -148,7 +148,7 @@ mod tests {
         let analysis = analyzer.analyze(&parse(
             "(concept (task ?t title: ?x)
                (xyz.todo ?t text: ?x))
-             (query (task ?t title: ?x))",
+             (select (task ?t title: ?x))",
         )?);
         assert!(analysis.diagnostics.is_empty());
         assert_eq!(
@@ -186,7 +186,7 @@ mod tests {
            (retract (xyz.draft ?t text: ?x)))
   (xyz.draft ?t text: ?x))
 
-(query (todo ?t text: ?x))
+(select (todo ?t text: ?x))
 
 (rule (xyz.seen ?t text: ?x)
   (todo ?t text: ?x)
@@ -227,7 +227,7 @@ mod tests {
         assert!(analysis.origin.is_empty());
 
         // The concept the refused document defined was not kept.
-        let after = analyzer.analyze(&parse("(query (todo ?t text: ?x))")?);
+        let after = analyzer.analyze(&parse("(select (todo ?t text: ?x))")?);
         assert!(matches!(
             after
                 .refusals()
@@ -248,7 +248,7 @@ mod tests {
             analysis.diagnostics
         );
         assert_eq!(analysis.origin, vec![1, 2, 3]);
-        let after = analyzer.analyze(&parse("(query (todo ?t text: ?x))")?);
+        let after = analyzer.analyze(&parse("(select (todo ?t text: ?x))")?);
         assert!(after.diagnostics.is_empty());
         assert_eq!(after.analyzed.len(), 1);
         Ok(())

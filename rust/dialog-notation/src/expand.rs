@@ -10,7 +10,7 @@
 //!
 //! ```clj
 //! (rule (syntax (rule (report ?head) ?head))
-//!   (expand (query ?head)))
+//!   (expand (select ?head)))
 //! ```
 //!
 //! `(expand pattern)` holds for the tree being expanded when it has the
@@ -43,6 +43,8 @@ use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, REST, fill, matches};
 use crate::syntax::{self, DERIVED, Parameters, Signature, Syntax};
 use crate::written::{Path, Segment};
+
+mod query;
 
 /// The core forms, written in the kernel.
 pub const PRELUDE: &str = include_str!("prelude.clj");
@@ -726,6 +728,11 @@ pub struct Expander {
     /// The views declared, in this document and the ones before it: each
     /// the concept it is of and its name.
     views: BTreeSet<(String, String)>,
+    /// The queries defined, each as it was written, by name.
+    queries: BTreeMap<String, Syntax>,
+    /// The concepts that hold a collection, each with the label of the
+    /// field that is one entry of it, `block: {?k ?b}`.
+    entries: BTreeMap<String, String>,
     /// The domains some installed rule reads.
     reads: BTreeSet<String>,
     /// Every form the rules were asked about since the last report,
@@ -790,7 +797,7 @@ impl Expander {
         // a name, a concept or a rule about syntax, is expanded before
         // anything that may use it.
         let declares = |tree: &Syntax| match tree.applies() {
-            Some("concept") => true,
+            Some("concept" | "query") => true,
             Some("rule") => items(tree)
                 .first()
                 .and_then(Syntax::applies)
@@ -873,6 +880,10 @@ impl Expander {
         // definition's each time.
         if let Err((part, error)) = valid(tree) {
             return self.about(&part, |_| Err(error));
+        }
+        if let Some(rules) = self.query_forms(tree)? {
+            kernel.extend(rules);
+            return Ok(());
         }
         let mut choices = Vec::new();
         loop {
@@ -994,6 +1005,19 @@ impl Expander {
             _ => None,
         };
         if let Some(declared) = &signature {
+            // The field that is one entry of a collection, `block: {?k ?b}`.
+            let entry = pattern.operand().and_then(|operand| {
+                operand.terms.iter().find_map(|(label, term)| match term {
+                    Syntax::Map(pair) if matches!(pair.as_slice(), [(Syntax::Variable(_), _)]) => {
+                        Some(label.clone())
+                    }
+                    _ => None,
+                })
+            });
+            match entry {
+                Some(label) => self.entries.insert(declared.name.clone(), label),
+                None => self.entries.remove(&declared.name),
+            };
             self.syntax.retain(|rule| {
                 rule.signature.as_ref() != Some(declared)
                     && rule.entity_of.as_ref() != Some(&declared.name)
@@ -1098,11 +1122,26 @@ impl Expander {
             .first()
             .and_then(|entry| entry.operand())
             .and_then(|operand| operand.terms.get("key"))
-            && !heads.contains(key)
         {
-            return Err(Error::Refused(format!(
-                "the key of a collection is a field of the concept's head: ?{key}"
-            )));
+            if !heads.contains(key) {
+                return Err(Error::Refused(format!(
+                    "the key of a collection is a field of the concept's head: ?{key}"
+                )));
+            }
+            // An entry is one term, its key and its value: they were never
+            // apart.
+            if let Some((label, _)) = pattern.operand().and_then(|operand| {
+                operand
+                    .terms
+                    .iter()
+                    .find(|(_, term)| matches!(term, Syntax::Variable(name) if name == key))
+            }) {
+                return Err(Error::Refused(format!(
+                    "{pattern} gives the key of its collection a field of its own, `{label}:`: a \
+                     collection's field is one entry, its key and its value, `block: {{?{key} \
+                     ?b}}`"
+                )));
+            }
         }
         let controls = said.iter().filter(|tree| on_control(tree)).count();
         let touched = said
@@ -1414,6 +1453,14 @@ impl Expander {
             {
                 return Ok(tree);
             }
+            // A query's answer is read by whoever asks and by a query,
+            // never where rows are.
+            if let Some(word) = word.as_deref()
+                && self.queries.contains_key(word)
+            {
+                let call = tree.clone();
+                return self.about(&call, |this| Err(this.read_where_rows_are(&call)));
+            }
             if word.as_deref() == Some("all") {
                 let each = items(&tree)
                     .iter()
@@ -1475,11 +1522,41 @@ impl Expander {
                     apply("all", each)
                 });
             }
-            let asked = tree;
+            let asked = self.former_entry(tree);
             tree = self.about(&asked, |this| {
                 former(&asked)?;
                 this.ask(&asked, position)
             })?;
+        }
+    }
+
+    /// A read of a concept that holds a collection, written with the
+    /// entry's key and value as two fields, `key: ?k block: ?b`, as the
+    /// views of stage 2 still are, read as the one entry it says,
+    /// `block: {?k ?b}`. Anything else is as it was.
+    fn former_entry(&self, tree: Syntax) -> Syntax {
+        let (Some(word), Some(operand)) = (tree.applies(), tree.operand()) else {
+            return tree;
+        };
+        let Some(label) = self.entries.get(word) else {
+            return tree;
+        };
+        let takes_key = self.syntax.iter().any(|rule| {
+            rule.signature.as_ref().is_some_and(|signature| {
+                signature.name == word && signature.parameters.contains("key")
+            })
+        });
+        match (operand.terms.get("key"), operand.terms.get(label)) {
+            (Some(key), Some(value)) if !takes_key && !matches!(value, Syntax::Map(_)) => {
+                let mut operand = operand.clone();
+                operand.terms.remove("key");
+                operand.terms.insert(
+                    label.clone(),
+                    Syntax::Map(vec![(key.clone(), value.clone())]),
+                );
+                Syntax::Application(Box::new(Syntax::Reference(word.to_string())), operand)
+            }
+            _ => tree,
         }
     }
 
@@ -1541,7 +1618,17 @@ impl Expander {
             read(
                 fields
                     .iter()
-                    .map(|label| (label.clone(), Syntax::Variable(format!("source-{label}"))))
+                    .map(|label| {
+                        let value = Syntax::Variable(format!("source-{label}"));
+                        // A collection's field is one entry, its key and
+                        // its value.
+                        let term = if self.entries.get(&call.concept) == Some(label) {
+                            Syntax::Map(vec![(Syntax::Variable("source-key".into()), value)])
+                        } else {
+                            value
+                        };
+                        (label.clone(), term)
+                    })
                     .collect(),
             ),
             &Syntax::Variable(CALLED.into()),
@@ -1841,7 +1928,8 @@ impl Expander {
                 return self.about(&written, |_| {
                     Err(Error::Refused(format!(
                         "{written} is a call, and a call is not a top-level form: the top level \
-                         takes (query …), (assert …), (retract …), (rule …) and (concept …)"
+                         takes (select …), (assert …), (retract …), (rule …), (concept …) and \
+                         (query …)"
                     )))
                 });
             }
@@ -2018,9 +2106,9 @@ mod tests {
     fn it_reads_a_line_over_a_collection() {
         assert_eq!(
             expanded(
-                "(concept (notebook-entry ?b at: ?p block: ?x)
+                "(concept (notebook-entry ?b block: {?p ?x})
                    (xyz.tonk.notebook/?p of: ?b is: ?x as: :entity cardinality: :one by: :position))",
-                "(query (notebook-entry notebook:1 at: ?p block: ?x))"
+                "(select (notebook-entry notebook:1 block: {?p ?x}))"
             )
             .unwrap(),
             vec![
@@ -2030,7 +2118,7 @@ mod tests {
         );
         for (text, why) in [
             (
-                "(concept (m ?e name: ?n source: ?s) (xyz.m/?n of: ?e is: ?s))",
+                "(concept (m ?e source: {?n ?s}) (xyz.m/?n of: ?e is: ?s))",
                 "says what a key is",
             ),
             (
@@ -2038,7 +2126,7 @@ mod tests {
                 "is not what a key is",
             ),
             (
-                "(concept (m ?e name: ?n source: ?s) (xyz.m/?n of: ?e is: ?s by: :colour))",
+                "(concept (m ?e source: {?n ?s}) (xyz.m/?n of: ?e is: ?s by: :colour))",
                 "is not what a key is",
             ),
             (
@@ -2046,7 +2134,7 @@ mod tests {
                 "the key of a collection is a field of the concept's head: ?n",
             ),
             (
-                "(concept (m ?e name: ?n source: ?s at: ?p block: ?b)
+                "(concept (m ?e source: {?n ?s} block: {?p ?b})
                    (xyz.m/?n of: ?e is: ?s by: :name)
                    (xyz.n/?p of: ?e is: ?b by: :position))",
                 "a concept holds one",
@@ -2490,7 +2578,7 @@ mod tests {
             (rule (assert (todo ?t list: ?l text: ?x state: :open))
               (todo/add todo: ?t list: ?l text: ?x))
             (rule (todo/count ?l ?t) (todo ?t list: ?l ...))
-            (query (todo ?t text: ?x ...))"#;
+            (select (todo ?t text: ?x ...))"#;
         let expand = |text: &str| {
             let mut expander = Expander::new().unwrap();
             let (kernel, diagnostics) = expander.submit(text).unwrap();
@@ -2511,7 +2599,7 @@ mod tests {
         let mut expander = Expander::new().unwrap();
         let (kernel, diagnostics) = expander
             .submit(
-                "(query (memo ?t text: ?x))
+                "(select (memo ?t text: ?x))
                  (rule (syntax (concept (?name ?t text: ?x) (xyz.note/text of: ?t is: ?x)))
                    (expand (note-kind ?name)))
                  (note-kind memo)",
@@ -2530,28 +2618,28 @@ mod tests {
     /// and adds nothing.
     #[test]
     fn it_reads_a_concept_by_the_fields_a_read_says() {
-        let bare = expanded(TODO, "(query (todo ?t text: ?x))").unwrap();
+        let bare = expanded(TODO, "(select (todo ?t text: ?x))").unwrap();
         assert_eq!(bare.len(), 1);
         assert!(bare[0].contains("text: (:last (:text ?x))"), "{bare:?}");
-        let open = expanded(TODO, "(query (todo ?t text: ?x ...))").unwrap();
+        let open = expanded(TODO, "(select (todo ?t text: ?x ...))").unwrap();
         assert_eq!(open.len(), 1);
         // `...` alone is `... _`. The two say one thing, and differ in
         // the names the expansion gives its own variables, which are
         // made of the form as written.
         assert_eq!(
-            expanded(TODO, "(query (todo ?t text: ?x ... _))")
+            expanded(TODO, "(select (todo ?t text: ?x ... _))")
                 .unwrap()
                 .len(),
             1
         );
         // Every field said, it needs no `...`.
-        assert!(expanded(TODO, "(query (todo ?t list: ?l text: ?x state: ?s))").is_ok());
+        assert!(expanded(TODO, "(select (todo ?t list: ?l text: ?x state: ?s))").is_ok());
         // What it leaves out may not be bound: a concept's fields are
         // facts, and no record of them is kept.
-        assert!(expanded(TODO, "(query (todo ?t text: ?x ... ?others))").is_err());
+        assert!(expanded(TODO, "(select (todo ?t text: ?x ... ?others))").is_err());
         // A relation.
-        assert!(expanded(TODO, "(query (xyz.todo ?t text: ?x))").is_ok());
-        assert!(expanded(TODO, "(query (xyz.todo ?t text: ?x ...))").is_ok());
+        assert!(expanded(TODO, "(select (xyz.todo ?t text: ?x))").is_ok());
+        assert!(expanded(TODO, "(select (xyz.todo ?t text: ?x ...))").is_ok());
     }
 
     /// `(unless …)` once, last, or several times among the premises, is
@@ -2665,7 +2753,7 @@ mod tests {
             "(concept (card ?c title: ?x owner: ?o)
                (xyz.card ?c title: (:last (:text ?x)))
                (xyz.owned ?c by: (:last (:entity ?o))))",
-            "(query (card ?c title: ?x ...))",
+            "(select (card ?c title: ?x ...))",
         )
         .unwrap();
         assert_eq!(kernel.len(), 1, "{kernel:?}");
@@ -2711,7 +2799,7 @@ mod tests {
     /// another where it stands as the premise.
     #[test]
     fn it_expands_a_query_to_a_rule_that_reports() {
-        let kernel = expanded(TODO, "(query (todo ?t text: ?x ...))").unwrap();
+        let kernel = expanded(TODO, "(select (todo ?t text: ?x ...))").unwrap();
         let rule = Clauses::of(&parse(&kernel[0]).unwrap()[0]);
         let at = |tree: &Syntax, label: &str| {
             tree.operand()
@@ -2900,7 +2988,7 @@ mod tests {
     #[test]
     fn it_refuses_what_nothing_gives_a_meaning_and_what_two_rules_do() {
         assert!(matches!(
-            expanded(TODO, "(query (todo ?t ...) (frobnicate ?t))"),
+            expanded(TODO, "(select (todo ?t ...) (frobnicate ?t))"),
             Err(Error::Unknown(_))
         ));
         // A write that says the fields of neither definition.
@@ -2919,12 +3007,12 @@ mod tests {
     fn it_resolves_a_name_by_the_labels_written() {
         let note = "(concept (todo ?t title: ?x) (xyz.note ?t title: ?x))";
         assert_eq!(
-            expanded(TODO, &format!("{note} (query (todo ?t title: ?x))")).unwrap(),
+            expanded(TODO, &format!("{note} (select (todo ?t title: ?x))")).unwrap(),
             vec!["(rule (report (xyz.note ?t title: ?x)) (xyz.note ?t title: ?x))"]
         );
         assert_eq!(
-            expanded(TODO, &format!("{note} (query (todo ?t text: ?x ...))")).unwrap(),
-            expanded(TODO, "(query (todo ?t text: ?x ...))").unwrap()
+            expanded(TODO, &format!("{note} (select (todo ?t text: ?x ...))")).unwrap(),
+            expanded(TODO, "(select (todo ?t text: ?x ...))").unwrap()
         );
     }
 
@@ -2938,7 +3026,8 @@ mod tests {
         let reordered = "(concept (todo ?t state: ?s text: ?x list: ?l)
                            (abc.task ?t list: ?l text: ?x state: ?s))";
         for later in [task, reordered] {
-            let rules = expanded(TODO, &format!("{later} (query (todo ?t text: ?x ...))")).unwrap();
+            let rules =
+                expanded(TODO, &format!("{later} (select (todo ?t text: ?x ...))")).unwrap();
             assert_eq!(rules.len(), 1, "{rules:?}");
             assert!(rules[0].contains(")) (abc.task ?t "), "{rules:?}");
             assert!(!rules[0].contains("xyz.todo"), "{rules:?}");
@@ -2952,7 +3041,7 @@ mod tests {
     fn it_reads_through_every_definition_the_labels_fit() {
         let both = "(concept (todo ?t title: ?x done: ?d) (xyz.todo ?t title: ?x done: ?d))
                     (concept (todo ?t title: ?x pinned: ?p) (xyz.note ?t title: ?x pinned: ?p))";
-        let rules = expanded(both, "(query (todo ?t title: ?x ...))").unwrap();
+        let rules = expanded(both, "(select (todo ?t title: ?x ...))").unwrap();
         assert_eq!(rules.len(), 2, "{rules:?}");
         for (rule, domain) in rules.iter().zip(["xyz.todo", "xyz.note"]) {
             // The labels come in their own order, so the field the
@@ -2979,7 +3068,7 @@ mod tests {
         assert!(matches!(
             expanded(
                 both,
-                "(query (xyz.tag ?t name: ?n) (xyz.tag ?t name: ?n) (unless (todo ?t title: _ ...)))"
+                "(select (xyz.tag ?t name: ?n) (xyz.tag ?t name: ?n) (unless (todo ?t title: _ ...)))"
             ),
             Err(Error::Ambiguous(..))
         ));
@@ -2991,7 +3080,7 @@ mod tests {
     #[test]
     fn it_reads_a_line_as_the_read_of_one_attribute() {
         let read = |line: &str| {
-            let rules = expanded("", &format!("(query {line})")).unwrap();
+            let rules = expanded("", &format!("(select {line})")).unwrap();
             assert_eq!(rules.len(), 1, "{rules:?}");
             rules[0]
                 .strip_prefix("(rule (report ")
@@ -3060,7 +3149,7 @@ mod tests {
     #[test]
     fn it_refuses_a_line_that_is_not_one() {
         let refused = |line: &str, why: &str| {
-            let said = expanded("", &format!("(query {line})"));
+            let said = expanded("", &format!("(select {line})"));
             assert!(
                 matches!(&said, Err(Error::Refused(said)) if said.contains(why)),
                 "{line}: {said:?}"
@@ -3091,7 +3180,7 @@ mod tests {
             "says `pick:`, which a line does not take",
         );
         assert!(matches!(
-            expanded("", "(query (xyz.todo/title of: ?i is: ?t in: :draft))"),
+            expanded("", "(select (xyz.todo/title of: ?i is: ?t in: :draft))"),
             Err(Error::Unsupported(said)) if said.contains("layer")
         ));
     }
@@ -3109,8 +3198,8 @@ mod tests {
                        (xyz.todo ?i title: (:last (:text ?t)) state: (:last (:entity ?s)))
                        (xyz.list ?l task: (:all (:entity ?i))))";
         for text in [
-            "(query (todo ?i list: ?l title: ?t state: ?s))",
-            "(query (todo ?i title: ?t))",
+            "(select (todo ?i list: ?l title: ?t state: ?s))",
+            "(select (todo ?i title: ?t))",
             r#"(assert (todo todo:1 list: list:home title: "Buy milk" state: :open))"#,
             "(rule (xyz.open ?i title: ?t) (todo ?i title: ?t state: :open))",
         ] {
@@ -3135,7 +3224,7 @@ mod tests {
             expanded(
                 "(concept (list-item ?l todo: ?t)
                    (xyz.list/task of: ?l is: ?t cardinality: :many))",
-                "(query (list-item list:home todo: ?t))"
+                "(select (list-item list:home todo: ?t))"
             )
             .unwrap(),
             vec![
@@ -3150,8 +3239,8 @@ mod tests {
     fn it_reads_an_attribute_of_two_unlabeled_terms_as_of_and_is() {
         for (unlabeled, labelled) in [
             (
-                "(query (xyz.todo/title ?t ?x))",
-                "(query (xyz.todo/title of: ?t is: ?x))",
+                "(select (xyz.todo/title ?t ?x))",
+                "(select (xyz.todo/title of: ?t is: ?x))",
             ),
             (
                 "(rule (xyz.done/title ?t ?x) (xyz.todo/title ?t ?x) (xyz.todo/state ?t :done))",
@@ -3162,8 +3251,8 @@ mod tests {
                 r#"(assert (xyz.todo/title of: todo:1 is: "Buy milk"))"#,
             ),
             (
-                "(concept (titled ?t title: ?x) (xyz.todo/title ?t ?x)) (query (titled ?t title: ?x))",
-                "(concept (titled ?t title: ?x) (xyz.todo/title of: ?t is: ?x)) (query (titled ?t title: ?x))",
+                "(concept (titled ?t title: ?x) (xyz.todo/title ?t ?x)) (select (titled ?t title: ?x))",
+                "(concept (titled ?t title: ?x) (xyz.todo/title of: ?t is: ?x)) (select (titled ?t title: ?x))",
             ),
         ] {
             let read = expanded("", unlabeled).unwrap();
@@ -3182,7 +3271,7 @@ mod tests {
                 "(concept (todo ?i title: ?t)
                    (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
                    (xyz.list/task of: ?l is: ?i as: :entity cardinality: :many))",
-                "(query (todo ?i title: ?t))"
+                "(select (todo ?i title: ?t))"
             ),
             Err(Error::Refused(why)) if why.contains("every variable in it is a parameter: ?l")
         ));
@@ -3190,7 +3279,7 @@ mod tests {
             expanded(
                 "(concept (todo ?i title: ?t)
                    (xyz.todo/title of: ?i is: ?t cardinality: :few))",
-                "(query (todo ?i title: ?t))"
+                "(select (todo ?i title: ?t))"
             ),
             Err(Error::Refused(why)) if why.contains("is not a cardinality")
         ));
@@ -3223,7 +3312,7 @@ mod tests {
             "{concluded:?}"
         );
         assert_eq!(
-            expanded(lists, "(query (list/count-open list:home ?n))").unwrap(),
+            expanded(lists, "(select (list/count-open list:home ?n))").unwrap(),
             vec![
                 "(rule (report (concept.list.count-open list:home is: ?n)) (concept.list.count-open list:home is: ?n))"
             ]
@@ -3240,7 +3329,7 @@ mod tests {
         );
         // Under no declared concept, the same spelling is an attribute.
         assert_eq!(
-            expanded(lists, "(query (xyz.shelf/count-open shelf:a ?n))").unwrap(),
+            expanded(lists, "(select (xyz.shelf/count-open shelf:a ?n))").unwrap(),
             vec![
                 "(rule (report (xyz.shelf shelf:a count-open: ?n)) (xyz.shelf shelf:a count-open: ?n))"
             ]
@@ -3253,7 +3342,7 @@ mod tests {
                  (concept (list/archive list: ?l)
                    (xyz.list.archive/list of: ?c is: ?l in: :control))"
             ),
-            "(query (list/archive list: ?l))",
+            "(select (list/archive list: ?l))",
         )
         .unwrap();
         assert!(
@@ -3261,7 +3350,7 @@ mod tests {
             "{command:?}"
         );
         assert!(matches!(
-            expanded(lists, "(query (list/count-open list:home))"),
+            expanded(lists, "(select (list/count-open list:home))"),
             Err(Error::Refused(why)) if why.contains("needs its entity and a value")
         ));
     }
@@ -3296,14 +3385,14 @@ mod tests {
                     (concept (todo ?t name: ?b) (xyz.todo ?t text: ?b))";
         let rules = expanded(
             both,
-            "(query (xyz.tag ?t name: ?n) (xyz.tag ?t name: ?n) (todo ?t ...))",
+            "(select (xyz.tag ?t name: ?n) (xyz.tag ?t name: ?n) (todo ?t ...))",
         )
         .unwrap();
         assert_eq!(rules.len(), 1, "{rules:?}");
         // Each name for the field reads the same attribute.
         assert_eq!(
-            expanded(both, "(query (todo ?t title: ?x ...))").unwrap(),
-            expanded(both, "(query (todo ?t name: ?x))").unwrap()
+            expanded(both, "(select (todo ?t title: ?x ...))").unwrap(),
+            expanded(both, "(select (todo ?t name: ?x))").unwrap()
         );
     }
 
@@ -3327,7 +3416,7 @@ mod tests {
         assert_eq!(
             expanded(
                 "(concept (list-item ?l todo: ?t) (xyz.todo ?t list: ?l))",
-                "(query (list-item list:home todo: ?t))"
+                "(select (list-item list:home todo: ?t))"
             )
             .unwrap(),
             vec!["(rule (report (xyz.todo ?t list: list:home)) (xyz.todo ?t list: list:home))"]
@@ -3338,7 +3427,7 @@ mod tests {
     fn it_joins_the_reads_of_one_entity_under_unless() {
         let kernel = expanded(
             "(concept (author ?p name: ?n email: ?e) (io.person ?p name: ?n) (io.contact ?p email: ?e))",
-            "(query (io.person ?p name: ?n) (io.person ?p name: ?n) (unless (author ?p ...)))",
+            "(select (io.person ?p name: ?n) (io.person ?p name: ?n) (unless (author ?p ...)))",
         )
         .unwrap();
         assert!(kernel[0].contains("(unless (io.person ?p io.contact/email: ?e."));

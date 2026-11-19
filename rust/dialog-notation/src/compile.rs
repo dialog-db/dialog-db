@@ -17,6 +17,7 @@
 //! | `(report A)` with any other premises | a [`DeductiveRule`] deriving the report, and a [`ConceptQuery`] of it |
 //! | `description: "…"` on a rule Dialog-DB keeps | a [`ConceptStatement`] asserting `syntax.meta/description` of the rule's entity |
 //! | `(view …)` | a [`Plan`](crate::Plan): its layers, each a query of its own, that a back end maintains it by; nothing written |
+//! | `(select.query …)`, a query asked | a [`Selection`](crate::select::Selection): the [`ConceptQuery`]s its rows come from, put together in memory; nothing written |
 //!
 //! A kernel rule has one head, as a Dialog-DB rule has. What Dialog-DB
 //! has no counterpart for comes back as [`Error::Unsupported`], never as
@@ -64,6 +65,9 @@ pub enum Step {
     /// A view: the plan a back end maintains it by, every layer's query
     /// compiled. Nothing of it is written to a branch.
     View(Box<crate::view::plan::Plan>),
+    /// A query asked: the Dialog-DB queries its rows come from, and how
+    /// they are put together into its answers. Nothing of it is written.
+    Select(Box<crate::select::Selection>),
 }
 
 /// A write at the top level with a `when`: what its `when` matches, and
@@ -311,7 +315,7 @@ impl Query {
 /// A value, as the tree that says it. A list is said as `[a b]`: the data
 /// model has one sequence, and `[ ]` is how it is written where a value
 /// stands.
-fn written(value: &Value) -> Syntax {
+pub(crate) fn written(value: &Value) -> Syntax {
     match value {
         Value::Record(_) if matches!(value.composite(), Ok(Some(_))) => {
             match value.composite() {
@@ -389,6 +393,11 @@ pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
             })?;
         }
         return Ok(vec![Step::View(Box::new(plan))]);
+    }
+    if form.applies() == Some(crate::select::SELECTED) {
+        return Ok(vec![Step::Select(Box::new(
+            crate::select::Selection::compile(form)?,
+        ))]);
     }
     let rule = retracted(Rule::parse(form)?, form)?;
     if rule.once {
@@ -618,6 +627,25 @@ fn shape(
             Syntax::Variable(variable) => name(Some(variable)).into(),
             Syntax::Blank => name(None).into(),
             Syntax::Constant(value) => value.clone().into(),
+            // A set, a map with no names, is kept in a record as a list:
+            // its members in the order of their values, each once.
+            Syntax::Map(entries) if crate::select::is_set(node) => {
+                let mut members: Vec<&Syntax> = entries.iter().map(|(_, member)| member).collect();
+                if members
+                    .iter()
+                    .all(|member| matches!(member, Syntax::Constant(_)))
+                {
+                    members.sort_by(|a, b| crate::select::order(a, b));
+                    members.dedup();
+                }
+                ListPattern::new(
+                    members
+                        .into_iter()
+                        .map(|member| walk(member, name, quoted, open))
+                        .collect::<Result<Vec<_>, Error>>()?,
+                )
+                .into()
+            }
             // The entry under `...` is the entries not named, as a
             // struct.
             Syntax::Map(entries) => {

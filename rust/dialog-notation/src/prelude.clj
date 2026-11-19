@@ -7,12 +7,13 @@
 ; A variable the pattern binds is replaced in the template. Any other
 ; variable in a template is the template's own, fresh at each expansion.
 
-; A query is a rule whose head lands in the report. With no premise it
-; reads what it reports.
+; Asking is a rule whose head lands in the report. With no premise it
+; reads what it reports. A query, which collects, is defined with
+; `(query …)` and asked the same way; the walker reads both.
 (rule (syntax (rule (report ?head) ?head))
-  (expand (query ?head)))
+  (expand (select ?head)))
 (rule (syntax (rule (report ?head) ?premise ... ?more))
-  (expand (query ?head ?premise ... ?more)))
+  (expand (select ?head ?premise ... ?more)))
 
 ; A concept is a rule about syntax: where its name is applied, the reads
 ; its body holds stand. Its variables tie its parameters to the fields;

@@ -76,7 +76,7 @@ async fn it_defines_a_concept_and_runs_a_command_through_it() -> Result<()> {
         .await?;
 
     assert_eq!(
-        report(&mut notebook, "(query (todo ?t text: ?x state: ?s ...))").await?,
+        report(&mut notebook, "(select (todo ?t text: ?x state: ?s ...))").await?,
         vec![
             r#"(xyz.todo todo:1 state: :open text: "Buy milk")"#,
             r#"(xyz.todo todo:2 state: :open text: "Call mum")"#,
@@ -90,7 +90,7 @@ async fn it_defines_a_concept_and_runs_a_command_through_it() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (todo ?t text: ?x list: list:home state: :open))"
+            "(select (todo ?t text: ?x list: list:home state: :open))"
         )
         .await?,
         vec![r#"(xyz.todo todo:1 list: list:home state: :open text: "Buy milk")"#],
@@ -100,7 +100,7 @@ async fn it_defines_a_concept_and_runs_a_command_through_it() -> Result<()> {
     // The command held for one round and is not on the branch: read
     // as any concept is, it has no rows.
     assert!(
-        report(&mut notebook, "(query (todo/add todo: ?t text: ?x ...))")
+        report(&mut notebook, "(select (todo/add todo: ?t text: ?x ...))")
             .await?
             .is_empty()
     );
@@ -118,7 +118,7 @@ async fn it_runs_a_document_whose_uses_stand_above_its_declarations() -> Result<
             r#"(assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))
                (rule (assert (todo ?t list: ?l text: ?x state: :open))
                  (todo/add todo: ?t list: ?l text: ?x))
-               (query (xyz.todo ?t text: (:last ?x)))
+               (select (xyz.todo ?t text: (:last ?x)))
                (concept (todo/add todo: ?t list: ?l text: ?x)
                  (xyz.todo.add/todo of: ?c is: ?t as: :entity in: :control)
                  (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control)
@@ -138,7 +138,11 @@ async fn it_runs_a_document_whose_uses_stand_above_its_declarations() -> Result<
         .submit(r#"(assert (todo/add todo: todo:2 list: list:home text: "Call mum"))"#)
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (todo ?t text: ?x state: :open ...))").await?,
+        report(
+            &mut notebook,
+            "(select (todo ?t text: ?x state: :open ...))"
+        )
+        .await?,
         vec![
             r#"(xyz.todo todo:1 state: :open text: "Buy milk")"#,
             r#"(xyz.todo todo:2 state: :open text: "Call mum")"#,
@@ -173,7 +177,7 @@ async fn it_makes_an_entity_with_id_in_a_rule() -> Result<()> {
             .submit(r#"(assert (todo/add list: list:home text: "Buy milk"))"#)
             .await?;
     }
-    let todos = report(&mut notebook, "(query (todo ?t text: ?x ...))").await?;
+    let todos = report(&mut notebook, "(select (todo ?t text: ?x ...))").await?;
     assert_eq!(todos.len(), 1, "{todos:?}");
     assert!(todos[0].starts_with("(xyz.todo id:"), "{todos:?}");
 
@@ -182,16 +186,16 @@ async fn it_makes_an_entity_with_id_in_a_rule() -> Result<()> {
             r#"(assert (xyz.todo (:id xyz.todo list: list:home text: "Buy milk") tag: (:text "shop")))"#,
         )
         .await?;
-    let tagged = report(&mut notebook, "(query (xyz.todo ?t tag: ?g))").await?;
+    let tagged = report(&mut notebook, "(select (xyz.todo ?t tag: ?g))").await?;
     let entity = |row: &str| row.split_whitespace().nth(1).map(str::to_string);
     assert_eq!(entity(&tagged[0]), entity(&todos[0]), "{tagged:?}");
     Ok(())
 }
 
 const COLLECTIONS: &str = "
-    (concept (notebook-entry ?b at: ?p block: ?x)
+    (concept (notebook-entry ?b block: {?p ?x})
       (xyz.tonk.notebook/?p of: ?b is: ?x as: :entity cardinality: :one by: :position))
-    (concept (element-method ?e name: ?n source: ?s)
+    (concept (element-method ?e source: {?n ?s})
       (xyz.tonk.element.method/?n of: ?e is: ?s as: :text cardinality: :one by: :name))";
 
 /// A collection's entries are its attributes: a line over one leaves
@@ -204,17 +208,17 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
     let (_, diagnostics) = notebook
         .submit(&format!(
             r#"{COLLECTIONS}
-               (assert (notebook-entry notebook:1 at: "N1" block: block:a))
-               (assert (notebook-entry notebook:1 at: "N2" block: block:b))
-               (assert (element-method element:x name: "render" source: "return 1"))
-               (assert (element-method element:x name: "update" source: "return 2"))"#
+               (assert (notebook-entry notebook:1 block: {{"N1" block:a}}))
+               (assert (notebook-entry notebook:1 block: {{"N2" block:b}}))
+               (assert (element-method element:x source: {{"render" "return 1"}}))
+               (assert (element-method element:x source: {{"update" "return 2"}}))"#
         ))
         .await?;
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert_eq!(
         report(
             &mut notebook,
-            "(query (notebook-entry notebook:1 at: ?p block: ?x))"
+            "(select (notebook-entry notebook:1 block: {?p ?x}))"
         )
         .await?,
         vec![
@@ -225,7 +229,7 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            r#"(query (element-method ?e name: "update" source: ?s))"#
+            r#"(select (element-method ?e source: {"update" ?s}))"#
         )
         .await?,
         vec![r#"(xyz.tonk.element.method element:x update: "return 2")"#]
@@ -241,7 +245,7 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.tonk.element.method/released of: ?e is: ?s as: :text cardinality: :one by: :name))"
+            "(select (xyz.tonk.element.method/released of: ?e is: ?s as: :text cardinality: :one by: :name))"
         )
         .await?,
         vec![r#"(xyz.tonk.element.method element:x released: "return 3")"#]
@@ -250,7 +254,7 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            r#"(query (notebook-entry notebook:1 at: "N2" block: ?x))"#
+            r#"(select (notebook-entry notebook:1 block: {"N2" ?x}))"#
         )
         .await?,
         vec!["(xyz.tonk.notebook notebook:1 N2: block:b)"]
@@ -260,14 +264,14 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
     // under a key its premises bind.
     notebook
         .submit(
-            r#"(rule (xyz.placed ?x at: ?p) (notebook-entry ?b at: ?p block: ?x))
-               (rule (assert (notebook-entry ?b at: ?p block: ?x))
+            r#"(rule (xyz.placed ?x at: ?p) (notebook-entry ?b block: {?p ?x}))
+               (rule (assert (notebook-entry ?b block: {?p ?x}))
                  (xyz.move ?x to: ?b at: ?p))
                (assert (xyz.move block:c to: notebook:1 at: (:text "N3")))"#,
         )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (xyz.placed ?x at: ?p))").await?,
+        report(&mut notebook, "(select (xyz.placed ?x at: ?p))").await?,
         vec![
             r#"(xyz.placed block:a at: "N1")"#,
             r#"(xyz.placed block:b at: "N2")"#,
@@ -280,13 +284,13 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
     notebook
         .submit(
             "(rule (xyz.stray ?x at: ?p)
-               (notebook-entry ?b at: ?p block: ?x)
-               (notebook-entry ?b at: ?q block: ?y)
+               (notebook-entry ?b block: {?p ?x})
+               (notebook-entry ?b block: {?q ?y})
                (< ?q : ?p))",
         )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (xyz.stray ?x at: ?p))").await?,
+        report(&mut notebook, "(select (xyz.stray ?x at: ?p))").await?,
         vec![
             r#"(xyz.stray block:b at: "N2")"#,
             r#"(xyz.stray block:c at: "N3")"#,
@@ -297,14 +301,14 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
         result.map_err(|error| error.downcast::<Error>())
     };
     let shape = notebook
-        .submit(r#"(assert (notebook-entry notebook:1 at: "first" block: block:d))"#)
+        .submit(r#"(assert (notebook-entry notebook:1 block: {"first" block:d}))"#)
         .await;
     assert!(matches!(why(shape), Err(Ok(Error::Refused(said))) if said.contains("the key")),);
     // A retract of one entry, its entity, key and value written,
     // retracts that entry, and its neighbours stay. One that leaves out
     // the key or the value is not decided.
     for undecided in [
-        "(retract (notebook-entry notebook:1 block: block:b))",
+        "(retract (notebook-entry notebook:1 block: {_ block:b}))",
         "(retract (notebook-entry notebook:1))",
     ] {
         let refused = notebook.submit(undecided).await;
@@ -314,12 +318,12 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
         );
     }
     notebook
-        .submit(r#"(retract (notebook-entry notebook:1 at: "N1" block: block:a))"#)
+        .submit(r#"(retract (notebook-entry notebook:1 block: {"N1" block:a}))"#)
         .await?;
     assert_eq!(
         report(
             &mut notebook,
-            "(query (notebook-entry notebook:1 at: ?p block: ?x))"
+            "(select (notebook-entry notebook:1 block: {?p ?x}))"
         )
         .await?,
         vec![
@@ -335,11 +339,11 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
                  (xyz.block.place/subject of: ?c is: ?b as: :entity in: :control)
                  (xyz.block.place/notebook of: ?c is: ?n as: :entity in: :control)
                  (xyz.block.place/key of: ?c is: ?k as: :text in: :control))
-               (rule (assert (notebook-entry ?n at: ?k block: ?b))
+               (rule (assert (notebook-entry ?n block: {?k ?b}))
                  (block/place subject: ?b notebook: ?n key: ?k))
-               (rule (retract (notebook-entry ?n at: ?old block: ?b))
+               (rule (retract (notebook-entry ?n block: {?old ?b}))
                  (block/place subject: ?b notebook: ?n key: ?k)
-                 (notebook-entry ?n at: ?old block: ?b)
+                 (notebook-entry ?n block: {?old ?b})
                  (!= ?old is: ?k))"#,
         )
         .await?;
@@ -349,7 +353,7 @@ async fn it_reads_and_writes_the_entries_of_a_collection() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (notebook-entry notebook:1 at: ?p block: ?x))"
+            "(select (notebook-entry notebook:1 block: {?p ?x}))"
         )
         .await?,
         vec![
@@ -374,7 +378,7 @@ async fn it_keeps_a_text_that_spans_lines() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (xyz.el ?e source: ?s))").await?,
+        report(&mut notebook, "(select (xyz.el ?e source: ?s))").await?,
         vec![
             r#"(xyz.el el:1 source: "render() {
   return `<p class=\"a\">\\n</p>`;
@@ -407,14 +411,14 @@ async fn it_writes_once_what_a_when_matches() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (todo ?t text: ?x state: ?s))").await?,
+        report(&mut notebook, "(select (todo ?t text: ?x state: ?s))").await?,
         vec![
             r#"(xyz.todo todo:1 state: :done text: "Call mom")"#,
             r#"(xyz.todo todo:2 state: :open text: "Buy milk")"#,
         ]
     );
     // Every claim the cell holds: the write succeeded the one it read.
-    let claims = report(&mut notebook, "(query (xyz.todo todo:1 state: ?s))").await?;
+    let claims = report(&mut notebook, "(select (xyz.todo todo:1 state: ?s))").await?;
     assert_eq!(claims, vec!["(xyz.todo todo:1 state: :done)"]);
 
     // Never installed: a to-do the `when` would match, added later, is
@@ -423,7 +427,7 @@ async fn it_writes_once_what_a_when_matches() -> Result<()> {
         .submit(r#"(assert (todo todo:3 text: "Call mom" state: :open))"#)
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (todo todo:3 state: ?s ...))").await?,
+        report(&mut notebook, "(select (todo todo:3 state: ?s ...))").await?,
         vec!["(xyz.todo todo:3 state: :open)"]
     );
 
@@ -435,7 +439,7 @@ async fn it_writes_once_what_a_when_matches() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (todo ?t text: ?x ...))").await?,
+        report(&mut notebook, "(select (todo ?t text: ?x ...))").await?,
         vec![
             r#"(xyz.todo todo:2 text: "Buy milk")"#,
             r#"(xyz.todo todo:3 text: "Call mom")"#,
@@ -487,15 +491,15 @@ async fn it_reads_a_concept_with_a_parameter_left_out() -> Result<()> {
         r#"(xyz.todo todo:2 text: "Buy milk")"#,
     ];
     assert_eq!(
-        report(&mut notebook, "(query (todo ?t text: ?x))").await?,
+        report(&mut notebook, "(select (todo ?t text: ?x))").await?,
         both
     );
     assert_eq!(
-        report(&mut notebook, "(query (todo ?t text: ?x ...))").await?,
+        report(&mut notebook, "(select (todo ?t text: ?x ...))").await?,
         both
     );
     assert_eq!(
-        report(&mut notebook, "(query (xyz.said ?t text: ?x))").await?,
+        report(&mut notebook, "(select (xyz.said ?t text: ?x))").await?,
         vec![
             r#"(xyz.said todo:1 text: "Call mom")"#,
             r#"(xyz.said todo:2 text: "Buy milk")"#,
@@ -531,16 +535,16 @@ async fn it_compares_with_equality_and_inequality() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (xyz.same ?p left: ?l))").await?,
+        report(&mut notebook, "(select (xyz.same ?p left: ?l))").await?,
         vec![r#"(xyz.same pair:1 left: "a")"#]
     );
     assert_eq!(
-        report(&mut notebook, "(query (xyz.other ?p left: ?l))").await?,
+        report(&mut notebook, "(select (xyz.other ?p left: ?l))").await?,
         vec![r#"(xyz.other pair:2 left: "a")"#]
     );
     let twice = notebook
         .submit(
-            "(query (xyz.pair ?p left: ?l)
+            "(select (xyz.pair ?p left: ?l)
                (xyz.pair ?p left: ?l right: ?r)
                (unless (!= ?l is: ?r)))",
         )
@@ -566,13 +570,13 @@ async fn it_places_an_entry_between_two_with_dialog_position() -> Result<()> {
                  (xyz.block.insert/notebook of: ?c is: ?b as: :entity in: :control)
                  (xyz.block.insert/after of: ?c is: ?lo as: :text in: :control)
                  (xyz.block.insert/before of: ?c is: ?hi as: :text in: :control))
-               (rule (assert (notebook-entry ?b at: ?at block: ?x))
+               (rule (assert (notebook-entry ?b block: {{?at ?x}}))
                  (block/insert block: ?x notebook: ?b after: ?lo before: ?hi)
                  (dialog/position ?x after: ?lo before: ?hi is: ?at))
                (rule (xyz.between ?x at: ?k)
-                 (notebook-entry ?b at: ?k block: ?x)
-                 (notebook-entry ?b at: ?lo block: block:a)
-                 (notebook-entry ?b at: ?hi block: block:c)
+                 (notebook-entry ?b block: {{?k ?x}})
+                 (notebook-entry ?b block: {{?lo block:a}})
+                 (notebook-entry ?b block: {{?hi block:c}})
                  (< ?lo : ?k)
                  (< ?k : ?hi))
                (assert (block/insert block: block:a notebook: notebook:1 after: "" before: ""))"#
@@ -580,7 +584,7 @@ async fn it_places_an_entry_between_two_with_dialog_position() -> Result<()> {
         .await?;
     let first = report(
         &mut notebook,
-        "(query (notebook-entry notebook:1 at: ?k block: block:a))",
+        "(select (notebook-entry notebook:1 block: {?k block:a}))",
     )
     .await?;
     assert_eq!(first.len(), 1, "{first:?}");
@@ -599,7 +603,7 @@ async fn it_places_an_entry_between_two_with_dialog_position() -> Result<()> {
         .await?;
     let last = report(
         &mut notebook,
-        "(query (notebook-entry notebook:1 at: ?k block: block:c))",
+        "(select (notebook-entry notebook:1 block: {?k block:c}))",
     )
     .await?;
     let c = key(&last[0]);
@@ -609,7 +613,7 @@ async fn it_places_an_entry_between_two_with_dialog_position() -> Result<()> {
             r#"(assert (block/insert block: block:b notebook: notebook:1 after: "{a}" before: "{c}"))"#
         ))
         .await?;
-    let between = report(&mut notebook, "(query (xyz.between ?x at: ?k))").await?;
+    let between = report(&mut notebook, "(select (xyz.between ?x at: ?k))").await?;
     assert_eq!(between.len(), 1, "{between:?}");
     assert!(
         between[0].starts_with("(xyz.between block:b at: "),
@@ -640,7 +644,7 @@ async fn it_reads_the_entity_of_the_command_that_fired() -> Result<()> {
     notebook
         .submit(r#"(assert (todo/add list: list:home text: "Buy milk"))"#)
         .await?;
-    let todos = report(&mut notebook, "(query (todo ?t text: ?x))").await?;
+    let todos = report(&mut notebook, "(select (todo ?t text: ?x))").await?;
     assert_eq!(todos.len(), 1, "{todos:?}");
     // The command's entity is what its content derives.
     notebook
@@ -648,7 +652,7 @@ async fn it_reads_the_entity_of_the_command_that_fired() -> Result<()> {
             r#"(assert (xyz.todo (:id xyz.todo.add list: list:home text: "Buy milk") tag: (:text "made")))"#,
         )
         .await?;
-    let tagged = report(&mut notebook, "(query (xyz.todo ?t tag: ?g))").await?;
+    let tagged = report(&mut notebook, "(select (xyz.todo ?t tag: ?g))").await?;
     let entity = |row: &str| row.split_whitespace().nth(1).map(str::to_string);
     assert_eq!(
         entity(&tagged[0]),
@@ -677,7 +681,7 @@ async fn it_compiles_a_view_to_its_plan_and_describes_it() -> Result<()> {
     let (_, diagnostics) = notebook.submit(document).await?;
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert_eq!(
-        report(&mut notebook, "(query (xyz.todo ?t title: ?x))").await?,
+        report(&mut notebook, "(select (xyz.todo ?t title: ?x))").await?,
         vec![r#"(xyz.todo todo:1 title: "Buy milk")"#]
     );
     let checked = dialog_notation::check(&mut dialog_notation::Analyzer::new()?, document);
@@ -844,11 +848,11 @@ async fn it_retracts_every_field_of_a_concept_named_by_its_entity() -> Result<()
         .submit("(assert (block/remove subject: block:2))")
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (xyz.block ?b notebook: ?n))").await?,
+        report(&mut notebook, "(select (xyz.block ?b notebook: ?n))").await?,
         vec!["(xyz.block block:3 notebook: notebook:1)"]
     );
     assert_eq!(
-        report(&mut notebook, "(query (xyz.block ?b source: ?s))").await?,
+        report(&mut notebook, "(select (xyz.block ?b source: ?s))").await?,
         vec![r#"(xyz.block block:3 source: "three")"#]
     );
     let partial = notebook
@@ -899,7 +903,7 @@ async fn it_runs_a_concept_written_as_lines() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (todo ?i title: ?t state: ?s))").await?,
+        report(&mut notebook, "(select (todo ?i title: ?t state: ?s))").await?,
         vec![
             r#"(xyz.todo todo:1 state: :open title: "Buy milk")"#,
             r#"(xyz.todo todo:2 state: :open title: "Call mum")"#,
@@ -914,7 +918,7 @@ async fn it_runs_a_concept_written_as_lines() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.todo/state of: ?i is: ?s as: :entity cardinality: :one))"
+            "(select (xyz.todo/state of: ?i is: ?s as: :entity cardinality: :one))"
         )
         .await?,
         vec![
@@ -923,7 +927,7 @@ async fn it_runs_a_concept_written_as_lines() -> Result<()> {
         ]
     );
     assert_eq!(
-        report(&mut notebook, "(query (todo ?i title: ?t state: :open))").await?,
+        report(&mut notebook, "(select (todo ?i title: ?t state: :open))").await?,
         vec![r#"(xyz.todo todo:1 state: :open title: "Buy milk")"#]
     );
 
@@ -937,7 +941,7 @@ async fn it_runs_a_concept_written_as_lines() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.todo/tag of: todo:1 is: ?tag as: :text cardinality: :many))"
+            "(select (xyz.todo/tag of: todo:1 is: ?tag as: :text cardinality: :many))"
         )
         .await?,
         vec![
@@ -991,11 +995,11 @@ async fn it_derives_an_attribute_in_a_concepts_domain() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (todo/home ?t ?n))").await?,
+        report(&mut notebook, "(select (todo/home ?t ?n))").await?,
         vec![r#"(concept.todo.home todo:1 is: "Home")"#]
     );
     assert_eq!(
-        report(&mut notebook, "(query (todo/home todo:1 is: ?n))").await?,
+        report(&mut notebook, "(select (todo/home todo:1 is: ?n))").await?,
         vec![r#"(concept.todo.home todo:1 is: "Home")"#]
     );
 
@@ -1013,12 +1017,12 @@ async fn it_derives_an_attribute_in_a_concepts_domain() -> Result<()> {
         "{written:?}"
     );
     assert!(
-        report(&mut notebook, "(query (list ?l name: \"Work\"))")
+        report(&mut notebook, "(select (list ?l name: \"Work\"))")
             .await?
             .is_empty()
     );
     assert_eq!(
-        report(&mut notebook, "(query (todo/home ?t ?n))").await?,
+        report(&mut notebook, "(select (todo/home ?t ?n))").await?,
         vec![r#"(concept.todo.home todo:1 is: "Home")"#]
     );
     Ok(())
@@ -1050,11 +1054,11 @@ async fn it_reads_and_writes_an_attribute_by_its_two_terms_unlabeled() -> Result
         .await?;
     let open = vec![r#"(xyz.open todo:1 title: "Buy milk")"#];
     assert_eq!(
-        report(&mut notebook, "(query (xyz.open/title ?t ?x))").await?,
+        report(&mut notebook, "(select (xyz.open/title ?t ?x))").await?,
         open
     );
     assert_eq!(
-        report(&mut notebook, "(query (xyz.open/title of: ?t is: ?x))").await?,
+        report(&mut notebook, "(select (xyz.open/title of: ?t is: ?x))").await?,
         open
     );
     Ok(())
@@ -1080,7 +1084,7 @@ async fn it_counts_with_a_command_a_rule_reads() -> Result<()> {
         .submit("(assert (counter/increment counter: counter:a))")
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (xyz.counter ?c count: (:last ?n)))").await?,
+        report(&mut notebook, "(select (xyz.counter ?c count: (:last ?n)))").await?,
         vec!["(xyz.counter counter:a count: 3)"]
     );
 
@@ -1105,7 +1109,7 @@ async fn it_counts_with_a_command_a_rule_reads() -> Result<()> {
         "{misspelled:?}"
     );
     assert_eq!(
-        report(&mut notebook, "(query (xyz.counter ?c count: (:last ?n)))").await?,
+        report(&mut notebook, "(select (xyz.counter ?c count: (:last ?n)))").await?,
         vec!["(xyz.counter counter:a count: 3)"]
     );
     Ok(())
@@ -1128,14 +1132,14 @@ async fn it_reads_and_writes_a_backlink_through_a_concept() -> Result<()> {
         .await?;
 
     assert_eq!(
-        report(&mut notebook, "(query (list-item list:home todo: ?t))").await?,
+        report(&mut notebook, "(select (list-item list:home todo: ?t))").await?,
         vec![
             "(xyz.todo todo:1 list: list:home)",
             "(xyz.todo todo:2 list: list:home)",
         ]
     );
     assert_eq!(
-        report(&mut notebook, "(query (list-item ?l todo: todo:3))").await?,
+        report(&mut notebook, "(select (list-item ?l todo: todo:3))").await?,
         vec!["(xyz.todo todo:3 list: list:work)"]
     );
     Ok(())
@@ -1158,14 +1162,14 @@ async fn it_joins_the_reads_a_concept_holds_and_negates_them_as_one() -> Result<
         .await?;
 
     assert_eq!(
-        report(&mut notebook, "(query (author ?p name: ?n ...))").await?,
+        report(&mut notebook, "(select (author ?p name: ?n ...))").await?,
         vec![r#"(io.person person:ada name: "Ada")"#],
         "a read the query names no field of says nothing in the report"
     );
     assert_eq!(
         report(
             &mut notebook,
-            "(query (io.person ?p name: ?n)
+            "(select (io.person ?p name: ?n)
                    (io.person ?p name: (:text ?n))
                    (unless (author ?p ...)))"
         )
@@ -1177,7 +1181,7 @@ async fn it_joins_the_reads_a_concept_holds_and_negates_them_as_one() -> Result<
     assert_eq!(
         report(
             &mut notebook,
-            "(query (io.person ?p name: ?n)
+            "(select (io.person ?p name: ?n)
                (io.person ?p name: (:text ?n))
                (unless (author ?p ...)))"
         )
@@ -1207,7 +1211,7 @@ async fn it_derives_a_relation_and_reports_rows_of_several_premises() -> Result<
         .await?;
 
     assert_eq!(
-        report(&mut notebook, "(query (shop.offer ?i name: ?n))").await?,
+        report(&mut notebook, "(select (shop.offer ?i name: ?n))").await?,
         vec![
             r#"(shop.offer item:cup name: "Cup")"#,
             r#"(shop.offer item:tea name: "Tea")"#,
@@ -1216,7 +1220,7 @@ async fn it_derives_a_relation_and_reports_rows_of_several_premises() -> Result<
     assert_eq!(
         report(
             &mut notebook,
-            "(query (shop.pair ?a with: ?b total: (+ ?p : ?q))
+            "(select (shop.pair ?a with: ?b total: (+ ?p : ?q))
                    (shop.offer ?a price: ?p)
                    (shop.offer ?b price: ?q)
                    (< ?p : ?q))"
@@ -1249,7 +1253,7 @@ async fn it_says_where_a_warning_and_a_refusal_are() -> Result<()> {
     assert_eq!((span.end.line, span.end.column), (1, 36));
 
     let refused = notebook
-        .submit("\n\n  (query (xyz.a ?a n: ?n) (xyz.a ?a n: ?n) (:like ?n : \"x\"))")
+        .submit("\n\n  (select (xyz.a ?a n: ?n) (xyz.a ?a n: ?n) (:like ?n : \"x\"))")
         .await
         .expect_err("the compiler has no counterpart for it");
     assert!(
@@ -1303,7 +1307,7 @@ async fn it_finds_a_rule_by_what_the_comment_above_it_says() -> Result<()> {
         .await?;
     let said = report(
         &mut notebook,
-        r#"(query (syntax.meta ?rule description: ?text))"#,
+        r#"(select (syntax.meta ?rule description: ?text))"#,
     )
     .await?;
     assert_eq!(said.len(), 2, "{said:?}");
@@ -1340,7 +1344,7 @@ async fn it_refuses_to_assert_and_retract_from_one_rule() -> Result<()> {
         "{refused:?}"
     );
     assert_eq!(
-        report(&mut notebook, "(query (xyz.todo ?t list: ?l))").await?,
+        report(&mut notebook, "(select (xyz.todo ?t list: ?l))").await?,
         Vec::<String>::new()
     );
     Ok(())
@@ -1377,7 +1381,7 @@ async fn it_asserts_and_retracts_from_two_rules_of_one_head() -> Result<()> {
         .submit("(assert (todo/move todo: todo:2 list: list:work))")
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (xyz.todo ?t list: ?l))").await?,
+        report(&mut notebook, "(select (xyz.todo ?t list: ?l))").await?,
         vec![
             "(xyz.todo todo:1 list: list:work)",
             "(xyz.todo todo:2 list: list:work)"
@@ -1414,11 +1418,11 @@ async fn it_asserts_and_retracts_on_a_command_a_rule_deduces() -> Result<()> {
         .submit("(assert (todo/move todo: todo:1 list: list:work))")
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (xyz.todo ?t list: ?l))").await?,
+        report(&mut notebook, "(select (xyz.todo ?t list: ?l))").await?,
         vec!["(xyz.todo todo:1 list: list:work)"]
     );
     assert!(
-        report(&mut notebook, "(query (todo/moved todo: ?t ...))")
+        report(&mut notebook, "(select (todo/moved todo: ?t ...))")
             .await?
             .is_empty()
     );
@@ -1446,7 +1450,7 @@ async fn it_derives_a_relation_from_itself() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (fam.ancestor ?a descendant: person:dee))"
+            "(select (fam.ancestor ?a descendant: person:dee))"
         )
         .await?,
         vec![
@@ -1468,7 +1472,7 @@ async fn it_fires_a_rule_in_the_document_that_installs_it() -> Result<()> {
             "(assert (xyz.counter counter:a count: (:last (:natural 1))))
              {COUNTER}
              (assert (counter/increment counter: counter:a))
-             (query (xyz.counter ?c count: (:last ?n)))"
+             (select (xyz.counter ?c count: (:last ?n)))"
         ))
         .await?;
     assert!(diagnostics.is_empty());
@@ -1504,12 +1508,16 @@ async fn it_lets_a_rule_issue_a_command_another_rule_reads() -> Result<()> {
         .submit("(assert (list/archive list: list:home))")
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (todo ?t text: ?x state: :open ...))").await?,
+        report(
+            &mut notebook,
+            "(select (todo ?t text: ?x state: :open ...))"
+        )
+        .await?,
         vec![r#"(xyz.todo todo:3 state: :open text: "Ship it")"#]
     );
     // Neither command is on the branch.
     assert!(
-        report(&mut notebook, "(query (todo/complete todo: ?t))")
+        report(&mut notebook, "(select (todo/complete todo: ?t))")
             .await?
             .is_empty()
     );
@@ -1535,7 +1543,7 @@ async fn it_derives_one_entity_from_the_same_values() -> Result<()> {
         .await?;
     notebook.submit(r#"(assert (note/jot text: "ho"))"#).await?;
 
-    let notes = report(&mut notebook, "(query (xyz.note ?n text: ?x))").await?;
+    let notes = report(&mut notebook, "(select (xyz.note ?n text: ?x))").await?;
     assert_eq!(notes.len(), 2, "{notes:?}");
     assert!(notes.iter().all(|note| note.starts_with("(xyz.note id:")));
     Ok(())
@@ -1554,14 +1562,14 @@ async fn it_elects_one_of_two_writes_of_one_round_whatever_their_order() -> Resu
         notebook.submit(TODO).await?;
         notebook.submit(&document.join("\n")).await?;
         assert_eq!(
-            report(&mut notebook, "(query (xyz.todo ?t state: ?s))").await?,
+            report(&mut notebook, "(select (xyz.todo ?t state: ?s))").await?,
             vec![
                 "(xyz.todo todo:1 state: :done)",
                 "(xyz.todo todo:1 state: :open)",
             ],
             "both writes are in the cell"
         );
-        let last = report(&mut notebook, "(query (xyz.todo ?t state: (:last ?s)))").await?;
+        let last = report(&mut notebook, "(select (xyz.todo ?t state: (:last ?s)))").await?;
         assert_eq!(last.len(), 1, "one of them is elected: {last:?}");
         elected.push(last);
     }
@@ -1586,14 +1594,14 @@ async fn it_reports_through_every_definition_a_query_fits() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (todo ?t title: ?x ...))").await?,
+        report(&mut notebook, "(select (todo ?t title: ?x ...))").await?,
         vec![
             r#"(xyz.note note:1 title: "Call Ada")"#,
             r#"(xyz.todo todo:1 title: "Buy milk")"#,
         ]
     );
     assert_eq!(
-        report(&mut notebook, "(query (todo ?t pinned: ?p ...))").await?,
+        report(&mut notebook, "(select (todo ?t pinned: ?p ...))").await?,
         vec!["(xyz.note note:1 pinned: true)"]
     );
     Ok(())
@@ -1700,7 +1708,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
 
     // Whole, under a variable.
     assert_eq!(
-        report(&mut notebook, "(query (xyz.note ?n about: ?about))").await?,
+        report(&mut notebook, "(select (xyz.note ?n about: ?about))").await?,
         vec![
             r#"(xyz.note note:1 about: {:author "Ada" :pinned true :tags ["math" "engines"]})"#,
             r#"(xyz.note note:2 about: {:author "Grace"})"#,
@@ -1714,7 +1722,11 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
         r#"(xyz.note note:2 about: {:author "Grace"})"#,
     ];
     assert_eq!(
-        report(&mut notebook, "(query (xyz.note ?n about: {:author ?who}))").await?,
+        report(
+            &mut notebook,
+            "(select (xyz.note ?n about: {:author ?who}))"
+        )
+        .await?,
         both
     );
     // A trailing `...` says the same, and so does a struct with no
@@ -1722,7 +1734,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.note ?n about: {:author ?who ...}))"
+            "(select (xyz.note ?n about: {:author ?who ...}))"
         )
         .await?,
         both
@@ -1730,7 +1742,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            r#"(query (xyz.note ?n about: {:author "Ada"}))"#
+            r#"(select (xyz.note ?n about: {:author "Ada"}))"#
         )
         .await?,
         both[..1]
@@ -1738,7 +1750,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            r#"(query (xyz.note ?n about: {:author ?who :tags [?first ?second] :pinned true}))"#
+            r#"(select (xyz.note ?n about: {:author ?who :tags [?first ?second] :pinned true}))"#
         )
         .await?,
         vec![r#"(xyz.note note:1 about: {:author "Ada" :pinned true :tags ["math" "engines"]})"#]
@@ -1748,7 +1760,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.note ?n about: {:author ?who ... ?others}))"
+            "(select (xyz.note ?n about: {:author ?who ... ?others}))"
         )
         .await?,
         vec![
@@ -1761,7 +1773,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.note ?n about: {:author _ :tags [?first _] :pinned _}))"
+            "(select (xyz.note ?n about: {:author _ :tags [?first _] :pinned _}))"
         )
         .await?,
         vec![r#"(xyz.note note:1 about: {:author "Ada" :pinned true :tags ["math" "engines"]})"#]
@@ -1771,7 +1783,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            r#"(query (xyz.note ?n about: {:pinned true :tags ["math" "engines"] :author "Ada"}))"#
+            r#"(select (xyz.note ?n about: {:pinned true :tags ["math" "engines"] :author "Ada"}))"#
         )
         .await?
         .len(),
@@ -1786,7 +1798,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.person ?p name: ?who)
+            "(select (xyz.person ?p name: ?who)
                (xyz.note ?n about: {:author ?who :tags _ :pinned _})
                (xyz.person ?p name: ?who))",
         )
@@ -1801,7 +1813,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
         .submit("(rule (xyz.by ?n author: ?who) (xyz.note ?n about: {:author ?who}))")
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (xyz.by ?n author: ?who))").await?,
+        report(&mut notebook, "(select (xyz.by ?n author: ?who))").await?,
         vec![
             r#"(xyz.by note:1 author: "Ada")"#,
             r#"(xyz.by note:2 author: "Grace")"#,
@@ -1814,7 +1826,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.person ?p name: ?who)
+            "(select (xyz.person ?p name: ?who)
                (xyz.by ?n author: ?who) (xyz.person ?p name: ?who))",
         )
         .await?,
@@ -1835,7 +1847,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
         )
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (xyz.signed ?n by: ?who))").await?,
+        report(&mut notebook, "(select (xyz.signed ?n by: ?who))").await?,
         vec![
             r#"(xyz.signed note:1 by: "Ada")"#,
             r#"(xyz.signed note:2 by: "Grace")"#,
@@ -1845,7 +1857,7 @@ async fn it_keeps_a_struct_and_takes_it_apart_by_a_pattern() -> Result<()> {
         .submit(r#"(assert (xyz.note note:3 about: {:author "Hedy" :pinned false}))"#)
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (xyz.signed ?n by: ?who))").await?,
+        report(&mut notebook, "(select (xyz.signed ?n by: ?who))").await?,
         vec![
             r#"(xyz.signed note:1 by: "Ada")"#,
             r#"(xyz.signed note:2 by: "Grace")"#,
@@ -1873,7 +1885,7 @@ async fn it_tells_a_name_that_was_repointed_from_one_claimed_twice() -> Result<(
                    (name/second name: ?n))";
     let first = "(assert (name/first name: name:todo))";
     let second = "(assert (name/second name: name:todo))";
-    let every = "(query (xyz.name ?n referent: ?r))";
+    let every = "(select (xyz.name ?n referent: ?r))";
 
     let mut repointed = Notebook::open().await?;
     repointed.submit(rules).await?;
@@ -1895,7 +1907,7 @@ async fn it_tells_a_name_that_was_repointed_from_one_claimed_twice() -> Result<(
         ]
     );
     assert_eq!(
-        report(&mut twice, "(query (xyz.name ?n referent: (:last ?r)))")
+        report(&mut twice, "(select (xyz.name ?n referent: (:last ?r)))")
             .await?
             .len(),
         1
@@ -1921,13 +1933,13 @@ async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()>
 
     let milk = vec![r#"(xyz.todo todo:1 text: "Buy milk")"#];
     for query in [
-        "(query (todo ?t text: ?x ...))",
-        "(query (todo text: ?x of: ?t ...))",
+        "(select (todo ?t text: ?x ...))",
+        "(select (todo text: ?x of: ?t ...))",
     ] {
         assert_eq!(report(&mut notebook, query).await?, milk, "{query}");
     }
     assert_eq!(
-        report(&mut notebook, "(query (xyz.note of: ?n text: ?x))").await?,
+        report(&mut notebook, "(select (xyz.note of: ?n text: ?x))").await?,
         vec![
             r#"(xyz.note note:1 text: "by label")"#,
             r#"(xyz.note note:2 text: "by position")"#,
@@ -1942,7 +1954,7 @@ async fn it_reads_a_call_the_same_however_its_primary_is_written() -> Result<()>
 
     // Beside a part with no label, `of:` would be the primary twice.
     let twice = notebook
-        .submit("(query (xyz.note ?n of: ?m))")
+        .submit("(select (xyz.note ?n of: ?m))")
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(matches!(twice, Err(Ok(Error::Refused(_)))));
@@ -2036,7 +2048,7 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     // `/todo`. The tuple that starts with `todo` applies nothing.
     let mut applies = report(
         &mut notebook,
-        "(query (syntax.form ?f is: {:type :application
+        "(select (syntax.form ?f is: {:type :application
                                      :operator {:type :reference :name /todo}
                                      :operand _}))",
     )
@@ -2061,7 +2073,7 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     // part": a read has no way to say a record holds nothing more.
     let bare = report(
         &mut notebook,
-        "(query (syntax.form ?f is: {:type :application
+        "(select (syntax.form ?f is: {:type :application
                                      :operator {:type :reference :name ?name}
                                      :operand {:type :parameters :items ?items :terms {}}}))",
     )
@@ -2075,7 +2087,7 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     // one of its own.
     let tuples = report(
         &mut notebook,
-        "(query (syntax.form ?f is: {:type :tuple :items ?items}))",
+        "(select (syntax.form ?f is: {:type :tuple :items ?items}))",
     )
     .await?;
     assert_eq!(tuples.len(), 1, "{tuples:?}");
@@ -2085,7 +2097,7 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     // form that applies a name, whatever else its nodes hold.
     let named = report(
         &mut notebook,
-        "(query (syntax.form ?f is: {:operator {:name ?name ... ?reference} ... ?node}))",
+        "(select (syntax.form ?f is: {:operator {:name ?name ... ?reference} ... ?node}))",
     )
     .await?;
     assert_eq!(named.len(), 3, "{named:?}");
@@ -2093,8 +2105,8 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     // The parts of a node are a list, which `'( )` and `[ ]` both take
     // apart: the kept tuple of two parts.
     for pair in [
-        "(query (syntax.form ?f is: {:type :tuple :items '(_ _)}))",
-        "(query (syntax.form ?f is: {:type :tuple :items [_ _]}))",
+        "(select (syntax.form ?f is: {:type :tuple :items '(_ _)}))",
+        "(select (syntax.form ?f is: {:type :tuple :items [_ _]}))",
     ] {
         let pairs = report(&mut notebook, pair).await?;
         assert_eq!(pairs.len(), 1, "{pair}: {pairs:?}");
@@ -2103,7 +2115,7 @@ async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     // And by a run: every application whose first part is a variable.
     let first = report(
         &mut notebook,
-        "(query (syntax.form ?f is: {:operand {:items '({:type :variable :name ?variable} ... ?more)
+        "(select (syntax.form ?f is: {:operand {:items '({:type :variable :name ?variable} ... ?more)
                                                ... ?parameters}
                                      ... ?node}))",
     )
@@ -2139,32 +2151,32 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
     // Whole, under a variable: a list is printed `[ ]`, quoted or not
     // where it was written.
     assert_eq!(
-        sorted(report(&mut notebook, "(query (xyz.note ?n tags: ?tags))").await?),
+        sorted(report(&mut notebook, "(select (xyz.note ?n tags: ?tags))").await?),
         vec![one, two, three]
     );
     // A list pattern with no run is the list of exactly its items, in
     // either spelling, whichever spelling wrote the list.
     assert_eq!(
-        report(&mut notebook, "(query (xyz.note ?n tags: '(?only)))").await?,
+        report(&mut notebook, "(select (xyz.note ?n tags: '(?only)))").await?,
         vec![two]
     );
     assert_eq!(
-        report(&mut notebook, "(query (xyz.note ?n tags: [?only]))").await?,
+        report(&mut notebook, "(select (xyz.note ?n tags: [?only]))").await?,
         vec![two]
     );
     assert_eq!(
-        report(&mut notebook, "(query (xyz.note ?n tags: '(?a ?b)))").await?,
+        report(&mut notebook, "(select (xyz.note ?n tags: '(?a ?b)))").await?,
         vec![three]
     );
     assert_eq!(
-        report(&mut notebook, "(query (xyz.note ?n tags: [?a ?b ?c]))").await?,
+        report(&mut notebook, "(select (xyz.note ?n tags: [?a ?b ?c]))").await?,
         vec![one]
     );
     // With a run it is a list that starts with them. A run may take
     // nothing.
     for starts in [
-        "(query (xyz.note ?n tags: '(?first ?second ... ?more)))",
-        "(query (xyz.note ?n tags: [?first ?second ... ?more]))",
+        "(select (xyz.note ?n tags: '(?first ?second ... ?more)))",
+        "(select (xyz.note ?n tags: [?first ?second ... ?more]))",
     ] {
         assert_eq!(
             sorted(report(&mut notebook, starts).await?),
@@ -2173,8 +2185,8 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
         );
     }
     for starts in [
-        r#"(query (xyz.note ?n tags: '("math" ... ?more)))"#,
-        r#"(query (xyz.note ?n tags: ["math" ...]))"#,
+        r#"(select (xyz.note ?n tags: '("math" ... ?more)))"#,
+        r#"(select (xyz.note ?n tags: ["math" ...]))"#,
     ] {
         assert_eq!(
             sorted(report(&mut notebook, starts).await?),
@@ -2185,8 +2197,8 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
     // A list with no variable in it is the value, and what a row prints
     // reads back as it.
     for whole in [
-        r#"(query (xyz.note ?n tags: '("math" "engines" "looms")))"#,
-        r#"(query (xyz.note ?n tags: ["math" "engines" "looms"]))"#,
+        r#"(select (xyz.note ?n tags: '("math" "engines" "looms")))"#,
+        r#"(select (xyz.note ?n tags: ["math" "engines" "looms"]))"#,
     ] {
         assert_eq!(report(&mut notebook, whole).await?, vec![one], "{whole}");
     }
@@ -2194,7 +2206,7 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.note ?n about: {:tags '(_ {:by ?who})}))"
+            "(select (xyz.note ?n about: {:tags '(_ {:by ?who})}))"
         )
         .await?,
         vec![r#"(xyz.note note:4 about: {:tags ["math" {:by "Ada"}]})"#]
@@ -2202,7 +2214,7 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
 
     // A list has no labelled part.
     let labelled = notebook
-        .submit("(query (xyz.note ?n tags: '(?first then: ?second)))")
+        .submit("(select (xyz.note ?n tags: '(?first then: ?second)))")
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(
@@ -2216,11 +2228,11 @@ async fn it_keeps_a_list_and_takes_it_apart_by_its_first_items() -> Result<()> {
         .submit("(assert (xyz.note note:5 tags: '(:open :done)))")
         .await?;
     assert_eq!(
-        report(&mut notebook, "(query (xyz.note ?n tags: '(:open ...)))").await?,
+        report(&mut notebook, "(select (xyz.note ?n tags: '(:open ...)))").await?,
         vec!["(xyz.note note:5 tags: [:open :done])"]
     );
     let bare = notebook
-        .submit(r#"(query (xyz.note ?n tags: ("math" "engines")))"#)
+        .submit(r#"(select (xyz.note ?n tags: ("math" "engines")))"#)
         .await
         .map_err(|error| error.downcast::<Error>());
     assert!(matches!(bare, Err(Ok(Error::Refused(_)))), "{bare:?}");
@@ -2239,7 +2251,7 @@ async fn it_holds_a_symbol_with_no_domain_as_a_value_and_not_as_an_attribute() -
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.form ?f head: ?h var: ?v op: ?o))"
+            "(select (xyz.form ?f head: ?h var: ?v op: ?o))"
         )
         .await?,
         vec!["(xyz.form form:1 head: /todo op: /+ var: /?x)"]
@@ -2272,7 +2284,7 @@ async fn it_refuses_and_says_what_is_not_supported() -> Result<()> {
     // A variable in `unless` is one a premise binds.
     let unbound = notebook
         .submit(
-            "(query (xyz.todo ?t text: ?x)
+            "(select (xyz.todo ?t text: ?x)
                (xyz.todo ?t text: ?x)
                (unless (xyz.todo ?t list: ?l)))",
         )
@@ -2282,7 +2294,7 @@ async fn it_refuses_and_says_what_is_not_supported() -> Result<()> {
     // A formula inside `unless` has nowhere to go.
     let formula = notebook
         .submit(
-            "(query (xyz.counter ?c count: ?n)
+            "(select (xyz.counter ?c count: ?n)
                (xyz.counter ?c count: ?n)
                (unless (xyz.counter ?c count: (+ ?n : 1))))",
         )
@@ -2301,7 +2313,7 @@ async fn it_refuses_and_says_what_is_not_supported() -> Result<()> {
         matches!(why(retracted), Err(Ok(Error::Unsupported(said))) if said.contains("retracts a command"))
     );
     assert!(
-        report(&mut notebook, "(query (xyz.todo todo:9 text: ?x))")
+        report(&mut notebook, "(select (xyz.todo todo:9 text: ?x))")
             .await?
             .is_empty()
     );
@@ -2414,7 +2426,7 @@ async fn it_runs_the_table_on_a_branch() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     let (_, diagnostics) = notebook.submit(&the_table_without_its_views()?).await?;
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    let cells = "(query (table/cell ?c sheet: id:table/book/sheet1 at: ?at content: ?x))";
+    let cells = "(select (table/cell ?c sheet: id:table/book/sheet1 at: ?at content: ?x))";
     assert_eq!(report(&mut notebook, cells).await?.len(), 14);
 
     notebook
@@ -2445,7 +2457,7 @@ async fn it_runs_the_table_on_a_branch() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (xyz.tonk.table.cell/at id:table/book/s1!C4 ?at))"
+            "(select (xyz.tonk.table.cell/at id:table/book/s1!C4 ?at))"
         )
         .await?,
         vec![r#"(xyz.tonk.table.cell id:table/book/s1!C4 at: "C4")"#]
@@ -2458,7 +2470,7 @@ async fn it_runs_the_table_on_a_branch() -> Result<()> {
         .await?;
     let made = report(
         &mut notebook,
-        r#"(query (table/sheet ?s table: id:table/book name: "Sheet2" order: "n"))"#,
+        r#"(select (table/sheet ?s table: id:table/book name: "Sheet2" order: "n"))"#,
     )
     .await?;
     let entity = |row: &str| row.split_whitespace().nth(1).map(str::to_string);
@@ -2471,7 +2483,7 @@ async fn it_runs_the_table_on_a_branch() -> Result<()> {
     assert_eq!(
         report(
             &mut notebook,
-            "(query (table/sheet ?s table: id:table/book name: ?name order: ?order))"
+            "(select (table/sheet ?s table: id:table/book name: ?name order: ?order))"
         )
         .await?,
         vec![
@@ -2486,7 +2498,7 @@ async fn it_runs_the_table_on_a_branch() -> Result<()> {
             r#"(assert (table/create-column sheet: id:table/book/sheet1 at: "B" width: "80" time: 3))"#,
         )
         .await?;
-    let columns = "(query (table/column ?k sheet: id:table/book/sheet1 at: ?at width: ?w))";
+    let columns = "(select (table/column ?k sheet: id:table/book/sheet1 at: ?at width: ?w))";
     let column = entity(&report(&mut notebook, columns).await?[0]).expect("a column");
     notebook
         .submit(&format!(

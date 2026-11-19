@@ -554,16 +554,30 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
                 // A struct's key is a name spelled as a keyword,
                 // `{:of ?t :list ?l}`: a call's labels are its keys, and
                 // `(todo ?t list: ?l)` is sugar for that struct.
+                // The empty label, `:` alone, is the key of a member of a
+                // set: a set is a map with no names, `{: "errand" : "home"}`.
                 let named = match (label(&next.text), next.text.strip_prefix(':')) {
                     (Some(name), _) if !name.is_empty() => {
                         return Err((former_key(name), next.span));
                     }
-                    (Some(_), _) | (None, Some("")) => {
-                        return Err((Error::Read("a map key with no name".into()), next.span));
-                    }
+                    (Some(_), _) | (None, Some("")) => Some(""),
                     (None, Some(name)) => Some(name),
                     (None, None) => None,
                 };
+                // A map has names for every key or for none.
+                let unnamed = named == Some("");
+                if let Some((first, _)) = entries.first()
+                    && (first == &Form::symbol("")) != unnamed
+                {
+                    return Err((
+                        Error::Read(
+                            "a map that names some keys and not others: a set is a map with no \
+                             names, `{: 1 : 2}`, and a record names every key"
+                                .into(),
+                        ),
+                        next.span,
+                    ));
+                }
                 let key = match named {
                     Some(name) => {
                         *at += 1;
@@ -823,7 +837,13 @@ mod tests {
                 read(text)
             );
         }
-        assert!(matches!(read("{: 1}"), Err(Error::Read(why)) if why.contains("no name")));
+        // A map with no names is a set; one that names some keys and not
+        // others is refused.
+        assert!(read("{: 1}").is_ok());
+        assert!(matches!(
+            read("{:a 1 : 2}"),
+            Err(Error::Read(why)) if why.contains("names some keys and not others")
+        ));
         // A rest stays what it was.
         let rest = read("{:of ?t ... ?rest}").unwrap();
         let Form::Map(entries) = &rest[0] else {
@@ -860,6 +880,27 @@ mod tests {
                 "{:author ?who ... ?others}",
                 "(todo ?t ...)"
             ]
+        );
+    }
+
+    /// A set is a map with no names: each key is the empty label. It
+    /// reads, and prints back as it was written.
+    #[test]
+    fn it_reads_a_set_as_a_map_with_no_names() {
+        let forms = read(r#"{: 1 : 2} {: "errand" : "home"} {}"#).unwrap();
+        let Form::Map(entries) = &forms[0] else {
+            panic!("a map");
+        };
+        assert_eq!(
+            entries,
+            &vec![
+                (Form::symbol(""), Form::Number("1".into())),
+                (Form::symbol(""), Form::Number("2".into()))
+            ]
+        );
+        assert_eq!(
+            forms.iter().map(Form::to_string).collect::<Vec<_>>(),
+            vec!["{: 1 : 2}", r#"{: "errand" : "home"}"#, "{}"]
         );
     }
 

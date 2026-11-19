@@ -14,6 +14,36 @@ says how to cut a release.
 
 ## Unreleased
 
+### The notation asks with `select`, and `query` defines a query that collects
+
+[#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
+[design/macros/design-queries.md](./design/macros/design-queries.md).
+
+`dialog-notation` has a second layer above concepts and rules. `(query
+(todo/card ?t is: ?card) condition… (is ?card shape))` defines a query:
+a head like a concept's, its answer under `is:`, and conditions. A term
+of a read written `(collect ?x)` binds `?x` to the whole of that field,
+one row with a map, `{}` for none. Asking is `(select …)`.
+
+What this changes for you:
+
+- `(query condition…)` as a question is refused, with a message naming
+  `select`. Write `(select condition…)`.
+- A collection's field in a concept head is one entry, `block: {?k ?b}`.
+  A head that gives the key a field of its own, `key: ?k block: ?b`, is
+  refused.
+- `{: 1 : 2}` reads: a set is a map with no names. A record keeps it as a
+  list, its members in order, each once.
+- `collect` in a rule, a concept or a write, and a rule or concept that
+  applies a query, are refused.
+- `Step::Select` holds a `Selection`: the Dialog-DB queries to run and
+  `Selection::answer`, which puts their rows together.
+
+Why: no Dialog-DB query or rule can state a fold, and a rule that reads
+one could feed itself. A query is read only by whoever asks and by
+another query, so it collects freely, and it is evaluated in the
+notation over rows Dialog-DB gives.
+
 ### A rule can name an entity it did not read
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
@@ -1712,6 +1742,10 @@ most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
 
 ### Compatibility and migration
 
+- A set the notation writes into a record, `{: 1 : 2}`, is stored as a
+  list, which every release reads; it reads back as that list. Nothing
+  is rewritten, and a query is stored nowhere. Nothing for an embedder to
+  run.
 - Nothing stored or synced changes shape for `entity/derive`, and nothing
   is rewritten on upgrade. A rule that applies it is stored as any rule
   is, and a release without the formula cannot read that rule's body, as

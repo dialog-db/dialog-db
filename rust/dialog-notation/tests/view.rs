@@ -1647,8 +1647,8 @@ async fn it_renders_the_restated_views_with_nothing_and_with_a_little() -> Resul
             ("notebook/route", "ui", Some("site:2")),
         ],
         &[
-            r#"(assert (notebook notebook:1 title: "Plan" key: "N1" block: block:a))"#,
-            r#"(assert (notebook notebook:1 title: "Plan" key: "N2" block: block:b))"#,
+            r#"(assert (notebook notebook:1 title: "Plan" block: {"N1" block:a}))"#,
+            r#"(assert (notebook notebook:1 title: "Plan" block: {"N2" block:b}))"#,
             r#"(assert (notebook/block block:a notebook: notebook:1 source: "Hi"))"#,
             r#"(assert (notebook/block block:b notebook: notebook:1 source: "Text"))"#,
             r#"(assert (notebook/index-route site:1 repo: "r" branch: "main"))"#,
@@ -1809,13 +1809,13 @@ const INDEXES: &str = r#"
       (notebook ?n title: ?title))"#;
 
 const BOOKS: &str = r#"
-    (concept (book ?n key: ?k block: ?b)
+    (concept (book ?n block: {?k ?b})
       (xyz.book/?k of: ?n is: ?b as: :entity cardinality: :one by: :position))"#;
 
 const ORDER: &str = r#"
     (view book :order
       [:div {:class "order"} [:span {:data-block ?b :data-key ?k}]]
-      (book ?n key: ?k block: ?b))"#;
+      (book ?n block: {?k ?b}))"#;
 
 /// A patch said short: what it does, to what, and how deep.
 fn said(patch: &Patch) -> String {
@@ -2031,8 +2031,8 @@ async fn it_compares_tonks_rule_with_the_layered_plan() -> Result<()> {
     );
 
     let entries = [
-        r#"(assert (book book:1 key: "N2" block: block:b))"#,
-        r#"(assert (book book:1 key: "N1" block: block:a))"#,
+        r#"(assert (book book:1 block: {"N2" block:b}))"#,
+        r#"(assert (book book:1 block: {"N1" block:a}))"#,
     ];
     let entry = |block: &str, key: &str| {
         format!(r#"[:span {{:data-block "block:{block}" :data-key "{key}"}}]"#)

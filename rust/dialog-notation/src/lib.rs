@@ -40,7 +40,7 @@
 //! let trees = parse(
 //!     "(concept (task ?t title: ?x)
 //!        (xyz.todo ?t text: (:last (:text ?x))))
-//!      (query (task ?t title: ?x))",
+//!      (select (task ?t title: ?x))",
 //! )?;
 //! let mut analyzer = Analyzer::new()?;
 //! let analysis = analyzer.analyze(&trees);
@@ -63,6 +63,7 @@ pub mod kernel;
 pub mod parse;
 pub mod pattern;
 pub mod print;
+pub mod select;
 pub mod syntax;
 pub mod view;
 pub mod written;
@@ -76,6 +77,7 @@ pub use expand::{Expander, Position};
 pub use form::{Form, Part, read};
 pub use parse::{Parsed, parse, parse_document, parse_written};
 pub use print::print;
+pub use select::Selection;
 pub use syntax::{Parameters, Signature, Syntax};
 pub use view::plan::{Case, Condition, Layer, Place, Placed, Plan, Why};
 pub use view::tree::{

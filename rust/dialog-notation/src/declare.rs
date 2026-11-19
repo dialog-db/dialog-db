@@ -87,7 +87,8 @@ pub struct Key {
     /// What a key is, `by:`: `name` or `position`.
     pub by: String,
     /// The label the concept's head gives the key, where it is a head
-    /// field.
+    /// field. A key in an entry, `block: {?k ?b}`, has none: the entry
+    /// is the line's label.
     pub label: Option<String>,
 }
 
@@ -239,15 +240,27 @@ pub(crate) fn concept(
         })
         .collect();
     // The label the head gives each line's value and key.
+    // A collection's field is one entry, `block: {?k ?b}`: its label is
+    // the value's, and the key has none of its own.
     let labelled = |term: &Syntax| {
         head_operand.terms.iter().find_map(|(label, field)| {
-            (field == term && matches!(term, Syntax::Variable(_))).then(|| label.clone())
+            let value = match field {
+                Syntax::Map(pair) => match pair.as_slice() {
+                    [(_, value)] => value,
+                    _ => field,
+                },
+                _ => field,
+            };
+            (value == term && matches!(term, Syntax::Variable(_))).then(|| label.clone())
         })
     };
     for line in &mut lines {
         line.label = labelled(&line.is);
         if let Some(key) = &mut line.key {
-            key.label = labelled(&key.term);
+            key.label = head_operand.terms.iter().find_map(|(label, field)| {
+                (field == &key.term && matches!(key.term, Syntax::Variable(_)))
+                    .then(|| label.clone())
+            });
         }
     }
     let command = entity.is_none()
@@ -258,7 +271,7 @@ pub(crate) fn concept(
     // What a read of it compiles to: the descriptors Dialog-DB reads it
     // through.
     let query = Syntax::Application(
-        Box::new(Syntax::Reference("query".into())),
+        Box::new(Syntax::Reference("select".into())),
         Parameters {
             items: vec![head.clone()],
             ..Parameters::default()

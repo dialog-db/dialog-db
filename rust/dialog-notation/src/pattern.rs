@@ -157,6 +157,14 @@ pub fn matches(tree: &Syntax, pattern: &Syntax, bindings: Bindings) -> Option<Bi
             if entries.len() != patterns.len() {
                 return None;
             }
+            // An entry, `{?k ?b}`, is the one place a key is a variable:
+            // it takes the one entry of the tree, its key and its value.
+            if let ([(key @ Syntax::Variable(_), wanted)], [(given, value)]) =
+                (patterns.as_slice(), entries.as_slice())
+            {
+                let bindings = matches(given, key, bindings)?;
+                return matches(value, wanted, bindings);
+            }
             patterns
                 .iter()
                 .try_fold(bindings, |bindings, (key, pattern)| {
