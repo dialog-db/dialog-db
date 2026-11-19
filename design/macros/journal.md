@@ -1818,3 +1818,14 @@ Restating the table's views turned up what a directory is: a query whose head ha
 **Could not measure.** Rows read is node reads, not rows: counting the rows a scan visits needs a counter in dialog-query or dialog-repository, which this measurement does not change. Time is the dev build, not release.
 
 **Decision.** Not decided. Nothing is made faster.
+
+## 2026-11-18, Designing: rows or one answer, and what Datomic does
+
+**Asked.** Stage 2 keyed a row of markup by its head, so two rows of one head showed as one. The agent proposed refusing such a query; the maintainer leaned to aggregating whatever is many, unasked, with a variable moved into the head to get rows. Then: compare them, suggest something for pairs, and take Datomic seriously, since each time he thought he had a better idea he regretted it. Then: does Datomic write `[?g ...]`, and `(distinct ?tags)` reads well to him.
+
+**Learned.** Datomic does neither: rows by default, aggregates written in `:find`, trees from `pull`. Unasked aggregation loses which value goes with which when two of them are many, which is the maintainer's own question about pairing from the afternoon. Datomic pairs by collecting one value, a tuple; here the entry is that value. `[?a ...]` exists in Datomic, with both directions told apart by where it stands.
+
+The measurement that came in after (next entry but one above) bears on this: what costs is a row keyed by something other than an entity, which is exactly what several rows of one head need.
+
+**Decided.** Not decided: rows or one answer for a head; `distinct` for `collect`; a set always, with `merge` for a map.
+
