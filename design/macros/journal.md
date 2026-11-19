@@ -1640,3 +1640,11 @@ His second question is #712, his own: a collection premise is a positive join, s
 
 **Decided.** The maintainer's: report and fix on `main`. Done as #834 and #835 (draft), the read-side fix, and taken off #773 by a revert. Not decided, his: whether an entry's blanks are written out, with format 4; and #712.
 
+## 2026-11-18, Designing: the canonical form of a read
+
+**Asked.** Why the build still writes `(:entry (:all …))`, when the design's full spelling was agreed. Then, by the maintainer: the line should be canonical, the expansion is confusing and misleading, and a `claim` form he had considered.
+
+**Learned.** The form he met is the kernel's read, which nobody writes: no sketch, example or prelude rule holds one. The agent had shown it as if it were notation, and the reader does take it from a document. It contradicts the design in one place the agent had not seen: it writes picks, which `cardinality:` replaced. The pick-wraps-a-term form was the agent's proposal in kernel.md, never the maintainer's decision. What it is, plainly, is the engine's descriptor shown as syntax.
+
+**Decided.** Not decided. [design-canonical-read.md](design-canonical-read.md) sets the three side by side. The agent's hypothesis is the line, with the descriptor as compile output; `claim` is the simpler form and has met no reader.
+
