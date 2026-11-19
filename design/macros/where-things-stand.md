@@ -1,0 +1,47 @@
+# Where things stand, 2026-11-19
+
+A handoff note, written so the work can be picked up from the files alone. It is a snapshot; the [journal](journal.md) and the [ledger](claims.md) are the record.
+
+## Decided, by the maintainer
+
+- Two kinds. Rules and concepts give rows and never fold. A query nests and folds, and no rule reads one. ([design-queries.md](design-queries.md), and `research/notation/design.md` on `docs/notation`, #728.)
+- A query is `(query (name ?entity … is: ?answer) condition… (is ?answer shape))`; a view says `(view ?answer template)` there. Asking is `select`.
+- A collection's field is one entry, `block: {?k ?b}`. A set is a map with no names, `{: 1 : 2}`, stored in a record as a list.
+- The whole of a field is written on the read. The word is `distinct` (Datomic's); it always gives a set, of values or of whole entries, and a map is made where the answer is built, `{... ?entries}`. The build still says `collect` and gives a map directly.
+- The engine carries the fold, in a form of its own that no rule reads: an application over an inner query and a reduce. An authored rule still cannot fold (`open_rule_error` stays). The engine gets an aggregator for the set of values. The notation is an interface to the engine and evaluates nothing itself. (#830, `design/named-fold`.)
+- Keeping a fold current under a subscription is a gap to close. (#837, `design/fold-maintenance`.)
+- A query's definition is kept and synced as a concept's, a rule's and a macro's are.
+
+## Built and pushed on `feat/notation-poc` (#773)
+
+- Stage 1 and 2: queries, `collect`, `select`, entries, sets, views as queries with exact patches (`76a234e`, `6fea503`). Evaluated in the notation crate in memory, which was the wrong place.
+- The cost of that, measured (`examples/cost.rs`, `0c9af72`): one change among 1000 to-dos takes 110 to 145 ms against under 1 ms for a plain subscription, and `select` of one card 57 s. Both are the build's own doing: a made-up row entity for every layer, and answering in memory.
+
+## Running when this was written
+
+| thread | doing | where its work lands |
+|---|---|---|
+| build | the engine's folding query, the `distinct` aggregator, the notation lowered onto them, and the cost measured again | commits on `feat/notation-poc`; engine commits there must move to a pull request of their own below #773 |
+| research | the literature on incremental aggregation | a report to be filed under `design/fold-maintenance/` on #837 |
+| research | how tonk keeps a view current today | the same |
+
+Reported and filed: how a subscription is kept current today (`design/fold-maintenance/subscriptions-as-built.md` on #837), and [definitions on the branch](definitions-on-the-branch.md).
+
+## Open, in the order to take them
+
+1. The numbers from the build thread, against the bars in the ledger.
+2. #837: a problem statement and an approach for keeping a fold current. What is known: a poll returns a change, but a subscription keeps a flat answer and nothing for a group, learns a row stopped holding only by deriving the entity again, and asks the whole query again when a fold is in reach. So folding the changes needs signed changes of a rule's rows, which nothing produces today.
+3. Definitions on the branch, for concepts, macros and queries together: three options in [definitions-on-the-branch.md](definitions-on-the-branch.md), none chosen.
+4. Rows of one head: Datomic gives a row for each; the maintainer leaned to aggregating. Not decided.
+5. What two entries of one key leave when a set of entries becomes a map.
+6. A bar for "lightning fast": proposed as not growing with the page and within 2 times a plain subscription on a release build. Not answered.
+7. No reader round has seen any of the query forms.
+
+## Other pull requests
+
+- #835, `fix/blank-entry-read`: a stored rule reading an entry with key and value blank did not read back. Off `main`, green, draft.
+- tonk-labs/tonk#1338: the notation in tonk, pinned to a revision older than all of the above.
+
+## To build here
+
+Every cargo call went through one lock, one job, one target directory, on 8 GB. On a machine without those limits the build thread's work, definitions on the branch and the maintenance work can each have a worktree.
