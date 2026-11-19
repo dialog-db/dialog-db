@@ -12,3 +12,13 @@ He asked that the work go as far as it can overnight on the agent's judgment, ea
 | 6 | Taking a name away retracts the pointer and leaves the definition | Datomic: retract the ident, keep the entity | | retract the definition too |
 | 7 | The source map holds the revision a name was resolved at only when the caller gives one | the journal of 2026-11-11 lists it; the crate does not know a revision | | make it required |
 | 8 | Definitions that refer to each other are not designed for | none exists in the prelude or any sketch, a query that calls itself is refused, and a rule refers to a concept's attributes, not to its rules | `definitions-plan.md`, the count; tonk's library not counted | design the cycle when one is wanted |
+| 9 | A fold's subscription is `Branch::subscribe_fold`, a type beside `Subscription`; `Branch::subscribe` of a fold still asks again whole | built on `wip/engine-fold` (`9c86637` to `52bf3d8`): 8 randomized tests, one for each fold, equal a fresh select after every poll, floats to the bit; one tag among 200 groups folds 1 group | the worker's report, 2026-11-19 | make `subscribe` dispatch to it |
+| 10 | A conclusion is turned back into bindings by a new `Application::bindings`, default none | the fold needs rows and a subscription reports conclusions | the same | carry matches in a subscription's delta |
+| 11 | One outer poll reads one revision by stamping the branch before and after its two inner polls and polling again if it moved, up to 8 rounds; past that it reports what it has and the next poll corrects it | a subscription evaluates against the live branch and cannot be pinned today | the same; 🟡 under writes arriving faster than 8 polls an answer of two revisions can be reported once | give a subscription a pinned view to poll against |
+| 12 | Rows of an inner query are a set: one row given twice is folded once | attribute and concept queries never give one twice | the same | count rows |
+
+Found on the way and not acted on, each to be checked against main before anything is done:
+
+- A stored float whose value is integral reads back as an integer, and `sum` then refuses the mix of float and integer. Met by the fold's float test, which had to avoid 1e16.
+- `max` cannot order an unsigned integer against a signed one.
+- The fold's own cost is nothing (B8 within 1.1 times its inner subscriptions) but the notation's inputs query is a rule whose head is an entity made of the row's values, so its subscription costs 141 ms among 1000 where a rule keyed by the to-do costs 3. The notation's to fix.
