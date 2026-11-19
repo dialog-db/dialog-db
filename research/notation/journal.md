@@ -24,6 +24,7 @@ What we tried, what it measured, and what we decided, newest last. The [idea](..
 - **R27:** rules without `when` read as well as with it, 70 of 70 points in both; every reader read a domain call as stored facts only, which is not what dialog does.
 - **Next:** settle what [implementation](implementation.md) found the design must decide first (rounds, `:top` ranking, authority, `fresh`), then build the front end in its order.
 - **Open:** whether commands are asserted or written; what a rule head that names no entity lands on; whether questions stay calls with variables or become rules into a domain-call head; text literals; optional parameters. The design's Open list has the rest.
+- **2026-11-18, not read by any round:** a second kind beside rules, the query, which nests and collects and which no rule reads; a view is a query whose answer is markup; a collection's field is one entry, `{?k ?v}`; the whole of a field is `(collect ?x)`, a record by key or a set; asking is `select`. Folds leave rule heads. Argued in [design-queries.md](https://github.com/dialog-db/dialog-db/blob/feat/notation-poc/design/macros/design-queries.md) on #773, where it is being built.
 
 ## Datasets
 
@@ -1054,4 +1055,23 @@ Set aside: deriving names from the wrapped concept (coordination between layers)
 Set aside: views as derived attributes, `list/card` (views could not be listed by name, and the user wanted `(view todo …)`); `(rule (view list :card …))` read as a stored definition (a rule re-derives when its data changes); a record or a declared `on/toggle` as the binding (no visible tie to the event).
 
 **Decision.** The design takes it as proposed. Listing a concept's views needs the engine to index a rule's conclusion constants.
+
+## 2026-11-18 — Queries, `collect`, and `select`
+
+**Question.** What reads a concept and shapes the answer, when a notebook with no block is no row of a concept that reads its blocks, a to-do with no tag must keep its row in a view, and a count of nothing must be 0.
+
+**Method.** Design sittings with the maintainer, with a sketch of each form and what it answers, against Datomic's `pull` and `:find`, GraphQL and EdgeQL. No reader round. The sittings are journaled in `design/macros/journal.md` on `feat/notation-poc` (#773), and the forms, with every alternative set aside, in [design-queries.md](https://github.com/dialog-db/dialog-db/blob/feat/notation-poc/design/macros/design-queries.md).
+
+**Results.** Captured in [design](design.md):
+
+- Two kinds. Rules and concepts give rows, may recurse and never collect. A query nests and collects, and no rule reads one, so a fold cannot feed itself. Datomic draws the same line between `:where` and `:find`.
+- `(query (name ?entity … is: ?answer) condition… (is ?answer shape))`. The head is a concept's; the shape is said in the body. A view says `(view ?answer template)` there.
+- Everything in one query is required. The whole of a field, none included, is `(collect ?x)` on the read: a record by key for a collection, a set for many plain values, and `{}` for none. A fold is a function of it, so counting nothing is 0.
+- A collection's field in a head is one entry, `{?k ?v}`, in place of a key field and a value field.
+- A set is a record with no names, `{: 1 : 2}`.
+- Asking is `select`, which read as well as `query` in R24 and R25.
+
+Set aside, each for a reason in the note: the fold over an entity and nested view references of 2026-11-17; a marker attribute on the repeating element, as tonk's templates have; a template with nested queries; a collection that carries its own conditions; a spread, `{... ?x}`, which does not say whether it takes a value apart or puts rows together; `all`, `list`, `many` and a spelling of the variable for `collect`; a bare call for asking.
+
+**Decision.** The maintainer's, form by form. Derived attributes no longer fold, and the zero written by a second rule (the entry of 2026-11-16, Empty groups) is no longer needed. What a reader makes of any of it is not known.
 

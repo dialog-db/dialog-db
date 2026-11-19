@@ -65,7 +65,8 @@ A run goes on tick by tick while a tick lands something, up to a turn limit. No 
 | Keyword | `:done`, `:text`. A keyword is an entity: `:done` is `done:`, with the colon in front so it is not read as a label. Keywords serve where other languages use them: types, cardinalities and the cases of a variant. |
 | Entity | a URI: `todo:9c1e`, `did:key:z6Mk…`, `tonk:notebook/edge` |
 | Variant | `[:open :done]`, a type whose value is one of these cases, listed in order |
-| Record | `{"N1" id:notebook/scratch/1}`, the value of a collection |
+| Record | `{:title "Buy milk" :done true}`, or keyed by text, `{"N1" id:notebook/scratch/1}` |
+| Set | `{: "errand" : "home"}`, a record with no names. `{}` is the empty set and the empty record |
 | Domain | `xyz.todo`, a namespace of attributes |
 | Attribute | `xyz.todo/title`, written in full on every line that reads or writes it |
 | Name | `todo`, the name of a concept |
@@ -94,10 +95,11 @@ In a question or a premise, a parameter left out matches anything. In an `assert
 
 A document is a set of top-level forms evaluated as one run. The order of its forms does not matter. A top-level form is one of:
 
-- a question, `(query …)`;
+- a question, `(select …)`;
 - a write, such as `(assert (todo/add list: list:home text: "Buy milk"))` or `(assert (xyz.todo/state of: todo:9c1e is: :done))`;
 - a `rule`;
-- a `concept`.
+- a `concept`;
+- a `query`.
 
 A write at the top level is ground, or has a `when` that binds its variables (see [Writes succeed what they read](#writes-succeed-what-they-read)). A bare call, with variables or without, is not a top-level form.
 
@@ -113,14 +115,14 @@ In R23, 8 of 10 readers preferred this to a `!` at the top level deciding the co
 ## Questions
 
 ```clj
-(query (todo ?t list: list:home state: :open))
+(select (todo ?t list: list:home state: :open))
 ```
 
 A question's answer is the rows of variable bindings that match what holds in the tick, including what the document asserts and deduces. It changes nothing, in either kind of run.
 
-A concept a question names must be declared, installed or in the same document, or the question is a compile error. An attribute needs no declaration: `(query (xyz.todo/text of: ?t is: ?x))` reads whatever the attribute holds. A reader's default is the other way: in R25, 16 of 20 expected an undeclared concept to answer nothing, as an unknown relation does in Datalog.
+A concept a question names must be declared, installed or in the same document, or the question is a compile error. An attribute needs no declaration: `(select (xyz.todo/text of: ?t is: ?x))` reads whatever the attribute holds. A reader's default is the other way: in R25, 16 of 20 expected an undeclared concept to answer nothing, as an unknown relation does in Datalog.
 
-`query`, `select`, `find` and `(? …)` read alike, with documentation (R24) and without (R25), and no reader misread any of them. `query` is the maintainer's choice. A query form and a document run as a query mean the same thing: they read and change nothing.
+`query`, `select`, `find` and `(? …)` read alike, with documentation (R24) and without (R25), and no reader misread any of them. `select` is the maintainer's choice, since `query` names what is defined (see [Queries](#queries)). A question and a document run as a query both read and change nothing.
 
 ## Concepts
 
@@ -182,37 +184,25 @@ Ties fall to cause, then to the value's hash, so every order is total and every 
 - An elector returns one of its claims, so a write binds it: `(assert (account acct:1 status: :active))` writes `?s = :active` through the line, which under `:many` adds a claim. The read still gives `:suspended` while `:suspended` is held. Un-suspending is retracting it.
 - In R45 a ranking in a rule's conclusion, `([:suspended :active :registered] ?state)`, was invisible without a sentence: 0 of 20 readers kept `:suspended` after `:active` was asserted again, and 20 of 20 with one.
 
-Only electors fold in a concept. A fold that computes a value, `count`, `sum`, `avg`, binds none of what it read, so nothing could be written through it, and a concept stays two-way. Those conclude into a concept's domain (below).
+Only electors fold in a concept. A fold that computes a value, `count`, `sum`, `avg`, binds none of what it read, so nothing could be written through it, and a concept stays two-way. Those belong to a query (see [Queries](#queries)).
 
 ### Derived attributes
 
 A rule may conclude an attribute in a concept's own domain, named under the concept:
 
 ```clj
-(rule (list/count-open ?l (count ?t))
+(rule (list/open ?l ?t)
   (list ?l)
   (todo ?t list: ?l state: :open))
 
-(list/count-open list:home ?n)
+(list/open list:home ?t)
 ```
 
-- `list/count-open` is an attribute in the domain of the `list` concept: the concept's hash and the name `count-open`. It is hash-addressed like any attribute, and the name matters only inside that domain.
-- A concept's domain is concluded only. Asserting `list/count-open` is an error. A stored domain, `xyz.todo`, holds facts; a concept's domain holds what rules conclude about its entities. Which is which shows in the name.
-- **Folds conclude only into a concept's domain**, choosing or computing: `count`, `all`, a view. A stored attribute never holds a folded value, so a stored `5` can never beat a count.
-- A fold sees only the rows that exist. A list with no open to-dos has no group, so `(list/count-open list:home ?n)` matches nothing, as in Datalog and Datomic. A zero is written, not implied, over a domain and with `unless`:
-
-  ```clj
-  (rule (list/count ?l status: ?s count: (count ?t))
-    (todo ?t list: ?l state: ?s))
-
-  (rule (list/count ?l status: ?s count: 0)
-    (list ?l)
-    (todo/state ?s)
-    (unless (todo _ list: ?l state: ?s)))
-  ```
-
-- A variant is the relation of its cases. A keyword is an entity, so `[:open :done]` gives `open:` and `done:`, and `(todo/state ?s)` ranges over them, as a Datomic query ranges over idents. That is what gives a zero its domain.
-- Everything derived about a list is found under `list/`.
+- `list/open` is an attribute in the domain of the `list` concept: the concept's hash and the name `open`. It is hash-addressed like any attribute, and the name matters only inside that domain.
+- A concept's domain is concluded only. Asserting `list/open` is an error. A stored domain, `xyz.todo`, holds facts; a concept's domain holds what rules conclude about its entities. Which is which shows in the name.
+- **A rule does not compute a fold.** `count`, `sum`, `avg` and collecting belong to a query, which no rule reads (see [Queries](#queries)). So neither a stored attribute nor a concluded one holds a folded value, and a stored `5` can never beat a count.
+- A variant is the relation of its cases. A keyword is an entity, so `[:open :done]` gives `open:` and `done:`, and `(todo/state ?s)` ranges over them, as a Datomic query ranges over idents.
+- Everything derived about a list is found under `list/`, its queries too.
 
 ### Layers
 
@@ -231,19 +221,22 @@ Readers read the composite with no help (20 of 20 in R43 and R44). Retracting th
 
 ### Collections
 
-A collection's keys are its attribute names, as in dialog today: a notebook's `N5` is the attribute `xyz.tonk.notebook/N5`. A line over a collection leaves the key as a variable in the name, and `by:` says what a key is, `:name` for a dictionary or `:position` for a sequence:
+A collection's keys are its attribute names, as in dialog today: a notebook's `N5` is the attribute `xyz.tonk.notebook/N5`. A line over a collection leaves the key as a variable in the name, and `by:` says what a key is, `:name` for a dictionary or `:position` for a sequence. In the head the field is one entry, a key and its value together:
 
 ```clj
-(concept (element-method ?e name: ?n source: ?s)
+(concept (element-method ?e method: {?n ?s})
   (xyz.tonk.element.method/?n of: ?e is: ?s as: :text cardinality: :one by: :name))
 
-(concept (notebook-entry ?b at: ?p block: ?x)
+(concept (notebook-entry ?b block: {?p ?x})
   (xyz.tonk.notebook/?p of: ?b is: ?x as: :entity cardinality: :one by: :position))
 ```
 
 - `/?n` reads one row per key. All 100 readers in R46 read it that way without being told.
 - `by:` is part of the attribute's identity, as dialog's `Keyed::Dictionary` and `Keyed::Sequence` are, so it goes on the line. Without it, 18 of 20 readers took a sequence's `N1` for an opaque id (R46); with it, 20 of 20 told them apart.
-- The key is a head field, and a concept holds one collection only: two would give a row for every pair of their entries.
+- An entry is one head field, `{?p ?x}`, so a key is never apart from its value. R46's readers saw the key as a field of its own; the entry as one term has met no reader.
+- `(notebook-entry ?b block: {?p ?x})` is a row for each entry, and no row where there is none. The whole of a collection, none included, is read in a query with `collect` (see [Queries](#queries)).
+- A write goes through one entry: `(assert (notebook-entry notebook:scratch block: {"N3" block:x}))`. The whole is not written.
+- A concept holds one collection only: two would give a row for every pair of their entries.
 - `cardinality:` applies to each entry.
 
 An entry is a fact, so entries written on two devices merge key by key. A record value is one value: opaque to queries, and two concurrent writes of it elect one whole record.
@@ -346,7 +339,7 @@ Two devices that `todo/add` the same list and text make one to-do; every `note/j
 A conclusion is one of:
 
 - a concept or an attribute, a deduction: it holds in this tick while the conditions do, and is never stored;
-- an attribute in a concept's domain, `(list/count-open ?l …)`, a deduction whose value may fold;
+- an attribute in a concept's domain, `(list/open ?l …)`, a deduction about the concept's entities;
 - a command, which holds in this tick for other rules to read;
 - `(assert …)` or `(retract …)`, which lands after the tick. A rule that asserts a command issues it for the next tick, where it holds for that tick only.
 
@@ -384,7 +377,7 @@ Rules derive to a fixpoint, recursion included, and a rule's conclusion holds wh
 (rule (xyz.app.open/text of: ?t is: ?x)
   (todo ?t text: ?x state: :open))
 
-(query (xyz.app.open/text of: ?t is: ?x))
+(select (xyz.app.open/text of: ?t is: ?x))
 ```
 
 Re-issuing a command in a later tick, which `!` did, is open (below).
@@ -419,58 +412,105 @@ An elector is a choice of merge, which Bloom^L would call a lattice. A `:many` r
 
 A remote call, Unison's `fork` and `await`, is a layer on top: a request sent, a rule at the peer that answers, and a rule that matches the reply to its request by the request's entity.
 
-## Views
+## Queries
 
-**Proposed.** `(view concept name template condition…)`: the concept the view renders, its name, the template, and the conditions that bind the template's variables.
+Decided 2026-11-18 in design sittings with the maintainer, and argued in full in [design-queries.md](https://github.com/dialog-db/dialog-db/blob/feat/notation-poc/design/macros/design-queries.md). No reader round has seen these forms.
 
-```clj
-(view todo :row
-  [:li
-    [:input {:type "checkbox"
-             :checked ?done
-             :on/change (todo/toggle todo: ?t checked: .currentTarget.checked)}]
-    [:span ?title]]
-  (todo ?t title: ?title done: ?done))
-
-(view list :card
-  [:article
-    [:h2 ?name]
-    [:p ?count " open"]
-    [:ul {view: :row  of: ?t}]]
-  (list ?l name: ?name)
-  (list/count-open ?l ?count)
-  (todo ?t list: ?l))
+```mermaid
+flowchart LR
+  A["attributes<br/>stored claims"] --> R["rules and concepts<br/>rows · may recurse · never collect"]
+  R --> Q["queries<br/>trees · nest · collect"]
+  Q --> Q
+  Q --> C["whoever asks:<br/>a person, an agent, a renderer"]
+  Q -. never .-> R
 ```
 
-A concept has as many views as names, `:row`, `:card`, `:detail`, and one view per name, as in tonk's views dictionary today.
+A rule's conclusion is read by other rules, so a fold in a head can feed itself. A query's answer is read by whoever asked and by a query above it, never by a rule, so it collects freely. Datomic draws the same line: an aggregate stands in `:find` only, and a tree comes from `pull`.
 
-### What it expands to
+```clj
+(query (todo/card ?t is: ?card)
+  (todo ?t title: ?title)
+  (todo/tag ?t tag: (collect ?tags))
+  (is ?card {:title ?title :tags ?tags}))
 
-**A rule.** `(view todo :row TEMPLATE CONDITIONS…)` is a deductive rule concluding the built-in relation `view`, with the template folded into its value: `(rule (view todo :row ?markup) CONDITIONS…)`. It is deductive, so nothing runs until something renders it, and nothing is stored. Like every rule it is indexed by what it concludes; indexing the conclusion's constants, `todo` and `:row`, as well lets the views of a concept be listed. That index is an engine addition.
+(select (todo/card ?t is: ?card))
+```
 
-**The entity.** The conditions apply the view's concept exactly once, `(todo ?t …)`, and that application's entity is the one rendered: rendering `:row` for `todo:9c1e` runs the conditions with `?t` bound to it. No application of the concept, or two, is an analysis error.
+- **The head** is a concept's head. `is:` is the field that holds the answer. A field passed bound is a parameter, as with any relation. A query is named under its concept, as a derived attribute is.
+- **The body** is conditions, and `(is ?x shape)`, which says what a variable is: a record, a function of other variables, or a term.
+- **A call** is the head applied, a condition like any other: `(todo/card ?t is: ?card)`. Only a query or a question may call a query.
+- Every condition is required: one row for each way all of them hold.
 
-**The fold.** The conditions give rows, and the template is filled once per entity from all of them:
+### One at a time, or the whole
 
-- An element repeats once per distinct combination of the values of the variables it holds directly that take more than one value; otherwise it renders once. `[:li ?title]` over three titles is three `li`.
-- Values from one row stay together. An element holding `?title` and `?done` repeats per pair, so each check box keeps its own title.
-- There is no `for` and no loop form: anything can be many, and many repeats, as tonk's templates do today.
+| | one at a time: a row for each, and no row for none | the whole: one row, and empty for none |
+|---|---|---|
+| many values | `(todo/tag ?t tag: ?g)` | `(todo/tag ?t tag: (collect ?tags))`, a set |
+| a keyed collection | `(notebook-entry ?b block: {?p ?x})` | `(notebook-entry ?b block: (collect ?blocks))`, a record by key |
 
-**The value.** The result is a markup value, opaque to queries like any record value: an element is its tag, its attributes and its children, and text is text. A vector is markup, as in Hiccup.
+"Buy milk" is tagged `errand` and `home`, and "Call mum" has no tag. `todo/card` answers:
 
-**Nested views** are references, `{view: :row of: ?t}`, never markup. The renderer resolves each one and subscribes to it, so a change re-renders the smallest view it touches: a renamed to-do re-renders its `li`, not the card.
+| `?t` | `?card` |
+|---|---|
+| Buy milk | `{:title "Buy milk" :tags {: "errand" : "home"}}` |
+| Call mum | `{:title "Call mum" :tags {}}` |
+
+With `(todo/tag ?t tag: ?g)` in its place, "Call mum" has no row. The query says which it wants.
+
+- `collect` stands where an elector does. `(top ?s)` chooses one of a field's claims; `(collect ?s)` takes every one.
+- What comes out is a record either way: with its keys for a keyed collection, and with no names, a set, for many plain values. Never a list: many values have no order, and a sequence's order is in its keys. A record stores a set as a list.
+- A pattern takes one value apart; `collect` puts many rows together.
+- **A read that collects never gates**, as `unless` never binds. So every other term in it is bound by a required condition, a constant, or blank. A query of an entity that only collects is refused: nothing would say which entities. A query of no entity that only collects answers once, and that is an index.
+- `collect` is a fold, so it is refused in a `rule` and in a `concept`.
+- **A fold is a function of what was collected:** `(count ?tags)` is 2 and 0 above. Counting nothing gives 0, with no second rule to write the zero.
+- An item built from more than one field is a query of its own, and its answers are collected: `(todo/chip ?t is: (collect ?chips))`. An answer that is an entry, `is: {?k ?s}`, collects into a record by key.
+
+## Views
+
+A view is a query whose answer is markup, said by `(view ?x template)` where `is` would stand:
+
+```clj
+(query (todo/chip ?t tag: ?g is: ?chip)
+  (todo/tag ?t tag: ?g)
+  (view ?chip [:span {:class "tag"} ?g]))
+
+(query (todo/row ?t list: ?l is: ?row)
+  (todo ?t list: ?l title: ?title done: ?done)
+  (todo/chip ?t is: (collect ?chips))
+  (view ?row
+    [:li
+      [:input {:type "checkbox"
+               :checked ?done
+               :on/change (todo/toggle todo: ?t checked: .currentTarget.checked)}]
+      [:span ?title]
+      ?chips]))
+
+(query (list/card ?l is: ?card)
+  (list ?l name: ?name)
+  (todo (collect ?open) list: ?l state: :open)
+  (todo/row _ list: ?l is: (collect ?rows))
+  (view ?card
+    [:article
+      [:h2 ?name]
+      [:p (count ?open) " open"]
+      [:ul ?rows]]))
+```
+
+**What repeats.** A query's answer is its template once for each row of its conditions, and only a read that collects makes many of anything. There is no `for`, no loop form, and nothing is inferred from where a variable stands. A to-do with no tag keeps its `li`, and a list with nothing on it shows its card with an empty `ul` and `0 open`.
+
+**An index** is a query with no entity that collects, so it stands when there is nothing to show:
+
+```clj
+(query (list/index is: ?index)
+  (list/card _ is: (collect ?cards))
+  (view ?index [:main ?cards]))
+```
+
+**The value.** The answer is a markup value, opaque to queries like any record value: an element is its tag, its attributes and its children, and text is text. A vector is markup, as in Hiccup. Collected markup stands as children: under keys, in the order of the keys; as a set, in a stable order.
 
 **Event bindings.** An attribute `:on/<type>` holds the command its element posts, every field accounted for: from the conditions' variables (`todo: ?t`), or from the live event, written as a path (`.currentTarget.checked`, `.detail.amount`, `.timeStamp`). A path is allowed only in an event binding. It expands to data on the element: the event type, the command, the bound values, and the paths still to read. The renderer listens for `<type>` at the view's root. When an event reaches an element with a binding, it reads the paths, takes each value as the command field's `as:` wants, and asserts the command. A path that does not resolve means nothing posts. A `submit` binding prevents the default. The analyzer checks a binding like any call: every field of the command, and nothing else.
 
-**The DOM.** The renderer turns a markup value into DOM and patches it on a change: an element by its position in its parent, a repeated element by the row values it repeats over, so a new to-do inserts one `li`. A value bound to `:checked`, `:value` or `:selected` sets the property, not the attribute. Order comes from positional dictionaries, which sort by position, or from CSS `order`; unordered values keep a stable order between renders.
-
-A view whose template is a record instead of markup is a query, called by name for data:
-
-```clj
-(view list :summary {name: ?name  open: ?count}
-  (list ?l name: ?name)
-  (list/count-open ?l ?count))
-```
+**The DOM.** A view is maintained, not rendered again: the renderer subscribes to each query and patches on a change, so a new to-do inserts one `li` and a renamed one sets one text. A value bound to `:checked`, `:value` or `:selected` sets the property, not the attribute.
 
 ## Prior art
 
@@ -488,9 +528,10 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 | LogiQL: constructor predicates make entities from a key. | `id` and `fresh` in a command's rule. |
 | LogiQL: `exec` runs a block once, `addblock` installs it. | A query runs a document's rules once; a transaction installs them. |
 | Bloom: a row's fields stay together because a row is one tuple. | A command's rows are keyed by its name and content. |
-| Bloom^L: lattices merge without coordination. | Electors are merges; `last` is the one that needs a clock. Computing folds are not, and conclude only into a concept's domain. |
-| Datomic: cardinality one replaces, many adds; aggregates live in `:find` and group by what is not aggregated. | `cardinality:` does the same for writes; every fold, views included, groups the same way. |
-| Hiccup: markup as vectors, events as attributes (Reagent's `:on-click`). | A view's template, a fold over its conditions' rows, with commands bound inline. |
+| Bloom^L: lattices merge without coordination. | Electors are merges; `last` is the one that needs a clock. Computing folds are not, and belong to queries. |
+| Datomic: cardinality one replaces, many adds; aggregates live in `:find`, never in a clause or a rule, and a tree comes from `pull`. | `cardinality:` does the same for writes; folds and trees live in queries, which no rule reads. |
+| Datomic's `pull`, GraphQL's selection sets, EdgeQL's shapes: the answer has the shape asked for. `pull` leaves a missing attribute's key out; EdgeQL gives the empty set; GraphQL and EdgeQL filter in a nested part, `pull` cannot. | A query's `is`. `collect` gives the empty record for none, and an item with conditions of its own is a query that is collected. |
+| Hiccup: markup as vectors, events as attributes (Reagent's `:on-click`). | A view's template, filled once for each row of its query, with commands bound inline. |
 | tonk's `event!:` declarations, `on:<name>=<command>` bindings. | Inline bindings: the command written in full at the element, with paths for what the event fills. |
 
 ## Open
@@ -507,7 +548,7 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 - Whether a type filters before an elector chooses or after. With two text claims, `"Buy milk"` and a newer `42`, under `as: :text`, typing first gives `"Buy milk"` and electing first gives nothing.
 - What retract takes for a collection concept: `(retract (notebook-entry notebook:scratch))` names every entry; it likely needs the entity and the key.
 - What two concurrent blind writes on a `:one` line leave: each succeeds what was live where it landed, so both stay live for the next read to elect.
-- Optional fields and defaults. `(option ?x)` in a head read correctly once in six (R2). Proposed on the line: `optional: true`, and `default: :open`, which is `optional` with `Coalesce` on read. A default cannot be a rule on its own attribute: that is a cycle through negation.
+- Optional fields and defaults. `(option ?x)` in a head read correctly once in six (R2). Proposed on the line: `optional: true`, and `default: :open`, which is `optional` with `Coalesce` on read. A default cannot be a rule on its own attribute: that is a cycle through negation. In a query an optional field is the whole of it, none or one; in a rule there is no spelling yet.
 - Whether a query holds several calls answered jointly, and whether questions stay calls or become rules into a relation head.
 - How text spans lines or holds `"`. The sketches write templates as `"""…"""`, which is not part of the notation.
 - Rows without an entity, such as a set of pairs, and relations without a value, such as a set of entities: every fact needs an entity and a field.
@@ -519,9 +560,18 @@ Comparing the design with [Bloom](http://bloom-lang.net), Dedalus and LogiQL set
 - Whether templates name models by concept name rather than by pinned URI.
 - The sketches, which predate commands.
 - The YAML spelling.
-- The cardinality work (`claude/pick-strategy-rules-crdt-tvdpm7`, #793) lets any deductive rule fold and ranks a fold's value against stored claims. The notation puts electors only in concept heads and every other fold only into a concept's domain, which is concluded only, so a folded value never competes with a stored claim. The engine and the notation have to agree on this.
+- The cardinality work (`claude/pick-strategy-rules-crdt-tvdpm7`, #793) lets any deductive rule fold and ranks a fold's value against stored claims. The notation puts electors only in concept heads and every other fold in queries, which no rule reads, so a folded value never competes with a stored claim. The engine and the notation have to agree on this.
 - A rename under `:many` when the old value is on another layer leaves the old value beside the new one.
 - How a rule names a variant's cases: `(todo/state ?s)`, the concept's domain and the field, is the spelling used so far.
 - Event flags beyond `submit`'s prevented default: spelling `stopPropagation`, or a `submit` that keeps the default.
-- Routes, which [macros](macros.md) left as they were, now that views are a form of their own.
+- Routes, which [macros](macros.md) left as they were, now that a view is a query.
 - How a concept's domain is spelled when the concept's name is ambiguous: `list/` resolves by name in the document.
+- Queries, `collect`, the entry as one term and `select` have met no reader.
+- A document run "as a query" now shares its word with the form that defines a query.
+- A fold with nothing to give: `count` and `sum` of nothing are 0, and `max` has none. Datomic's `pull` leaves the key out.
+- A limit on what is collected. `pull` stops at 1000 unless told.
+- A query that calls itself: a thread, an outline. `pull` allows it, with a depth, and stops at an entity it has met.
+- How a renderer finds the view for an entity: likely the name under its concept, `todo/row` for a row of a `todo`.
+- What tells one row from another while a view is maintained, so a to-do renamed is one text set.
+- A rule that must read a fold. None is known; `unless` says "none", and nothing says "at least three". Stratifying folds in rules is a check over a whole program, and rules arrive from peers.
+- Whether a concept is needed at all, when a condition may be a line.
