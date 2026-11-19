@@ -526,7 +526,7 @@ fn list_bytes(items: &[&str], width: usize) -> Vec<u8> {
     } else {
         starts[1..]
             .iter()
-            .flat_map(|start| start.to_be_bytes()[8 - width..].to_vec())
+            .flat_map(|start| (*start as u64).to_be_bytes()[8 - width..].to_vec())
             .collect()
     };
     out.push((offsets.len() + body.len()) as u8);
@@ -598,6 +598,45 @@ fn it_refuses_a_varint_longer_than_it_needs() {
     // The table's count, 0, in two bytes.
     let bytes = [TABLE, 0x80, 0x00, 0, LIST, 0, 0];
     assert!(matches!(refused(&bytes), CompositeError::Malformed));
+}
+
+/// A five-byte varint past `u32::MAX` is refused on every target. On a
+/// 32-bit target a `usize` would keep only its low bits, and the table's
+/// count, 2^32 here, would read as 0.
+#[dialog_common::test]
+fn it_refuses_a_varint_past_what_four_byte_offsets_reach() {
+    let bytes = [TABLE, 0x80, 0x80, 0x80, 0x80, 0x10, 0, LIST, 0, 0];
+    assert!(matches!(refused(&bytes), CompositeError::Malformed));
+    // The largest a varint may be still reads, and is refused only because
+    // the bytes do not hold that many keys.
+    let largest = [TABLE, 0xFF, 0xFF, 0xFF, 0xFF, 0x0F, 0, LIST, 0, 0];
+    assert!(matches!(refused(&largest), CompositeError::Malformed));
+}
+
+/// The bytes of a few fixed composites, so an encoding that differs between
+/// a 32-bit target (wasm32) and a 64-bit one cannot pass. The list of
+/// `SCAN_LIMIT + 1` texts carries one-byte offsets.
+#[dialog_common::test]
+fn it_writes_the_same_bytes_on_every_target() {
+    assert_eq!(
+        Composite::list([text("a"), text("b")])
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        [TABLE, 0, 0, LIST, 2, 6, 3, b'a', 0, 3, b'b', 0]
+    );
+    let many: Vec<String> = (0..=SCAN_LIMIT).map(|n| format!("i{n}")).collect();
+    let bytes = Composite::list(many.iter().map(|t| text(t)))
+        .unwrap()
+        .to_bytes()
+        .into_owned();
+    assert_eq!(bytes[..4], [TABLE, 0, 0, layout::head(LIST, 1)]);
+    assert_eq!(usize::from(bytes[4]), SCAN_LIMIT + 1);
+    // Eight one-byte offsets and nine items of four bytes (`03 i 0 00`).
+    assert_eq!(bytes[5], 44);
+    assert_eq!(bytes[6..14], [4, 8, 12, 16, 20, 24, 28, 32]);
+    assert_eq!(bytes[14..18], [3, b'i', b'0', 0]);
+    assert_eq!(bytes.len(), 6 + 44);
 }
 
 #[dialog_common::test]
