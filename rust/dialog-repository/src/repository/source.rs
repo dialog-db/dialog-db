@@ -502,6 +502,18 @@ impl Source {
     }
 }
 
+impl Source {
+    /// The line this source holds, pinned at `revision` instead: what a
+    /// [`Frame`](crate::Frame) whose session line did not move since the
+    /// last one reads, without holding the line anew.
+    pub(crate) fn rebased(&self, revision: Option<Revision>) -> Self {
+        Source {
+            held: self.held.clone(),
+            revision,
+        }
+    }
+}
+
 impl From<Branch> for Source {
     /// Pin `branch` at the head it stands at now (see [`Live::pin`]).
     fn from(branch: Branch) -> Self {

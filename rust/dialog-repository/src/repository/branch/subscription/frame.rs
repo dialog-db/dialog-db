@@ -113,19 +113,35 @@ impl Moved {
 
 impl Frame {
     /// Take a frame of `branch`, read through `stack` when there is one.
-    pub(super) fn take(branch: &Branch, stack: Option<&Stack>) -> Self {
+    ///
+    /// A layer that stands where it stood in `last`, a frame of the same
+    /// lines, is held as `last` holds it: a line's sequence names what it
+    /// holds, so the value frozen then is the one it would freeze now,
+    /// and a poll that finds nothing moved takes its frame for the
+    /// reference counts alone.
+    pub(super) fn take(branch: &Branch, stack: Option<&Stack>, last: Option<&Frame>) -> Self {
         let taken = TAKEN.fetch_add(1, Ordering::Relaxed);
+        let last = last.filter(|last| last.is_of(branch, stack));
         let revision = branch.revision();
         let frozen = branch.overlay().frozen();
         let overlay = frozen.revision().sequence;
-        let primary = Source::at(branch.with_overlay(Ephemeral::fixed(frozen)), revision);
+        let primary = match last {
+            Some(last) if last.overlay == overlay => last.primary.rebased(revision),
+            _ => Source::at(branch.with_overlay(Ephemeral::fixed(frozen)), revision),
+        };
         let mut memories = Vec::new();
         let mut durables = Vec::new();
         if let Some(stack) = stack {
-            for (layer, memory) in stack.memories() {
+            let held = stack.memories();
+            memories.reserve(held.len());
+            for (index, (layer, memory)) in held.into_iter().enumerate() {
                 let frozen = memory.frozen();
                 let sequence = frozen.revision().sequence;
-                memories.push((layer, Ephemeral::fixed(frozen), sequence));
+                let line = match last.and_then(|last| last.memories.get(index)) {
+                    Some((named, line, at)) if *named == layer && *at == sequence => line.clone(),
+                    _ => Ephemeral::fixed(frozen),
+                };
+                memories.push((layer, line, sequence));
             }
             let held = stack.durables();
             durables = held.sources_at(&held.pinned());
@@ -200,10 +216,16 @@ impl Frame {
                 .iter()
                 .zip(&before.durables)
                 .any(|((_, now), (_, then))| now.revision() != then.revision());
+        let memories = self.memories.len() != before.memories.len()
+            || self
+                .memories
+                .iter()
+                .zip(&before.memories)
+                .any(|((_, _, now), (_, _, then))| now != then);
         Moved {
             head: self.revision() != before.revision(),
             overlay: self.overlay != before.overlay,
-            memories: self.memory_sequences() != before.memory_sequences(),
+            memories,
             durables,
         }
     }
@@ -255,7 +277,7 @@ impl Branch {
     /// ([`Subscription::poll_at`](super::Subscription::poll_at)) reads
     /// that and nothing later.
     pub fn frame(&self) -> Frame {
-        Frame::take(self, None)
+        Frame::take(self, None, None)
     }
 }
 
@@ -265,7 +287,7 @@ impl Stack {
     /// Every subscription of the stack polled at it reads that, so they
     /// agree.
     pub fn frame(&self) -> Frame {
-        Frame::take(self.primary(), Some(self))
+        Frame::take(self.primary(), Some(self), None)
     }
 }
 

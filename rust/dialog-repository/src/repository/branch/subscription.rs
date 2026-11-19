@@ -758,7 +758,7 @@ where
     /// subscriptions of one branch or stack at it
     /// ([`poll_at`](Self::poll_at)) and they read one state.
     pub fn frame(&self) -> Frame {
-        Frame::take(&self.branch, self.stack.as_ref())
+        Frame::take(&self.branch, self.stack.as_ref(), self.frame.as_ref())
     }
 
     /// Poll the subscription at a frame of where the branch stands now
@@ -907,20 +907,18 @@ where
             // A durable layer that moved is read afresh: its tree is not
             // diffed against the cover, so the query re-evaluates.
             if !moved.durables && !(moved.head && self.demand.depends_on_head()) {
-                let pinned = last.revision().cloned();
-                let overlay = last.overlay_sequence();
-                let memories = last.memory_sequences();
                 let mut touched = Touched::Nothing;
                 if moved.head {
                     touched =
-                        touched.merge(self.touched(env, pinned.as_ref(), frame.revision()).await?);
+                        touched.merge(self.touched(env, last.revision(), frame.revision()).await?);
                 }
                 if moved.overlay && !matches!(touched, Touched::Rules) {
-                    touched =
-                        touched.merge(self.touched_overlay(overlay, frame.overlay_sequence()));
+                    touched = touched.merge(
+                        self.touched_overlay(last.overlay_sequence(), frame.overlay_sequence()),
+                    );
                 }
                 if moved.memories && !matches!(touched, Touched::Rules) {
-                    touched = touched.merge(self.touched_memories(&memories, &frame));
+                    touched = touched.merge(self.touched_memories(last, &frame));
                 }
                 match touched {
                     Touched::Nothing => {
@@ -966,15 +964,18 @@ where
         self.stack.as_ref().map(Stack::memories).unwrap_or_default()
     }
 
-    /// Classify what the stack's memory layers changed from the
-    /// sequences in `from` to where `frame` holds them, within the
-    /// demand cover, as [`touched_overlay`](Self::touched_overlay) does
-    /// for the branch's session overlay. A sequence a layer's ring no
-    /// longer reaches is [`Touched::Rules`], which recomputes.
-    fn touched_memories(&self, from: &[u64], frame: &Frame) -> Touched {
+    /// Classify what the stack's memory layers changed from where `last`
+    /// holds them to where `frame` does, within the demand cover, as
+    /// [`touched_overlay`](Self::touched_overlay) does for the branch's
+    /// session overlay. A sequence a layer's ring no longer reaches is
+    /// [`Touched::Rules`], which recomputes.
+    fn touched_memories(&self, last: &Frame, frame: &Frame) -> Touched {
         let mut touched = Touched::Nothing;
-        for (((_, memory), from), (_, _, upto)) in
-            self.memories().iter().zip(from).zip(frame.memories())
+        for (((_, memory), (_, _, from)), (_, _, upto)) in self
+            .memories()
+            .iter()
+            .zip(last.memories())
+            .zip(frame.memories())
         {
             let Some(instants) = between(memory, *from, *upto) else {
                 return Touched::Rules;

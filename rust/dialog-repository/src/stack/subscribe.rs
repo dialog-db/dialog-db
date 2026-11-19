@@ -432,11 +432,15 @@ impl Stack {
         if !subscriptions.scheduled.swap(false, Ordering::AcqRel) {
             return Ok(0);
         }
+        let live = subscriptions.live();
+        if live.is_empty() {
+            return Ok(0);
+        }
         let env: Environment = Arc::new(env.clone());
         let frame = self.frame();
         let mut delivered = 0;
         let mut failed = None;
-        for subscription in subscriptions.live() {
+        for subscription in live {
             match subscription.poll(&frame, &env).await {
                 Ok(Polled::Delivered) => delivered += 1,
                 Ok(Polled::Unchanged) => {}
