@@ -221,6 +221,40 @@ impl AttributeQueryAll {
     ) -> Result<(), EvaluationError> {
         let claim = Claim::from(fact);
         let standing = Standing::new(version, claim.cause().clone());
+        self.bind_claim(candidate, &claim, layer)?;
+        candidate.cite_owned(&self.source, claim);
+        // The fact's standing is cited once, under the variable its
+        // value bound when the scan names one, so a value derived from
+        // it stands as it does; under the scan's own source otherwise.
+        match self.is.shared_name() {
+            Some(name) => candidate.cite_variable_standing(name, standing),
+            None => candidate.cite_standing(&self.source, standing),
+        }
+        Ok(())
+    }
+
+    /// The bindings a row this scan read `claim` into holds: what
+    /// [`merge`](Self::merge) binds, without the claim it cites.
+    /// `None` for a scan that binds each row's layer, which a claim
+    /// does not carry.
+    pub(crate) fn bindings(&self, claim: &Claim) -> Option<Match> {
+        if self.binds_layer() {
+            return None;
+        }
+        let mut row = Match::new();
+        self.bind_claim(&mut row, claim, None).ok()?;
+        Some(row)
+    }
+
+    /// Bind the `the`, `of`, `is` and `cause` of `claim`, and the
+    /// layer it was read from where the scan binds it, to this scan's
+    /// named terms.
+    fn bind_claim(
+        &self,
+        candidate: &mut Match,
+        claim: &Claim,
+        layer: Option<&Entity>,
+    ) -> Result<(), EvaluationError> {
         // A slot for each of `the`, `of`, `is` and `cause`, and one for
         // `in` only when the scan binds it: a row's bindings are reserved
         // per row, so a scan without `in:` reserves what it did before.
@@ -253,14 +287,6 @@ impl AttributeQueryAll {
                 self.cause.binding_kind(),
                 Value::Bytes(claim.cause().clone().0.into()),
             )?;
-        }
-        candidate.cite_owned(&self.source, claim);
-        // The fact's standing is cited once, under the variable its
-        // value bound when the scan names one, so a value derived from
-        // it stands as it does; under the scan's own source otherwise.
-        match self.is.shared_name() {
-            Some(name) => candidate.cite_variable_standing(name, standing),
-            None => candidate.cite_standing(&self.source, standing),
         }
         Ok(())
     }
@@ -607,6 +633,10 @@ impl Application for AttributeQueryAll {
 
     fn realize(&self, input: Match) -> Result<Claim, EvaluationError> {
         input.prove(&self.source)
+    }
+
+    fn bindings(&self, claim: &Claim) -> Option<Match> {
+        AttributeQueryAll::bindings(self, claim)
     }
 }
 
