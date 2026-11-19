@@ -14,6 +14,62 @@ says how to cut a release.
 
 ## Unreleased
 
+### A subscription's poll reads one frame, and several subscriptions can be polled at one
+
+(pull request to be opened)
+
+Argued in `design/fold-maintenance/design-one-revision.md` (on the
+`design/fold-maintenance` branch).
+
+A poll reads many times: the changes since the last poll, the entities
+they touch, the rules, each touched entity derived again, or the whole
+query. Each of those read the branch and its layers where they stood as
+that read ran, so a commit landing between two of them made one poll
+report a delta that mixed revisions, which the next poll repaired. A
+poll now takes a `Frame`, a position for every layer it reads: the
+branch's head, the session overlay and each memory layer of a stack as
+they stood (`Ephemeral::frozen`), and each durable layer's revision.
+Every read of the poll goes to that frame. The state before the changes
+is the frame the last poll was at, which the subscription keeps, so the
+session overlay is no longer rewound through its ring of instants.
+
+What this changes for you:
+
+- New: `Frame`, taken by `Branch::frame`, `Stack::frame` or
+  `Subscription::frame`, and `Subscription::poll_at(&frame, env)` and
+  `FoldSubscription::poll_at(&frame, env)`, which return the new
+  `PollError`: `Stale` for a frame taken before the one the subscription
+  last polled at, `Foreign` for a frame of another branch or stack, and
+  `Evaluation` for an evaluation that failed. A poll at the frame the
+  subscription last polled at returns `Ok(None)`.
+- `poll(env)` takes a frame for itself and returns `EvaluationError` as
+  before.
+- A poll's delta is the difference of the query's answers at the frame
+  the last poll was at and the frame this one is at. A write that lands
+  while a poll runs is reported whole by the next poll, and none of it by
+  this one.
+- `Stack::settle` polls every subscription of a round at one frame, so
+  the subscriptions of one view agree.
+- `FoldSubscription::poll` polls both of its queries at one frame. It no
+  longer polls them again, up to eight times, when the branch moved while
+  they were polled.
+- A subscription first polled before the branch's first commit now
+  maintains a change that needs the state before it (a retraction joined
+  across entities), where it recomputed.
+- While a subscription holds its last frame, a write to the session
+  overlay or a memory layer copies the part of the line it changes (see
+  `Frozen`).
+
+Why: one poll could report a delta that mixed revisions, and the
+subscriptions of one view, the two of a fold among them, have to agree.
+A frame is taken for a few reference counts per layer, and a poll that
+reads through it no longer pins the branch again for each entity it
+derives.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten.
+
 ### A subscription's poll costs the entities it touched, not its whole answer
 
 [#838](https://github.com/dialog-db/dialog-db/pull/838).
