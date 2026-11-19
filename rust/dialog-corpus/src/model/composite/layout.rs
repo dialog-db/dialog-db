@@ -58,14 +58,20 @@ pub(super) fn varint(mut n: usize, out: &mut Vec<u8>) {
 
 /// A varint at `at`, and where it ends. A varint is minimal (no trailing
 /// zero group), so each number has one encoding.
+///
+/// The number is read in a `u64` and refused past `u32::MAX`, the most
+/// offsets four bytes wide can reach, so the same bytes read alike on a
+/// 32-bit target (wasm32), where a `usize` would drop the high bits of a
+/// five-byte varint, and a 64-bit one.
 pub(super) fn read_varint(bytes: &[u8], at: usize) -> Option<(usize, usize)> {
-    let mut n = 0usize;
+    let mut n = 0u64;
     for (step, &byte) in bytes.get(at..)?.iter().enumerate().take(5) {
-        n |= ((byte & 0x7f) as usize) << (7 * step);
+        n |= u64::from(byte & 0x7f) << (7 * step);
         if byte & 0x80 == 0 {
             if step > 0 && byte == 0 {
                 return None;
             }
+            let n = usize::try_from(u32::try_from(n).ok()?).ok()?;
             return Some((n, at + step + 1));
         }
     }
