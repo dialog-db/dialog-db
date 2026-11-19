@@ -16,6 +16,7 @@ He asked that the work go as far as it can overnight on the agent's judgment, ea
 | 10 | A conclusion is turned back into bindings by a new `Application::bindings`, default none | the fold needs rows and a subscription reports conclusions | the same | carry matches in a subscription's delta |
 | 11 | One outer poll reads one revision by stamping the branch before and after its two inner polls and polling again if it moved, up to 8 rounds; past that it reports what it has and the next poll corrects it | a subscription evaluates against the live branch and cannot be pinned today | the same; 🟡 under writes arriving faster than 8 polls an answer of two revisions can be reported once | give a subscription a pinned view to poll against |
 | 12 | Rows of an inner query are a set: one row given twice is folded once | attribute and concept queries never give one twice | the same | count rows |
+| 13 | The subscription's two defects are fixed in one draft pull request against main, dialog-db/dialog-db#838: the scoped diff searches its ranges, and the kept answer is indexed by entity | measured as the first and second cost of a view at ten thousand rows; scope probes for one changed key at 10000 ranges went from 839697 to 2544, kept rows read for one touched entity among 400 from 400 to 1 | the pull request's tests, each failing without its fix; time not measured again yet | close the pull request |
 
 Found on the way and not acted on, each to be checked against main before anything is done:
 
