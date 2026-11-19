@@ -29,6 +29,11 @@ Counted in the prelude, the model and every sketch and example. None refers to i
                  syntax.source/references  [{name, entity, path}]
 ```
 
+Corrected by the maintainer, 2026-11-20:
+
+- The form hashed is canonical: conditions and anything else whose order does not matter are put in the order the rule's canonical labelling gives, and variables named by it. Two spellings of one definition are one entity.
+- A name's entity is made of the name alone and points at every definition standing under it. A definition holds its signature, and an application is resolved by the labels it writes. What an application that fits several does is open: by authority and showing all to start (the ledger), or qualified by hash as in Unison (his recollection).
+
 The name and the description are not part of what is hashed.
 
 1. A compiled form and an entity for each kind (`src/definition.rs`). A concept: its labels with attribute, type, cardinality, layer, key. A macro: its resolved rule. A query: its analyzed tree without a call's constants.
