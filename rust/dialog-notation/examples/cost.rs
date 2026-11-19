@@ -4,10 +4,12 @@
 //!
 //! ```sh
 //! cargo run -p dialog-notation --example cost -- 5
+//! cargo run --release -p dialog-notation --example cost -- 5 100 10000
 //! ```
 //!
-//! The argument is how many runs; each run measures every N and every
-//! variant once, interleaved, on a branch built afresh. Reads are counted
+//! The first argument is how many runs, and the ones after it the sizes N
+//! (10, 100, 1000 and 10000 when none is given); each run measures every N
+//! and every variant once, interleaved, on a branch built afresh. Reads are counted
 //! as the tree node reads and blob loads the reading env performs, by
 //! dialog-repository's `Interposing` env; writes go around it, so only
 //! reads are counted. Time is from after the write has landed (committed
@@ -17,7 +19,7 @@
 //! What it prints: for each measurement and N, the median time in
 //! microseconds with the least and the most, the median node reads, blob
 //! loads, rows the layers delivered and patches, and the ratio of the
-//! median at N=1000 to N=10.
+//! median at the largest N to the smallest.
 
 #![allow(deprecated)]
 
@@ -42,7 +44,7 @@ type Env = Interposing<
     dialog_peer::Peer<dialog_storage::provider::storage::VolatileSpace, dialog_peer::Session>,
 >;
 
-const SIZES: [usize; 3] = [10, 100, 1000];
+const SIZES: [usize; 4] = [10, 100, 1000, 10000];
 
 const SCHEMA: &str = r#"
     (concept (list ?l name: ?name)
@@ -600,6 +602,57 @@ async fn baseline(n: usize, results: &mut Results) -> Result<()> {
             patches: 0,
         },
     );
+    // A row that reads another entity: each to-do with its list's name,
+    // a rule by the to-do that joins through its list. A second list
+    // holds one to-do; renaming it changes one row, renaming the first
+    // list changes all `n`.
+    notebook
+        .submit(
+            r#"(assert (list list:other name: "Other"))
+               (assert (todo todo:other list: list:other title: "Elsewhere" state: :open))"#,
+        )
+        .await?;
+    let listed = query_of(
+        &mut Analyzer::new()?,
+        "(select (todo/listed ?t name: ?name) (todo ?t list: ?l) (list ?l name: ?name))",
+    )?;
+    if let Some(rule) = &listed.rule {
+        notebook.branch.overlay().assert(rule.clone())?;
+    }
+    let mut subscription = notebook.branch.subscribe(listed.select.clone());
+    subscription.poll(&env).await?;
+    for (name, write) in [
+        (
+            "B9 list name by to-do, other list renamed",
+            r#"(assert (list list:other name: "Away"))"#,
+        ),
+        (
+            "B9 list name by to-do, home list renamed",
+            r#"(assert (list list:home name: "House"))"#,
+        ),
+    ] {
+        notebook.submit(write).await?;
+        let recomputed = subscription.recomputes();
+        let from = mark(&env);
+        let start = Instant::now();
+        let delta = subscription.poll(&env).await?;
+        let micros = start.elapsed().as_micros();
+        let (nodes, blobs) = since(&env, from);
+        record(
+            results,
+            name,
+            n,
+            Sample {
+                micros,
+                nodes,
+                blobs,
+                rows: delta
+                    .map(|delta| delta.asserted.len() + delta.retracted.len())
+                    .unwrap_or_default(),
+                patches: usize::from(subscription.recomputes() > recomputed),
+            },
+        );
+    }
     Ok(())
 }
 
@@ -632,10 +685,17 @@ async fn main() -> Result<()> {
         .map(|runs| runs.parse())
         .transpose()?
         .unwrap_or(5);
+    let mut sizes = std::env::args()
+        .skip(2)
+        .map(|n| n.parse())
+        .collect::<Result<Vec<usize>, _>>()?;
+    if sizes.is_empty() {
+        sizes = SIZES.to_vec();
+    }
     let mut results = Results::new();
     let mut layers = BTreeMap::new();
     for run in 0..runs {
-        for n in SIZES {
+        for &n in &sizes {
             // A, B: the notation's card and the baseline, alternated.
             if run % 2 == 0 {
                 notation(n, &mut results, &mut layers).await?;
@@ -664,14 +724,14 @@ async fn main() -> Result<()> {
     };
     for name in &names {
         let mut medians = Vec::new();
-        for n in SIZES {
+        for &n in &sizes {
             let Some(samples) = results.get(&(name.clone(), n)) else {
                 continue;
             };
             let times: Vec<u128> = samples.iter().map(|sample| sample.micros).collect();
             let time = median(times.clone());
             let nodes = median(samples.iter().map(|sample| sample.nodes).collect());
-            medians.push((time, nodes));
+            medians.push((n, time, nodes));
             println!(
                 "{:<26} {:>5} {:>10} {:>10} {:>10} {:>8} {:>7} {:>7} {:>8}",
                 name,
@@ -688,10 +748,12 @@ async fn main() -> Result<()> {
         if let (Some(first), Some(last)) = (medians.first(), medians.last()) {
             let ratio = |a: f64, b: f64| if a == 0.0 { f64::NAN } else { b / a };
             println!(
-                "{:<26} ratio 1000/10: time {:.1}, nodes {:.1}",
+                "{:<26} ratio {}/{}: time {:.1}, nodes {:.1}",
                 "",
-                ratio(first.0 as f64, last.0 as f64),
+                last.0,
+                first.0,
                 ratio(first.1 as f64, last.1 as f64),
+                ratio(first.2 as f64, last.2 as f64),
             );
         }
     }
