@@ -16,7 +16,8 @@ says how to cut a release.
 
 ### A parameter holds a pattern: a term, or a map or a list of terms
 
-[#778](https://github.com/dialog-db/dialog-db/pull/778),
+(pull request to be opened)
+
 [design/patterns.md](./design/patterns.md),
 [design/patterns/design-parameters.md](./design/patterns/design-parameters.md),
 [design/patterns/design-pattern-meaning.md](./design/patterns/design-pattern-meaning.md),
@@ -31,7 +32,7 @@ holds a `Pattern`: a term, or a map or a list of patterns.
 Where the value is bound the pattern takes it apart and binds the
 variables inside it, and a value that does not match drops the row.
 Where every variable inside it is bound the pattern is the value, a
-composite kept as a record. A rule's body runs it whichever way the
+composite. A rule's body runs it whichever way the
 plan puts first.
 
 What this changes for you:
@@ -44,7 +45,7 @@ What this changes for you:
 - Inside a map or a list a number matches by the number it is. A scan
   reads a value through a type, so the natural 4, and a variable typed
   a natural, read a stored 4.3 as 4. In a pattern `{n: 4}` does not
-  match a record that holds 4.3, and a variable typed a natural does
+  match a map that holds 4.3, and a variable typed a natural does
   not bind there: a pattern matches only a value it builds, whichever
   of a rule's premises runs first.
 - `Parameters::set` binds a name to a pattern, and `shape`, `pattern`,
@@ -95,10 +96,8 @@ What this changes for you:
   a rest or a run another premise needs to be a number, fail the same
   way. A variable written with no type inside a pattern is any present
   value.
-- Matching a pattern against a record under a version this release
-  does not read is `EvaluationError::RecordVersion`, not a dropped row.
-- A rule's identity names a record constant that holds a composite by
-  its parts, as `Value::reference` does.
+- A rule's identity names a composite constant by its reference, as
+  `Value::reference` does.
 
 A premise whose parameters are all terms costs what it did: a concept
 read is the stream it was, field for field, and parameters of terms
@@ -109,6 +108,51 @@ Why: a rule that issues a command, derives an entity from a row or
 takes a form apart needs a value made of values where a term stands.
 One pattern that both builds and takes apart lets the planner order the
 premises, as it does for every other premise.
+
+### A pattern reads a composite in place: a map pattern a map or a record, a list pattern a list
+
+(pull request to be opened)
+
+[design/patterns.md](./design/patterns.md)
+
+A pattern's value is a `Composite`: a map pattern stands for a
+composite map (a record among them) and a list pattern for a composite
+list. It takes a value apart through the composite's view, a named key
+by `Composite::get` and an item by `Composite::item`, so a pattern that
+binds one field of a nested composite decodes that field and nothing
+beside it. Only a rest or a run that binds a variable decodes what it
+takes.
+
+What this changes for you:
+
+- A map pattern's key is any scalar a composite holds: text, an
+  attribute or another value. `MapPattern::new` and `Pattern::map` take
+  keys through the new `Key` trait, which text (`&str`, `String`), an
+  attribute (`Relation`) and any `Value` implement, and
+  `MapPattern::entries` gives `(Value, Pattern)`. A text key and an
+  attribute are two keys: `{"title": ?t}` does not read the field
+  `note/title`. A text key is written as before, quoted; any other key as
+  its value.
+- A key the pattern names matches where it holds exactly one value. A
+  map whose named key holds several values matches no pattern that names
+  it, and a rest takes such a key with every value it holds. A rest that
+  holds a key the pattern names builds no value.
+- `MapPattern::new` and `Pattern::map` return `PatternError`, were
+  `CompositeError`: `RepeatedKey` for a key named twice (the natural `3`
+  and the float `3.0` are one key) and `Key` for a key no composite
+  holds (a composite, or NaN).
+- `Pattern::unify` returns `bool`, was `Result<bool, EvaluationError>`:
+  a composite is read only from its canonical bytes, so nothing is left
+  to refuse. `EvaluationError::RecordVersion` is gone, and an opaque
+  `Value::Record` matches no map or list pattern.
+- A map pattern is typed `composite:map` and a list pattern
+  `composite:list`, as are a rest and a run. A map pattern under a field
+  declared `record:`, or a list pattern under one declared
+  `composite:map`, fails to compile with `TypeError::TypeInference`.
+
+Why: the composite a pattern stood on, dag-cbor kept in a
+`Value::Record`, is replaced by `Value::Composite`, and reading through
+its view keeps the cost of a pattern to the parts it names.
 
 ### A value can be a composite: a map, a record or a list, held as one value and read in place
 
@@ -2046,12 +2090,10 @@ most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
   that holds one is never stored, and an older replica never meets one.
   Laid over a branch for a query, such a rule is kept in memory beside
   the query's changes and no fact holds its body. Nothing is rewritten
-  on upgrade and an embedder runs nothing. One
-  rule changes identity between releases: a rule whose body holds a
-  record constant that is a composite is named by the composite's parts
-  here and by its bytes in an older release, so each release finds the
-  body the other stored under an entity it does not derive and leaves
-  it inert. No release before this one could write such a constant.
+  on upgrade and an embedder runs nothing. A pattern with no variable is
+  the composite it builds, a constant a stored rule holds as it holds
+  any; the rule's identity names that constant by its
+  `Composite::reference`. No release before this one could hold one.
 - Composites: nothing an existing space holds is rewritten or read
   differently, and opaque `record:` values keep their encoding and identity.
   No release before this one wrote a composite (the draft #812 was never

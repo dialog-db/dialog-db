@@ -1,5 +1,7 @@
 # Design decision: the byte that says a record is versioned
 
+**Superseded.** The value this note decided for, dag-cbor kept in a `Value::Record`, is replaced by `Value::Composite` (#843, [design/composite-value.md](../composite-value.md)) and removed from the code; no release held it. The patterns now stand on that value: [design-on-composite.md](design-on-composite.md).
+
 **Problem it serves:** a rule cannot say a value by its shape (the topic's [problem](../patterns.md)). A composite is kept as a `Value::Record`, and so is a revision's record, which is a bare dag-cbor map. A reader has to tell the two apart from the bytes alone, and has to tell a later version from both.
 
 **Decision:** which byte goes in front of a composite, and what a reader makes of a first byte.

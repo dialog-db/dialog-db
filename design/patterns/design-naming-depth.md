@@ -1,5 +1,7 @@
 # Design decision: naming a record that nests deep
 
+**Superseded.** The value this note decided for, dag-cbor kept in a `Value::Record`, is replaced by `Value::Composite` (#843, [design/composite-value.md](../composite-value.md)) and removed from the code; no release held it. The patterns now stand on that value: [design-on-composite.md](design-on-composite.md).
+
 **Problem it serves:** a composite is named by its parts, and a part that is a composite by its own parts, down to a depth (`NAMED_DEPTH`, 128). The test that says naming a deeper record "does not exhaust the stack" failed on wasm, in release, on 43d49a5 and on 7ee8e5e: `RuntimeError: memory access out of bounds`. It passed on every native target. A record is data from anywhere, so one that cannot be named is one a replica cannot hold.
 
 **Decision:** how a record nested in records is named so that the claim holds on every target.

@@ -1,5 +1,7 @@
 # Design decision: the dag-cbor of a composite
 
+**Superseded.** The value this note decided for, dag-cbor kept in a `Value::Record`, is replaced by `Value::Composite` (#843, [design/composite-value.md](../composite-value.md)) and removed from the code; no release held it. The patterns now stand on that value: [design-on-composite.md](design-on-composite.md).
+
 **Problem it serves:** dialog has no value made of values (the topic's [problem](../patterns.md)). The direction says dag-cbor under a version byte now and another layout later. This is what version 1 writes after the byte.
 
 **Decision:** how a part, a nested composite and a map's entries are written, so that one value has one byte string.
