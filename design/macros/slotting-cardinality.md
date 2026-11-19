@@ -49,3 +49,13 @@ Tonk's main pins `v0.5.0-rc.7`. This week's cost work (#825, #838 to #841) is on
 Of tonk#1329, the Rust is kept and the 147 YAML files are not: they are written again in the notation at step 4.
 
 For the maintainer: which of the two is format 4; and, left open in the cardinality thread, whether a listed `as` with no pick keeps meaning `top`, as on 0.4.
+
+## 2026-11-20, decided by the maintainer
+
+- **Formats.** #827's rule bodies are format 4. A stored rule that holds a pattern, #799's, is format 5.
+- **A listed `as` implies nothing.** `as: [:todo :done]` with no pick does not mean `top`. A ranked read is written, `(top ?state)` in the concept's head or perhaps `is: (top ?state)`, and it no longer means that a write takes the other winner away. With `cardinality: :one` a write does retract the last and assert the new, and the last is the last written, not the top.
+- **Not decided:** whether `cardinality: :one` and `top` may stand together at all. #827 as it is refuses `cardinality: one` beside a ranking pick.
+
+So #827 reads such a field as he means it, the newest claim. Its upgrade rewriting a 0.4 field of this kind to `top` keeps what old data meant and is not a rule for what is written now.
+
+Also from him, same day: #844 need not be in 0.5; and he is landing #827 next.
