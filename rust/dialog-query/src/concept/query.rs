@@ -241,12 +241,15 @@ impl<'de> Deserialize<'de> for ConceptQuery {
         let mut terms = Parameters::new();
         for (name, value) in raw.terms {
             let collection = raw.assert.collections().any(|(field, _)| field == name);
-            // An entry object carries `the`/`is` and no `?`; anything
+            // An entry object carries `the`/`is` and no `?`, and is
+            // empty when both are blank, which are left out; anything
             // else under a collection field is a bare value term,
             // which binds every entry (`{_: ?value}`).
             let entry = collection
                 && value.as_object().is_some_and(|map| {
-                    !map.contains_key("?") && (map.contains_key("the") || map.contains_key("is"))
+                    map.is_empty()
+                        || (!map.contains_key("?")
+                            && (map.contains_key("the") || map.contains_key("is")))
                 });
             let bound: Bound = if entry {
                 serde_json::from_value(value).map_err(D::Error::custom)?
