@@ -8,7 +8,7 @@ use std::env::{self, VarError};
 use std::fmt;
 use std::thread;
 
-use super::{Delta, Subscription};
+use super::{Delta, Frame, Subscription};
 use crate::Branch;
 use crate::RepositoryExt as _;
 use crate::helpers::test_repo;
@@ -967,16 +967,45 @@ where
 
     /// Poll after `step` and hold the invariant: the maintained result
     /// is a fresh evaluation's, and the reported delta is exactly the
-    /// difference from the previous result.
+    /// difference from the previous result. Returns the fresh
+    /// evaluation.
     async fn check(
         &mut self,
         step: usize,
         branch: &Branch,
         operator: &Operator,
         log: &Log,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<String>> {
         let delta = self.subscription.poll(operator).await?;
         let fresh = canonical(&fresh::<C>(branch, operator).await?);
+        self.hold(step, delta, fresh.clone(), log)?;
+        Ok(fresh)
+    }
+
+    /// Poll at `frame`, taken after the step it was taken at and before
+    /// the writes of `step`, and hold the invariant against `fresh`, a
+    /// fresh evaluation as of the frame.
+    async fn check_at(
+        &mut self,
+        step: usize,
+        frame: &Frame,
+        fresh: Vec<String>,
+        operator: &Operator,
+        log: &Log,
+    ) -> anyhow::Result<()> {
+        let delta = self.subscription.poll_at(frame, operator).await?;
+        self.hold(step, delta, fresh, log)
+    }
+
+    /// Hold the invariant after a poll that reported `delta`, against
+    /// `fresh`, a fresh evaluation of what the poll read.
+    fn hold(
+        &mut self,
+        step: usize,
+        delta: Option<Delta<C>>,
+        fresh: Vec<String>,
+        log: &Log,
+    ) -> anyhow::Result<()> {
         let results = canonical(self.subscription.results());
         let (asserted, retracted) = match &delta {
             Some(Delta {
@@ -1011,12 +1040,17 @@ where
     }
 }
 
-/// Two subscriptions to the concept `C`: one polled after every step,
-/// and one polled only now and then, so one delta can span several
-/// commits and overlay instants.
+/// Three subscriptions to the concept `C`: one polled after every step,
+/// one polled only now and then, so one delta can span several
+/// commits and overlay instants, and one polled after every step at the
+/// frame taken after the step before, so the step's own writes land
+/// between the frame and the poll.
 struct Watches<C: Predicate> {
     every: Watch<C>,
     lagging: Watch<C>,
+    framed: Watch<C>,
+    /// The frame `framed` polls at next, and a fresh evaluation as of it.
+    taken: Option<(Frame, Vec<String>)>,
 }
 
 impl<C> Watches<C>
@@ -1029,6 +1063,13 @@ where
             every: Watch::new(format!("{concept}, polled every step"), branch, operator).await?,
             lagging: Watch::new(format!("{concept}, polled now and then"), branch, operator)
                 .await?,
+            framed: Watch::new(
+                format!("{concept}, polled at the frame before the step"),
+                branch,
+                operator,
+            )
+            .await?,
+            taken: None,
         })
     }
 
@@ -1040,7 +1081,15 @@ where
         operator: &Operator,
         log: &Log,
     ) -> anyhow::Result<()> {
-        self.every.check(step, branch, operator, log).await?;
+        if let Some((frame, fresh)) = self.taken.take() {
+            self.framed
+                .check_at(step, &frame, fresh, operator, log)
+                .await?;
+        }
+        let fresh = self.every.check(step, branch, operator, log).await?;
+        // Taken with nothing written since the fresh evaluation, so the
+        // evaluation is of the frame.
+        self.taken = Some((branch.frame(), fresh));
         if rng.chance(1, 3) {
             self.lagging.check(step, branch, operator, log).await?;
         }
@@ -1051,14 +1100,16 @@ where
     /// maintained: a subscription that recomputed every time would
     /// pass trivially.
     fn ensure_maintained(&self, seed: u64) -> anyhow::Result<()> {
-        let recomputes = self.every.subscription.recomputes();
-        let maintenances = self.every.subscription.maintenances();
-        anyhow::ensure!(
-            maintenances > recomputes,
-            "{} (seed {seed}): {maintenances} maintained polls against {recomputes} \
-             recomputes; the delta-join path was not what the run exercised",
-            self.every.label
-        );
+        for watch in [&self.every, &self.framed] {
+            let recomputes = watch.subscription.recomputes();
+            let maintenances = watch.subscription.maintenances();
+            anyhow::ensure!(
+                maintenances > recomputes,
+                "{} (seed {seed}): {maintenances} maintained polls against {recomputes} \
+                 recomputes; the delta-join path was not what the run exercised",
+                watch.label
+            );
+        }
         Ok(())
     }
 
