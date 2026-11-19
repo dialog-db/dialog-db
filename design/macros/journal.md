@@ -1750,3 +1750,11 @@ Restating the table's views turned up what a directory is: a query whose head ha
 
 **Decided.** The maintainer's: `select`. design.md on #728 still says `query` for asking, and still has the fold in a rule's head, the view form and two fields for a collection; none of it is changed yet.
 
+
+## 2026-11-18, Building: queries, stage 1
+
+**Asked.** Build what design-queries.md decided, `select` answering once on a branch: `query` and `is`, `collect`, the entry as one term, the set as a map with no names, and the refusals. Not views.
+
+**Learned.** Every table of the note answers as written. The notation evaluates a query: its required conditions are one Dialog-DB query, each collecting read is one more, grouped in memory, and a call takes the called query's rows where its fields agree. A query of several reads read back through its head's entity crosses one entity's values, as the view plan found; a row named by `(id …)` of all its values does not. Two things in the way: the sketch says a field passed bound is a parameter, and a query here is answered whole and then narrowed, so a field only a caller gives is refused; and `notebook-views.clj`, left for stage 2, still writes `key: ?k block: ?b`, so a read written that way of an entry is read as the entry, while a concept head written that way is refused. The pinned numbers of the notebook did not move.
+
+**Decided.** Not decided by the maintainer: the agent's defaults, `count` the one function, a query that calls itself refused, a set merging equal answers and printing in the order of its values, a stored set reading back as a list. Next: views as queries, stage 2.

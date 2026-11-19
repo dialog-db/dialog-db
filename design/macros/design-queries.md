@@ -269,3 +269,23 @@ Of the four, `?..x`. Against `(collect ?x)` it is shorter and adds no form; the 
 | GraphQL | none; resolvers | selection sets, arguments on any field, fragments for reuse | none built in |
 | EdgeQL | sets and paths | shapes, with `filter`, `order by`, `limit` at each level; nothing is the empty set | `count(.link)` in a computed field |
 | here | concepts and rules | a record or markup built in a query's body | the whole of a field, and functions of it |
+
+## As built, stage 1
+
+Built on #773, 2026-11-18, in `rust/dialog-notation`: `src/select.rs`, `src/expand/query.rs`, and the tests in `tests/query.rs`, each a claim of this note with the answers its tables give.
+
+- **`query` defines, `select` asks.** `(query HEAD condition… (is ?x shape))` is kept by the analyzer and compiles to nothing. `(select (todo/card ?t is: ?card))` of a query compiles to a `Selection`. `(select condition…)` of a concept is what `(query condition…)` was. `(query …)` with one part, with a head that has no `is:`, or whose head names a domain or a stored attribute, is refused: "asking is written `(select …)`".
+- **How it answers.** Dialog-DB cannot fold, so the notation does. The conditions every answer needs are one Dialog-DB query; each read that collects is one more, run once and grouped in memory by the terms it shares; a call takes the called query's rows where its fields agree. A query is answered in full and then filtered by what the call passes, so a field passed bound narrows the answers and is not pushed into the read.
+- **A row is kept whole.** A query of several reads read back through its head's entity crosses the values of one entity (the view plan's workaround picks the entity that fixes most). Here each row's entity is `(id ?query-row c0: ?a c1: ?b …)` of all its values, so a row is its values and nothing else.
+- **The entry.** `block: {?k ?b}` in a concept's head; a head with the key as a field of its own is refused. A pattern takes `{?k ?b}` apart against one entry, the one place a key is a variable. Assert and retract go through one entry.
+- **Sets.** `{: 1 : 2}` reads and prints as written. A map that names some keys and not others is refused. Written into a record it is a list, its members in the order of their values, each once; it reads back as that list.
+- **Refused:** a query of an entity that only collects; a term of a collecting read bound by nothing that does not collect; `collect` in a rule, in a concept, under `unless`, in what is asked, and in a write's head ("writes the whole of a field"); a rule or a concept that applies a query; a query that calls itself; a function of a collection other than `count`.
+
+**Where it differs from the sketch, and why:**
+
+- `(view ?x template)` in a query's body is refused as not built: views are stage 2.
+- Every variable of a query's head is bound by its body: a field that only a caller could give is refused, since a query is answered whole before a call narrows it.
+- The views of `notebook-views.clj` still write a collection as `key: ?k block: ?b`. A read written so, of a concept whose field is an entry, is read as the entry, until stage 2 restates the views. A concept head written so is refused.
+- A line's `Key::label` is `None` for a key that stands in an entry: the entry's label is the line's.
+
+The pinned measures of the notebook did not move: 56 forms, 56 read, 53 expanded, 53 compiled, 5 described; with core, 60 of each and 5.
