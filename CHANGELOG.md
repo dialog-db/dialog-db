@@ -14,6 +14,34 @@ says how to cut a release.
 
 ## Unreleased
 
+### A stored rule that reads a collection entry with its key and value blank reads back
+
+[#835](https://github.com/dialog-db/dialog-db/pull/835), reported in
+[#834](https://github.com/dialog-db/dialog-db/issues/834).
+
+A concept application that reads a collection and binds neither the key
+nor the value of its entries, `entry: {the: _, is: _}`, writes the entry
+as `{}`, both halves left out as blanks are. Reading it back took `{}`
+for a constant and failed, so the rule's stored body did not decode and
+the rule could not be loaded from a branch:
+`rule hydrate: dag-cbor decode failed: an empty map names no type`. It now
+reads `{}` under a collection field as that entry.
+
+What this changes for you:
+
+- A rule holding such a read loads from the branch it was installed on,
+  under the identity it was installed with. The error above is gone for
+  it.
+
+Why: the writer and the reader of a concept application disagreed on one
+form of an entry, so a rule that compiled had a body nothing could read.
+
+#### Compatibility and migration
+
+- Nothing is rewritten and no rule's bytes or identity change: bodies an
+  earlier release stored with `{}` already hold what this one reads.
+  An earlier release cannot read such a body, as it could not before.
+
 ### An index node's buffered operations are its entries, and a separator reads as the key it is
 
 An index node buffers writes headed for its children (`novelty`), and
