@@ -1629,3 +1629,14 @@ The agent had pressed the layered rule as the answer. It keeps the card, and it 
 Two things it turned up and did not settle. The view plan's sidestep cannot come out: with the fix the rules load, and without the sidestep every block is paired with every key, which is a different fault, not looked into. And a rule built through dialog-query's own API with a collection field and no key seems to change identity across a decode, the bytes the same; a hypothesis in the ledger, since only a probe saw it.
 
 **Decided.** The managing agent's: the read-side fix stays on #773 until the maintainer says which pull request below it should carry it. Not decided, the maintainer's: the identity of a missing key against a blank one, since either fix changes identities.
+
+## 2026-11-18, Building: the blank entry goes to main
+
+**Asked.** The maintainer: a fault on `main` is addressed on `main`, as a report with a test that reproduces it and then a fix, after checking it is not fixed or open already. Then: are explicit blanks the better format, and should such a read match at all where there is no entry.
+
+**Learned.** Nothing reports or fixes it: no issue or pull request names it, and of the open pull requests that touch the file (#827, #825, #806, #784) none changes the entry's reader or writer. Built on `main` at `86bd0c2`, both tests fail with the error. The agent's case for leaving blanks out, made by voice, was the wrong way round: a blank in a field that is no collection is written out, and only an entry leaves a blank half out, so writing them out is the consistent spelling. It still changes the bytes of every rule that reads an entry with a blank half, which on `main` is a released format.
+
+His second question is #712, his own: a collection premise is a positive join, so no entry gives no row, and he expected the row. That is also what makes a to-do with no tag no to-do in a view. If #712 goes its first way, a read with both halves blank says nothing, and "has an entry" needs a spelling.
+
+**Decided.** The maintainer's: report and fix on `main`. Done as #834 and #835 (draft), the read-side fix, and taken off #773 by a revert. Not decided, his: whether an entry's blanks are written out, with format 4; and #712.
+
