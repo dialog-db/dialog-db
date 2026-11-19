@@ -49,6 +49,10 @@ runs, in the journal's "Where things stand"; they change together.
 - [Graph queries](graph-queries.md): **Proposed.** A concept's entity field
   names the concept it points to, so a concept describes a graph, a query
   returns it and a subscription follows changes anywhere in it.
+- [One notation](notation.md): **Exploring**, on
+  [dialog-db/dialog-db#728](https://github.com/dialog-db/dialog-db/pull/728).
+  One notation for questions, writes, rules and commands, read right by
+  the least capable reader we can find.
 - [Single-file format](single-file-format.md): **Building**, on
   [dialog-db/dialog-db#733](https://github.com/dialog-db/dialog-db/pull/733).
   A replica's blocks in one append-only file, every token stored once.
