@@ -45,8 +45,9 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
     Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
 pub struct Primitive {
-    /// One bit per [`ValueType`] variant (positions 0-8, and 10 for
-    /// `Composite`), plus a `Nothing` bit at position 9.
+    /// One bit per [`ValueType`] variant (positions 0-8, 10 for a
+    /// composite map and 11 for a composite list), plus a `Nothing` bit at
+    /// position 9.
     bits: u16,
 }
 
@@ -58,7 +59,7 @@ impl Display for Primitive {
         if self.required() == Self::ALL {
             write!(f, "Value")?;
         } else {
-            const ATOMS: [ValueType; 10] = [
+            const ATOMS: [ValueType; 11] = [
                 ValueType::String,
                 ValueType::Boolean,
                 ValueType::UnsignedInt,
@@ -68,7 +69,8 @@ impl Display for Primitive {
                 ValueType::Entity,
                 ValueType::Symbol,
                 ValueType::Record,
-                ValueType::Composite,
+                ValueType::CompositeMap,
+                ValueType::CompositeList,
             ];
             let mut first = true;
             for atom in ATOMS {
@@ -105,7 +107,7 @@ impl Primitive {
     /// variable that "accepts anything" still demands a Present
     /// value.
     pub const ALL: Self = Self {
-        bits: 0b101_1111_1111,
+        bits: 0b1101_1111_1111,
     };
 
     /// Every shape including the `Nothing` atom: the broadest
@@ -175,8 +177,12 @@ impl Primitive {
             ValueType::Entity => 1 << 6,
             ValueType::Symbol => 1 << 7,
             ValueType::Record => 1 << 8,
-            // Position 9 is the `Nothing` atom.
-            ValueType::Composite => 1 << 10,
+            // Position 9 is the `Nothing` atom. A composite is a map or a
+            // list, as a number is one of three; a record is a member of
+            // the map's, as a sized number type is of its storage type's.
+            ValueType::CompositeMap | ValueType::CompositeRecord => 1 << 10,
+            ValueType::CompositeList => 1 << 11,
+            ValueType::Composite => (1 << 10) | (1 << 11),
             // Any number: all three number types.
             ValueType::Number => (1 << 2) | (1 << 3) | (1 << 4),
             // A sized number type is a member of its storage type.
@@ -259,7 +265,7 @@ impl Primitive {
     /// Does **not** yield the `Nothing` atom.
     pub fn iter(self) -> impl Iterator<Item = ValueType> {
         let bits = self.bits;
-        (0..11u32).filter_map(move |pos| {
+        (0..12u32).filter_map(move |pos| {
             if (bits & (1 << pos)) != 0 {
                 value_type_for_bit(pos)
             } else {
@@ -281,7 +287,8 @@ fn value_type_for_bit(pos: u32) -> Option<ValueType> {
         7 => ValueType::Symbol,
         8 => ValueType::Record,
         // 9 is the `Nothing` atom, which no value type is.
-        10 => ValueType::Composite,
+        10 => ValueType::CompositeMap,
+        11 => ValueType::CompositeList,
         _ => return None,
     })
 }

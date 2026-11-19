@@ -36,7 +36,7 @@ pub fn encode_value(value: &Value, out: &mut Vec<u8>) {
         Value::Symbol(attribute) => encode_bytes(attribute.to_string().as_bytes(), out),
         // A composite's canonical bytes, escaped as a byte string, so a
         // spilled composite's prefix is delimited as an inline one is.
-        Value::Composite(composite) => encode_bytes(composite.as_bytes(), out),
+        Value::Composite(composite) => encode_bytes(&composite.to_bytes(), out),
     }
 }
 
@@ -120,7 +120,10 @@ pub fn decode_value(value_type: ValueDataType, bytes: &[u8]) -> Option<(Value, &
             let (raw, rest) = decode_bytes(bytes)?;
             (Value::Record(raw), rest)
         }
-        ValueDataType::Composite => {
+        ValueDataType::Composite
+        | ValueDataType::CompositeMap
+        | ValueDataType::CompositeRecord
+        | ValueDataType::CompositeList => {
             let (raw, rest) = decode_bytes(bytes)?;
             (
                 Value::Composite(crate::Composite::from_bytes(&raw).ok()?),

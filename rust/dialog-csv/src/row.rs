@@ -31,7 +31,7 @@ fn value_to_parts(value: &Value) -> (&'static str, String) {
         Value::Float(n) => ("float", n.to_string()),
         Value::Record(record) => ("record", record.to_base58()),
         Value::Symbol(attr) => ("attribute", attr.to_string()),
-        Value::Composite(composite) => ("composite", composite.as_bytes().to_base58()),
+        Value::Composite(composite) => ("composite", composite.to_bytes().to_base58()),
     }
 }
 

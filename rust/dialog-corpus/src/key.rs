@@ -159,7 +159,7 @@ fn encoded_len_lower_bound(value: &Value) -> usize {
     match value {
         Value::Bytes(bytes) => bytes.len(),
         Value::Record(bytes) => bytes.len(),
-        Value::Composite(composite) => composite.as_bytes().len(),
+        Value::Composite(composite) => composite.to_bytes().len(),
         Value::String(string) => string.len(),
         Value::Entity(entity) => entity.as_str().len(),
         // A number in the one band takes at least its class byte; the

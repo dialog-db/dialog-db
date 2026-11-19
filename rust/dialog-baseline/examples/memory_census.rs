@@ -155,7 +155,7 @@ fn value_bytes(value: &Value) -> Vec<u8> {
         Value::UnsignedInt(number) => number.to_le_bytes().to_vec(),
         Value::SignedInt(number) => number.to_le_bytes().to_vec(),
         Value::Float(number) => number.to_le_bytes().to_vec(),
-        Value::Composite(composite) => composite.as_bytes().to_vec(),
+        Value::Composite(composite) => composite.to_bytes().into_owned(),
     }
 }
 

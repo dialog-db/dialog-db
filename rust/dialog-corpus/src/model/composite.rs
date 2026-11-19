@@ -1,417 +1,835 @@
-//! A composite: one value made of attribute and value pairs.
+//! A composite: one value made of values, a map or a list.
 //!
-//! A composite is atomic, as any value is: it is written and replaced whole.
-//! Its fields are named by attributes (relations), a field may hold several
-//! values, and a value may itself be a composite. Two composites are equal
-//! exactly when they hold the same pairs, whatever order they were given in
-//! and however many times a pair was repeated.
+//! A composite is atomic, as any value is: it is written and replaced whole,
+//! never edited in place. It is one of two kinds:
+//!
+//! - a **map**: entries, each a key and a value. A key is any value that is
+//!   not a composite, text the usual one. A key may hold several values, so
+//!   a map is a set of entries, sorted, without repeats.
+//! - a **list**: items in order, repeats kept.
+//!
+//! A **record** is the sub-band of the map in which every key is an
+//! attribute (a [`Value::Symbol`]), as the naturals are a band of the
+//! numbers: one kind, told by its keys, never by a flag
+//! ([`Composite::is_record`]).
 //!
 //! # Canonical bytes
 //!
 //! ```text
-//! composite := count · names · fields
-//! names     := name 00 …              every attribute the composite (and every
-//!                                     composite nested in it) names, once,
-//!                                     sorted, as a key writes an attribute
-//! fields    := (index · type · value)* · 00
-//!                                     a field names its attribute by its place
-//!                                     in `names` (from 1; 0 ends the fields),
-//!                                     sorted by index, then by its value's bytes
-//! value     := the value as a key encodes it, every number in the one band;
-//!              a nested composite is its fields, naming the outer `names`
-//! count     := the number of names, as a LEB128 varint; so is an index
+//! composite := table · body              a composite on its own: a buffer of one
+//! table     := seq(TABLE) of keys        every key the composite and every map
+//!                                        nested in it uses, once, sorted by bytes
+//! body      := seq(MAP) of (index · slot)   entries sorted by key, then by value
+//!            | seq(LIST) of slot             items in order
+//! slot      := type · payload            a scalar as a tree key holds it, every
+//!                                        number in the one band
+//!            | 22 · body                 a nested composite, its keys in the table
+//! seq(kind) := head · count · size · offsets · items
+//! head      := kind | width << 2         width: no offsets, or 1, 2 or 4 bytes
+//! offsets   := where each item after the first starts, from the first, big
+//!              endian, in the narrowest width that holds the last; written
+//!              when, and only when, there are more than SCAN_LIMIT items
 //! ```
 //!
-//! Each composite has exactly one encoding: [`Composite::from_bytes`] reads
-//! the bytes back and refuses any that are not the encoding of what they
-//! hold. Equal bytes are therefore equal composites, so equality and hashing
-//! in memory compare bytes.
+//! `count`, `size` (the bytes of the offsets and the items) and a key's
+//! `index` are LEB128 varints. Every rule fixes one choice, so each
+//! composite has exactly one encoding, and [`Composite::from_bytes`] refuses
+//! any other. Equal composites on their own therefore have equal bytes, so a
+//! composite is keyed in the tree by its bytes.
+//!
+//! # Views
+//!
+//! A [`Composite`] is a view: the buffer that holds it and where its body
+//! starts. A nested composite read out of another shares its buffer and its
+//! table, so it is never written again to be read, and reading a field, an
+//! item, the length or an iteration reads only what it returns: a nested
+//! body says its size, so it is stepped over without being read, and a long
+//! sequence's offsets reach an item without reading those before it.
 //!
 //! # Identity
 //!
-//! A composite's [merkle reference](Composite::reference) is a map under
-//! `composite:` from each attribute (its relation as a `symbol:`) to its
-//! value's reference, or to the `set:` of its values' references when it
-//! holds several. A nested composite is its own reference, so nothing of the
-//! bytes' layout enters a composite's identity.
+//! A map's [merkle reference](Composite::reference) is a map under
+//! `composite:` from each key's reference to its value's reference, or to
+//! the `set:` of its values' references when it holds several; a list's is
+//! the `list:` of its items' references. A nested composite is its own
+//! reference, so no part of the layout, the table or the offsets, enters a
+//! composite's identity.
 
+mod encode;
+mod layout;
+
+use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::hash::{Hash, Hasher};
+use std::iter::from_fn;
+use std::ops::Range;
 use std::sync::Arc;
 
 use merkle_reference::{Reference, Type};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeSeq};
+use thiserror::Error;
 
-use crate::identity::{COMPOSITE, SYMBOL};
+use self::encode::{Node, canonical, node, scalar};
+use self::layout::{LIST, MAP, Seq, TABLE, read_varint, seq, slot_end};
+use crate::identity::COMPOSITE;
 use crate::{
-    DialogCorpusError, NUMBER_BAND, Relation, Value, ValueDataType, decode_bytes_cow, decode_value,
-    encode_bytes, encode_key_value,
+    DialogCorpusError, Relation, Value, ValueDataType, ValueView, decode_value, decode_value_view,
 };
 
-/// What ends a list of fields: the index no field has.
-const END: u8 = 0;
+/// How many items a sequence holds before it is written with offsets.
+/// Below it, finding an item by stepping over those before it is as fast as
+/// reading an offset (`design/composite-value.md` has the measurements), and
+/// the offsets would only add bytes.
+pub const SCAN_LIMIT: usize = 8;
 
-/// A value made of attribute and value pairs, held as its canonical bytes.
+/// How deeply composites may nest in one another.
+pub const MAX_DEPTH: usize = 128;
+
+/// Why bytes are not a composite, or values do not make one.
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositeError {
+    /// The bytes do not read as a composite at all.
+    #[error("the bytes do not read as a composite")]
+    Malformed,
+    /// The bytes read as a composite, but are not its canonical encoding:
+    /// keys or entries out of order or repeated, a key no entry uses, a
+    /// varint longer than it needs, offsets where there should be none or
+    /// none where there should be some, or bytes past the end.
+    #[error("the bytes are not the canonical encoding of the composite they read as")]
+    NotCanonical,
+    /// A key was a composite: a key is a scalar value.
+    #[error("a map's key cannot be a composite")]
+    CompositeKey,
+    /// A value or a key was NaN, which is not a value.
+    #[error("a composite cannot hold NaN, which is not a value")]
+    NotANumber,
+    /// Composites nested deeper than [`MAX_DEPTH`].
+    #[error("composites nest at most {MAX_DEPTH} deep")]
+    TooDeep,
+}
+
+impl From<CompositeError> for DialogCorpusError {
+    fn from(error: CompositeError) -> Self {
+        DialogCorpusError::InvalidValue(error.to_string())
+    }
+}
+
+/// Which kind a composite is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CompositeKind {
+    /// Entries, each a key and a value. A record is a map.
+    Map,
+    /// Items in order.
+    List,
+}
+
+/// A map or a list of values: a view over the buffer that holds it.
 #[derive(Clone)]
-pub struct Composite(Arc<[u8]>);
+pub struct Composite {
+    buffer: Arc<[u8]>,
+    /// Where its body's head is in `buffer`.
+    body: usize,
+}
 
-/// A composite's content: its pairs, in canonical order, a nested
-/// composite as its own content.
-#[derive(Clone, Debug, PartialEq)]
-struct Content(Vec<(Relation, Item)>);
+#[cfg(test)]
+use std::cell::Cell;
 
-#[derive(Clone, Debug, PartialEq)]
-enum Item {
-    Value(Value),
-    Composite(Content),
+#[cfg(test)]
+thread_local! {
+    /// How many scalars this thread has decoded out of composites, so a test
+    /// can say that a read decoded only what it returned.
+    static DECODED: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn decoded() -> usize {
+    DECODED.with(Cell::get)
+}
+
+fn counted() {
+    #[cfg(test)]
+    DECODED.with(|count| count.set(count.get() + 1));
 }
 
 impl Composite {
-    /// The composite holding `fields`: each an attribute and a value, in any
-    /// order, an attribute repeated for each value it holds. A value may be
-    /// a composite. A pair given twice is held once, and so are two numbers
-    /// that are one number (the natural `3` and the float `3.0`).
-    pub fn new<I>(fields: I) -> Result<Self, DialogCorpusError>
+    /// The map holding `entries`: each a key and a value, in any order, a
+    /// key repeated for each value it holds. An entry given twice is held
+    /// once, and so are two numbers that are one number (the natural `3` and
+    /// the float `3.0`).
+    pub fn map<I>(entries: I) -> Result<Self, CompositeError>
+    where
+        I: IntoIterator<Item = (Value, Value)>,
+    {
+        let mut held = Vec::new();
+        for (key, value) in entries {
+            held.push((scalar(&key)?, node(&value)?));
+        }
+        Self::of(&Node::Map(held))
+    }
+
+    /// The record holding `fields`: a map whose keys are attributes.
+    pub fn record<I>(fields: I) -> Result<Self, CompositeError>
     where
         I: IntoIterator<Item = (Relation, Value)>,
     {
-        let mut pairs = Vec::new();
-        for (attribute, value) in fields {
-            pairs.push((attribute, item(value)?));
-        }
-        Ok(Self(encode(&Content(pairs)).into()))
+        Self::map(
+            fields
+                .into_iter()
+                .map(|(attribute, value)| (Value::Symbol(attribute), value)),
+        )
+    }
+
+    /// [`Composite::record`], by the name it had first.
+    pub fn new<I>(fields: I) -> Result<Self, CompositeError>
+    where
+        I: IntoIterator<Item = (Relation, Value)>,
+    {
+        Self::record(fields)
+    }
+
+    /// The list of `items`, in the order given.
+    pub fn list<I>(items: I) -> Result<Self, CompositeError>
+    where
+        I: IntoIterator<Item = Value>,
+    {
+        let items = items
+            .into_iter()
+            .map(|item| node(&item))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::of(&Node::List(items))
+    }
+
+    fn of(node: &Node) -> Result<Self, CompositeError> {
+        Ok(Self::root(canonical(node)?.into()))
+    }
+
+    /// The composite at the root of `buffer`, which holds one.
+    fn root(buffer: Arc<[u8]>) -> Self {
+        let body = seq(&buffer, 0).map_or(0, |table| table.end);
+        Self { buffer, body }
     }
 
     /// The composite whose canonical bytes are `bytes`, refusing bytes that
     /// do not read as a composite or are not the canonical encoding of the
     /// one they read as.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DialogCorpusError> {
-        let content = read(bytes).ok_or_else(|| invalid("bytes that do not read as one"))?;
-        if encode(&content) != bytes {
-            return Err(invalid("bytes that are not its canonical encoding"));
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CompositeError> {
+        let read = Self::root(bytes.into());
+        let node = read.checked_node()?;
+        if canonical(&node)? != bytes {
+            return Err(CompositeError::NotCanonical);
         }
-        Ok(Self(bytes.into()))
+        Ok(read)
     }
 
-    /// The canonical bytes.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+    /// The composite in `bytes`, read with every check
+    /// [`Composite::from_bytes`] makes but the last: whether they are the
+    /// canonical layout. Only measurement uses it, to read layouts with
+    /// other limits than [`SCAN_LIMIT`].
+    #[doc(hidden)]
+    pub fn from_layout(bytes: &[u8]) -> Result<Self, CompositeError> {
+        let read = Self::root(bytes.into());
+        read.checked_node()?;
+        Ok(read)
     }
 
-    /// Every pair, in canonical order: by attribute, then by value. A nested
-    /// composite is given as a composite of its own.
-    pub fn fields(&self) -> Vec<(Relation, Value)> {
-        self.content()
-            .0
+    /// This composite written with offsets in every sequence of more than
+    /// `limit` items: a layout readers read but [`Composite::from_bytes`]
+    /// refuses unless `limit` is [`SCAN_LIMIT`]. Only measurement uses it.
+    #[doc(hidden)]
+    pub fn layout(&self, limit: usize) -> Vec<u8> {
+        encode::encode(&self.node(), limit)
+    }
+
+    /// Whether this is the composite at the root of its buffer, rather than
+    /// one nested in another.
+    pub fn is_root(&self) -> bool {
+        seq(&self.buffer, 0).is_some_and(|table| table.end == self.body)
+    }
+
+    /// Its canonical bytes on its own: the buffer it is the root of, or, for
+    /// a composite nested in another, its content written again.
+    pub fn to_bytes(&self) -> Cow<'_, [u8]> {
+        if self.is_root() {
+            Cow::Borrowed(&self.buffer)
+        } else {
+            Cow::Owned(encode::encode(&self.node(), SCAN_LIMIT))
+        }
+    }
+
+    /// The bytes of the buffer this composite is a view over, and the span
+    /// of its body in them.
+    pub fn buffer(&self) -> (&[u8], Range<usize>) {
+        let end = self.seq().map_or(self.body, |body| body.end);
+        (&self.buffer, self.body..end)
+    }
+
+    fn seq(&self) -> Option<Seq> {
+        seq(&self.buffer, self.body)
+    }
+
+    fn table(&self) -> Option<Seq> {
+        seq(&self.buffer, 0).filter(|table| table.kind == TABLE)
+    }
+
+    /// Which kind it is.
+    pub fn kind(&self) -> CompositeKind {
+        match self.seq().map(|body| body.kind) {
+            Some(LIST) => CompositeKind::List,
+            _ => CompositeKind::Map,
+        }
+    }
+
+    /// Whether it is a map.
+    pub fn is_map(&self) -> bool {
+        self.kind() == CompositeKind::Map
+    }
+
+    /// Whether it is a list.
+    pub fn is_list(&self) -> bool {
+        self.kind() == CompositeKind::List
+    }
+
+    /// Whether it is a record: a map every key of which is an attribute. The
+    /// table is sorted by type byte first, so the attributes are one run of
+    /// it, and the entries are sorted by key, so only the first entry's key
+    /// and the last's are read.
+    pub fn is_record(&self) -> bool {
+        let Some(body) = self.seq().filter(|body| body.kind == MAP) else {
+            return false;
+        };
+        let first = self.entry_at(&body, 0).map(|(key, _, _)| key);
+        let last = body
+            .count
+            .checked_sub(1)
+            .and_then(|last| self.entry_at(&body, last))
+            .map(|(key, _, _)| key);
+        [first, last].into_iter().flatten().all(|key| {
+            self.key_bytes(key)
+                .is_some_and(|key| key.first() == Some(&(ValueDataType::Symbol as u8)))
+        })
+    }
+
+    /// How many entries or items it holds at its top level: read from its
+    /// head.
+    pub fn len(&self) -> usize {
+        self.seq().map_or(0, |body| body.count)
+    }
+
+    /// Whether it holds nothing.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The slot bytes of the key at `index` in the table.
+    fn key_bytes(&self, index: usize) -> Option<&[u8]> {
+        let table = self.table()?;
+        let start = match table.offset(&self.buffer, index) {
+            Some(start) => start,
+            None if table.width == 0 && index < table.count => {
+                let mut at = table.items;
+                for _ in 0..index {
+                    at = slot_end(&self.buffer, at, table.end)?;
+                }
+                at
+            }
+            None => return None,
+        };
+        let end = slot_end(&self.buffer, start, table.end)?;
+        self.buffer.get(start..end)
+    }
+
+    /// The place of `key` (a slot's bytes) in the table: by halving where
+    /// the table has offsets, by stepping through it otherwise. No key is
+    /// decoded either way; their bytes are compared.
+    fn key_index(&self, key: &[u8]) -> Option<usize> {
+        let table = self.table()?;
+        if table.width > 0 {
+            let (mut low, mut high) = (0, table.count);
+            while low < high {
+                let middle = (low + high) / 2;
+                match self.key_bytes(middle)?.cmp(key) {
+                    Ordering::Less => low = middle + 1,
+                    Ordering::Greater => high = middle,
+                    Ordering::Equal => return Some(middle),
+                }
+            }
+            return None;
+        }
+        let mut at = table.items;
+        for index in 0..table.count {
+            let end = slot_end(&self.buffer, at, table.end)?;
+            match self.buffer[at..end].cmp(key) {
+                Ordering::Less => at = end,
+                Ordering::Equal => return Some(index),
+                Ordering::Greater => return None,
+            }
+        }
+        None
+    }
+
+    /// The entry at `at` in a map body: its key's index, where its slot
+    /// starts and where it ends.
+    fn entry(&self, body: &Seq, at: usize) -> Option<(usize, usize, usize)> {
+        let (key, slot) = read_varint(&self.buffer, at)?;
+        let end = slot_end(&self.buffer, slot, body.end)?;
+        Some((key, slot, end))
+    }
+
+    /// The `index`th entry of a map body, by its offset or by stepping over
+    /// those before it.
+    fn entry_at(&self, body: &Seq, index: usize) -> Option<(usize, usize, usize)> {
+        if index >= body.count {
+            return None;
+        }
+        if let Some(at) = body.offset(&self.buffer, index) {
+            return self.entry(body, at);
+        }
+        let mut at = body.items;
+        for _ in 0..index {
+            at = self.entry(body, at)?.2;
+        }
+        self.entry(body, at)
+    }
+
+    /// The slot spans of every value `key` holds.
+    fn spans(&self, key: &Value) -> Vec<(usize, usize)> {
+        let mut spans = Vec::new();
+        let (Some(body), Ok(wanted)) = (self.seq().filter(|b| b.kind == MAP), scalar(key)) else {
+            return spans;
+        };
+        let Some(index) = self.key_index(&wanted) else {
+            return spans;
+        };
+        // The first entry of the key: by halving over the offsets, or by
+        // stepping from the front.
+        let mut at = if body.width > 0 {
+            let (mut low, mut high) = (0, body.count);
+            while low < high {
+                let middle = (low + high) / 2;
+                match self.entry_at(&body, middle) {
+                    Some((found, _, _)) if found < index => low = middle + 1,
+                    Some(_) => high = middle,
+                    None => return spans,
+                }
+            }
+            match body.offset(&self.buffer, low) {
+                Some(at) => at,
+                None => return spans,
+            }
+        } else {
+            body.items
+        };
+        while at < body.end {
+            let Some((found, slot, end)) = self.entry(&body, at) else {
+                break;
+            };
+            if found > index {
+                break;
+            }
+            if found == index {
+                spans.push((slot, end));
+            }
+            at = end;
+        }
+        spans
+    }
+
+    /// The value in the slot at `slot..end`: a scalar decoded, a nested
+    /// composite as a view of this buffer.
+    fn value_at(&self, slot: usize, end: usize) -> Option<Value> {
+        let kind = *self.buffer.get(slot)?;
+        if kind == ValueDataType::Composite as u8 {
+            return Some(Value::Composite(self.nested(slot)));
+        }
+        counted();
+        let (value, rest) = decode_value(ValueDataType::from(kind), &self.buffer[slot + 1..end])?;
+        rest.is_empty().then_some(value)
+    }
+
+    /// The value in the slot at `slot..end`, its text and bytes borrowed
+    /// from the buffer.
+    fn view_at(&self, slot: usize, end: usize) -> Option<ValueView<'_>> {
+        let kind = *self.buffer.get(slot)?;
+        if kind == ValueDataType::Composite as u8 {
+            return Some(ValueView::Composite(self.nested(slot)));
+        }
+        counted();
+        decode_value_view(ValueDataType::from(kind), &self.buffer[slot + 1..end]).ok()
+    }
+
+    /// The values `key` holds in a map, in canonical order: none when it
+    /// holds none, or this is a list. Only those values are decoded; a
+    /// nested composite is a view of this one's buffer.
+    pub fn get(&self, key: &Value) -> Vec<Value> {
+        self.spans(key)
             .into_iter()
-            .map(|(attribute, item)| (attribute, item.into_value()))
+            .filter_map(|(slot, end)| self.value_at(slot, end))
             .collect()
     }
 
-    /// The values `attribute` holds, in canonical order: none when the
-    /// composite does not name it. Only the fields it holds are decoded.
-    pub fn get(&self, attribute: &Relation) -> Vec<Value> {
-        let mut wanted = Vec::new();
-        encode_bytes(attribute.as_str().as_bytes(), &mut wanted);
-        let Some((names, mut at)) = header(&self.0) else {
-            return Vec::new();
-        };
-        let Some(index) = names.iter().position(|name| *name == wanted.as_slice()) else {
-            return Vec::new();
-        };
-        let index = index + 1;
-        let mut values = Vec::new();
-        while let Some((found, used)) = read_varint(&self.0[at..]) {
-            at += used;
-            if found == 0 || found > index {
-                break;
+    /// The first value `key` holds in a map.
+    pub fn first(&self, key: &Value) -> Option<Value> {
+        let (slot, end) = *self.spans(key).first()?;
+        self.value_at(slot, end)
+    }
+
+    /// The first value `key` holds in a map, its text and bytes borrowed.
+    pub fn first_view(&self, key: &Value) -> Option<ValueView<'_>> {
+        let (slot, end) = *self.spans(key).first()?;
+        self.view_at(slot, end)
+    }
+
+    /// The values the attribute `attribute` holds in a record.
+    pub fn field(&self, attribute: &Relation) -> Vec<Value> {
+        self.get(&Value::Symbol(attribute.clone()))
+    }
+
+    /// The item at `index` of a list: by its offset, or by stepping over
+    /// the items before it, a nested one by its size.
+    pub fn item(&self, index: usize) -> Option<Value> {
+        let (slot, end) = self.item_span(index)?;
+        self.value_at(slot, end)
+    }
+
+    /// The item at `index` of a list, its text and bytes borrowed.
+    pub fn item_view(&self, index: usize) -> Option<ValueView<'_>> {
+        let (slot, end) = self.item_span(index)?;
+        self.view_at(slot, end)
+    }
+
+    fn item_span(&self, index: usize) -> Option<(usize, usize)> {
+        let body = self.seq().filter(|body| body.kind == LIST)?;
+        if index >= body.count {
+            return None;
+        }
+        let start = match body.offset(&self.buffer, index) {
+            Some(start) => start,
+            None => {
+                let mut at = body.items;
+                for _ in 0..index {
+                    at = slot_end(&self.buffer, at, body.end)?;
+                }
+                at
             }
-            let Some(len) = slot_len(&self.0[at..]) else {
-                break;
-            };
-            if found == index
-                && let Some(item) = read_slot(&self.0[at..at + len], &names)
-            {
-                values.push(item.into_value());
-            }
-            at += len;
-        }
-        values
+        };
+        Some((start, slot_end(&self.buffer, start, body.end)?))
     }
 
-    /// How many pairs it holds at its top level.
-    pub fn len(&self) -> usize {
-        self.content().0.len()
-    }
-
-    /// Whether it holds no pair.
-    pub fn is_empty(&self) -> bool {
-        self.0.as_ref() == [0, END]
-    }
-
-    /// Its identity: a map under `composite:` from each attribute to its
-    /// value's reference, or to the `set:` of its values' references when
-    /// it holds several.
-    pub fn reference(&self) -> Reference {
-        reference(&self.content())
-    }
-
-    /// How many bytes at the front of `bytes` a composite's canonical
-    /// encoding takes, without checking it is canonical.
-    pub fn encoded_len(bytes: &[u8]) -> Option<usize> {
-        let (_, at) = header(bytes)?;
-        Some(at + fields_len(&bytes[at..])?)
-    }
-
-    fn content(&self) -> Content {
-        read(&self.0).expect("a composite holds canonical bytes")
-    }
-}
-
-impl Item {
-    fn into_value(self) -> Value {
-        match self {
-            Item::Value(value) => value,
-            Item::Composite(content) => Value::Composite(Composite(encode(&content).into())),
-        }
-    }
-}
-
-fn invalid(what: &str) -> DialogCorpusError {
-    DialogCorpusError::InvalidValue(format!("a composite cannot hold {what}"))
-}
-
-/// A value as a composite holds it: a nested composite as its content, and
-/// no value a number of which no type holds (NaN).
-fn item(value: Value) -> Result<Item, DialogCorpusError> {
-    match value {
-        Value::Composite(composite) => Ok(Item::Composite(composite.content())),
-        Value::Float(float) if float.is_nan() => Err(invalid("NaN, which is not a value")),
-        value => Ok(Item::Value(value)),
-    }
-}
-
-fn varint(mut n: usize, out: &mut Vec<u8>) {
-    loop {
-        let byte = (n & 0x7f) as u8;
-        n >>= 7;
-        if n == 0 {
-            out.push(byte);
-            return;
-        }
-        out.push(byte | 0x80);
-    }
-}
-
-/// A varint at the front of `bytes`, and how many bytes it took. A varint
-/// is minimal: no trailing zero group, so each number has one encoding.
-fn read_varint(bytes: &[u8]) -> Option<(usize, usize)> {
-    let mut n = 0usize;
-    for (at, &byte) in bytes.iter().enumerate().take(9) {
-        n |= ((byte & 0x7f) as usize) << (7 * at);
-        if byte & 0x80 == 0 {
-            if at > 0 && byte == 0 {
+    /// A map's entries in canonical order: by key, then by value. Each
+    /// entry is decoded as it is reached.
+    pub fn entries(&self) -> impl Iterator<Item = (Value, Value)> + '_ {
+        let body = self.seq().filter(|body| body.kind == MAP);
+        let mut at = body.map_or(0, |body| body.items);
+        from_fn(move || {
+            let body = body?;
+            if at >= body.end {
                 return None;
             }
-            return Some((n, at + 1));
+            let (key, slot, end) = self.entry(&body, at)?;
+            at = end;
+            let key_bytes = self.key_bytes(key)?;
+            counted();
+            let (key, rest) = decode_value(ValueDataType::from(key_bytes[0]), &key_bytes[1..])?;
+            if !rest.is_empty() {
+                return None;
+            }
+            Some((key, self.value_at(slot, end)?))
+        })
+    }
+
+    /// A list's items in order, each decoded as it is reached.
+    pub fn items(&self) -> impl Iterator<Item = Value> + '_ {
+        let body = self.seq().filter(|body| body.kind == LIST);
+        let mut at = body.map_or(0, |body| body.items);
+        from_fn(move || {
+            let body = body?;
+            if at >= body.end {
+                return None;
+            }
+            let end = slot_end(&self.buffer, at, body.end)?;
+            let value = self.value_at(at, end);
+            at = end;
+            value
+        })
+    }
+
+    /// A record's fields, in canonical order: every entry whose key is an
+    /// attribute.
+    pub fn fields(&self) -> Vec<(Relation, Value)> {
+        self.entries()
+            .filter_map(|(key, value)| match key {
+                Value::Symbol(attribute) => Some((attribute, value)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Its content, keys and scalars as their slot bytes, read without
+    /// checks: what writing it again reads.
+    fn node(&self) -> Node {
+        self.read_node(self.body)
+            .expect("a composite reads back as the content it was written from")
+    }
+
+    /// Its content, every part checked to read: what [`Self::from_bytes`]
+    /// compares against its canonical encoding.
+    fn checked_node(&self) -> Result<Node, CompositeError> {
+        let table = self.table().ok_or(CompositeError::Malformed)?;
+        let body = self.seq().ok_or(CompositeError::Malformed)?;
+        if body.kind == TABLE || body.end != self.buffer.len() {
+            return Err(CompositeError::Malformed);
         }
-    }
-    None
-}
-
-/// The type byte a value is keyed under in a composite: every number under
-/// the band's.
-fn type_byte(value: &Value) -> u8 {
-    match value {
-        Value::UnsignedInt(_) | Value::SignedInt(_) | Value::Float(_) => {
-            ValueDataType::Number as u8
+        // Every key in the table is a scalar that decodes.
+        let mut at = table.items;
+        for _ in 0..table.count {
+            let end = slot_end(&self.buffer, at, table.end).ok_or(CompositeError::Malformed)?;
+            if self.buffer[at] == ValueDataType::Composite as u8 {
+                return Err(CompositeError::Malformed);
+            }
+            self.check_scalar(at, end)?;
+            at = end;
         }
-        other => other.data_type() as u8,
-    }
-}
-
-fn names(content: &Content, into: &mut BTreeSet<Vec<u8>>) {
-    for (attribute, item) in &content.0 {
-        let mut name = Vec::with_capacity(attribute.as_str().len() + 1);
-        encode_bytes(attribute.as_str().as_bytes(), &mut name);
-        into.insert(name);
-        if let Item::Composite(nested) = item {
-            names(nested, into);
+        if at != table.end {
+            return Err(CompositeError::Malformed);
         }
+        self.read_node_checked(self.body, 0)
     }
-}
 
-fn encode(content: &Content) -> Vec<u8> {
-    let mut table = BTreeSet::new();
-    names(content, &mut table);
-    let index: BTreeMap<Vec<u8>, usize> = table
-        .iter()
-        .enumerate()
-        .map(|(at, name)| (name.clone(), at + 1))
-        .collect();
-    let mut out = Vec::new();
-    varint(table.len(), &mut out);
-    for name in &table {
-        out.extend_from_slice(name);
-    }
-    encode_fields(content, &index, &mut out);
-    out
-}
-
-fn encode_fields(content: &Content, index: &BTreeMap<Vec<u8>, usize>, out: &mut Vec<u8>) {
-    let mut fields: Vec<(usize, Vec<u8>)> = content
-        .0
-        .iter()
-        .map(|(attribute, item)| {
-            let mut name = Vec::new();
-            encode_bytes(attribute.as_str().as_bytes(), &mut name);
-            let mut slot = Vec::new();
-            match item {
-                Item::Value(value) => {
-                    slot.push(type_byte(value));
-                    encode_key_value(value, NUMBER_BAND, &mut slot);
-                }
-                Item::Composite(nested) => {
-                    slot.push(ValueDataType::Composite as u8);
-                    encode_fields(nested, index, &mut slot);
+    fn check_scalar(&self, slot: usize, end: usize) -> Result<(), CompositeError> {
+        let kind = self.buffer[slot];
+        if kind > ValueDataType::Number as u8 {
+            return Err(CompositeError::Malformed);
+        }
+        match decode_value(ValueDataType::from(kind), &self.buffer[slot + 1..end]) {
+            Some((Value::Float(float), [])) if float.is_nan() => Err(CompositeError::NotANumber),
+            Some((value, [])) => {
+                // A scalar holds the encoding its value is written in, and
+                // the type byte it is keyed under.
+                if scalar(&value)? == self.buffer[slot..end] {
+                    Ok(())
+                } else {
+                    Err(CompositeError::NotCanonical)
                 }
             }
-            (index[&name], slot)
+            _ => Err(CompositeError::Malformed),
+        }
+    }
+
+    fn read_node_checked(&self, at: usize, depth: usize) -> Result<Node, CompositeError> {
+        if depth >= MAX_DEPTH {
+            return Err(CompositeError::TooDeep);
+        }
+        let body = seq(&self.buffer, at).ok_or(CompositeError::Malformed)?;
+        let table = self.table().ok_or(CompositeError::Malformed)?;
+        let mut cursor = body.items;
+        let mut parts = Vec::with_capacity(body.count.min(self.buffer.len()));
+        for index in 0..body.count {
+            // Where offsets are written, each is where the item is.
+            if body.width > 0 && body.offset(&self.buffer, index) != Some(cursor) {
+                return Err(CompositeError::Malformed);
+            }
+            let (key, slot) = if body.kind == MAP {
+                let (key, slot) =
+                    read_varint(&self.buffer, cursor).ok_or(CompositeError::Malformed)?;
+                if key >= table.count {
+                    return Err(CompositeError::Malformed);
+                }
+                (Some(key), slot)
+            } else {
+                (None, cursor)
+            };
+            let end = slot_end(&self.buffer, slot, body.end).ok_or(CompositeError::Malformed)?;
+            let value = if self.buffer[slot] == ValueDataType::Composite as u8 {
+                self.read_node_checked(slot + 1, depth + 1)?
+            } else {
+                self.check_scalar(slot, end)?;
+                Node::Slot(self.buffer[slot..end].to_vec())
+            };
+            parts.push((key, value));
+            cursor = end;
+        }
+        if cursor != body.end {
+            return Err(CompositeError::Malformed);
+        }
+        Ok(match body.kind {
+            MAP => Node::Map(
+                parts
+                    .into_iter()
+                    .map(|(key, value)| {
+                        let key = key.and_then(|key| self.key_bytes(key)).map(<[u8]>::to_vec);
+                        key.map(|key| (key, value)).ok_or(CompositeError::Malformed)
+                    })
+                    .collect::<Result<_, _>>()?,
+            ),
+            LIST => Node::List(parts.into_iter().map(|(_, value)| value).collect()),
+            _ => return Err(CompositeError::Malformed),
         })
-        .collect();
-    fields.sort_unstable();
-    fields.dedup();
-    for (at, slot) in fields {
-        varint(at, out);
-        out.extend_from_slice(&slot);
     }
-    out.push(END);
-}
 
-/// The names a composite's header lists, and where its fields start.
-fn header(bytes: &[u8]) -> Option<(Vec<&[u8]>, usize)> {
-    let (count, mut at) = read_varint(bytes)?;
-    let mut names = Vec::with_capacity(count.min(bytes.len()));
-    for _ in 0..count {
-        let len = terminated_len(bytes.get(at..)?)?;
-        names.push(&bytes[at..at + len]);
-        at += len;
+    fn read_node(&self, at: usize) -> Option<Node> {
+        let body = seq(&self.buffer, at)?;
+        let mut cursor = body.items;
+        let mut entries = Vec::new();
+        let mut items = Vec::new();
+        while cursor < body.end {
+            let (key, slot) = if body.kind == MAP {
+                let (key, slot) = read_varint(&self.buffer, cursor)?;
+                (Some(key), slot)
+            } else {
+                (None, cursor)
+            };
+            let end = slot_end(&self.buffer, slot, body.end)?;
+            let value = if self.buffer[slot] == ValueDataType::Composite as u8 {
+                self.read_node(slot + 1)?
+            } else {
+                Node::Slot(self.buffer[slot..end].to_vec())
+            };
+            match key {
+                Some(key) => entries.push((self.key_bytes(key)?.to_vec(), value)),
+                None => items.push(value),
+            }
+            cursor = end;
+        }
+        Some(if body.kind == LIST {
+            Node::List(items)
+        } else {
+            Node::Map(entries)
+        })
     }
-    Some((names, at))
-}
 
-/// The length of one `0x00`-escaped, `0x00`-terminated string at the front
-/// of `bytes`, its terminator included.
-fn terminated_len(bytes: &[u8]) -> Option<usize> {
-    let mut at = 0;
-    loop {
-        let zero = at + memchr::memchr(0, bytes.get(at..)?)?;
-        match bytes.get(zero + 1) {
-            Some(0xFF) => at = zero + 2,
-            _ => return Some(zero + 1),
+    /// Its identity: for a map, a map under `composite:` from each key's
+    /// reference to its value's, or to the `set:` of its values' when it
+    /// holds several; for a list, the `list:` of its items' references.
+    pub fn reference(&self) -> Reference {
+        match self.kind() {
+            CompositeKind::List => Type::LIST.list(self.items().map(|item| item.reference())),
+            CompositeKind::Map => {
+                let mut grouped: Vec<(Reference, Vec<Reference>)> = Vec::new();
+                let mut last: Option<Value> = None;
+                for (key, value) in self.entries() {
+                    let value = value.reference();
+                    match (&last, grouped.last_mut()) {
+                        (Some(previous), Some((_, values))) if *previous == key => {
+                            values.push(value)
+                        }
+                        _ => {
+                            grouped.push((key.reference(), vec![value]));
+                            last = Some(key);
+                        }
+                    }
+                }
+                COMPOSITE.map(grouped.into_iter().map(|(key, values)| {
+                    let value = match values.as_slice() {
+                        [one] => *one,
+                        _ => Type::SET.set(values),
+                    };
+                    (key, value)
+                }))
+            }
         }
     }
-}
 
-/// The length of a list of fields at the front of `bytes`, its end
-/// included.
-fn fields_len(bytes: &[u8]) -> Option<usize> {
-    let mut at = 0;
-    loop {
-        let (index, used) = read_varint(bytes.get(at..)?)?;
-        at += used;
-        if index == 0 {
-            return Some(at);
+    /// Walks the content, keys and scalars as their bytes, so two views over
+    /// different tables are compared and hashed alike.
+    fn walk(&self, visit: &mut dyn FnMut(&[u8])) {
+        let Some(body) = self.seq() else { return };
+        visit(&[body.kind, 0xff]);
+        visit(&body.count.to_be_bytes());
+        let mut at = body.items;
+        while at < body.end {
+            let (key, slot) = if body.kind == MAP {
+                let Some((key, slot)) = read_varint(&self.buffer, at) else {
+                    return;
+                };
+                (self.key_bytes(key), slot)
+            } else {
+                (None, at)
+            };
+            let Some(end) = slot_end(&self.buffer, slot, body.end) else {
+                return;
+            };
+            if let Some(key) = key {
+                visit(key);
+            }
+            if self.buffer[slot] == ValueDataType::Composite as u8 {
+                self.nested(slot).walk(visit);
+            } else {
+                visit(&self.buffer[slot..end]);
+            }
+            at = end;
         }
-        at += slot_len(bytes.get(at..)?)?;
     }
-}
 
-/// The length of a value slot (its type byte and its value) at the front
-/// of `bytes`.
-fn slot_len(bytes: &[u8]) -> Option<usize> {
-    let (&kind, rest) = bytes.split_first()?;
-    let len = if kind == ValueDataType::Number as u8 {
-        dialog_number::encoded_len(rest)?
-    } else if kind == ValueDataType::Composite as u8 {
-        fields_len(rest)?
-    } else if kind == ValueDataType::Boolean as u8 {
-        1
-    } else if [
-        ValueDataType::Bytes,
-        ValueDataType::Entity,
-        ValueDataType::String,
-        ValueDataType::Record,
-        ValueDataType::Symbol,
-    ]
-    .iter()
-    .any(|t| *t as u8 == kind)
-    {
-        terminated_len(rest)?
-    } else {
-        return None;
-    };
-    Some(1 + len)
-}
-
-fn read(bytes: &[u8]) -> Option<Content> {
-    let (names, at) = header(bytes)?;
-    let (content, used) = read_fields(&bytes[at..], &names)?;
-    (at + used == bytes.len()).then_some(content)
-}
-
-fn read_fields(bytes: &[u8], names: &[&[u8]]) -> Option<(Content, usize)> {
-    let mut pairs = Vec::new();
-    let mut at = 0;
-    loop {
-        let (index, used) = read_varint(bytes.get(at..)?)?;
-        at += used;
-        if index == 0 {
-            return Some((Content(pairs), at));
+    /// The composite nested in the slot at `slot`, a view of this buffer.
+    fn nested(&self, slot: usize) -> Composite {
+        Composite {
+            buffer: self.buffer.clone(),
+            body: slot + 1,
         }
-        let name = names.get(index - 1)?;
-        let (attribute, _) = decode_bytes_cow(name)?;
-        let attribute = Relation::try_from(String::from_utf8(attribute.into_owned()).ok()?).ok()?;
-        let len = slot_len(bytes.get(at..)?)?;
-        pairs.push((attribute, read_slot(&bytes[at..at + len], names)?));
-        at += len;
     }
-}
 
-fn read_slot(slot: &[u8], names: &[&[u8]]) -> Option<Item> {
-    let (&kind, rest) = slot.split_first()?;
-    if kind == ValueDataType::Composite as u8 {
-        let (content, _) = read_fields(rest, names)?;
-        return Some(Item::Composite(content));
-    }
-    let (value, left) = decode_value(ValueDataType::from(kind), rest)?;
-    left.is_empty().then_some(Item::Value(value))
-}
-
-fn reference(content: &Content) -> Reference {
-    let mut by_attribute: BTreeMap<&Relation, Vec<Reference>> = BTreeMap::new();
-    for (attribute, item) in &content.0 {
-        let value = match item {
-            Item::Value(value) => value.reference(),
-            Item::Composite(nested) => reference(nested),
+    /// The part of a sequence at `at`: a map entry's key bytes, and where
+    /// its slot starts and ends.
+    fn part(&self, seq: &Seq, at: usize) -> Option<(Option<&[u8]>, usize, usize)> {
+        let (key, slot) = if seq.kind == MAP {
+            let (key, slot) = read_varint(&self.buffer, at)?;
+            (Some(self.key_bytes(key)?), slot)
+        } else {
+            (None, at)
         };
-        by_attribute.entry(attribute).or_default().push(value);
+        Some((key, slot, slot_end(&self.buffer, slot, seq.end)?))
     }
-    COMPOSITE.map(by_attribute.into_iter().map(|(attribute, values)| {
-        let key = SYMBOL.reference_of(attribute.as_str().as_bytes());
-        let value = match values.as_slice() {
-            [one] => *one,
-            _ => Type::SET.set(values),
+
+    /// Whether two composites hold the same content, whatever buffers hold
+    /// them: compared part by part, never written again.
+    fn same(&self, other: &Self) -> bool {
+        if self.is_root() && other.is_root() {
+            return self.buffer == other.buffer;
+        }
+        let (Some(left), Some(right)) = (self.seq(), other.seq()) else {
+            return false;
         };
-        (key, value)
-    }))
+        if left.kind != right.kind || left.count != right.count {
+            return false;
+        }
+        let (mut a, mut b) = (left.items, right.items);
+        while a < left.end && b < right.end {
+            let (Some((key_a, slot_a, end_a)), Some((key_b, slot_b, end_b))) =
+                (self.part(&left, a), other.part(&right, b))
+            else {
+                return false;
+            };
+            if key_a != key_b {
+                return false;
+            }
+            let nested = ValueDataType::Composite as u8;
+            match (
+                self.buffer[slot_a] == nested,
+                other.buffer[slot_b] == nested,
+            ) {
+                (true, true) => {
+                    if !self.nested(slot_a).same(&other.nested(slot_b)) {
+                        return false;
+                    }
+                }
+                (false, false) => {
+                    if self.buffer[slot_a..end_a] != other.buffer[slot_b..end_b] {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+            a = end_a;
+            b = end_b;
+        }
+        a == left.end && b == right.end
+    }
 }
 
 impl PartialEq for Composite {
     fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
+        self.same(other)
     }
 }
 
@@ -419,7 +837,10 @@ impl Eq for Composite {}
 
 impl Hash for Composite {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.hash(state)
+        self.walk(&mut |bytes| {
+            state.write_usize(bytes.len());
+            state.write(bytes);
+        })
     }
 }
 
@@ -429,38 +850,59 @@ impl PartialOrd for Composite {
     }
 }
 
+/// Composites order by their canonical bytes on their own, as the tree keys
+/// them.
 impl Ord for Composite {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0.cmp(&other.0)
+        self.to_bytes().cmp(&other.to_bytes())
     }
 }
 
 impl Debug for Composite {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        f.debug_map()
-            .entries(
-                self.fields()
-                    .iter()
-                    .map(|(a, v)| (a.as_str().to_owned(), v.clone())),
-            )
-            .finish()
+        match self.kind() {
+            CompositeKind::List => f.debug_list().entries(self.items()).finish(),
+            CompositeKind::Map => f.debug_map().entries(self.entries()).finish(),
+        }
     }
 }
 
-/// A human-readable format writes a composite as its pairs, each an
-/// attribute and a value, in canonical order (a list, since an attribute may
-/// hold several values); a binary format writes its canonical bytes.
+/// A human-readable format writes a map as `{"map": [[key, value], ...]}`,
+/// its entries in canonical order (a list of pairs, since a key may hold
+/// several values), and a list as `{"list": [item, ...]}`; a binary format
+/// writes its canonical bytes.
 impl Serialize for Composite {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
         if !serializer.is_human_readable() {
-            return serde_bytes::Bytes::new(&self.0).serialize(serializer);
+            return serde_bytes::Bytes::new(&self.to_bytes()).serialize(serializer);
         }
-        let fields = self.fields();
-        let mut seq = serializer.serialize_seq(Some(fields.len()))?;
-        for (attribute, value) in &fields {
-            seq.serialize_element(&(attribute.as_str(), value))?;
+        struct Entries<'a>(&'a Composite);
+        impl Serialize for Entries<'_> {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+                for entry in self.0.entries() {
+                    seq.serialize_element(&entry)?;
+                }
+                seq.end()
+            }
         }
-        seq.end()
+        struct Items<'a>(&'a Composite);
+        impl Serialize for Items<'_> {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+                for item in self.0.items() {
+                    seq.serialize_element(&item)?;
+                }
+                seq.end()
+            }
+        }
+        let mut map = serializer.serialize_map(Some(1))?;
+        match self.kind() {
+            CompositeKind::Map => map.serialize_entry("map", &Entries(self))?,
+            CompositeKind::List => map.serialize_entry("list", &Items(self))?,
+        }
+        map.end()
     }
 }
 
@@ -470,15 +912,17 @@ impl<'de> Deserialize<'de> for Composite {
             let bytes = serde_bytes::ByteBuf::deserialize(deserializer)?;
             return Composite::from_bytes(&bytes).map_err(de::Error::custom);
         }
-        let pairs: Vec<(String, Value)> = Vec::deserialize(deserializer)?;
-        let mut fields = Vec::with_capacity(pairs.len());
-        for (attribute, value) in pairs {
-            fields.push((
-                Relation::try_from(attribute).map_err(de::Error::custom)?,
-                value,
-            ));
+        #[derive(Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum Form {
+            Map(Vec<(Value, Value)>),
+            List(Vec<Value>),
         }
-        Composite::new(fields).map_err(de::Error::custom)
+        match Form::deserialize(deserializer)? {
+            Form::Map(entries) => Composite::map(entries),
+            Form::List(items) => Composite::list(items),
+        }
+        .map_err(de::Error::custom)
     }
 }
 

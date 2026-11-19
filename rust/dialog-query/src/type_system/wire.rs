@@ -46,7 +46,7 @@ use super::{ConceptRef, NameShape, Primitive, Refinement, Type};
 /// denotes. `option` has no `ValueType`: it is the synthetic absence
 /// atom, and a set containing it alongside others marks the variable
 /// optional.
-const VARIANTS: [(&str, Option<ValueType>); 11] = [
+const VARIANTS: [(&str, Option<ValueType>); 12] = [
     ("bytes", Some(ValueType::Bytes)),
     ("entity", Some(ValueType::Entity)),
     ("boolean", Some(ValueType::Boolean)),
@@ -55,7 +55,8 @@ const VARIANTS: [(&str, Option<ValueType>); 11] = [
     ("int", Some(ValueType::SignedInt)),
     ("float", Some(ValueType::Float)),
     ("record", Some(ValueType::Record)),
-    ("composite", Some(ValueType::Composite)),
+    ("map", Some(ValueType::CompositeMap)),
+    ("list", Some(ValueType::CompositeList)),
     ("symbol", Some(ValueType::Symbol)),
     ("option", None),
 ];
@@ -371,7 +372,7 @@ mod tests {
     }
 
     /// EVERY set of admissible types survives the round trip. This
-    /// walks every subset of the wire's variants (2048 of eleven): a
+    /// walks every subset of the wire's variants (4096 of twelve): a
     /// variant whose wire name were missing or duplicated would show
     /// up here rather than the first time someone queried for it.
     #[dialog_common::test]

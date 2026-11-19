@@ -6,7 +6,8 @@ use std::borrow::Cow;
 use std::str::from_utf8;
 
 use crate::{
-    Composite, DialogCorpusError, Uri, Value, ValueDataType, decode_value, model::ordkey::decode_bytes_cow,
+    Composite, DialogCorpusError, Uri, Value, ValueDataType, decode_value,
+    model::ordkey::decode_bytes_cow,
 };
 
 /// A [`Value`] borrowed from the bytes that store it: a scanned key's

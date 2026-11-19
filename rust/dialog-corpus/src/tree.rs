@@ -2055,7 +2055,7 @@ mod spill_cache_tests {
         else {
             panic!("a composite reads back as one");
         };
-        assert_eq!(read_back.get(&"place/at".parse()?), vec![at(37.77)?]);
+        assert_eq!(read_back.field(&"place/at".parse()?), vec![at(37.77)?]);
         Ok(())
     }
 

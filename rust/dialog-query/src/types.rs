@@ -188,8 +188,28 @@ define_descriptor!(
 );
 
 define_descriptor!(
-    /// Descriptor for composite values (attribute and value pairs).
-    CompositeType, Type::Composite
+    /// Descriptor for composite values: any map or list.
+    CompositeType,
+    Type::Composite
+);
+
+define_descriptor!(
+    /// Descriptor for composite maps, records among them.
+    CompositeMapType,
+    Type::CompositeMap
+);
+
+define_descriptor!(
+    /// Descriptor for records: composite maps whose every key is an
+    /// attribute.
+    CompositeRecordType,
+    Type::CompositeRecord
+);
+
+define_descriptor!(
+    /// Descriptor for composite lists.
+    CompositeListType,
+    Type::CompositeList
 );
 
 /// Descriptor for dynamically-typed values: carries an optional
