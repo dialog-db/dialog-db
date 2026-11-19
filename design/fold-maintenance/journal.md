@@ -82,3 +82,26 @@ The agent proposed a wider problem, "a subscriber pays for the unit derived agai
 So there are three things to fix in the engine, and the fold is the third: the diff over many ranges, the answer compared by a scan, the fold asked again.
 
 **Decided.** The agent's, in the maintainer's absence: fix them in that order of what they cost, the first two on main as a defect of the subscription, the fold on its own branch.
+
+## 2026-11-20, Measuring: the whole with the subscription's fix
+
+**Question.** With #838's two fixes applied, does one change to a view cost the same at 1000 and 10000 rows, within 5 times a plain subscription?
+
+**Method.** `cost.rs`, release, 3 runs, on `wip/engine-fold` and on an unpushed branch with #838's two commits picked onto it. The machine was shared, load 3 to 4 on 4 cores.
+
+| one change, ms, without the fix and with | 1000 | 10000 | with the fix: growth, and times plain |
+|---|---|---|---|
+| a view, rename | 4.2, 2.9 | 301, 46 | 16, 38 |
+| a view, tag added | 3.8, 2.4 | 312, 26 | 10.6, 29 |
+| a view, to-do added | 4.7, 2.8 | 346, 55 | 19, 36 |
+| select one card | 2.9, 3.0 | 4.2, 4.1 | 1.4 |
+| plain subscription, rename | 0.58, 0.59 | 1.9, 1.2 | 2.1 |
+| tags folded by the engine | 0.80, 0.81 | 3.0, 1.3 | 1.7, 1.5 |
+| one row through another entity | 3.0, 1.9 | 78, 6.9 | 3.6, 5.7 |
+| a list renamed, N rows | 126, 128 | 4639, 1351 | 68 us a row, flat |
+
+**Learned.** The fix is worth 6 to 12 times at ten thousand rows and the bars are still missed by every view measurement. What is left, by probes since removed: a subscription whose rule joins for each entity has a cover of 10006 to 20012 ranges, and each poll builds the scope from it again (2.6 to 5.7 ms), walks the difference (2 ms) and drops the scope (1.5 to 3.5 ms): 6 to 12 ms a poll for each such layer, where a cover of 6 to 9 ranges costs 0.7. Comparing kept rows is 20 us now. The notation's maintainer took 15 to 30 ms counting ten thousand instances again, which a view's count on the fold removes for this card. The fold and `select` of one card meet their bars.
+
+So the cover itself is the next thing: a range for each entity is built, merged and dropped on every poll.
+
+**Decided.** The agent's: keep the cover from poll to poll and make it coarser where it holds a range for each entity of one attribute, both as a change of their own after #838.
