@@ -1700,3 +1700,15 @@ The agent's inferred rule is withdrawn. So, if the sketch holds, are the design'
 
 **Decided.** The maintainer's: `(collect ?g)`. Not decided: the word for asking. Next to test: the table's views.
 
+## 2026-11-18, Designing: an entry is one term, and the spread takes the whole
+
+**Asked.** By voice: how Datomic and Datalogs aggregate; what stratifying folds in rules would cost; whether the marker could be a clause of its own; how a collection becomes a map and not a list. The agent went through `many` on two terms, which do not say how they pair, and `many` round a read, which the maintainer did not like.
+
+**Learned.** His way out was one he had raised in the afternoon and the agent had let drop: a collection's field is one entry, key and value together, `{?k ?b}`. Then nothing needs pairing, the whole of it is a map, many plain values are a set and never a list, and the spread says "the whole" on both. The agent's table against the spread had judged it with key and value apart and outside brackets; inside them it is the pattern's own rest, already in the tests. What it costs is that on a stored record the same shape gates, and that a set has neither a spelling nor a value yet.
+
+A separate clause for collecting needs inference or its own conditions, and inference has a case with no right answer: a variable read in two places.
+
+**Backtracked.** `collect`, taken an hour before, to the spread.
+
+**Decided.** The maintainer's: an entry is one term; a set, not a list. Proposed: `{... ?m}` and `#{... ?s}`. Not decided: the set's spelling and carrier, and the word for asking. Nothing is built.
+
