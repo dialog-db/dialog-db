@@ -165,6 +165,385 @@ that needed one waited on the layout of a record's bytes. A name that is
 a function of the parts does not depend on that layout, and the version
 byte leaves the layout free to change.
 
+### A subscription's poll costs the entities it touched, not its whole answer
+
+[#838](https://github.com/dialog-db/dialog-db/pull/838).
+
+A subscription keeps a range of its cover per entity it read, and a
+poll gates the tree difference by that cover. Every node, buffered
+operation and changed entry the difference walked was tested against
+every range, so one changed fact under a cover of ten thousand ranges
+cost tens of thousands of comparisons per node. The scope is now sorted
+and merged once and each test is a binary search. A maintained poll
+then compared each re-derived entity with the kept answer by scanning
+every kept row; the kept answer is now indexed by entity, so the
+comparison reads that entity's rows only.
+
+What this changes for you:
+
+- Nothing in the API. A poll's delta, its order and `results()` read as
+  they did.
+- A poll over a large cover, and a poll that re-derives many entities of
+  a large answer, does work in the touched entities and the log of the
+  cover, where it did work in their product.
+
+Why: a subscription's answer grows with the data it watches, and the
+cost of a poll that changed one fact grew with the square of it.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes.
+
+### An ephemeral line can be read as it stood, at no cost to take: `Ephemeral::frozen`
+
+[#841](https://github.com/dialog-db/dialog-db/pull/841).
+
+`Ephemeral::frozen` returns a `Frozen`: the line's facts, tombstones and
+revision as they stood when it was taken, answering the reads the line
+answers (`scan`, `select`, `export`, `len`, `is_empty`, `revision`) and
+never changing after. The line now holds its facts in chunks shared by
+reference count, so taking one copies nothing, and a write to the line
+while one is held copies the chunk it changes rather than every fact.
+
+What this changes for you:
+
+- New: `Ephemeral::frozen() -> Frozen`, and the `Frozen` type.
+- Nothing a read of a live line answers changes.
+
+Why: a subscription's poll is to read one fixed state of every layer,
+so that subscriptions of one view agree and a channel's facts, which
+last one tick, are read by a retry as they stood. Until now the state of
+a session overlay or a memory layer at an earlier point was had only by
+copying the whole line and undoing its instants.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten.
+
+### A query can fold, and a fold can be kept current
+
+[#839](https://github.com/dialog-db/dialog-db/pull/839).
+
+Decided in [dialog-db/dialog-db#830](https://github.com/dialog-db/dialog-db/pull/830)
+(a fold is a query type, not a rule) and
+[dialog-db/dialog-db#837](https://github.com/dialog-db/dialog-db/pull/837)
+(how it is kept current).
+
+`Fold::new(groups, inputs, reduce)` is a query in `dialog-query` that
+folds the rows of `inputs` with a `Reduce`, one row for each row of
+`groups`, joined on the grouping fields of the `Reduce`. A group no input
+joins is folded over inputs all absent, so `count` gives 0 for it. A fold
+is asked and subscribed to as any query is; it has no name and installs
+no rule, so an authored deductive rule still cannot fold.
+
+What this changes for you:
+
+- New: `Fold` and `FoldConclusion`, a folded row with the value of each
+  grouping field and each fold.
+- New: `Branch::subscribe_fold(fold)` and `Stack::fold_subscription(fold)`
+  give a `FoldSubscription`, polled as a `Subscription` is and giving
+  `Delta<FoldConclusion>`. It keeps a subscription of each of the fold's
+  two queries and the rows they report, and folds again in memory only the
+  groups a change moved a row of: a group whose row changed reports the
+  old row retracted and the new one asserted, and what it reports adds up
+  to what asking the fold whole gives. Both inner subscriptions are polled
+  at one state of the branch.
+- `Branch::subscribe(fold)` works too, and asks the whole fold again on
+  each poll that touches what it read; `Branch::subscribe_fold` is the
+  one that keeps it current.
+- New: `Application::bindings`, with a default of `None`: the bindings a
+  conclusion was realized from. Attribute queries, concept queries and
+  folds give them, and a `FoldSubscription` needs them of both its
+  queries; one over a query that gives none fails to poll.
+- New: `Fold::groups`, `Fold::inputs`, `Fold::key`, `Fold::fold_groups`
+  (the fold of a set of groups, which asking a fold and a
+  `FoldSubscription` both fold with) and `Reduce::fold_rows`.
+
+Why: a rule cannot fold, and a fold asked again whole on every change
+folds every group for a change to one. A query that folds needs no name
+and no stored value beside its own, and kept current it costs the two
+inner polls and the groups a change moved.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: a fold is a query asked in memory and
+  nothing of it is written. Nothing is rewritten on upgrade, and an older
+  release reads what this one writes.
+
+### A concept read binds stored values in place, and reads optional fields in one pass
+
+[#825](https://github.com/dialog-db/dialog-db/pull/825). Research: [zero-copy answers](research/zero-copy-answers.md)
+
+A concept read used to turn every row it scanned into owned values (an
+entity with a hash of its URI, an attribute, a value, a claim) and copy
+them again into each joined row. It now binds the scanned row in place
+and makes a value only when something reads it as one; a join compares
+the stored bytes. A concept with optional fields used to be read by
+probing every optional field once per entity; its optional fields are
+now read once each, in entity order, beside the required ones, and an
+entity a field lacks binds `Absent` as before.
+
+What this changes for you:
+
+- **List reads and subscriptions are faster.** On tonk-team at 10×, the
+  issue list reads in 82 ms where it took 288, the activity list in 106
+  where it took 486, and their subscription polls in 23 and 46 ms where
+  they took 939 and 1,398. Results are the same, row for row.
+- **New reads that do not hydrate:** `Match::view` and
+  `ConceptConclusion::view` return a `ValueView` borrowed from the stored
+  row; `Match::absent` answers without making the value;
+  `Conclusion::this_uri` (with a default) and
+  `ConceptConclusion::this_uri` give the entity's URI as stored.
+  `dialog_corpus` gains `ValueView`, `FactView::checked` and `CheckedRow`.
+- Nothing stored or synced changes.
+
+Why: copying values was most of a concept read's cost after the scan,
+and a concept with an optional field, which most of tonk's are, was
+never merged, so its list read probed every field of every entity.
+
+### A coverage entry spills nothing
+
+[#833](https://github.com/dialog-db/dialog-db/pull/833).
+
+A coverage key carries a hash of the covered value in the spilled form,
+whatever the value's size, so claims can be matched by it; no value is
+stored under that hash. `tree/entry` read it as a spilled value, so an
+inspector offered to read a value that could never be read, and waited
+on it.
+
+What this changes for you:
+
+- `tree/entry` yields no `spill` for an entry at a coverage key, and
+  `inspect::entries` no `spill` in its `EntrySummary`.
+- `dialog/key-part` reads a coverage key as its index, origin, edition,
+  entity and attribute and a part of kind `reference`, `value:<hash>`,
+  where it read a value type of `Bytes` and a `spill` part.
+
+Why: a spill names bytes a reader can fetch; a coverage key's hash names
+none.
+
+#### Compatibility and migration
+
+- Nothing stored changes.
+
+### An index node's buffered operations are its entries, and a separator reads as the key it is
+
+[#832](https://github.com/dialog-db/dialog-db/pull/832).
+
+An index node buffers writes headed for its children (`novelty`), and
+`tree/entry` gave no rows for an index, so a query could count them but
+not read them. A separator was split into its tag and one `prefix` part
+of lossy text, which for a history separator was the origin's raw bytes,
+and a forced seam's separator, the last key before the seam padded with
+zero bytes past the separator bound, read as a key whose value was the
+padding.
+
+What this changes for you:
+
+- `tree/entry` of an index node yields one row per operation it
+  buffers, with a new slot `span` naming the span the operation rides,
+  as `tree/span` names it. `span` is absent on a segment's entry. `at`
+  counts the node's buffered operations; `rank` is absent on them.
+- `dialog_corpus::inspect::entries` returns an index node's buffered
+  operations, and `EntrySummary` has a new field `span: Option<u64>`.
+- `dialog/separator-part` reads a separator field by field as far as it
+  reaches, as `dialog/key-part` reads a key: `entity`, `attribute`,
+  `vtype` and `value` parts in the ordering's order, the value-type byte
+  on its own, and a Bytes or Record value as hex. A history or coverage
+  separator yields its `origin` (hex) and `edition`. The `prefix` part is
+  gone.
+- A separator that is a whole key reads as that key. A forced seam's
+  separator reads as the key before the seam and a part of kind
+  `padding`.
+
+Why: an inspector shows what a node holds, and the operations an index
+buffers and where its boundaries fall are part of that.
+
+#### Compatibility and migration
+
+- Nothing stored changes: both read blocks as they are.
+
+### A revision is named by `revision:`, not by a `did:key:`
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829).
+
+A revision's entity was `did:key:z6Mk<base58(hash)>`: the shape of a key
+DID around a blake3 hash of the revision's version. It read as a
+principal and was none, and nothing could tell a revision from a branch,
+a replica or an operator by its name.
+
+It is now `revision:<base58(hash)>`, over the same hash
+(`Version::entity`, `Revision::entity`). A commit writes the revision's
+signed record under that entity, `dialog.branch/revision` carries it, and
+the built-in `Revision`, `RevisionParent` and `RevisionAncestor` concepts
+yield it for `this`, `parent` and `ancestor`.
+
+What this changes for you:
+
+- A revision entity you read from a query starts with `revision:`. Code
+  that told revisions apart by parsing `did:key:z6Mk` has to change; an
+  entity compared whole needs nothing.
+- `Version::entity_did` is `Version::entity_uri`. `Version::legacy_entity`
+  and `Version::legacy_entity_uri` give the name a revision had before,
+  and `Version::legacy_of` turns the current name into it.
+- A new formula, `dialog/revision-slot`, takes a revision entity as `of`
+  and yields as `is` each entity its record may be stored under: the
+  entity itself, then its older name.
+- A fact your space wrote about a revision under its older name (a
+  comment on a commit, say) still names the older entity, and no longer
+  joins the `this` of `Revision`. Join through `dialog/revision-slot`,
+  or rewrite those facts.
+
+Why: an entity's scheme is what a reader, a rule and a view have to tell
+kinds of thing apart, and a node (`node:`) and an asset (`asset:`)
+already say what they are. A name shaped like a key invites treating it
+as one.
+
+#### Compatibility and migration
+
+- A replica written by an older release holds each revision's record
+  under `did:key:z6Mk…`. Nothing is rewritten on upgrade: this release
+  reads a record under either name (the history reader, the built-in
+  revision concepts and a stack's durable layers all do) and writes new
+  ones under `revision:`, so one tree can hold both. An embedder runs
+  nothing.
+- A durable layer's pointer, the `dialog.branch/revision` of
+  `memory:<name>` stored in the primary's tree, names its revision by
+  the name the release that wrote it used. This release follows a
+  pointer an older release wrote, by either name, and opens the layer;
+  the layer's next move points the primary at the new revision by its
+  `revision:` name and retires the older claim, as any move does.
+- An older release cannot find a record written under `revision:`, so
+  it cannot read the history of what this release committed, nor follow
+  a durable layer's pointer this release wrote. Upgrade every replica of
+  a space before any of them commits with this release.
+
+### A tree node is a handle, and five resolvers read it
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829), argued in [design/tree-exploration.md](./design/tree-exploration.md).
+
+The seven `tree/*` resolvers each loaded a node's block and decoded one
+part of it, so a query asking three things of one node decoded it three
+times. A segment's entries were split across three of them (`tree/key`,
+`tree/entry`, `tree/blob`) and paired by position. A node was named by
+the base58 string of its hash, which is not an entity, so a rule could
+not derive a concept whose rows were nodes.
+
+A node is now opaque to a query, which holds its handle: the entity
+`node:<base58(hash)>` (`Entity::from_node`, `Entity::node_hash`).
+`dialog.branch/tree` carries the root's handle and `tree/span` yields
+each child's. A resolver takes the handle as `of`, asks the environment
+for the decoded node (`nodes::Read`, as the tree's own reads do), and
+yields one part of it. The environment decodes a node once and keeps it.
+
+```text
+tree/node   what the node is, and the format it was written under
+tree/span   an index node's children, with what the node holds about each
+tree/entry  a segment node's entries, each whole
+tree/block  the node's block as stored
+tree/value  a spilled value's bytes, by its asset: entity
+```
+
+What this changes for you:
+
+- `dialog/key-part` and `dialog/separator-part` yield `part`, each
+  component's own entity (`part:<base58(blake3(key))>/<at>`), so a rule
+  can derive one row per component. A query asking either formula
+  names `part` among its terms too.
+- `tree/key`, `tree/blob` and `tree/manifest` are gone, with
+  `TreeKeyQuery`, `TreeBlobQuery` and `TreeManifestQuery`. A key and its
+  rank, and a blob record's fields, are slots of `tree/entry`; the
+  manifest's fields are slots of `tree/node`. `tree/block` is new.
+- `of` is an entity: a `node:` for every resolver but `tree/value`,
+  which takes an `asset:`. A base58 string or raw bytes, which `of`
+  used to take, match nothing.
+- `dialog.branch/tree` is an entity (`branch::Tree(Entity)`), not text.
+  A concept that reads it declares the field as an entity; the hash is
+  `tree.0.node_hash()`.
+- `tree/span` yields `node` as a `node:` entity, and a new slot `span`:
+  the span's own entity, `span:<base58(node)>/<position>`. `tree/entry`
+  yields `entry`, `entry:<base58(node)>/<position>`. A rule deriving a
+  concept of spans or of entries has an entity for each row.
+- `tree/entry` yields `spill` and `blob` as `asset:` entities. A slot
+  that does not apply to a row is absent: `spill` when the value is
+  inline (it was an empty string), `origin` and `edition` when the
+  write was unversioned (they were empty and 0), the blob slots on any
+  entry that is no blob record, and the claim slots on one that is.
+- Slot names are kebab-case: `max-separator`, `inline-n`,
+  `spill-prefix`, `max-segment`, `frame-ceiling-factor`,
+  `anchor-selector`. `fanout_n` is `fanout-exponent`. `tree/node` also
+  yields `entry-overhead`, `key-overhead` and `link-overhead`, which no
+  resolver did.
+- `RESOLVER_COST` is 50,000, from 200. Where a rule's body has a fact
+  that decides whether a node is read, the planner now asks the fact
+  first, whether or not the caller gave the node.
+- `dialog_corpus::inspect` has a reading of each part that takes a
+  decoded node (`summary`, `spans`, `keys`, `entries`, `blob_records`,
+  `manifest`) beside the `inspect_*` functions that take bytes.
+- A resolver still requires its handle. A rule whose body is a resolver
+  alone is refused at install as before; a rule that names its nodes by
+  a fact installs, and reads those nodes and no others.
+
+Why: a query should be able to read everything a node holds without the
+embedder decoding blocks for it, and the reading and decoding of a node
+belong to the environment, which already does both for the tree. A
+handle that is an entity is what a rule needs to make a node, a span or
+an entry the subject of a concept.
+
+#### Compatibility and migration
+
+- Nothing stored changes. A branch's `dialog.branch/tree` is derived
+  when a query runs and never written; it now reads as a `node:`
+  entity. A durable layer's pointer does write `dialog.branch/tree`, of
+  `memory:<name>` in the primary's tree, and still writes it as the
+  tree's base58 text, so the same attribute reads as an entity of a
+  branch and as text of a layer: a rule reading a layer's pointer reads
+  text. Resolver rows are read off blocks. An older release reads
+  everything this one writes. A rule stored on a branch that uses `tree/key`,
+  `tree/blob` or `tree/manifest`, a snake_case manifest slot, or a
+  base58 string as `of`, or that reads `dialog.branch/tree` as text, no
+  longer compiles or no longer matches, and has to be re-authored.
+
+### A stack learns what its replica holds of a tree by command
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829), argued in [design/tree-exploration.md](./design/tree-exploration.md).
+Built on the stack's providers
+([#816](https://github.com/dialog-db/dialog-db/pull/816)).
+
+A tree resolver fetches a node the replica lacks, so that what a query
+answers does not depend on what happened to be local. That left a
+consumer no way to know, before it asked, whether asking for a node
+would fetch it.
+
+`dialog_repository::holdings` has two commands for that and the
+providers that answer them (`holdings::provide(&stack, env)`):
+
+- `dialog.node.probe/node`, the node to ask about, is answered with
+  `dialog.node.probed/node` and `dialog.node.probed/local`: whether the
+  replica holds the node, with nothing fetched.
+- `dialog.node.fetch/node`, the node to bring local, is answered with
+  `dialog.node.fetched/node` and `dialog.node.fetched/local`: whether
+  the replica holds it, having tried.
+
+What this changes for you:
+
+- `holdings::{provide, providers, probe, fetch}` and the attribute names
+  beside them are new. A stack they are not registered with reports
+  these commands as unhandled, like any command no provider claims.
+- An answer is written into `control:`, so it is a command for one tick
+  and nothing keeps it. A space keeps it with a rule, and where the
+  rule's attribute is placed is where it is kept: on a layer of the
+  session it is read and subscribed to through the stack, never
+  committed or synced, and gone with the session. A space with no such
+  rule gets nothing.
+- A command whose value is not a `node:` entity, and a read that fails,
+  fail the command: it gets a `dialog.command/failed` row with the
+  reason.
+
+Why: whether a block is held changes with no commit, so a query step
+that reported it would answer the same query differently from one
+moment to the next. As a command's answer captured by a rule, it enters
+a query as a fact of a layer the query has pinned.
 ### A provider claims the commands whose rows satisfy its concept, and a command sees the rows of its tick
 
 [#823](https://github.com/dialog-db/dialog-db/pull/823). Refs

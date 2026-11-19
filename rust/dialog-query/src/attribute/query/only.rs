@@ -1,10 +1,12 @@
-use super::all::AttributeQueryAll;
+use super::all::{AttributeQueryAll, Placed, Placement};
 use super::pipelined;
 use crate::Claim;
 use crate::Value;
 use crate::attribute::Relation;
 use crate::corpus::{Constrained, CorpusRelation, Selector};
 use crate::environment::Environment;
+#[cfg(feature = "trace-hydration")]
+use crate::hydration;
 use crate::query::Application;
 use crate::query::Output;
 use crate::schema::Cardinality;
@@ -31,6 +33,8 @@ type Winner = (Fact, Option<(Edition, [u8; 32])>);
 /// it. All other errors propagate.
 fn materialize_winner(winner: FactView) -> Result<Option<Winner>, DialogCorpusError> {
     let standing = winner.standing();
+    #[cfg(feature = "trace-hydration")]
+    hydration::here("fact (eager)");
     match winner.to_owned() {
         Ok(fact) => Ok(Some((fact, standing))),
         Err(DialogCorpusError::CorruptEntry(reason)) => {
@@ -155,11 +159,43 @@ fn slide<R: Windowed>(window: &mut Option<R>, row: R) -> Result<Option<R>, Dialo
 #[inline(always)]
 fn admitted(
     selector: &AttributeQueryAll,
+    placement: &mut Option<Placement>,
     base: &Match,
     winner: FactView,
     constraint: Option<&Value>,
     layer: Option<&Entity>,
 ) -> Result<Option<Match>, EvaluationError> {
+    // A winner the scan's kinds admit as stored is bound in place (see
+    // `AttributeQueryAll::place`); one checked against a constant value
+    // is materialized to compare it.
+    let winner = match constraint {
+        None => {
+            // Decided on the first winner, not per scan: a scan probed
+            // once per row of the step before it often elects nothing.
+            let placement = placement.get_or_insert_with(|| selector.placement());
+            match selector.place(placement, base, winner)? {
+                Placed::InPlace(row, standing, viewed) => {
+                    let mut extension = base.clone();
+                    selector.merge_scanned(
+                        placement,
+                        &mut extension,
+                        row,
+                        standing,
+                        viewed,
+                        layer,
+                    )?;
+                    return Ok(Some(extension));
+                }
+                Placed::Corrupt => return Ok(None),
+                Placed::Eager(winner) => winner,
+            }
+        }
+        Some(_) => {
+            #[cfg(feature = "trace-hydration")]
+            hydration::here("eager: value pinned to a constant");
+            winner
+        }
+    };
     let Some((winner, standing)) = materialize_winner(winner)?
         .and_then(|(winner, standing)| selector.admit(winner).map(|winner| (winner, standing)))
     else {
@@ -202,20 +238,21 @@ where
     try_stream! {
         let Layered { layers, rows } = Provider::<SelectIn<'_>>::execute(env, input).await?;
         let mut window: Option<(FactView, LayerIndex)> = None;
+        let mut placement: Option<Placement> = None;
         for await row in rows {
             let Some(closed) = slide(&mut window, row?)? else {
                 continue;
             };
             let (winner, at) = closed.into_parts();
             let layer = at.map(|at| &layers[usize::from(at)]);
-            if let Some(extension) = admitted(selector, base, winner, constraint, layer)? {
+            if let Some(extension) = admitted(selector, &mut placement, base, winner, constraint, layer)? {
                 yield extension;
             }
         }
         if let Some(closed) = window.take() {
             let (winner, at) = closed.into_parts();
             let layer = at.map(|at| &layers[usize::from(at)]);
-            if let Some(extension) = admitted(selector, base, winner, constraint, layer)? {
+            if let Some(extension) = admitted(selector, &mut placement, base, winner, constraint, layer)? {
                 yield extension;
             }
         }
@@ -441,6 +478,9 @@ impl AttributeQueryOnly {
         // so an unboxed input sat in its state twice, and returning the
         // generator unboxed copied the whole state again at every layer
         // that wrapped or boxed it (several KiB per scan step, per row).
+        // Decided on the first row, not per invocation: a scan probed once
+        // per row of the step before it often yields nothing at all.
+        let mut placement: Option<Placement> = None;
         Box::pin(try_stream! {
             for await each in selection {
                 let mut base = each?;
@@ -501,13 +541,13 @@ impl AttributeQueryOnly {
                             let Some(winner) = slide(&mut window, fact?)? else {
                                 continue;
                             };
-                            if let Some(extension) = admitted(&selector, &base, winner, value_constraint.as_ref(), pinned)? {
+                            if let Some(extension) = admitted(&selector, &mut placement, &base, winner, value_constraint.as_ref(), pinned)? {
                                 yield extension;
                             }
                         }
                         let last = window
                             .take()
-                            .map(|winner| admitted(&selector, &base, winner, value_constraint.as_ref(), pinned))
+                            .map(|winner| admitted(&selector, &mut placement, &base, winner, value_constraint.as_ref(), pinned))
                             .transpose()?
                             .flatten();
                         if let Some(extension) = last {
@@ -565,6 +605,10 @@ impl Application for AttributeQueryOnly {
 
     fn realize(&self, input: Match) -> Result<Claim, EvaluationError> {
         input.prove(self.query.source())
+    }
+
+    fn bindings(&self, claim: &Claim) -> Option<Match> {
+        self.query.bindings(claim)
     }
 }
 

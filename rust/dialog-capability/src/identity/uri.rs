@@ -101,12 +101,20 @@ impl Uri {
     /// therefore holds a valid canonical URI by construction on every path,
     /// stored reads included.
     pub fn from_stored(s: &str) -> Result<Self, IdentityError> {
+        Self::check_stored(s)?;
+        Ok(Self(s.into()))
+    }
+
+    /// Checks that `s` is what [`Self::from_stored`] would adopt, without
+    /// building the [`Uri`]: a reader that only hands the stored string on
+    /// (an answer's encoder) validates the row without allocating.
+    pub fn check_stored(s: &str) -> Result<(), IdentityError> {
         // The cheap proof first: for the common entity shapes (did:key,
         // user:, blob: — opaque-path non-special URIs) canonicality is
         // PROVEN by a single byte scan, ~free per row. Everything else
         // takes the real parse below. Same invariant either way.
         if is_provably_canonical(s) {
-            return Ok(Self(s.into()));
+            return Ok(());
         }
         let url: Url = s.parse().map_err(|error| {
             IdentityError::CorruptEntry(format!("stored entity is not a URI: {error}"))
@@ -119,7 +127,13 @@ impl Uri {
                 "stored entity is not a canonical URI rendering: {s:?}"
             )));
         }
-        Ok(Self(s.into()))
+        Ok(())
+    }
+
+    /// Adopts a stored string [`Self::check_stored`] already accepted,
+    /// without checking it again.
+    pub fn stored_unchecked(s: &str) -> Self {
+        Self(s.into())
     }
 
     /// The URI as its normalized string.
@@ -207,8 +221,18 @@ fn is_provably_canonical(s: &str) -> bool {
     if rest.is_empty() || rest[0] == b'/' {
         return false;
     }
-    rest.iter().all(|&b| {
-        b.is_ascii_alphanumeric()
+    rest.iter().all(|&b| OPAQUE[b as usize])
+}
+
+/// The bytes an opaque path may hold for its URI to be provably canonical:
+/// ASCII alphanumerics and `:/.-_~+=@!$&'()*,;`. A table, so the check is a
+/// load per byte: every stored entity is checked when it is read.
+static OPAQUE: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let b = byte as u8;
+        table[byte] = b.is_ascii_alphanumeric()
             || matches!(
                 b,
                 b':' | b'/'
@@ -228,9 +252,11 @@ fn is_provably_canonical(s: &str) -> bool {
                     | b'*'
                     | b','
                     | b';'
-            )
-    })
-}
+            );
+        byte += 1;
+    }
+    table
+};
 
 impl Display for Uri {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
@@ -308,6 +334,11 @@ impl TryFrom<String> for Uri {
     type Error = IdentityError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
+        // A provably canonical string is its own rendering, as in
+        // `from_str`; owned, it becomes the URI without being copied.
+        if is_provably_canonical(&value) {
+            return Ok(Uri(value.into_boxed_str()));
+        }
         value.parse()
     }
 }

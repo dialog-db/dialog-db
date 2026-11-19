@@ -39,7 +39,7 @@
 
 use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::RangeInclusive;
 use std::sync::{Arc, OnceLock};
 
@@ -53,6 +53,10 @@ use dialog_corpus::{
 use dialog_query::DeductiveRule;
 use dialog_search_tree::Manifest;
 use parking_lot::RwLock;
+
+mod chunks;
+
+use chunks::Chunks;
 
 use crate::rules::is_rule_attribute;
 
@@ -132,25 +136,47 @@ pub struct Ephemeral {
     state: Arc<RwLock<State>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct State {
+    /// What the line holds now. Every read of the line reads it, and
+    /// [`Ephemeral::frozen`] hands out a clone of it.
+    now: Frozen,
+    /// The most recent instants, oldest first, at most
+    /// [`LOG_CAPACITY`].
+    log: VecDeque<Instant>,
+}
+
+/// An ephemeral line as it stood at one instant: its facts, its
+/// tombstones and its revision, taken by [`Ephemeral::frozen`]. It
+/// answers every read the line answers, as the line answered it when
+/// the value was taken, and never changes after: writes to the line
+/// land in the line's own state, which shares with this value only
+/// what neither changes.
+///
+/// Taking one costs a few reference counts, whatever the line holds.
+/// What a write to the line costs while one is held is the part of the
+/// line it changes: the chunk of facts it touches (at most a hundred
+/// and twenty-eight index entries) and the list of chunks, one pointer
+/// per chunk; a tombstone placed or lifted copies the line's
+/// tombstones; a count of facts per attribute is copied whenever a
+/// fact is added or removed.
+#[derive(Clone, Debug)]
+pub struct Frozen {
     /// Every held fact under each of its three index keys.
     facts: Facts,
     /// Facts held beneath this line that the session hides, by sort
-    /// key, with the fact kept so lifting the tombstone can report
-    /// what became readable again. Shared with readers by `Arc` and
-    /// updated in place (copied only while a reader holds it), so a
-    /// read never copies the set and a write never rebuilds it.
+    /// key. Shared with readers by `Arc` and updated in place (copied
+    /// only while a reader holds it), so a read never copies the set
+    /// and a write never rebuilds it.
     tombstones: Arc<HashSet<SortKey>>,
-    shadowed: HashMap<SortKey, Fact>,
+    /// The same facts by sort key, with the fact kept so lifting the
+    /// tombstone can report what became readable again.
+    shadowed: Shadowed,
     sequence: u64,
     hash: Blake3Hash,
     /// The hash as of the last instant that was not a record (see
     /// [`Ephemeral::record`]): what [`Ephemeral::settled`] answers.
     settled: Blake3Hash,
-    /// The most recent instants, oldest first, at most
-    /// [`LOG_CAPACITY`].
-    log: VecDeque<Instant>,
     /// The hash of the rule facts held and hidden ([`Facts::rules`]),
     /// once read; reset by an instant that changes one.
     rules: OnceLock<Option<Blake3Hash>>,
@@ -158,18 +184,58 @@ struct State {
     bodies: Option<Bodies>,
 }
 
-impl Default for State {
+impl Default for Frozen {
     fn default() -> Self {
         Self {
             facts: Facts::default(),
             tombstones: Arc::new(HashSet::new()),
-            shadowed: HashMap::new(),
+            shadowed: Shadowed::default(),
             sequence: 0,
             hash: Blake3Hash::from([0u8; 32]),
             settled: Blake3Hash::from([0u8; 32]),
-            log: VecDeque::new(),
             rules: OnceLock::new(),
             bodies: None,
+        }
+    }
+}
+
+/// The facts a line hides beneath it, by sort key, shared by `Arc` and
+/// copied on a write only while a [`Frozen`] line holds them. `None`
+/// until the first tombstone, so a line that hides nothing allocates
+/// nothing for them.
+#[derive(Clone, Debug, Default)]
+struct Shadowed(Option<Arc<HashMap<SortKey, Fact>>>);
+
+impl Shadowed {
+    fn contains_key(&self, key: &SortKey) -> bool {
+        self.0.as_ref().is_some_and(|map| map.contains_key(key))
+    }
+
+    fn get(&self, key: &SortKey) -> Option<&Fact> {
+        self.0.as_ref()?.get(key)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&SortKey, &Fact)> {
+        self.0.iter().flat_map(|map| map.iter())
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &SortKey> {
+        self.iter().map(|(key, _)| key)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &Fact> {
+        self.iter().map(|(_, fact)| fact)
+    }
+
+    fn insert(&mut self, key: SortKey, fact: Fact) {
+        Arc::make_mut(self.0.get_or_insert_default()).insert(key, fact);
+    }
+
+    fn remove(&mut self, key: &SortKey) {
+        if let Some(map) = self.0.as_mut()
+            && map.contains_key(key)
+        {
+            Arc::make_mut(map).remove(key);
         }
     }
 }
@@ -184,14 +250,19 @@ fn index_keys(fact: &Fact, manifest: &Manifest) -> [Key; 3] {
 /// The key's tag byte keeps the three orders apart, so one map serves
 /// every selector shape and a scan comes out in tree order. Shared by
 /// [`Ephemeral`] and a transaction's [`Staged`](crate::Staged) store.
+///
+/// A clone shares everything it holds ([`Chunks`]), so a [`Frozen`]
+/// line costs nothing to take, and a write after it copies the chunk
+/// it changes rather than the map.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Facts {
-    map: BTreeMap<Key, Fact>,
+    map: Chunks<Key, Fact>,
     /// How many held facts each attribute has. A read names an
     /// attribute far more often than not, and most stores (a query's
     /// metadata, a session overlay) hold none of the ones it names, so
     /// the read is answered from here without building its range.
-    attributes: HashMap<Relation, usize>,
+    /// `None` until the first fact, so an empty store allocates nothing.
+    attributes: Option<Arc<HashMap<Relation, usize>>>,
     /// The key format facts are keyed under. Fixed to the default
     /// manifest, the same one every tree carries today and the one
     /// [`Demand`](crate::Demand) ranges are built under.
@@ -216,10 +287,14 @@ impl Facts {
         if self.map.contains_key(&entity) {
             return false;
         }
-        *self.attributes.entry(fact.the.clone()).or_default() += 1;
-        self.map.insert(entity, fact.clone());
-        self.map.insert(attribute, fact.clone());
-        self.map.insert(value, fact);
+        *Arc::make_mut(self.attributes.get_or_insert_default())
+            .entry(fact.the.clone())
+            .or_default() += 1;
+        self.map.insert_new([
+            (entity, fact.clone()),
+            (attribute, fact.clone()),
+            (value, fact),
+        ]);
         true
     }
 
@@ -231,7 +306,9 @@ impl Facts {
         for key in index_keys(fact, &self.manifest) {
             self.map.remove(&key);
         }
-        if let Entry::Occupied(mut held) = self.attributes.entry(fact.the.clone()) {
+        if let Some(attributes) = self.attributes.as_mut()
+            && let Entry::Occupied(mut held) = Arc::make_mut(attributes).entry(fact.the.clone())
+        {
             *held.get_mut() -= 1;
             if *held.get() == 0 {
                 held.remove();
@@ -250,6 +327,13 @@ impl Facts {
         self.scan_within(&Window::new(selector))
     }
 
+    /// Whether any held fact is of attribute `the`.
+    fn holds_attribute(&self, the: &Relation) -> bool {
+        self.attributes
+            .as_ref()
+            .is_some_and(|attributes| attributes.contains_key(the))
+    }
+
     /// The facts a window's selector matches, in the store's own key
     /// order. A store with no fact of the selector's attribute answers
     /// without building the range.
@@ -258,12 +342,13 @@ impl Facts {
             return Vec::new();
         }
         if let Some(the) = window.selector.attribute()
-            && !self.attributes.contains_key(the)
+            && !self.holds_attribute(the)
         {
             return Vec::new();
         }
+        let range = window.range(&self.manifest);
         self.map
-            .range(window.range(&self.manifest))
+            .range(range.start(), range.end())
             .map(|(_, fact)| fact.clone())
             .collect()
     }
@@ -314,7 +399,12 @@ impl Facts {
             row
         };
         let mut rows: Vec<Vec<u8>> = Vec::new();
-        for the in self.attributes.keys().filter(|the| is_rule_attribute(the)) {
+        for the in self
+            .attributes
+            .iter()
+            .flat_map(|attributes| attributes.keys())
+            .filter(|the| is_rule_attribute(the))
+        {
             for fact in self.scan(&Selector::new().the(the.clone())) {
                 rows.push(row(b'+', &fact));
             }
@@ -332,10 +422,7 @@ impl Facts {
     /// Every held fact once, in entity order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Fact> {
         self.map
-            .range(
-                <EntityKey<Key> as KeyViewConstruct>::min().into_key()
-                    ..=<EntityKey<Key> as KeyViewConstruct>::max().into_key(),
-            )
+            .range(entity_order().start(), entity_order().end())
             .map(|(_, fact)| fact)
     }
 
@@ -347,6 +434,16 @@ impl Facts {
         // Every fact sits under exactly three keys.
         self.map.len() / 3
     }
+}
+
+/// Every key of the entity order: the range [`Facts::iter`] walks to
+/// see each fact once. Built once, since a walk borrows its bounds.
+fn entity_order() -> &'static RangeInclusive<Key> {
+    static ORDER: OnceLock<RangeInclusive<Key>> = OnceLock::new();
+    ORDER.get_or_init(|| {
+        <EntityKey<Key> as KeyViewConstruct>::min().into_key()
+            ..=<EntityKey<Key> as KeyViewConstruct>::max().into_key()
+    })
 }
 
 /// A selector with the key range it covers in an in-memory store, built
@@ -425,7 +522,7 @@ impl Delta {
     }
 }
 
-impl State {
+impl Frozen {
     /// How this line holds `fact`, whose sort key is `key`, now.
     fn hold(&self, fact: &Fact, key: &SortKey) -> Hold {
         Hold {
@@ -541,8 +638,8 @@ impl State {
     }
 
     /// Mint an instant for a non-empty delta, advancing the sequence
-    /// and the chained hash and recording it in the ring. Returns the
-    /// instant, or `None` when nothing readers see changed.
+    /// and the chained hash. Returns the instant, or `None` when
+    /// nothing readers see changed.
     fn mint(&mut self, delta: Delta) -> Option<Instant> {
         if delta.is_empty() {
             return None;
@@ -575,13 +672,34 @@ impl State {
         }
         self.hash = Blake3Hash::hash_iter(chunks.iter().map(Vec::as_slice));
         self.settled = self.hash.clone();
-        let instant = Instant {
+        Some(Instant {
             sequence: self.sequence,
             hash: self.hash.clone(),
             asserted: delta.asserted,
             retracted: delta.retracted,
             found: delta.found,
-        };
+        })
+    }
+}
+
+impl State {
+    /// A line standing as `now`, with no instant in its ring.
+    fn from(now: Frozen) -> Self {
+        Self {
+            now,
+            log: VecDeque::new(),
+        }
+    }
+
+    fn apply(&mut self, instruction: Instruction, delta: &mut Delta) {
+        self.now.apply(instruction, delta);
+    }
+
+    /// Mint an instant for a non-empty delta ([`Frozen::mint`]) and
+    /// record it in the ring. Returns the instant, or `None` when
+    /// nothing readers see changed.
+    fn mint(&mut self, delta: Delta) -> Option<Instant> {
+        let instant = self.now.mint(delta)?;
         if self.log.len() == LOG_CAPACITY {
             self.log.pop_front();
         }
@@ -618,7 +736,7 @@ impl Ephemeral {
     /// that have no stored body (see [`Bodies`]).
     pub(crate) fn keeping(self, bodies: Option<Bodies>) -> Self {
         if bodies.is_some() {
-            self.state.write().bodies = bodies;
+            self.state.write().now.bodies = bodies;
         }
         self
     }
@@ -626,12 +744,12 @@ impl Ephemeral {
     /// The rule this line holds as it is under `entity`, when it holds
     /// one.
     pub(crate) fn body(&self, entity: &Entity) -> Option<DeductiveRule> {
-        self.state.read().bodies.as_ref()?.get(entity).cloned()
+        self.state.read().now.bodies.as_ref()?.get(entity).cloned()
     }
 
     /// Every rule this line holds as it is.
     pub(crate) fn bodies(&self) -> Option<Bodies> {
-        self.state.read().bodies.clone()
+        self.state.read().now.bodies.clone()
     }
 
     /// A new line holding this one's facts and tombstones with the
@@ -643,19 +761,7 @@ impl Ephemeral {
     /// from the same line and equal batches carry equal revisions.
     pub(crate) fn extending(&self, mut changes: Changes) -> Self {
         changes.take_assets();
-        let base = self.state.read();
-        let mut state = State {
-            facts: base.facts.clone(),
-            tombstones: base.tombstones.clone(),
-            shadowed: base.shadowed.clone(),
-            sequence: base.sequence,
-            hash: base.hash.clone(),
-            settled: base.settled.clone(),
-            log: VecDeque::new(),
-            rules: base.rules.clone(),
-            bodies: base.bodies.clone(),
-        };
-        drop(base);
+        let mut state = State::from(self.frozen());
         let mut delta = Delta::unrecorded();
         for instruction in changes.into_instructions() {
             state.apply(instruction, &mut delta);
@@ -675,23 +781,11 @@ impl Ephemeral {
     /// gets both back, one the line was cleared of gets back whatever
     /// of the two it had. This line is left as it was.
     pub(crate) fn rewound(&self, instants: &[Instant]) -> Self {
-        let base = self.state.read();
-        let mut state = State {
-            facts: base.facts.clone(),
-            tombstones: base.tombstones.clone(),
-            shadowed: base.shadowed.clone(),
-            sequence: base.sequence,
-            hash: base.hash.clone(),
-            settled: base.settled.clone(),
-            log: VecDeque::new(),
-            rules: base.rules.clone(),
-            bodies: base.bodies.clone(),
-        };
-        drop(base);
+        let mut state = State::from(self.frozen());
         let mut delta = Delta::unrecorded();
         for instant in instants.iter().rev() {
             for (fact, hold) in &instant.found {
-                state.restore(fact, *hold, &mut delta);
+                state.now.restore(fact, *hold, &mut delta);
             }
         }
         state.mint(delta);
@@ -763,14 +857,22 @@ impl Ephemeral {
             return Ok(None);
         }
         let mut state = self.state.write();
-        let settled = state.settled.clone();
+        let settled = state.now.settled.clone();
         let mut delta = Delta::recorded();
         for instruction in changes.into_instructions() {
             state.apply(instruction, &mut delta);
         }
         let instant = state.mint(delta);
-        state.settled = settled;
+        state.now.settled = settled;
         Ok(instant)
+    }
+
+    /// The line as it stands now, as a value that never changes: what
+    /// every read of the line answers now, it answers after any later
+    /// write. Taking one costs a few reference counts, whatever the line
+    /// holds (see [`Frozen`]).
+    pub fn frozen(&self) -> Frozen {
+        self.state.read().now.clone()
     }
 
     /// The line's hash as of its last instant that was not a record
@@ -778,7 +880,7 @@ impl Ephemeral {
     /// records that followed its last change, the all-zero hash for a
     /// line no instant but records has changed.
     pub(crate) fn settled(&self) -> Blake3Hash {
-        self.state.read().settled.clone()
+        self.state.read().now.settled()
     }
 
     /// Everything this line holds, as one batch: each tombstone as the
@@ -788,20 +890,7 @@ impl Ephemeral {
     /// [`apply`](Self::apply) them to a successor's line, which reproduces
     /// both the facts and the tombstones as one instant.
     pub fn export(&self) -> Changes {
-        let state = self.state.read();
-        let mut changes = Changes::new();
-        for fact in state.shadowed.values() {
-            changes.dissociate(fact.the.clone(), fact.of.clone(), fact.is.clone());
-        }
-        for fact in state.facts.iter() {
-            changes.associate(
-                fact.the.clone(),
-                fact.of.clone(),
-                fact.is.clone(),
-                dialog_corpus::Pick::All,
-            );
-        }
-        changes
+        self.state.read().now.export()
     }
 
     /// Drop every fact and tombstone recorded for entities that fail
@@ -812,22 +901,24 @@ impl Ephemeral {
         let mut state = self.state.write();
         let mut delta = Delta::recorded();
         let dropped: Vec<Fact> = state
+            .now
             .facts
             .iter()
             .filter(|fact| !keep(&fact.of))
             .cloned()
             .collect();
         for fact in dropped {
-            state.remove(&fact, &mut delta);
+            state.now.remove(&fact, &mut delta);
         }
         let lifted: Vec<SortKey> = state
+            .now
             .shadowed
             .iter()
             .filter(|(_, fact)| !keep(&fact.of))
             .map(|(key, _)| key.clone())
             .collect();
         for key in lifted {
-            state.lift(&key, &mut delta);
+            state.now.lift(&key, &mut delta);
         }
         state.mint(delta).is_some()
     }
@@ -836,13 +927,13 @@ impl Ephemeral {
     pub fn clear(&self) -> &Self {
         let mut state = self.state.write();
         let mut delta = Delta::recorded();
-        let held: Vec<Fact> = state.facts.iter().cloned().collect();
+        let held: Vec<Fact> = state.now.facts.iter().cloned().collect();
         for fact in held {
-            state.remove(&fact, &mut delta);
+            state.now.remove(&fact, &mut delta);
         }
-        let lifted: Vec<SortKey> = state.shadowed.keys().cloned().collect();
+        let lifted: Vec<SortKey> = state.now.shadowed.keys().cloned().collect();
         for key in lifted {
-            state.lift(&key, &mut delta);
+            state.now.lift(&key, &mut delta);
         }
         state.mint(delta);
         self
@@ -852,20 +943,12 @@ impl Ephemeral {
     /// when it has none (see [`Facts::rules`]). Kept until an instant
     /// changes a rule fact, so a line of plain facts answers at once.
     pub(crate) fn rules(&self) -> Option<Blake3Hash> {
-        let state = self.state.read();
-        state
-            .rules
-            .get_or_init(|| state.facts.rules(state.shadowed.values()))
-            .clone()
+        self.state.read().now.rules()
     }
 
     /// The line's identity now.
     pub fn revision(&self) -> EphemeralRevision {
-        let state = self.state.read();
-        EphemeralRevision {
-            sequence: state.sequence,
-            hash: state.hash.clone(),
-        }
+        self.state.read().now.revision()
     }
 
     /// The instants minted after `sequence`, oldest first, or `None`
@@ -874,7 +957,7 @@ impl Ephemeral {
     /// yields an empty vector.
     pub fn since(&self, sequence: u64) -> Option<Vec<Instant>> {
         let state = self.state.read();
-        if sequence >= state.sequence {
+        if sequence >= state.now.sequence {
             return Some(Vec::new());
         }
         match state.log.front() {
@@ -899,34 +982,24 @@ impl Ephemeral {
     /// against. Shared when that is the store's own format, so a read
     /// never copies the set; keyed afresh under another.
     pub(crate) fn tombstones(&self, manifest: &Manifest) -> Arc<HashSet<SortKey>> {
-        let state = self.state.read();
-        if manifest == state.facts.manifest() {
-            return state.tombstones.clone();
-        }
-        Arc::new(
-            state
-                .shadowed
-                .values()
-                .map(|fact| sort_key(fact, manifest))
-                .collect(),
-        )
+        self.state.read().now.tombstones(manifest)
     }
 
     /// Whether the store holds no facts (tombstones aside).
     pub fn is_empty(&self) -> bool {
-        self.state.read().facts.is_empty()
+        self.state.read().now.is_empty()
     }
 
     /// The number of facts held.
     pub fn len(&self) -> usize {
-        self.state.read().facts.len()
+        self.state.read().now.len()
     }
 
     /// The facts a selector matches, in the order a tree scan of the
     /// same selector would produce them under the store's own format.
     /// For rows merged with a tree's, see [`select`](Self::select).
     pub fn scan(&self, selector: &Selector<Constrained>) -> Vec<Fact> {
-        self.state.read().facts.scan(selector)
+        self.state.read().now.scan(selector)
     }
 
     /// The facts a selector matches, in the order a scan of a tree
@@ -936,13 +1009,93 @@ impl Ephemeral {
     /// store's own the rows are re-keyed, and only the order of values
     /// within a cell can change.
     pub fn select(&self, selector: &Selector<Constrained>, manifest: &Manifest) -> Vec<Fact> {
-        self.state.read().facts.select(selector, manifest)
+        self.state.read().now.select(selector, manifest)
     }
 
     /// [`select`](Self::select) over a window shared with the other
     /// stores one read meets.
     pub(crate) fn select_within(&self, window: &Window<'_>, manifest: &Manifest) -> Vec<Fact> {
-        self.state.read().facts.select_within(window, manifest)
+        self.state.read().now.select_within(window, manifest)
+    }
+}
+
+/// The reads of a line, answered from the state they read: the live
+/// line reads its current one, under its lock, and a [`Frozen`] value
+/// the one it was taken at. See the matching methods of [`Ephemeral`].
+impl Frozen {
+    /// The line's identity as of this value.
+    pub fn revision(&self) -> EphemeralRevision {
+        EphemeralRevision {
+            sequence: self.sequence,
+            hash: self.hash.clone(),
+        }
+    }
+
+    /// See [`Ephemeral::settled`].
+    pub(crate) fn settled(&self) -> Blake3Hash {
+        self.settled.clone()
+    }
+
+    /// Everything the line held, as one batch: see [`Ephemeral::export`].
+    pub fn export(&self) -> Changes {
+        let mut changes = Changes::new();
+        for fact in self.shadowed.values() {
+            changes.dissociate(fact.the.clone(), fact.of.clone(), fact.is.clone());
+        }
+        for fact in self.facts.iter() {
+            changes.associate(
+                fact.the.clone(),
+                fact.of.clone(),
+                fact.is.clone(),
+                dialog_corpus::Pick::All,
+            );
+        }
+        changes
+    }
+
+    /// See [`Ephemeral::rules`].
+    pub(crate) fn rules(&self) -> Option<Blake3Hash> {
+        self.rules
+            .get_or_init(|| self.facts.rules(self.shadowed.values()))
+            .clone()
+    }
+
+    /// See [`Ephemeral::tombstones`].
+    pub(crate) fn tombstones(&self, manifest: &Manifest) -> Arc<HashSet<SortKey>> {
+        if manifest == self.facts.manifest() {
+            return self.tombstones.clone();
+        }
+        Arc::new(
+            self.shadowed
+                .values()
+                .map(|fact| sort_key(fact, manifest))
+                .collect(),
+        )
+    }
+
+    /// Whether the line held no facts (tombstones aside).
+    pub fn is_empty(&self) -> bool {
+        self.facts.is_empty()
+    }
+
+    /// The number of facts the line held.
+    pub fn len(&self) -> usize {
+        self.facts.len()
+    }
+
+    /// See [`Ephemeral::scan`].
+    pub fn scan(&self, selector: &Selector<Constrained>) -> Vec<Fact> {
+        self.facts.scan(selector)
+    }
+
+    /// See [`Ephemeral::select`].
+    pub fn select(&self, selector: &Selector<Constrained>, manifest: &Manifest) -> Vec<Fact> {
+        self.facts.select(selector, manifest)
+    }
+
+    /// See [`Ephemeral::select_within`].
+    pub(crate) fn select_within(&self, window: &Window<'_>, manifest: &Manifest) -> Vec<Fact> {
+        self.facts.select_within(window, manifest)
     }
 }
 
@@ -954,6 +1107,7 @@ mod tests {
     use super::*;
     use dialog_corpus::Value;
     use dialog_query::the;
+    use std::collections::BTreeSet;
 
     fn fact(of: &str, the_: &str, is: &str) -> Fact {
         Fact {
@@ -1417,6 +1571,234 @@ mod tests {
             )),
             "the retract hides the fact beneath"
         );
+    }
+
+    /// What a plain model of a line holds: the facts stored in it and
+    /// the facts it hides beneath it, each a set of triples.
+    #[derive(Clone, Debug, Default)]
+    struct Model {
+        stored: BTreeSet<(String, String, String)>,
+        hidden: BTreeSet<(String, String, String)>,
+    }
+
+    const ENTITIES: u64 = 12;
+    const ATTRIBUTES: [&str; 3] = ["person/name", "person/role", "person/team"];
+    const VALUES: u64 = 4;
+
+    /// Every read a frozen line answers, compared with the model it
+    /// was taken at: its size, each entity's, attribute's and value's
+    /// scan, its tombstones and its export.
+    fn agrees(frozen: &Frozen, model: &Model) {
+        let triple = |fact: &Fact| {
+            let Value::String(is) = &fact.is else {
+                panic!("a string value");
+            };
+            (fact.of.to_string(), fact.the.to_string(), is.clone())
+        };
+        assert_eq!(frozen.len(), model.stored.len());
+        assert_eq!(frozen.is_empty(), model.stored.is_empty());
+        for entity in 0..ENTITIES {
+            let of = format!("id:{entity}");
+            let rows: Vec<_> = frozen
+                .scan(&Selector::new().of(of.parse().unwrap()))
+                .iter()
+                .map(triple)
+                .collect();
+            let expected: Vec<_> = model.stored.iter().filter(|t| t.0 == of).cloned().collect();
+            let mut sorted = rows.clone();
+            sorted.sort();
+            assert_eq!(sorted, expected, "the facts of {of}");
+        }
+        for the in ATTRIBUTES {
+            let rows = frozen.scan(&Selector::new().the(the.parse().unwrap()));
+            assert_eq!(
+                rows.len(),
+                model.stored.iter().filter(|t| t.1 == the).count(),
+                "the facts of {the}"
+            );
+            for value in 0..VALUES {
+                let is = format!("v{value}");
+                let rows = frozen.scan(
+                    &Selector::new()
+                        .the(the.parse().unwrap())
+                        .is(Value::String(is.clone())),
+                );
+                assert_eq!(
+                    rows.len(),
+                    model
+                        .stored
+                        .iter()
+                        .filter(|t| t.1 == the && t.2 == is)
+                        .count()
+                );
+            }
+        }
+        let hidden: HashSet<SortKey> = model
+            .hidden
+            .iter()
+            .map(|(of, the_, is)| sort_key(&fact(of, the_, is), &Manifest::default()))
+            .collect();
+        assert_eq!(*frozen.tombstones(&Manifest::default()), hidden);
+        let exported = Ephemeral::new();
+        exported.apply(frozen.export()).unwrap();
+        assert_eq!(exported.len(), model.stored.len());
+        assert_eq!(
+            exported.tombstones(&Manifest::default()).len(),
+            hidden.len()
+        );
+    }
+
+    /// A frozen line answers as the line did when it was taken, after
+    /// any number of later writes, retractions, tombstones and drops:
+    /// a few hundred seeded steps, a value taken every few, each held
+    /// to a plain model of the line as of its taking.
+    #[dialog_common::test]
+    fn it_keeps_a_frozen_line_as_the_line_stood() {
+        let mut rng = chunks::tests::Xorshift::new(11);
+        let line = Ephemeral::new();
+        let mut model = Model::default();
+        let mut held: Vec<(Frozen, Model, EphemeralRevision)> = Vec::new();
+        for step in 0..600 {
+            let triple = (
+                format!("id:{}", rng.below(ENTITIES)),
+                ATTRIBUTES[rng.below(ATTRIBUTES.len() as u64) as usize].to_string(),
+                format!("v{}", rng.below(VALUES)),
+            );
+            let (of, the_, is) = (&triple.0, &triple.1, &triple.2);
+            match rng.below(100) {
+                0..55 => {
+                    line.assert(claim(of, the_, is)).unwrap();
+                    model.stored.insert(triple);
+                }
+                55..96 => {
+                    line.retract(claim(of, the_, is)).unwrap();
+                    if !model.stored.remove(&triple) {
+                        model.hidden.insert(triple);
+                    }
+                }
+                96..99 => {
+                    let gone = format!("id:{}", rng.below(ENTITIES));
+                    line.retain_entities(|entity| entity.to_string() != gone);
+                    model.stored.retain(|t| t.0 != gone);
+                    model.hidden.retain(|t| t.0 != gone);
+                }
+                _ => {
+                    line.clear();
+                    model = Model::default();
+                }
+            }
+            if step % 5 == 0 {
+                held.push((line.frozen(), model.clone(), line.revision()));
+            }
+        }
+        agrees(&line.frozen(), &model);
+        for (frozen, model, revision) in &held {
+            assert_eq!(frozen.revision(), *revision);
+            agrees(frozen, model);
+        }
+    }
+
+    /// Taking a frozen line copies nothing: it shares the line's every
+    /// chunk of facts, its tombstones and its counts. A write after it
+    /// copies only the chunks it changes into the line, and leaves the
+    /// frozen value's own parts as they were.
+    #[dialog_common::test]
+    fn it_freezes_a_line_without_copying_it() {
+        let line = Ephemeral::new();
+        for index in 0..500 {
+            line.assert(claim(&format!("id:{index}"), "person/name", "A"))
+                .unwrap();
+        }
+        line.retract(claim("id:hidden", "person/name", "B"))
+            .unwrap();
+        let frozen = line.frozen();
+        {
+            let state = line.state.read();
+            let (shared, total) = frozen.facts.map.shared_with(&state.now.facts.map);
+            assert_eq!(shared, total, "every chunk is shared");
+            assert!(total > 10, "fifteen hundred entries span many chunks");
+            assert!(Arc::ptr_eq(&frozen.tombstones, &state.now.tombstones));
+            let parts = |frozen: &Frozen| {
+                (
+                    frozen.facts.attributes.clone().expect("counted"),
+                    frozen.shadowed.0.clone().expect("hidden"),
+                )
+            };
+            let (attributes, shadowed) = parts(&frozen);
+            let (live_attributes, live_shadowed) = parts(&state.now);
+            assert!(Arc::ptr_eq(&attributes, &live_attributes));
+            assert!(Arc::ptr_eq(&shadowed, &live_shadowed));
+        }
+        let tombstones = frozen.tombstones.clone();
+
+        line.assert(claim("id:new", "person/name", "A")).unwrap();
+        {
+            let state = line.state.read();
+            let (shared, total) = frozen.facts.map.shared_with(&state.now.facts.map);
+            assert!(
+                shared + 3 >= total,
+                "a fact's three keys copy at most three chunks: {shared} of {total} shared"
+            );
+            assert!(
+                Arc::ptr_eq(&frozen.tombstones, &state.now.tombstones),
+                "a fact write leaves the tombstones shared"
+            );
+        }
+        line.retract(claim("id:other", "person/name", "C")).unwrap();
+        assert!(
+            Arc::ptr_eq(&frozen.tombstones, &tombstones),
+            "a tombstone placed after copies the line's set, not the frozen one"
+        );
+        assert_eq!(frozen.len(), 500);
+        assert_eq!(frozen.tombstones(&Manifest::default()).len(), 1);
+        assert_eq!(line.len(), 501);
+        assert_eq!(line.tombstones(&Manifest::default()).len(), 2);
+    }
+
+    /// The ring answers across its capacity as it always has: the
+    /// instants after a pin within its reach, oldest first, and `None`
+    /// past it. Within its reach, rewinding the line by them gives back
+    /// the line a frozen value taken at the pin holds.
+    #[dialog_common::test]
+    fn it_reaches_back_the_ring_to_the_frozen_lines() {
+        let line = Ephemeral::new();
+        let mut held = vec![line.frozen()];
+        let total = LOG_CAPACITY as u64 + 40;
+        for index in 0..total {
+            if index % 3 == 2 {
+                line.retract(claim(&format!("id:{}", index - 1), "person/tag", "x"))
+                    .unwrap();
+            } else {
+                line.assert(claim(&format!("id:{index}"), "person/tag", "x"))
+                    .unwrap();
+            }
+            held.push(line.frozen());
+        }
+        let head = line.revision().sequence;
+        assert_eq!(head, total);
+        for (sequence, frozen) in held.iter().enumerate() {
+            let sequence = sequence as u64;
+            assert_eq!(frozen.revision().sequence, sequence);
+            match line.since(sequence) {
+                Some(instants) => {
+                    assert!(head - sequence <= LOG_CAPACITY as u64);
+                    let sequences: Vec<u64> =
+                        instants.iter().map(|instant| instant.sequence).collect();
+                    assert_eq!(sequences, (sequence + 1..=head).collect::<Vec<_>>());
+                    let rewound = line.rewound(&instants);
+                    let tags = Selector::new().the("person/tag".parse().unwrap());
+                    assert_eq!(rewound.scan(&tags), frozen.scan(&tags));
+                    assert_eq!(
+                        *rewound.tombstones(&Manifest::default()),
+                        *frozen.tombstones(&Manifest::default())
+                    );
+                }
+                None => assert!(
+                    head - sequence > LOG_CAPACITY as u64,
+                    "the ring reaches {sequence}"
+                ),
+            }
+        }
     }
 
     /// A line's rules hash names the rule facts it holds and hides: none

@@ -105,6 +105,12 @@ struct CompareArgs {
     /// when there are none).
     #[arg(long, conflicts_with = "base")]
     stale: Option<PathBuf>,
+
+    /// Write why the comparison fails, and what to do about it, to this
+    /// file as Markdown (empty when it passes), for the pull request's
+    /// report.
+    #[arg(long)]
+    failures: Option<PathBuf>,
 }
 
 fn main() -> Result<ExitCode> {
@@ -151,6 +157,21 @@ fn main() -> Result<ExitCode> {
             }
             if let Some(path) = &args.stale {
                 std::fs::write(path, comparison.stale_markdown().unwrap_or_default())?;
+            }
+            let what = if args.base {
+                "the base sweep"
+            } else {
+                "the baseline files"
+            };
+            if let Some(path) = &args.failures {
+                std::fs::write(path, comparison.failures_markdown(what).unwrap_or_default())?;
+            }
+            // In GitHub Actions, each failure is also an error annotation,
+            // so the checks page says why the gate failed.
+            if std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
+                for line in &comparison.regressions {
+                    println!("::error title=Perf gate, against {what}::{line}");
+                }
             }
             // In GitHub Actions, a stale baseline is also a warning
             // annotation on the run, so main's own gate shows it.

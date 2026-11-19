@@ -2053,6 +2053,57 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
     Ok(())
 }
 
+/// A tree a release before the `revision:` scheme wrote holds a
+/// revision's record under `did:key:z6Mk…`. The history reader finds it
+/// there, and verifies it as any other.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_reads_a_revision_record_under_its_older_name() -> Result<()> {
+    use base58::ToBase58 as _;
+    use ed25519_dalek::Signer as _;
+
+    let store = Blocks::new();
+    let key = signing_key(7);
+    let did_key = {
+        let mut bytes = vec![0xed, 0x01];
+        bytes.extend_from_slice(key.verifying_key().as_bytes());
+        format!("did:key:z{}", bytes.to_base58())
+    };
+    let mut signed = RevisionRecord {
+        format: super::REVISION_RECORD_FORMAT,
+        branch: Entity::new()?,
+        issuer: did_key,
+        authority: "did:web:example.com".to_string(),
+        parents: Vec::new(),
+        skips: Vec::new(),
+        signature: Vec::new(),
+    };
+    signed.signature = key.sign(&signed.payload()?).to_bytes().to_vec();
+    let version = signed.version();
+    assert!(version.entity().to_string().starts_with("revision:"));
+    assert!(
+        version
+            .legacy_entity()
+            .to_string()
+            .starts_with("did:key:z6Mk")
+    );
+
+    let mut tree = Corpus::empty_in(test_catalog());
+    let mut delta = ArchiveDelta::zero();
+    tree.record(
+        &store,
+        &mut delta,
+        signed.legacy_entries(&dialog_search_tree::Manifest::default())?,
+    )
+    .await?;
+    delta.flush_into(&store);
+
+    let history = TreeHistory::new(tree, store);
+    assert_eq!(history.revision_record(&version).await?, Some(signed));
+
+    Ok(())
+}
+
 /// A tree whose `inline_n` is below a revision record's size spills the
 /// record out of its key. Writing it stores the value block beside the
 /// tree, history reads the record back through that block, and the pull

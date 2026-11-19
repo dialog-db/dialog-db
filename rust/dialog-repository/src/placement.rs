@@ -76,6 +76,8 @@ use dialog_query::the;
 use futures_util::TryStreamExt as _;
 use parking_lot::RwLock;
 
+#[cfg(test)]
+use crate::repository::branch::legacy;
 use crate::repository::source::Source;
 use crate::{Channel, CommitError, Ephemeral, Revision};
 use crate::{Erased, select_from_source};
@@ -230,6 +232,11 @@ impl Statement for Selection {
 /// The revision a branch stands at, as its `dialog.branch/revision` row
 /// and a durable layer's pointer fact carry it: the revision's entity.
 pub(crate) fn revision_entity(revision: &Revision) -> Value {
+    // A test committing as an older release names it as that release did.
+    #[cfg(test)]
+    if legacy::writing() {
+        return Value::Entity(revision.version().legacy_entity());
+    }
     Value::Entity(revision.entity())
 }
 
