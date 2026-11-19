@@ -220,8 +220,8 @@ mod tests {
         SeparatorPart::compute(SeparatorPartInput { of: bytes })
     }
 
-    /// The empty separator is the −∞ boundary; a non-empty one is the
-    /// tag plus a lenient prefix component.
+    /// The empty separator is the −∞ boundary; a non-empty one is read
+    /// field by field as far as it reaches.
     #[dialog_common::test]
     fn it_decomposes_separators_leniently() {
         let empty = separator_parts(Vec::new());
@@ -233,7 +233,8 @@ mod tests {
         prefix.truncate(9); // a front-coded prefix, mid-component
         let rows = separator_parts(prefix.clone());
         let kinds: Vec<&str> = rows.iter().map(|row| row.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["index", "prefix"], "tag + prefix: {rows:?}");
+        assert_eq!(kinds[0], "index", "{rows:?}");
+        assert_eq!(kinds[1], "entity", "the cut falls in the entity: {rows:?}");
         assert_eq!(rows[1].bytes, prefix[1..].to_vec());
     }
 }

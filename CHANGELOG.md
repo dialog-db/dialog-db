@@ -46,7 +46,71 @@ and a concept with an optional field, which most of tonk's are, was
 never merged, so its list read probed every field of every entity.
 
 
+### A coverage entry spills nothing
+
+[#833](https://github.com/dialog-db/dialog-db/pull/833).
+
+A coverage key carries a hash of the covered value in the spilled form,
+whatever the value's size, so claims can be matched by it; no value is
+stored under that hash. `tree/entry` read it as a spilled value, so an
+inspector offered to read a value that could never be read, and waited
+on it.
+
+What this changes for you:
+
+- `tree/entry` yields no `spill` for an entry at a coverage key, and
+  `inspect::entries` no `spill` in its `EntrySummary`.
+- `dialog/key-part` reads a coverage key as its index, origin, edition,
+  entity and attribute and a part of kind `reference`, `value:<hash>`,
+  where it read a value type of `Bytes` and a `spill` part.
+
+Why: a spill names bytes a reader can fetch; a coverage key's hash names
+none.
+
+#### Compatibility and migration
+
+- Nothing stored changes.
+
+### An index node's buffered operations are its entries, and a separator reads as the key it is
+
+[#832](https://github.com/dialog-db/dialog-db/pull/832).
+
+An index node buffers writes headed for its children (`novelty`), and
+`tree/entry` gave no rows for an index, so a query could count them but
+not read them. A separator was split into its tag and one `prefix` part
+of lossy text, which for a history separator was the origin's raw bytes,
+and a forced seam's separator, the last key before the seam padded with
+zero bytes past the separator bound, read as a key whose value was the
+padding.
+
+What this changes for you:
+
+- `tree/entry` of an index node yields one row per operation it
+  buffers, with a new slot `span` naming the span the operation rides,
+  as `tree/span` names it. `span` is absent on a segment's entry. `at`
+  counts the node's buffered operations; `rank` is absent on them.
+- `dialog_corpus::inspect::entries` returns an index node's buffered
+  operations, and `EntrySummary` has a new field `span: Option<u64>`.
+- `dialog/separator-part` reads a separator field by field as far as it
+  reaches, as `dialog/key-part` reads a key: `entity`, `attribute`,
+  `vtype` and `value` parts in the ordering's order, the value-type byte
+  on its own, and a Bytes or Record value as hex. A history or coverage
+  separator yields its `origin` (hex) and `edition`. The `prefix` part is
+  gone.
+- A separator that is a whole key reads as that key. A forced seam's
+  separator reads as the key before the seam and a part of kind
+  `padding`.
+
+Why: an inspector shows what a node holds, and the operations an index
+buffers and where its boundaries fall are part of that.
+
+#### Compatibility and migration
+
+- Nothing stored changes: both read blocks as they are.
+
 ### A revision is named by `revision:`, not by a `did:key:`
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829).
 
 A revision's entity was `did:key:z6Mk<base58(hash)>`: the shape of a key
 DID around a blake3 hash of the revision's version. It read as a
@@ -101,7 +165,7 @@ as one.
 
 ### A tree node is a handle, and five resolvers read it
 
-Argued in [design/tree-exploration.md](./design/tree-exploration.md).
+[#829](https://github.com/dialog-db/dialog-db/pull/829), argued in [design/tree-exploration.md](./design/tree-exploration.md).
 
 The seven `tree/*` resolvers each loaded a node's block and decoded one
 part of it, so a query asking three things of one node decoded it three
@@ -187,7 +251,7 @@ an entry the subject of a concept.
 
 ### A stack learns what its replica holds of a tree by command
 
-Argued in [design/tree-exploration.md](./design/tree-exploration.md).
+[#829](https://github.com/dialog-db/dialog-db/pull/829), argued in [design/tree-exploration.md](./design/tree-exploration.md).
 Built on the stack's providers
 ([#816](https://github.com/dialog-db/dialog-db/pull/816)).
 
