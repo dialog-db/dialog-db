@@ -5614,7 +5614,13 @@ mod resolver_tests {
             .iter()
             .map(|span| entity(span, "node"))
             .collect();
-        assert!(children.len() > 2, "the tree has nodes no fact will name");
+        // The root and the first child are named; the second child is
+        // a node no fact names. How many children the root has depends
+        // on where the random entities cut the tree, and two is enough.
+        assert!(
+            children.len() > 1,
+            "the root is an index with a child no fact will name: {children:?}"
+        );
         let named = children[0].clone();
         let unnamed = children[1].clone();
         branch
