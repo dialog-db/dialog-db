@@ -22,16 +22,17 @@ A rule's conclusion is read by other rules, so a fold in a head can feed itself.
 ## The form
 
 ```clj
-(query (todo/tags ?t is: ?tags)        ; the head: a name, an entity, fields, and what it answers
-  (todo/tag ?t tag: ?g)                ; the body: conditions
-  (is ?tags [?g]))                     ; and what the answer is
+(query (todo/tagged ?t is: ?pair)       ; the head: a name, an entity, fields, and what it answers
+  (todo ?t title: ?title)               ; the body: conditions
+  (todo/tag ?t tag: ?g)
+  (is ?pair {title: ?title tag: ?g}))   ; and what the answer is
 ```
 
 - **The head** is a concept's head. `is:` is the field that holds the answer. A field passed bound is a parameter, as with any relation; there is no list of them.
-- **The body** is conditions, and `(is ?x shape)`, which says what a variable is. A shape is a record, a list `[…]`, a fold `(count ?g)`, or a term.
+- **The body** is conditions, and `(is ?x shape)`, which says what a variable is: a record, a list, a function of other variables, or a term.
 - **A call** is the head applied, a condition like any other: `(todo/tags ?t is: ?tags)`.
 - **A view** is a query whose answer is markup, said by `(view ?x template)` where `is` would stand.
-- `is` over rows and `view` are refused in a `rule`, and a rule cannot apply a query.
+- A read that collects (below) and `view` are refused in a `rule`, and a rule cannot apply a query.
 
 It is named under its concept, as the design's derived attributes are (`list/count-open`), and it has their shape: an entity and a value. So what was a getter is a query, and "everything derived about a list is found under `list/`" still holds.
 
@@ -47,14 +48,7 @@ It is named under its concept, as the design's derived attributes are (`list/cou
 
 "Buy milk" is tagged `errand` and `home`. "Call mum" has no tag.
 
-**Everything in one body is required.**
-
-```clj
-(query (todo/tagged ?t is: ?pair)
-  (todo ?t title: ?title)
-  (todo/tag ?t tag: ?g)
-  (is ?pair {title: ?title tag: ?g}))
-```
+**Everything in one body is required.** `todo/tagged`, above, answers:
 
 | `?t` | `?pair` |
 |---|---|
@@ -63,7 +57,7 @@ It is named under its concept, as the design's derived attributes are (`list/cou
 
 ## Where a collection gets its rows
 
-As agreed by voice, the tags of a to-do and a card that uses them:
+As first agreed by voice, the tags of a to-do and a card that uses them:
 
 ```clj
 (query (todo/tags ?t is: ?tags)
@@ -76,28 +70,28 @@ As agreed by voice, the tags of a to-do and a card that uses them:
   (is ?card {title: ?title tags: ?tags}))
 ```
 
-| `?t` | `?card` |
-|---|---|
-| Buy milk | `{title: "Buy milk" tags: ["errand" "home"]}` |
+**"Call mum" has no card.** `(todo/tag ?t tag: ?g)` is a condition of `todo/tags` and has no row for "Call mum", so there is nothing to collect from; and the call is a condition of the card. This is the design's own rule for a fold ("a fold sees only the rows that exist", as in Datalog and Datomic, where a count over nothing answers nothing) and the maintainer's from today: what is written as one query needs all of it.
 
-**"Call mum" has no card.** `(todo/tag ?t tag: ?g)` is a condition of `todo/tags`, it has no row for "Call mum", so there is nothing to collect from and no `?tags`; and `(todo/tags ?t is: ?tags)` is a condition of the card. This is the design's own rule for a fold ("a fold sees only the rows that exist", as in Datalog and Datomic, where a count over nothing answers nothing, not 0), and the maintainer's from today: what is written as one query needs all of it. It is also the case the whole exercise was for.
+Four ways to get the empty list:
 
-Three ways to get the empty list:
+| | A. a call with its inputs bound always answers | B. the collection carries its conditions | C. the engine sets apart what only feeds the collection | D. the read says it collects |
+|---|---|---|---|---|
+| written | as above | `(is ?tags [?g] (todo/tag ?t tag: ?g))` | as above | `(todo/tag ?t tag: (all ?tags))` |
+| whose | the agent's | the agent's | the agent's, withdrawn | the maintainer's, as `tag: [?g]` |
+| says what it needs in how it is written | 🟡 by where a query's boundary is | 🟢 in place | 🔴 inferred | 🟢 in place, on the read itself |
+| one meaning however it is asked | 🟡 "Call mum → []" is there when asked of "Call mum" and not when asked of every to-do | 🟢 | 🟢 | 🟢 a query of collecting reads alone is refused, so something required always says which entities |
+| forms added | none | `is` with conditions | none | a marker on a term |
+| a fold | a clause | a clause | a clause | 🟢 a function of a list: `(count ?tags)` |
+| a list of things built from a join | a named query | 🟢 in place | in place | 🟡 a named query for the item, and its field collected |
 
-| | A. a call with its inputs bound always answers | B. the collection carries its conditions | C. conditions that only feed the collection are set apart |
-|---|---|---|---|
-| written | as above, nothing more | `(is ?tags [?g] (todo/tag ?t tag: ?g))` | as above, nothing more |
-| the rule | a query whose answer is a collection or a fold answers once for the inputs it is given, with none an empty one, as SQL's aggregate with no `GROUP BY` | `is` with conditions of its own collects over their rows, none included. The body's other conditions are required | the engine works out which conditions the collected variables depend on |
-| says what it needs in how it is written | 🟡 by where the query's boundary is: each part that may be empty is a query with a name | 🟢 in place: required conditions in the body, collected ones in the clause | 🔴 inferred, which the maintainer set aside today |
-| one meaning however it is asked | 🟡 `todo/tags` holds "Call mum → []" when asked of "Call mum" and not when asked of every to-do | 🟢 the same rows either way | 🟢 |
-| prior art | SQL's scalar subquery | EdgeQL's nested shape with its own `filter`; GraphQL's field with arguments | none known |
+**Proposed: D, written `(all ?tags)`.** A collecting read never binds what is outside it, as `unless` never does, so the same safety rule covers both: every other term in it is bound by a required condition, a constant, or blank. That is the maintainer's "reject a query of collecting forms alone", one condition at a time.
 
-**Proposed: B.** It is the maintainer's "nested or through aggregation, and then empty is fine" with the two said in one place. A names nothing new and makes every optional part a named query, and what it answers turns on how it is called.
+Not `[?g]`: brackets round a variable are a list pattern already. `(query (xyz.note ?n tags: [?only]))` is in the notation's tests, and asks for a stored list of one. `all` is the design's own word for this fold, and stands where an elector does: `(top ?s)` chooses one, `(all ?s)` takes every one.
 
 ```clj
 (query (todo/card ?t is: ?card)
   (todo ?t title: ?title)
-  (is ?tags [?g] (todo/tag ?t tag: ?g))
+  (todo/tag ?t tag: (all ?tags))
   (is ?card {title: ?title tags: ?tags}))
 ```
 
@@ -106,28 +100,20 @@ Three ways to get the empty list:
 | Buy milk | `{title: "Buy milk" tags: ["errand" "home"]}` |
 | Call mum | `{title: "Call mum" tags: []}` |
 
-Named, for reuse, the collection is the whole body, and nothing in it binds `?t`, so `?t` is what the caller gives:
-
-```clj
-(query (todo/tags ?t is: ?tags)
-  (is ?tags [?g] (todo/tag ?t tag: ?g)))
-
-(query (todo/card ?t is: ?card)
-  (todo ?t title: ?title)
-  (todo/tags ?t is: ?tags)
-  (is ?card {title: ?title tags: ?tags}))
-```
-
-That answers which fields are parameters without a list of them: a head field the body does not bind is one, and asking with it open is refused.
-
-**A fold** is the same clause: `(is ?n (count ?g) (todo/tag ?t tag: ?g))` is 2 for "Buy milk" and 0 for "Call mum".
+**A fold** is a function of the list: `tags: (count ?tags)` is 2 for "Buy milk" and 0 for "Call mum".
 
 ## Rendered
 
+A tag's chip is built from a tag, so it is a query of its own, passed the to-do, and the row collects its answers:
+
 ```clj
-(query (todo/row ?t is: ?row)
-  (todo ?t title: ?title)
-  (view ?chips [:span {:class "tag"} ?g] (todo/tag ?t tag: ?g))
+(query (todo/chip ?t tag: ?g is: ?chip)
+  (todo/tag ?t tag: ?g)
+  (view ?chip [:span {:class "tag"} ?g]))
+
+(query (todo/row ?t list: ?l is: ?row)
+  (todo ?t list: ?l title: ?title)
+  (todo/chip ?t is: (all ?chips))
   (view ?row [:li ?title ?chips]))
 ```
 ```html
@@ -135,17 +121,20 @@ That answers which fields are parameters without a list of them: a head field th
 <li>Call mum</li>
 ```
 
-`view` with conditions of its own is the template once for each of their rows, and stands as children where its variable is put. Move `(todo/tag ?t tag: ?g)` into the body and "Call mum" has no `li`.
+The call leaves `tag:` out, so it reads every chip of `?t`, one for each row of `todo/chip`. Written `(todo/chip ?t is: ?chip)`, with no `all`, "Call mum" has no `li`.
 
 ## A notebook and its blocks
 
 ```clj
+(query (notebook/entry ?n at: ?k is: ?entry)
+  (notebook/blocks ?n at: ?k block: ?b)
+  (notebook/block ?b source: ?s)
+  (is ?entry {at: ?k source: ?s}))
+
 (query (notebook/outline ?n is: ?outline)
   (notebook/named ?n title: ?title)
-  (is ?blocks [{at: ?k source: ?s}]
-    (notebook/blocks ?n at: ?k block: ?b)
-    (notebook/block ?b source: ?s))
-  (is ?outline {title: ?title blocks: ?blocks}))
+  (notebook/entry ?n is: (all ?entries))
+  (is ?outline {title: ?title blocks: ?entries}))
 ```
 
 | `?n` | `?outline` |
@@ -158,12 +147,12 @@ The design's own card. `list/count-open` was a rule concluding a fold, and an em
 ```clj
 (query (list/card ?l is: ?card)
   (list ?l name: ?name)
-  (is ?open (count ?t) (todo ?t list: ?l state: :open))
-  (is ?rows [?row] (todo ?t list: ?l) (todo/row ?t is: ?row))
+  (todo (all ?open) list: ?l state: :open)
+  (todo/row _ list: ?l is: (all ?rows))
   (view ?card
     [:article
       [:h2 ?name]
-      [:p ?open " open"]
+      [:p (count ?open) " open"]
       [:ul ?rows]]))
 ```
 
@@ -172,8 +161,8 @@ The design's own card. `list/count-open` was a rule concluding a fold, and an em
 | was | becomes |
 |---|---|
 | `(view concept :name template condition…)` and its call | a query named under the concept, `todo/row`, whose answer is markup, and its head applied |
-| the design's fold over an entity, and tonk's marker, taken this morning | `is` or `view` with conditions of its own collects, and nothing else repeats. The third answer today to "where does it repeat", and the first that infers nothing |
-| a fold in a rule's head (`list/count-open`), and the zero written by a second rule | `(is ?open (count ?t) …)`, where counting nothing gives 0. Nothing in the engine quarantines a fold (#830) |
+| the design's fold over an entity, and tonk's marker, taken this morning | a read marked `all` collects, and nothing else repeats. The third answer today to "where does it repeat", and the first that infers nothing |
+| a fold in a rule's head (`list/count-open`), and the zero written by a second rule | `(count ?open)` of a list collected, where counting nothing gives 0. Nothing in the engine quarantines a fold (#830) |
 | a getter | a query of an entity and a value |
 | #712: a collection that is empty | the row is rightly missing; the collection as a whole is collected, and empty |
 | `maybe:`, which the notation has no spelling for (it occurs 25 times in tonk's library) | a collection of none or one |
@@ -181,16 +170,17 @@ The design's own card. `list/count-open` was a rule concluding a fold, and an em
 ## What would refute it
 
 - **A rule that must read a fold.** "Archive a list when nothing on it is open" is an `unless`, not a count. tonk's library has no fold in any rule; where it counts, an element's script does. One rule that needs a number folded from rows, and the line between the layers is in the wrong place.
-- **A real view that reads worse.** `notebook :ui` and the table's views restated, not done yet.
+- **A real view that reads worse.** Every repeated part built from more than one field is a query with a name. `notebook :ui` and the table's views restated, not done yet.
 - **Readers.** None of it has met one.
 
 ## Open
 
 - **`query` is already the design's word for asking**, `(query (todo ?t state: :open))`, the maintainer's choice after R24 and R25. With a head and a body under the same word, `(query (a ?x) (b ?x))` reads both ways. In those rounds `find`, `select` and `(? …)` read as well as `query` for asking. Proposed: `query` names what is defined, a noun beside `concept` and `rule`, and asking is `find`.
-- **`is` marks many with brackets, `view` with nothing.** `(is ?x ?g conditions…)` with no brackets and no fold is one value from many rows, and is refused. A `view` with conditions is always many. Hiccup's vector is an element, so brackets cannot mean a list there.
+- **Two terms collected in one read**, `(notebook/blocks ?n at: (all ?ks) block: (all ?bs))`: two lists in step, or refused. Proposed: refused until something needs it.
+- **Other folds on a read**, `(todo (count ?n) list: ?l)`, beside `all`. Not proposed: a function of the list says the same.
 - **A fold with nothing to give.** `count` and `sum` of nothing are 0. `max`, or the one value of a collection of none or one, has none. `pull` leaves the key out. Proposed: the same.
 - **Order and limit**, which `pull` (1000 by default), GraphQL and EdgeQL all had to answer. A collection over a `by: :position` read stands in that order. #77.
-- **Rows or distinct answers** in a collection. Datomic answers a set and has `:with` for when a count must not merge them.
+- **Rows or distinct answers.** Proposed: a collecting read gives one item for each row of the read, so two tags that make the same chip are two chips.
 - **A query that calls itself**: a thread, an outline. `pull` allows it, with a depth, and stops at an entity it has already met.
 - **How a renderer finds the view** for an entity, now that a view is a query's name. Proposed: the name under the concept, `todo/row` for `:row` of a `todo`.
 - **Whether the engine carries a list or markup as a binding** through a body. Records are values since #778; not checked for this.

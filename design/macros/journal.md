@@ -1684,3 +1684,11 @@ The agent's inferred rule is withdrawn. So, if the sketch holds, are the design'
 
 **Decided.** The form, his. Not decided: where a collection gets its rows, and the word for asking. Nothing is built.
 
+## 2026-11-18, Designing: the read says it collects
+
+**Asked.** Which of the ways to the empty list. The maintainer gave a fourth: mark the collected term on the read, `(todo/tag ?t tag: [?g])`, and refuse a query that has only such reads, since nothing would say which entities.
+
+**Learned.** His is better than the agent's B on three counts: no clause with conditions inside it, a fold becomes a function of a list, and the refusal gives one meaning however the query is asked, which A lacked. It collects one read, so an item built from a join (a block with its source, a chip) is a query of its own whose field is collected: his "subview passed its parent". The brackets are taken, though: `tags: [?only]` is a list pattern in the build, tested. `all` is the design's word.
+
+**Decided.** The maintainer's: the read says it collects, and a query needs a required condition. Not decided: the marker, proposed as `(all ?g)`; and the word for asking.
+
