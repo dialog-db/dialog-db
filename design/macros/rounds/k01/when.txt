@@ -1,0 +1,53 @@
+You are using a notation for a database language. Work from the text below alone. Do not use any tools other than the one Read you were told to make, and do not search files or the web.
+
+Basics you can rely on:
+- The database stores facts: entity, attribute, value. Entities are written like `todo:1` or `list:home`.
+- `(xyz.todo ?t text: ?x state: ?s)` is a read. It matches every entity that has those fields. `?t`, `?x`, `?s` are variables; a constant such as `:open` in a field's place matches only that value.
+- A command is something a person issues, for example `(complete (xyz.todo todo:1))`. It holds only at the moment it is issued. Nothing is stored by issuing it.
+- A rule is `(rule head… (when premise…) (unless premise…))`: one or more heads, then the premises inside `(when …)`, then, if there are any, the premises that must not hold inside `(unless …)`.
+- A head says what the rule gives. `(assert! A)` stores A, and it stays stored. `(retract! A)` removes A. A head with neither word derives A: it holds for as long as the premises hold, and is never stored.
+- A premise says what has to be there: a read, or a command someone issued.
+- `(unless …)` holds when what is inside it has no match.
+- A rule with several heads writes them one after another, before `(when …)`.
+- A write may also stand on its own, outside a rule, with a `(when …)` after what it writes. It is short for the rule with that head.
+
+Two rules, as examples:
+```
+(rule (assert! (xyz.todo ?t state: :done))
+  (when (complete (xyz.todo ?t))))
+
+(rule (xyz.pending ?t text: ?x)
+  (when (xyz.todo ?t text: ?x state: :open)))
+```
+
+Answer every task. Number your answers A to F.
+
+Task A. Read this rule:
+```
+(rule (xyz.blocked ?t by: ?b)
+  (when (xyz.todo ?t after: ?b state: :open)
+        (xyz.todo ?b state: :open))
+  (unless (xyz.waived ?t)))
+```
+Say (1) what has to be in the database for it to give anything, (2) what must not be there, (3) what it gives, and whether that is stored.
+
+Task B. Read this rule:
+```
+(rule (assert! (xyz.todo ?t state: :done))
+  (when (archive (xyz.list ?l))
+        (xyz.todo ?t list: ?l)))
+```
+The database holds `todo:1` and `todo:2` on `list:home` and `todo:3` on `list:work`, all with state `:open`. Someone issues `(archive (xyz.list list:home))`. Say what the state of each of the three to-dos is afterwards, and whether the rule itself archives a list or issues any command.
+
+Task C. Write a rule: a to-do is `xyz.stale` when it is open, the list it is on has state `:archived` (a list is read as `(xyz.list ?l state: ?s)`, and a to-do's list as `(xyz.todo ?t list: ?l)`), and it has no pin (a pin is read as `(xyz.pin ?t)`). Stale is derived, not stored.
+
+Task D. Write one rule: when someone issues `(reopen (xyz.todo ?t))`, store state `:open` on that to-do, and remove its fact `(xyz.done-at ?t at: ?when)`.
+
+Task E. Read this line, which stands on its own, outside any rule:
+```
+(assert! (xyz.todo ?t state: :done)
+  (when (complete (xyz.todo ?t))))
+```
+Say what it does when someone issues `(complete (xyz.todo todo:4))`, and what it does when nobody issues anything. Then write the `(rule …)` it is short for.
+
+Task F. Rate from 1 to 5 how clear the way a rule is written is (5 is clearest). Name the one thing you found most confusing. If you would write a rule another way, show how.

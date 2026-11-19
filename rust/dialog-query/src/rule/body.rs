@@ -2,24 +2,29 @@
 //! envelope that names the format it is written in.
 //!
 //! ```text
-//! { "format": 3, "rule": { "deduce": ..., "when": [...] } }
+//! { "format": 4, "rule": { "deduce": ..., "when": [...] } }
 //! ```
 //!
-//! Format 3 writes the rule's canonical spelling (see
+//! Format 4 writes the rule's canonical spelling (see
 //! [`canonical`](crate::rule::canonical)): the locals and the head's
 //! fields renamed by the labeling, a premise's fields named by what
 //! they read, the premises sorted, and no descriptions. The body then
 //! holds exactly what the rule's identity holds, so every spelling of
 //! one rule stores the same bytes, and a rule's body is found by
-//! encoding the rule. What the author wrote is not stored.
+//! encoding the rule. What the author wrote is not stored. Where a
+//! parameter stands it writes a variable, a constant, or a map or a
+//! list of them (see [`Pattern`](crate::Pattern)).
 //!
-//! Format 2 wrote the authored descriptor, with every constant tagged
+//! Format 3 wrote the same spelling and had no way to write a map or a
+//! list of terms, so a rule that held one had no body. A
+//! rule that holds none is written in format 4 as it was in format 3,
+//! but for the number. Format 2 wrote the authored descriptor, with every constant tagged
 //! by the entity naming its type (`{"text:": "foo:"}`), so a constant
 //! decodes as the type it was written as. Format 1 (0.2.0) and format
 //! 0 (the bare descriptor the release before formats wrote) wrote
 //! constants bare, and a bare constant reads as the first type its
-//! payload fits. All three are still read, and `Branch::upgrade_rules`
-//! rewrites them in format 3. A body in a later format than this
+//! payload fits. All four are still read, and `Branch::upgrade_rules`
+//! rewrites them in format 4. A body in a later format than this
 //! release reads is refused by name rather than read as something it
 //! is not.
 //!
@@ -32,7 +37,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// The rule body format this release writes.
-pub const FORMAT: u64 = 3;
+pub const FORMAT: u64 = 4;
 
 #[derive(Serialize)]
 struct Envelope<'a, T> {
@@ -59,6 +64,12 @@ pub(crate) fn encode<T: Serialize>(rule: &T) -> Option<Vec<u8>> {
         rule,
     })
     .ok()
+}
+
+/// `rule` as an earlier release stored it, in `format`.
+#[cfg(test)]
+pub(crate) fn encode_as<T: Serialize>(format: u64, rule: &T) -> Option<Vec<u8>> {
+    serde_ipld_dagcbor::to_vec(&Envelope { format, rule }).ok()
 }
 
 /// The descriptor a stored body holds, in [`FORMAT`] or any earlier.
@@ -94,8 +105,8 @@ mod tests {
     }
 
     /// A body is written in the current format and read back, and the
-    /// bodies earlier releases wrote are still read: the format 2
-    /// envelope and the bare descriptor of format 0.
+    /// bodies earlier releases wrote are still read: the envelopes of
+    /// formats 3 and 2, and the bare descriptor of format 0.
     #[dialog_common::test]
     fn it_reads_every_format_up_to_its_own() {
         let current = encode(&body()).expect("encodes");
@@ -103,15 +114,39 @@ mod tests {
         assert_eq!(stamp.format, Some(FORMAT));
         assert_eq!(decode::<Body>(&current), Ok(body()));
 
-        let earlier = serde_ipld_dagcbor::to_vec(&Envelope {
-            format: 2,
-            rule: &body(),
-        })
-        .expect("encodes");
-        assert_eq!(decode::<Body>(&earlier), Ok(body()));
+        for earlier in [3, 2] {
+            let earlier = serde_ipld_dagcbor::to_vec(&Envelope {
+                format: earlier,
+                rule: &body(),
+            })
+            .expect("encodes");
+            assert_eq!(decode::<Body>(&earlier), Ok(body()));
+        }
 
         let bare = serde_ipld_dagcbor::to_vec(&body()).expect("encodes");
         assert_eq!(decode::<Body>(&bare), Ok(body()));
+    }
+
+    /// A key of the envelope this release does not know is skipped,
+    /// and the body is read as its number says. So a release cannot be
+    /// told what a body holds by a key beside the number: only a later
+    /// number makes it refuse. A design that names what a body uses
+    /// has to move the number too.
+    #[dialog_common::test]
+    fn it_reads_past_an_envelope_key_it_does_not_know() {
+        #[derive(Serialize)]
+        struct Extended<'a> {
+            format: u64,
+            uses: Vec<&'a str>,
+            rule: &'a Body,
+        }
+        let extended = serde_ipld_dagcbor::to_vec(&Extended {
+            format: FORMAT,
+            uses: vec!["pattern"],
+            rule: &body(),
+        })
+        .expect("encodes");
+        assert_eq!(decode::<Body>(&extended), Ok(body()));
     }
 
     /// A body in a later format is refused by name.

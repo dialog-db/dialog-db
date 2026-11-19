@@ -19,6 +19,7 @@ use crate::concept::descriptor::ConceptDescriptor;
 use crate::corpus::Value;
 use crate::error::{AnalysisError, TypeError};
 use crate::negation::Negation;
+use crate::pattern;
 use crate::planner::Planner;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
@@ -256,7 +257,12 @@ fn compile_rule_as<T: Compile>(
             other => other,
         })
         .collect();
+    // A concept premise that holds a map or a list of terms
+    // reads the whole value into a variable, and an equality between
+    // that variable and the pattern follows it, so everything that
+    // analyses or evaluates the body meets terms only.
     let display_premises = premises.clone();
+    let premises = pattern::lower(premises);
     let authored_reduce = reduce.clone();
     encodable_constants(&conclusion, &premises, &reduce)?;
     if authored
@@ -455,7 +461,9 @@ fn encodable_constants(
     };
     listed(conclusion)?;
     for premise in premises {
-        for (_, term) in premise.parameters().iter() {
+        // A constant inside a map or a list is written as one alone
+        // is, so it is held to the same.
+        for term in premise.parameters().leaves() {
             if let Term::Constant(value) = term {
                 refuse(value)?;
             }

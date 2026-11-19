@@ -14,7 +14,7 @@ use crate::rule::types::TypeEnv;
 use crate::selection::Match;
 use crate::selection::Selection;
 use crate::try_stream;
-use crate::{Environment, Parameters, Premise, Term};
+use crate::{Environment, Premise, Term};
 use auto_enums::auto_enum;
 use core::pin::Pin;
 use futures_util::StreamExt;
@@ -341,8 +341,10 @@ where
     let premise = inner.as_premise();
     let shared: Vec<String> = premise
         .parameters()
-        .iter()
-        .filter_map(|(_, term)| term.name().map(String::from))
+        // The variables inside a map or a list of terms too:
+        // a candidate binds those, never the whole.
+        .leaves()
+        .filter_map(|term| term.name().map(String::from))
         // A variable any candidate binds is part of the key; a candidate
         // that leaves it without a value (absent, from an optional
         // premise before the negation) has no key, and the candidates
@@ -455,16 +457,16 @@ fn apply_types_to_proposition(proposition: Proposition, types: &TypeEnv) -> Prop
             // boundary is the consuming premise's job: a narrowed
             // variable arriving Absent is filtered by whichever
             // scalar slot demanded it.)
-            let mut terms = Parameters::new();
-            for (param, term) in query.terms.iter() {
-                let projected = match term.name().and_then(|name| types.get(name)) {
-                    Some(kind) => {
-                        Term::typed_var(term.name().unwrap_or_default().to_string(), kind.clone())
-                    }
-                    None => term.clone(),
-                };
-                terms.insert(param.clone(), projected);
-            }
+            let terms =
+                query
+                    .terms
+                    .map_terms(|term| match term.name().and_then(|name| types.get(name)) {
+                        Some(kind) => Term::typed_var(
+                            term.name().unwrap_or_default().to_string(),
+                            kind.clone(),
+                        ),
+                        None => term.clone(),
+                    });
             Proposition::Concept(ConceptQuery {
                 terms,
                 predicate: query.predicate,
@@ -508,7 +510,7 @@ mod tests {
     use crate::optional::OptionalAttributeQuery;
     use crate::the;
     use crate::types::Any;
-    use crate::{AttributeDescriptor, Cardinality, ConceptDescriptor, Term};
+    use crate::{AttributeDescriptor, Cardinality, ConceptDescriptor, Parameters, Term};
 
     fn optional_nickname_premise(var: &str) -> Premise {
         OptionalAttributeQuery::new(

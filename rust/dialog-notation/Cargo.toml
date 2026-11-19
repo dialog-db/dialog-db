@@ -1,0 +1,32 @@
+[package]
+name = "dialog-notation"
+version.workspace = true
+edition = "2024"
+authors.workspace = true
+description = "A notation for Dialog-DB: a small kernel, and the core forms defined in it as rules"
+license.workspace = true
+
+[dependencies]
+dialog-corpus = { workspace = true }
+dialog-query = { workspace = true }
+merkle-reference = { workspace = true }
+base58 = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The tests run documents against a real branch, which only the
+# repository's helpers build.
+dialog-common = { workspace = true, features = ["helpers"] }
+dialog-peer = { workspace = true, features = ["helpers"] }
+dialog-storage = { workspace = true }
+dialog-repository = { workspace = true, features = ["helpers"] }
+anyhow = { workspace = true }
+futures-util = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt"] }
+wasm-bindgen-test = { workspace = true }
+
+[lints.rust]
+# `dialog_common::test` asks whether its caller runs web integration
+# tests. This crate has none.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("web-integration-tests"))'] }

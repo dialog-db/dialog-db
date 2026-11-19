@@ -24,7 +24,8 @@
 use std::collections::BTreeSet;
 use std::{error, fmt};
 
-use dialog_corpus::identity::{BOOLEAN, ENTITY, NUMBER, RECORD, SYMBOL, TEXT};
+use dialog_corpus::Value;
+use dialog_corpus::identity::{BOOLEAN, ENTITY, NUMBER, SYMBOL, TEXT};
 use merkle_reference::{Reference, Type};
 use serde::Serialize;
 use serde::ser::{self, SerializeMap as _};
@@ -32,8 +33,10 @@ use serde::ser::{self, SerializeMap as _};
 use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::concept::query::ConceptQuery;
+use crate::constraint::Constraint;
 use crate::identity::{NULL, RULE, field};
 use crate::negation::Negation;
+use crate::pattern::Pattern;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
@@ -114,10 +117,90 @@ fn head_reference(conclusion: &ConceptDescriptor) -> Reference {
 
 /// A premise's proposition: a concept application by its concept and
 /// bindings, anything else by its wire form.
+///
+/// An equality a side of which is a map or a list of terms has
+/// no wire form. It is referenced as its wire form would be read, with
+/// each side by its [`pattern_reference`], so an equality between two
+/// terms has the reference it always had.
 fn proposition_reference(proposition: &Proposition) -> Option<Reference> {
     match proposition {
         Proposition::Concept(query) => concept_premise(query),
+        Proposition::Constraint(Constraint::Equality(equality))
+            if equality.this.is_composite() || equality.is.is_composite() =>
+        {
+            Some(Type::MAP.map([
+                (text("assert"), text("==")),
+                (
+                    text("where"),
+                    Type::MAP.map([
+                        (text("this"), pattern_reference(&equality.this)?),
+                        (text("is"), pattern_reference(&equality.is)?),
+                    ]),
+                ),
+            ]))
+        }
         other => wire_reference(other),
+    }
+}
+
+/// The reference of a premise's proposition, for whatever orders
+/// premises by it.
+pub(crate) fn proposition(proposition: &Proposition) -> Option<Reference> {
+    proposition_reference(proposition)
+}
+
+/// A pattern, by its parts: a leaf as the term it is, and a map
+/// or a list of terms as a map from its shape to its parts' references,
+/// with what takes the entries or items it did not name beside them.
+/// The same pattern has the same reference however its map's entries
+/// were given, and no layout of a value of the shape is part of it.
+fn pattern_reference(pattern: &Pattern) -> Option<Reference> {
+    let parts = |patterns: &[Pattern]| -> Option<Reference> {
+        Some(
+            Type::LIST.list(
+                patterns
+                    .iter()
+                    .map(pattern_reference)
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+        )
+    };
+    Some(match pattern {
+        Pattern::Term(term) => term_reference(term)?,
+        Pattern::Map(map) => {
+            let entries = map
+                .entries()
+                .iter()
+                .map(|(key, part)| {
+                    let key = Value::String(key.clone()).reference();
+                    Some((key, pattern_reference(part)?))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let mut shape = vec![(text("map:"), Type::MAP.map(entries))];
+            if let Some(rest) = map.rest() {
+                shape.push((text("rest"), term_reference(rest)?));
+            }
+            Type::MAP.map(shape)
+        }
+        Pattern::List(list) => {
+            let mut shape = vec![(text("list:"), parts(list.items())?)];
+            if let Some(run) = list.run() {
+                shape.push((text("run"), term_reference(run)?));
+            }
+            Type::MAP.map(shape)
+        }
+    })
+}
+
+/// What a concept application binds under `name`: a term, or the map
+/// or list of terms it holds there.
+fn binding_reference(query: &ConceptQuery, name: &str) -> Option<Option<Reference>> {
+    match query.terms.shape(name) {
+        Some(pattern) => Some(Some(pattern_reference(pattern)?)),
+        None => match query.terms.get(name) {
+            Some(term) => Some(Some(term_reference(term)?)),
+            None => Some(None),
+        },
     }
 }
 
@@ -139,24 +222,26 @@ fn concept_premise(query: &ConceptQuery) -> Option<Reference> {
         let binding = if collections.contains(name) {
             named.insert(key_operand.clone());
             let mut entry = Vec::new();
-            if let Some(term) = query.terms.get(&key_operand) {
-                entry.push((text("the"), term_reference(term)?));
+            if let Some(the) = binding_reference(query, &key_operand)? {
+                entry.push((text("the"), the));
             }
-            if let Some(term) = query.terms.get(name) {
-                entry.push((text("is"), term_reference(term)?));
+            if let Some(is) = binding_reference(query, name)? {
+                entry.push((text("is"), is));
             }
             Type::MAP.map(entry)
         } else {
-            match query.terms.get(name) {
-                Some(term) => term_reference(term)?,
+            match binding_reference(query, name)? {
+                Some(binding) => binding,
                 None => continue,
             }
         };
         bindings.push((field_reference(field), binding));
     }
-    for (name, term) in query.terms.iter() {
-        if !named.contains(name.as_str()) {
-            bindings.push((text(name), term_reference(term)?));
+    for name in query.terms.keys() {
+        if !named.contains(name.as_str())
+            && let Some(binding) = binding_reference(query, name)?
+        {
+            bindings.push((text(name), binding));
         }
     }
     Some(Type::MAP.map([
@@ -240,7 +325,9 @@ fn constant(tag: &str, payload: &Node) -> Option<Reference> {
         ("boolean:", Node::Bool(value)) => BOOLEAN.reference_of(&[u8::from(*value)]),
         ("natural:" | "integer:" | "float:", Node::Number(content)) => NUMBER.reference_of(content),
         ("bytes:", payload) => Reference::hash(&bytes_of(payload)?),
-        ("record:", payload) => RECORD.reference_of(&bytes_of(payload)?),
+        // A record that holds a composite is named by its parts, and
+        // any other by its bytes, as `Value::reference` names one.
+        ("record:", payload) => Value::Record(bytes_of(payload)?).reference(),
         _ => return None,
     })
 }
@@ -681,6 +768,97 @@ mod tests {
             compile(other).this(),
             compile(employee("", serde_json::json!({ "integer:": 5 }))).this()
         );
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn team_lead() -> serde_json::Value {
+        serde_json::json!({
+            "deduce": { "with": {
+                "manager": { "the": "org/manager-of", "as": "entity:" }
+            } },
+            "when": [
+                {
+                    "assert": { "with": {
+                        "team": { "the": "org/member-of", "as": "entity:" }
+                    } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "team": { "?": { "name": "team" } }
+                    }
+                },
+                {
+                    "assert": { "with": {
+                        "lead": { "the": "org/team-lead", "as": "entity:" }
+                    } },
+                    "where": {
+                        "this": { "?": { "name": "team" } },
+                        "lead": { "?": { "name": "manager" } }
+                    }
+                }
+            ]
+        })
+    }
+
+    fn bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// A rule format 3 wrote keeps its name, and its bytes but for the
+    /// number of the format, which is the last of them. The name and
+    /// the bytes format 3 wrote are written out here, so that a change
+    /// to how a rule is spelled, or a format that can say more, shows
+    /// as a failure of this test when it moves anything else of a rule
+    /// that uses none of what was added. A stored rule is found by its
+    /// entity and read by its body: the entity moving strands what a
+    /// replica holds, and so does a body this release cannot read.
+    #[dialog_common::test]
+    fn it_keeps_the_name_of_a_rule_format_3_wrote_and_its_bytes_but_for_the_number() {
+        let employee = compile(employee("", serde_json::json!({ "integer:": 5 })));
+        let stored = [
+            (
+                employee,
+                "rule:jy5fVr2HUJMqTfSU8R55LSVERSxYketm51KUKixf8Au",
+                "a26472756c65a2647768656e81a2657768657265a3622330a168696e74656765723a05\
+                 622331a1613fa1646e616d65627e306474686973a1613fa1646e616d65647468697366\
+                 617373657274a16477697468a2622330a163746865706f72672f706572736f6e2d6c65\
+                 76656c622331a262617365746578743a637468656f6f72672f706572736f6e2d6e616d\
+                 6566646564756365a16477697468a1627e30a262617365746578743a63746865716f72\
+                 672f656d706c6f7965652d6e616d6566666f726d617403",
+            ),
+            (
+                compile(team_lead()),
+                "rule:8Hww7aJ9mifiBmiKvr7vYrCbtyYTmRdTbhhorEeFuXRk",
+                "a26472756c65a2647768656e82a2657768657265a2622330a1613fa1646e616d65627e\
+                 306474686973a1613fa1646e616d65627e3166617373657274a16477697468a1622330\
+                 a262617367656e746974793a637468656d6f72672f7465616d2d6c656164a265776865\
+                 7265a2622330a1613fa1646e616d65627e316474686973a1613fa1646e616d65647468\
+                 697366617373657274a16477697468a1622330a262617367656e746974793a63746865\
+                 6d6f72672f6d656d6265722d6f6666646564756365a16477697468a1627e30a2626173\
+                 67656e746974793a637468656e6f72672f6d616e616765722d6f6666666f726d617403",
+            ),
+        ];
+        for (rule, name, third) in stored {
+            assert_eq!(rule.this().to_string(), name);
+
+            let third = bytes(third);
+            let (number, body) = third.split_last().expect("a body");
+            assert_eq!(*number, 3, "the bytes written out are format 3");
+            let mut fourth = body.to_vec();
+            fourth.push(4);
+            assert_eq!(hex(&rule.try_encode().expect("a body")), hex(&fourth));
+
+            // What format 3 wrote reads as the rule, under its name, and
+            // is written again as what this release writes.
+            let read = DeductiveRule::decode(&third).expect("format 3 is read");
+            assert_eq!(read.this().to_string(), name);
+            assert_eq!(read.try_encode(), Some(fourth));
+        }
     }
 
     /// With several variables, the canonical labeling orders them by the

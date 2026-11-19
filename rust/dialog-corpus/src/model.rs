@@ -39,6 +39,10 @@ pub use symbol::*;
 mod value;
 pub use value::*;
 
+mod composite;
+pub use composite::*;
+pub(crate) use composite::{NAMED_DEPTH, type_and_bytes};
+
 mod ordkey;
 pub use ordkey::*;
 

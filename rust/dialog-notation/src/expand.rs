@@ -1,0 +1,2824 @@
+//! Expansion: rewriting a tree until every part of it is kernel.
+//!
+//! The kernel is small: `rule`, whose first part is its head and whose
+//! other parts are its premises, `(unless …)` among them for what must
+//! not hold; the application of a relation and of a formula; `assert`,
+//! `retract` and `report` as a rule's head. A head with no word is
+//! derived. `assert` of claims on the control layer, a command's, issues
+//! them for one tick. A rule has one head. Every other form is given its meaning by a rule
+//! about syntax:
+//!
+//! ```clj
+//! (rule (syntax (rule (report ?head) ?head))
+//!   (expand (select ?head)))
+//! ```
+//!
+//! `(expand pattern)` holds for the tree being expanded when it has the
+//! pattern's shape, and `(syntax template)` is what the tree becomes.
+//! Neither is walked into: what is inside them is syntax.
+//!
+//! A template answers `(all a b)` when the tree stands for several, as
+//! a concept does for the reads of its body. Among the premises they
+//! stand one after another. In the head's place they are a rule each,
+//! with the premises again. `(all …)` is not written in a rule: it is
+//! refused there.
+//!
+//! The [`Expander`] is the walker. It rewrites a top-level tree until
+//! it is a `rule`, then every head and premise until each applies a
+//! relation or a formula, asking the rules about syntax at each step.
+//! In this proof of concept those rules are kept and evaluated here,
+//! not stored in a replica and not run by the query engine, which
+//! cannot yet take a tree apart.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use dialog_corpus::Value;
+
+use crate::Error;
+use crate::diagnostic::Diagnostic;
+use crate::form::Kind;
+use crate::kernel::QUOTE;
+use crate::kernel::{CONTROL, Head, Keyed, Rule, TYPES};
+use crate::parse::parse;
+use crate::pattern::{Binding, Bindings, REST, fill, matches};
+use crate::syntax::{self, DERIVED, Parameters, Signature, Syntax};
+use crate::written::{Path, Segment};
+
+mod query;
+
+/// The core forms, written in the kernel.
+pub const PRELUDE: &str = include_str!("prelude.clj");
+
+/// Where a form stands when it is expanded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Position {
+    /// A rule's head, or the top level of a document.
+    Head,
+    /// A premise, `(unless …)` or not.
+    Premise,
+}
+
+/// What a rule about syntax concludes.
+#[derive(Clone, Debug)]
+enum Answer {
+    /// `(syntax template)`: the form becomes the template, filled.
+    Syntax(Syntax),
+    /// `(warning "…")`: the form stands, and this is said about it.
+    Warning(String),
+}
+
+/// A rule about syntax: `(expand pattern)` among its premises, and
+/// `(syntax template)` or `(warning "…")` as its head.
+#[derive(Clone, Debug)]
+struct Definition {
+    answer: Answer,
+    pattern: Syntax,
+    position: Option<Position>,
+    when: Vec<Syntax>,
+    unless: Vec<Syntax>,
+    /// What the rule defines, where it defines a concept: a name
+    /// applied with labels, standing for reads and nothing else.
+    signature: Option<Signature>,
+    /// The command whose entity this definition reads, where it is the
+    /// one a command's declaration adds for `of:` in a premise.
+    entity_of: Option<String>,
+}
+
+/// One form that several definitions take, and which of them stands
+/// for it in the rule being expanded.
+#[derive(Clone, Debug)]
+struct Choice {
+    form: Syntax,
+    taken: usize,
+    of: usize,
+}
+
+/// The formula that makes a position between two others.
+const POSITION: &str = "dialog/position";
+
+/// What a kernel rule says of itself when it is a write at the top level
+/// with a `when`: it runs once and is not installed.
+pub const ONCE: &str = "once";
+
+/// The words that make a rule's head a write or an answer.
+const HEAD_WORDS: [&str; 3] = ["assert", "retract", "report"];
+
+/// What the two writes were called while a mark told what is kept from
+/// what holds one round. Unrefused, either would be read as a name that
+/// nothing gives a meaning, and said to be unknown.
+const FORMER_WORDS: [(&str, &str); 2] = [("assert!", "assert"), ("retract!", "retract")];
+
+/// Refuse a write under the name it had.
+fn former(tree: &Syntax) -> Result<(), Error> {
+    match FORMER_WORDS
+        .iter()
+        .find(|(former, _)| tree.applies() == Some(former))
+    {
+        Some((former, word)) => Err(Error::Refused(format!(
+            "`{former}` is written `{word}`: no form carries `!`"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// The words whose parts are syntax, never walked into.
+const DIRECTIVES: [&str; 3] = ["expand", "syntax", "warning"];
+
+/// `name` applied to `items`, with no labelled part.
+fn apply(name: &str, items: Vec<Syntax>) -> Syntax {
+    Syntax::Application(
+        Box::new(Syntax::Reference(name.to_string())),
+        Parameters {
+            items,
+            ..Parameters::default()
+        },
+    )
+}
+
+/// A formula of one part, as a type and a pick are: `(:text ?x)`.
+fn wrap(word: &str, inner: Syntax) -> Result<Syntax, Error> {
+    Ok(Syntax::Application(
+        Box::new(Syntax::Constant(syntax::entity(&format!("{word}:"))?)),
+        Parameters {
+            items: vec![inner],
+            ..Parameters::default()
+        },
+    ))
+}
+
+/// The read a line is. A line is one attribute, by its full name:
+///
+/// ```clj
+/// (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
+/// (xyz.todo ?i title: (:last (:text ?t)))
+/// ```
+///
+/// `of:` is the entity and `is:` the value; unlabeled, the two are the
+/// entity and then the value, `(xyz.todo/title ?i ?t)`. `as:` is the type the value
+/// is read under. `cardinality:` says how many claims the attribute
+/// holds for one entity: `:one` reads the newest, `:many` every one.
+/// Either may be left out, and then the read says nothing of it. `in:`
+/// is the layer, and the one taken is a command's, `:control`.
+///
+/// `None` when `tree` applies no attribute.
+pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
+    let Syntax::Application(operator, operand) = tree else {
+        return Ok(None);
+    };
+    let Some((domain, field)) = (match &**operator {
+        Syntax::Reference(name) if Kind::of(name) == Kind::Attribute => name.split_once('/'),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+    let mut terms = operand.terms.clone();
+    // A line over a collection leaves the key a variable in the name,
+    // and says what a key is.
+    let by = terms.remove("by");
+    let (field, key) = match (field.strip_prefix('?'), by) {
+        (Some(key), Some(by)) => match by.keyword().and_then(Keyed::of) {
+            Some(_) => ("entry", Some((Syntax::Variable(key.to_string()), by))),
+            None => {
+                return Err(Error::Refused(format!(
+                    "{by} is not what a key is: `by: :name` or `by: :position`"
+                )));
+            }
+        },
+        (Some(_), None) => {
+            return Err(Error::Refused(format!(
+                "{tree} is over a collection, and says what a key is: `by: :name` or \
+                 `by: :position`"
+            )));
+        }
+        // One entry, its key written in the name: `by:` is part of the
+        // attribute's identity, so it is said here too.
+        (None, Some(by)) => match by.keyword().and_then(Keyed::of) {
+            Some(_) => (
+                "entry",
+                Some((
+                    Syntax::Constant(dialog_corpus::Value::String(field.to_string())),
+                    by,
+                )),
+            ),
+            None => {
+                return Err(Error::Refused(format!(
+                    "{by} is not what a key is: `by: :name` or `by: :position`"
+                )));
+            }
+        },
+        (None, None) => (field, None),
+    };
+    let (entity, mut value) = match (operand.items.as_slice(), terms.remove("is")) {
+        ([entity], Some(value)) => (entity, value),
+        // Unlabeled, an attribute's two terms are the entity and then
+        // the value, as Datomic writes `[?e :attr ?v]`.
+        ([entity, value], None) => (entity, value.clone()),
+        ([_], None) => {
+            return Err(Error::Refused(format!(
+                "{tree} says no value: a line is an attribute, its entity and its value, \
+                 unlabeled or as `of:` and `is:`"
+            )));
+        }
+        _ => {
+            return Err(Error::Refused(format!(
+                "{tree} needs its entity, under `of:` or with no label, and nothing else without a \
+                 label: it is read as an attribute, since no concept is declared under its name"
+            )));
+        }
+    };
+    if let Some(kind) = terms.remove("as") {
+        let word = match &kind {
+            // A variant, `[:open :done]`: each of its cases is an entity.
+            // That the value is one of them is not checked.
+            Syntax::Tuple(cases)
+                if !cases.is_empty() && cases.iter().all(|case| case.keyword().is_some()) =>
+            {
+                "entity"
+            }
+            kind => kind
+                .keyword()
+                .filter(|word| TYPES.contains(word))
+                .ok_or_else(|| {
+                    Error::Refused(format!(
+                        "{kind} is not a type: `as:` takes one of {}, or the cases of a variant, `[:open :done]`",
+                        TYPES.map(|word| format!(":{word}")).join(" ")
+                    ))
+                })?,
+        };
+        value = wrap(word, value)?;
+    }
+    if let Some(cardinality) = terms.remove("cardinality") {
+        let pick = match cardinality.keyword() {
+            Some("one") => "last",
+            Some("many") => "all",
+            _ => {
+                return Err(Error::Refused(format!(
+                    "{cardinality} is not a cardinality: `:one` or `:many`"
+                )));
+            }
+        };
+        value = wrap(pick, value)?;
+    }
+    if let Some(layer) = terms.remove("in") {
+        if layer.keyword() != Some(CONTROL) {
+            return Err(Error::Unsupported(format!(
+                "{tree} names the layer {layer}, and Dialog-DB has no layers yet: the one \
+                 taken is a command's, `:control`"
+            )));
+        }
+        value = wrap(CONTROL, value)?;
+    }
+    if let Some((key, by)) = key {
+        value = Syntax::Application(
+            Box::new(Syntax::Constant(syntax::entity("entry:")?)),
+            Parameters {
+                items: vec![value],
+                terms: BTreeMap::from([("key".into(), key), ("by".into(), by)]),
+            },
+        );
+    }
+    if let Some(label) = terms.keys().next() {
+        return Err(Error::Refused(format!(
+            "{tree} says `{label}:`, which a line does not take: `of:`, `is:`, `as:` and `cardinality:`"
+        )));
+    }
+    Ok(Some(Syntax::Application(
+        Box::new(Syntax::Reference(domain.to_string())),
+        Parameters {
+            items: vec![entity.clone()],
+            terms: BTreeMap::from([(field.to_string(), value)]),
+        },
+    )))
+}
+
+/// The read a derived attribute is: one named under a declared concept,
+/// `list/count-open`, in that concept's own domain. It is a relation of
+/// its own, named by the concept's name and the attribute's, since the
+/// build has no hash of a concept to name it by:
+///
+/// ```clj
+/// (list/count-open ?l (count ?t))
+/// (concept.list.count-open ?l is: (count ?t))
+///
+/// (list/count ?l status: ?s count: (count ?t))
+/// (concept.list.count ?l count: (count ?t) status: ?s)
+/// ```
+///
+/// Its two terms unlabeled are the entity and the value, under `is:`.
+/// With labels, it is the fields they name.
+fn derived(tree: &Syntax, concept: &str, name: &str) -> Result<Syntax, Error> {
+    let operand = tree.operand().cloned().unwrap_or_default();
+    let (entity, terms) = match (operand.items.as_slice(), operand.terms.is_empty()) {
+        ([entity, value], true) => (
+            entity.clone(),
+            BTreeMap::from([("is".into(), value.clone())]),
+        ),
+        ([entity], false) => (entity.clone(), operand.terms),
+        _ => {
+            return Err(Error::Refused(format!(
+                "{tree} needs its entity and a value, or its entity and labelled fields: it \
+                 is read as an attribute in the domain of the concept `{concept}`, since no \
+                 concept is declared under its name"
+            )));
+        }
+    };
+    Ok(Syntax::Application(
+        Box::new(Syntax::Reference(format!("{DERIVED}.{concept}.{name}"))),
+        Parameters {
+            items: vec![entity],
+            terms,
+        },
+    ))
+}
+
+/// A template that stands for reads, with every line in it as the read
+/// it is, and the lines of one entity under one domain as one read of
+/// several fields. Any other template is left as it is.
+///
+/// ```clj
+/// (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
+/// (xyz.todo/state of: ?i is: ?s as: :entity cardinality: :one)
+///
+/// (xyz.todo ?i state: (:last (:entity ?s)) title: (:last (:text ?t)))
+/// ```
+fn lines(template: Syntax) -> Result<Syntax, Error> {
+    let mut any = false;
+    let mut reads: Vec<Syntax> = Vec::new();
+    for part in members(template.clone()) {
+        let read = match line(&part)? {
+            Some(read) => {
+                any = true;
+                read
+            }
+            None if part.is_read() => part,
+            None => return Ok(template),
+        };
+        // Two blanks are two entities, so a read of a blank stays apart.
+        let fits = |earlier: &Syntax| {
+            earlier.applies() == read.applies()
+                && items(earlier) == items(&read)
+                && items(&read) != [Syntax::Blank]
+                && match (earlier.operand(), read.operand()) {
+                    (Some(earlier), Some(read)) => read
+                        .terms
+                        .keys()
+                        .all(|label| !earlier.terms.contains_key(label)),
+                    _ => false,
+                }
+        };
+        match (
+            reads.iter_mut().find(|earlier| fits(earlier)),
+            read.operand(),
+        ) {
+            (Some(Syntax::Application(_, earlier)), Some(read)) => {
+                earlier.terms.extend(read.terms.clone());
+            }
+            _ => reads.push(read),
+        }
+    }
+    Ok(match (any, reads.len()) {
+        (false, _) => template,
+        (true, 1) => reads.remove(0),
+        (true, _) => apply("all", reads),
+    })
+}
+
+/// `rule` with every variable an expansion named for itself, `?c.<site>`,
+/// written `_` in the premises where it occurs once in the whole rule: it
+/// joins nothing, and `_` is how one that joins nothing is written, so a
+/// rule stores alike whoever wrote it (the managing agent's reading). A
+/// variable the author wrote is never changed. Heads are left as they are:
+/// a field a head leaves out is told apart by its variable. A query is
+/// stored nowhere, and its report reads the entity its premise binds, so
+/// it is left as it is too.
+fn blanked(rule: Syntax) -> Syntax {
+    let mut clauses = Clauses::of(&rule);
+    if clauses
+        .head
+        .as_ref()
+        .and_then(Syntax::applies)
+        .is_some_and(|word| matches!(word, "syntax" | "warning" | "report"))
+    {
+        return rule;
+    }
+    let mut all = Vec::new();
+    rule.variables(&mut all);
+    let once: BTreeSet<String> = all
+        .iter()
+        .filter(|name| name.contains('.') && all.iter().filter(|other| other == name).count() == 1)
+        .cloned()
+        .collect();
+    if once.is_empty() {
+        return rule;
+    }
+    fn walk(tree: &Syntax, once: &BTreeSet<String>) -> Syntax {
+        match tree {
+            Syntax::Variable(name) if once.contains(name) => Syntax::Blank,
+            Syntax::Application(operator, operand) => Syntax::Application(
+                Box::new(walk(operator, once)),
+                Parameters {
+                    items: operand.items.iter().map(|item| walk(item, once)).collect(),
+                    terms: operand
+                        .terms
+                        .iter()
+                        .map(|(label, term)| (label.clone(), walk(term, once)))
+                        .collect(),
+                },
+            ),
+            Syntax::Tuple(items) => {
+                Syntax::Tuple(items.iter().map(|item| walk(item, once)).collect())
+            }
+            Syntax::Map(entries) => Syntax::Map(
+                entries
+                    .iter()
+                    .map(|(key, value)| (walk(key, once), walk(value, once)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+    clauses.when = clauses
+        .when
+        .iter()
+        .map(|premise| walk(premise, &once))
+        .collect();
+    clauses.unless = clauses
+        .unless
+        .iter()
+        .map(|premise| walk(premise, &once))
+        .collect();
+    clauses.into_rule()
+}
+
+/// The parts with no label of an application, or none.
+fn items(tree: &Syntax) -> &[Syntax] {
+    tree.operand().map_or(&[], |operand| &operand.items)
+}
+
+/// Whether a term is read on the control layer: `(:control …)`.
+fn controlled(term: &Syntax) -> bool {
+    matches!(term, Syntax::Application(operator, _) if operator.keyword() == Some(CONTROL))
+}
+
+/// Whether a read is of claims on the control layer: every labelled
+/// part of it `(:control …)`.
+fn on_control(tree: &Syntax) -> bool {
+    tree.is_read()
+        && tree.operand().is_some_and(|operand| {
+            !operand.terms.is_empty() && operand.terms.values().all(controlled)
+        })
+}
+
+/// The parts of a kernel rule.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Clauses {
+    /// What the rule says about itself: its labelled parts.
+    pub said: BTreeMap<String, Syntax>,
+    /// Its head: the first part.
+    pub head: Option<Syntax>,
+    /// Its premises: what must hold.
+    pub when: Vec<Syntax>,
+    /// What `(unless …)` holds: what must not.
+    pub unless: Vec<Syntax>,
+}
+
+impl Clauses {
+    /// The parts of a `(rule …)` tree: its first part is its head, every
+    /// part after it is a premise, and what `(unless …)` holds must not
+    /// hold.
+    pub fn of(rule: &Syntax) -> Self {
+        let mut clauses = Clauses::default();
+        let Some(operand) = rule.operand() else {
+            return clauses;
+        };
+        clauses.said = operand.terms.clone();
+        let Some((head, premises)) = operand.items.split_first() else {
+            return clauses;
+        };
+        clauses.head = Some(head.clone());
+        for premise in premises {
+            if premise.applies() == Some("unless") {
+                clauses.unless.extend(items(premise).iter().cloned());
+            } else {
+                clauses.when.push(premise.clone());
+            }
+        }
+        clauses
+    }
+
+    /// These parts as a `(rule …)` tree.
+    pub fn into_rule(self) -> Syntax {
+        let mut parts: Vec<Syntax> = self.head.into_iter().collect();
+        parts.extend(self.when);
+        if !self.unless.is_empty() {
+            parts.push(apply("unless", self.unless));
+        }
+        Syntax::Application(
+            Box::new(Syntax::Reference("rule".into())),
+            Parameters {
+                items: parts,
+                terms: self.said,
+            },
+        )
+    }
+}
+
+/// The trees a tree stands for: itself, or what `(all …)` holds.
+fn members(tree: Syntax) -> Vec<Syntax> {
+    if tree.applies() == Some("all") {
+        items(&tree).iter().cloned().flat_map(members).collect()
+    } else {
+        vec![tree]
+    }
+}
+
+/// `tree` without a trailing `...` or `... _`, and whether it had one.
+fn open(tree: &Syntax) -> (Syntax, bool) {
+    let dots = |part: &Syntax| matches!(part, Syntax::Reference(name) if name == REST);
+    let Syntax::Application(operator, operand) = tree else {
+        return (tree.clone(), false);
+    };
+    let kept = match operand.items.as_slice() {
+        [items @ .., last] if dots(last) => items,
+        [items @ .., last, Syntax::Blank] if dots(last) => items,
+        _ => return (tree.clone(), false),
+    };
+    (
+        Syntax::Application(
+            operator.clone(),
+            Parameters {
+                items: kept.to_vec(),
+                terms: operand.terms.clone(),
+            },
+        ),
+        true,
+    )
+}
+
+/// Whether `tree` is written as a form may be, and otherwise the part
+/// that is not and why. The reader gives labels and `...` no meaning,
+/// so what they may not say is said here.
+///
+/// A form with a label written is one record, and its one part with no
+/// label is the record's `of:`. So beside labels a second part with no
+/// label is refused, and so is `of:` beside a part with none. A view
+/// called in a template names its concept and its view first, and those
+/// two are not counted. `...` and
+/// what follows it are the parts not named, and no part of their own.
+fn valid(tree: &Syntax) -> Result<(), (Syntax, Error)> {
+    let refuse = |why: String| Err((tree.clone(), Error::Refused(why)));
+    match tree {
+        Syntax::Reference(name) if name.starts_with(REST) && name != REST => refuse(format!(
+            "`{name}`: `...` stands apart from what follows it, `... {}`",
+            &name[REST.len()..]
+        )),
+        // What is quoted is not a form that says anything.
+        Syntax::Application(..) if tree.applies() == Some(QUOTE) => Ok(()),
+        Syntax::Application(operator, operand) => {
+            // What is inside first, so the part that is refused is the
+            // innermost that is.
+            valid(operator)?;
+            operand
+                .items
+                .iter()
+                .chain(operand.terms.values())
+                .try_for_each(valid)?;
+            // A view called in a template names its concept and its view
+            // first, `(view todo :item list: ?l)`: after those two, a part
+            // with no label is the entity it is called for, as `of:` is.
+            let called = usize::from(tree.applies() == Some("view")) * 2;
+            let named = operand
+                .items
+                .iter()
+                .take_while(|item| !matches!(item, Syntax::Reference(name) if name == REST))
+                .count()
+                .saturating_sub(called);
+            if !operand.terms.is_empty() && named > 1 {
+                return refuse(format!(
+                    "{tree} has {named} parts with no label beside its labelled parts: the \
+                     labelled parts are one record, and its one part with no label is its `of:`"
+                ));
+            }
+            if named > 0 && operand.terms.contains_key("of") {
+                return refuse(format!(
+                    "{tree} says `of:` twice: the part with no label is its `of:`"
+                ));
+            }
+            Ok(())
+        }
+        Syntax::Tuple(items) => items.iter().try_for_each(valid),
+        Syntax::Map(entries) => entries.iter().try_for_each(|(key, value)| {
+            valid(key)?;
+            valid(value)
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// `tree` with the variables an expansion at `site` named for itself
+/// renamed by where each first occurs, so two answers that differ only
+/// in what a definition called its own variables are equal.
+fn unnamed(tree: &Syntax, site: &str) -> Syntax {
+    fn walk(tree: &Syntax, suffix: &str, seen: &mut Vec<String>) -> Syntax {
+        match tree {
+            Syntax::Variable(name) if name.ends_with(suffix) => {
+                let at = seen
+                    .iter()
+                    .position(|other| other == name)
+                    .unwrap_or_else(|| {
+                        seen.push(name.clone());
+                        seen.len() - 1
+                    });
+                Syntax::Variable(format!("{at}{suffix}"))
+            }
+            Syntax::Tuple(items) => {
+                Syntax::Tuple(items.iter().map(|item| walk(item, suffix, seen)).collect())
+            }
+            Syntax::Map(entries) => Syntax::Map(
+                entries
+                    .iter()
+                    .map(|(key, value)| (walk(key, suffix, seen), walk(value, suffix, seen)))
+                    .collect(),
+            ),
+            Syntax::Application(operator, operand) => {
+                let operator = walk(operator, suffix, seen);
+                let items = operand
+                    .items
+                    .iter()
+                    .map(|item| walk(item, suffix, seen))
+                    .collect();
+                let terms = operand
+                    .terms
+                    .iter()
+                    .map(|(label, term)| (label.clone(), walk(term, suffix, seen)))
+                    .collect();
+                Syntax::Application(Box::new(operator), Parameters { items, terms })
+            }
+            other => other.clone(),
+        }
+    }
+    walk(tree, &format!(".{site}"), &mut Vec::new())
+}
+
+/// Several reads of one entity as one read, so that their absence is
+/// the absence of all of them together. Dialog negates one proposition,
+/// and a read of one entity may span domains.
+fn together(mut trees: Vec<Syntax>, written: &Syntax) -> Result<Syntax, Error> {
+    if trees.len() == 1 {
+        return Ok(trees.remove(0));
+    }
+    let spans = || {
+        Error::Refused(format!(
+            "the absence of {written} is not one read: dialog negates one proposition, and this spans entities"
+        ))
+    };
+    let entity = items(&trees[0]).first().cloned();
+    if !trees
+        .iter()
+        .all(|tree| tree.is_read() && items(tree).first() == entity.as_ref())
+    {
+        return Err(spans());
+    }
+    let domain = trees[0].applies().unwrap_or_default().to_string();
+    let mut operand = Parameters {
+        items: entity.into_iter().collect(),
+        ..Parameters::default()
+    };
+    for tree in &trees {
+        let other = tree.applies().unwrap_or_default();
+        for (label, term) in tree
+            .operand()
+            .into_iter()
+            .flat_map(|operand| &operand.terms)
+        {
+            let whole = if label.contains('/') || other == domain {
+                label.clone()
+            } else {
+                format!("{other}/{label}")
+            };
+            if let Some(said) = operand.terms.insert(whole.clone(), term.clone())
+                && said != *term
+            {
+                return Err(Error::Refused(format!(
+                    "the absence of {written} says `{whole}:` twice"
+                )));
+            }
+        }
+    }
+    Ok(Syntax::Application(
+        Box::new(Syntax::Reference(domain)),
+        operand,
+    ))
+}
+
+/// The walker, with the rules about syntax it has been given.
+#[derive(Clone, Debug, Default)]
+pub struct Expander {
+    syntax: Vec<Definition>,
+    /// The names some rule about syntax is for.
+    names: BTreeSet<String>,
+    /// The names of the concepts declared. A name declared wins over
+    /// reading it as an attribute: `todo/add`.
+    concepts: BTreeSet<String>,
+    /// The commands declared, each the domain its claims are in.
+    commands: BTreeMap<String, String>,
+    /// How many rules about syntax have been kept, ever: what tells a
+    /// pass over a document that it declared something.
+    declared: usize,
+    /// The queries defined, each as it was written, by name.
+    queries: BTreeMap<String, Syntax>,
+    /// The concepts that hold a collection, each with the label of the
+    /// field that is one entry of it, `block: {?k ?b}`.
+    entries: BTreeMap<String, String>,
+    /// The domains some installed rule reads.
+    reads: BTreeSet<String>,
+    /// Every form the rules were asked about since the last report,
+    /// and which tree of the document it was asked for.
+    asked: Vec<(Syntax, Position, usize)>,
+    /// The trees of the document being expanded, as given.
+    document: Vec<Syntax>,
+    /// Which of them is being expanded.
+    tree: usize,
+    /// For each kernel rule of the last document, which tree it came of.
+    origin: Vec<usize>,
+    /// The parts of the tree being expanded that are being worked on,
+    /// outermost first: what a refusal is about.
+    blame: Vec<Syntax>,
+    /// The forms several definitions take in the rule being expanded.
+    choices: Vec<Choice>,
+    /// Whether the head being expanded reports, and writes nothing.
+    reporting: bool,
+    /// Whether the premise being expanded is one that must not hold.
+    negating: bool,
+}
+
+impl Expander {
+    /// A walker that knows the core forms.
+    pub fn new() -> Result<Self, Error> {
+        let mut expander = Expander::default();
+        expander.submit(PRELUDE)?;
+        Ok(expander)
+    }
+
+    /// Parse `text` and expand every tree of it. A rule about syntax is
+    /// kept here; every other comes back as kernel rules, in the order
+    /// written, with what the rules said about the document. A tree
+    /// whose head stands for several comes back as a rule each.
+    pub fn submit(&mut self, text: &str) -> Result<(Vec<Syntax>, Vec<Diagnostic>), Error> {
+        self.expand(parse(text)?)
+    }
+
+    /// Expand every tree of `trees`, as [`submit`](Self::submit) does
+    /// the trees a text parses to. The first refusal is the error.
+    pub fn expand(&mut self, trees: Vec<Syntax>) -> Result<(Vec<Syntax>, Vec<Diagnostic>), Error> {
+        let (kernel, diagnostics) = self.check(trees);
+        match diagnostics
+            .iter()
+            .find_map(|diagnostic| diagnostic.refusal.clone())
+        {
+            Some(error) => Err(error),
+            None => Ok((kernel, diagnostics)),
+        }
+    }
+
+    /// Expand every tree of `trees` and say everything there is to say
+    /// about them. A tree that is refused gives no rule and a
+    /// diagnostic that holds the refusal, and the trees after it are
+    /// expanded all the same. The refusals come first, in the order of
+    /// their trees, and then what the rules said without refusing.
+    pub fn check(&mut self, trees: Vec<Syntax>) -> (Vec<Syntax>, Vec<Diagnostic>) {
+        self.asked.clear();
+        self.origin.clear();
+        self.document = trees.clone();
+        // The order of a document's forms does not matter. What declares
+        // a name, a concept or a rule about syntax, is expanded before
+        // anything that may use it.
+        let declares = |tree: &Syntax| match tree.applies() {
+            Some("concept" | "query") => true,
+            Some("rule") => items(tree)
+                .first()
+                .and_then(Syntax::applies)
+                .is_some_and(|word| matches!(word, "syntax" | "warning")),
+            _ => false,
+        };
+        let mut pending: Vec<usize> = (0..trees.len())
+            .filter(|at| declares(&trees[*at]))
+            .chain((0..trees.len()).filter(|at| !declares(&trees[*at])))
+            .collect();
+        let mut done: BTreeMap<usize, Vec<Syntax>> = BTreeMap::new();
+        let mut refused: BTreeMap<usize, Diagnostic> = BTreeMap::new();
+        // A form a macro expands to may declare a name too. Whatever
+        // failed before it is expanded again once it has, until nothing
+        // more is declared. A name two such expansions need of each
+        // other is refused as whatever the first one met.
+        for _ in 0..=trees.len() {
+            let declared = self.declared;
+            let mut failed = Vec::new();
+            for at in pending {
+                let tree = &trees[at];
+                self.tree = at;
+                self.blame.clear();
+                let mut rules = Vec::new();
+                match self.each(tree, &mut rules) {
+                    Ok(()) => {
+                        refused.remove(&at);
+                        done.insert(at, rules);
+                    }
+                    Err(error) => {
+                        // The refusal is about the innermost part being
+                        // worked on that is a part of the tree as written.
+                        let (form, inside) = self
+                            .blame
+                            .iter()
+                            .rev()
+                            .find_map(|part| Some((part.clone(), tree.locate(part)?)))
+                            .unwrap_or((tree.clone(), Path::new()));
+                        let mut path = vec![Segment::Item(at)];
+                        path.extend(inside);
+                        refused.insert(at, Diagnostic::refused(Some(form), path, error));
+                        failed.push(at);
+                    }
+                }
+            }
+            pending = failed;
+            if pending.is_empty() || self.declared == declared {
+                break;
+            }
+        }
+        let mut kernel = Vec::new();
+        for (at, rules) in done {
+            for rule in rules {
+                if !kernel.contains(&rule) {
+                    kernel.push(rule);
+                    self.origin.push(at);
+                }
+            }
+        }
+        let mut diagnostics: Vec<Diagnostic> = refused.into_values().collect();
+        diagnostics.extend(self.diagnose());
+        (kernel, diagnostics)
+    }
+
+    /// The kernel rules one tree of a document expands to, added to
+    /// `kernel`.
+    fn each(&mut self, tree: &Syntax, kernel: &mut Vec<Syntax>) -> Result<(), Error> {
+        // Where several definitions take a form that is read, the rule
+        // is expanded once a definition: what is read is what any of
+        // them reads. Within one rule a form that recurs is the same
+        // definition's each time.
+        if let Err((part, error)) = valid(tree) {
+            return self.about(&part, |_| Err(error));
+        }
+        if let Some(rules) = self.query_forms(tree)? {
+            kernel.extend(rules);
+            return Ok(());
+        }
+        let mut choices = Vec::new();
+        loop {
+            self.choices = choices;
+            let rules = self.top(tree.clone())?;
+            choices = std::mem::take(&mut self.choices);
+            for rule in rules {
+                if let Some(rule) = self.install(rule)?
+                    && !kernel.contains(&rule)
+                {
+                    kernel.push(rule);
+                }
+            }
+            while let Some(last) = choices.last_mut() {
+                if last.taken + 1 < last.of {
+                    last.taken += 1;
+                    break;
+                }
+                choices.pop();
+            }
+            if choices.is_empty() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Do `work` with `part` as what a refusal in it is about.
+    fn about<T>(
+        &mut self,
+        part: &Syntax,
+        work: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let depth = self.blame.len();
+        self.blame.push(part.clone());
+        let done = work(self);
+        if done.is_ok() {
+            self.blame.truncate(depth);
+        }
+        done
+    }
+
+    /// For each kernel rule the last document expanded to, which of its
+    /// trees the rule came of.
+    pub fn origin(&self) -> &[usize] {
+        &self.origin
+    }
+
+    /// Keep a rule about syntax, and note what any other rule reads.
+    fn install(&mut self, rule: Syntax) -> Result<Option<Syntax>, Error> {
+        let clauses = Clauses::of(&rule);
+        let answer = match clauses.head.as_ref() {
+            Some(head) if head.applies() == Some("syntax") => match items(head) {
+                [template] => Some(Answer::Syntax(template.clone())),
+                _ => return Err(Error::Refused(format!("{head} takes one template"))),
+            },
+            Some(head) if head.applies() == Some("warning") => match items(head) {
+                [Syntax::Constant(dialog_corpus::Value::String(message))] => {
+                    Some(Answer::Warning(message.clone()))
+                }
+                _ => return Err(Error::Refused(format!("{head} takes one text"))),
+            },
+            _ => None,
+        };
+        // A concept written as lines is kept as the reads they are.
+        let answer = match answer {
+            Some(Answer::Syntax(template)) => Some(Answer::Syntax(lines(template)?)),
+            other => other,
+        };
+        let Some(answer) = answer else {
+            for premise in &clauses.when {
+                if let (true, Some(domain)) = (premise.is_read(), premise.applies()) {
+                    self.reads.insert(domain.to_string());
+                }
+            }
+            return Ok(Some(rule));
+        };
+
+        let mut when = clauses.when;
+        let at = when
+            .iter()
+            .position(|premise| premise.applies() == Some("expand"))
+            .ok_or_else(|| {
+                Error::Refused(format!(
+                    "a rule about syntax needs an (expand …) premise: {rule}"
+                ))
+            })?;
+        let expand = when.remove(at);
+        let pattern = match items(&expand) {
+            [pattern] => pattern.clone(),
+            _ => return Err(Error::Refused(format!("{expand} takes one pattern"))),
+        };
+        let position = match expand.operand().and_then(|operand| operand.terms.get("in")) {
+            None => None,
+            Some(word) => match word.keyword() {
+                Some("head") => Some(Position::Head),
+                Some("premise") => Some(Position::Premise),
+                _ => return Err(Error::Refused(format!("{word} is not a position"))),
+            },
+        };
+
+        if let Answer::Syntax(template) = &answer {
+            Self::check_concept(&pattern, template)?;
+        }
+        if let Some(name) = pattern.applies() {
+            self.names.insert(name.to_string());
+        }
+        // A definition under a signature replaces the one before it
+        // under the same: the last write wins. Under another signature
+        // it stands beside it.
+        let signature = match &answer {
+            Answer::Syntax(template)
+                if position.is_none()
+                    && when.is_empty()
+                    && clauses.unless.is_empty()
+                    && members(template.clone()).iter().all(Syntax::is_read) =>
+            {
+                Signature::of(&pattern, "concept")
+            }
+            _ => None,
+        };
+        if let Some(declared) = &signature {
+            // The field that is one entry of a collection, `block: {?k ?b}`.
+            let entry = pattern.operand().and_then(|operand| {
+                operand.terms.iter().find_map(|(label, term)| match term {
+                    Syntax::Map(pair) if matches!(pair.as_slice(), [(Syntax::Variable(_), _)]) => {
+                        Some(label.clone())
+                    }
+                    _ => None,
+                })
+            });
+            match entry {
+                Some(label) => self.entries.insert(declared.name.clone(), label),
+                None => self.entries.remove(&declared.name),
+            };
+            self.syntax.retain(|rule| {
+                rule.signature.as_ref() != Some(declared)
+                    && rule.entity_of.as_ref() != Some(&declared.name)
+            });
+            self.concepts.insert(declared.name.clone());
+            match &answer {
+                Answer::Syntax(template) if items(&pattern).is_empty() && on_control(template) => {
+                    self.commands.insert(
+                        declared.name.clone(),
+                        template.applies().unwrap_or_default().to_string(),
+                    );
+                }
+                _ => {
+                    self.commands.remove(&declared.name);
+                }
+            }
+        }
+        self.declared += 1;
+        // A premise that reads a command may name its entity, `of: ?c`,
+        // and so bind the entity the command's content derived: the
+        // command's own variable for its entity is what `of:` fills.
+        // Only a premise: an entity is derived when a command is
+        // asserted, and never given.
+        let read = match (&signature, &answer) {
+            (Some(declared), Answer::Syntax(template))
+                if self.commands.contains_key(&declared.name) =>
+            {
+                match (items(template).first(), &pattern) {
+                    (Some(own @ Syntax::Variable(_)), Syntax::Application(operator, operand)) => {
+                        Some(Definition {
+                            answer: answer.clone(),
+                            pattern: Syntax::Application(
+                                operator.clone(),
+                                Parameters {
+                                    items: vec![own.clone()],
+                                    terms: operand.terms.clone(),
+                                },
+                            ),
+                            position: Some(Position::Premise),
+                            when: when.clone(),
+                            unless: clauses.unless.clone(),
+                            signature: None,
+                            entity_of: Some(declared.name.clone()),
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        self.syntax.push(Definition {
+            answer,
+            pattern,
+            position,
+            when,
+            unless: clauses.unless,
+            signature,
+            entity_of: None,
+        });
+        self.syntax.extend(read);
+        Ok(None)
+    }
+
+    /// A concept maps facts to itself and back. So what it stands for is
+    /// reads and nothing else, since a check has no inverse, and every
+    /// variable in them is one of its parameters, since a write must
+    /// know every value. The reads may be of several entities.
+    ///
+    /// A command is a concept whose head names no entity and whose lines
+    /// are all on the control layer. Its entity is the one variable that
+    /// is no parameter, and stands only as what its lines are of. What a
+    /// concept that is one of these and not the other is, the design
+    /// does not say, and it is refused as unsupported.
+    fn check_concept(pattern: &Syntax, template: &Syntax) -> Result<(), Error> {
+        let said = members(template.clone());
+        if !said.iter().any(Syntax::is_read)
+            || !said.iter().all(|tree| tree.is_read() || tree.is_formula())
+        {
+            return Ok(());
+        }
+        if let Some(check) = said.iter().find(|tree| tree.is_formula()) {
+            return Err(Error::Refused(format!(
+                "a concept maps both ways, and a check has no inverse: {check}"
+            )));
+        }
+        // A concept holds one collection, and its key is a head field.
+        let entries: Vec<&Syntax> = said
+            .iter()
+            .flat_map(|tree| tree.operand().into_iter().flat_map(|operand| operand.terms.values()))
+            .filter(|term| matches!(term, Syntax::Application(operator, _) if operator.keyword() == Some("entry")))
+            .collect();
+        if entries.len() > 1 {
+            return Err(Error::Refused(format!(
+                "{pattern} holds {} collections, and a concept holds one: two would give a row \
+                 for every pair of their entries",
+                entries.len()
+            )));
+        }
+        let mut heads = Vec::new();
+        pattern.variables(&mut heads);
+        if let Some(Syntax::Variable(key)) = entries
+            .first()
+            .and_then(|entry| entry.operand())
+            .and_then(|operand| operand.terms.get("key"))
+        {
+            if !heads.contains(key) {
+                return Err(Error::Refused(format!(
+                    "the key of a collection is a field of the concept's head: ?{key}"
+                )));
+            }
+            // An entry is one term, its key and its value: they were never
+            // apart.
+            if let Some((label, _)) = pattern.operand().and_then(|operand| {
+                operand
+                    .terms
+                    .iter()
+                    .find(|(_, term)| matches!(term, Syntax::Variable(name) if name == key))
+            }) {
+                return Err(Error::Refused(format!(
+                    "{pattern} gives the key of its collection a field of its own, `{label}:`: a \
+                     collection's field is one entry, its key and its value, `block: {{?{key} \
+                     ?b}}`"
+                )));
+            }
+        }
+        let controls = said.iter().filter(|tree| on_control(tree)).count();
+        let touched = said
+            .iter()
+            .filter(|tree| {
+                tree.operand()
+                    .is_some_and(|operand| operand.terms.values().any(controlled))
+            })
+            .count();
+        let command = match (items(pattern).is_empty(), touched) {
+            (false, 0) => false,
+            (true, _) if controls == said.len() => true,
+            (false, _) => {
+                return Err(Error::Unsupported(format!(
+                    "{pattern} names its entity and holds lines on the control layer: what such \
+                     a concept is is not decided, a command's head names no entity"
+                )));
+            }
+            (true, 0) => {
+                return Err(Error::Unsupported(format!(
+                    "{pattern} names no entity and its lines are not on the control layer: \
+                     what such a concept is is not decided, a command's lines are `in: :control`"
+                )));
+            }
+            (true, _) => {
+                return Err(Error::Unsupported(format!(
+                    "{pattern} names no entity and mixes lines on the control layer with \
+                     stored ones: what such a concept is is not decided"
+                )));
+            }
+        };
+        let mut given = Vec::new();
+        pattern.variables(&mut given);
+        // What a line is of, apart from what it says of it.
+        let mut valued = Vec::new();
+        for tree in &said {
+            if let Some(operand) = tree.operand() {
+                operand
+                    .terms
+                    .values()
+                    .for_each(|term| term.variables(&mut valued));
+            }
+        }
+        let mut entities = Vec::new();
+        said.iter()
+            .flat_map(|tree| items(tree).first())
+            .for_each(|entity| entity.variables(&mut entities));
+        let own: BTreeSet<&String> = entities
+            .iter()
+            .chain(&valued)
+            .filter(|name| !given.contains(name))
+            .collect();
+        if let Some(own) = own.iter().find(|name| !command || valued.contains(name)) {
+            return Err(Error::Refused(format!(
+                "a concept maps both ways, so every variable in it is a parameter: ?{own}"
+            )));
+        }
+        if command && own.len() > 1 {
+            return Err(Error::Unsupported(format!(
+                "{pattern} holds lines about more than one entity it does not name: what such a \
+                 command is is not decided"
+            )));
+        }
+        if command && said.len() > 1 {
+            return Err(Error::Unsupported(format!(
+                "{pattern} holds lines of more than one domain: this build derives a command's \
+                 entity from the claims of one domain"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The bindings under which a rule about syntax applies to `tree`.
+    fn applies(&self, rule: &Definition, tree: &Syntax, position: Position) -> Option<Bindings> {
+        if rule.position.is_some_and(|wanted| wanted != position) {
+            return None;
+        }
+        let mut bindings = matches(tree, &rule.pattern, Bindings::new())?;
+        for premise in &rule.when {
+            bindings = self.holds(premise, bindings)?;
+        }
+        if rule
+            .unless
+            .iter()
+            .any(|premise| self.holds(premise, bindings.clone()).is_some())
+        {
+            return None;
+        }
+        Some(bindings)
+    }
+
+    /// Whether a premise of a rule about syntax holds, and what it binds.
+    /// Such a premise applies one of a few formulas over names, asks
+    /// which domain a declared command is in, `(:command ?name is: ?domain)`,
+    /// or reads what this walker knows: the names syntax is defined for,
+    /// `(dialog.name _ is: ?name)`, and the domains installed rules
+    /// read, `(dialog.rule _ on: ?domain)`.
+    fn holds(&self, premise: &Syntax, bindings: Bindings) -> Option<Bindings> {
+        let value = |term: &Syntax| match term {
+            Syntax::Variable(name) => match bindings.get(name) {
+                Some(Binding::One(tree)) => Some(tree.clone()),
+                _ => None,
+            },
+            other => Some(other.clone()),
+        };
+        let name = |term: &Syntax| match value(term)? {
+            Syntax::Reference(name) => Some(name),
+            _ => None,
+        };
+        let Syntax::Application(operator, operand) = premise else {
+            return None;
+        };
+        let subject = operand.items.first();
+        // `is:` bound to `domain`, or holding it already.
+        let is = |domain: String| {
+            let Syntax::Variable(is) = operand.terms.get("is")? else {
+                return None;
+            };
+            let domain = Binding::One(Syntax::Reference(domain));
+            let mut bindings = bindings.clone();
+            match bindings.get(is) {
+                Some(bound) if *bound == domain => {}
+                Some(_) => return None,
+                None => {
+                    bindings.insert(is.clone(), domain);
+                }
+            }
+            Some(bindings)
+        };
+        match (operator.keyword(), &**operator) {
+            // A command declared, and the domain its claims are in.
+            (Some("command"), _) => is(self.commands.get(&name(subject?)?)?.clone()),
+            (Some("domain"), _) => {
+                (Kind::of(&name(subject?)?) == Kind::Domain).then_some(bindings.clone())
+            }
+            (Some("name"), _) => {
+                (Kind::of(&name(subject?)?) == Kind::Name).then_some(bindings.clone())
+            }
+            (None, Syntax::Reference(relation)) if relation == "dialog.name" => self
+                .names
+                .contains(&name(operand.terms.get("is")?)?)
+                .then_some(bindings.clone()),
+            (None, Syntax::Reference(relation)) if relation == "dialog.rule" => self
+                .reads
+                .contains(&name(operand.terms.get("on")?)?)
+                .then_some(bindings.clone()),
+            _ => None,
+        }
+    }
+
+    /// What the rules say `tree` expands to in `position`. No answer is
+    /// refused. Of several:
+    ///
+    /// - Answers that differ only in the names of their own variables
+    ///   are one answer.
+    /// - A write takes the definition whose signature is the labels
+    ///   written, since a write says every field. None or several such
+    ///   is refused.
+    /// - A read takes each in turn, the rule expanded once for each.
+    /// - What must not hold is refused: its absence under any of the
+    ///   definitions would be a rule of several negations, not several
+    ///   rules.
+    fn ask(&mut self, tree: &Syntax, position: Position) -> Result<Syntax, Error> {
+        // What the template's own variables are named apart by: the
+        // tree being expanded and where it stands, by reference, so the
+        // names do not move with how either is spelled.
+        let site = apply(
+            "site",
+            vec![
+                tree.clone(),
+                Syntax::Reference(
+                    match position {
+                        Position::Head => "head",
+                        Position::Premise => "premise",
+                    }
+                    .into(),
+                ),
+            ],
+        )
+        .reference()?
+        .to_string()[..4]
+            .to_string();
+        // Of the rules that apply, the ones that name the most: a
+        // pattern that leaves a part to its `...` gives way to one that
+        // names it. `(?concept ... ?fields)` and
+        // `(?concept ?subject ... ?fields)` both match a call with a
+        // part that has no label, and the second is the one meant.
+        // A part a read leaves out matches anything, so a trailing
+        // `...` adds nothing to one and is taken off.
+        let (said, _) = open(tree);
+        let mut found: Vec<(Syntax, Option<Signature>)> = Vec::new();
+        let mut least = usize::MAX;
+        for rule in &self.syntax {
+            if let (Answer::Syntax(template), Some(bindings)) =
+                (&rule.answer, self.applies(rule, &said, position))
+            {
+                let left: usize = bindings
+                    .values()
+                    .map(|binding| match binding {
+                        Binding::Many(taken) => taken.len(),
+                        Binding::Row(taken) => taken.len(),
+                        Binding::One(_) => 0,
+                    })
+                    .sum();
+                if left > least {
+                    continue;
+                }
+                if left < least {
+                    least = left;
+                    found.clear();
+                }
+                let answer = fill(template, &bindings, &site)?;
+                let same = unnamed(&answer, &site);
+                if !found.iter().any(|(other, _)| unnamed(other, &site) == same) {
+                    found.push((answer, rule.signature.clone()));
+                }
+            }
+        }
+        self.asked.push((tree.clone(), position, self.tree));
+        let ambiguous = |found: &[(Syntax, Option<Signature>)]| {
+            Error::Ambiguous(
+                tree.to_string(),
+                found
+                    .iter()
+                    .map(|(answer, _)| answer.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+            )
+        };
+        match found.len() {
+            0 => Err(Error::Unknown(tree.to_string())),
+            1 => Ok(found.remove(0).0),
+            _ if self.negating => Err(ambiguous(&found)),
+            _ if position == Position::Head && !self.reporting => {
+                let written = Signature::of(&said, "concept");
+                let mut exact = found.iter().filter(|(_, signature)| {
+                    signature.is_some()
+                        && signature.as_ref().map(|signature| &signature.parameters)
+                            == written.as_ref().map(|written| &written.parameters)
+                });
+                match (exact.next(), exact.next()) {
+                    (Some((answer, _)), None) => Ok(answer.clone()),
+                    _ => Err(ambiguous(&found)),
+                }
+            }
+            of => {
+                let taken = match self.choices.iter().find(|choice| choice.form == *tree) {
+                    Some(choice) => choice.taken,
+                    None => {
+                        self.choices.push(Choice {
+                            form: tree.clone(),
+                            taken: 0,
+                            of,
+                        });
+                        0
+                    }
+                };
+                found
+                    .get(taken)
+                    .map(|(answer, _)| answer.clone())
+                    .ok_or_else(|| ambiguous(&found))
+            }
+        }
+    }
+
+    /// What the rules say about the forms they were asked about, now that
+    /// the whole document is in: a rule further down may be what reads a
+    /// command issued further up.
+    fn diagnose(&mut self) -> Vec<Diagnostic> {
+        let mut diagnostics: Vec<Diagnostic> = Vec::new();
+        for (form, position, tree) in std::mem::take(&mut self.asked) {
+            for rule in &self.syntax {
+                if let (Answer::Warning(message), Some(_)) =
+                    (&rule.answer, self.applies(rule, &form, position))
+                {
+                    let mut path = vec![Segment::Item(tree)];
+                    path.extend(
+                        self.document
+                            .get(tree)
+                            .and_then(|written| written.locate(&form))
+                            .unwrap_or_default(),
+                    );
+                    let diagnostic = Diagnostic {
+                        form: Some(form.clone()),
+                        message: message.clone(),
+                        path,
+                        span: None,
+                        refusal: None,
+                    };
+                    if !diagnostics.contains(&diagnostic) {
+                        diagnostics.push(diagnostic);
+                    }
+                }
+            }
+        }
+        diagnostics
+    }
+
+    /// A head or a premise, rewritten until it applies a relation or a
+    /// formula. `(all …)` comes back when it stands for several.
+    fn application(&mut self, mut tree: Syntax, position: Position) -> Result<Syntax, Error> {
+        loop {
+            let word = tree.applies().map(str::to_string);
+            if tree.is_read()
+                || tree.is_formula()
+                || word
+                    .as_deref()
+                    .is_some_and(|word| DIRECTIVES.contains(&word))
+            {
+                return Ok(tree);
+            }
+            // A query's answer is read by whoever asks and by a query,
+            // never where rows are.
+            if let Some(word) = word.as_deref()
+                && self.queries.contains_key(word)
+            {
+                let call = tree.clone();
+                return self.about(&call, |this| Err(this.read_where_rows_are(&call)));
+            }
+            if word.as_deref() == Some("all") {
+                let each = items(&tree)
+                    .iter()
+                    .cloned()
+                    .map(|member| self.application(member, position))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(apply("all", each));
+            }
+            // `(dialog/position ?b after: ?lo before: ?hi is: ?at)`, the
+            // formula a position key is made by, as the design writes it:
+            // a name with a `/` that is no attribute.
+            if word.as_deref() == Some(POSITION)
+                && !self.concepts.contains(POSITION)
+                && let Syntax::Application(_, operand) = &tree
+            {
+                return Ok(Syntax::Application(
+                    Box::new(Syntax::Constant(syntax::entity("position:")?)),
+                    operand.clone(),
+                ));
+            }
+            // A concept declared under a name that holds a `/` is the
+            // concept, not an attribute.
+            let declared = word
+                .as_deref()
+                .is_some_and(|word| self.concepts.contains(word));
+            // An attribute named under a declared concept is one a rule
+            // concludes about that concept's entities: `list/count-open`.
+            if !declared
+                && let Some((concept, name)) = word.as_deref().and_then(|word| {
+                    (Kind::of(word) == Kind::Attribute)
+                        .then(|| word.split_once('/'))
+                        .flatten()
+                })
+                && self.concepts.contains(concept)
+            {
+                return self.about(&tree, |_| derived(&tree, concept, name));
+            }
+            if !declared && let Some(read) = self.about(&tree, |_| line(&tree))? {
+                return Ok(read);
+            }
+            if let (Position::Head, Some(word)) = (
+                position,
+                word.as_deref().filter(|word| HEAD_WORDS.contains(word)),
+            ) {
+                let inner = match items(&tree) {
+                    [inner] => inner.clone(),
+                    _ => return Err(Error::Refused(format!("{tree} takes one application"))),
+                };
+                let reporting = std::mem::replace(&mut self.reporting, word == "report");
+                let stands = self.application(inner, Position::Head);
+                self.reporting = reporting;
+                let mut each: Vec<Syntax> = members(stands?)
+                    .into_iter()
+                    .map(|member| apply(word, vec![member]))
+                    .collect();
+                return Ok(if each.len() == 1 {
+                    each.remove(0)
+                } else {
+                    apply("all", each)
+                });
+            }
+            let asked = tree;
+            tree = self.about(&asked, |this| {
+                former(&asked)?;
+                this.ask(&asked, position)
+            })?;
+        }
+    }
+
+    /// `(id ?t list: ?l text: ?x)` and `(fresh ?n)`, the formulas a new
+    /// thing is made by, as the kernel premise they are, or `None` for
+    /// any other premise.
+    ///
+    /// `id` binds `?t` to the entity `(:id domain list: ?l text: ?x)`
+    /// names, the same on every device. The design leaves open whether
+    /// it names a domain or a concept; the build takes the domain of
+    /// the head `?t` is the entity of, so `id` names what `(:id …)`
+    /// names there. A head of no domain, or of two, is unsupported.
+    ///
+    /// `fresh` is unsupported: Dialog-DB has no formula that mints.
+    fn made(&self, premise: &Syntax, heads: &[Syntax]) -> Result<Option<Syntax>, Error> {
+        let word = match premise.applies() {
+            Some(word @ ("id" | "fresh")) if !self.concepts.contains(word) => word,
+            _ => return Ok(None),
+        };
+        if word == "fresh" {
+            return Err(Error::Unsupported(format!(
+                "{premise}: Dialog-DB has no formula that makes a new entity in a rule. Its \
+                 formulas are functions of their inputs, and an entity never equal to any \
+                 other is not one"
+            )));
+        }
+        let (Some(operand), [entity @ Syntax::Variable(_)]) = (premise.operand(), items(premise))
+        else {
+            return Err(Error::Refused(format!(
+                "{premise} binds one variable, the entity: `(id ?t list: ?l text: ?x)`"
+            )));
+        };
+        if operand.terms.is_empty() || operand.terms.contains_key("is") {
+            return Err(Error::Refused(format!(
+                "{premise} identifies its entity by labels and values, and says no `is:`: \
+                 `(id ?t list: ?l text: ?x)`"
+            )));
+        }
+        let mut domains: Vec<&str> = heads
+            .iter()
+            .filter_map(|head| match head.is_read() {
+                true => Some(head),
+                false => items(head).first(),
+            })
+            .filter(|read| read.is_read() && items(read).first() == Some(entity))
+            .filter_map(Syntax::applies)
+            .collect();
+        domains.dedup();
+        let domain = match domains.as_slice() {
+            [domain] => domain.to_string(),
+            [] => {
+                return Err(Error::Unsupported(format!(
+                    "{premise}: {entity} is the entity of no head, and the build takes the \
+                     domain an `id` names from the head: whether `id` names a domain or a \
+                     concept is not decided"
+                )));
+            }
+            _ => {
+                return Err(Error::Unsupported(format!(
+                    "{premise}: {entity} is the entity of heads of {}, and whether `id` names a \
+                     domain or a concept is not decided",
+                    domains.join(" and ")
+                )));
+            }
+        };
+        let mut terms = operand.terms.clone();
+        terms.insert("is".into(), entity.clone());
+        Ok(Some(Syntax::Application(
+            Box::new(Syntax::Constant(syntax::entity("id:")?)),
+            Parameters {
+                items: vec![Syntax::Reference(domain)],
+                terms,
+            },
+        )))
+    }
+
+    /// A top-level tree, rewritten until it is kernel rules. A write at
+    /// the top level is a rule with that head and whatever clauses
+    /// follow it. A kernel rule has one head, so a head that stands for
+    /// several, as a concept of several reads does, is a rule each, with
+    /// the premises again.
+    fn top(&mut self, mut tree: Syntax) -> Result<Vec<Syntax>, Error> {
+        let written = tree.clone();
+        while tree.applies() != Some("rule") {
+            // A call stands in a rule, a query or a write. Alone at the
+            // top level it says nothing to do.
+            if tree.is_read()
+                || tree.is_formula()
+                || tree.applies() == Some("all")
+                || tree
+                    .applies()
+                    .is_some_and(|word| Kind::of(word) == Kind::Attribute)
+            {
+                return self.about(&written, |_| {
+                    Err(Error::Refused(format!(
+                        "{written} is a call, and a call is not a top-level form: the top level \
+                         takes (select …), (assert …), (retract …), (rule …), (concept …) and \
+                         (query …)"
+                    )))
+                });
+            }
+            tree = match (
+                tree.applies().filter(|word| HEAD_WORDS.contains(word)),
+                tree.operand(),
+            ) {
+                (Some(word), Some(operand)) => {
+                    let Some((first, rest)) = operand.items.split_first() else {
+                        return Err(Error::Refused(format!("{tree} takes an application")));
+                    };
+                    let mut parts = vec![apply(word, vec![first.clone()])];
+                    let mut terms = operand.terms.clone();
+                    // A write at the top level is ground, or takes a
+                    // `when` that binds its variables. It runs once, in
+                    // its document, and is never installed.
+                    match (word, rest) {
+                        (_, []) => {}
+                        ("assert" | "retract", [when])
+                            if when.applies() == Some("when") && !items(when).is_empty() =>
+                        {
+                            parts.extend(items(when).iter().cloned());
+                            terms.insert(ONCE.into(), Syntax::Constant(Value::Boolean(true)));
+                        }
+                        ("assert" | "retract", _) => {
+                            let tree = tree.clone();
+                            return self.about(&tree, |_| {
+                                Err(Error::Refused(format!(
+                                    "{tree} has premises: a write at the top level is ground, or \
+                                     takes what it reads in a `(when …)`, `(assert (xyz.todo/state \
+                                     of: ?t is: :done) (when (todo ?t text: \"Call mom\")))`. A \
+                                     write that stays is a `rule`"
+                                )))
+                            });
+                        }
+                        _ => parts.extend(rest.iter().cloned()),
+                    }
+                    Syntax::Application(
+                        Box::new(Syntax::Reference("rule".into())),
+                        Parameters {
+                            items: parts,
+                            terms,
+                        },
+                    )
+                }
+                _ => self.about(&tree, |this| {
+                    former(&tree)?;
+                    this.ask(&tree, Position::Head)
+                })?,
+            };
+        }
+        let written = Clauses::of(&tree);
+        // `(all …)` is what a template answers when a tree stands for
+        // several. Nobody writes it: several premises are written one
+        // after another, and several heads are a rule each.
+        let several = |part: &Syntax| part.applies() == Some("all");
+        if let Some(head) = &written.head
+            && (several(head)
+                || (head
+                    .applies()
+                    .is_some_and(|word| HEAD_WORDS.contains(&word))
+                    && items(head).iter().any(several)))
+        {
+            self.blame.push(head.clone());
+            return Err(Error::Refused(format!(
+                "{head} is several heads: a rule has one head, so write a rule for each"
+            )));
+        }
+        if let Some(part) = written
+            .when
+            .iter()
+            .chain(&written.unless)
+            .find(|part| several(part))
+        {
+            self.blame.push(part.clone());
+            return Err(Error::Refused(format!(
+                "{part} is not a premise: premises are written one after another"
+            )));
+        }
+        let heads = match written.head {
+            Some(head) => {
+                members(self.about(&head, |this| this.application(head.clone(), Position::Head))?)
+            }
+            None => Vec::new(),
+        };
+        let mut walked = Clauses {
+            said: written.said,
+            ..Clauses::default()
+        };
+        for premise in written.when {
+            // Nothing but its place tells a head from a premise, so a
+            // write after the first part is said to be misplaced, and
+            // not asked about as a premise.
+            if premise
+                .applies()
+                .is_some_and(|word| HEAD_WORDS.contains(&word))
+            {
+                self.blame.push(premise.clone());
+                return Err(Error::Refused(format!(
+                    "{premise} is a head, and stands among the premises: the first part of a rule is its head, and a rule has one, so write a rule for each"
+                )));
+            }
+            if let Some(made) = self.about(&premise, |this| this.made(&premise, &heads))? {
+                walked.when.push(made);
+                continue;
+            }
+            walked.when.extend(members(self.about(&premise, |this| {
+                this.application(premise.clone(), Position::Premise)
+            })?));
+        }
+        for premise in written.unless {
+            let joined = self.about(&premise, |this| {
+                this.negating = true;
+                let stands = this.application(premise.clone(), Position::Premise);
+                this.negating = false;
+                together(members(stands?), &premise)
+            })?;
+            walked.unless.push(joined);
+        }
+        let split = heads.len() > 1;
+        let mut rules = Vec::new();
+        for head in heads {
+            let rule = Clauses {
+                head: Some(head),
+                ..walked.clone()
+            }
+            .into_rule();
+            // A concept of several reads is reported a rule a read. A
+            // read the query named no field of says nothing, so it gets
+            // no rule.
+            if split
+                && let Ok(typed) = Rule::parse(&rule)
+                && let Head::Report(read) = &typed.head
+                && read.named(&typed.bound()).is_empty()
+            {
+                continue;
+            }
+            rules.push(blanked(rule));
+        }
+        if rules.is_empty() {
+            return Err(Error::Refused(format!("{tree} reports no field")));
+        }
+        Ok(rules)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TODO: &str = r#"
+        (concept (todo ?t list: ?l text: ?x state: ?s)
+          (xyz.todo ?t list: (:last (:entity ?l)) text: (:last (:text ?x)) state: (:last ?s)))
+        (concept (todo/add todo: ?t list: ?l text: ?x)
+          (xyz.todo.add/todo of: ?c is: ?t in: :control)
+          (xyz.todo.add/list of: ?c is: ?l in: :control)
+          (xyz.todo.add/text of: ?c is: ?x in: :control))
+        (rule (assert (todo ?t list: ?l text: ?x state: :open))
+          (todo/add todo: ?t list: ?l text: ?x))
+    "#;
+
+    fn expanded(setup: &str, text: &str) -> Result<Vec<String>, Error> {
+        let mut expander = Expander::new()?;
+        expander.submit(setup)?;
+        let (kernel, _) = expander.submit(text)?;
+        Ok(kernel.iter().map(Syntax::to_string).collect())
+    }
+
+    /// A line over a collection leaves the key a variable in the
+    /// attribute's name and says what a key is. It is the read of every
+    /// entry, its key a field of the concept's head. A concept holds one
+    /// collection.
+    #[test]
+    fn it_reads_a_line_over_a_collection() {
+        assert_eq!(
+            expanded(
+                "(concept (notebook-entry ?b block: {?p ?x})
+                   (xyz.tonk.notebook/?p of: ?b is: ?x as: :entity cardinality: :one by: :position))",
+                "(select (notebook-entry notebook:1 block: {?p ?x}))"
+            )
+            .unwrap(),
+            vec![
+                "(rule (report (xyz.tonk.notebook notebook:1 entry: (:entry (:last (:entity ?x)) by: :position key: ?p))) \
+                 (xyz.tonk.notebook notebook:1 entry: (:entry (:last (:entity ?x)) by: :position key: ?p)))"
+            ]
+        );
+        for (text, why) in [
+            (
+                "(concept (m ?e source: {?n ?s}) (xyz.m/?n of: ?e is: ?s))",
+                "says what a key is",
+            ),
+            (
+                "(concept (m ?e source: ?s) (xyz.m/source of: ?e is: ?s by: :colour))",
+                "is not what a key is",
+            ),
+            (
+                "(concept (m ?e source: {?n ?s}) (xyz.m/?n of: ?e is: ?s by: :colour))",
+                "is not what a key is",
+            ),
+            (
+                "(concept (m ?e source: ?s) (xyz.m/?n of: ?e is: ?s by: :name))",
+                "the key of a collection is a field of the concept's head: ?n",
+            ),
+            (
+                "(concept (m ?e source: {?n ?s} block: {?p ?b})
+                   (xyz.m/?n of: ?e is: ?s by: :name)
+                   (xyz.n/?p of: ?e is: ?b by: :position))",
+                "a concept holds one",
+            ),
+        ] {
+            assert!(
+                matches!(expanded("", text), Err(Error::Refused(said)) if said.contains(why)),
+                "{text}: {:?}",
+                expanded("", text)
+            );
+        }
+    }
+
+    /// A write at the top level takes what it reads in a `when`, and is a
+    /// rule that says it runs once. Premises after it with no `when` are
+    /// refused, with the two forms to write.
+    #[test]
+    fn it_reads_a_top_level_write_with_when_as_a_rule_that_runs_once() {
+        assert_eq!(
+            expanded(
+                "",
+                r#"(assert (xyz.todo/state of: ?t is: :done) (when (xyz.todo/text ?t "Call mom")))"#
+            )
+            .unwrap(),
+            vec![
+                r#"(rule (assert (xyz.todo ?t state: :done)) (xyz.todo ?t text: "Call mom") once: true)"#
+            ]
+        );
+        assert!(
+            expanded(
+                "",
+                "(retract (xyz.todo/tag ?t ?g) (when (xyz.todo/tag ?t ?g) (unless (xyz.todo/state ?t :open))))"
+            )
+            .unwrap()[0]
+                .contains("(unless (xyz.todo ?t state: :open)) once: true)")
+        );
+        for text in [
+            r#"(assert (xyz.todo/state of: ?t is: :done) (xyz.todo/text ?t "Call mom"))"#,
+            "(assert (xyz.todo/state of: ?t is: :done) (when))",
+        ] {
+            assert!(
+                matches!(expanded("", text), Err(Error::Refused(why)) if why.contains("a write at the top level is ground")),
+                "{text}"
+            );
+        }
+    }
+
+    /// `id` stands as a premise and binds its entity to what `(:id …)`
+    /// names in the domain of the head it is the entity of. Whether it
+    /// names a domain or a concept is not decided, so an entity of no
+    /// head or of heads of two domains is unsupported, and so is
+    /// `fresh`, which Dialog-DB has no formula for.
+    #[test]
+    fn it_reads_id_and_fresh_as_premises() {
+        let made = expanded(
+            TODO,
+            "(rule (assert (todo ?t list: ?l text: ?x state: :open))
+               (todo/add list: ?l text: ?x)
+               (id ?t list: ?l text: ?x))",
+        )
+        .unwrap();
+        assert_eq!(made.len(), 1);
+        assert!(
+            made[0].ends_with(" (:id xyz.todo is: ?t list: ?l text: ?x))"),
+            "{made:?}"
+        );
+        for (text, why) in [
+            (
+                "(rule (assert (xyz.note ?n text: ?x)) (xyz.draft ?d text: ?x) (fresh ?n))",
+                "no formula that makes a new entity",
+            ),
+            (
+                "(rule (xyz.seen ?d n: ?x) (xyz.draft ?d text: ?x) (id ?t text: ?x))",
+                "is the entity of no head",
+            ),
+            (
+                "(concept (card ?c title: ?x owner: ?o)
+                   (xyz.card ?c title: ?x) (xyz.owned ?c by: ?o))
+                 (rule (assert (card ?c title: ?x owner: ?o))
+                   (xyz.draft ?d title: ?x by: ?o)
+                   (id ?c title: ?x))",
+                "is the entity of heads of xyz.card and xyz.owned",
+            ),
+        ] {
+            assert!(
+                matches!(expanded("", text), Err(Error::Unsupported(why2)) if why2.contains(why)),
+                "{text}: {:?}",
+                expanded("", text)
+            );
+        }
+        assert!(matches!(
+            expanded("", "(rule (assert (xyz.note ?n text: ?x)) (xyz.draft ?d text: ?x) (id ?n))"),
+            Err(Error::Refused(why)) if why.contains("by labels and values")
+        ));
+    }
+
+    /// A variable the expansion named for itself and the rule uses once
+    /// is written `_` among the premises, so the stored body holds a
+    /// blank there. One the author wrote is kept, used once or not, and
+    /// so is a command's entity read with `of:` and used again.
+    #[test]
+    fn it_writes_an_expansions_variable_used_once_as_a_blank() {
+        let rule = expanded(
+            TODO,
+            "(rule (xyz.added ?t text: ?x) (todo/add todo: ?t text: ?x))",
+        )
+        .unwrap();
+        assert_eq!(
+            rule,
+            vec![
+                "(rule (xyz.added ?t text: ?x) (xyz.todo.add _ list: (:control _) text: (:control ?x) todo: (:control ?t)))"
+            ]
+        );
+        let compiled = crate::compile(&parse(&rule[0]).unwrap().remove(0));
+        let Ok([crate::compile::Step::Deduce(stored)]) = compiled.as_deref() else {
+            panic!("one rule");
+        };
+        let body = serde_json::to_string(&stored.descriptor()).unwrap();
+        assert!(!body.contains("?c."), "{body}");
+        assert!(body.contains(r#"{"?":{}}"#), "{body}");
+
+        let read = expanded(
+            TODO,
+            "(rule (xyz.added ?c text: ?x) (todo/add of: ?c text: ?x))",
+        )
+        .unwrap();
+        assert!(read[0].contains("(xyz.todo.add ?c "), "{read:?}");
+        let own = expanded("", "(rule (xyz.seen ?t n: 1) (xyz.todo ?t text: ?once))").unwrap();
+        assert!(own[0].contains("text: ?once"), "{own:?}");
+    }
+
+    /// The order of a document's forms does not matter: uses written
+    /// above the concepts and commands they use expand as they do
+    /// below them.
+    #[test]
+    fn it_expands_a_document_in_any_order() {
+        let declarations = r#"
+            (concept (todo ?t list: ?l text: ?x state: ?s)
+              (xyz.todo ?t list: (:last (:entity ?l)) text: (:last (:text ?x)) state: (:last ?s)))
+            (concept (todo/add todo: ?t list: ?l text: ?x)
+              (xyz.todo.add/todo of: ?c is: ?t in: :control)
+              (xyz.todo.add/list of: ?c is: ?l in: :control)
+              (xyz.todo.add/text of: ?c is: ?x in: :control))"#;
+        let uses = r#"
+            (assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))
+            (rule (assert (todo ?t list: ?l text: ?x state: :open))
+              (todo/add todo: ?t list: ?l text: ?x))
+            (rule (todo/count ?l ?t) (todo ?t list: ?l ...))
+            (select (todo ?t text: ?x ...))"#;
+        let expand = |text: &str| {
+            let mut expander = Expander::new().unwrap();
+            let (kernel, diagnostics) = expander.submit(text).unwrap();
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            let mut kernel: Vec<String> = kernel.iter().map(Syntax::to_string).collect();
+            kernel.sort();
+            kernel
+        };
+        let first = expand(&format!("{declarations}{uses}"));
+        assert_eq!(first.len(), 4, "{first:?}");
+        assert_eq!(first, expand(&format!("{uses}{declarations}")));
+    }
+
+    /// A macro's expansion may declare a name: what used it above is
+    /// expanded again once it is declared.
+    #[test]
+    fn it_expands_again_what_a_later_expansion_declares_a_name_for() {
+        let mut expander = Expander::new().unwrap();
+        let (kernel, diagnostics) = expander
+            .submit(
+                "(select (memo ?t text: ?x))
+                 (rule (syntax (concept (?name ?t text: ?x) (xyz.note/text of: ?t is: ?x)))
+                   (expand (note-kind ?name)))
+                 (note-kind memo)",
+            )
+            .unwrap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            kernel.iter().map(Syntax::to_string).collect::<Vec<_>>(),
+            vec!["(rule (report (xyz.note ?t text: ?x)) (xyz.note ?t text: ?x))"]
+        );
+        assert_eq!(expander.origin(), &[0]);
+    }
+
+    /// A part a read leaves out matches anything, so a read of a
+    /// concept may say some of its fields. A trailing `...` is allowed
+    /// and adds nothing.
+    #[test]
+    fn it_reads_a_concept_by_the_fields_a_read_says() {
+        let bare = expanded(TODO, "(select (todo ?t text: ?x))").unwrap();
+        assert_eq!(bare.len(), 1);
+        assert!(bare[0].contains("text: (:last (:text ?x))"), "{bare:?}");
+        let open = expanded(TODO, "(select (todo ?t text: ?x ...))").unwrap();
+        assert_eq!(open.len(), 1);
+        // `...` alone is `... _`. The two say one thing, and differ in
+        // the names the expansion gives its own variables, which are
+        // made of the form as written.
+        assert_eq!(
+            expanded(TODO, "(select (todo ?t text: ?x ... _))")
+                .unwrap()
+                .len(),
+            1
+        );
+        // Every field said, it needs no `...`.
+        assert!(expanded(TODO, "(select (todo ?t list: ?l text: ?x state: ?s))").is_ok());
+        // What it leaves out may not be bound: a concept's fields are
+        // facts, and no record of them is kept.
+        assert!(expanded(TODO, "(select (todo ?t text: ?x ... ?others))").is_err());
+        // A relation.
+        assert!(expanded(TODO, "(select (xyz.todo ?t text: ?x))").is_ok());
+        assert!(expanded(TODO, "(select (xyz.todo ?t text: ?x ...))").is_ok());
+    }
+
+    /// `(unless …)` once, last, or several times among the premises, is
+    /// one rule.
+    #[test]
+    fn it_reads_unless_beside_when_or_inside_it() {
+        let beside = expanded(
+            TODO,
+            "(rule (xyz.lonely ?t text: ?x)
+               (todo ?t text: ?x ...)
+               (unless (xyz.tag ?t name: _) (xyz.star ?t by: _)))",
+        )
+        .unwrap();
+        let inside = expanded(
+            TODO,
+            "(rule (xyz.lonely ?t text: ?x)
+               (todo ?t text: ?x ...)
+               (unless (xyz.tag ?t name: _))
+               (unless (xyz.star ?t by: _)))",
+        )
+        .unwrap();
+        assert_eq!(beside, inside);
+        assert!(beside[0].contains("(unless (xyz.tag ?t name: _) (xyz.star ?t by: _))"));
+    }
+
+    /// Nothing but its place tells a head from a premise, so a write
+    /// after the first part is refused. A rule has one head: `(all …)`
+    /// in its place is refused too, and both refusals say to write a
+    /// rule for each.
+    #[test]
+    fn it_refuses_a_second_head_however_it_is_written() {
+        let among = expanded(
+            "",
+            "(rule (assert (xyz.todo ?t list: ?to))
+                   (retract (xyz.todo ?t list: ?from))
+               (xyz.move ?t to: ?to from: ?from))",
+        );
+        assert!(
+            matches!(&among, Err(Error::Refused(why))
+                if why.contains("stands among the premises") && why.contains("a rule for each")),
+            "{among:?}"
+        );
+        for written in [
+            "(rule (all (assert (xyz.todo ?t list: ?to))
+                        (retract (xyz.todo ?t list: ?from)))
+               (xyz.move ?t to: ?to from: ?from))",
+            "(rule (assert (all (xyz.todo ?t list: ?to) (xyz.seen ?t at: ?to)))
+               (xyz.move ?t to: ?to from: ?from))",
+            "(assert (all (xyz.todo ?t list: ?to) (xyz.seen ?t at: ?to))
+               (when (xyz.move ?t to: ?to from: ?from)))",
+        ] {
+            let several = expanded("", written);
+            assert!(
+                matches!(&several, Err(Error::Refused(why))
+                    if why.contains("is several heads") && why.contains("a rule for each")),
+                "{several:?}"
+            );
+        }
+        let premise = expanded(
+            "",
+            "(rule (xyz.done ?t at: ?to)
+               (all (xyz.todo ?t list: ?to) (xyz.seen ?t at: ?to)))",
+        );
+        assert!(
+            matches!(&premise, Err(Error::Refused(why)) if why.contains("is not a premise")),
+            "{premise:?}"
+        );
+        // The two rules that say it.
+        assert_eq!(
+            expanded(
+                "",
+                "(rule (assert (xyz.todo ?t list: ?to))
+                   (xyz.move ?t to: ?to from: ?from))
+                 (rule (retract (xyz.todo ?t list: ?from))
+                   (xyz.move ?t to: ?to from: ?from))",
+            )
+            .unwrap(),
+            vec![
+                "(rule (assert (xyz.todo ?t list: ?to)) (xyz.move ?t from: ?from to: ?to))",
+                "(rule (retract (xyz.todo ?t list: ?from)) (xyz.move ?t from: ?from to: ?to))",
+            ]
+        );
+    }
+
+    /// A concept of several reads stands for them all. Written, it is a
+    /// rule a read, each with the premises again, since a kernel rule
+    /// has one head.
+    #[test]
+    fn it_writes_a_concept_of_several_reads_as_a_rule_each() {
+        let kernel = expanded(
+            "(concept (card ?c title: ?x owner: ?o)
+               (xyz.card ?c title: (:last (:text ?x)))
+               (xyz.owned ?c by: (:last (:entity ?o))))",
+            "(rule (assert (card ?c title: ?x owner: ?o))
+               (xyz.draft ?c title: ?x by: ?o))",
+        )
+        .unwrap();
+        assert_eq!(
+            kernel,
+            vec![
+                "(rule (assert (xyz.card ?c title: (:last (:text ?x)))) (xyz.draft ?c by: ?o title: ?x))",
+                "(rule (assert (xyz.owned ?c by: (:last (:entity ?o)))) (xyz.draft ?c by: ?o title: ?x))",
+            ]
+        );
+    }
+
+    /// Reported, a read the query named no field of gets no rule.
+    #[test]
+    fn it_reports_only_the_reads_a_query_names_a_field_of() {
+        let kernel = expanded(
+            "(concept (card ?c title: ?x owner: ?o)
+               (xyz.card ?c title: (:last (:text ?x)))
+               (xyz.owned ?c by: (:last (:entity ?o))))",
+            "(select (card ?c title: ?x ...))",
+        )
+        .unwrap();
+        assert_eq!(kernel.len(), 1, "{kernel:?}");
+        assert!(kernel[0].starts_with("(rule (report (xyz.card ?c title: (:last (:text ?x))))"));
+    }
+
+    /// A pattern is any form, not an application only: here a form in
+    /// brackets at the top level.
+    #[test]
+    fn it_expands_a_form_that_is_not_an_application() {
+        let kernel = expanded(
+            r#"(rule (syntax (assert (xyz.note ?n text: (:text ?x))))
+                 (expand [note ?n ?x]))"#,
+            r#"[note note:1 "hi"]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            kernel,
+            vec![r#"(rule (assert (xyz.note note:1 text: (:text "hi"))))"#]
+        );
+    }
+
+    #[test]
+    fn it_expands_a_concept_where_it_is_read_and_where_it_is_written() {
+        let mut expander = Expander::new().unwrap();
+        let (kernel, diagnostics) = expander.submit(TODO).unwrap();
+        let [rule] = kernel.as_slice() else {
+            panic!("one rule: {kernel:?}");
+        };
+        let rule = rule.to_string();
+        // The command's entity, which the author did not write and the
+        // rule uses once, is a blank.
+        assert_eq!(
+            rule,
+            "(rule (assert (xyz.todo ?t list: (:last (:entity ?l)) state: (:last :open) text: (:last (:text ?x)))) \
+             (xyz.todo.add _ list: (:control ?l) text: (:control ?x) todo: (:control ?t)))"
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    /// A field the query leaves out is still read, under a variable of
+    /// the expansion's own: one where the concept stands as the head,
+    /// another where it stands as the premise.
+    #[test]
+    fn it_expands_a_query_to_a_rule_that_reports() {
+        let kernel = expanded(TODO, "(select (todo ?t text: ?x ...))").unwrap();
+        let rule = Clauses::of(&parse(&kernel[0]).unwrap()[0]);
+        let at = |tree: &Syntax, label: &str| {
+            tree.operand()
+                .and_then(|operand| operand.terms.get(label))
+                .cloned()
+        };
+        let own = |tree: &Syntax| match at(tree, "list") {
+            Some(list) => list.to_string(),
+            None => panic!("{tree} reads the list"),
+        };
+        let reported = rule.head.as_ref().unwrap();
+        assert_eq!(reported.applies(), Some("report"));
+        let head = &items(reported)[0];
+        assert_eq!(at(head, "text"), at(&rule.when[0], "text"));
+        assert!(own(head).starts_with("(:last (:entity ?l."));
+        assert!(own(&rule.when[0]).starts_with("(:last (:entity ?l."));
+        assert_ne!(own(head), own(&rule.when[0]));
+    }
+
+    /// A command is issued by asserting it: at the top level, a rule
+    /// with that head and no premise. Its head names no entity, so the
+    /// kernel rule holds one of the expansion's own, which the kernel
+    /// derives from what the command says. One declared that no rule
+    /// reads is issued all the same, and said so.
+    #[test]
+    fn it_issues_a_command_and_warns_when_nothing_reads_it() {
+        let mut expander = Expander::new().unwrap();
+        expander.submit(TODO).unwrap();
+        let (kernel, diagnostics) = expander
+            .submit(r#"(assert (todo/add todo: todo:1 list: list:home text: "Buy milk"))"#)
+            .unwrap();
+        assert_eq!(kernel.len(), 1);
+        assert!(
+            kernel[0]
+                .to_string()
+                .starts_with("(rule (assert (xyz.todo.add ?c."),
+            "{kernel:?}"
+        );
+        assert!(diagnostics.is_empty());
+
+        let (_, diagnostics) = expander
+            .submit(
+                r#"(concept (todo/snooze todo: ?t)
+                     (xyz.todo.snooze/todo of: ?c is: ?t in: :control))
+                   (assert (todo/snooze todo: todo:1))"#,
+            )
+            .unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message, "no rule reads this command");
+        assert_eq!(
+            diagnostics[0]
+                .form
+                .as_ref()
+                .map(Syntax::to_string)
+                .as_deref(),
+            Some("(todo/snooze todo: todo:1)")
+        );
+
+        // A command is declared, so one misspelled is no command: a name
+        // with a `/` that no concept is declared under is an attribute.
+        assert!(matches!(
+            expander.submit(r#"(assert (todo/ad todo: todo:1 list: list:home text: "x"))"#),
+            Err(Error::Refused(why)) if why.contains("no concept is declared under its name")
+        ));
+    }
+
+    #[test]
+    fn it_does_not_warn_about_a_command_a_later_rule_reads() {
+        let mut expander = Expander::new().unwrap();
+        let (_, diagnostics) = expander
+            .submit(
+                "(concept (counter/increment counter: ?n)
+                   (xyz.counter.increment/counter of: ?c is: ?n in: :control))
+                 (assert (counter/increment counter: counter:a))
+                 (rule (assert (xyz.counter ?c count: (+ ?n : 1)))
+                   (counter/increment counter: ?c) (xyz.counter ?c count: ?n))",
+            )
+            .unwrap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    /// A command is a concept, so a premise reads it as one, by any of
+    /// its fields, and a rule with it as its head and no word deduces
+    /// it, holding while the premises do.
+    #[test]
+    fn it_reads_and_deduces_a_command_as_a_concept() {
+        let premise = expanded(
+            TODO,
+            "(rule (xyz.added ?t text: ?x) (todo/add todo: ?t text: ?x))",
+        )
+        .unwrap();
+        assert_eq!(premise.len(), 1);
+        assert_eq!(
+            premise[0],
+            "(rule (xyz.added ?t text: ?x) (xyz.todo.add _ list: (:control _) text: (:control ?x) todo: (:control ?t)))"
+        );
+        let deduced = expanded(
+            TODO,
+            r#"(rule (todo/add todo: ?t list: list:home text: ?x) (xyz.draft ?t text: ?x))"#,
+        )
+        .unwrap();
+        assert!(
+            deduced[0].starts_with("(rule (xyz.todo.add ?c."),
+            "{deduced:?}"
+        );
+        let kernel = Rule::parse(&parse(&deduced[0]).unwrap().remove(0)).unwrap();
+        assert!(matches!(&kernel.head, Head::Derive(read)
+            if matches!(&read.entity, crate::kernel::Term::Formula(id) if id.name == "id")));
+    }
+
+    /// A call alone at the top level says nothing to do, a command's
+    /// included: the top level takes a question, a write, a rule and a
+    /// concept.
+    #[test]
+    fn it_refuses_a_call_at_the_top_level() {
+        for text in [
+            r#"(todo/add todo: todo:1 list: list:home text: "x")"#,
+            r#"(todo todo:1 list: list:home text: "x" state: :open)"#,
+            r#"(xyz.todo todo:1 text: "x")"#,
+            r#"(xyz.todo/text of: todo:1 is: "x")"#,
+        ] {
+            assert!(
+                matches!(expanded(TODO, text), Err(Error::Refused(why))
+                    if why.contains("a call is not a top-level form")),
+                "{text}"
+            );
+        }
+    }
+
+    /// A command's head names no entity, and its lines are on the
+    /// control layer. A concept that is one and not the other, and one
+    /// whose lines are about several entities it does not name, are
+    /// what the design does not decide, and are unsupported. A layer
+    /// other than `:control` is unsupported, since Dialog-DB has none.
+    #[test]
+    fn it_refuses_what_is_not_decided_of_a_command() {
+        for (text, why) in [
+            (
+                "(concept (todo/x text: ?x) (xyz.todo/text of: ?c is: ?x))",
+                "its lines are not on the control layer",
+            ),
+            (
+                "(concept (todo/x text: ?x n: ?n)
+                   (xyz.todo.x/text of: ?c is: ?x in: :control)
+                   (xyz.todo.x/n of: ?c is: ?n))",
+                "mixes lines on the control layer with stored ones",
+            ),
+            (
+                "(concept (todo/x ?t text: ?x) (xyz.todo.x/text of: ?t is: ?x in: :control))",
+                "names its entity and holds lines on the control layer",
+            ),
+            (
+                "(concept (todo/x text: ?x n: ?n)
+                   (xyz.todo.x/text of: ?c is: ?x in: :control)
+                   (xyz.todo.x/n of: ?d is: ?n in: :control))",
+                "about more than one entity",
+            ),
+            (
+                "(concept (todo/x text: ?x n: ?n)
+                   (xyz.todo.x/text of: ?c is: ?x in: :control)
+                   (xyz.todo.y/n of: ?c is: ?n in: :control))",
+                "more than one domain",
+            ),
+            (
+                "(concept (todo/x text: ?x) (xyz.todo.x/text of: ?c is: ?x in: :draft))",
+                "no layers yet",
+            ),
+        ] {
+            assert!(
+                matches!(expanded("", text), Err(Error::Unsupported(said)) if said.contains(why)),
+                "{text}: {:?}",
+                expanded("", text)
+            );
+        }
+        // A variable of a command's that is no parameter and stands as
+        // a value is refused as any concept's is.
+        assert!(matches!(
+            expanded(
+                "",
+                "(concept (todo/x text: ?x) (xyz.todo.x/text of: ?c is: ?y in: :control))"
+            ),
+            Err(Error::Refused(why)) if why.contains("every variable in it is a parameter")
+        ));
+    }
+
+    #[test]
+    fn it_refuses_what_nothing_gives_a_meaning_and_what_two_rules_do() {
+        assert!(matches!(
+            expanded(TODO, "(select (todo ?t ...) (frobnicate ?t))"),
+            Err(Error::Unknown(_))
+        ));
+        // A write that says the fields of neither definition.
+        assert!(matches!(
+            expanded(
+                TODO,
+                "(concept (todo ?t title: ?x) (xyz.note ?t title: ?x)) (assert (todo todo:1))"
+            ),
+            Err(Error::Ambiguous(..))
+        ));
+    }
+
+    /// Two definitions under one name and other labels stand side by
+    /// side, and the labels an application writes say which it is.
+    #[test]
+    fn it_resolves_a_name_by_the_labels_written() {
+        let note = "(concept (todo ?t title: ?x) (xyz.note ?t title: ?x))";
+        assert_eq!(
+            expanded(TODO, &format!("{note} (select (todo ?t title: ?x))")).unwrap(),
+            vec!["(rule (report (xyz.note ?t title: ?x)) (xyz.note ?t title: ?x))"]
+        );
+        assert_eq!(
+            expanded(TODO, &format!("{note} (select (todo ?t text: ?x ...))")).unwrap(),
+            expanded(TODO, "(select (todo ?t text: ?x ...))").unwrap()
+        );
+    }
+
+    /// A definition under the signature of an earlier one replaces it:
+    /// the last write wins.
+    #[test]
+    fn it_replaces_a_definition_by_a_later_one_of_the_same_signature() {
+        let task = "(concept (todo ?t list: ?l text: ?x state: ?s)
+                      (abc.task ?t list: ?l text: ?x state: ?s))";
+        // The order the labels are written in is not another signature.
+        let reordered = "(concept (todo ?t state: ?s text: ?x list: ?l)
+                           (abc.task ?t list: ?l text: ?x state: ?s))";
+        for later in [task, reordered] {
+            let rules =
+                expanded(TODO, &format!("{later} (select (todo ?t text: ?x ...))")).unwrap();
+            assert_eq!(rules.len(), 1, "{rules:?}");
+            assert!(rules[0].contains(")) (abc.task ?t "), "{rules:?}");
+            assert!(!rules[0].contains("xyz.todo"), "{rules:?}");
+        }
+    }
+
+    /// Where the labels written fit several definitions, a read is of
+    /// every one of them: the rule is expanded once a definition, and a
+    /// form that recurs in it is the same definition's each time.
+    #[test]
+    fn it_reads_through_every_definition_the_labels_fit() {
+        let both = "(concept (todo ?t title: ?x done: ?d) (xyz.todo ?t title: ?x done: ?d))
+                    (concept (todo ?t title: ?x pinned: ?p) (xyz.note ?t title: ?x pinned: ?p))";
+        let rules = expanded(both, "(select (todo ?t title: ?x ...))").unwrap();
+        assert_eq!(rules.len(), 2, "{rules:?}");
+        for (rule, domain) in rules.iter().zip(["xyz.todo", "xyz.note"]) {
+            // The labels come in their own order, so the field the
+            // query left out stands before or after the one it named.
+            assert!(
+                rule.starts_with(&format!("(rule (report ({domain} ?t "))
+                    && rule.contains(" title: ?x"),
+                "{rule}"
+            );
+            assert!(rule.contains(&format!(")) ({domain} ?t ")), "{rule}");
+        }
+        // A write says every field, so the labels written are one
+        // definition's signature.
+        assert_eq!(
+            expanded(both, r#"(assert (todo todo:1 title: "x" pinned: true))"#).unwrap(),
+            vec![r#"(rule (assert (xyz.note todo:1 pinned: true title: "x")))"#]
+        );
+        // A write that fits both and is neither is refused, and so is
+        // the absence of what several definitions take.
+        assert!(matches!(
+            expanded(both, r#"(assert (todo todo:1 title: "x"))"#),
+            Err(Error::Ambiguous(..))
+        ));
+        assert!(matches!(
+            expanded(
+                both,
+                "(select (xyz.tag ?t name: ?n) (xyz.tag ?t name: ?n) (unless (todo ?t title: _ ...)))"
+            ),
+            Err(Error::Ambiguous(..))
+        ));
+    }
+
+    /// A line is one attribute by its full name, and is the read of
+    /// that one field: `as:` the type it is read under, `cardinality:`
+    /// the newest claim or every claim.
+    #[test]
+    fn it_reads_a_line_as_the_read_of_one_attribute() {
+        let read = |line: &str| {
+            let rules = expanded("", &format!("(select {line})")).unwrap();
+            assert_eq!(rules.len(), 1, "{rules:?}");
+            rules[0]
+                .strip_prefix("(rule (report ")
+                .and_then(|rest| rest.split_once(") ("))
+                .map(|(head, _)| head.to_string())
+                .unwrap_or_else(|| rules[0].clone())
+        };
+        assert_eq!(
+            read("(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)"),
+            "(xyz.todo ?i title: (:last (:text ?t)))"
+        );
+        assert_eq!(
+            read("(xyz.list/task of: ?l is: ?i as: :entity cardinality: :many)"),
+            "(xyz.list ?l task: (:all (:entity ?i)))"
+        );
+        // The entity with no label, as any primary may be written.
+        assert_eq!(
+            read("(xyz.todo/title ?i is: ?t as: :text cardinality: :one)"),
+            "(xyz.todo ?i title: (:last (:text ?t)))"
+        );
+        // Unlabeled, the entity and then the value.
+        assert_eq!(read("(xyz.todo/title ?i ?t)"), "(xyz.todo ?i title: ?t)");
+        assert_eq!(
+            read(r#"(xyz.todo/title ?i "Buy milk")"#),
+            r#"(xyz.todo ?i title: "Buy milk")"#
+        );
+        // A part left out says nothing.
+        assert_eq!(
+            read("(xyz.todo/title of: ?i is: ?t)"),
+            "(xyz.todo ?i title: ?t)"
+        );
+        assert_eq!(
+            read("(xyz.todo/title of: ?i is: ?t cardinality: :many)"),
+            "(xyz.todo ?i title: (:all ?t))"
+        );
+        // The cases of a variant are entities.
+        assert_eq!(
+            read("(xyz.todo/state of: ?i is: ?s as: [:open :done] cardinality: :one)"),
+            "(xyz.todo ?i state: (:last (:entity ?s)))"
+        );
+        // A line stands where a read does: in a write, and in a rule.
+        assert_eq!(
+            expanded(
+                "",
+                "(assert (xyz.todo/state of: todo:1 is: :done as: :entity cardinality: :one))"
+            )
+            .unwrap(),
+            vec!["(rule (assert (xyz.todo todo:1 state: (:last (:entity :done)))))"]
+        );
+        assert_eq!(
+            expanded(
+                "",
+                "(rule (xyz.done ?i title: ?t)
+                   (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
+                   (xyz.todo/state of: ?i is: :done as: :entity cardinality: :one))"
+            )
+            .unwrap(),
+            vec![
+                "(rule (xyz.done ?i title: ?t) (xyz.todo ?i title: (:last (:text ?t))) (xyz.todo ?i state: (:last (:entity :done))))"
+            ]
+        );
+    }
+
+    /// What a line does not say as a line is refused, each with what
+    /// it is, and a layer is what Dialog-DB has not got.
+    #[test]
+    fn it_refuses_a_line_that_is_not_one() {
+        let refused = |line: &str, why: &str| {
+            let said = expanded("", &format!("(select {line})"));
+            assert!(
+                matches!(&said, Err(Error::Refused(said)) if said.contains(why)),
+                "{line}: {said:?}"
+            );
+        };
+        refused("(xyz.todo/title of: ?i)", "says no value");
+        refused("(xyz.todo/title ?i ?t ?u)", "needs its entity");
+        // Beside a type, the two terms are labelled.
+        refused(
+            "(xyz.todo/title ?i ?t as: :text)",
+            "has 2 parts with no label",
+        );
+        refused("(xyz.todo/title is: ?t)", "needs its entity");
+        // Two parts with no label are refused where the text is read.
+        refused("(xyz.todo/title ?i ?j is: ?t)", "has 2 parts with no label");
+        refused("(xyz.todo/title of: ?i is: ?t as: :words)", "is not a type");
+        refused("(xyz.todo/title of: ?i is: ?t as: [])", "is not a type");
+        refused(
+            "(xyz.todo/title of: ?i is: ?t as: [:open 2])",
+            "is not a type",
+        );
+        refused(
+            "(xyz.todo/title of: ?i is: ?t cardinality: :few)",
+            "is not a cardinality",
+        );
+        refused(
+            "(xyz.todo/title of: ?i is: ?t pick: :last)",
+            "says `pick:`, which a line does not take",
+        );
+        assert!(matches!(
+            expanded("", "(select (xyz.todo/title of: ?i is: ?t in: :draft))"),
+            Err(Error::Unsupported(said)) if said.contains("layer")
+        ));
+    }
+
+    /// A concept is its lines. Kept, the lines of one entity under one
+    /// domain are one read of several fields, so a concept written as
+    /// lines is read, written and reported as one written as that read.
+    #[test]
+    fn it_keeps_a_concept_of_lines_as_the_reads_they_are() {
+        let lines = "(concept (todo ?i list: ?l title: ?t state: ?s)
+                       (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
+                       (xyz.todo/state of: ?i is: ?s as: [:open :done] cardinality: :one)
+                       (xyz.list/task of: ?l is: ?i as: :entity cardinality: :many))";
+        let reads = "(concept (todo ?i list: ?l title: ?t state: ?s)
+                       (xyz.todo ?i title: (:last (:text ?t)) state: (:last (:entity ?s)))
+                       (xyz.list ?l task: (:all (:entity ?i))))";
+        for text in [
+            "(select (todo ?i list: ?l title: ?t state: ?s))",
+            "(select (todo ?i title: ?t))",
+            r#"(assert (todo todo:1 list: list:home title: "Buy milk" state: :open))"#,
+            "(rule (xyz.open ?i title: ?t) (todo ?i title: ?t state: :open))",
+        ] {
+            let by_lines = expanded(lines, text).unwrap();
+            assert_eq!(by_lines, expanded(reads, text).unwrap(), "{text}");
+            assert!(!by_lines.is_empty());
+        }
+        assert_eq!(
+            expanded(
+                lines,
+                r#"(assert (todo todo:1 list: list:home title: "Buy milk" state: :open))"#
+            )
+            .unwrap(),
+            vec![
+                r#"(rule (assert (xyz.todo todo:1 state: (:last (:entity :open)) title: (:last (:text "Buy milk")))))"#,
+                "(rule (assert (xyz.list list:home task: (:all (:entity todo:1)))))",
+            ]
+        );
+
+        // Read from the value's side, a line gives the reverse relation.
+        assert_eq!(
+            expanded(
+                "(concept (list-item ?l todo: ?t)
+                   (xyz.list/task of: ?l is: ?t cardinality: :many))",
+                "(select (list-item list:home todo: ?t))"
+            )
+            .unwrap(),
+            vec![
+                "(rule (report (xyz.list list:home task: (:all ?t))) (xyz.list list:home task: (:all ?t)))"
+            ]
+        );
+    }
+
+    /// An attribute's two terms unlabeled are the same as `of:` and
+    /// `is:`, in a premise, a head, a line of a concept and a write.
+    #[test]
+    fn it_reads_an_attribute_of_two_unlabeled_terms_as_of_and_is() {
+        for (unlabeled, labelled) in [
+            (
+                "(select (xyz.todo/title ?t ?x))",
+                "(select (xyz.todo/title of: ?t is: ?x))",
+            ),
+            (
+                "(rule (xyz.done/title ?t ?x) (xyz.todo/title ?t ?x) (xyz.todo/state ?t :done))",
+                "(rule (xyz.done/title of: ?t is: ?x) (xyz.todo/title of: ?t is: ?x) (xyz.todo/state of: ?t is: :done))",
+            ),
+            (
+                r#"(assert (xyz.todo/title todo:1 "Buy milk"))"#,
+                r#"(assert (xyz.todo/title of: todo:1 is: "Buy milk"))"#,
+            ),
+            (
+                "(concept (titled ?t title: ?x) (xyz.todo/title ?t ?x)) (select (titled ?t title: ?x))",
+                "(concept (titled ?t title: ?x) (xyz.todo/title of: ?t is: ?x)) (select (titled ?t title: ?x))",
+            ),
+        ] {
+            let read = expanded("", unlabeled).unwrap();
+            assert!(!read.is_empty());
+            assert_eq!(read, expanded("", labelled).unwrap(), "{unlabeled}");
+        }
+    }
+
+    /// Every variable of a concept's body is one of its parameters,
+    /// written as lines too, and a line that is not one refuses the
+    /// concept where it is defined.
+    #[test]
+    fn it_refuses_a_concept_whose_lines_hold_a_variable_its_head_does_not() {
+        assert!(matches!(
+            expanded(
+                "(concept (todo ?i title: ?t)
+                   (xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)
+                   (xyz.list/task of: ?l is: ?i as: :entity cardinality: :many))",
+                "(select (todo ?i title: ?t))"
+            ),
+            Err(Error::Refused(why)) if why.contains("every variable in it is a parameter: ?l")
+        ));
+        assert!(matches!(
+            expanded(
+                "(concept (todo ?i title: ?t)
+                   (xyz.todo/title of: ?i is: ?t cardinality: :few))",
+                "(select (todo ?i title: ?t))"
+            ),
+            Err(Error::Refused(why)) if why.contains("is not a cardinality")
+        ));
+    }
+
+    /// An attribute named under a declared concept is in that concept's
+    /// domain: a relation of its own, concluded and read under the one
+    /// name. Unlabeled it is the entity and a value under `is:`; with
+    /// labels, the fields they name. A concept's own name, `todo/add`
+    /// declared, is the concept and not an attribute of `todo`.
+    #[test]
+    fn it_reads_a_derived_attribute_in_its_concepts_domain() {
+        let lists = "(concept (list ?l name: ?n)
+                       (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))
+                     (concept (todo ?t list: ?l state: ?s)
+                       (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
+                       (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one))";
+        let concluded = expanded(
+            lists,
+            "(rule (list/count-open ?l (count ?t))
+               (list ?l)
+               (todo ?t list: ?l state: :open))",
+        )
+        .unwrap();
+        assert_eq!(concluded.len(), 1);
+        assert!(
+            concluded[0].starts_with(
+                "(rule (concept.list.count-open ?l is: (count ?t)) (xyz.list ?l name: "
+            ),
+            "{concluded:?}"
+        );
+        assert_eq!(
+            expanded(lists, "(select (list/count-open list:home ?n))").unwrap(),
+            vec![
+                "(rule (report (concept.list.count-open list:home is: ?n)) (concept.list.count-open list:home is: ?n))"
+            ]
+        );
+        let labelled = expanded(
+            lists,
+            "(rule (list/count ?l status: ?s count: (count ?t))
+               (todo ?t list: ?l state: ?s))",
+        )
+        .unwrap();
+        assert!(
+            labelled[0].starts_with("(rule (concept.list.count ?l count: (count ?t) status: ?s) "),
+            "{labelled:?}"
+        );
+        // Under no declared concept, the same spelling is an attribute.
+        assert_eq!(
+            expanded(lists, "(select (xyz.shelf/count-open shelf:a ?n))").unwrap(),
+            vec![
+                "(rule (report (xyz.shelf shelf:a count-open: ?n)) (xyz.shelf shelf:a count-open: ?n))"
+            ]
+        );
+        // A declared name wins over an attribute of the concept before
+        // its `/`.
+        let command = expanded(
+            &format!(
+                "{lists}
+                 (concept (list/archive list: ?l)
+                   (xyz.list.archive/list of: ?c is: ?l in: :control))"
+            ),
+            "(select (list/archive list: ?l))",
+        )
+        .unwrap();
+        assert!(
+            command[0].starts_with("(rule (report (xyz.list.archive "),
+            "{command:?}"
+        );
+        assert!(matches!(
+            expanded(lists, "(select (list/count-open list:home))"),
+            Err(Error::Refused(why)) if why.contains("needs its entity and a value")
+        ));
+    }
+
+    /// A write was `assert!` and `retract!` while a mark told what is
+    /// kept. Either is refused with the word to write, not said to be
+    /// unknown.
+    #[test]
+    fn it_refuses_a_write_under_the_name_it_had() {
+        for (former, word) in [("assert!", "assert"), ("retract!", "retract")] {
+            for text in [
+                format!(r#"({former} (todo todo:1 list: list:home text: "x" state: :open))"#),
+                format!("(rule ({former} (xyz.todo ?t state: :done)) (todo/add todo: ?t))"),
+            ] {
+                assert!(
+                    matches!(
+                        expanded(TODO, &text),
+                        Err(Error::Refused(why)) if why == format!("`{former}` is written `{word}`: no form carries `!`")
+                    ),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    /// Two definitions of one concept, which call its field by other
+    /// names. An application that writes no label is the same read
+    /// through either, so nothing is chosen and the rule is one.
+    #[test]
+    fn it_reads_one_concept_once_however_many_names_its_fields_have() {
+        let both = "(concept (todo ?t title: ?a) (xyz.todo ?t text: ?a))
+                    (concept (todo ?t name: ?b) (xyz.todo ?t text: ?b))";
+        let rules = expanded(
+            both,
+            "(select (xyz.tag ?t name: ?n) (xyz.tag ?t name: ?n) (todo ?t ...))",
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 1, "{rules:?}");
+        // Each name for the field reads the same attribute.
+        assert_eq!(
+            expanded(both, "(select (todo ?t title: ?x ...))").unwrap(),
+            expanded(both, "(select (todo ?t name: ?x))").unwrap()
+        );
+    }
+
+    #[test]
+    fn it_refuses_a_concept_that_cannot_map_both_ways() {
+        assert!(matches!(
+            expanded(
+                "",
+                "(concept (cheap ?i price: ?n) (shop.item ?i price: ?n) (< ?n : 100))"
+            ),
+            Err(Error::Refused(_))
+        ));
+        assert!(matches!(
+            expanded("", "(concept (titled ?t) (xyz.todo ?t text: ?x))"),
+            Err(Error::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn it_reads_a_concept_from_the_other_side() {
+        assert_eq!(
+            expanded(
+                "(concept (list-item ?l todo: ?t) (xyz.todo ?t list: ?l))",
+                "(select (list-item list:home todo: ?t))"
+            )
+            .unwrap(),
+            vec!["(rule (report (xyz.todo ?t list: list:home)) (xyz.todo ?t list: list:home))"]
+        );
+    }
+
+    #[test]
+    fn it_joins_the_reads_of_one_entity_under_unless() {
+        let kernel = expanded(
+            "(concept (author ?p name: ?n email: ?e) (io.person ?p name: ?n) (io.contact ?p email: ?e))",
+            "(select (io.person ?p name: ?n) (io.person ?p name: ?n) (unless (author ?p ...)))",
+        )
+        .unwrap();
+        assert!(kernel[0].contains("(unless (io.person ?p io.contact/email: ?e."));
+        assert!(kernel[0].contains(" name: ?n."));
+    }
+}
