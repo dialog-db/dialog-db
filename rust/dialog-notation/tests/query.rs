@@ -105,6 +105,44 @@ async fn it_collects_the_whole_of_a_field_as_a_set() -> Result<()> {
     Ok(())
 }
 
+/// The folds a selection asks Dialog-DB for.
+fn folds(text: &str) -> Result<usize> {
+    let analysis = dialog_notation::Analyzer::new()?.analyze(&dialog_notation::parse(text)?);
+    for tree in &analysis.analyzed {
+        if let [dialog_notation::Step::Select(selection)] =
+            dialog_notation::compile(tree)?.as_slice()
+        {
+            return Ok(selection.folds.len());
+        }
+    }
+    Err(anyhow::anyhow!("no selection: {:?}", analysis.diagnostics))
+}
+
+/// A read that collects one variable, whose shared terms the conditions
+/// every answer needs bind, is folded by Dialog-DB, with `distinct` and
+/// `count-distinct`: the card's tags are one fold, asked for every card
+/// or for one. A read that collects entries is put together here.
+#[dialog_common::test]
+fn it_asks_dialog_db_to_fold_a_collected_read() -> Result<()> {
+    assert_eq!(
+        folds(&format!("{TODOS}{CARD}(select (todo/card ?t is: ?card))"))?,
+        1
+    );
+    assert_eq!(
+        folds(&format!(
+            "{TODOS}{CARD}(select (todo/card todo:2 is: ?card))"
+        ))?,
+        1
+    );
+    let outline = "(query (notebook/outline ?n is: ?outline)
+           (notebook/named ?n title: ?title)
+           (notebook/blocks ?n block: (collect ?blocks))
+           (is ?outline {:title ?title :blocks ?blocks}))
+         (select (notebook/outline ?n is: ?outline))";
+    assert_eq!(folds(&format!("{NOTEBOOK}{outline}"))?, 0);
+    Ok(())
+}
+
 /// A fold is a function of what was collected: `count` of the tags is 2
 /// and 0. A function other than `count` is refused.
 #[dialog_common::test]
