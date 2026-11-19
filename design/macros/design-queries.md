@@ -51,12 +51,13 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 
 | | one at a time: a row for each, and no row for none | the whole: one row, and empty for none |
 |---|---|---|
-| many values | `(todo/tag ?t tag: ?g)` | `(todo/tag ?t tag: #{... ?tags})`, a set |
+| many values | `(todo/tag ?t tag: ?g)` | `(todo/tag ?t tag: {... ?tags})`, a set: a map with no names |
 | a keyed collection | `(notebook/blocks ?n block: {?k ?b})` | `(notebook/blocks ?n block: {... ?blocks})`, a map |
 
 - The spread is the pattern's own rest, which already takes what is not named, as a collection, and already may take nothing. Here nothing is named, so it takes all.
 - Key and value are paired because they were never apart: an entry is one term.
-- The brackets say what comes out, a map or a set. No list: many values have no order, and a sequence's order is in its keys.
+- What comes out is a map either way. A keyed collection's has its keys. Many plain values have none, and a map with no names is a set: `{: "errand" : "home"}`. No list: many values have no order, and a sequence's order is in its keys.
+- On a stored record `{... ?r}` binds what `?r` alone would, so nobody writes it there, and the spelling is in effect unused. In a condition it takes; in `is` or a template the same spelling puts, `{title: ?title ... ?more}`.
 - **A read of the whole never gates**, as `unless` never binds. So every other term in it is bound by a required condition, a constant, or blank, and a query of such reads alone is refused: nothing would say which entities.
 - It is a fold, so it is refused in a `rule`.
 - A write goes through one entry: `(assert (notebook/blocks ?n block: {"N3" block:x}))`. The whole is not written.
@@ -77,14 +78,14 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 ```clj
 (query (todo/card ?t is: ?card)
   (todo ?t title: ?title)
-  (todo/tag ?t tag: #{... ?tags})
+  (todo/tag ?t tag: {... ?tags})
   (is ?card {title: ?title tags: ?tags}))
 ```
 
 | `?t` | `?card` |
 |---|---|
-| Buy milk | `{title: "Buy milk" tags: #{"errand" "home"}}` |
-| Call mum | `{title: "Call mum" tags: #{}}` |
+| Buy milk | `{title: "Buy milk" tags: {: "errand" : "home"}}` |
+| Call mum | `{title: "Call mum" tags: {}}` |
 
 **Folded:** `tags: (count ?tags)` is 2 and 0. A fold is a function of what was collected.
 
@@ -97,7 +98,7 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 
 (query (todo/row ?t list: ?l is: ?row)
   (todo ?t list: ?l title: ?title)
-  (todo/chip ?t is: #{... ?chips})
+  (todo/chip ?t is: {... ?chips})
   (view ?row [:li ?title ?chips]))
 ```
 ```html
@@ -154,7 +155,7 @@ With each block's source, which is a join for each entry. The item is a query wh
 (query (notebook/ui ?n is: ?ui)
   (notebook/named ?n title: ?title)
   (notebook/order-item ?n is: {... ?order})
-  (notebook/block-row _ notebook: ?n is: #{... ?rows})
+  (notebook/block-row _ notebook: ?n is: {... ?rows})
   (view ?ui
     [:notebook-save {:style "display: block;"}
       [:tonk-notebook {:data-subject ?n :data-notebook ?n :title ?title
@@ -169,14 +170,14 @@ Two views this morning, three queries now, and a notebook with no block shows it
 
 ## The spread, against a word
 
-| | the spread: `{... ?blocks}`, `#{... ?tags}` | a word: `(collect ?blocks)` |
+| | the spread: `{... ?blocks}`, `{... ?tags}` | a word: `(collect ?blocks)` |
 |---|---|---|
-| says what comes out | 🟢 the brackets: a map, a set | by the field's declaration, which the call does not show |
+| says what comes out | 🟢 a map, by the braces; with its keys or with none by the field's declaration | by the field's declaration, which the call does not show |
 | says it does not gate | by what a rest is: it may take nothing | 🟢 by a word, which an error can name |
 | already in the notation | 🟢 `{:author ?who ... ?others}` and `[?first ... ?more]` are in its tests | no |
-| second meaning | 🟡 on a field that stores one record, `{... ?r}` is that record, and no claim is no row. On a collection it is every entry, and none is `{}`. All there is, both times; they part where there is nothing | none |
-| new to the reader | 🟡 `#{`, and a variable for a key, `{?k ?b}`, which a record pattern refuses today ("a key is a label or text") | a word |
-| a set as a value | ? dialog has none: a list and a record are both `Record`. Until it does, a set is carried as a list with no duplicates, in the order of its values | the same |
+| second meaning | on a field that stores one record, `{... ?r}` is that record, and no claim is no row; on a collection it is every entry, and none is `{}`. All there is, both times, and on a stored record nobody has cause to write it, since `?r` says the same | none |
+| new to the reader | 🟡 a map with no names, `{: 1 : 2}`, which the reader refuses today ("a map key with no name"), and a variable for a key, `{?k ?b}`, which a record pattern refuses today ("a key is a label or text") | a word |
+| a set as a value | ? a map with no names. Whether dialog's `Record` can hold entries with no key is not checked | the same |
 
 **Proposed: the spread**, with `collect` to fall back on if readers take `{... ?x}` on a collection for gating. `[?g]`, set aside earlier, was a different case: as a pattern it is a list of exactly one, and as a collection it would have meant all. A rest means all there is under both.
 
@@ -201,7 +202,7 @@ Two views this morning, three queries now, and a notebook with no block shows it
 ## Open
 
 - **`query` is already the design's word for asking**, `(query (todo ?t state: :open))`, the maintainer's choice after R24 and R25. With a head and a body under the same word, `(query (a ?x) (b ?x))` reads both ways. `find`, `select` and `(? …)` read as well in those rounds. Proposed: `query` names what is defined, and asking is `find`.
-- **A set of answers merges equal ones.** Two to-dos with one title are one title in a set. Count entities, not what is shown of them.
+- **A set merges equal answers.** Two to-dos with one title are one title in a set. Count entities, not what is shown of them.
 - **A fold with nothing to give.** `count` and `sum` of nothing are 0; `max` has none. `pull` leaves the key out. Proposed: the same.
 - **Limit.** `pull` stops at 1000 unless told. #77.
 - **A query that calls itself**: a thread, an outline. `pull` allows it, with a depth, and stops at an entity it has met.

@@ -1712,3 +1712,11 @@ A separate clause for collecting needs inference or its own conditions, and infe
 
 **Decided.** The maintainer's: an entry is one term; a set, not a list. Proposed: `{... ?m}` and `#{... ?s}`. Not decided: the set's spelling and carrier, and the word for asking. Nothing is built.
 
+## 2026-11-18, Designing: a set is a map with no names
+
+**Asked.** What a set is, as a spelling and a value. The agent had written `#{`.
+
+**Learned.** The maintainer: a set is a map with no names, `{: 1 : 2}`. So one spread, `{... ?x}`, takes the whole of a keyed collection and of many plain values alike, and the empty set and the empty map are one thing. The reader has the empty label and refuses it as a key today. His own doubt and its answer: `{... ?r}` is destructuring, which reads as taking; and destructuring a map into a map has no point, so on a stored record nobody writes it.
+
+**Decided.** The maintainer's: the set's spelling. Proposed still: the spread for the whole. Nothing is built.
+
