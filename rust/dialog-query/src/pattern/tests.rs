@@ -20,6 +20,7 @@ use crate::session::RuleRegistry;
 use crate::source::test::TestEnv;
 use crate::the;
 use crate::{ConceptDescriptor, DeductiveRule, FormulaQuery, Parameters};
+use dialog_corpus::helpers::composite_decodes;
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_repository::Branch;
 use dialog_storage::provider::storage::VolatileSpace;
@@ -35,7 +36,7 @@ fn var(name: &str) -> Pattern {
 }
 
 fn note() -> Value {
-    Composite::map([
+    text_map([
         ("title", text("Buy milk")),
         ("done", Value::Boolean(false)),
         ("priority", Value::UnsignedInt(2)),
@@ -46,10 +47,19 @@ fn note() -> Value {
 
 fn unify(pattern: &Pattern, value: &Value) -> Option<Match> {
     let mut row = Match::new();
-    pattern
-        .unify(value, &mut row)
-        .expect("matches or not")
-        .then_some(row)
+    pattern.unify(value, &mut row).then_some(row)
+}
+
+/// The composite map of `entries`, each key text.
+fn text_map<'a>(
+    entries: impl IntoIterator<Item = (&'a str, Value)>,
+) -> Result<Composite, CompositeError> {
+    Composite::map(entries.into_iter().map(|(key, value)| (text(key), value)))
+}
+
+/// The composite list of `items`.
+fn list<const N: usize>(items: [Value; N]) -> Composite {
+    Composite::list(items).expect("a list")
 }
 
 /// Inside a map or a list a number matches by the number it is, and
@@ -128,14 +138,14 @@ fn it_binds_the_entries_a_map_pattern_did_not_name() {
     assert_eq!(row.value_of("title"), Some(&text("Buy milk")));
     let rest = row.value_of("rest").expect("the rest is bound");
     assert_eq!(
-        rest.composite(),
-        Ok(Some(
-            Composite::map([
+        *rest,
+        Value::from(
+            text_map([
                 ("done", Value::Boolean(false)),
                 ("priority", Value::UnsignedInt(2)),
             ])
             .expect("a map")
-        ))
+        )
     );
 
     let open = Pattern::Map(named.with_rest(Term::blank()));
@@ -173,23 +183,23 @@ fn it_matches_constants_and_bound_variables() {
     let mut row = Match::new();
     row.bind(&Term::var("title"), text("Call home"))
         .expect("binds");
-    assert!(!pattern.unify(&note(), &mut row).expect("decides"));
+    assert!(!pattern.unify(&note(), &mut row));
 }
 
 /// A list pattern takes a list apart by its items, binds a run as a
 /// list, and with no run matches a list of exactly its items.
 #[dialog_common::test]
 fn it_takes_a_list_apart_and_binds_a_run() {
-    let list: Value = Composite::list([text("a"), text("b"), text("c")]).into();
+    let items: Value = list([text("a"), text("b"), text("c")]).into();
 
     let exact = Pattern::list([var("x"), var("y"), var("z")]);
-    let row = unify(&exact, &list).expect("matches");
+    let row = unify(&exact, &items).expect("matches");
     assert_eq!(row.value_of("y"), Some(&text("b")));
-    assert!(unify(&Pattern::list([var("x")]), &list).is_none());
+    assert!(unify(&Pattern::list([var("x")]), &items).is_none());
     assert!(
         unify(
             &Pattern::list([var("a"), var("b"), var("c"), var("d")]),
-            &list
+            &items
         )
         .is_none()
     );
@@ -197,11 +207,11 @@ fn it_takes_a_list_apart_and_binds_a_run() {
     let Pattern::List(head) = Pattern::list([var("first")]) else {
         panic!("a list pattern");
     };
-    let row = unify(&Pattern::List(head.with_run(Term::var("others"))), &list).expect("matches");
+    let row = unify(&Pattern::List(head.with_run(Term::var("others"))), &items).expect("matches");
     assert_eq!(row.value_of("first"), Some(&text("a")));
     assert_eq!(
         row.value_of("others"),
-        Some(&Composite::list([text("b"), text("c")]).into())
+        Some(&list([text("b"), text("c")]).into())
     );
 
     // A map is no list.
@@ -213,16 +223,13 @@ fn it_takes_a_list_apart_and_binds_a_run() {
 /// and patterns nest as values do.
 #[dialog_common::test]
 fn it_takes_nested_shapes_apart() {
-    let place: Value = Composite::map([
+    let place: Value = text_map([
         ("name", text("Home")),
         (
             "at",
-            Composite::list([Value::Float(45.5), Value::Float(-122.5)]).into(),
+            list([Value::Float(45.5), Value::Float(-122.5)]).into(),
         ),
-        (
-            "tags",
-            Composite::list([text("quiet"), text("green")]).into(),
-        ),
+        ("tags", list([text("quiet"), text("green")]).into()),
     ])
     .expect("a map")
     .into();
@@ -285,7 +292,7 @@ fn it_is_the_value_once_its_variables_are_bound() {
     assert_eq!(
         exact.build(&row),
         Some(
-            Composite::map([("title", text("Buy milk")), ("done", Value::Boolean(false)),])
+            text_map([("title", text("Buy milk")), ("done", Value::Boolean(false)),])
                 .expect("a map")
                 .into()
         )
@@ -296,11 +303,11 @@ fn it_is_the_value_once_its_variables_are_bound() {
     };
     let mut row = Match::new();
     row.bind(&Term::var("title"), text("a")).expect("binds");
-    row.bind(&Term::var("others"), Composite::list([text("b")]).into())
+    row.bind(&Term::var("others"), list([text("b")]).into())
         .expect("binds");
     assert_eq!(
         Pattern::List(head.with_run(Term::var("others"))).build(&row),
-        Some(Composite::list([text("a"), text("b")]).into())
+        Some(list([text("a"), text("b")]).into())
     );
 }
 
@@ -326,9 +333,7 @@ fn it_is_no_value_where_its_parts_make_none() {
     clash
         .bind(
             &Term::var("rest"),
-            Composite::map([("title", text("Other"))])
-                .expect("a map")
-                .into(),
+            text_map([("title", text("Other"))]).expect("a map").into(),
         )
         .expect("binds");
     assert_eq!(pattern.build(&clash), None, "the rest names the title too");
@@ -348,39 +353,150 @@ fn it_is_a_constant_with_no_variable() {
     assert!(constant.is_constant());
     assert_eq!(
         constant.as_value(),
-        Some(
-            Composite::map([("text", text("hi"))])
-                .expect("a map")
-                .into()
-        )
+        Some(text_map([("text", text("hi"))]).expect("a map").into())
     );
     let open = Pattern::map([("text".to_string(), var("x"))]).expect("a pattern");
     assert!(!open.is_constant());
     assert_eq!(open.as_value(), None);
 }
 
-/// A record under a version this release does not read is refused
-/// by its number, where a record of before simply does not match.
+/// An opaque record is no composite: no map or list pattern matches
+/// one, and a leaf takes it whole. A composite has no version to
+/// refuse, since its bytes are read only where they are its one
+/// canonical encoding.
 #[dialog_common::test]
-fn it_refuses_a_record_of_a_later_version_by_its_number() {
+fn it_matches_no_opaque_record_by_a_shape() {
     let pattern = Pattern::map([("title".to_string(), var("title"))]).expect("a pattern");
+    let opaque = Value::Record(vec![0x01, 0xa1, 0x61, 0x61, 0x01]);
+    assert!(unify(&pattern, &opaque).is_none());
+    assert!(unify(&Pattern::list([var("x")]), &opaque).is_none());
+    let row = unify(&var("x"), &opaque).expect("a leaf takes it");
+    assert_eq!(row.value_of("x"), Some(&opaque));
+}
 
-    let Value::Record(mut bytes) = note() else {
-        panic!("a record");
+/// A key a map pattern names matches where it holds exactly one value.
+/// A key that holds several is matched by no entry, since the pattern
+/// built holds one; a rest takes such a key with every value it holds.
+#[dialog_common::test]
+fn it_matches_a_named_key_only_where_it_holds_one_value() {
+    let tagged: Value = text_map([
+        ("title", text("Buy milk")),
+        ("tag", text("home")),
+        ("tag", text("errand")),
+    ])
+    .expect("a map")
+    .into();
+
+    let Pattern::Map(tag) = Pattern::map([("tag", var("tag"))]).expect("a pattern") else {
+        panic!("a map pattern");
     };
-    bytes[0] = 9;
-    let mut row = Match::new();
-    let refused = pattern.unify(&Value::Record(bytes), &mut row);
-    assert!(
-        matches!(refused, Err(EvaluationError::RecordVersion { version: 9 })),
-        "{refused:?}"
-    );
+    let named = Pattern::Map(tag.with_rest(Term::blank()));
+    assert!(unify(&named, &tagged).is_none(), "the tag holds two values");
 
-    let before = Value::Record(vec![0xa1, 0x61, 0x61, 0x01]);
-    assert!(unify(&pattern, &before).is_none());
-    // A leaf takes any record whole, whatever its version.
-    let mut row = Match::new();
-    assert!(var("x").unify(&before, &mut row).expect("decides"));
+    let Pattern::Map(title) = Pattern::map([("title", var("title"))]).expect("a pattern") else {
+        panic!("a map pattern");
+    };
+    let pattern = Pattern::Map(title.with_rest(Term::var("rest")));
+    let row = unify(&pattern, &tagged).expect("matches");
+    assert_eq!(
+        row.value_of("rest"),
+        Some(
+            &text_map([("tag", text("errand")), ("tag", text("home"))])
+                .expect("a map")
+                .into()
+        ),
+        "the rest takes both tags"
+    );
+    assert_eq!(pattern.build(&row), Some(tagged.clone()), "and builds back");
+
+    // A rest that holds a key the pattern names, with one value or
+    // several, makes no map this pattern takes apart.
+    let mut clash = Match::new();
+    clash
+        .bind(&Term::var("title"), text("Buy milk"))
+        .expect("binds");
+    clash
+        .bind(
+            &Term::var("rest"),
+            text_map([("title", text("Other")), ("tag", text("home"))])
+                .expect("a map")
+                .into(),
+        )
+        .expect("binds");
+    assert_eq!(pattern.build(&clash), None);
+}
+
+/// A text key and an attribute are two keys, as they are in a
+/// composite: a pattern names each as the composite holds it, and a
+/// record's field is read by its attribute.
+#[dialog_common::test]
+fn it_tells_a_text_key_from_an_attribute() {
+    let record: Value = Composite::record([
+        (the!("note/title").into(), text("Buy milk")),
+        (the!("note/done").into(), Value::Boolean(false)),
+    ])
+    .expect("a record")
+    .into();
+
+    let by_attribute = Pattern::map([
+        (the!("note/title"), var("title")),
+        (the!("note/done"), var("done")),
+    ])
+    .expect("a pattern");
+    let row = unify(&by_attribute, &record).expect("matches");
+    assert_eq!(row.value_of("title"), Some(&text("Buy milk")));
+    assert_eq!(by_attribute.build(&row), Some(record.clone()));
+
+    let by_text = Pattern::Map(shape(&[("note/title", var("title"))]).with_rest(Term::blank()));
+    assert!(unify(&by_text, &record).is_none(), "no text key is held");
+    assert_ne!(
+        by_attribute.to_string(),
+        Pattern::map([("note/title", var("title")), ("note/done", var("done"))])
+            .expect("a pattern")
+            .to_string()
+    );
+}
+
+/// A pattern that binds one field of a nested composite decodes that
+/// field and nothing beside it: each level is read through the view,
+/// a nested composite as a view of the same buffer.
+#[dialog_common::test]
+fn it_decodes_only_the_field_it_binds() {
+    fn siblings(depth: &str) -> impl Iterator<Item = (String, Value)> + '_ {
+        (0..16).map(move |index| (format!("{depth}{index}"), text(&"x".repeat(64))))
+    }
+    let leaf = Composite::map(
+        siblings("c")
+            .map(|(key, value)| (text(&key), value))
+            .chain([(text("name"), text("Ada"))]),
+    )
+    .expect("a map");
+    let middle = Composite::map(
+        siblings("b")
+            .map(|(key, value)| (text(&key), value))
+            .chain([(text("leaf"), Value::from(leaf))]),
+    )
+    .expect("a map");
+    let root: Value = Composite::map(
+        siblings("a")
+            .map(|(key, value)| (text(&key), value))
+            .chain([(text("middle"), Value::from(middle))]),
+    )
+    .expect("a map")
+    .into();
+
+    let open =
+        |entries: Vec<(&str, Pattern)>| Pattern::Map(shape(&entries).with_rest(Term::blank()));
+    let pattern = open(vec![(
+        "middle",
+        open(vec![("leaf", open(vec![("name", var("name"))]))]),
+    )]);
+
+    let before = composite_decodes();
+    let row = unify(&pattern, &root).expect("matches");
+    let decoded = composite_decodes() - before;
+    assert_eq!(row.value_of("name"), Some(&text("Ada")));
+    assert_eq!(decoded, 1, "only the name bound is decoded");
 }
 
 /// A pattern knows the variables inside it, and whether they are
@@ -427,7 +543,20 @@ fn it_is_written_one_way() {
 
     assert!(matches!(
         Pattern::map([("a".to_string(), var("x")), ("a".to_string(), var("y"))]),
-        Err(CompositeError::DuplicateKey(_))
+        Err(PatternError::RepeatedKey(Value::String(key))) if key == "a"
+    ));
+    // The natural 3 and the float 3.0 are one key, as in a composite.
+    assert!(matches!(
+        Pattern::map([
+            (Value::UnsignedInt(3), var("x")),
+            (Value::Float(3.0), var("y"))
+        ]),
+        Err(PatternError::RepeatedKey(_))
+    ));
+    // A composite is no key.
+    assert!(matches!(
+        Pattern::map([(Value::from(list([text("a")])), var("x"))]),
+        Err(PatternError::Key(CompositeError::CompositeKey))
     ));
 }
 
@@ -453,7 +582,7 @@ fn entity(uri: &str) -> Entity {
 }
 
 fn map(entries: &[(&str, Value)]) -> Value {
-    Composite::map(entries.iter().map(|(key, value)| (*key, value.clone())))
+    text_map(entries.iter().map(|(key, value)| (*key, value.clone())))
         .expect("a map")
         .into()
 }
@@ -529,7 +658,7 @@ async fn notes(branch: &Branch, operator: &Operator) -> anyhow::Result<()> {
             (
                 the!("note/payload"),
                 &entity("id:list"),
-                Composite::list([text("not"), text("a"), text("map")]).into(),
+                list([text("not"), text("a"), text("map")]).into(),
             ),
         ],
     )
@@ -546,7 +675,7 @@ async fn payloads(
     terms.insert("this".into(), Term::var("this"));
     terms.set("payload".into(), pattern);
     let rows = ConceptQuery {
-        predicate: concept("payload", "note/payload", "record:"),
+        predicate: concept("payload", "note/payload", "composite:"),
         terms,
     }
     .evaluate(Match::new().seed(), source)
@@ -724,9 +853,9 @@ async fn it_reads_a_pattern_with_nothing_to_bind_as_a_constant() -> anyhow::Resu
     Ok(())
 }
 
-/// The head of the rule below: a card, kept as a record.
+/// The head of the rule below: a card, kept as a composite map.
 fn card() -> ConceptDescriptor {
-    concept("card", "note/card", "record:")
+    concept("card", "note/card", "composite:map")
 }
 
 /// `card(this, card) :- title(this, title), body(this, body),
@@ -917,7 +1046,7 @@ async fn it_takes_a_record_apart_in_either_order_of_premises() -> anyhow::Result
     let payload = || {
         read(
             "note/payload",
-            "record:",
+            "composite:map",
             shape(&[
                 ("title", var("title")),
                 ("done", Pattern::from(Value::Boolean(false))),
@@ -996,7 +1125,7 @@ async fn it_derives_a_fact_from_inside_a_stored_record() -> anyhow::Result<()> {
         heading.clone(),
         vec![read(
             "note/payload",
-            "record:",
+            "composite:map",
             shape(&[("title", var("heading"))]).with_rest(Term::blank()),
         )],
     )?;
@@ -1037,8 +1166,8 @@ async fn it_negates_a_premise_that_holds_a_pattern() -> anyhow::Result<()> {
     // Every note whose payload is not a map that says it is done.
     let done = shape(&[("done", Pattern::from(Value::Boolean(true)))]).with_rest(Term::blank());
     let premises = vec![
-        read("note/payload", "record:", var("payload")),
-        !read("note/payload", "record:", done),
+        read("note/payload", "composite:map", var("payload")),
+        !read("note/payload", "composite:map", done),
     ];
     let (rows, _) = solve(
         &source,
@@ -1093,7 +1222,7 @@ async fn it_negates_a_pattern_over_many_candidates() -> anyhow::Result<()> {
         ),
         !read(
             "note/payload",
-            "record:",
+            "composite:map",
             shape(&[("label", var("label"))]).with_rest(Term::blank()),
         ),
     ];
@@ -1153,7 +1282,7 @@ fn it_refuses_a_rule_whose_pattern_can_never_be_bound() {
         ),
         !read(
             "note/payload",
-            "record:",
+            "composite:map",
             shape(&[("title", var("unbound"))]),
         ),
     ];
@@ -1203,7 +1332,7 @@ fn it_refuses_adding_a_number_to_a_text_bound_inside_a_map() {
         vec![
             read(
                 "note/payload",
-                "record:",
+                "composite:map",
                 shape(&[("title", Pattern::Term(title))]).with_rest(Term::blank()),
             ),
             add_one(Term::var("title")),
@@ -1223,7 +1352,7 @@ fn it_refuses_adding_a_number_to_a_text_bound_inside_a_map() {
         vec![
             read(
                 "note/payload",
-                "record:",
+                "composite:map",
                 shape(&[("count", Pattern::Term(count))]).with_rest(Term::blank()),
             ),
             add_one(Term::var("count")),
@@ -1232,8 +1361,9 @@ fn it_refuses_adding_a_number_to_a_text_bound_inside_a_map() {
     .expect("a number is added to a number bound inside a map");
 }
 
-/// A map or a list stands only where a record can be read:
-/// under a field that reads text it is refused, and so is a rest that
+/// A map or a list stands only where a composite of its kind can be
+/// read: under a field that reads text it is refused, and so under one
+/// that reads an opaque record or the other kind, and so is a rest that
 /// another premise needs to be a number.
 #[dialog_common::test]
 fn it_types_a_pattern_by_its_shape() {
@@ -1251,6 +1381,26 @@ fn it_types_a_pattern_by_its_shape() {
         "{refused:?}"
     );
 
+    // A map pattern is a composite map, which an opaque record is not,
+    // and a list pattern is no map.
+    for (declared, pattern) in [
+        ("record:", Pattern::Map(shape(&[("title", var("x"))]))),
+        ("composite:map", Pattern::list([var("x")])),
+    ] {
+        let refused = DeductiveRule::new(
+            heading.clone(),
+            vec![
+                read("note/title", "text:", var("heading")),
+                read("note/payload", declared, pattern),
+            ],
+        )
+        .expect_err("the field holds no value of the shape");
+        assert!(
+            matches!(refused, TypeError::TypeInference { .. }),
+            "{declared}: {refused:?}"
+        );
+    }
+
     // What an equality sets equal to a map is not narrowed to a
     // record, and neither is a rest: either may still be read from a
     // field that declares no type, where a value of another type is a
@@ -1260,7 +1410,7 @@ fn it_types_a_pattern_by_its_shape() {
         card(),
         vec![read(
             "note/payload",
-            "record:",
+            "composite:map",
             shape(&[("title", var("title"))]).with_rest(Term::var("card")),
         )],
     )
@@ -1272,7 +1422,7 @@ fn it_types_a_pattern_by_its_shape() {
         vec![
             read(
                 "note/payload",
-                "record:",
+                "composite:map",
                 shape(&[("title", var("title"))]).with_rest(Term::var("rest")),
             ),
             add_one(Term::var("rest")),

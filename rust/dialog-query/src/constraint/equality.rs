@@ -59,13 +59,13 @@ pub struct Equality {
     pub is: Pattern,
 }
 
-/// The kind a side of an equality has: a leaf's own, and a record for a
-/// map or a list, which is what a value of that shape is kept
-/// as.
+/// The kind a side of an equality has: a leaf's own, a composite map
+/// for a map pattern and a composite list for a list pattern.
 fn kind_of(side: &Pattern) -> Option<Kind> {
     match side {
         Pattern::Term(term) => term.kind(),
-        _ => Some(Kind::from(ValueDataType::Record)),
+        Pattern::Map(_) => Some(Kind::from(ValueDataType::CompositeMap)),
+        Pattern::List(_) => Some(Kind::from(ValueDataType::CompositeList)),
     }
 }
 
@@ -252,7 +252,7 @@ impl Equality {
             }
         };
         let mut extension = base.clone();
-        Ok(other.unify(&value, &mut extension)?.then_some(extension))
+        Ok(other.unify(&value, &mut extension).then_some(extension))
     }
 }
 

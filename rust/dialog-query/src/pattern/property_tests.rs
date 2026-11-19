@@ -62,11 +62,32 @@ fn value(dice: &mut Dice, depth: usize) -> Value {
                 .map(|_| value(dice, depth - 1))
                 .collect::<Vec<_>>(),
         )
+        .expect("a list")
         .into()
     } else {
-        Composite::map((0..size).map(|at| (format!("k{at}"), value(dice, depth - 1))))
-            .expect("no key twice")
-            .into()
+        let entries = (0..size)
+            .map(|at| (key(dice, at), value(dice, depth - 1)))
+            .collect::<Vec<_>>();
+        Composite::map(entries).expect("a map").into()
+    }
+}
+
+/// The key a pattern names at `at`: text, a natural or an attribute,
+/// each kind of key a composite holds, never one of [`other`]'s.
+fn key(dice: &mut Dice, at: usize) -> Value {
+    match dice.below(3) {
+        0 => Value::String(format!("k{at}")),
+        1 => Value::UnsignedInt(at as u128),
+        _ => Value::Symbol(format!("k/k{at}").parse().expect("an attribute")),
+    }
+}
+
+/// A key a pattern does not name, drawn from two so that a rest may
+/// hold one key with several values.
+fn other(dice: &mut Dice) -> Value {
+    match dice.below(2) {
+        0 => Value::String(format!("other{}", dice.below(2))),
+        _ => Value::UnsignedInt(100 + dice.below(2) as u128),
     }
 }
 
@@ -101,26 +122,22 @@ fn pattern(dice: &mut Dice, depth: usize, row: &mut Match, names: &mut usize) ->
                 let others = (0..dice.below(3))
                     .map(|_| value(dice, 1))
                     .collect::<Vec<_>>();
-                let run = variable(row, names, Composite::list(others).into());
+                let run = variable(row, names, Composite::list(others).expect("a list").into());
                 list.with_run(run).into()
             }
         }
     } else {
-        let entries: Vec<(String, Pattern)> = (0..size)
-            .map(|at| (format!("k{at}"), pattern(dice, depth - 1, row, names)))
+        let entries: Vec<(Value, Pattern)> = (0..size)
+            .map(|at| (key(dice, at), pattern(dice, depth - 1, row, names)))
             .collect();
         let map = MapPattern::new(entries).expect("no key twice");
         match dice.below(2) {
             0 => map.into(),
             _ => {
                 let others = (0..dice.below(3))
-                    .map(|at| (format!("other{at}"), value(dice, 1)))
+                    .map(|_| (other(dice), value(dice, 1)))
                     .collect::<Vec<_>>();
-                let rest = variable(
-                    row,
-                    names,
-                    Composite::map(others).expect("no key twice").into(),
-                );
+                let rest = variable(row, names, Composite::map(others).expect("a map").into());
                 map.with_rest(rest).into()
             }
         }
@@ -174,7 +191,7 @@ fn it_builds_what_it_takes_apart_and_takes_apart_what_it_builds() {
         // Met with nothing bound: the value binds the variables.
         let mut taken = Match::new();
         assert!(
-            drawn.unify(&built, &mut taken).expect("is read"),
+            drawn.unify(&built, &mut taken),
             "{round}: {drawn} does not match what it built"
         );
         assert_eq!(
@@ -186,7 +203,7 @@ fn it_builds_what_it_takes_apart_and_takes_apart_what_it_builds() {
         // Met with its variables bound: the value is checked by them.
         let mut checked = row.clone();
         assert!(
-            drawn.unify(&built, &mut checked).expect("is read"),
+            drawn.unify(&built, &mut checked),
             "{round}: {drawn} does not match what it built from the row that built it"
         );
 
@@ -194,7 +211,7 @@ fn it_builds_what_it_takes_apart_and_takes_apart_what_it_builds() {
         // builds the value.
         let narrowed = typed(&drawn, round);
         let mut taken = Match::new();
-        if narrowed.unify(&built, &mut taken).expect("is read") {
+        if narrowed.unify(&built, &mut taken) {
             typed_matches += 1;
             assert_eq!(
                 narrowed.build(&taken),
@@ -213,7 +230,7 @@ fn it_builds_what_it_takes_apart_and_takes_apart_what_it_builds() {
         {
             let mut taken = Match::new();
             assert!(
-                !drawn.unify(&elsewhere, &mut taken).expect("is read")
+                !drawn.unify(&elsewhere, &mut taken)
                     || drawn.build(&taken) == Some(elsewhere.clone()),
                 "{round}: {drawn} matches {elsewhere:?} and builds another value"
             );

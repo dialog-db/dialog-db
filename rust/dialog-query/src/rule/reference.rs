@@ -25,7 +25,7 @@ use std::collections::BTreeSet;
 use std::{error, fmt};
 
 use dialog_corpus::Value;
-use dialog_corpus::identity::{BOOLEAN, ENTITY, NUMBER, SYMBOL, TEXT};
+use dialog_corpus::identity::{BOOLEAN, ENTITY, NUMBER, RECORD, SYMBOL, TEXT};
 use merkle_reference::{Reference, Type};
 use serde::Serialize;
 use serde::ser::{self, SerializeMap as _};
@@ -172,7 +172,7 @@ fn pattern_reference(pattern: &Pattern) -> Option<Reference> {
                 .entries()
                 .iter()
                 .map(|(key, part)| {
-                    let key = Value::String(key.clone()).reference();
+                    let key = key.reference();
                     Some((key, pattern_reference(part)?))
                 })
                 .collect::<Option<Vec<_>>>()?;
@@ -263,7 +263,15 @@ fn field_reference(field: &ConceptFieldDescriptor) -> Reference {
     Type::LIST.list([field.descriptor().reference(), Type::MAP.map(options)])
 }
 
+/// A term's reference: a variable's and a scalar constant's that of
+/// its wire form, and a composite constant's its own reference
+/// ([`Composite::reference`](dialog_corpus::Composite::reference)), so
+/// a pattern with nothing to bind, held as the value it is, is named
+/// as that value is.
 fn term_reference(term: &Term<Any>) -> Option<Reference> {
+    if let Term::Constant(value @ Value::Composite(_)) = term {
+        return Some(value.reference());
+    }
     wire_reference(term)
 }
 
@@ -325,9 +333,7 @@ fn constant(tag: &str, payload: &Node) -> Option<Reference> {
         ("boolean:", Node::Bool(value)) => BOOLEAN.reference_of(&[u8::from(*value)]),
         ("natural:" | "integer:" | "float:", Node::Number(content)) => NUMBER.reference_of(content),
         ("bytes:", payload) => Reference::hash(&bytes_of(payload)?),
-        // A record that holds a composite is named by its parts, and
-        // any other by its bytes, as `Value::reference` names one.
-        ("record:", payload) => Value::Record(bytes_of(payload)?).reference(),
+        ("record:", payload) => RECORD.reference_of(&bytes_of(payload)?),
         _ => return None,
     })
 }

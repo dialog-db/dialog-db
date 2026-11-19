@@ -146,11 +146,11 @@ impl TypeEnv {
         // once every premise has contributed, so an operand a later
         // premise types still decides the output.
         let mut signed: Vec<SignedImage> = Vec::new();
-        // The variables a pattern makes hold a record: what an equality
-        // sets equal to a map or a list, a rest and a run.
-        // Checked once every premise has contributed (see
-        // [`Self::check_records`]).
-        let mut records: Vec<String> = Vec::new();
+        // The variables a pattern makes hold a composite, each with the
+        // kind it makes it: what an equality sets equal to a map or a
+        // list, a rest (a map) and a run (a list). Checked once every
+        // premise has contributed (see [`Self::check_composites`]).
+        let mut composites: Vec<(String, ValueType)> = Vec::new();
 
         for premise in premises {
             // Negation premises don't contribute; they filter on
@@ -184,7 +184,7 @@ impl TypeEnv {
                 // typed by its shape and its leaves, not as the
                 // variable standing for the whole.
                 if let Some(pattern) = shape {
-                    Self::infer_shape(&mut ctx, pattern, field.content_type(), &mut records)?;
+                    Self::infer_shape(&mut ctx, pattern, field.content_type(), &mut composites)?;
                     continue;
                 }
                 let Some(var_name) = param.name() else {
@@ -214,17 +214,17 @@ impl TypeEnv {
                 }
             }
 
-            // A variable an equality sets equal to a map
-            // or a list holds a record, in every row that passes it.
+            // A variable an equality sets equal to a map or a list holds
+            // a composite of that kind, in every row that passes it.
             if let Proposition::Constraint(Constraint::Equality(equality)) = proposition {
                 for (shape, other) in [
                     (&equality.this, &equality.is),
                     (&equality.is, &equality.this),
                 ] {
-                    if shape.is_composite()
+                    if let Some(kind) = Self::kind_of(shape)
                         && let Some(name) = other.name()
                     {
-                        records.push(name.to_string());
+                        composites.push((name.to_string(), kind));
                     }
                 }
             }
@@ -233,7 +233,7 @@ impl TypeEnv {
         }
 
         Self::settle_signed(&mut ctx, &signed)?;
-        Self::check_records(&mut ctx, &records)?;
+        Self::check_composites(&mut ctx, &composites)?;
 
         let named: HashMap<String, VarId> = ctx
             .named_vars()
@@ -369,39 +369,54 @@ impl TypeEnv {
         Ok(())
     }
 
+    /// The kind of composite a map or a list pattern stands for:
+    /// `composite:map` (a record among them) or `composite:list`.
+    /// `None` for a leaf.
+    fn kind_of(pattern: &Pattern) -> Option<ValueType> {
+        match pattern {
+            Pattern::Term(_) => None,
+            Pattern::Map(_) => Some(ValueType::CompositeMap),
+            Pattern::List(_) => Some(ValueType::CompositeList),
+        }
+    }
+
     /// Contribute a map or a list of terms standing in a slot
     /// of kind `slot`. The pattern's type follows from its shape and
     /// its leaves:
     ///
-    /// - a value of the shape is kept as a record, so the slot has to
-    ///   read records, and one that reads only text is a conflict;
+    /// - a value of the shape is a composite of its kind, so the slot
+    ///   has to read that kind, and one that reads only text, or only
+    ///   lists where the pattern is a map, is a conflict;
     /// - a leaf keeps the descriptor a term has: a variable written as
     ///   text is text wherever else the rule mentions it, and one
     ///   written with no type is any present value;
-    /// - a rest is a map and a run is a list, so each holds a record
-    ///   and is added to `records`.
+    /// - a rest is a map and a run is a list, and each is added to
+    ///   `composites` with its kind.
     fn infer_shape(
         ctx: &mut Context,
         pattern: &Pattern,
         slot: Option<&Kind>,
-        records: &mut Vec<String>,
+        composites: &mut Vec<(String, ValueType)>,
     ) -> Result<(), InferenceError> {
-        let record = Inferred::Static(Kind::from(ValueType::Record));
-        if let Some(slot) = slot
-            && let Err(reason) = ctx.unify(&lift(&slot.clone().required()), &record)
+        if let Some(kind) = Self::kind_of(pattern)
+            && let Some(slot) = slot
+            && let Err(reason) = ctx.unify(
+                &lift(&slot.clone().required()),
+                &Inferred::Static(Kind::from(kind)),
+            )
         {
             return Err(InferenceError::Conflict {
                 variable: pattern.to_string(),
                 reason: reason.to_string(),
             });
         }
-        Self::infer_leaves(ctx, pattern, records)
+        Self::infer_leaves(ctx, pattern, composites)
     }
 
     fn infer_leaves(
         ctx: &mut Context,
         pattern: &Pattern,
-        records: &mut Vec<String>,
+        composites: &mut Vec<(String, ValueType)>,
     ) -> Result<(), InferenceError> {
         let leaf = |ctx: &mut Context, term: &Term<Any>| {
             let Some(name) = term.name() else {
@@ -420,54 +435,61 @@ impl TypeEnv {
             Pattern::Term(term) => leaf(ctx, term),
             Pattern::Map(map) => {
                 for (_, part) in map.entries() {
-                    Self::infer_leaves(ctx, part, records)?;
+                    Self::infer_leaves(ctx, part, composites)?;
                 }
-                Self::infer_remainder(ctx, map.rest(), records, leaf)
+                Self::infer_remainder(ctx, map.rest(), ValueType::CompositeMap, composites, leaf)
             }
             Pattern::List(list) => {
                 for part in list.items() {
-                    Self::infer_leaves(ctx, part, records)?;
+                    Self::infer_leaves(ctx, part, composites)?;
                 }
-                Self::infer_remainder(ctx, list.run(), records, leaf)
+                Self::infer_remainder(ctx, list.run(), ValueType::CompositeList, composites, leaf)
             }
         }
     }
 
     /// A rest or a run: a present value, like any leaf, that holds a
-    /// record.
+    /// composite of `kind`.
     fn infer_remainder(
         ctx: &mut Context,
         remainder: Option<&Term<Any>>,
-        records: &mut Vec<String>,
+        kind: ValueType,
+        composites: &mut Vec<(String, ValueType)>,
         leaf: impl Fn(&mut Context, &Term<Any>) -> Result<(), InferenceError>,
     ) -> Result<(), InferenceError> {
         let Some(term) = remainder else {
             return Ok(());
         };
-        records.extend(term.name().map(String::from));
+        composites.extend(term.name().map(|name| (name.to_string(), kind)));
         leaf(ctx, term)
     }
 
-    /// Refuse a rule in which a variable a pattern makes hold a record
-    /// cannot hold one, because another premise types it as something
-    /// else: a rest that a sum adds to, or a field of text read into a
-    /// map.
+    /// Refuse a rule in which a variable a pattern makes hold a
+    /// composite cannot hold one of that kind, because another premise
+    /// types it as something else: a rest that a sum adds to, a field
+    /// of text read into a map, or a run read where a map is declared.
     ///
     /// The variable is checked and not narrowed. A variable narrowed to
     /// a kind is stamped with it wherever a concept premise binds it,
     /// and a concept field that declares no type then fails the query
     /// on the first value of another kind it yields, where a pattern is
     /// to drop that row.
-    fn check_records(ctx: &mut Context, records: &[String]) -> Result<(), InferenceError> {
-        let record = Primitive::singleton(ValueType::Record);
-        for name in records {
+    fn check_composites(
+        ctx: &mut Context,
+        composites: &[(String, ValueType)],
+    ) -> Result<(), InferenceError> {
+        for (name, held) in composites {
             let var = ctx.var_for_name(name);
             let kind = Self::resolve(ctx, var);
-            if kind.primitive_part().intersect(record).is_none() {
+            if kind
+                .primitive_part()
+                .intersect(Primitive::singleton(*held))
+                .is_none()
+            {
                 return Err(InferenceError::Conflict {
                     variable: name.clone(),
                     reason: format!(
-                        "a pattern makes it hold a record, and the rule's other premises make it \
+                        "a pattern makes it hold a {held}, and the rule's other premises make it \
                          {kind}"
                     ),
                 });

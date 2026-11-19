@@ -6,7 +6,7 @@ use std::error;
 use std::fmt;
 
 use crate::attribute::Keyed;
-use crate::corpus::{COMPOSITE_VERSION, CorpusTypeError, DialogCorpusError, Type, Value};
+use crate::corpus::{CorpusTypeError, DialogCorpusError, Type, Value};
 pub use crate::environment::Environment;
 pub use crate::proposition::Proposition;
 use crate::reduce::Aggregator;
@@ -687,17 +687,6 @@ pub enum EvaluationError {
     ConstraintViolation {
         /// Description of the violated constraint.
         constraint: String,
-    },
-
-    /// A pattern was matched against a record under a version this
-    /// release does not read. The record may well match, and this
-    /// release cannot tell, so the row is refused and not dropped.
-    #[error(
-        "A record in version {version} cannot be taken apart: this release reads version {COMPOSITE_VERSION}"
-    )]
-    RecordVersion {
-        /// The version the record names.
-        version: u8,
     },
 
     /// A required parameter was not provided.
