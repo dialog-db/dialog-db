@@ -31,6 +31,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use dialog_corpus::Entity;
+use futures_util::stream;
 
 use crate::Term;
 use crate::concept::Conclusion;
@@ -156,7 +157,7 @@ where
                     }
                 }
             }
-            let folded = reduce.fold(futures_util::stream::iter(rows)).await?;
+            let folded = reduce.fold(stream::iter(rows)).await?;
             // The caller's rows, each joined to the folded rows it
             // agrees with.
             for caller in selection.try_vec().await? {
@@ -214,9 +215,9 @@ mod tests {
     use crate::the;
     use anyhow::Result;
     use dialog_peer::helpers::{test_repo, test_session_with_peer};
+    use dialog_storage::provider::storage::VolatileSpace;
 
-    type Operator =
-        dialog_peer::Peer<dialog_storage::provider::storage::VolatileSpace, dialog_peer::Session>;
+    type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
 
     /// To-do 1 tagged `errand` and `home`, to-do 2 with no tag.
     async fn todos() -> Result<(Operator, dialog_repository::Branch, Entity, Entity)> {
