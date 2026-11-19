@@ -350,53 +350,59 @@ struct Group {
     columns: Vec<Vec<Value>>,
 }
 
-impl Reduce {
-    /// Create a reduce over the given grouping field names and
-    /// entries.
-    pub fn new(groups: Vec<String>, entries: Vec<ReduceEntry>) -> Self {
-        Self { groups, entries }
+/// The groups a fold has read so far, by key bytes, each with its
+/// columns of present input values.
+struct Table {
+    group_terms: Vec<Term<Any>>,
+    entries: Vec<ReduceEntry>,
+    groups: BTreeMap<Vec<u8>, Group>,
+}
+
+impl Table {
+    fn new(reduce: Reduce) -> Self {
+        let Reduce { groups, entries } = reduce;
+        Self {
+            group_terms: groups.iter().map(|name| Term::var(name.as_str())).collect(),
+            entries,
+            groups: BTreeMap::new(),
+        }
     }
 
-    /// Consume the selection, group its rows, and fold each group
-    /// into one output row.
-    ///
-    /// Output rows bind the grouping fields to the group key values
-    /// (Present or Absent) and each reduce output field to its fold
-    /// result — Absent for the identity-less folds over an all-absent
-    /// column. Rows come back ordered by group key bytes, so the
-    /// result is independent of input row order.
-    pub async fn fold(self, selection: impl Selection) -> Result<Vec<Match>, EvaluationError> {
-        let Self { groups, entries } = self;
-        let group_terms: Vec<Term<Any>> =
-            groups.iter().map(|name| Term::var(name.as_str())).collect();
-
-        let mut table: BTreeMap<Vec<u8>, Group> = BTreeMap::new();
-        let mut selection = pin!(selection);
-        while let Some(row) = selection.try_next().await? {
-            let mut key = Vec::with_capacity(group_terms.len());
-            for term in &group_terms {
-                // Unbound propagates as UnboundVariable; Absent is a
-                // legitimate key component.
-                match row.lookup(term)? {
-                    Binding::Present(value) => key.push(Some(value)),
-                    Binding::Absent => key.push(None),
-                }
-            }
-            let key_bytes = encode(&key)?;
-            let group = table.entry(key_bytes).or_insert_with(|| Group {
-                key,
-                columns: vec![Vec::new(); entries.len()],
-            });
-            for (column, entry) in group.columns.iter_mut().zip(&entries) {
-                match row.lookup(&entry.input)? {
-                    Binding::Present(value) => column.push(value),
-                    Binding::Absent => {}
-                }
+    /// Put a row's present inputs into its group's columns.
+    fn add(&mut self, row: &Match) -> Result<(), EvaluationError> {
+        let mut key = Vec::with_capacity(self.group_terms.len());
+        for term in &self.group_terms {
+            // Unbound propagates as UnboundVariable; Absent is a
+            // legitimate key component.
+            match row.lookup(term)? {
+                Binding::Present(value) => key.push(Some(value)),
+                Binding::Absent => key.push(None),
             }
         }
+        let key_bytes = encode(&key)?;
+        let entries = &self.entries;
+        let group = self.groups.entry(key_bytes).or_insert_with(|| Group {
+            key,
+            columns: vec![Vec::new(); entries.len()],
+        });
+        for (column, entry) in group.columns.iter_mut().zip(entries) {
+            match row.lookup(&entry.input)? {
+                Binding::Present(value) => column.push(value),
+                Binding::Absent => {}
+            }
+        }
+        Ok(())
+    }
 
-        let mut output = Vec::with_capacity(table.len());
-        for group in table.into_values() {
+    /// One row for each group, in the order of the key bytes.
+    fn finish(self) -> Result<Vec<Match>, EvaluationError> {
+        let Self {
+            group_terms,
+            entries,
+            groups,
+        } = self;
+        let mut output = Vec::with_capacity(groups.len());
+        for group in groups.into_values() {
             let mut row = Match::new();
             for (term, value) in group_terms.iter().zip(group.key) {
                 match value {
@@ -414,6 +420,44 @@ impl Reduce {
             output.push(row);
         }
         Ok(output)
+    }
+}
+
+impl Reduce {
+    /// Create a reduce over the given grouping field names and
+    /// entries.
+    pub fn new(groups: Vec<String>, entries: Vec<ReduceEntry>) -> Self {
+        Self { groups, entries }
+    }
+
+    /// Consume the selection, group its rows, and fold each group
+    /// into one output row.
+    ///
+    /// Output rows bind the grouping fields to the group key values
+    /// (Present or Absent) and each reduce output field to its fold
+    /// result — Absent for the identity-less folds over an all-absent
+    /// column. Rows come back ordered by group key bytes, so the
+    /// result is independent of input row order.
+    pub async fn fold(self, selection: impl Selection) -> Result<Vec<Match>, EvaluationError> {
+        let mut table = Table::new(self);
+        let mut selection = pin!(selection);
+        while let Some(row) = selection.try_next().await? {
+            table.add(&row)?;
+        }
+        table.finish()
+    }
+
+    /// [`fold`](Self::fold) over rows already in hand, without awaiting:
+    /// the same grouping and the same folds, so the same rows.
+    pub fn fold_rows<'r>(
+        self,
+        rows: impl IntoIterator<Item = &'r Match>,
+    ) -> Result<Vec<Match>, EvaluationError> {
+        let mut table = Table::new(self);
+        for row in rows {
+            table.add(row)?;
+        }
+        table.finish()
     }
 
     /// Evaluate as a premise-shaped stream transformer: consume the

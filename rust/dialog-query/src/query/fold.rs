@@ -31,7 +31,6 @@
 use std::collections::{BTreeMap, HashMap};
 
 use dialog_corpus::Entity;
-use futures_util::stream;
 
 use crate::Term;
 use crate::concept::Conclusion;
@@ -101,6 +100,65 @@ impl<G, Q> Fold<G, Q> {
     pub fn reduce(&self) -> &Reduce {
         &self.reduce
     }
+
+    /// The query whose rows are the groups.
+    pub fn groups(&self) -> &G {
+        &self.groups
+    }
+
+    /// The query whose rows are folded.
+    pub fn inputs(&self) -> &Q {
+        &self.inputs
+    }
+
+    /// The key a row of either query is grouped under: the values it
+    /// binds the grouping fields of [`reduce`](Self::reduce) to, written
+    /// as their dag-cbor bytes. A group row and an input row with the
+    /// same key are of one group.
+    pub fn key(&self, row: &Match) -> Result<Vec<u8>, EvaluationError> {
+        key(row, &self.reduce.groups)
+    }
+
+    /// Fold the group rows `groups`, each joined with the input rows
+    /// `inputs` gives for its [`key`](Self::key), or, where it gives
+    /// none, with each input absent, by [`Reduce::fold`]: one folded row
+    /// for each key among `groups` that some joined row is left for.
+    ///
+    /// This is the whole of a fold: [`evaluate`](Application::evaluate)
+    /// calls it once with every group, and a subscription of a fold
+    /// calls it with the group rows of one key to fold that group again.
+    /// [`Reduce::fold`] groups by key and folds each group's values in an
+    /// order of their own, never the order of the rows, so a group folded
+    /// alone gives the row it gives folded among every other.
+    pub fn fold_groups<'r, I>(
+        &self,
+        groups: impl IntoIterator<Item = &'r Match>,
+        inputs: impl Fn(&[u8]) -> I,
+    ) -> Result<Vec<Match>, EvaluationError>
+    where
+        I: IntoIterator<Item = &'r Match>,
+    {
+        let mut rows = Vec::new();
+        for group in groups {
+            let mut found = inputs(&self.key(group)?).into_iter().peekable();
+            if found.peek().is_none() {
+                let mut row = group.clone();
+                for entry in &self.reduce.entries {
+                    if !row.contains(&entry.input) {
+                        row.bind_absent(&entry.input)?;
+                    }
+                }
+                rows.push(row);
+            } else {
+                for input in found {
+                    if let Some(row) = group.clone().combine(input) {
+                        rows.push(row);
+                    }
+                }
+            }
+        }
+        self.reduce.clone().fold_rows(&rows)
+    }
 }
 
 /// How a group's key is written, to look its inputs up by.
@@ -129,35 +187,14 @@ where
         Env: crate::Scope<'a>,
     {
         try_stream! {
-            let Fold { groups, inputs, reduce } = self;
             // The inputs of each group, by its key.
             let mut joined: HashMap<Vec<u8>, Vec<Match>> = HashMap::new();
-            for row in inputs.evaluate(Match::new().seed(), env).try_vec().await? {
-                joined.entry(key(&row, &reduce.groups)?).or_default().push(row);
+            for row in self.inputs.clone().evaluate(Match::new().seed(), env).try_vec().await? {
+                joined.entry(self.key(&row)?).or_default().push(row);
             }
             // Every group, with its inputs, or with each input absent.
-            let mut rows = Vec::new();
-            for group in groups.evaluate(Match::new().seed(), env).try_vec().await? {
-                match joined.get(&key(&group, &reduce.groups)?) {
-                    Some(found) => {
-                        for input in found {
-                            if let Some(row) = group.clone().combine(input) {
-                                rows.push(Ok(row));
-                            }
-                        }
-                    }
-                    None => {
-                        let mut row = group.clone();
-                        for entry in &reduce.entries {
-                            if !row.contains(&entry.input) {
-                                row.bind_absent(&entry.input)?;
-                            }
-                        }
-                        rows.push(Ok(row));
-                    }
-                }
-            }
-            let folded = reduce.fold(stream::iter(rows)).await?;
+            let groups = self.groups.clone().evaluate(Match::new().seed(), env).try_vec().await?;
+            let folded = self.fold_groups(&groups, |key| joined.get(key).into_iter().flatten())?;
             // The caller's rows, each joined to the folded rows it
             // agrees with.
             for caller in selection.try_vec().await? {
@@ -197,6 +234,20 @@ where
                 .map_err(|_| EvaluationError::Store("the ungrouped entity".into()))?,
         };
         Ok(FoldConclusion { this, values })
+    }
+
+    /// Each grouping field and fold bound to its value, absent where
+    /// it is absent: what [`realize`](Application::realize) read.
+    fn bindings(&self, conclusion: &FoldConclusion) -> Option<Match> {
+        let mut row = Match::new();
+        for (name, value) in &conclusion.values {
+            let term = Term::<Any>::var(name.as_str());
+            match value {
+                Some(value) => row.bind(&term, value.clone()).ok()?,
+                None => row.bind_absent(&term).ok()?,
+            }
+        }
+        Some(row)
     }
 }
 
