@@ -47,4 +47,6 @@ He asked whether layers that move at different paces, the durable one seldom and
 
 Built in three steps, each a pull request: the ephemeral layer's facts copy-on-write, with no change of behaviour; the frame and `poll_at`; a durable layer's move as a difference.
 
-Open, asked of the maintainer: whether a fact that came and went between two polls is reported. A poll that reads the state as of its frame does not see it.
+Whether a fact that came and went between two polls is reported: the maintainer, 2026-11-19, a subscription that reacts to commands on a channel cannot skip one; but whether subscriptions cover channels at all is a separate question, and it can be argued they do not. Not decided.
+
+So the frame is built so as not to decide it: a frame names a sequence for each ephemeral layer, and a layer keeps its last instants, so a caller that must see every instant polls frame by frame through them, and one that wants what holds now polls at the newest. A poll reports what holds as of its frame.
