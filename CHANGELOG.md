@@ -356,6 +356,33 @@ Why: a rule set has to mean one thing whatever else is installed. The
 same body gave a different answer when an unrelated rule closed a cycle
 around it, with nothing reported. Setting the rule aside is reported,
 and names the rule.
+
+### An ephemeral line can be read as it stood, at no cost to take: `Ephemeral::frozen`
+
+[#841](https://github.com/dialog-db/dialog-db/pull/841).
+
+`Ephemeral::frozen` returns a `Frozen`: the line's facts, tombstones and
+revision as they stood when it was taken, answering the reads the line
+answers (`scan`, `select`, `export`, `len`, `is_empty`, `revision`) and
+never changing after. The line now holds its facts in chunks shared by
+reference count, so taking one copies nothing, and a write to the line
+while one is held copies the chunk it changes rather than every fact.
+
+What this changes for you:
+
+- New: `Ephemeral::frozen() -> Frozen`, and the `Frozen` type.
+- Nothing a read of a live line answers changes.
+
+Why: a subscription's poll is to read one fixed state of every layer,
+so that subscriptions of one view agree and a channel's facts, which
+last one tick, are read by a retry as they stood. Until now the state of
+a session overlay or a memory layer at an earlier point was had only by
+copying the whole line and undoing its instants.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten.
+
 ### A query can fold, and a fold can be kept current
 
 [#839](https://github.com/dialog-db/dialog-db/pull/839).
