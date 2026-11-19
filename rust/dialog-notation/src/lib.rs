@@ -75,7 +75,7 @@ pub use analyze::{Analysis, Analyzer};
 pub use check::{Checked, check, check_forms};
 pub use compile::{Query, Step, Write, compile};
 pub use declare::{Concept, Declaration, Key, Line};
-pub use definition::{Binding, Defined, Definition, Namespaces};
+pub use definition::{Binding, Defined, Definition, Namespaces, Suggestion};
 pub use diagnostic::{Diagnostic, Severity};
 pub use expand::{Expander, Position};
 pub use form::{Form, Part, read};
@@ -134,4 +134,45 @@ pub enum Error {
     /// namespace and its definition.
     #[error("{} is defined more than once under one signature: {}", .0.name, candidates(&.0.candidates))]
     Several(Box<Candidates>),
+    /// A bare name that is not mine: a namespace one of my petnames
+    /// points at has it, and it is written `@petname/name`.
+    #[error("{} is no name of yours: {}", .0.name, suggested(&.0.suggestions))]
+    Elsewhere(Box<Suggested>),
+    /// A bare name of mine whose signatures the labels written fit none
+    /// of, where a namespace one of my petnames points at has the name
+    /// under one they fit.
+    #[error("{} of yours takes no {}: {} does, perhaps it is meant", .0.name, labelled(&.0.labels), suggested(&.0.suggestions))]
+    Unfitting(Box<Suggested>),
+}
+
+/// A name that was not resolved, the labels it was written with, and
+/// what may have been meant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Suggested {
+    /// The name as written.
+    pub name: String,
+    /// The labels written.
+    pub labels: Vec<String>,
+    /// What may have been meant, each where it is and under which
+    /// signature.
+    pub suggestions: Vec<definition::Suggestion>,
+}
+
+fn suggested(suggestions: &[definition::Suggestion]) -> String {
+    suggestions
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn labelled(labels: &[String]) -> String {
+    if labels.is_empty() {
+        return "application with no label".into();
+    }
+    labels
+        .iter()
+        .map(|label| format!("{label}:"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }

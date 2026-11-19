@@ -229,19 +229,25 @@ async fn it_sees_a_definition_a_pull_brought() -> Result<()> {
 }
 
 /// A definition of another namespace, as a branch both write to would
-/// hold it: `todo` of the same labels as mine, over other attributes.
+/// hold it: `chore`, which mine does not define, and `theirs` in mine
+/// bound to their namespace.
 async fn theirs(notebook: &mut Notebook) -> Result<Defined> {
-    let mut analyzer =
-        Analyzer::new()?.with_namespace(dialog_corpus::Entity::from_str("did:key:theirs")?);
+    let theirs = dialog_corpus::Entity::from_str("did:key:theirs")?;
+    let mut analyzer = Analyzer::new()?.with_namespace(theirs.clone());
     let checked = check(
         &mut analyzer,
-        "(concept (todo ?t title: ?title) (abc.task/name of: ?t is: ?title as: :text))",
+        "(concept (chore ?t title: ?title) (abc.task/name of: ?t is: ?title as: :text))",
     );
     let made = checked.defined[0].clone();
     let mut transaction = notebook.branch.transaction();
     for statement in definition::statements(&made)? {
         transaction = transaction.assert(statement);
     }
+    transaction = transaction.assert(definition::binding_statement(&Binding {
+        namespace: notebook.analyzer().namespaces().mine().clone(),
+        key: "theirs".into(),
+        referent: theirs,
+    })?);
     transaction
         .commit()
         .publish()
@@ -251,64 +257,42 @@ async fn theirs(notebook: &mut Notebook) -> Result<Defined> {
     Ok(made)
 }
 
-/// `todo` alone is every namespace's: two definitions of one signature,
-/// mine and another's, are refused, both listed, and nothing of the
-/// document is written. `@theirs/todo`, once `theirs` in mine names
-/// their namespace, is theirs alone.
+/// A bare name is mine and nothing else. One mine does not hold is
+/// refused, naming the `@theirs/chore` that is, and nothing of the
+/// document is written; written `@theirs/chore`, it is theirs.
 #[dialog_common::test]
-async fn it_refuses_a_name_two_namespaces_define_and_writes_nothing() -> Result<()> {
+async fn it_refuses_a_bare_name_that_is_not_mine_and_writes_nothing() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     notebook.submit(DOCUMENT).await?;
     let made = theirs(&mut notebook).await?;
     let live = Live::new(notebook.branch.clone());
     let kept = live.kept(&notebook.operator).await?;
-    let mine = notebook.analyzer().namespaces().mine().clone();
     let revision = notebook.branch.revision();
     let refused = notebook
         .submit(
             r#"(assert (todo todo:2 title: "Call mum"))
-               (concept (card ?c is: ?x) (xyz.card/is of: ?c is: ?x))"#,
+               (assert (chore task:2 title: "Mine?"))"#,
         )
         .await
         .map_err(|error| error.downcast::<Error>());
-    let Err(Ok(Error::Several(several))) = &refused else {
-        panic!("refused as several: {refused:?}");
-    };
-    assert!(matches!(&refused, Err(Ok(Error::Several(_)))));
-    assert_eq!(several.name, "todo");
-    let mut listed: Vec<&str> = several
-        .candidates
-        .iter()
-        .map(|(namespace, _)| namespace.as_str())
-        .collect();
-    listed.sort();
-    let mut namespaces = vec!["did:key:theirs", mine.as_str()];
-    namespaces.sort();
-    assert_eq!(listed, namespaces);
     assert!(
-        several
-            .candidates
-            .iter()
-            .any(|(_, definition)| definition == made.definition.entity.as_str())
+        matches!(&refused, Err(Ok(Error::Elsewhere(_)))),
+        "{refused:?}"
     );
+    let Err(Ok(Error::Elsewhere(elsewhere))) = &refused else {
+        unreachable!()
+    };
+    assert_eq!(elsewhere.name, "chore");
+    let [suggestion] = elsewhere.suggestions.as_slice() else {
+        panic!("one suggestion: {elsewhere:?}");
+    };
+    assert_eq!(suggestion.to_string(), "@theirs/chore (concept (title:))");
+    assert_eq!(suggestion.definition, made.definition.entity);
     assert_eq!(notebook.branch.revision(), revision, "nothing is written");
     assert_eq!(live.kept(&notebook.operator).await?, kept);
 
-    // A petname says whose: `theirs` in mine, bound to their namespace.
-    let mut transaction = notebook.branch.transaction();
-    transaction = transaction.assert(definition::binding_statement(&Binding {
-        namespace: mine.clone(),
-        key: "theirs".into(),
-        referent: dialog_corpus::Entity::from_str("did:key:theirs")?,
-    })?);
-    transaction
-        .commit()
-        .publish()
-        .perform(&notebook.operator)
-        .await?;
-    notebook.reload().await?;
     notebook
-        .submit(r#"(assert (@theirs/todo task:1 title: "Theirs"))"#)
+        .submit(r#"(assert (@theirs/chore task:1 title: "Theirs"))"#)
         .await?;
     assert_eq!(
         notebook.submit("(select (abc.task ?t name: ?x))").await?.0,

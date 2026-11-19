@@ -1806,7 +1806,7 @@ impl Expander {
             )
         };
         let taken = match found.len() {
-            0 => return Err(Error::Unknown(tree.to_string())),
+            0 => return Err(self.unresolved(tree, &said, written.as_deref())),
             1 => found.remove(0),
             _ if self.negating => return Err(ambiguous(&found)),
             _ if position == Position::Head && !self.reporting => {
@@ -1846,6 +1846,49 @@ impl Expander {
             }
         }
         Ok(answer)
+    }
+
+    /// Why nothing takes `tree`, written with the name `written`: a bare
+    /// name mine does not hold, or holds under signatures the labels fit
+    /// none of, said with where a petname of mine points at one that
+    /// fits; anything else is unknown.
+    fn unresolved(&self, tree: &Syntax, said: &Syntax, written: Option<&str>) -> Error {
+        let unknown = Error::Unknown(tree.to_string());
+        let Some(name) = written.filter(|name| !definition::qualified(name)) else {
+            return unknown;
+        };
+        let labels: Vec<String> = said
+            .operand()
+            .map(|operand| operand.terms.keys().cloned().collect())
+            .unwrap_or_default();
+        let fits = |signature: &str| {
+            definition::labels_of(signature)
+                .is_some_and(|(_, held)| labels.iter().all(|label| held.contains(label)))
+        };
+        let elsewhere = self.spaces.elsewhere(name);
+        let mine = self.spaces.resolve(name).unwrap_or_default();
+        if mine.is_empty() {
+            if elsewhere.is_empty() {
+                return unknown;
+            }
+            return Error::Elsewhere(Box::new(crate::Suggested {
+                name: name.to_string(),
+                labels,
+                suggestions: elsewhere,
+            }));
+        }
+        let fitting: Vec<definition::Suggestion> = elsewhere
+            .into_iter()
+            .filter(|suggestion| fits(&suggestion.signature))
+            .collect();
+        if fitting.is_empty() {
+            return unknown;
+        }
+        Error::Unfitting(Box::new(crate::Suggested {
+            name: name.to_string(),
+            labels,
+            suggestions: fitting,
+        }))
     }
 
     /// What the rules say about the forms they were asked about, now that

@@ -209,22 +209,35 @@ mod tests {
         }
     }
 
+    /// `cdata` in mine, bound to cdata's namespace.
+    fn petname(analyzer: &mut Analyzer, petname: &str, namespace: &str) {
+        analyzer
+            .take(
+                Vec::new(),
+                [Binding {
+                    namespace: analyzer.namespaces().mine().clone(),
+                    key: petname.into(),
+                    referent: entity(namespace),
+                }],
+            )
+            .unwrap();
+    }
+
+    /// Mine, given what cdata defines in its namespace and `cdata` in
+    /// mine bound to it.
+    fn beside(ours: &str, theirs: &str) -> (Analyzer, Analyzer) {
+        let mut mine = defining(MINE, ours);
+        let theirs = defining(CDATA, theirs);
+        taking(&mut mine, &theirs);
+        petname(&mut mine, "cdata", CDATA);
+        (mine, theirs)
+    }
+
     /// `@cdata/todo` is two lookups: `cdata` in mine, bound to cdata's
     /// namespace, and `todo` in that. It means cdata's `todo` alone.
     #[test]
     fn it_resolves_a_petname_through_two_bindings() {
-        let mut mine = defining(MINE, OURS);
-        let theirs = defining(CDATA, THEIRS);
-        taking(&mut mine, &theirs);
-        mine.take(
-            Vec::new(),
-            [Binding {
-                namespace: entity(MINE),
-                key: "cdata".into(),
-                referent: entity(CDATA),
-            }],
-        )
-        .unwrap();
+        let (mut mine, _) = beside(OURS, THEIRS);
         let read = asked(&mut mine, "(select (@cdata/todo ?t title: ?x))").unwrap();
         assert_eq!(read.len(), 1, "{read:?}");
         assert!(read[0].contains("abc.task"), "{read:?}");
@@ -236,19 +249,30 @@ mod tests {
         ));
     }
 
-    /// `todo` alone is every namespace's. Two definitions of one
-    /// signature, in two namespaces, are refused, each listed by its
-    /// namespace and its entity, and nothing of the document is kept.
+    /// A bare name is mine and nothing else: where cdata has a `todo` of
+    /// the same signature as mine, `todo` is mine.
     #[test]
-    fn it_refuses_a_name_two_namespaces_define_under_one_signature() {
-        let mut mine = defining(MINE, OURS);
-        let theirs = defining(CDATA, THEIRS);
-        taking(&mut mine, &theirs);
+    fn it_resolves_a_bare_name_in_mine_alone() {
+        let (mut mine, _) = beside(OURS, THEIRS);
+        let read = asked(&mut mine, "(select (todo ?t title: ?x))").unwrap();
+        assert!(read[0].contains("xyz.todo"), "{read:?}");
+        assert!(!read[0].contains("abc.task"), "{read:?}");
+    }
+
+    /// A bare name mine does not hold is refused, naming each
+    /// `@petname/name` that is, with its signature, and nothing of the
+    /// document is kept.
+    #[test]
+    fn it_refuses_a_bare_name_mine_does_not_hold_and_says_where_it_is() {
+        let (mut mine, _) = beside(
+            "(concept (card ?c is: ?x) (xyz.card/is of: ?c is: ?x))",
+            THEIRS,
+        );
         let before = mine.namespaces().clone();
         let analysis = mine.analyze(
             &parse(
-                "(concept (card ?t is: ?x) (xyz.card/is of: ?t is: ?x))
-             (select (todo ?t title: ?x))",
+                "(concept (note ?n text: ?x) (xyz.note/text of: ?n is: ?x))
+                 (select (todo ?t title: ?x))",
             )
             .unwrap(),
         );
@@ -256,22 +280,20 @@ mod tests {
             .refusals()
             .next()
             .and_then(|refused| refused.refusal.clone());
-        let Some(Error::Several(several)) = &refusal else {
-            panic!("refused as several: {refusal:?}");
+        assert!(matches!(&refusal, Some(Error::Elsewhere(_))), "{refusal:?}");
+        let Some(Error::Elsewhere(elsewhere)) = &refusal else {
+            unreachable!()
         };
-        assert!(matches!(&refusal, Some(Error::Several(_))));
-        assert_eq!(several.name, "todo");
-        let namespaces: Vec<&str> = several
-            .candidates
+        assert_eq!(elsewhere.name, "todo");
+        let said: Vec<String> = elsewhere
+            .suggestions
             .iter()
-            .map(|(namespace, _)| namespace.as_str())
+            .map(ToString::to_string)
             .collect();
-        assert_eq!(namespaces, vec![CDATA, MINE]);
-        assert!(
-            several
-                .candidates
-                .iter()
-                .all(|(_, definition)| definition.starts_with("definition:"))
+        assert_eq!(said, vec!["@cdata/todo (concept (title:))"]);
+        assert_eq!(
+            refusal.unwrap().to_string(),
+            "todo is no name of yours: @cdata/todo (concept (title:))"
         );
         assert!(analysis.defined.is_empty() && analysis.analyzed.is_empty());
         assert_eq!(
@@ -281,30 +303,46 @@ mod tests {
         );
     }
 
-    /// Where the signatures differ, the labels written say which: two
-    /// namespaces may each define `todo`, one with `title:` and one with
-    /// `name:`.
+    /// A bare name of mine written with labels none of my signatures
+    /// take is refused, naming the `@petname/name` they fit; mine is
+    /// still what the labels it takes mean.
     #[test]
-    fn it_resolves_a_name_by_the_labels_among_namespaces() {
-        let mut mine = defining(MINE, OURS);
-        let theirs = defining(
-            CDATA,
+    fn it_refuses_a_bare_name_whose_labels_fit_another_namespaces() {
+        let (mut mine, _) = beside(
+            OURS,
             "(concept (todo ?t name: ?x) (abc.task/name of: ?t is: ?x as: :text))",
         );
-        taking(&mut mine, &theirs);
+        let refused = asked(&mut mine, "(select (todo ?t name: ?x))");
+        assert!(matches!(&refused, Err(Error::Unfitting(_))), "{refused:?}");
+        let Err(error @ Error::Unfitting(unfitting)) = &refused else {
+            unreachable!()
+        };
+        assert_eq!(unfitting.labels, vec!["name".to_string()]);
+        assert_eq!(
+            error.to_string(),
+            "todo of yours takes no name:: @cdata/todo (concept (name:)) does, perhaps it is meant"
+        );
         let title = asked(&mut mine, "(select (todo ?t title: ?x))").unwrap();
         assert!(title[0].contains("xyz.todo"), "{title:?}");
-        let name = asked(&mut mine, "(select (todo ?t name: ?x))").unwrap();
-        assert!(name[0].contains("abc.task"), "{name:?}");
+        let theirs = asked(&mut mine, "(select (@cdata/todo ?t name: ?x))").unwrap();
+        assert!(theirs[0].contains("abc.task"), "{theirs:?}");
+    }
+
+    /// A name no namespace holds is unknown, as before.
+    #[test]
+    fn it_refuses_a_name_nothing_holds_as_unknown() {
+        let (mut mine, _) = beside(OURS, THEIRS);
+        assert!(matches!(
+            asked(&mut mine, "(select (nonesuch ?t title: ?x))"),
+            Err(Error::Unknown(_))
+        ));
     }
 
     /// `todo#3fa9` is the definition under `todo` whose hash starts so,
-    /// whichever namespace binds it.
+    /// in mine or where a petname of mine points.
     #[test]
     fn it_picks_a_definition_by_a_prefix_of_its_hash() {
-        let mut mine = defining(MINE, OURS);
-        let theirs = defining(CDATA, THEIRS);
-        taking(&mut mine, &theirs);
+        let (mut mine, theirs) = beside(OURS, THEIRS);
         let named = name_space(&entity(CDATA), "todo").unwrap();
         let definition = theirs
             .namespaces()
@@ -322,6 +360,34 @@ mod tests {
             asked(&mut mine, "(select (todo#zzzz ?t title: ?x))"),
             Err(Error::Unknown(_))
         ));
+    }
+
+    /// What may be meant while typing: every name starting so in mine and
+    /// in each namespace a petname of mine points at, with where it is,
+    /// its signature and its definition.
+    #[test]
+    fn it_suggests_names_across_mine_and_my_petnames() {
+        let (mine, _) = beside(
+            &format!("{OURS} (concept (tag ?t tag: ?g) (xyz.todo/tag of: ?t is: ?g))"),
+            "(concept (todo ?t name: ?x) (abc.task/name of: ?t is: ?x as: :text))",
+        );
+        let said: Vec<String> = mine
+            .namespaces()
+            .suggest("to")
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            said,
+            vec!["todo (concept (title:))", "@cdata/todo (concept (name:))"],
+            "mine first"
+        );
+        let all = mine.namespaces().suggest("");
+        assert_eq!(all.len(), 3, "{all:?}");
+        assert!(
+            all.iter()
+                .all(|one| one.definition.as_str().starts_with("definition:"))
+        );
     }
 
     /// A warning says the way to the form it is about, which the

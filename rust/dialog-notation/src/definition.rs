@@ -779,25 +779,38 @@ impl Namespaces {
         rows
     }
 
-    /// What a reference as written may mean: the rows of `Name` it walks
-    /// to. `todo` is every namespace's `todo`; `@cdata/todo` is the
-    /// `todo` of what `cdata` in mine is bound to, and `@a/@b/todo`
-    /// walks on from there; `todo#3fa9` keeps the rows whose
-    /// definition's hash starts so. A petname bound to nothing is
-    /// refused as unknown.
+    /// The petnames in mine: each name bound to something that is no
+    /// name's namespace and no definition, a namespace of someone's.
+    pub fn petnames(&self) -> Vec<(String, Entity)> {
+        self.bound
+            .get(&self.mine)
+            .into_iter()
+            .flatten()
+            .filter(|(_, referent)| !is_name_space(referent) && !is_definition(referent))
+            .map(|(petname, referent)| (petname.clone(), referent.clone()))
+            .collect()
+    }
+
+    /// What a reference as written means: the rows of `Name` it walks
+    /// to. `todo` is mine and nothing else; `@cdata/todo` is the `todo`
+    /// of what `cdata` in mine is bound to, and `@a/@b/todo` walks on
+    /// from there; `todo#3fa9` keeps the rows of `todo`, in mine or in a
+    /// namespace a petname of mine points at, whose definition's hash
+    /// starts so. A petname bound to nothing is refused as unknown.
     pub fn resolve(&self, written: &str) -> Result<Vec<Name>, Error> {
         let (path, prefix) = match written.split_once('#') {
             Some((path, prefix)) => (path, Some(prefix)),
             None => (written, None),
         };
         let mut rows = match path.strip_prefix('@') {
-            None => {
-                let mut rows = Vec::new();
-                for namespace in self.bound.keys() {
-                    rows.extend(self.named_in(namespace, path));
+            None if prefix.is_some() => {
+                let mut rows = self.named_in(&self.mine, path);
+                for (_, namespace) in self.petnames() {
+                    rows.extend(self.named_in(&namespace, path));
                 }
                 rows
             }
+            None => self.named_in(&self.mine, path),
             Some(qualified) => {
                 let mut namespace = self.mine.clone();
                 let mut rest = qualified;
@@ -820,6 +833,84 @@ impl Namespaces {
             rows.retain(|row| hash_of(&row.definition).starts_with(prefix));
         }
         Ok(rows)
+    }
+
+    /// What may be meant by what is being typed: every name in mine, and
+    /// in each namespace a petname of mine points at, that starts with
+    /// `prefix`, each signature of it a suggestion.
+    pub fn suggest(&self, prefix: &str) -> Vec<Suggestion> {
+        let mut found = Vec::new();
+        let mut from = vec![(None, self.mine.clone())];
+        from.extend(
+            self.petnames()
+                .into_iter()
+                .map(|(petname, namespace)| (Some(petname), namespace)),
+        );
+        for (petname, namespace) in from {
+            for name in self
+                .bound
+                .get(&namespace)
+                .into_iter()
+                .flat_map(|keys| keys.keys())
+            {
+                if !name.starts_with(prefix) {
+                    continue;
+                }
+                for row in self.named_in(&namespace, name) {
+                    found.push(Suggestion {
+                        petname: petname.clone(),
+                        namespace: row.namespace,
+                        name: row.name,
+                        signature: row.signature,
+                        definition: row.definition,
+                    });
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// `name` where a petname of mine points: what a bare `name` that
+    /// mine does not hold, or holds under other signatures, may have
+    /// meant.
+    pub fn elsewhere(&self, name: &str) -> Vec<Suggestion> {
+        self.suggest(name)
+            .into_iter()
+            .filter(|suggestion| suggestion.petname.is_some() && suggestion.name == name)
+            .collect()
+    }
+}
+
+/// A name that may be meant: where it is, under which signature, and
+/// the definition it is bound to.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Suggestion {
+    /// The petname in mine of the namespace it is in; `None` for mine.
+    pub petname: Option<String>,
+    /// The namespace it is in.
+    pub namespace: Entity,
+    /// The name.
+    pub name: String,
+    /// Its signature.
+    pub signature: String,
+    /// The definition it is bound to.
+    pub definition: Entity,
+}
+
+impl Suggestion {
+    /// How it is written: `todo` in mine, `@cdata/todo` elsewhere.
+    pub fn written(&self) -> String {
+        match &self.petname {
+            Some(petname) => format!("@{petname}/{}", self.name),
+            None => self.name.clone(),
+        }
+    }
+}
+
+impl Display for Suggestion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.written(), self.signature)
     }
 }
 
