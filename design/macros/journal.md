@@ -1740,3 +1740,13 @@ A separate clause for collecting needs inference or its own conditions, and infe
 
 **Decided, later the same evening.** The maintainer's: `(collect ?x)`. What stands of the sketch: the two layers, the head with `is:`, `is` and `view` in the body, an entry as one term, a set as a map with no names stored as a list, `collect` for the whole of a field, and the refusal of a query that only collects. What is open first: the word for asking, since `query` now names what is defined.
 
+## 2026-11-18, Designing: select, and an index
+
+**Asked.** The word for asking, now that `query` names what is defined.
+
+**Learned.** The maintainer: `select`, or the head applied with nothing round it. The second goes against a rule the design wrote down on purpose, that every top-level form starts with its verb, and against the build, which refuses a call there. A command is why: `(todo/add list: … text: …)` bare could be asking or doing. `select` was read as well as `query` in R24 and R25, and unlike `query` it does not clash with running a document as a query.
+
+Restating the table's views turned up what a directory is: a query whose head has no entity. It only collects, answers once, and stands empty. So the refusal is of a query of an entity that only collects.
+
+**Decided.** The maintainer's: `select`. design.md on #728 still says `query` for asking, and still has the fold in a rule's head, the view form and two fields for a collection; none of it is changed yet.
+

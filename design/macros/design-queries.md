@@ -33,6 +33,7 @@ Folds in rules, stratified, as Datalogs with aggregates have them, would let a r
 - **The head** is a concept's head. `is:` is the field that holds the answer. A field passed bound is a parameter, as with any relation.
 - **The body** is conditions, and `(is ?x shape)`, which says what a variable is: a record, a function of other variables, or a term. `(view ?x template)` says it is markup.
 - **A call** is the head applied, a condition like any other: `(todo/tagged ?t is: ?pair)`.
+- **Asking** is `select`: `(select (todo/tagged ?t is: ?pair))`, or of a concept, `(select (todo ?t title: ?title))`. `query` names what is defined, beside `concept` and `rule`.
 - Every condition is required: one row for each way all of them hold.
 
 It is named under its concept, as the design's derived attributes are (`list/count-open`), and has their shape. So what was a getter is a query.
@@ -58,7 +59,7 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 - Key and value are paired because they were never apart: an entry is one term.
 - What comes out is a map either way. A keyed collection's has its keys. Many plain values have none, and a map with no names is a set: `{: "errand" : "home"}`, stored in a record as a list. No list as such: many values have no order, and a sequence's order is in its keys.
 - A pattern takes one value apart; `collect` puts many rows together. `{…}` and `[…]` in a condition are always the first.
-- **A read of the whole never gates**, as `unless` never binds. So every other term in it is bound by a required condition, a constant, or blank, and a query of such reads alone is refused: nothing would say which entities.
+- **A read of the whole never gates**, as `unless` never binds. So every other term in it is bound by a required condition, a constant, or blank. A query of an entity that only collects is refused: nothing would say which entities. A query of no entity that only collects answers once, and that is an index.
 - It is a fold, so it is refused in a `rule`.
 - A write goes through one entry: `(assert (notebook/blocks ?n block: {"N3" block:x}))`. The whole is not written.
 
@@ -168,6 +169,43 @@ With each block's source, which is a join for each entry. The item is a query wh
 
 Two views this morning, three queries now, and a notebook with no block shows its whole page, where the marker form showed its outer element only. The order's items stand by position; the rows are a set, which is all tonk's hidden rows need.
 
+## The table's views, and an index
+
+This morning's six views are six queries. Four are a row each, like this one, and the page collects them:
+
+```clj
+(query (table/sheet-row ?s is: ?row)
+  (table/sheet ?s table: ?table name: ?name order: ?order)
+  (view ?row [:div {:class "table-sheet-row"
+                    :subject ?s :data-table ?table :data-name ?name :data-order ?order}]))
+
+(query (table/ui ?t is: ?ui)
+  (table ?t name: ?name)
+  (table/sheet-row _ is: (collect ?sheets))
+  (table/cell-row _ is: (collect ?cells))
+  (table/column-row _ is: (collect ?columns))
+  (table/rowsize-row _ is: (collect ?sizes))
+  (view ?ui
+    [:tonk-table {:subject ?t
+                  ; the nine :on/ bindings, as before
+                  }
+      [:div {:hidden true}
+        [:div {:class "table-sheet-rows"} ?sheets]
+        [:div {:class "table-cell-rows"} ?cells]
+        [:div {:class "table-column-rows"} ?columns]
+        [:div {:class "table-rowsize-rows"} ?sizes]]]))
+```
+
+The directory has no entity in its head, as a command's concept has none. It answers once, and stands empty when there is no table:
+
+```clj
+(query (table/directory is: ?directory)
+  (table/ui _ is: (collect ?tables))
+  (view ?directory [:div {:class "table-directory"} ?tables]))
+```
+
+This was the one view of eleven that repeated the wrong element under the marker rule: tonk's YAML keeps the outer `div` and repeats the display inside it, which is what this says. It is also the morning's question of what renders when there is no notebook.
+
 ## A word, not the spread
 
 **The maintainer's: not `{... ?x}`.** It does not say whether it takes a value apart or puts rows together, and those are different things.
@@ -209,12 +247,11 @@ Of the four, `?..x`. Against `(collect ?x)` it is shorter and adds no form; the 
 ## What would refute it
 
 - **A rule that must read a fold.** tonk's library has no fold in any rule; where it counts, an element's script does.
-- **A real view that reads worse.** Every repeated part built from more than one field is a query with a name. The notebook's page holds up. The table's views, rows of cells, are not restated yet.
+- **A real view that reads worse.** Every repeated part built from more than one field is a query with a name. The notebook's page is three queries for two views; the table's are six for six. Neither is run.
 - **Readers.** None of it has met one: not the head with `is:`, not `{?k ?b}`, not `collect` on a field.
 
 ## Open
 
-- **`query` is already the design's word for asking**, `(query (todo ?t state: :open))`, the maintainer's choice after R24 and R25. With a head and a body under the same word, `(query (a ?x) (b ?x))` reads both ways. `find`, `select` and `(? …)` read as well in those rounds. Proposed: `query` names what is defined, and asking is `find`.
 - **A set merges equal answers.** Two to-dos with one title are one title in a set. Count entities, not what is shown of them.
 - **A fold with nothing to give.** `count` and `sum` of nothing are 0; `max` has none. `pull` leaves the key out. Proposed: the same.
 - **Limit.** `pull` stops at 1000 unless told. #77.
