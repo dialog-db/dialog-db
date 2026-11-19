@@ -90,3 +90,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 - [A commit that lost its branch's race replays even when nothing it read changed](replay-avoidance.md):
   **Describing.** Split out of file-writers: capturing what a transaction
   considered, so a replay is skipped when nothing it read overlaps.
+- [A folded value is recomputed for its subscriber, not maintained](fold-maintenance.md):
+  **Diagnosing.** The engine folds behind a gate and leaves keeping a
+  fold current under a subscription for later. Prior art for doing it at
+  the cost of the change is laid out; what it costs today is not measured.
