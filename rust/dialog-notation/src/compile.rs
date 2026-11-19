@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use dialog_corpus::{Composite, Entity, Relation, Value};
+use dialog_corpus::{Entity, Relation, Value};
 use dialog_query::concept::descriptor::ConceptStatement;
 use dialog_query::formula::entity::derive;
 use dialog_query::{
@@ -376,46 +376,46 @@ impl Query {
 /// model has one sequence, and `[ ]` is how it is written where a value
 /// stands.
 pub(crate) fn written(value: &Value) -> Syntax {
-    match value {
-        Value::Record(_) if matches!(value.composite(), Ok(Some(_))) => {
-            match value.composite() {
-                // A record has no order. It is said by its keys in the
-                // order of the alphabet, which is not the order it is
-                // kept in.
-                Ok(Some(Composite::Map(map))) => Syntax::Map(
-                    map.iter()
-                        .collect::<std::collections::BTreeMap<_, _>>()
-                        .into_iter()
-                        .map(|(key, value)| {
-                            // A key that reads as a name is the label
-                            // it was written as; any other is text.
-                            let label = key.starts_with(|first: char| first.is_ascii_lowercase())
-                                && key.chars().all(|part| {
-                                    part.is_ascii_lowercase()
-                                        || part.is_ascii_digit()
-                                        || matches!(part, '-' | '.' | '/')
-                                });
-                            let key = if label {
-                                Syntax::Reference(key.to_string())
-                            } else {
-                                Syntax::Constant(data::text(key))
-                            };
-                            (key, written(value))
-                        })
-                        .collect(),
-                ),
-                Ok(Some(Composite::List(items))) => {
-                    Syntax::Tuple(items.iter().map(written).collect())
-                }
-                _ => Syntax::Blank,
-            }
+    match data::shape(value) {
+        // A record has no order. It is said by its keys in the order of
+        // the alphabet, which is not the order it is kept in.
+        Ok(data::Data::Map(map)) => {
+            return Syntax::Map(
+                map.entries()
+                    .collect::<std::collections::BTreeMap<_, _>>()
+                    .into_iter()
+                    .map(|(key, value)| {
+                        // A key that reads as a name is the label it was
+                        // written as; any other is text.
+                        let key = key.text();
+                        let label = key.starts_with(|first: char| first.is_ascii_lowercase())
+                            && key.chars().all(|part| {
+                                part.is_ascii_lowercase()
+                                    || part.is_ascii_digit()
+                                    || matches!(part, '-' | '.' | '/')
+                            });
+                        let key = if label {
+                            Syntax::Reference(key.to_string())
+                        } else {
+                            Syntax::Constant(data::text(key))
+                        };
+                        (key, written(value))
+                    })
+                    .collect(),
+            );
         }
-        Value::Bytes(bytes) | Value::Record(bytes) => Syntax::Tuple(
+        Ok(data::Data::List(items)) => return Syntax::Tuple(items.iter().map(written).collect()),
+        _ => {}
+    }
+    if let Some(bytes) = data::bytes(value) {
+        return Syntax::Tuple(
             bytes
                 .iter()
                 .map(|byte| Syntax::Constant(Value::UnsignedInt(u64::from(*byte).into())))
                 .collect(),
-        ),
+        );
+    }
+    match value {
         // A symbol is written as the name that says it, `/todo` where
         // it has no domain.
         Value::Symbol(symbol) => Syntax::Reference(symbol.to_string()),

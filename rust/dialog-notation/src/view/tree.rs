@@ -209,7 +209,8 @@ pub fn text(value: &Value) -> String {
         Value::SignedInt(number) => number.to_string(),
         Value::Float(number) => number.to_string(),
         Value::Symbol(symbol) => symbol.to_string(),
-        Value::Bytes(_) | Value::Record(_) => format!("{value:?}"),
+        // Bytes, and a record the notation does not read.
+        other => format!("{other:?}"),
     }
 }
 

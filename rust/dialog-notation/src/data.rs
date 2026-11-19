@@ -80,12 +80,121 @@ pub fn list(items: impl IntoIterator<Item = Value>) -> Value {
     Composite::list(items).into()
 }
 
-/// A map of `entries`, in whatever order. A key is text, and one given
-/// twice is refused.
-pub fn map<K: Into<String>>(entries: impl IntoIterator<Item = (K, Value)>) -> Result<Value, Error> {
-    Composite::map(entries)
-        .map(Value::from)
-        .map_err(|error| Error::Refused(error.to_string()))
+/// A key of a map, as data keeps it. It is text today; the type is the
+/// module's own, so a key that is no text can be one later without
+/// anything above this module saying what a key is made of.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Key(String);
+
+impl Key {
+    /// The key that is `text`.
+    pub fn new(text: impl Into<String>) -> Self {
+        Key(text.into())
+    }
+
+    /// The text the key is, where it is text.
+    pub fn text(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for Key {
+    fn from(text: &str) -> Self {
+        Key::new(text)
+    }
+}
+
+impl From<String> for Key {
+    fn from(text: String) -> Self {
+        Key(text)
+    }
+}
+
+impl From<&String> for Key {
+    fn from(text: &String) -> Self {
+        Key(text.clone())
+    }
+}
+
+impl std::fmt::Display for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A map, read: what it holds under each key.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Map(CompositeMap);
+
+impl Map {
+    /// What it holds under `key`.
+    pub fn get(&self, key: impl Into<Key>) -> Option<&Value> {
+        self.0.get(key.into().text())
+    }
+
+    /// Its entries, in the order it keeps them.
+    pub fn entries(&self) -> impl Iterator<Item = (Key, &Value)> {
+        self.0.iter().map(|(key, value)| (Key::new(key), value))
+    }
+}
+
+/// What a value is, told apart: a map, a list, or neither.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Data {
+    /// A map.
+    Map(Map),
+    /// A list, its items in order.
+    List(Vec<Value>),
+    /// A value that is neither.
+    Scalar,
+}
+
+/// What `value` is. A record under a version this release does not read
+/// is refused by its number.
+pub fn shape(value: &Value) -> Result<Data, Error> {
+    Ok(match value.composite().map_err(unread)? {
+        Some(Composite::Map(map)) => Data::Map(Map(map)),
+        Some(Composite::List(items)) => Data::List(items.into_values()),
+        None => Data::Scalar,
+    })
+}
+
+/// Whether `value` is bytes the notation does not read: a byte string,
+/// or a record that holds no map or list this release reads.
+pub fn opaque(value: &Value) -> bool {
+    matches!(value, Value::Bytes(_) | Value::Record(_))
+}
+
+/// The bytes `value` is, where it is bytes or a record.
+pub fn bytes(value: &Value) -> Option<&[u8]> {
+    match value {
+        Value::Bytes(bytes) | Value::Record(bytes) => Some(bytes),
+        _ => None,
+    }
+}
+
+/// The bytes a map or a list is kept as.
+pub fn encode(value: &Value) -> Result<Vec<u8>, Error> {
+    match value {
+        Value::Record(bytes) => Ok(bytes.clone()),
+        other => Err(Error::Read(format!("a node that is no record: {other:?}"))),
+    }
+}
+
+/// The map or list `bytes` keep, as [`encode`] gave them.
+pub fn decode(bytes: &[u8]) -> Value {
+    Value::Record(bytes.to_vec())
+}
+
+/// A map of `entries`, in whatever order. A key given twice is refused.
+pub fn map<K: Into<Key>>(entries: impl IntoIterator<Item = (K, Value)>) -> Result<Value, Error> {
+    Composite::map(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.into().0, value)),
+    )
+    .map(Value::from)
+    .map_err(|error| Error::Refused(error.to_string()))
 }
 
 /// A map whose keys are names, each the text it is written as.
@@ -100,24 +209,29 @@ fn unread(error: CompositeError) -> Error {
 /// The map `value` is. A value that is no map is not one, and a record
 /// under a version this release does not read is refused by its
 /// number.
-pub fn entries(value: &Value) -> Result<Option<CompositeMap>, Error> {
-    match value.composite().map_err(unread)? {
-        Some(Composite::Map(map)) => Ok(Some(map)),
+pub fn entries(value: &Value) -> Result<Option<Map>, Error> {
+    match shape(value)? {
+        Data::Map(map) => Ok(Some(map)),
         _ => Ok(None),
     }
 }
 
 /// The members of the list `value` is.
 pub fn items(value: &Value) -> Result<Option<Vec<Value>>, Error> {
-    match value.composite().map_err(unread)? {
-        Some(Composite::List(items)) => Ok(Some(items.into_values())),
+    match shape(value)? {
+        Data::List(items) => Ok(Some(items)),
         _ => Ok(None),
     }
 }
 
-/// What a map holds under the name `field`.
-pub fn field<'a>(map: &'a CompositeMap, field: &str) -> Option<&'a Value> {
-    map.get(field)
+/// What a map holds under `key`.
+pub fn field(map: &Map, key: impl Into<Key>) -> Option<&Value> {
+    map.get(key)
+}
+
+/// The item of the list `value` is at `index`.
+pub fn item(value: &Value, index: usize) -> Result<Option<Value>, Error> {
+    Ok(items(value)?.and_then(|mut items| (index < items.len()).then(|| items.swap_remove(index))))
 }
 
 /// Whether a name is written with a domain: something stands before

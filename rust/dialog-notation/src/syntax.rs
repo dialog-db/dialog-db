@@ -46,7 +46,7 @@ use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 
 use base58::ToBase58;
-use dialog_corpus::{CompositeMap, Entity, Value};
+use dialog_corpus::{Entity, Value};
 use merkle_reference::Reference;
 
 use crate::Error;
@@ -493,15 +493,12 @@ impl Syntax {
     /// The tree as bytes: the ones the `record:` value it is kept as
     /// holds.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        match self.value()? {
-            Value::Record(bytes) => Ok(bytes),
-            other => Err(Error::Read(format!("a node that is no record: {other:?}"))),
-        }
+        data::encode(&self.value()?)
     }
 
     /// The tree `bytes` hold.
     pub fn decode(bytes: &[u8]) -> Result<Syntax, Error> {
-        Syntax::try_from(&Value::Record(bytes.to_vec()))
+        Syntax::try_from(&data::decode(bytes))
     }
 
     /// The way from this node to the first node inside it that is
@@ -591,8 +588,8 @@ impl Syntax {
                     _ => Form::Symbol(entity.as_str().to_string()),
                 },
                 Value::Symbol(_) => Form::Symbol(data::spelled(value).unwrap_or_default()),
-                // The notation writes neither.
-                Value::Bytes(_) | Value::Record(_) => Form::Blank,
+                // Bytes and records: the notation writes neither.
+                _ => Form::Blank,
             },
             Syntax::Reference(name) => Form::Symbol(name.clone()),
             Syntax::Map(entries) => Form::Map(
@@ -617,11 +614,11 @@ fn unread(what: &str) -> Error {
 }
 
 /// The node `value` is: a map that says its type.
-fn fields(value: &Value) -> Result<CompositeMap, Error> {
+fn fields(value: &Value) -> Result<data::Map, Error> {
     data::entries(value)?.ok_or_else(|| unread("type"))
 }
 
-fn nodes(node: &CompositeMap, field: &str) -> Result<Vec<Syntax>, Error> {
+fn nodes(node: &data::Map, field: &str) -> Result<Vec<Syntax>, Error> {
     data::field(node, field)
         .map(data::items)
         .transpose()?
@@ -632,7 +629,7 @@ fn nodes(node: &CompositeMap, field: &str) -> Result<Vec<Syntax>, Error> {
         .collect()
 }
 
-fn text(node: &CompositeMap, field: &str) -> Result<String, Error> {
+fn text(node: &data::Map, field: &str) -> Result<String, Error> {
     match data::field(node, field) {
         Some(Value::String(text)) => Ok(text.clone()),
         _ => Err(unread(field)),
@@ -640,7 +637,7 @@ fn text(node: &CompositeMap, field: &str) -> Result<String, Error> {
 }
 
 /// The type a node says it is: the name of the entity under `type`.
-fn kind(node: &CompositeMap) -> Result<&str, Error> {
+fn kind(node: &data::Map) -> Result<&str, Error> {
     match data::field(node, "type") {
         Some(Value::Entity(entity)) => entity
             .as_str()
@@ -663,8 +660,8 @@ impl TryFrom<&Value> for Parameters {
             .transpose()?
             .flatten()
             .ok_or_else(|| unread("terms"))?
-            .iter()
-            .map(|(label, term)| Ok((label.to_string(), Syntax::try_from(term)?)))
+            .entries()
+            .map(|(label, term)| Ok((label.text().to_string(), Syntax::try_from(term)?)))
             .collect::<Result<_, Error>>()?;
         Ok(Parameters {
             items: nodes(&node, "items")?,
@@ -687,7 +684,7 @@ impl TryFrom<&Value> for Syntax {
             "variable" => Syntax::Variable(text(&node, "name")?),
             "blank" => Syntax::Blank,
             "constant" => match part("value")? {
-                Value::Bytes(_) | Value::Record(_) => {
+                value if data::opaque(value) => {
                     return Err(Error::Unsupported(
                         "a constant that is bytes or a record: the notation writes neither".into(),
                     ));
@@ -1112,10 +1109,7 @@ mod tests {
     fn it_keeps_a_tree_as_a_composite_value() -> Result<(), Error> {
         let tree = one(r#"(f ?x 2.0 {:a [1 "b"]} label: _ ... ?rest)"#);
         let kept = tree.value()?;
-        assert!(matches!(
-            kept.composite(),
-            Ok(Some(dialog_corpus::Composite::Map(_)))
-        ));
+        assert!(matches!(data::shape(&kept), Ok(data::Data::Map(_))));
         let back = Syntax::try_from(&kept)?;
         assert_eq!(
             back.to_string(),
