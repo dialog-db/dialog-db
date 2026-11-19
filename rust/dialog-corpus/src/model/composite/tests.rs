@@ -560,6 +560,21 @@ fn it_writes_the_layout_the_documentation_draws() {
     expected.extend_from_slice(b"geo/lat\0");
     expected.extend_from_slice(&[MAP, 1, 3, 0, ValueDataType::Boolean as u8, 1]);
     assert_eq!(record.to_bytes().as_ref(), expected);
+
+    // The drawing in design/composite-value.md.
+    let drawn = Composite::map([
+        (text("type"), Value::Entity("tuple:".parse().unwrap())),
+        (
+            text("items"),
+            Value::Composite(Composite::list([text("a"), text("b")]).unwrap()),
+        ),
+    ])
+    .unwrap();
+    let mut expected = vec![TABLE, 2, 13, 3];
+    expected.extend_from_slice(b"items\0\x03type\0");
+    expected.extend_from_slice(&[MAP, 2, 20, 0, 22, LIST, 2, 6, 3, b'a', 0, 3, b'b', 0, 1, 1]);
+    expected.extend_from_slice(b"tuple:\0");
+    assert_eq!(drawn.to_bytes().as_ref(), expected);
 }
 
 fn refused(bytes: &[u8]) -> CompositeError {

@@ -395,11 +395,31 @@ impl Composite {
     /// The slot spans of every value `key` holds.
     fn spans(&self, key: &Value) -> Vec<(usize, usize)> {
         let mut spans = Vec::new();
+        self.each_span(key, &mut |slot, end| {
+            spans.push((slot, end));
+            true
+        });
+        spans
+    }
+
+    /// The span of the first value `key` holds.
+    fn first_span(&self, key: &Value) -> Option<(usize, usize)> {
+        let mut first = None;
+        self.each_span(key, &mut |slot, end| {
+            first = Some((slot, end));
+            false
+        });
+        first
+    }
+
+    /// Visits the slot span of each value `key` holds, in order, while
+    /// `visit` answers true.
+    fn each_span(&self, key: &Value, visit: &mut dyn FnMut(usize, usize) -> bool) {
         let (Some(body), Ok(wanted)) = (self.seq().filter(|b| b.kind == MAP), scalar(key)) else {
-            return spans;
+            return;
         };
         let Some(index) = self.key_index(&wanted) else {
-            return spans;
+            return;
         };
         // The first entry of the key: by halving over the offsets, or by
         // stepping from the front.
@@ -410,12 +430,12 @@ impl Composite {
                 match self.entry_at(&body, middle) {
                     Some((found, _, _)) if found < index => low = middle + 1,
                     Some(_) => high = middle,
-                    None => return spans,
+                    None => return,
                 }
             }
             match body.offset(&self.buffer, low) {
                 Some(at) => at,
-                None => return spans,
+                None => return,
             }
         } else {
             body.items
@@ -427,12 +447,11 @@ impl Composite {
             if found > index {
                 break;
             }
-            if found == index {
-                spans.push((slot, end));
+            if found == index && !visit(slot, end) {
+                break;
             }
             at = end;
         }
-        spans
     }
 
     /// The value in the slot at `slot..end`: a scalar decoded, a nested
@@ -470,13 +489,13 @@ impl Composite {
 
     /// The first value `key` holds in a map.
     pub fn first(&self, key: &Value) -> Option<Value> {
-        let (slot, end) = *self.spans(key).first()?;
+        let (slot, end) = self.first_span(key)?;
         self.value_at(slot, end)
     }
 
     /// The first value `key` holds in a map, its text and bytes borrowed.
     pub fn first_view(&self, key: &Value) -> Option<ValueView<'_>> {
-        let (slot, end) = *self.spans(key).first()?;
+        let (slot, end) = self.first_span(key)?;
         self.view_at(slot, end)
     }
 
