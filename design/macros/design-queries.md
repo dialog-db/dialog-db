@@ -190,7 +190,9 @@ Two views this morning, three queries now, and a notebook with no block shows it
 | `?..x` | a variable named `..x`, with no error | none |
 | `{?..x}` | a struct that ends on a key, which gets a blank value | none; and under `{?k ?b}` it is an entry with any value |
 
-Of the four, `?..x`. Against `(collect ?x)` it is shorter and adds no form; the word explains itself, sits with the electors, and is what an error would say anyway. Which a reader gets right unaided is a round's question, not run.
+Of the four, `?..x`. Against `(collect ?x)` it is shorter and adds no form; the word explains itself, sits with the electors, and is what an error would say anyway.
+
+**Decided 2026-11-18, by the maintainer: `(collect ?x)`.**
 
 ## What it replaces
 

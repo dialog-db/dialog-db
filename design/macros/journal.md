@@ -1738,3 +1738,5 @@ A separate clause for collecting needs inference or its own conditions, and infe
 
 **Decided.** Not decided: `(collect ?x)` or `?..x`. The agent's hypothesis is that the word reads right unaided more often, which a reader round would settle.
 
+**Decided, later the same evening.** The maintainer's: `(collect ?x)`. What stands of the sketch: the two layers, the head with `is:`, `is` and `view` in the body, an entry as one term, a set as a map with no names stored as a list, `collect` for the whole of a field, and the refusal of a query that only collects. What is open first: the word for asking, since `query` now names what is defined.
+
