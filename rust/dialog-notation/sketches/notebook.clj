@@ -27,7 +27,7 @@
 
 ; A notebook: prose with live dialog query cells. Its content is the block
 ; sequence, every block keyed by a fractional position, in document order.
-(concept (notebook ?n title: ?title key: ?k block: ?b)
+(concept (notebook ?n title: ?title block: {?k ?b})
   ; The notebook's title.
   (xyz.tonk.notebook/title of: ?n is: ?title as: :text cardinality: :one)
   ; The notebook's blocks, in document order. `pick: :all` per entry in the
@@ -46,7 +46,7 @@
 ; The sequence alone, so a placement writes one entry.
 
 ; A notebook's block sequence, as standalone entries.
-(concept (notebook/blocks ?n key: ?k block: ?b)
+(concept (notebook/blocks ?n block: {?k ?b})
   ; The notebook's blocks, in document order.
   (xyz.tonk.notebook/?k of: ?n is: ?b as: :entity cardinality: :one by: :position))
 
@@ -78,8 +78,8 @@
 ; constraints and gives no spelling; this is the build's, `(< ?p : 10)`.
 ; YAML 129-132.
 (rule (block/stray-entry ?b at: ?at)
-  (notebook/blocks ?n key: ?first block: ?b)
-  (notebook/blocks ?n key: ?at block: ?b)
+  (notebook/blocks ?n block: {?first ?b})
+  (notebook/blocks ?n block: {?at ?b})
   (< ?first : ?at))
 
 ; One block of a notebook. It points back at its notebook so the block rows
@@ -263,7 +263,7 @@
         ; design's reference names an entity, `{:view :row :of ?t}`, and
         ; not a concept. YAML 327.
         {:view :directory :model notebook/block}]]]
-  (notebook ?n title: ?title key: ?k block: ?b))
+  (notebook ?n title: ?title block: {?k ?b}))
 
 ; Every notebook: the directory view, what core's `/{*model}` route renders
 ; at `/space/{repo}/notebook`, one link per notebook. These rows are also the
@@ -526,7 +526,7 @@
 
 ; A placed block's position.
 (rule (block/position ?b at: ?k)
-  (notebook/blocks ?n key: ?k block: ?b)
+  (notebook/blocks ?n block: {?k ?b})
   (unless (block/stray-entry ?b at: ?k)))
 
 ; An inserted block's successor, so the position rules can recurse over it.
@@ -576,7 +576,7 @@
 ; Place an inserted block.
 ; GAP: a command's own entity, read with `of:` as above, the managing
 ; agent's opinion and not the design's. YAML 835.
-(rule (assert (notebook/blocks ?n key: ?k block: ?b))
+(rule (assert (notebook/blocks ?n block: {?k ?b}))
   (block/insert of: ?b notebook: ?n source: ?s next: ?x prev: ?p)
   (block/position ?b at: ?k))
 
@@ -591,7 +591,7 @@
 ; The entry lands under `xyz.tonk.notebook/<key>`.
 
 ; Persist a placement into the notebook's sequence.
-(rule (assert (notebook/blocks ?n key: ?k block: ?b))
+(rule (assert (notebook/blocks ?n block: {?k ?b}))
   (block/place subject: ?b notebook: ?n key: ?k))
 
 ; A placement leaves the block with one entry, the placed one. The element can
@@ -603,13 +603,13 @@
 ; GAP: a retract of one entry of a collection: the design's retract through
 ; a concept takes every field on the entity, and what it takes for a
 ; collection is open. YAML 885.
-(rule (retract (notebook/blocks ?n key: ?old block: ?b))
+(rule (retract (notebook/blocks ?n block: {?old ?b}))
   (block/place subject: ?b notebook: ?n key: ?k)
-  (notebook/blocks ?n key: ?old block: ?b)
+  (notebook/blocks ?n block: {?old ?b})
   (!= ?old is: ?k))
 
 ; Enter a moved block under its new position.
-(rule (assert (notebook/blocks ?n key: ?k block: ?b))
+(rule (assert (notebook/blocks ?n block: {?k ?b}))
   (block/move subject: ?b notebook: ?n key: ?k))
 
 ; Every entry the block held goes, not just `from`: a block entered twice is
@@ -617,9 +617,9 @@
 
 ; A moved block leaves every other entry it held.
 ; GAP: a retract of one entry of a collection, as above. YAML 916.
-(rule (retract (notebook/blocks ?n key: ?old block: ?b))
+(rule (retract (notebook/blocks ?n block: {?old ?b}))
   (block/move subject: ?b notebook: ?n key: ?k)
-  (notebook/blocks ?n key: ?old block: ?b)
+  (notebook/blocks ?n block: {?old ?b})
   (!= ?old is: ?k))
 
 ; Every entry the block holds, read from the sequence rather than the key the
@@ -627,9 +627,9 @@
 
 ; Retract a removed block's every entry from the notebook's sequence.
 ; GAP: a retract of one entry of a collection, as above. YAML 937.
-(rule (retract (notebook/blocks ?n key: ?k block: ?b))
+(rule (retract (notebook/blocks ?n block: {?k ?b}))
   (block/remove subject: ?b notebook: ?n)
-  (notebook/blocks ?n key: ?k block: ?b))
+  (notebook/blocks ?n block: {?k ?b}))
 
 ; The block's own facts go too. A block with a source and no entry is what
 ; the element treats as a placement that never landed, so a deleted block
@@ -642,13 +642,13 @@
 
 ; Seed.
 
-(assert (notebook id:notebook/scratch title: "Scratch" key: "N1" block: id:notebook/scratch/1))
+(assert (notebook id:notebook/scratch title: "Scratch" block: {"N1" id:notebook/scratch/1}))
 
 ; The YAML asserts `notebook` without its title; a write of some fields goes
 ; through a concept that holds only them.
-(assert (notebook/blocks id:notebook/scratch key: "N5" block: id:notebook/scratch/2))
+(assert (notebook/blocks id:notebook/scratch block: {"N5" id:notebook/scratch/2}))
 
-(assert (notebook/blocks id:notebook/scratch key: "N9" block: id:notebook/scratch/3))
+(assert (notebook/blocks id:notebook/scratch block: {"N9" id:notebook/scratch/3}))
 
 ; The seeded blocks are exactly what `split` produces from the projected
 ; document, or the first edit re-partitions the whole notebook: a heading is
