@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A subscription's poll costs the entities it touched, not its whole answer
 
-Branch `perf/subscription-cover` (no pull request yet).
+[#838](https://github.com/dialog-db/dialog-db/pull/838).
 
 A subscription keeps a range of its cover per entity it read, and a
 poll gates the tree difference by that cover. Every node, buffered
