@@ -14,36 +14,6 @@ says how to cut a release.
 
 ## Unreleased
 
-### A subscription's cover records no read that a range it holds already covers
-
-[#844](https://github.com/dialog-db/dialog-db/pull/844).
-
-A concept whose rule scans an attribute for its candidates and reads it
-again of each entity it derives recorded a range for every one of those
-reads: each re-derived entity grew the cover by a range per attribute,
-so a subscription over ten thousand notes ended with a range per note
-and attribute, all of them inside the scans' own. A scan pinned to an
-attribute and an entity or a value is now left out of the cover when
-the cover holds the attribute's whole range, which holds every fact of
-the attribute (each fact is written in all three index orders). The
-cover is never widened past what was read.
-
-What this changes for you:
-
-- Nothing in the API. A poll's delta, its order and `results()` read as
-  they did, and a write the cover let through before still passes it.
-- `Demand::len` of such a subscription stays at the ranges its scans
-  recorded (four for a list of notes with a title and a body) instead of
-  growing with the entities it re-derives. `Demand::covers` answers for
-  one index key, and a fact is covered when any of its three keys is.
-
-Why: the cover is kept, searched and recorded into on every poll that
-maintains, and ranges inside ranges it holds bought no precision.
-
-#### Compatibility and migration
-
-- Nothing stored or synced changes.
-
 ### A poll scopes its diff to the cover as it stands, copying none of it
 
 [#844](https://github.com/dialog-db/dialog-db/pull/844).

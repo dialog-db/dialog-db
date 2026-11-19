@@ -70,7 +70,7 @@ use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_search_tree::nodes;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
@@ -84,7 +84,7 @@ use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::{fetch_spilled, selector_range};
 use dialog_corpus::{
-    AttributeKey, Entity, EntityKey, Fact, Key, Relation, Selector, Speculation, State, ValueKey,
+    AttributeKey, Entity, EntityKey, Fact, Key, Selector, Speculation, State, ValueKey,
 };
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get, Put};
@@ -157,27 +157,7 @@ pub struct Demand {
     /// `head` permanently and silently disable incremental
     /// maintenance for the subscription.
     metadata: Arc<Mutex<BTreeSet<Entity>>>,
-    /// The attribute-leading range of each attribute a scan named,
-    /// built once: a scan of the attribute is held by it when the cover
-    /// holds it ([`Demand::record_fact`]).
-    attributes: Arc<Mutex<AttributeRanges>>,
 }
-
-/// The attribute-leading range of each attribute, by attribute.
-///
-/// A cover drops a point read of an attribute whose whole range it
-/// holds, and records every other read as it is. It could also replace
-/// many points of one attribute with that range, past some count of
-/// them, bounding a cover by the attributes it reads; that range would
-/// be wider than what was read, and a poll's diff walks the changed
-/// nodes inside the cover. On a replica that adopts heads by reference
-/// (`Download::MinimalRanges`) the walk fetches those nodes, so every
-/// write to the attribute by an entity no point named would fetch its
-/// changed path, and any spilled value it carries, where the precise
-/// cover fetched nothing, and would become a candidate re-derived by a
-/// read of its own. With the cover searched rather than walked, its
-/// precise points cost a search each, so the wider cover is not taken.
-type AttributeRanges = BTreeMap<Relation, RangeInclusive<Key>>;
 
 /// The overlay-injected attributes whose values change whenever the
 /// branch head moves. `dialog.branch/name` and `dialog.branch/replica`
@@ -259,46 +239,11 @@ impl Demand {
         manifest: &dialog_search_tree::Manifest,
     ) {
         self.keyed_under(manifest);
-        self.record_fact(selector, manifest);
+        record_range(&self.all, selector_range(selector, manifest));
         let metadata = self.metadata.lock().expect("demand metadata lock");
         if selects_head(selector, &metadata) {
             self.head.store(true, Ordering::Relaxed);
         }
-    }
-
-    /// Record a fact scan's range, unless the cover holds the range of
-    /// the scan's whole attribute, which holds it.
-    ///
-    /// A scan with an exact attribute and an entity or a value (a point
-    /// read of one entity's attribute, or a lookup of the entities
-    /// holding a value) reads a part of that attribute's facts, and the
-    /// attribute-leading range of the attribute holds every one of them:
-    /// each fact is written in all three orders, and a change surfaces
-    /// in the diff in each. In the order the scan reads, one attribute's
-    /// facts of many entities, or of many values, are not contiguous, so
-    /// each such scan would be a range of its own: a rule that scans an
-    /// attribute for its candidates and re-reads it of each entity it
-    /// derives leaves a range per entity, all of them inside the scan's.
-    /// Leaving them out changes no change the cover lets through.
-    ///
-    /// The cover is never widened past what was read: see
-    /// [`AttributeRanges`] for why.
-    fn record_fact(
-        &self,
-        selector: &Selector<Constrained>,
-        manifest: &dialog_search_tree::Manifest,
-    ) {
-        let range = selector_range(selector, manifest);
-        if let Some(attribute) = selector.attribute() {
-            let mut attributes = self.attributes.lock().expect("demand attributes lock");
-            let whole = attributes.entry(attribute.clone()).or_insert_with(|| {
-                selector_range(&Selector::new().the(attribute.clone()), manifest)
-            });
-            if self.all.lock().expect("demand lock").contains_range(whole) {
-                return;
-            }
-        }
-        record_range(&self.all, range);
     }
 
     /// Anchor the branch entity that carries the head-bearing
@@ -361,11 +306,7 @@ impl Demand {
         self.manifest.lock().expect("demand manifest lock").clone()
     }
 
-    /// Whether the key falls inside any recorded range. A fact is
-    /// covered when any of its three index keys is: a point read of an
-    /// attribute whose whole range the cover holds is covered by that
-    /// range, in the attribute-leading order, and its entity-leading key
-    /// may fall outside every range.
+    /// Whether the key falls inside any recorded range.
     pub fn covers(&self, key: &Key) -> bool {
         covers_key(&self.all, key)
     }
@@ -3186,128 +3127,6 @@ mod tests {
         Ok(())
     }
 
-    /// A subscription to a concept whose rule scans its attributes for
-    /// candidates and reads them of each entity it re-derives records no
-    /// range for those point reads, since the scans' ranges hold them: the
-    /// cover of an answer of ten thousand notes stays four ranges however
-    /// many notes a poll re-derives, where each re-derived note added two
-    /// (406 after re-deriving two hundred). The coarse cover still gates: a write to an attribute
-    /// the query does not read costs no maintenance, a rename is
-    /// maintained into the delta a fresh evaluation gives, and a body
-    /// written for an entity outside the answer changes nothing.
-    #[dialog_common::test]
-    async fn it_bounds_the_cover_of_a_rule_keyed_by_entity() -> anyhow::Result<()> {
-        const NOTES: usize = 10_000;
-        const BOUND: usize = 16;
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-        let notes = (0..NOTES)
-            .map(|index| format!("id:note-{index:05}").parse())
-            .collect::<Result<Vec<Entity>, _>>()?;
-        let mut seed = branch.transaction();
-        for (index, note) in notes.iter().enumerate() {
-            seed = seed
-                .assert(
-                    the!("note/title")
-                        .of(note.clone())
-                        .is(format!("title-{index}")),
-                )
-                .assert(
-                    the!("note/body")
-                        .of(note.clone())
-                        .is(format!("body-{index}")),
-                );
-        }
-        seed.commit().publish().perform(&operator).await?;
-
-        let mut subscription = branch.subscribe(notes_query());
-        let initial = subscription.poll(&operator).await?.expect("initial");
-        assert_eq!(initial.asserted.len(), NOTES);
-        let cover = subscription.demand().len();
-        assert!(
-            cover <= BOUND,
-            "a cover over {NOTES} notes must hold a range per attribute read, \
-             not per note: {cover} ranges"
-        );
-
-        // A tag is no attribute the query reads: the poll stays silent.
-        branch
-            .transaction()
-            .assert(
-                the!("note/tag")
-                    .of(notes[7].clone())
-                    .is("pinned".to_string()),
-            )
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        assert!(subscription.poll(&operator).await?.is_none(), "untouched");
-        assert_eq!(subscription.maintenances(), 0);
-
-        // A rename is maintained into the one row it moves.
-        branch
-            .transaction()
-            .assert(
-                the!("note/title")
-                    .of(notes[7].clone())
-                    .is("renamed".to_string()),
-            )
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        let delta = subscription.poll(&operator).await?.expect("renamed");
-        assert_eq!((delta.asserted.len(), delta.retracted.len()), (1, 1));
-        assert_eq!(subscription.maintenances(), 1);
-        assert_eq!(subscription.recomputes(), 1, "never recomputed");
-
-        // Re-deriving many notes re-reads each one's attributes by point:
-        // the cover holds them in the attribute's range, not one apiece.
-        const RENAMED: usize = 200;
-        let mut renames = branch.transaction();
-        for note in notes.iter().skip(100).take(RENAMED) {
-            renames = renames.assert(
-                the!("note/body")
-                    .of(note.clone())
-                    .is("rewritten".to_string()),
-            );
-        }
-        renames.commit().publish().perform(&operator).await?;
-        let delta = subscription.poll(&operator).await?.expect("rewritten");
-        assert_eq!(delta.asserted.len(), RENAMED);
-        assert_eq!(subscription.maintenances(), 2);
-        let cover = subscription.demand().len();
-        assert!(
-            cover <= BOUND,
-            "re-deriving {RENAMED} notes must not add a range apiece: {cover} ranges"
-        );
-
-        // A body for an entity with no title derives no note.
-        let stray: Entity = "id:stray".parse()?;
-        branch
-            .transaction()
-            .assert(the!("note/body").of(stray).is("no title".to_string()))
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        let delta = subscription.poll(&operator).await?;
-        assert!(delta.is_none_or(|delta| delta.is_empty()));
-        assert_eq!(subscription.recomputes(), 1, "never recomputed");
-        assert!(subscription.demand().len() <= BOUND);
-
-        let fresh = branch
-            .query()
-            .select(notes_query())
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        assert_eq!(bindings(subscription.results()), bindings(&fresh));
-        Ok(())
-    }
-
     mod concepts {
         //! Derived concepts + attributes shared by the incremental
         //! maintenance tests below.
@@ -5594,23 +5413,6 @@ mod tests {
             }
         }))
         .expect("the people query parses")
-    }
-
-    /// Every note with its title and body: a concept whose rule reads
-    /// both attributes of each entity it derives.
-    fn notes_query() -> ConceptQuery {
-        serde_json::from_value(serde_json::json!({
-            "assert": { "with": {
-                "title": { "the": "note/title", "as": "text:" },
-                "body": { "the": "note/body", "as": "text:" }
-            } },
-            "where": {
-                "this": {"?": {"name": "this"}},
-                "title": {"?": {"name": "title"}},
-                "body": {"?": {"name": "body"}}
-            }
-        }))
-        .expect("the notes query parses")
     }
 
     /// Every variable a row's match binds for the query's operands,
