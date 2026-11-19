@@ -70,7 +70,7 @@ use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_search_tree::nodes;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
@@ -96,7 +96,7 @@ use dialog_query::concept::query::fixpoint::{Continuation, InMemoryAnswerTable};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output as _, Restriction};
 use dialog_query::source::SelectRules;
-use dialog_search_tree::Change;
+use dialog_search_tree::{Change, KeyRanges};
 use dialog_storage::Blake3Hash;
 use futures_util::stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
@@ -121,13 +121,16 @@ const MAINTAIN_WINDOW: usize = 16;
 /// while the evaluation streams.
 #[derive(Clone, Debug, Default)]
 pub struct Demand {
-    /// Ranges read by fact scans: the query's data demand.
-    facts: Arc<Mutex<Ranges>>,
+    /// Ranges read by fact scans: the query's data demand. Kept sorted
+    /// and disjoint as they are recorded, behind a shared handle a poll
+    /// borrows ([`Demand::snapshot`]): the scope of a poll's diff is the
+    /// cover as it stands, with nothing copied, merged or dropped.
+    facts: Arc<Mutex<Arc<Ranges>>>,
     /// Ranges read by rule-discovery scans (`dialog.rule/*`). Kept
     /// apart because a change here can install a rule, which can
     /// affect any row — it invalidates the whole result, not one
     /// entity's slice.
-    rules: Arc<Mutex<Ranges>>,
+    rules: Arc<Mutex<Arc<Ranges>>>,
     /// The format the recorded ranges are keyed under: the manifest of
     /// the tree the evaluation read. `None` until something is recorded.
     /// Keys checked against the cover are built under it.
@@ -186,50 +189,28 @@ fn selects_head(selector: &Selector<Constrained>, metadata: &BTreeSet<Entity>) -
     }
 }
 
-/// Insert a range into a cover, merging overlaps: the cover stays a
-/// sorted list of disjoint intervals, so it cannot grow beyond the
-/// number of genuinely distinct demanded regions no matter how many
-/// (nested, repeated) selectors record into it.
-/// Disjoint, sorted ranges, keyed by start: the predecessor of a key
-/// is the one range that can contain it, so recording and checking a
-/// range cost a lookup each, however many an evaluation records.
-type Ranges = BTreeMap<Key, Key>;
+/// Disjoint, sorted ranges, merged as they are recorded, so a cover
+/// cannot grow beyond the number of genuinely distinct demanded regions
+/// no matter how many (nested, repeated) selectors record into it.
+/// Recording and checking a range cost a search each, however many an
+/// evaluation records, and a range the cover holds already changes
+/// nothing.
+type Ranges = KeyRanges<Key>;
 
-fn record_range(ranges: &Mutex<Ranges>, range: RangeInclusive<Key>) {
-    merge_range(&mut ranges.lock().expect("demand lock"), range);
+/// Record `range` into a cover. A poll's snapshot of the cover is
+/// dropped before anything records again, so the shared set is written
+/// in place; were one still held, the set would be copied first and the
+/// snapshot left as it was taken.
+fn record_range(ranges: &Mutex<Arc<Ranges>>, range: RangeInclusive<Key>) {
+    let mut ranges = ranges.lock().expect("demand lock");
+    if ranges.contains_range(&range) {
+        return;
+    }
+    Arc::make_mut(&mut ranges).insert(range);
 }
 
-/// Add `range` to `ranges`, merged with every range it overlaps.
-fn merge_range(ranges: &mut Ranges, range: RangeInclusive<Key>) {
-    let (mut start, mut end) = range.into_inner();
-    // The range starting at or before the new one may reach into it.
-    if let Some((existing_start, existing_end)) = ranges.range(..=start.clone()).next_back()
-        && *existing_end >= start
-    {
-        start = existing_start.clone();
-        end = end.max(existing_end.clone());
-        ranges.remove(&start);
-    }
-    // Every range starting inside the new one is absorbed.
-    let absorbed: Vec<Key> = ranges
-        .range(start.clone()..=end.clone())
-        .map(|(existing_start, _)| existing_start.clone())
-        .collect();
-    for existing_start in absorbed {
-        if let Some(existing_end) = ranges.remove(&existing_start) {
-            end = end.max(existing_end);
-        }
-    }
-    ranges.insert(start, end);
-}
-
-fn covers_key(ranges: &Mutex<Ranges>, key: &Key) -> bool {
-    ranges
-        .lock()
-        .expect("demand lock")
-        .range(..=key.clone())
-        .next_back()
-        .is_some_and(|(_, end)| end >= key)
+fn covers_key(ranges: &Mutex<Arc<Ranges>>, key: &Key) -> bool {
+    ranges.lock().expect("demand lock").contains(key.as_ref())
 }
 
 impl Demand {
@@ -292,9 +273,8 @@ impl Demand {
         ranges: &[RangeInclusive<Key>],
     ) {
         self.keyed_under(manifest);
-        let mut rules = self.rules.lock().expect("demand lock");
         for range in ranges {
-            merge_range(&mut rules, range.clone());
+            record_range(&self.rules, range.clone());
         }
     }
 
@@ -332,13 +312,24 @@ impl Demand {
         covers_key(&self.rules, key)
     }
 
-    /// A snapshot of every recorded range (facts and rules), sorted and
-    /// disjoint: the scope a cover-gated tree diff walks. A scope in that
-    /// shape is searched as it is, where one in any other would be sorted
-    /// first.
+    /// The fact and rule covers as they stand, each sorted and
+    /// disjoint: the scope a cover-gated tree diff walks, the union of
+    /// the two. Taking it shares the sets, copying no range, so a poll
+    /// whose evaluations recorded nothing new does no work in the size
+    /// of its cover to build its scope, or to drop it.
+    pub(crate) fn snapshot(&self) -> (Arc<Ranges>, Arc<Ranges>) {
+        (
+            self.facts.lock().expect("demand lock").clone(),
+            self.rules.lock().expect("demand lock").clone(),
+        )
+    }
+
+    /// Every recorded range (facts and rules) merged into one sorted,
+    /// disjoint list: what the union [`Demand::snapshot`] scopes a diff
+    /// to holds.
+    #[cfg(test)]
     pub(crate) fn ranges(&self) -> Vec<RangeInclusive<Key>> {
-        let facts = self.facts.lock().expect("demand lock");
-        let rules = self.rules.lock().expect("demand lock");
+        let (facts, rules) = self.snapshot();
         // Both covers are sorted and disjoint: walk them side by side,
         // taking the range that starts first and folding into the last
         // range taken any range it reaches, so each key is cloned once,
@@ -1053,10 +1044,14 @@ where
         if pinned == target {
             return Ok(Touched::Nothing);
         }
-        let scope = self.demand.ranges();
-        if scope.is_empty() {
+        // The cover as it stands, shared: the diff borrows its sets, so
+        // a poll builds, walks with and drops a scope of any size at the
+        // cost of a search per test against it.
+        let (facts, rules) = self.demand.snapshot();
+        if facts.is_empty() && rules.is_empty() {
             return Ok(Touched::Nothing);
         }
+        let cover = [&*facts, &*rules];
 
         // Read exactly as a select does: a pull replicates tree nodes
         // along changed paths but never spilled value blocks, so the first
@@ -1079,7 +1074,7 @@ where
         let previous = index_at(pinned);
         let next = index_at(target);
 
-        let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
+        let changes = previous.differentiate_covered(&next, &cover, &storage, &storage);
         let mut changes = Box::pin(changes);
         let mut subjects = BTreeSet::new();
         let mut asserted = Vec::new();
@@ -1096,7 +1091,7 @@ where
                 Change::Add(entry) => entry,
                 Change::Remove(entry) => entry,
             };
-            if self.demand.covers_rules(&entry.key) {
+            if rules.contains(entry.key.as_ref()) {
                 return Ok(Touched::Rules);
             }
             // An entry arriving with a datum became readable; an
@@ -2972,15 +2967,15 @@ mod tests {
             let mut expected = super::Ranges::new();
             for (start, end) in facts {
                 super::record_range(&demand.facts, key(*start)..=key(*end));
-                super::merge_range(&mut expected, key(*start)..=key(*end));
+                expected.insert(key(*start)..=key(*end));
             }
             for (start, end) in rules {
                 super::record_range(&demand.rules, key(*start)..=key(*end));
-                super::merge_range(&mut expected, key(*start)..=key(*end));
+                expected.insert(key(*start)..=key(*end));
             }
             let expected: Vec<_> = expected
-                .into_iter()
-                .map(|(start, end)| start..=end)
+                .iter()
+                .map(|(start, end)| start.clone()..=end.clone())
                 .collect();
             assert_eq!(
                 demand.ranges(),
@@ -3062,6 +3057,85 @@ mod tests {
                 .await?;
             assert_eq!(bindings(subscription.results()), bindings(&fresh));
         }
+        Ok(())
+    }
+
+    /// A poll walks its diff with the cover as it stands: it builds no
+    /// scope from it, so the ranges a poll compares against or builds from
+    /// do not grow with the cover. One rename under a cover of a hundred,
+    /// a thousand and ten thousand ranges (the people's own, and point
+    /// ranges for entities that hold nothing, as a rule keyed by entity
+    /// records them) costs within a small constant of the same work.
+    /// Before, every poll merged the cover into a list and the diff
+    /// checked the list's order twice: 1,550, 4,160 and 23,360 ranges at
+    /// the three sizes, where a poll now compares against 186, 220 and
+    /// 254.
+    #[dialog_common::test]
+    async fn it_polls_a_large_cover_as_it_polls_a_small_one() -> anyhow::Result<()> {
+        use dialog_corpus::tree::selector_range;
+        use dialog_search_tree::helpers::{scope_builds, scope_probes};
+        const PEOPLE: usize = 8;
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let people = (0..PEOPLE)
+            .map(|index| format!("id:person-{index:04}").parse())
+            .collect::<Result<Vec<Entity>, _>>()?;
+        let mut seed = branch.transaction();
+        for (index, person) in people.iter().enumerate() {
+            seed = seed.assert(
+                the!("person/name")
+                    .of(person.clone())
+                    .is(format!("name-{index}")),
+            );
+        }
+        seed.commit().publish().perform(&operator).await?;
+
+        let padding = CorpusRelation::try_from("person/padding".to_string())?;
+        let mut work = Vec::new();
+        for cover in [100usize, 1_000, 10_000] {
+            let mut subscription = branch.subscribe(people_query());
+            subscription.poll(&operator).await?.expect("initial");
+            let manifest = subscription.demand().manifest().expect("recorded");
+            let mut index = 0;
+            while subscription.demand().len() < cover {
+                let entity: Entity = format!("id:pad-{index:06}").parse()?;
+                let selector = Selector::new().the(padding.clone()).of(entity);
+                super::record_range(
+                    &subscription.demand().facts,
+                    selector_range(&selector, &manifest),
+                );
+                index += 1;
+            }
+
+            let person = &people[0];
+            branch
+                .transaction()
+                .assert(
+                    the!("person/name")
+                        .of(person.clone())
+                        .is(format!("renamed-{cover}")),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            let before = scope_probes() + scope_builds();
+            let delta = subscription.poll(&operator).await?.expect("renamed");
+            work.push(scope_probes() + scope_builds() - before);
+            assert_eq!(delta.asserted.len(), 1);
+            assert_eq!(subscription.maintenances(), 1, "maintained");
+            assert!(subscription.demand().len() >= cover);
+        }
+        let [small, _, large] = work[..] else {
+            unreachable!("three covers")
+        };
+        assert!(
+            large <= 3 * small.max(1),
+            "a poll under a cover of 10,000 ranges must cost what one under 100 \
+             does: ranges compared against or built from per poll {work:?} \
+             at 100 / 1,000 / 10,000"
+        );
         Ok(())
     }
 
