@@ -24,4 +24,15 @@ Both create `rust/dialog-corpus/src/model/composite.rs` and both edit `identity.
 - #812 first: the notation cannot keep its syntax trees, `distinct`'s lists or its list patterns in that shape without lists and text keys being added or encoded. That is a decision and then about a day; without lists, days.
 - The patterns line first: every stored composite later moves from byte 7 to byte 22, with its references and every rule identity over one. Bearable only while nothing durable holds one; #778 still refuses to store a rule that holds a pattern.
 
-**A hypothesis, the agent's:** they are two things and not two versions of one. #812's is a struct of attributes, what a concept's instance is as a value. The patterns line's is plain data as IPLD has it, what a syntax tree and a collected list are. They already have different type bytes. Refuted if the maintainer means every map to be keyed by relations, in which case the syntax tree needs relation keys and an ordered collection has to be found.
+**A hypothesis, the agent's, refuted by the maintainer on 2026-11-20:** that they are two kinds of value and both should exist.
+
+**The maintainer, 2026-11-20:** if `Value::Composite` cannot hold a syntax tree it fails its goals, which were a built-in composite value that offers random access, is stored more compactly, and can be read without decoding all of it.
+
+So there is one kind, #812's, and it has to grow to hold what the notation holds: an ordered collection, and keys a syntax tree can use. The value on the patterns line, dag-cbor after a version byte, meets none of the three goals: it is decoded whole, in order. What the notation and the patterns built over it stay; the value under them is replaced.
+
+```
+ now      notation ──▶ patterns (#778) ──▶ Composite::{Map, List} in Value::Record, dag-cbor
+ wanted   notation ──▶ patterns        ──▶ Value::Composite (#812), with an ordered collection
+```
+
+Open: what an ordered collection is in #812's encoding so that an item is reached by its index without reading the others; and whether a key must be a relation, with the syntax tree's keys named in a domain (`syntax/type`), or may be any text.
