@@ -1,6 +1,6 @@
 # A folded value is recomputed for its subscriber, not maintained
 
-Phase: **Delimiting.** A problem statement is proposed and waits on the maintainer and on one measurement.
+Phase: **Building.** Directed by the maintainer on 2026-11-19; the problem statement stays as proposed. What is built first is in [design-fold-state.md](fold-maintenance/design-fold-state.md).
 phases mean, and the [journal](fold-maintenance/journal.md) for where the
 topic stands.
 

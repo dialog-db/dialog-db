@@ -52,3 +52,11 @@ The agent had feared that folding the changes needed something the engine does n
 The agent proposed a wider problem, "a subscriber pays for the unit derived again, not for the change", and withdraws it on this evidence: for a join the unit is within a factor of the change. The order is lost in the fold, as the topic says, and in the scan of the kept answer.
 
 **Decided.** Not decided. The statement still waits on the maintainer.
+
+## 2026-11-19, Building: direction by the maintainer, and what the state is
+
+**Asked.** Whether the statement is the problem, twice, and then what views as queries are for. The maintainer: he is not doing design here. The notation and its views were arrived at with evals and refinements already written down, the prototype's scaling was a prototype's, and he will not go through arriving at views again. What is needed is an efficient implementation of views and the gaps closed so it can land.
+
+**Learned.** The agent kept asking for a problem statement for a decision already made. The statement in the topic stands as proposed and is not put to him again.
+
+**Decided.** By the maintainer: build. The agent's plan, which he liked: index the kept answer by entity after a profile; the fold kept from signed rows; the rows of a seeded join kept, later and only if measured. What a fold's subscription holds is in [design-fold-state.md](design-fold-state.md), the agent's decision: each group's rows folded again by the engine's own fold, so it equals asking again by construction, with a value changed by a step as a later refinement. Rests on the open hypothesis that the inner subscriptions cost the change.
