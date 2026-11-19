@@ -1837,3 +1837,15 @@ The measurement that came in after (next entry but one above) bears on this: wha
 
 **Decided.** A, with two corrections to the report's wording: a definition of any kind is keyed by its content and the name points at it; and what is kept is the resolved definition, each reference holding the entity of what was named with the name beside it. Rests on no open hypothesis.
 
+## 2026-11-19, Designing: resolved and inlined, corrected
+
+**Learned.** The entry above says a kept reference holds the entity of what was named. That is not the plan. The maintainer: every reference is resolved and inlined at compile time, and the source map captures both the name it was referenced under and the entity it resolved to. It is what the entries of 2026-11-11 ("Forms are fully inlined") and 2026-11-12 (the drawing of as written, as kept, beside it) already say.
+
+```
+ as written    (todo ?t state: :done)
+ as kept       this: ?t   xyz.todo/state: :done          what it meant, written out
+ source map    todo -> concept:…, state: -> xyz.todo/state, where in the source
+```
+
+**Decided.** What reaches the branch for a definition is its compiled form, inlined, and a source map beside it. Nothing stored follows a name.
+
