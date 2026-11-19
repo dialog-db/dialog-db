@@ -37,8 +37,18 @@ What this changes for you:
   each root inserted first. `recomputes()` on both says how often a query
   was evaluated whole.
 - New: the `Reader` trait, the env a poll reads through, and `LiveError`.
-- A view's counts are still kept by the `Maintainer` from its layers'
-  rows.
+- A view's count of a read its own query collects, grouped by the entity
+  the query answers of, is kept by Dialog-DB: `Live::watch` subscribes
+  to the fold the selection's lowering gives that read
+  (`Plan::folds`, a `FoldedCount` each) in place of the count's layer,
+  and gives the `Maintainer` the counts, `Maintainer::apply_counted` with
+  `Counts`, and no row of that layer. The patches are those the layer's
+  rows give. A count of a query collected into the markup, of an entry,
+  or of a read the lowering leaves in memory is counted from its layer's
+  rows as before.
+- New: `Plan::folding`, `Count::whole`, `Selection::folded` (a
+  `FoldedPart` each), `Maintainer::given`, `Maintainer::rows`,
+  `Watched::maintainer` and `Watched::folded`.
 
 Why: each caller laid the rules, created and polled the subscriptions and
 fed the maintainer by hand, and the notation is the interface that knows

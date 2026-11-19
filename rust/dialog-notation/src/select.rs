@@ -194,6 +194,22 @@ impl Folded {
     }
 }
 
+/// A read that collects, as [`Selection::folded`] says Dialog-DB folds
+/// it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FoldedPart {
+    /// The variable the whole is bound to.
+    pub target: String,
+    /// Its fold, by its index in [`Selection::folds`].
+    pub fold: usize,
+    /// The terms the fold groups by: a folded row binds each of them.
+    pub shared: Vec<String>,
+    /// The field of a folded row that holds how many the whole holds.
+    pub count: String,
+    /// Whether what is collected is an entry `{?k ?v}`.
+    pub entry: bool,
+}
+
 /// A query, as its analyzed tree says it.
 #[derive(Clone, Debug)]
 struct Defined {
@@ -413,6 +429,30 @@ impl Selection {
             shared,
             entry,
         })
+    }
+
+    /// The reads of the query `name` that collect and that Dialog-DB
+    /// folds, each with the fold that gives its whole.
+    pub fn folded(&self, name: &str) -> Vec<FoldedPart> {
+        self.defined
+            .get(name)
+            .map(|defined| {
+                defined
+                    .collects
+                    .iter()
+                    .filter_map(|collect| {
+                        let lowered = collect.folded.as_ref()?;
+                        Some(FoldedPart {
+                            target: collect.target.clone(),
+                            fold: lowered.fold,
+                            shared: lowered.shared.clone(),
+                            count: counted(&collect.target),
+                            entry: lowered.entry.is_some(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The one query that reads every row of a part, by its index in

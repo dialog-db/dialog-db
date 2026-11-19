@@ -79,11 +79,12 @@ pub use expand::{Expander, Position};
 pub use form::{Form, Part, read};
 pub use parse::{Parsed, parse, parse_document, parse_written};
 pub use print::print;
-pub use select::{Folded, Selection};
+pub use select::{Folded, FoldedPart, Selection};
 pub use syntax::{Parameters, Signature, Syntax};
-pub use view::plan::{Condition, Count, Layer, Place, Placed, Plan, Source, Why};
+pub use view::plan::{Condition, Count, FoldedCount, Layer, Place, Placed, Plan, Source, Why};
 pub use view::tree::{
-    Address, Change, Content, Given, Maintainer, Patch, Posted, Rendered, Row, Shown, render,
+    Address, Change, Content, Counts, Given, Maintainer, Patch, Posted, Rendered, Row, Shown,
+    render,
 };
 pub use view::{Attribute, CALLED, Element, Event, Input, Node, Piece};
 pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};

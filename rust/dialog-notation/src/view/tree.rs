@@ -150,6 +150,20 @@ pub struct Change {
     pub left: Vec<Row>,
 }
 
+/// A count Dialog-DB keeps, as it moved since the last change: for each
+/// instance of the count's host, the row that names it, binding the keys
+/// of the host and every instance above it, and the count there. A host
+/// whose count is in neither list counts what it counted.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Counts {
+    /// The counted place, by its index in [`Plan::elements`].
+    pub place: usize,
+    /// Each host's count now.
+    pub arrived: Vec<(Row, u64)>,
+    /// Each host's count before.
+    pub left: Vec<(Row, u64)>,
+}
+
 /// A value with an order over every value: the order values have, and
 /// their printed form where they have none.
 #[derive(Clone, Debug)]
@@ -222,6 +236,10 @@ pub struct Maintainer {
     /// While a change is applied: each count an instance showed before
     /// it, by the counted place and the instance's chain.
     counted: BTreeMap<(usize, Chain), u64>,
+    /// The counted places whose counts are given, not counted from rows.
+    given: BTreeSet<usize>,
+    /// The counts given, by the counted place and its host's chain.
+    tallies: BTreeMap<(usize, Chain), u64>,
 }
 
 impl Maintainer {
@@ -276,7 +294,40 @@ impl Maintainer {
             lineage,
             shows,
             counted: BTreeMap::new(),
+            given: BTreeSet::new(),
+            tallies: BTreeMap::new(),
         }
+    }
+
+    /// Take the count of the counted place `place` from the [`Counts`]
+    /// given to [`Maintainer::apply_counted`], and no row of its layer:
+    /// it counts 0 where none is given.
+    pub fn given(&mut self, place: usize) {
+        self.given.insert(place);
+    }
+
+    /// How many rows stand behind the instances of a layer's places, each
+    /// as many times as it was given.
+    pub fn rows(&self, layer: usize) -> usize {
+        self.plan
+            .region(layer)
+            .iter()
+            .flat_map(|at| self.live[*at].values())
+            .flat_map(BTreeMap::values)
+            .sum()
+    }
+
+    /// The count a counted place shows under the instance `host` of its
+    /// host, as it stands.
+    fn tally(&self, place: usize, host: &Chain) -> u64 {
+        if self.given.contains(&place) {
+            return self
+                .tallies
+                .get(&(place, host.clone()))
+                .copied()
+                .unwrap_or(0);
+        }
+        self.under(place, host).len() as u64
     }
 
     /// The plan it maintains.
@@ -359,7 +410,7 @@ impl Maintainer {
                 let number =
                     match before.and_then(|_| self.counted.get(&(count.place, prefix.clone()))) {
                         Some(number) => *number,
-                        None => self.under(count.place, &prefix).len() as u64,
+                        None => self.tally(count.place, &prefix),
                     };
                 values.insert(count.variable.clone(), Value::UnsignedInt(number.into()));
             }
@@ -578,6 +629,14 @@ impl Maintainer {
     /// the rows are behind are looked at, and where the values one shows
     /// changed, the instances under it that show them.
     pub fn apply(&mut self, changes: &[Change]) -> Vec<Patch> {
+        self.apply_counted(changes, &[])
+    }
+
+    /// Take rows that arrived and rows that left, and counts that moved,
+    /// as one change, and say what it changed in the tree, as
+    /// [`Maintainer::apply`] does. A count given is of a place
+    /// [`Maintainer::given`] names; one of any other place is ignored.
+    pub fn apply_counted(&mut self, changes: &[Change], counts: &[Counts]) -> Vec<Patch> {
         let mut moves: Vec<(usize, Chain, Kept, bool)> = Vec::new();
         let mut touched: BTreeSet<(usize, Chain)> = BTreeSet::new();
         for change in changes {
@@ -617,10 +676,37 @@ impl Maintainer {
             .collect();
         for (element, chain) in touched.iter().filter(|(element, _)| counting(*element)) {
             let host = chain[..chain.len() - 1].to_vec();
-            let number = self.under(*element, &host).len() as u64;
+            let number = self.tally(*element, &host);
             self.counted.insert((*element, host), number);
         }
         touched.extend(hosts);
+        // A count given touches its host, and is set once the counts
+        // before are noted: what left first, then what arrived.
+        let mut tallied: Vec<(usize, Chain, Option<u64>)> = Vec::new();
+        for moved in counts
+            .iter()
+            .filter(|moved| self.given.contains(&moved.place))
+        {
+            let Some(host) = self.plan.elements[moved.place].parent else {
+                continue;
+            };
+            let gone = moved.left.iter().map(|(row, _)| (row, None));
+            let come = moved
+                .arrived
+                .iter()
+                .map(|(row, number)| (row, Some(*number)));
+            for (row, number) in gone.chain(come) {
+                let Some(chain) = self.project(host, row) else {
+                    continue;
+                };
+                let before = self.tally(moved.place, &chain);
+                self.counted
+                    .entry((moved.place, chain.clone()))
+                    .or_insert(before);
+                touched.insert((host, chain.clone()));
+                tallied.push((moved.place, chain, number));
+            }
+        }
         let before: Before = touched
             .iter()
             .map(|(element, chain)| {
@@ -630,6 +716,12 @@ impl Maintainer {
                 )
             })
             .collect();
+        for (place, chain, number) in tallied {
+            match number {
+                Some(number) => self.tallies.insert((place, chain), number),
+                None => self.tallies.remove(&(place, chain)),
+            };
+        }
         for (element, chain, kept, arrived) in moves {
             let rows = self.live[element].entry(chain.clone()).or_default();
             if arrived {

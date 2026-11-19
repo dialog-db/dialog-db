@@ -54,8 +54,8 @@ use dialog_search_tree::nodes;
 
 use crate::select::Selection;
 use crate::syntax::Syntax;
-use crate::view::plan::Plan;
-use crate::view::tree::{Change, Maintainer, Patch, Rendered};
+use crate::view::plan::{FoldedCount, Plan};
+use crate::view::tree::{Change, Counts, Maintainer, Patch, Rendered, Row};
 use crate::{Error, Query};
 
 /// What a subscription of a branch reads through: the env every poll is
@@ -262,22 +262,38 @@ impl Live {
 
     /// The view `plan` kept current for `entity`, the entity it is
     /// rendered for where it answers of one: its layers' rules laid and a
-    /// subscription of each layer's query.
+    /// subscription of each layer's query, but for a count Dialog-DB
+    /// keeps, [`Plan::folds`], whose layer is a standing fold instead.
+    /// The [`Maintainer`] is given the fold's counts and no row of that
+    /// layer.
     pub fn watch(&self, plan: Plan, entity: Option<Value>) -> Result<Watched, LiveError> {
+        let mut maintainer = Maintainer::new(plan.clone(), entity.clone());
+        let mut folds: BTreeMap<usize, FoldedCount> = BTreeMap::new();
+        for folded in plan.folds() {
+            let layer = plan.elements[plan.counts[folded.count].place].layer;
+            folds.insert(layer, folded);
+        }
         let mut layers = Vec::new();
         for layer in 0..plan.layers.len() {
             if plan.layers[layer].conditions.is_empty() {
                 layers.push(None);
                 continue;
             }
+            if let Some(folded) = folds.remove(&layer) {
+                self.lay(&folded.folded.rules)?;
+                let feed = self.branch.subscribe_fold(folded.folded.fold.clone());
+                maintainer.given(plan.counts[folded.count].place);
+                layers.push(Some(Feed::Counted(Box::new((folded, feed)))));
+                continue;
+            }
             let query = plan.query(layer, entity.as_ref())?;
             self.lay(&query.rule)?;
             let feed = self.branch.subscribe(query.select.clone());
-            layers.push(Some((query, feed)));
+            layers.push(Some(Feed::Rows(Box::new((query, feed)))));
         }
         Ok(Watched {
             delivered: vec![0; layers.len()],
-            maintainer: Maintainer::new(plan.clone(), entity.clone()),
+            maintainer,
             plan,
             entity,
             layers,
@@ -388,13 +404,20 @@ impl Standing {
     }
 }
 
+/// What keeps a layer of a view.
+enum Feed {
+    /// The layer's query and its subscription.
+    Rows(Box<(Query, Subscription<ConceptQuery>)>),
+    /// A count Dialog-DB keeps, and its standing fold.
+    Counted(Box<(FoldedCount, FoldSubscription<ConceptQuery, ConceptQuery>)>),
+}
+
 /// A view kept current on a branch. Made by [`Live::watch`].
 pub struct Watched {
     plan: Plan,
     entity: Option<Value>,
-    /// Each layer's query and its subscription; `None` for a layer with
-    /// no condition.
-    layers: Vec<Option<(Query, Subscription<ConceptQuery>)>>,
+    /// What keeps each layer; `None` for a layer with no condition.
+    layers: Vec<Option<Feed>>,
     maintainer: Maintainer,
     /// The rows each layer delivered at the last poll, come and gone.
     delivered: Vec<usize>,
@@ -413,12 +436,32 @@ impl Watched {
     }
 
     /// For each layer with a query, how many times its subscription
-    /// evaluated it whole.
+    /// evaluated it whole: a fold's, both of its queries.
     pub fn recomputes(&self) -> Vec<usize> {
         self.layers
             .iter()
             .flatten()
-            .map(|(_, feed)| feed.recomputes())
+            .map(|feed| match feed {
+                Feed::Rows(rows) => rows.1.recomputes(),
+                Feed::Counted(counted) => counted.1.recomputes(),
+            })
+            .collect()
+    }
+
+    /// The maintainer of the tree, which holds the rows each layer gave
+    /// it.
+    pub fn maintainer(&self) -> &Maintainer {
+        &self.maintainer
+    }
+
+    /// The layers whose count Dialog-DB keeps by a fold, by their index
+    /// in [`Plan::layers`].
+    pub fn folded(&self) -> Vec<usize> {
+        self.layers
+            .iter()
+            .enumerate()
+            .filter(|(_, feed)| matches!(feed, Some(Feed::Counted(_))))
+            .map(|(layer, _)| layer)
             .collect()
     }
 
@@ -433,10 +476,37 @@ impl Watched {
     /// inserted.
     pub async fn poll<E: Reader>(&mut self, env: &E) -> Result<Vec<Patch>, LiveError> {
         let mut changes = Vec::new();
+        let mut counts = Vec::new();
         self.delivered.iter_mut().for_each(|rows| *rows = 0);
         for (layer, at) in self.layers.iter_mut().enumerate() {
-            let Some((query, feed)) = at else {
-                continue;
+            let (query, feed) = match at {
+                None => continue,
+                Some(Feed::Counted(counted)) => {
+                    let (folded, feed) = &mut **counted;
+                    let Some(delta) = feed.poll(env).await? else {
+                        continue;
+                    };
+                    self.delivered[layer] = delta.asserted.len() + delta.retracted.len();
+                    let place = self.plan.counts[folded.count].place;
+                    counts.push(Counts {
+                        place,
+                        arrived: delta
+                            .asserted
+                            .iter()
+                            .map(|row| tallied(folded, row))
+                            .collect::<Result<_, _>>()?,
+                        left: delta
+                            .retracted
+                            .iter()
+                            .map(|row| tallied(folded, row))
+                            .collect::<Result<_, _>>()?,
+                    });
+                    continue;
+                }
+                Some(Feed::Rows(rows)) => {
+                    let (query, feed) = &mut **rows;
+                    (query, feed)
+                }
             };
             let Some(delta) = feed.poll(env).await? else {
                 continue;
@@ -462,7 +532,30 @@ impl Watched {
             }
             self.polled = true;
         }
-        patches.extend(self.maintainer.apply(&changes));
+        patches.extend(self.maintainer.apply_counted(&changes, &counts));
         Ok(patches)
     }
+}
+
+/// A folded row of a count as the host instance it names and the count
+/// there.
+fn tallied(folded: &FoldedCount, row: &FoldConclusion) -> Result<(Row, u64), LiveError> {
+    let values = folded.folded.values(row);
+    let host: Row = folded
+        .shared
+        .iter()
+        .filter_map(|name| Some((name.clone(), values.get(name)?.clone())))
+        .collect();
+    let number = match values.get(&folded.field) {
+        Some(Value::UnsignedInt(number)) => u64::try_from(*number).map_err(|_| {
+            LiveError::Notation(Error::Refused(format!("a count of {number} is too many")))
+        })?,
+        Some(other) => {
+            return Err(LiveError::Notation(Error::Refused(format!(
+                "a fold counted {other:?}, which is no count"
+            ))));
+        }
+        None => 0,
+    };
+    Ok((host, number))
 }
