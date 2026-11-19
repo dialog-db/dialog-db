@@ -1648,3 +1648,15 @@ His second question is #712, his own: a collection premise is a positive join, s
 
 **Decided.** Not decided. [design-canonical-read.md](design-canonical-read.md) sets the three side by side. The agent's hypothesis is the line, with the descriptor as compile output; `claim` is the simpler form and has met no reader.
 
+## 2026-11-18, Designing: no entry, no row
+
+**Asked.** Whether a field of many values is satisfied by none, which the agent had asked twice, and which #712 asks of a collection.
+
+**Learned.** The maintainer's answer is no: the key and the value are fields of the head and neither is optional, so a notebook with no block is no `notebook` of that shape. Two concepts, the title in one and the blocks in the other, and the first always matches; Datomic does the same. A reader who wants the blocks with the notebook wants them collected, and that is an aggregate.
+
+It does not sit with #712 as written, which expected the row. The agent's reading: the YAML shows a collection as one field holding a map, where the notation shows an entry as a row, so #712 is two questions and he has answered the first. The second, the map as a whole, is a fold, and no query can state one yet (#830).
+
+It leaves the view where it was. Splitting the concept does not keep a to-do's `li` when it has no tag, since two reads conjoined still give no row.
+
+**Decided.** The maintainer's: no entry, no row; split the concept. So a read of an entry with both halves blank says there is one, and the fix in #835 stands as it is. Not decided: how a view reads the second concept without losing the first, and the aggregate.
+
