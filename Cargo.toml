@@ -220,6 +220,7 @@ version = "0.5.0-rc.7"
 path = "./rust/dialog-migration"
 version = "0.5.0-rc.7"
 
+
 [workspace.dependencies.dialog-corpus]
 path = "./rust/dialog-corpus"
 version = "0.5.0-rc.7"
