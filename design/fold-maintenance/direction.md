@@ -28,15 +28,32 @@ flowchart LR
 | the stored or wire format | none | none | 🟢 none | 🔴 the node format | none |
 | a fold over a fold | two strata, as now | ? | ? changes of the lower one feed the upper | no | no |
 
-**What is known of dialog here, and what is not.** A subscription of a
-concept already answers a change in time that does not grow with the page
-(#773's baseline). Whether it reports what stopped holding as a row of its
-own, which C needs, is not checked. Whether a group is ever a range of one
-index, which D needs, is not checked.
+**What is known of dialog here** ([as built](subscriptions-as-built.md)).
 
-**A hypothesis, the agent's.** C, held in the subscription: the precursor's
-grouping of rows, done to the changes and not to the rows. It asks nothing
-of storage, it gives a view the insert and the remove it would otherwise
-have to work out, and a set of values costs no more than a count. Refuted
-if dialog's subscription cannot say what stopped holding without reading
-the group again, in which case B is what is left.
+- A poll returns a change: the rows that started holding and the rows that stopped (`Delta { asserted, retracted }`).
+- A subscription keeps its whole last answer, and nothing for a rule, a premise or a group. It learns a row stopped holding by deriving the touched entity again and comparing.
+- No change of a rule's rows, with a sign, exists inside the engine: what travels is the set of entities that may have gained or lost.
+- A fold is evaluated over every group, at empty scope, even when one group is asked for; and a fold in reach makes a subscription ask again.
+- One thing is kept across polls beside the answer today: the fixpoint of a recursive concept, held in the subscription.
+- The tree holds stored facts, so D cannot fold rows a rule derived.
+
+```mermaid
+flowchart LR
+  F["a fact changes"] --> I["subscription of the inner query<br/>derives the touched entity again"]
+  I -- "rows that stopped, rows that started" --> G["a state for each group:<br/>a count, a sum, values with their counts"]
+  G -- "the group's old value retracted, its new one asserted;<br/>for a set, the value that entered or left" --> S["the subscriber"]
+```
+
+**A hypothesis, the agent's, refined by the reading.** C, built on what a subscription already gives. The engine has no signed rows inside it, but a subscription's poll is exactly that at its edge. So a folding query's subscription is:
+
+1. a subscription of its inner query, kept current as any is, one touched entity at a time;
+2. beside it, a state for each group, changed by what each poll of the inner one says stopped and started;
+3. a poll of its own that reports the groups whose value moved.
+
+It asks nothing new of the engine's maintenance and nothing of storage. The state is the second thing a subscription holds across polls, after the fixpoint. `min` and `max` need no ordered structure: the inner subscription already keeps the group's rows, so a retracted least is found again in memory. A set of values is a count for each value, and what it reports is the value that entered or left, which is the patch a view wants. One poll reads one revision, so several folds over one inner query move together, which is use case 5.
+
+- **Confirmed if** one changed fact costs the inner subscription's poll and a step for each row in its change, at 10 groups' rows and at 1000: within 2 times a plain subscription of the inner query, and not growing.
+- **Refuted if** the inner query's own maintenance grows with the page for the bodies views have (a join through another entity, a collection read), in which case the fold is not what costs; or if holding the inner answer for every subscriber is more memory than a page can afford.
+- **What it leaves:** the first read still folds every row once; a fold of a fold feeds changes upward and is not worked out; the answer is scanned whole for each touched entity (`subscription.rs` 1312), which is nothing at a thousand rows and something at a hundred thousand.
+
+B is the fallback and needs less: let a fold be asked for one group when the restriction is on a field of the group's key, and derive that group again. It costs the group's rows on each change, which is what C saves.

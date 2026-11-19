@@ -1,6 +1,6 @@
 # A folded value is recomputed for its subscriber, not maintained
 
-Phase: **Diagnosing.** See the [design index](README.md) for what the
+Phase: **Delimiting.** A problem statement is proposed and waits on the maintainer and on one measurement.
 phases mean, and the [journal](fold-maintenance/journal.md) for where the
 topic stands.
 
@@ -33,12 +33,13 @@ keep that as the last resort.
 
 ## Problem
 
-Not stated yet. A candidate, to be confirmed by measuring: what one changed
-fact costs the subscriber of a folded value grows with the group it belongs
-to, or with every group, where a subscriber of the rows pays for the change
-alone.
+**Proposed, not confirmed.** Whoever subscribes to a value folded from many facts pays, for one changed fact, for every row of every group and not for the change. A subscription keeps rows current by deriving again the entity a change touched; a fold is evaluated over the whole of its body at once and has no entity to derive again, so with a fold in reach the subscription asks its whole query again
+([as built](fold-maintenance/subscriptions-as-built.md), sections 5 and 6). A view that counts or collects therefore costs what its page holds, on every change.
+
+Read from the code and pinned by a spike's test (5 recomputes, 0 maintenances); what it costs in time as groups grow is being measured on #773.
+
+What a user could do were it solved is in [use cases](fold-maintenance/use-cases.md), taken from what tonk works around today ([as built](fold-maintenance/tonk-as-built.md)).
 
 ## Approach
 
-Not decided. [Prior art](fold-maintenance/direction.md) is gathered, with
-what each would ask of dialog.
+Not decided. [direction.md](fold-maintenance/direction.md) has the prior art and a hypothesis that fits what dialog already does: a folding query's subscription is a subscription of its inner query, whose polls already say what started and what stopped holding, with a fold of those changes held beside it.

@@ -91,6 +91,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   **Describing.** Split out of file-writers: capturing what a transaction
   considered, so a replay is skipped when nothing it read overlaps.
 - [A folded value is recomputed for its subscriber, not maintained](fold-maintenance.md):
-  **Diagnosing.** The engine folds behind a gate and leaves keeping a
-  fold current under a subscription for later. Prior art for doing it at
-  the cost of the change is laid out; what it costs today is not measured.
+  **Delimiting.** A fold in reach makes a subscription ask its whole query
+  again, so a view that counts pays for its page on every change. A
+  statement of that is proposed, with a hypothesis: fold what a
+  subscription of the inner query already reports.
