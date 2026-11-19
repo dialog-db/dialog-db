@@ -47,6 +47,29 @@ He asked whether layers that move at different paces, the durable one seldom and
 
 Built in three steps, each a pull request: the ephemeral layer's facts copy-on-write, with no change of behaviour; the frame and `poll_at`; a durable layer's move as a difference.
 
-Whether a fact that came and went between two polls is reported: the maintainer, 2026-11-19, a subscription that reacts to commands on a channel cannot skip one; but whether subscriptions cover channels at all is a separate question, and it can be argued they do not. Not decided.
+## Channels are not a subscription's
 
-So the frame is built so as not to decide it: a frame names a sequence for each ephemeral layer, and a layer keeps its last instants, so a caller that must see every instant polls frame by frame through them, and one that wants what holds now polls at the newest. A poll reports what holds as of its frame.
+Asked whether a fact that came and went between two polls is reported. The maintainer, 2026-11-19: he sees no reason for a channel's data to appear on a subscription; the split is Dedalus's and Bloom's, a channel is asynchronous delivery with no promise of which tick; a view may skip steps, and what does work must not skip a channel's messages but may skip steps of other layers.
+
+Read from the code the same day (`rust/dialog-repository/src`), and it already is so:
+
+| | | where |
+|---|---|---|
+| a channel | a layer whose rows live one tick, a tick being one round of induction inside a dispatch; what a rule writes there is the next round's stimulus and is never committed | `channel.rs` 1-26, 71; `repository/branch/transaction/batch.rs` 238-262 |
+| a command to its provider | a dispatch's report hands the commands it landed to an `Effect`, read from the batch itself; `Effect::perform` runs the registered providers. No subscription, no queue, no poll | `stack/invoke.rs` 303, 418-497; `stack/effect.rs` 598-649 |
+| when providers run | never during the commit; the embedder performs the effect when it chooses, and commands the answer writes chain on | `effect.rs` 18-27, 578-653, 721-733 |
+| a subscription and channels | it reads none: its composite has no channels, and a channel write schedules no poll | `subscription.rs` 950, 976, 985-997; `stack/subscribe.rs` 17-21 |
+| a reader of a channel from outside | `Stack::arrivals`, from a position of its own; it misses nothing once it exists | `stack/arrivals.rs` 79-112 |
+
+```
+ Dedalus                              dialog
+ a timestep, one fixed snapshot       a frame
+ deductive, the same timestep         a rule, a query, a view; a subscription samples these and may skip
+ inductive, the next                  assert! and retract!, fired at commit
+ async, some later timestep           a write to a channel, taken by the next dispatch's first tick
+ what must not skip                   the dispatch, which runs every tick; not an observer
+```
+
+**Decided:** a frame has a position for each durable layer and each of the session and memory layers, and none for a channel. A poll is always at the newest frame; nothing steps through instants. An earlier decision that a provider is "a subscription over the command concept" (`design/tree-exploration/claims.md` 102, still marked as holding) was replaced in that topic's journal and is stale.
+
+One of the maintainer's reasons for B, that a channel's facts cannot be found by asking again, does not bear on a subscription, which reads no channel. B stands on the other two: a plain subscription can report a delta of mixed revisions, and the subscriptions of one view have to agree.
