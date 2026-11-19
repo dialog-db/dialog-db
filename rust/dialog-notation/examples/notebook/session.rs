@@ -38,8 +38,12 @@ impl $name {
         repository: std::sync::Arc<dialog_repository::Repository<dialog_credentials::Credential>>,
         branch: Branch,
     ) -> Result<Self> {
+        // Whose the definitions are: the account the operator acts for,
+        // which stands for the person on every device, and not the
+        // device's profile.
+        let mine: dialog_corpus::Entity = operator.authority().await?.to_string().parse()?;
         let analyzer = Live::new(branch.clone())
-            .analyzer(&operator)
+            .analyzer(mine, &operator)
             .await
             .map_err(unwrapped)?;
         Ok($name {
@@ -65,8 +69,9 @@ impl $name {
     /// from what the branch keeps, as a notebook opened anew would.
     pub async fn reload(&mut self) -> Result<()> {
         self.branch.refresh(&self.operator).await?;
+        let mine = self.analyzer.namespaces().mine().clone();
         self.analyzer = Live::new(self.branch.clone())
-            .analyzer(&self.operator)
+            .analyzer(mine, &self.operator)
             .await
             .map_err(unwrapped)?;
         Ok(())

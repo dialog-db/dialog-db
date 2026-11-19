@@ -106,8 +106,8 @@ async fn it_answers_from_a_fresh_analyzer_on_the_filesystem() -> Result<()> {
 
 /// What a small document writes: the definition under its entity, with
 /// its kind; a source map that says what was written and what each name
-/// resolved to; and two bindings, the name in mine, the profile the
-/// branch is read under, and the signature in the name's namespace.
+/// resolved to; and two bindings, the name in mine, the account the
+/// notebook's operator acts for, and the signature in the name's namespace.
 #[dialog_common::test]
 async fn it_writes_a_definition_its_source_map_and_its_bindings() -> Result<()> {
     let mut notebook = Notebook::open().await?;
@@ -115,7 +115,8 @@ async fn it_writes_a_definition_its_source_map_and_its_bindings() -> Result<()> 
     let kept = Live::new(notebook.branch.clone())
         .kept(&notebook.operator)
         .await?;
-    assert!(kept.mine.as_str().starts_with("did:"), "{}", kept.mine);
+    let mine = notebook.analyzer().namespaces().mine().clone();
+    assert!(mine.as_str().starts_with("did:"), "{mine}");
     let card = notebook
         .analyzer()
         .namespaces()
@@ -124,7 +125,7 @@ async fn it_writes_a_definition_its_source_map_and_its_bindings() -> Result<()> 
     let [card] = card.as_slice() else {
         panic!("one todo/card: {card:?}");
     };
-    assert_eq!(card.namespace, kept.mine);
+    assert_eq!(card.namespace, mine);
     assert_eq!(card.signature, "query (is:)");
     let stored = kept
         .definitions
@@ -141,9 +142,9 @@ async fn it_writes_a_definition_its_source_map_and_its_bindings() -> Result<()> 
         "{form}"
     );
     assert!(form.contains("xyz.todo"), "{form}");
-    let named = definition::name_space(&kept.mine, "todo/card")?;
+    let named = definition::name_space(&mine, "todo/card")?;
     assert!(kept.bindings.contains(&Binding {
-        namespace: kept.mine.clone(),
+        namespace: mine.clone(),
         key: "todo/card".into(),
         referent: named.clone(),
     }));
@@ -162,7 +163,7 @@ async fn it_writes_a_definition_its_source_map_and_its_bindings() -> Result<()> 
         vec![format!(
             r#"(syntax.name {} definition: {} is: "todo/card")"#,
             definition::binding_entity(
-                &definition::name_space(&kept.mine, "todo/card")?,
+                &definition::name_space(&mine, "todo/card")?,
                 "query (is:)"
             )?,
             card.definition
@@ -199,7 +200,7 @@ async fn it_keeps_one_definition_under_one_entity_on_two_branches() -> Result<()
     assert_eq!(entities(&one, "todo")?, entities(&other, "todo")?);
     assert_eq!(entities(&one, "todo/card")?, entities(&other, "todo/card")?);
     let mine = |notebook: &Notebook| notebook.analyzer().namespaces().mine().clone();
-    assert_ne!(mine(&one), mine(&other), "two profiles, two namespaces");
+    assert_ne!(mine(&one), mine(&other), "two accounts, two namespaces");
     Ok(())
 }
 
@@ -261,6 +262,7 @@ async fn it_refuses_a_name_two_namespaces_define_and_writes_nothing() -> Result<
     let made = theirs(&mut notebook).await?;
     let live = Live::new(notebook.branch.clone());
     let kept = live.kept(&notebook.operator).await?;
+    let mine = notebook.analyzer().namespaces().mine().clone();
     let revision = notebook.branch.revision();
     let refused = notebook
         .submit(
@@ -280,7 +282,7 @@ async fn it_refuses_a_name_two_namespaces_define_and_writes_nothing() -> Result<
         .map(|(namespace, _)| namespace.as_str())
         .collect();
     listed.sort();
-    let mut namespaces = vec!["did:key:theirs", kept.mine.as_str()];
+    let mut namespaces = vec!["did:key:theirs", mine.as_str()];
     namespaces.sort();
     assert_eq!(listed, namespaces);
     assert!(
@@ -295,7 +297,7 @@ async fn it_refuses_a_name_two_namespaces_define_and_writes_nothing() -> Result<
     // A petname says whose: `theirs` in mine, bound to their namespace.
     let mut transaction = notebook.branch.transaction();
     transaction = transaction.assert(definition::binding_statement(&Binding {
-        namespace: kept.mine.clone(),
+        namespace: mine.clone(),
         key: "theirs".into(),
         referent: dialog_corpus::Entity::from_str("did:key:theirs")?,
     })?);

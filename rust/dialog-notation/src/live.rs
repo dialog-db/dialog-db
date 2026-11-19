@@ -106,8 +106,6 @@ impl<T> Reader for T where
 /// What a branch keeps of the notation's definitions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Kept {
-    /// The local namespace: the profile the branch is read under.
-    pub mine: Entity,
     /// Every definition, as kept.
     pub definitions: Vec<Definition>,
     /// Every namespace's bindings.
@@ -199,26 +197,14 @@ impl Live {
         Ok(())
     }
 
-    /// What the branch keeps of the notation's definitions: the local
-    /// namespace, which is the profile the session reads the branch
-    /// under (the authority every query of a branch is given, on
-    /// `db:session` as `dialog.session/profile`), every definition and
-    /// every namespace's bindings.
+    /// What the branch keeps of the notation's definitions: every
+    /// definition and every namespace's bindings.
+    ///
+    /// Which namespace is mine is not among them: a query of a branch is
+    /// given the device's profile and its operator (`db:session`), and
+    /// nothing that stands for the person across their devices. The
+    /// caller says whose it is ([`analyzer`](Self::analyzer)).
     pub async fn kept<E: Reader>(&self, env: &E) -> Result<Kept, LiveError> {
-        let rows = self
-            .read(&[("profile", "dialog.session/profile", "entity:")], env)
-            .await?;
-        let mine = rows
-            .iter()
-            .find_map(|(this, values)| {
-                (this.as_str() == "db:session")
-                    .then(|| match values.get("profile") {
-                        Some(Value::Entity(profile)) => Some(profile.clone()),
-                        _ => None,
-                    })
-                    .flatten()
-            })
-            .ok_or_else(|| Error::Read("the branch is read under no profile".into()))?;
         let mut definitions = Vec::new();
         for (this, values) in self
             .read(
@@ -278,20 +264,18 @@ impl Live {
             }
         }
         Ok(Kept {
-            mine,
             definitions,
             bindings,
         })
     }
 
-    /// An analyzer for the branch: the core forms, every definition the
-    /// branch keeps under every name a namespace binds it to, and the
-    /// session's profile as mine. A selection, a macro and a view
-    /// defined in an earlier document answer with nothing submitted
-    /// again.
-    pub async fn analyzer<E: Reader>(&self, env: &E) -> Result<Analyzer, LiveError> {
+    /// An analyzer for the branch with `mine` as the local namespace,
+    /// the authority the caller acts for (an account, not a device's
+    /// profile): the core forms, every definition the branch keeps under
+    /// every name a namespace binds it to.
+    pub async fn analyzer<E: Reader>(&self, mine: Entity, env: &E) -> Result<Analyzer, LiveError> {
         let kept = self.kept(env).await?;
-        Ok(Analyzer::load(kept.mine, kept.definitions, kept.bindings)?)
+        Ok(Analyzer::load(mine, kept.definitions, kept.bindings)?)
     }
 
     /// Take into `analyzer` what the branch keeps that it does not know:
