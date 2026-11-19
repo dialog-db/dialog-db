@@ -1867,3 +1867,13 @@ The measurement that came in after (next entry but one above) bears on this: wha
 **Learned.** The 140 ms was the row's made-up entity; keyed by the entity it is 4.5 ms. Several rows of one head are not slow when carried as one record under their entity, so cost does not decide rows against one answer for a head. The fold is the cost that remains, and it now has a number. Reads are flat in the three changes; time is not, from 100 to 1000.
 
 **Decided.** Not decided. A release build and N=10000 are needed before the remaining growth is called anything.
+
+## 2026-11-19, Delimiting again: what views as queries are for
+
+**Asked.** What the maintainer saw in tonk that made him want views kept current by the engine: cost, parts out of step, authoring, or two engines. He: all of them, and a view written as a query fits better than a custom element at each step. He had hoped views could go as deep as needed with the engine's changes keeping them current, and the first prototype fell short.
+
+**Learned.** He did not rank the four, and a statement cannot be four things. The agent's reading is that they share a cause: a view is asked for piecewise. If so, "a view is one query" is the remedy and what it needs of the engine is #837: a query that nests and folds, kept at the cost of the change. He called a view a terminal deductive rule; decided earlier is that a query is not a rule and no rule reads it. The agent takes "terminal" as the same thing said loosely, and records it so it can be corrected.
+
+**Backtracked.** From Building to Delimiting for views: the prototype was built with no problem written.
+
+**Decided.** Not decided. The statement is put to him.
