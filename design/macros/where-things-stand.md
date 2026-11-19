@@ -31,7 +31,7 @@ Reported and filed: how a subscription is kept current today (`design/fold-maint
 
 1. The numbers from the build thread, against the bars in the ledger.
 2. #837: a problem statement and an approach for keeping a fold current. What is known: a poll returns a change, but a subscription keeps a flat answer and nothing for a group, learns a row stopped holding only by deriving the entity again, and asks the whole query again when a fold is in reach. So folding the changes needs signed changes of a rule's rows, which nothing produces today.
-3. Definitions on the branch, for concepts, macros and queries together: three options in [definitions-on-the-branch.md](definitions-on-the-branch.md), none chosen.
+3. Definitions on the branch, for concepts, macros and queries together ([definitions-on-the-branch.md](definitions-on-the-branch.md)). Decided by the maintainer: a name is an attribute pointing at the definition's entity, as in tonk and roughly as in Unison. He had taken the build to be option C already and it is not; it need not be. Open: whether a stored definition refers to what it uses by entity or by name.
 4. Rows of one head: Datomic gives a row for each; the maintainer leaned to aggregating. Not decided.
 5. What two entries of one key leave when a set of entries becomes a map.
 6. A bar for "lightning fast": proposed as not growing with the page and within 2 times a plain subscription on a release build. Not answered.
