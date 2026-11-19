@@ -4,7 +4,7 @@
 
 **For:** a notebook with no block is no `notebook` with a block (no entry, no row, decided 2026-11-18), and still whoever asks for a notebook expects its blocks, none included. A to-do with no tag keeps its `li`. A count of nothing is 0.
 
-**Not decided.** A sketch to align on before anything is built. The frame, the form, the entry as one field and the spread are the maintainer's, by voice, 2026-11-18. How each got here is in the [journal](journal.md).
+**Decided** by the maintainer, by voice, on 2026-11-18, and built in two stages: rows, `select` and `collect` (stage 1), and views as queries (stage 2). How each part got here is in the [journal](journal.md).
 
 ## Two layers
 
@@ -289,3 +289,41 @@ Built on #773, 2026-11-18, in `rust/dialog-notation`: `src/select.rs`, `src/expa
 - A line's `Key::label` is `None` for a key that stands in an entry: the entry's label is the line's.
 
 The pinned measures of the notebook did not move: 56 forms, 56 read, 53 expanded, 53 compiled, 5 described; with core, 60 of each and 5.
+
+## As built, stage 2
+
+Built on #773, 2026-11-18, in `rust/dialog-notation`: `src/view/plan.rs` and `src/view/tree.rs` reworked, the tests in `tests/view.rs`.
+
+```mermaid
+flowchart TD
+  S["(select (notebook/ui ?n is: ?ui))"] --> P["Plan: one template"]
+  P --> L0["layer 0: notebook/named, by ?n"]
+  P --> L1["layer 1: order-item's read, by its key"]
+  P --> L2["layer 2: block-row's read, by its block"]
+  L0 & L1 & L2 --> M["Maintainer: rows in, patches out"]
+```
+
+- **A view is a query whose answer is markup.** `(view ?x template)` in the body. `(select …)` of one compiles to a `Plan`; asked by the session, it is rendered once and printed as Hiccup.
+- **What is collected is put in place.** A query collected into markup has its template put where its variable stands, its variables named apart (`q1.`, `q2.` …), and its required conditions a layer under the element it stands in. Calls are not mounted; the whole page is one plan, one subscription a layer.
+- **What tells instances apart.** The root by the query's entity, or once for a query of no entity. A query collected by the terms of its head the call leaves free, an entry's key first, so the order stands by position and a set by its values.
+- **A count** is a layer whose instances are counted and never shown, under the element that shows it: `0 open`, and `1 open` when a to-do arrives, one text set.
+- **A layer that does not bind a key above it takes that layer's conditions too**, so `(table/sheet-row _ is: (collect ?sheets))` gives every sheet under each table. Its rows are re-read when the table's conditions change.
+- **A query not found** under a declared concept is shown as its source, now from the collecting read, `(todo/missing _ list: ?l is: (collect ?items))`.
+- **Removed:** the view form, its call, `{:view …}`, `Plan::repeating` and the marker rule, `Plan::called`, the read of `key: ?k block: ?b` as an entry. Each is refused with a message that points to a query.
+- **The sketches.** `notebook-views.clj` and `table-views.clj` are queries, `:on/` bindings in full. The view forms in `notebook.clj` and `table.clj` are taken out, with a line saying where they went. The measures read the views' file after the sketch.
+
+| measure | before | after |
+|---|---|---|
+| notebook | 56 forms, 56 read, 53 expanded, 53 compiled, 5 described (`notebook.clj`) | 58, 58, 55, 55, 7 (`notebook.clj` + `notebook-views.clj`) |
+| notebook with core | 60, 60, 60, 60, 5 | 62, 62, 62, 62, 7 |
+| table with core | 54, 54, 54, 54, 6 | 54, 54, 54, 54, 6 (`+ table-views.clj`) |
+
+"Described" now counts the queries whose answer is markup that, asked, are laid out in a plan.
+
+**Where it differs from the sketch, and why:**
+
+- **Identity is a hypothesis.** An answer is told apart by its head, not by every value it binds: a to-do renamed is the same `li`, its text set. So two answers of one head show as one instance, the first row's values: `task/flat` with the tag's read required shows one `li` for a to-do with two tags. Refuted by a view where two answers of one head must both show; the test that would break is `it_maintains_a_row_whose_chips_are_collected`.
+- **A required call in a markup query** (`(todo/chip ?t is: ?chip)`, one at a time) is not built; collect it, or read what it reads.
+- **A value collected and put in markup** (a set of tags) is refused: markup holds markup collected, or its count.
+- **Stage 1's whole-then-narrow** is not what a view does: each layer is its own subscription, so one entity changed re-reads the layers whose reads it touches, and, through a joined condition, a layer under it. `select` of a markup query in the session asks every layer whole, once.
+- **Declarations** give a query's name and whether its answer is markup, where they gave a view's description.

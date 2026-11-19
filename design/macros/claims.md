@@ -104,7 +104,6 @@
 | a resolver records no demand but the head, so a name read through one is stale after every commit, where a scan is stale after a commit that touches the range it read | fact | `resolver.rs`, module doc (`Demand::head`) | holds |
 | the analyzer needs the database too, for references, so it is a resolver as well | opinion | Irakli, 2026-11-12 | - |
 | expansion and analysis can be rules over four native things: parse, take apart (a pattern), read a name, compile | hypothesis | confirmed by `concept` of the prelude expanded by rules with no native expander; refuted by a step that cannot be written, which names the missing primitive | open |
-
 | a command runs once in a commit, so an analysis read through a resolver is not kept long enough to go stale; staleness is a cost to a standing query only | fact | Irakli, 2026-11-12; `Demand::head` is what a kept answer is checked against, and a command keeps none | holds |
 | a resolver given the root reads committed state only, so it does not see a definition of the commit in progress or of a rule laid over the branch | hypothesis | the tree resolvers take the root from `BranchRevision`. Confirmed by a command whose source defines a name and reads it through such a resolver in the same commit and does not find it; refuted if the resolver is given the overlay | open |
 | a deductive rule may aggregate: a `reduce` clause with `count`, `count-distinct`, `sum`, `min`, `max`, `avg` | fact | `reduce.rs` (`Aggregator`), `DeductiveRule::with_reduce`, `notes/aggregation.md` | holds |
@@ -405,7 +404,6 @@
 | the table's six views are six queries, and its directory, the one view that repeated the wrong element this morning, is a query of no entity that collects and answers once | hypothesis | the agent's, written out in [design-queries.md](design-queries.md), not run | open |
 | a collecting read binds nothing outside it, as `unless` does not, so one safety rule covers both; and a list of things built from a join is collected from a named query of the item | hypothesis | the agent's reading of the maintainer's form, in [design-queries.md](design-queries.md). Refuted by a real view that needs the item's query at every level and reads worse than tonk's YAML | open; nothing built |
 | `query` with a head and a body collides with the design's `(query condition)` for asking | fact | design.md, Questions; `(query (a ?x) (b ?x))` reads both ways | holds; settled 2026-11-18 by `select` for asking |
-
 | `(select (q ?e is: ?x))` of a query answers a row for each way its conditions hold: two for "Buy milk", none for "Call mum" | fact | `it_answers_a_row_for_each_way_its_conditions_hold`, tests/query.rs | holds |
 | `(collect ?x)` on a term binds the whole of the field, one row with a set, `{}` for none, and never gates: `{:title "Call mum" :tags {}}` | fact | `it_collects_the_whole_of_a_field_as_a_set` | holds |
 | `(count ?tags)` of what was collected is 2 and 0 | fact | `it_counts_what_was_collected` | holds; any other function is refused |
@@ -418,4 +416,13 @@
 | `{: 1 : 2}` reads and prints the same, and a record stores a set as a list that reads back as that list | fact | `it_reads_a_set_as_a_map_with_no_names` in form.rs, `it_stores_a_set_in_a_record_as_a_list` | holds; whether it should read back as a set is not decided |
 | answering a query whole in memory and filtering by the call is fast enough for tonk's notebook and table | hypothesis | the agent's. Confirmed by the notebook's page as queries answering on a seeded space within a frame; refuted by a call that passes a bound field over a large collection | open |
 | a row of several reads keeps its values together when its entity is `(id …)` of all of them | fact | `it_collects_a_query_whose_answer_is_an_entry_as_a_map`: two blocks of one notebook give two entries, not four | holds |
+| a to-do row with its chips collected shows "Call mum" with its `li` and no chip; a tag added is one Insert of a `span`, a rename one SetText, a tag removed one Remove | fact | `it_maintains_a_row_whose_chips_are_collected`, tests/view.rs | holds |
+| with the tag's read required instead, "Call mum" has no `li` | fact | the same test, `task/flat` | holds |
+| a card counts what it collects: `0 open` and an empty `ul`, and a to-do added is one Insert under the `ul` and the count's text set | fact | `it_counts_what_a_card_collects` | holds |
+| the notebook's page shows whole with no block, and a block placed before the first is one Insert at index 0 of the order | fact | `it_maintains_the_notebook_page_by_position` | holds |
+| an index is one container, empty with nothing, and an entity added is one Insert inside it | fact | `it_maintains_an_index_as_one_container`, `it_renders_the_tables_page_and_directory` | holds |
+| a query not found under a declared concept shows as its source and follows a field | fact | `it_shows_a_query_not_found_as_its_source` | holds |
+| the view form, its call, `{:view …}`, an unbound variable, an event of no command or of other fields, and `false` as an attribute are refused with messages that say what to write | fact | `it_refuses_what_a_view_may_not_say` | holds |
+| an answer is told apart by its head, so a rename is a text set and two answers of one head are one instance | hypothesis | the agent's. Refuted by a view where two answers of one head must both show | open |
+| a layer that reads with `_` taking the conditions of the layer above costs little | hypothesis | the agent's. Measured by the table's page with many tables: every sheet row is re-read under each | open |
 | a view not found is shown as its source by the renderer, as the concept applied to the entity with its fields | opinion | Irakli's; built 2026-11-18 as `Plan::source`, the wrapper `view-source` the managing agent's | decides in the build |

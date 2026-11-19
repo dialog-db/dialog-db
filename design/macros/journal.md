@@ -1758,3 +1758,11 @@ Restating the table's views turned up what a directory is: a query whose head ha
 **Learned.** Every table of the note answers as written. The notation evaluates a query: its required conditions are one Dialog-DB query, each collecting read is one more, grouped in memory, and a call takes the called query's rows where its fields agree. A query of several reads read back through its head's entity crosses one entity's values, as the view plan found; a row named by `(id …)` of all its values does not. Two things in the way: the sketch says a field passed bound is a parameter, and a query here is answered whole and then narrowed, so a field only a caller gives is refused; and `notebook-views.clj`, left for stage 2, still writes `key: ?k block: ?b`, so a read written that way of an entry is read as the entry, while a concept head written that way is refused. The pinned numbers of the notebook did not move.
 
 **Decided.** Not decided by the maintainer: the agent's defaults, `count` the one function, a query that calls itself refused, a set merging equal answers and printing in the order of its values, a stored set reading back as a list. Next: views as queries, stage 2.
+
+## 2026-11-18, Building: views as queries, stage 2
+
+**Asked.** Build views as queries: `(view ?x template)` in a query's body, what it collects put in place, maintained through subscriptions; remove the view form, its call, the marker rule and the read of two fields as an entry.
+
+**Learned.** The layered maintainer needed little: a query's markup is one template once each query it collects is put in its place, and each query's required conditions are a layer. What the old plan worked out by rule, which element takes which condition, the query now says. Three things needed a rule of the agent's: what tells an answer from another (its head, a hypothesis), a count (a layer counted and not shown), and a layer that reads with `_` (it takes the conditions above it). An index stands as one container, where tonk's notebook directory was one a notebook.
+
+**Decided.** The maintainer's, from the brief: the view form goes, and the views are restated as the note writes them. The agent's: the rules above, refusing a required call in markup, and taking the view forms out of `notebook.clj` and `table.clj` so the measures read the views' files.
