@@ -696,6 +696,16 @@ type EvaluationFuture<'a, T> =
 #[cfg(target_arch = "wasm32")]
 type EvaluationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, EvaluationError>> + 'a>>;
 
+/// Where everything a subscription reads stands at one moment
+/// ([`Subscription::stamp`]).
+#[derive(Clone, Debug, PartialEq)]
+struct Stamp {
+    revision: Option<Revision>,
+    overlay: u64,
+    memories: Vec<u64>,
+    durables: Vec<Option<Revision>>,
+}
+
 /// The index root a revision pins — `None` for an unborn branch,
 /// which has no tree at all.
 fn tree_hash(revision: &Option<Revision>) -> Option<Blake3Hash> {
@@ -870,6 +880,21 @@ where
         self.durable_heads = durables;
         self.initialized = true;
         Ok(Some(delta))
+    }
+
+    /// Where everything this subscription reads stands now: the
+    /// branch's head, its session overlay's sequence, and through a
+    /// stack each memory layer's sequence and each durable layer's head.
+    /// A poll pins what it reads at what it finds at its start, so two
+    /// polls that begin at one stamp, with the stamp unmoved after both,
+    /// read one state.
+    fn stamp(&self) -> Stamp {
+        Stamp {
+            revision: self.branch.revision(),
+            overlay: self.branch.overlay().revision().sequence,
+            memories: self.memory_sequences_now(),
+            durables: self.durable_heads_now(),
+        }
     }
 
     /// The memory layers the subscription reads through its stack, by
@@ -5699,3 +5724,6 @@ mod tests {
 
 #[cfg(test)]
 mod invariants;
+
+mod fold;
+pub use fold::FoldSubscription;
