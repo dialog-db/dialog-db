@@ -1829,3 +1829,11 @@ The measurement that came in after (next entry but one above) bears on this: wha
 
 **Decided.** Not decided: rows or one answer for a head; `distinct` for `collect`; a set always, with `merge` for a map.
 
+## 2026-11-19, Designing: definitions on the branch, and a question asked twice
+
+**Asked.** How concepts, macros and queries reach the branch. The maintainer: names are attributes pointing at a definition's entity, as in tonk and roughly as in Unison; starting with option A of [definitions-on-the-branch.md](definitions-on-the-branch.md) is fine. The agent then asked whether a stored form may refer to what it uses by name.
+
+**Learned.** That was decided on 2026-11-12 (above: a macro resolves its names when it is defined) and the agent asked it again, having taken the research report's wording of option A, which keeps source forms, without checking the ledger. The maintainer: all references are resolved at compile time.
+
+**Decided.** A, with two corrections to the report's wording: a definition of any kind is keyed by its content and the name points at it; and what is kept is the resolved definition, each reference holding the entity of what was named with the name beside it. Rests on no open hypothesis.
+
