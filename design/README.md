@@ -86,8 +86,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   **Describing.** Split out of file-writers: capturing what a transaction
   considered, so a replay is skipped when nothing it read overlaps.
 - [A value computed over many facts cannot be given a name](named-fold.md):
-  **Delimiting.** The notation's derived attributes and views are deductive
-  rules that fold, and a deductive rule takes no fold. A spike admitted one
-  with a cycle through it quarantined; what keeps the refusal is that a
-  folded value competes with the claims stored under its name. The problem
-  is to be stated again.
+  **Building.** A fold lives in a form of its own that no rule reads, a
+  query: an application over an inner query and a reduce. An authored rule
+  still cannot fold. Being built on #773; keeping it current under a
+  subscription is [its own topic](https://github.com/dialog-db/dialog-db/pull/837).

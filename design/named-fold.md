@@ -1,6 +1,6 @@
 # A value computed over many facts cannot be given a name
 
-**Phase: Delimiting.** Back from Directing on 2026-11-18: a spike showed the cause stated below is not what keeps the refusal in place. See the [journal](named-fold/journal.md) for where the topic stands.
+**Phase: Building.** Directed by the maintainer on 2026-11-18: a fold lives in a form of its own that no rule reads, a query, which the engine supports and the notation only spells. It is being built on dialog-db/dialog-db#773. See the [journal](named-fold/journal.md) for where the topic stands.
 
 ## Description
 

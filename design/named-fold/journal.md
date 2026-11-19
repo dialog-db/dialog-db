@@ -55,3 +55,13 @@ Two things said before cannot both be true: the problem statement says the refus
 
 **Decided.** Not decided. Two questions decide between inline and a reserved namespace: whether a getter must be read by a rule that derives (N5), and whether answering a prefix at `QueryEnv::select` hides a stored claim from every read (N2). The maintainer is to say whether the restated problem is his.
 
+## 2026-11-18, Directing to Building: a form of its own, in the engine
+
+**Asked.** Whether a query over the notation had to be slow, after one measured 57 s to answer a card among 1000 (#773).
+
+**Learned.** It did not: the agent had built the collecting in the notation, in memory, on its own reading that dialog cannot state a fold in a query. The maintainer: aggregation in deductive rules was built and only not rolled out; a query was what he had in mind to keep cycles out; the engine's machinery should carry it, kept from rules by not being offered to them or by a form of its own; the notation is an interface to the engine and not a separate thing. He first said he would even allow folds in deductive rules so long as the notation did not expose them, then made plain he meant the engine supporting it without offering it to rules.
+
+That is the Inline column of [design-no-domain.md](design-no-domain.md): one query type in dialog-query over an inner query and a `Reduce`. No name is installed, so nothing stored can stand beside the value and no rule can read it. What the column listed as left undone stands: a getter in a rule that derives, which is now ruled out on purpose, and where a query's definition lives across replicas, which is open.
+
+**Decided.** The maintainer's: that direction; an aggregator for the set of values; and that keeping a fold current under a subscription is to be closed (dialog-db/dialog-db#837). `open_rule_error` stays. The spike's change is not taken.
+
