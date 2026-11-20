@@ -25,6 +25,7 @@ use crate::nodes::{Preload, Read};
 use dialog_capability::Provider;
 
 mod scope;
+pub use scope::KeyRanges;
 use scope::Scope;
 #[cfg(any(test, feature = "helpers"))]
 pub(crate) use scope::probes as scope_probes;
@@ -2227,7 +2228,35 @@ where
             target_tree,
             source_storage,
             target_storage,
-            Some(scope),
+            Some(Scope::new(scope)),
+            MissingPolicy::default(),
+            prefetch.into(),
+        )
+        .await
+    }
+
+    /// [`compute_within_with`](Self::compute_within_with), scoped to the
+    /// union of `cover`: sets kept sorted and disjoint as they are recorded,
+    /// borrowed as they are, so the scope costs nothing to build or drop
+    /// however many ranges they hold. Consume via
+    /// [`changes_covered`](Self::changes_covered).
+    pub async fn compute_covered<D>(
+        source_tree: &PersistentTree<Key, Value, D>,
+        target_tree: &PersistentTree<Key, Value, D>,
+        source_storage: &'a Env,
+        target_storage: &'a Env,
+        cover: &[&KeyRanges<Key>],
+        prefetch: Prefetch,
+    ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
+    where
+        D: Distribution,
+    {
+        Self::compute_scoped(
+            source_tree,
+            target_tree,
+            source_storage,
+            target_storage,
+            Some(Scope::sets(cover)),
             MissingPolicy::default(),
             prefetch.into(),
         )
@@ -2239,7 +2268,7 @@ where
         target_tree: &PersistentTree<Key, Value, D>,
         source_storage: &'a Env,
         target_storage: &'a Env,
-        scope: Option<&[core::ops::RangeInclusive<Key>]>,
+        scope: Option<Scope<'_, Key>>,
         missing: MissingPolicy,
         reads: Reads,
     ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
@@ -2247,8 +2276,8 @@ where
         D: Distribution,
     {
         let planned = reads == Reads::Planned;
-        // Sorted and merged once, so every test against it is a search.
-        let scope = scope.map(Scope::new);
+        // Sorted and merged once (or borrowed sorted), so every test against
+        // it is a search.
         let scope = scope.as_ref();
         let source_storage = source_tree.accessor(source_storage);
         let target_storage = target_tree.accessor(target_storage);
@@ -2614,6 +2643,30 @@ where
             // twice more per difference, which cost a subscription's poll
             // more than the search saved (subscribe-fanout in dialog-perf).
             let scope = Scope::new(scope);
+            futures_util::pin_mut!(changes);
+            for await change in changes {
+                let change = change?;
+                let key = match &change {
+                    Change::Add(entry) => &entry.key,
+                    Change::Remove(entry) => &entry.key,
+                };
+                if scope.contains(key.as_ref()) {
+                    yield change;
+                }
+            }
+        }
+    }
+
+    /// [`changes_within`](Self::changes_within) for a difference built by
+    /// [`compute_covered`](Self::compute_covered): the changes inside the
+    /// union of `cover`, each tested by a search of every set.
+    pub fn changes_covered(
+        &'a self,
+        cover: &'a [&'a KeyRanges<Key>],
+    ) -> impl Differential<Key, Value> + 'a {
+        let changes = self.changes();
+        try_stream! {
+            let scope = Scope::sets(cover);
             futures_util::pin_mut!(changes);
             for await change in changes {
                 let change = change?;
@@ -3802,7 +3855,7 @@ mod tests {
             &tree,
             &storage,
             &storage,
-            Some(&scope),
+            Some(super::Scope::new(&scope)),
             super::MissingPolicy::default(),
             super::Reads::Serial,
         )
@@ -7351,7 +7404,7 @@ mod tests {
             target,
             source_storage,
             target_storage,
-            scope,
+            scope.map(super::Scope::new),
             missing,
             reads,
         )
