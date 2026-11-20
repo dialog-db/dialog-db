@@ -1169,6 +1169,75 @@ mod tests {
         DeductiveRule::new(conclusion.clone(), premises).expect("rule compiles")
     }
 
+    /// A concept of one field, `name`, over `{domain}/name`, read under
+    /// cardinality one as `kind`.
+    fn single(domain: &str, kind: Type) -> ConceptDescriptor {
+        ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                format!("{domain}/name").parse().expect("valid selector"),
+                "",
+                Cardinality::One,
+                Some(kind),
+            ),
+        )])
+        .expect("concept builds")
+    }
+
+    /// The polarity of the first premise of `rule`, a read of a
+    /// cardinality-one attribute.
+    fn first(rule: &DeductiveRule) -> Polarity {
+        rule_edges(rule)
+            .into_iter()
+            .next()
+            .map(|(_, polarity)| polarity)
+            .expect("a premise")
+    }
+
+    /// A value read under cardinality one and taken apart by a pattern
+    /// is decided on: the rows whose value the pattern does not match
+    /// are dropped. A value built into a whole by a pattern is passed
+    /// along: building drops nothing, and the whole is what reaches the
+    /// head.
+    #[dialog_common::test]
+    fn it_decides_on_a_value_a_pattern_takes_apart_and_not_on_one_it_builds() {
+        let read = |predicate: &ConceptDescriptor, name: crate::Pattern| {
+            let mut terms = Parameters::new();
+            terms.insert("this".to_string(), Term::<Entity>::var("this").into());
+            terms.set("name".to_string(), name);
+            Premise::Assert(Proposition::Concept(ConceptQuery {
+                terms,
+                predicate: predicate.clone(),
+            }))
+        };
+
+        let note = single("note", Type::CompositeMap);
+        let title = single("title", Type::String);
+        let apart = DeductiveRule::new(
+            title.clone(),
+            vec![read(
+                &note,
+                crate::Pattern::map([("title", Term::<Any>::var("name"))])
+                    .expect("a pattern")
+                    .into(),
+            )],
+        )
+        .expect("rule compiles");
+        assert_eq!(first(&apart), Polarity::Electing { decides: true });
+
+        let built = DeductiveRule::new(
+            note.clone(),
+            vec![
+                read(&title, Term::<Any>::var("text").into()),
+                crate::Pattern::map([("title", Term::<Any>::var("text"))])
+                    .expect("a pattern")
+                    .is(Term::<Any>::var("name")),
+            ],
+        )
+        .expect("rule compiles");
+        assert_eq!(first(&built), Polarity::Electing { decides: false });
+    }
+
     /// A well-stratified recursive closure is rejected with a
     /// structured error until the fixpoint evaluator lands, rather
     /// than evaluated unboundedly.
