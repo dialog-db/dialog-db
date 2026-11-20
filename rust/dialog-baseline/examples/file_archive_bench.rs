@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_capability::Subject;
 use dialog_chronicle::{Chronicle, FILE_NAME, Options};
-use dialog_corpus::{Entity, Fact, Instruction, Pick, Relation, Selector, Value};
+use dialog_corpus::{Cardinality, Entity, Fact, Instruction, Relation, Selector, Value};
 use dialog_effects::storage::{Directory, Location};
 use dialog_peer::helpers::{Seed, open_peer_as, test_owned};
 use dialog_repository::RepositoryExt as _;
@@ -292,7 +292,7 @@ macro_rules! run {
                                 is: Value::String(format!("edit {n}")),
                                 cause: None,
                             },
-                            Pick::Last,
+                            Cardinality::One,
                         ))
                     })
                     .collect::<anyhow::Result<_>>()?;

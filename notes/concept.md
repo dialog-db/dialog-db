@@ -2,11 +2,11 @@
 
 Dialog stores information as immutable claims in the form `{the, of, is, cause}`, where `the` identifies the relation, `of` the entity, `is` the value, and `cause` the provenance. At the associative layer there is no schema; claims are just associations.
 
-The semantic layer introduces **attributes** and **concepts** on top of this. An attribute elevates a raw relation with domain-specific invariants (value type and pick). A concept composes multiple attributes sharing an entity, describing the shape of a thing much like a type or class in a programming language, but realized through schema-on-read rather than schema-on-write. An entity is not limited to a single concept: the same entity can simultaneously satisfy `Employee`, `Manager`, and `Person` if it has the right claims.
+The semantic layer introduces **attributes** and **concepts** on top of this. An attribute elevates a raw relation with domain-specific invariants (value type and cardinality). A concept composes multiple attributes sharing an entity, describing the shape of a thing much like a type or class in a programming language, but realized through schema-on-read rather than schema-on-write. An entity is not limited to a single concept: the same entity can simultaneously satisfy `Employee`, `Manager`, and `Person` if it has the right claims.
 
 ## Defining Attributes
 
-An attribute is a newtype wrapping a value type. Its identity is a hash of the relation it reads, its type and its pick, where `the` is a nominal identifier in `domain/name` format. The `the` carries semantic meaning beyond structure: `employee/name` and `employee/role` may both wrap `String` under the `last` pick, yet they remain distinct because their `the` denotes different relations.
+An attribute is a newtype wrapping a value type. Its identity is a hash of the relation it reads, its cardinality, its type and the values it lists, where `the` is a nominal identifier in `domain/name` format. The `the` carries semantic meaning beyond structure: `employee/name` and `employee/role` may both wrap `String` under cardinality one, yet they remain distinct because their `the` denotes different relations.
 
 ```rs
 mod employee {
@@ -36,12 +36,12 @@ mod model {
 }
 ```
 
-By default an attribute is read under the `last` pick (one value per entity, the newest). Use `#[pick(all)]` for multi-valued attributes, or `#[pick(max)]` / `#[pick(min)]` to read the greatest or least value:
+By default an attribute has cardinality one (one value per entity, the newest). Use `#[cardinality(many)]` for multi-valued attributes; a read of the greatest or least value is a concept field that declares `#[dialog(pick = max)]` or `min` over such an attribute:
 
 ```rs
 mod employee {
     #[derive(Attribute, Clone, PartialEq)]
-    #[pick(all)]
+    #[cardinality(many)]
     pub struct Skill(pub String);  // -> "employee/skill" (many)
 }
 ```

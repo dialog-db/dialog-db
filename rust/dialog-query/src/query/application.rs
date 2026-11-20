@@ -81,6 +81,18 @@ pub trait Application: Clone + ConditionalSend + 'static {
         Ok(conclusion)
     }
 
+    /// The bindings `conclusion` was realized from: the row of this
+    /// query's [`evaluate`](Self::evaluate) that [`realize`](Self::realize)
+    /// turned into it, as far as its variables go. What a maintainer
+    /// that holds conclusions needs to join them again, as a
+    /// subscription of a [`Fold`](crate::Fold) folds the rows its inner
+    /// subscriptions report. Only the bindings are given, not the
+    /// claims a row cites. The default is `None`: the conclusion does
+    /// not carry them, and such a maintainer cannot use this query.
+    fn bindings(&self, _conclusion: &Self::Conclusion) -> Option<Match> {
+        None
+    }
+
     /// The concept this query applies, when it is a concept query.
     /// Incremental maintainers use it to resolve the rule set and
     /// decide whether per-entity restriction is sound (every rule

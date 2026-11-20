@@ -10,7 +10,7 @@
 //!
 //! ```no_run
 //! # use dialog_capability::{Fork, Provider};
-//! # use dialog_corpus::{Entity, Fact, Instruction, Pick, Value};
+//! # use dialog_corpus::{Entity, Fact, Instruction, Cardinality, Value};
 //! # use dialog_query::attribute::Relation;
 //! # use dialog_query::query::Output as _;
 //! # use dialog_query::{AttributeQuery, Term, the};
@@ -51,7 +51,7 @@
 //!             cause: None,
 //!         };
 //!         anyhow::Ok(transaction.integrate(
-//!             [Instruction::Assert(count, Pick::All)].into_iter().collect(),
+//!             [Instruction::Assert(count, Cardinality::Many)].into_iter().collect(),
 //!         ))
 //!     })
 //!     .perform(env)

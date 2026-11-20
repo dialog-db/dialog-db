@@ -569,14 +569,14 @@ async fn it_records_history_in_the_fact_tree() -> Result<()> {
         &mut tree,
         &store,
         first,
-        Instruction::Assert(title("Hej"), crate::Pick::All),
+        Instruction::Assert(title("Hej"), crate::Cardinality::Many),
     )
     .await?;
     apply(
         &mut tree,
         &store,
         second,
-        Instruction::Assert(title("Hi"), crate::Pick::Last),
+        Instruction::Assert(title("Hi"), crate::Cardinality::One),
     )
     .await?;
 
@@ -627,7 +627,7 @@ async fn it_records_history_in_the_fact_tree() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
-    use crate::Pick;
+    use crate::Cardinality;
     use futures_util::stream;
 
     let store = Blocks::new();
@@ -685,24 +685,24 @@ async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
         &mut tree,
         &store,
         first,
-        Instruction::Assert(salary(100), crate::Pick::All),
+        Instruction::Assert(salary(100), crate::Cardinality::Many),
     )
     .await?;
     apply(
         &mut tree,
         &store,
         second,
-        Instruction::Assert(salary(200), crate::Pick::All),
+        Instruction::Assert(salary(200), crate::Cardinality::Many),
     )
     .await?;
 
-    // `max` elects 200, the greatest, and 150 succeeds it; 100 stays.
+    // One elects 200, the newest, and 150 succeeds it; 100 stays.
     assert!(
         apply(
             &mut tree,
             &store,
             third,
-            Instruction::Assert(salary(150), Pick::Max)
+            Instruction::Assert(salary(150), Cardinality::One)
         )
         .await?
     );
@@ -725,18 +725,18 @@ async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
             &mut tree,
             &store,
             fourth,
-            Instruction::Assert(salary(150), Pick::Max)
+            Instruction::Assert(salary(150), Cardinality::One)
         )
         .await?
     );
     assert_eq!(held(&tree, &store).await?, vec![100, 150]);
 
-    // `last` elects the newest, 150, and 300 succeeds it; 100 stays.
+    // One elects the newest, 150, and 300 succeeds it; 100 stays.
     apply(
         &mut tree,
         &store,
         fifth,
-        Instruction::Assert(salary(300), Pick::Last),
+        Instruction::Assert(salary(300), Cardinality::One),
     )
     .await?;
     assert_eq!(held(&tree, &store).await?, vec![100, 300]);
@@ -798,7 +798,7 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
         &mut tree,
         &store,
         first,
-        vec![Instruction::Assert(title("Hej"), crate::Pick::All)],
+        vec![Instruction::Assert(title("Hej"), crate::Cardinality::Many)],
     )
     .await?;
     apply(
@@ -806,7 +806,7 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
         &store,
         second,
         vec![
-            Instruction::Assert(title("Hi"), crate::Pick::Last),
+            Instruction::Assert(title("Hi"), crate::Cardinality::One),
             Instruction::Assert(
                 Fact {
                     the: other.clone(),
@@ -814,7 +814,7 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
                     is: Value::String("hi".into()),
                     cause: None,
                 },
-                crate::Pick::All,
+                crate::Cardinality::Many,
             ),
         ],
     )
@@ -904,7 +904,7 @@ async fn it_selects_records_whose_values_spilled() -> Result<()> {
                 is: Value::String(body.clone()),
                 cause: None,
             },
-            crate::Pick::All,
+            crate::Cardinality::Many,
         )]),
     )
     .await?;
@@ -1015,7 +1015,7 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
                 is: Value::String(body.clone()),
                 cause: None,
             },
-            crate::Pick::All,
+            crate::Cardinality::Many,
         ));
     }
     tree.apply_versioned(&store, &mut delta, Some(version), stream::iter(claims))
@@ -1243,7 +1243,7 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
             &mut delta,
             Some(version),
             stream::iter(vec![
-                Instruction::Assert(title.clone(), crate::Pick::All),
+                Instruction::Assert(title.clone(), crate::Cardinality::Many),
                 Instruction::Retract(title),
             ]),
         )
@@ -1309,7 +1309,10 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
         &store,
         &mut delta,
         Some(first),
-        stream::iter(vec![Instruction::Assert(title.clone(), crate::Pick::All)]),
+        stream::iter(vec![Instruction::Assert(
+            title.clone(),
+            crate::Cardinality::Many,
+        )]),
     )
     .await?;
     delta.flush_into(&store);
@@ -1322,7 +1325,7 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
             Some(second),
             stream::iter(vec![
                 Instruction::Retract(title.clone()),
-                Instruction::Assert(title.clone(), crate::Pick::All),
+                Instruction::Assert(title.clone(), crate::Cardinality::Many),
             ]),
         )
         .await?;
@@ -1382,11 +1385,11 @@ async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
     for (version, instruction) in [
         (
             first,
-            Instruction::Assert(doc(big.clone()), crate::Pick::All),
+            Instruction::Assert(doc(big.clone()), crate::Cardinality::Many),
         ),
         (
             second,
-            Instruction::Assert(doc(Value::String("v2".into())), crate::Pick::Last),
+            Instruction::Assert(doc(Value::String("v2".into())), crate::Cardinality::One),
         ),
     ] {
         let mut delta = ArchiveDelta::zero();
@@ -1498,13 +1501,13 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
     for (version, instructions) in [
         (
             old,
-            vec![Instruction::Assert(title.clone(), crate::Pick::All)],
+            vec![Instruction::Assert(title.clone(), crate::Cardinality::Many)],
         ),
         (
             new,
             vec![
                 Instruction::Retract(title.clone()),
-                Instruction::Assert(title.clone(), crate::Pick::All),
+                Instruction::Assert(title.clone(), crate::Cardinality::Many),
             ],
         ),
     ] {
@@ -1597,10 +1600,13 @@ async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
 
     let mut tree = Corpus::empty_in(test_catalog());
     for (version, instruction) in [
-        (bob, Instruction::Assert(urgent.clone(), crate::Pick::All)),
+        (
+            bob,
+            Instruction::Assert(urgent.clone(), crate::Cardinality::Many),
+        ),
         (
             mallory,
-            Instruction::Assert(urgent.clone(), crate::Pick::All),
+            Instruction::Assert(urgent.clone(), crate::Cardinality::Many),
         ),
         (retractor, Instruction::Retract(urgent.clone())),
     ] {
@@ -1675,7 +1681,10 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
             &store,
             &mut delta,
             Some(version),
-            stream::iter(vec![Instruction::Assert(urgent.clone(), crate::Pick::All)]),
+            stream::iter(vec![Instruction::Assert(
+                urgent.clone(),
+                crate::Cardinality::Many,
+            )]),
         )
         .await?;
         delta.flush_into(&store);
@@ -1794,14 +1803,14 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
         &mut tree,
         &store,
         first,
-        Instruction::Assert(title("Hej"), crate::Pick::All),
+        Instruction::Assert(title("Hej"), crate::Cardinality::Many),
     )
     .await?;
     apply(
         &mut tree,
         &store,
         second,
-        Instruction::Assert(title("Hi"), crate::Pick::All),
+        Instruction::Assert(title("Hi"), crate::Cardinality::Many),
     )
     .await?;
 
@@ -1812,7 +1821,7 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
         &mut tree,
         &store,
         third,
-        Instruction::Assert(title("Hello"), crate::Pick::Last),
+        Instruction::Assert(title("Hello"), crate::Cardinality::One),
     )
     .await?;
     assert!(changed, "succeeding a standing value is a change");
@@ -1845,7 +1854,7 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
         &mut tree,
         &store,
         Version::new(Origin::from([7u8; 32]), Edition::new(3)),
-        Instruction::Assert(title("Hello"), crate::Pick::Last),
+        Instruction::Assert(title("Hello"), crate::Cardinality::One),
     )
     .await?;
     assert!(!changed, "re-writing a standing value is a no-op");
@@ -1881,7 +1890,7 @@ async fn it_disambiguates_truncated_history_keys_in_queries() -> Result<()> {
                 is: Value::String(value.into()),
                 cause: None,
             },
-            crate::Pick::All,
+            crate::Cardinality::Many,
         )
     };
 
@@ -2532,8 +2541,14 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
 
     let mut tree = Corpus::empty_in(test_catalog());
     for (version, instruction) in [
-        (first, Instruction::Assert(title("Hej"), crate::Pick::All)),
-        (second, Instruction::Assert(title("Hi"), crate::Pick::Last)),
+        (
+            first,
+            Instruction::Assert(title("Hej"), crate::Cardinality::Many),
+        ),
+        (
+            second,
+            Instruction::Assert(title("Hi"), crate::Cardinality::One),
+        ),
         (third, Instruction::Retract(title("Hi"))),
     ] {
         let mut delta = ArchiveDelta::zero();

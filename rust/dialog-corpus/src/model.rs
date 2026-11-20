@@ -26,8 +26,8 @@ pub use asset::*;
 
 mod update;
 pub use update::{
-    AssetChange, Change, ChangeStream, Changes, Contender, Pick, SortKey, Standing, Statement,
-    Update, sort_key,
+    AssetChange, Cardinality, Change, ChangeStream, Changes, Contender, SortKey, Standing,
+    Statement, Update, sort_key,
 };
 
 mod relation;
@@ -38,6 +38,9 @@ pub use symbol::*;
 
 mod value;
 pub use value::*;
+
+mod view;
+pub use view::*;
 
 mod ordkey;
 pub use ordkey::*;

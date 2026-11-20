@@ -44,7 +44,7 @@
 //!     cause: None,
 //! };
 //! corpus
-//!     .apply(&blocks, &mut delta, stream::iter(vec![Instruction::Assert(fact, dialog_corpus::Pick::All)]))
+//!     .apply(&blocks, &mut delta, stream::iter(vec![Instruction::Assert(fact, dialog_corpus::Cardinality::Many)]))
 //!     .await?;
 //! // A commit writes the staged nodes and spilled values where they belong;
 //! // this stand-in keeps them in the blocks.

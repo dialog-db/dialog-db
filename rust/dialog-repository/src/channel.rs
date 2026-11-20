@@ -290,7 +290,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use dialog_corpus::{Pick, Update as _, Value};
+    use dialog_corpus::{Cardinality, Update as _, Value};
 
     fn rows(subjects: &[&str]) -> Changes {
         let mut changes = Changes::new();
@@ -299,7 +299,7 @@ mod tests {
                 "mail.message/subject".parse().expect("attribute"),
                 subject.parse().expect("entity"),
                 Value::String((*subject).into()),
-                Pick::All,
+                Cardinality::Many,
             );
         }
         changes

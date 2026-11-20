@@ -590,7 +590,7 @@ pub enum CommitError {
     #[error("Commit-time induction failed: {0}")]
     Induction(String),
 
-    /// A write succeeding a claim under a choosing pick could not
+    /// A write succeeding a claim under cardinality one could not
     /// read the claims of its cell to elect the one it succeeds.
     #[error("Succession failed: {0}")]
     Succession(String),

@@ -2,7 +2,8 @@ use crate::attribute::Relation;
 use crate::attribute::query::DynamicAttributeQuery;
 use crate::environment::Environment;
 use crate::query::Application;
-use crate::selection::{Binding, Match, Selection};
+use crate::selection::{Match, Selection};
+use crate::selective::Ranking;
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::Any;
 use crate::{
@@ -60,6 +61,14 @@ impl OptionalAttributeQuery {
     ) -> Self {
         Self {
             query: DynamicAttributeQuery::new(the, of, is, cause, cardinality),
+        }
+    }
+
+    /// This left-join electing one claim of each cell by `ranking` (see
+    /// [`DynamicAttributeQuery::ranked`]).
+    pub(crate) fn ranked(self, ranking: Ranking) -> Self {
+        Self {
+            query: self.query.ranked(ranking),
         }
     }
 
@@ -162,8 +171,7 @@ impl OptionalAttributeQuery {
                 }
 
                 let is_term = selector.query.is().clone();
-                let claimed_absent =
-                    matches!(base.lookup(&is_term), Ok(Binding::Absent));
+                let claimed_absent = is_term.name().is_some_and(|name| base.absent(name));
 
                 if claimed_absent {
                     // The row claims the value is absent. A fact for
@@ -258,6 +266,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::Binding;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;

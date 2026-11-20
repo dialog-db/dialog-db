@@ -13,7 +13,7 @@ use crate::helpers::test_repo;
 use crate::rules::Transient;
 use crate::{Branch, Repository};
 use anyhow::Result;
-use dialog_corpus::{Changes, Entity, Instruction, Pick, Relation, Selector, Update, Value};
+use dialog_corpus::{Cardinality, Changes, Entity, Instruction, Relation, Selector, Update, Value};
 use dialog_credentials::Credential;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_peer::{Peer, Session};
@@ -60,7 +60,7 @@ fn text(value: &str) -> Value {
 }
 
 fn write(changes: &mut Changes, the: &str, of: &str, is: Value) {
-    changes.associate(relation(the), entity(of), is, Pick::Last);
+    changes.associate(relation(the), entity(of), is, Cardinality::One);
 }
 
 /// The premise reading an event's user into `this` and its kind into

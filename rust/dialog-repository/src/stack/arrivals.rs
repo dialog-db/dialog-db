@@ -49,7 +49,7 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use dialog_corpus::{Changes, Entity, Fact, Pick, Update as _};
+use dialog_corpus::{Cardinality, Changes, Entity, Fact, Update as _};
 use dialog_query::EvaluationError;
 use dialog_query::query::{Application, Output as _};
 
@@ -175,7 +175,7 @@ impl<Q: Application> Arrivals<Q> {
         // `last` that a later one replaced arrived all the same.
         let mut batch = Changes::new();
         for fact in arrived {
-            batch.associate(fact.the, fact.of, fact.is, Pick::All);
+            batch.associate(fact.the, fact.of, fact.is, Cardinality::Many);
         }
         let batch = Ephemeral::holding(batch);
         QueryLayer::new()

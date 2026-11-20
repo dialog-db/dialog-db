@@ -13,6 +13,21 @@
 > `dialog_corpus::Pick`, replaced the `Policy` and `Select` the
 > note mentions. Types are named by entities (`text:`, `integer:`,
 > `natural:`, ...). See [`glossary.md`](./glossary.md).
+>
+> Since then, picks are gone too
+> ([#793](https://github.com/dialog-db/dialog-db/issues/793)). An
+> attribute is a relation, a type and a **cardinality**: under one a
+> read returns the cell's newest claim (what `last` read) and a write
+> succeeds it, under many a read returns every claim (what `all` read)
+> and a write adds one. A read under `top`, `max` or `min` is now a
+> concept field with that `pick` over a cardinality-many attribute, a
+> listed `as` ranking its values best first; a chain of
+> relations is a rule deriving one relation from each (see
+> [`aggregation.md`](./aggregation.md#selective-aggregators-on-concept-fields)). Where this note speaks of
+> a choosing pick, read cardinality one; of `all`, cardinality many. Its
+> ranked elections, relation chains and the `ranked` half of
+> `Polarity::Electing` are gone; a cardinality-one read whose value a
+> rule decides on inside its own cycle is still an absence test.
 
 ## The claim
 
@@ -161,22 +176,32 @@ every candidate the fixpoint derives, and readers elect the newest at
 the exit, as the fixpoint always has. The component stays positive, so
 it has a least fixpoint, and the answer depends on the rules alone. A
 notebook needs this: it positions a run of inserted blocks from each
-block's successor, reading the position relation under `last`. What
-it gives up is the stratified reading of `last` inside a cycle: a
-derivation can start from a candidate a reader would not elect. Inheritance
+block's successor, reading the position relation under `last`. That
+holds for a rule that passes the value along: each candidate it derives
+stands by the candidate it carried, so the exit elects what a
+stratified read would have. A rule that decides on the value (a read
+pinned to a constant, or a value compared, joined on, negated over or
+checked) would fire for a candidate no reader elects, and nothing at
+the exit takes its conclusion back. So a `last` read the rule decides
+on is an absence test like a ranked one, and a rule closing a cycle
+through it is quarantined. The one decision kept is a rewrite, a rule
+reading the cell it concludes, which succeeds the value it read. Inheritance
 down a hierarchy through a ranked choice, a node's own value or else
 its parent's, is what quarantine rules out; lattice-valued recursion,
 where the chosen value may feed the recursion as long as it is only
 used in ways that respect its order, could admit it later.
 
-So `unless` and optional premises stay in deductive rules. `reduce`
-does not: a fold has no reading over a set still growing, and unlike a
-choice it cannot be deferred to the component's exit without giving
-the rules inside a different relation than the readers outside. A
-fold belongs to the closed places, a query, a subscription, an
-inductive rule, and is refused in a deductive rule at compile time
-(`ReduceInOpenRule`), which the author sees at once and a merge never
-does.
+So `unless` and optional premises stay in deductive rules. An authored
+`reduce` does not (`ReduceInOpenRule`). A computing fold (`count`,
+`sum`, `avg`) yields a value none of its inputs holds: concluded into
+an attribute it would compete with the claims stored there, and
+nothing could be written through it, so where it belongs is not
+settled. A picking fold, which returns one of its inputs, is how a
+concept field with a `pick` reads a relation rules derive. Over a
+relation no cycle derives it reads that relation in full, as a
+negation of it does, and is stratified; a concept whose ranked field
+closes a cycle through the relation it reads has a rule of the cycle
+quarantined, as plainly as one closing it through `unless`.
 
 Ordered choice, which the old `variants` desugaring expressed by
 negating earlier alternatives, is better expressed by election: give
@@ -440,10 +465,11 @@ and sees the built-in's head for it like any rule's.
 
 ### Reducing rules
 
-A deductive rule refuses `reduce` (see quarantine above). The
-plumbing that split a reducing rule's heads and folded them stands in
-the code until inductive rules take `reduce`, where a fold has a
-sealed state to read and a fact to write.
+A deductive rule an author writes refuses `reduce` (see quarantine
+above). The selecting rule the engine writes for a concept folds each
+ranked field over a derived relation with its pick, and a subscription
+over one is maintained per entity: a change touching an entity's
+candidates picks again for that entity and no other.
 
 ### Storage: `dialog.rule/derives`
 

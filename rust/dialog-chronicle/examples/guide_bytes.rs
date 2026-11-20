@@ -43,7 +43,7 @@ mod walk {
     use dialog_capability::Subject;
     use dialog_chronicle::{Chronicle, FILE_NAME};
     use dialog_common::Blake3Hash;
-    use dialog_corpus::{Changes, Entity, Fact, Instruction, Pick, Relation, Value};
+    use dialog_corpus::{Cardinality, Changes, Entity, Fact, Instruction, Relation, Value};
     use dialog_effects::storage::{Directory, Location};
     use dialog_peer::helpers::{Seed, open_peer_as, test_owned};
     use dialog_repository::RepositoryExt as _;
@@ -145,8 +145,14 @@ mod walk {
             branch,
             &operator,
             [
-                Instruction::Assert(fact("item:2", "demo.grocery/name", "Rye bread")?, Pick::All),
-                Instruction::Assert(fact("item:1", "demo.grocery/quantity", "1")?, Pick::All),
+                Instruction::Assert(
+                    fact("item:2", "demo.grocery/name", "Rye bread")?,
+                    Cardinality::Many
+                ),
+                Instruction::Assert(
+                    fact("item:1", "demo.grocery/quantity", "1")?,
+                    Cardinality::Many
+                ),
             ]
             .into_iter()
             .collect()
@@ -159,7 +165,7 @@ mod walk {
             &operator,
             [Instruction::Assert(
                 fact("item:1", "demo.grocery/name", "Oat milk")?,
-                Pick::All
+                Cardinality::Many
             )]
             .into_iter()
             .collect()
@@ -172,7 +178,7 @@ mod walk {
             &operator,
             [Instruction::Assert(
                 fact("item:1", "demo.grocery/name", "Oat milk, 2 L")?,
-                Pick::Last
+                Cardinality::One
             )]
             .into_iter()
             .collect()
@@ -210,7 +216,7 @@ mod walk {
             &operator,
             [Instruction::Assert(
                 fact("item:3", "demo.grocery/name", "Eggs")?,
-                Pick::All
+                Cardinality::Many
             )]
             .into_iter()
             .collect()
@@ -225,7 +231,7 @@ mod walk {
             &operator,
             [Instruction::Assert(
                 fact("item:3", "demo.grocery/quantity", "12")?,
-                Pick::All
+                Cardinality::Many
             )]
             .into_iter()
             .collect()
@@ -239,7 +245,7 @@ mod walk {
             &operator,
             [Instruction::Assert(
                 fact("item:2", "demo.grocery/quantity", "2")?,
-                Pick::All
+                Cardinality::Many
             )]
             .into_iter()
             .collect()
@@ -247,7 +253,7 @@ mod walk {
         let tries = std::sync::atomic::AtomicUsize::new(0);
         let changes: Changes = [Instruction::Assert(
             fact("item:4", "demo.grocery/name", "Coffee")?,
-            Pick::All,
+            Cardinality::Many,
         )]
         .into_iter()
         .collect();

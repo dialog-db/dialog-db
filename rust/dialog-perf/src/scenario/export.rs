@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::{Result, anyhow};
-use dialog_corpus::Pick;
+use dialog_corpus::Cardinality;
 use futures_util::TryStreamExt as _;
 
 use super::{Outcome, Prepared, seed_stuff};
@@ -46,7 +46,7 @@ impl Prepared for Walk {
 /// export streaming every block of the tree.
 pub async fn walk(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
-    seed_stuff(&env, size, Pick::Last).await?;
+    seed_stuff(&env, size, Cardinality::One).await?;
     env.reopen().await?;
     Ok(Box::new(Walk { env }))
 }
