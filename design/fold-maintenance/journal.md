@@ -105,3 +105,13 @@ So there are three things to fix in the engine, and the fold is the third: the d
 So the cover itself is the next thing: a range for each entity is built, merged and dropped on every poll.
 
 **Decided.** The agent's: keep the cover from poll to poll and make it coarser where it holds a range for each entity of one attribute, both as a change of their own after #838.
+
+## 2026-11-20, Measuring asked for: what a person waits for is round trips
+
+**Asked.** dialog-db/dialog-db#844 made a poll's cover smaller and failed the Replication gate on one row: the same 82 requests and the same bytes, in 11 round trips where main takes 8. With the points left out of the cover the scoped diff no longer fetches the leaves of the entities about to be derived again, and they are fetched by re-derivation, 16 entities at a time. That half was reverted and #844 is the other half, a poll that borrows its cover. In passing: with the smaller cover and a window of 64 the two phases take 5 and 6 round trips, fewer than main's 11 and 8. Whether to measure the window was put to the maintainer.
+
+**The maintainer:** yes. "Many waves means many network roundtrips which means longer waits for ppl. So things may be improving perf locally but degrading actual experience."
+
+**Learned.** Every number this topic has chased is of a replica that holds its data: instructions, allocations, milliseconds in memory. For a replica that does not, the cost a person feels is the number of waves, and a change can lower the first while raising the second. The bar for fast has two parts and only one was written.
+
+**Decided.** By the maintainer: measure. A research topic on its own branch, `research/rederive-window`: what decides the round trips of one poll on a replica that does not hold the data, across every replication report and network shape, for windows from 16 to unbounded with the cover as on main and smaller; what a wider window costs where nothing is fetched; and whether a poll that fetches in one wave what its re-derivations will read is better than tuning a number. Hypotheses and bars are written there before any run.
