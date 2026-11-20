@@ -231,6 +231,40 @@ bytes no query could read and no two writers spelled alike. The notation
 keeps its syntax trees as maps and lists, and a composite that is read
 without decoding all of it is what lets a rule reach one node of one.
 
+### A poll scopes its diff to the cover as it stands, copying none of it
+
+[#844](https://github.com/dialog-db/dialog-db/pull/844).
+
+A subscription's cover was kept sorted and disjoint, but every poll
+merged its fact and rule ranges into a new list to scope the diff, the
+diff checked that list's order twice, and the poll then dropped it: a
+cover of ten thousand ranges cost tens of thousands of range copies,
+comparisons and frees per poll, whatever changed. The cover is now kept
+as one shared sorted list (`dialog_search_tree::KeyRanges`), and the
+poll's diff borrows it as it stands
+(`PersistentTree::differentiate_covered`). A range a re-derivation
+records again, which the cover already holds, changes nothing.
+
+What this changes for you:
+
+- Nothing in the API of a subscription. A poll's delta, its order and
+  `results()` read as they did.
+- A poll does work in the log of its cover, not its size: one changed
+  fact under a cover of ten thousand ranges costs what it does under a
+  hundred.
+- `dialog_search_tree` adds `KeyRanges`, a set of key ranges kept sorted
+  and disjoint as ranges are added, and `PersistentTree::differentiate_covered`,
+  a scoped difference over a union of them.
+
+Why: after #838 the diff searched its scope, so what a poll over a large
+answer still paid in the size of its cover was building, copying and
+dropping that scope.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes.
+
+
 ### A read that names a derived value no longer fails with an unbound variable
 
 Refs [#793](https://github.com/dialog-db/dialog-db/issues/793)

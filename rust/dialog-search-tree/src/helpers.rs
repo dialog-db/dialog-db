@@ -1474,3 +1474,13 @@ pub fn buffer_decodes() -> usize {
 pub fn scope_probes() -> usize {
     crate::differential::scope_probes::count()
 }
+
+/// How many ranges the calling thread's scoped differences have built their
+/// scopes from so far: a list of ranges is checked for order (and copied when
+/// out of order) once per difference, a union of
+/// [`KeyRanges`](crate::KeyRanges) is borrowed and counts nothing. Take it
+/// before and after a scoped difference to pin that its scope costs nothing to
+/// build.
+pub fn scope_builds() -> usize {
+    crate::differential::scope_probes::built()
+}

@@ -572,6 +572,43 @@ where
         }
     }
 
+    /// [`differentiate_within`](Self::differentiate_within), scoped to the
+    /// union of `cover`: sets kept sorted and disjoint as they are recorded
+    /// (a subscription's demand cover), borrowed as they are. Building the
+    /// scope touches none of their ranges, so a difference over a cover of
+    /// ten thousand ranges costs what one over ten does, but for the log of
+    /// the ranges each search pays.
+    pub fn differentiate_covered<'a, Env>(
+        &'a self,
+        other: &'a Self,
+        cover: &'a [&'a crate::KeyRanges<Key>],
+        self_storage: &'a Env,
+        other_storage: &'a Env,
+    ) -> impl Differential<Key, Value> + ConditionalSend + 'a
+    where
+        Env: Provider<Read<PersistentNode<Key, Value>>>
+            + Provider<Preload<PersistentNode<Key, Value>>>
+            + ConditionalSync,
+        Key: ConditionalSync,
+        Value: PartialEq + ConditionalSync,
+        D: ConditionalSync,
+    {
+        async_stream::try_stream! {
+            let difference = TreeDifference::compute_covered(
+                self,
+                other,
+                self_storage,
+                other_storage,
+                cover,
+                Prefetch::Lazy,
+            )
+            .await?;
+            for await change in difference.changes_covered(cover) {
+                yield change?;
+            }
+        }
+    }
+
     /// Builds a persistent tree from a sealed root hash. Used by
     /// [`TransientTree::persist`] to turn a finished edit batch back into a
     /// [`PersistentTree`]. The batch's new nodes go into the caller's delta,
