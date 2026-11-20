@@ -1,7 +1,6 @@
 use crate::Blake3Hash;
 use crate::history::Edition;
 use crate::key::value_tail_bytes;
-use crate::model::ordvalue::encode_value_owned;
 use crate::{Asset, Cause, Entity, Fact, Instruction, Relation, Value};
 use dialog_search_tree::Manifest;
 use futures_util::Stream;
@@ -19,15 +18,15 @@ use std::vec::IntoIter;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Change {
-    /// Assert a value for an entity-attribute pair under a pick: the
-    /// pick the attribute is read under, which says what the write
-    /// succeeds. Under [`Pick::All`] the value is appended. Under any
-    /// other pick the one live claim of the cell the pick elects,
-    /// the claim a read under it returns, is retracted beside the
-    /// value. Committed as [`Instruction::Assert`], which elects among
-    /// the cell's stored claims in the tree write itself; a transactor
-    /// settles it first against the candidates the tree cannot see.
-    Assert(Value, Pick),
+    /// Assert a value for an entity-attribute pair under the
+    /// attribute's cardinality, which says what the write succeeds.
+    /// Under [`Cardinality::Many`] the value is appended. Under
+    /// [`Cardinality::One`] the cell's newest live claim, the claim a
+    /// read returns, is retracted beside the value. Committed as
+    /// [`Instruction::Assert`], which elects among the cell's stored
+    /// claims in the tree write itself; a transactor settles it first
+    /// against the candidates the tree cannot see.
+    Assert(Value, Cardinality),
     /// Retract a value from an entity-attribute pair.
     Retract(Value),
 }
@@ -40,43 +39,135 @@ impl Change {
         }
     }
 
-    /// Whether the change is an assertion under a pick that elects:
-    /// one the transactor or the tree has to settle.
+    /// Whether the change is an assertion under cardinality one: one
+    /// the transactor or the tree has to settle.
     pub fn elects(&self) -> bool {
-        matches!(self, Change::Assert(_, policy) if policy.elects())
+        matches!(self, Change::Assert(_, cardinality) if cardinality.elects())
     }
 }
 
-/// Which of a relation's candidates an attribute picks: the newest
-/// (`last`), every one (`all`), the best ranked among listed values
-/// (`top`), the greatest (`max`) or the least (`min`). An attribute is a
-/// relation qualified by a value type and a pick. Every write through
-/// an attribute carries its pick: a write under any pick but `all`
-/// succeeds the claim the pick returns, and a write under `all`
-/// appends and succeeds nothing.
+/// How many claims an attribute's cell holds, which is what a write
+/// through the attribute does: under [`Cardinality::One`] the cell holds
+/// one claim, the newest, and a write succeeds it; under
+/// [`Cardinality::Many`] the cell holds every claim written, and a write
+/// adds one beside the others.
 ///
-/// Each pick is named by an entity, `last:`, `all:`, `top:`, `max:` or
-/// `min:`, which is what a batch carries and what an attribute's
-/// identity hashes; the plain names an earlier release wrote are still
-/// read.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Pick {
-    /// The newest claim.
-    #[serde(rename = "last:", alias = "last")]
-    Last,
-    /// Every claim: a write appends.
-    #[serde(rename = "all:", alias = "all")]
-    All,
-    /// The claim with the greatest value, the newest among equals.
-    #[serde(rename = "max:", alias = "max")]
-    Max,
-    /// The claim with the least value, the newest among equals.
-    #[serde(rename = "min:", alias = "min")]
-    Min,
-    /// The claim whose value is listed first, best first; an unlisted
-    /// value ranks last, and the newest wins among equals.
-    #[serde(rename = "top:", alias = "top")]
-    Top(Vec<Value>),
+/// A batch carries it beside every assertion, spelled `one` or `many`.
+/// The picks a 0.3 or 0.4 release wrote in that place are still read:
+/// `last` (`last:`) as one and `all` (`all:`) as many, and `max`, `min` and `top`, which
+/// chose the claim a write succeeded by value, as one, whose write
+/// succeeds the newest claim.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Cardinality {
+    /// One claim per cell, the newest: a write succeeds it.
+    #[default]
+    One,
+    /// Every claim written: a write adds one.
+    Many,
+}
+
+impl Serialize for Cardinality {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for Cardinality {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(CardinalityVisitor)
+    }
+}
+
+/// Reads a cardinality, or the pick an earlier release wrote in its
+/// place: a name, or a `top` with the values it ranked (`{"top:": [..]}`).
+struct CardinalityVisitor;
+
+impl CardinalityVisitor {
+    fn named<E: de::Error>(name: &str) -> Result<Cardinality, E> {
+        match name {
+            "one" | "last:" | "last" | "max:" | "max" | "min:" | "min" | "top:" | "top" => {
+                Ok(Cardinality::One)
+            }
+            "many" | "all:" | "all" => Ok(Cardinality::Many),
+            other => Err(E::unknown_variant(other, &["one", "many"])),
+        }
+    }
+}
+
+impl<'de> de::Visitor<'de> for CardinalityVisitor {
+    type Value = Cardinality;
+
+    fn expecting(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        formatter.write_str("`one` or `many`")
+    }
+
+    fn visit_str<E: de::Error>(self, name: &str) -> Result<Cardinality, E> {
+        Self::named(name)
+    }
+
+    fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Cardinality, A::Error> {
+        let Some(name) = map.next_key::<String>()? else {
+            return Err(de::Error::invalid_length(0, &self));
+        };
+        map.next_value::<de::IgnoredAny>()?;
+        let cardinality = Self::named(&name)?;
+        if map.next_key::<de::IgnoredAny>()?.is_some() {
+            return Err(de::Error::invalid_length(2, &self));
+        }
+        Ok(cardinality)
+    }
+}
+
+impl Display for Cardinality {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(self.name())
+    }
+}
+
+impl Cardinality {
+    /// The cardinality's name as the notation spells it: `one` or `many`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Cardinality::One => "one",
+            Cardinality::Many => "many",
+        }
+    }
+
+    /// Whether a write under this cardinality succeeds a claim: under
+    /// one, it succeeds the claim a read returns, the newest.
+    pub fn elects(&self) -> bool {
+        matches!(self, Cardinality::One)
+    }
+
+    /// Whether `candidate` is the newer of two claims: the greater
+    /// standing, then, between claims that stand equal (two values one
+    /// revision wrote under one cause), the greater hash of the value
+    /// ([`Value::tiebreak`]). This is the order a cardinality-one read
+    /// elects by, and what an aggregator falls back to among equals.
+    pub fn newer(candidate: Contender<'_>, incumbent: Contender<'_>) -> bool {
+        candidate.1 > incumbent.1
+            || (candidate.1 == incumbent.1 && value_beats(candidate.0, incumbent.0))
+    }
+
+    /// The claim a write under this cardinality succeeds among
+    /// `claims`, by index: the newest, the one a read returns. `None`
+    /// over no claims, and under many, whose writes succeed nothing.
+    pub fn elect<'a, I>(&self, claims: I) -> Option<usize>
+    where
+        I: IntoIterator<Item = Contender<'a>>,
+    {
+        if !self.elects() {
+            return None;
+        }
+        let mut best: Option<(usize, Contender<'a>)> = None;
+        for (index, claim) in claims.into_iter().enumerate() {
+            best = Some(match best {
+                Some(incumbent) if !Self::newer(claim, incumbent.1) => incumbent,
+                _ => (index, claim),
+            });
+        }
+        best.map(|(index, _)| index)
+    }
 }
 
 /// The standing of a candidate: the deepest revision version the claim
@@ -147,147 +238,19 @@ pub(crate) fn value_beats(candidate: &Value, incumbent: &Value) -> bool {
     candidate.tiebreak() > incumbent.tiebreak()
 }
 
-impl Display for Pick {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        f.write_str(self.name())
-    }
-}
-
-impl Pick {
-    /// The pick's name as the notation spells it: `last`, `all`, `top`,
-    /// `max` or `min`.
-    pub fn name(&self) -> &'static str {
-        let uri = self.uri();
-        &uri[..uri.len() - 1]
-    }
-
-    /// The entity that names this pick: `last:`, `all:`, `top:`, `max:`
-    /// or `min:`.
-    pub fn uri(&self) -> &'static str {
-        match self {
-            Pick::Last => "last:",
-            Pick::All => "all:",
-            Pick::Top(_) => "top:",
-            Pick::Max => "max:",
-            Pick::Min => "min:",
-        }
-    }
-
-    /// Whether the pick returns the whole candidate set (`all`) rather
-    /// than one candidate.
-    pub fn is_set(&self) -> bool {
-        matches!(self, Pick::All)
-    }
-
-    /// The values a `top` ranks, best first; empty for every other pick.
-    pub fn ranked(&self) -> &[Value] {
-        match self {
-            Pick::Top(values) => values,
-            _ => &[],
-        }
-    }
-
-    /// Where `value` ranks under this pick: its position among
-    /// the values a `top` lists, best first, an unlisted value last;
-    /// zero under every other pick and under a `top` listing nothing.
-    pub fn rank_of(&self, value: &Value) -> usize {
-        match self {
-            Pick::Top(among) => Self::rank_among(among, value),
-            _ => 0,
-        }
-    }
-
-    /// Where `value` ranks among `listed`, best first: an unlisted
-    /// value ranks last, and every value ranks first when nothing is
-    /// listed.
-    pub fn rank_among(listed: &[Value], value: &Value) -> usize {
-        if listed.is_empty() {
-            return 0;
-        }
-        listed
-            .iter()
-            .position(|candidate| candidate == value)
-            .unwrap_or(usize::MAX)
-    }
-
-    /// Whether `candidate` is the newer of two claims: the greater
-    /// standing, then, between claims that stand equal (two values one
-    /// revision wrote under one cause), the greater hash of the value
-    /// ([`Value::tiebreak`]). This is the whole of `last`, and what every
-    /// other pick falls back to among equals.
-    pub fn newer(candidate: Contender<'_>, incumbent: Contender<'_>) -> bool {
-        candidate.1 > incumbent.1
-            || (candidate.1 == incumbent.1 && value_beats(candidate.0, incumbent.0))
-    }
-
-    /// Whether `candidate` displaces `incumbent` under this pick:
-    /// the one a read under the pick returns of the two. `last` takes
-    /// the newer; `top` the better rank, then the newer; `max` and `min`
-    /// the greater or the lesser value, then the greater standing. This
-    /// is the one ordering every election runs on, whether it elects
-    /// among a cell's stored claims at the tree or among stored and
-    /// derived candidates in a query.
-    pub fn prefers(&self, candidate: Contender<'_>, incumbent: Contender<'_>) -> bool {
-        match self {
-            Pick::Last | Pick::All => Self::newer(candidate, incumbent),
-            Pick::Top(_) => {
-                let (mine, theirs) = (self.rank_of(candidate.0), self.rank_of(incumbent.0));
-                mine < theirs || (mine == theirs && Self::newer(candidate, incumbent))
-            }
-            Pick::Max | Pick::Min => {
-                let ordering = candidate.0.partial_cmp(incumbent.0).unwrap_or_else(|| {
-                    encode_value_owned(candidate.0).cmp(&encode_value_owned(incumbent.0))
-                });
-                let wanted = match self {
-                    Pick::Max => Ordering::Greater,
-                    _ => Ordering::Less,
-                };
-                ordering == wanted || (ordering.is_eq() && candidate.1 > incumbent.1)
-            }
-        }
-    }
-
-    /// Whether a write under this pick elects a claim to succeed:
-    /// every pick but `all`.
-    pub fn elects(&self) -> bool {
-        !matches!(self, Pick::All)
-    }
-
-    /// The claim this pick elects among `claims`, by index: the one
-    /// a read under it returns. `None` over no claims, and under `all`,
-    /// which elects nothing.
-    pub fn elect<'a, I>(&self, claims: I) -> Option<usize>
-    where
-        I: IntoIterator<Item = Contender<'a>>,
-    {
-        if !self.elects() {
-            return None;
-        }
-        let mut best: Option<(usize, Contender<'a>)> = None;
-        for (index, claim) in claims.into_iter().enumerate() {
-            best = Some(match best {
-                Some(incumbent) if !self.prefers(claim, incumbent.1) => incumbent,
-                _ => (index, claim),
-            });
-        }
-        best.map(|(index, _)| index)
-    }
-}
-
 /// The write side of the triple store.
 ///
 /// Implementors accumulate fact changes (associations and dissociations)
 /// that can later be committed atomically.
 pub trait Update {
-    /// Assert that the `attribute` of `entity` is `value`, under
-    /// `policy`: the pick the attribute is read under. Under
-    /// [`Pick::All`] the value is appended beside the cell's claims.
-    /// Under any other pick the one live claim of the cell the
-    /// pick elects is retracted when the batch commits, and every
-    /// other claim of the cell stays. A batch holds one write of a
-    /// cell under [`Pick::Last`]: a later one succeeds the earlier
-    /// and takes its place.
-    fn associate(&mut self, the: Relation, of: Entity, is: Value, policy: Pick);
+    /// Assert that the `attribute` of `entity` is `value`, under the
+    /// attribute's `cardinality`. Under [`Cardinality::Many`] the value
+    /// is appended beside the cell's claims. Under [`Cardinality::One`]
+    /// the cell's newest live claim is retracted when the batch
+    /// commits, and every other claim of the cell stays. A batch holds
+    /// one write of a cell under [`Cardinality::One`]: a later one
+    /// succeeds the earlier and takes its place.
+    fn associate(&mut self, the: Relation, of: Entity, is: Value, cardinality: Cardinality);
 
     /// Retract that the `attribute` of `entity` is `value`.
     fn dissociate(&mut self, the: Relation, of: Entity, is: Value);
@@ -296,7 +259,14 @@ pub trait Update {
     /// descriptor names the layer it lands in (`in:`), where a plain
     /// write lands in the primary. A batch keeps such writes apart, by
     /// layer, for the commit to route (see [`Changes::take_shares`]).
-    fn associate_in(&mut self, layer: Entity, the: Relation, of: Entity, is: Value, policy: Pick);
+    fn associate_in(
+        &mut self,
+        layer: Entity,
+        the: Relation,
+        of: Entity,
+        is: Value,
+        cardinality: Cardinality,
+    );
 
     /// [`dissociate`](Self::dissociate), from `layer`.
     fn dissociate_in(&mut self, layer: Entity, the: Relation, of: Entity, is: Value);
@@ -648,7 +618,7 @@ impl Changes {
     }
 
     /// Convert to an instruction stream, the form a commit applies. An
-    /// assertion under a choosing pick commits as the instruction of
+    /// assertion under cardinality one commits as the instruction of
     /// the same shape: the tree elects among the cell's stored claims.
     /// A relation some rule derives has derived candidates the tree
     /// cannot see, so a transaction settles those writes against its
@@ -687,8 +657,8 @@ impl Changes {
             for (attribute, changes) in attributes {
                 for change in changes {
                     match change {
-                        Change::Assert(value, policy) => {
-                            self.associate(attribute.clone(), entity.clone(), value, policy)
+                        Change::Assert(value, cardinality) => {
+                            self.associate(attribute.clone(), entity.clone(), value, cardinality)
                         }
                         Change::Retract(value) => {
                             self.dissociate(attribute.clone(), entity.clone(), value)
@@ -702,12 +672,12 @@ impl Changes {
                 for (attribute, changes) in attributes {
                     for change in changes {
                         match change {
-                            Change::Assert(value, policy) => self.associate_in(
+                            Change::Assert(value, cardinality) => self.associate_in(
                                 layer.clone(),
                                 attribute.clone(),
                                 entity.clone(),
                                 value,
-                                policy,
+                                cardinality,
                             ),
                             Change::Retract(value) => self.dissociate_in(
                                 layer.clone(),
@@ -735,13 +705,13 @@ impl Changes {
         })
     }
 
-    /// Whether any cell of this batch holds an assertion under a
-    /// choosing pick, which the transactor has yet to resolve.
+    /// Whether any cell of this batch holds an assertion under
+    /// cardinality one, which the transactor has yet to resolve.
     pub fn has_successions(&self) -> bool {
         self.iter().any(|(_, _, change)| change.elects())
     }
 
-    /// The cells holding an assertion under a choosing pick, each once.
+    /// The cells holding an assertion under cardinality one, each once.
     pub fn cells_with_successions(&self) -> Vec<(Relation, Entity)> {
         let mut cells = Vec::new();
         for (entity, attribute, change) in self.iter() {
@@ -815,8 +785,8 @@ impl Changes {
     /// commits the batch drains them first with
     /// [`take_assets`](Self::take_assets), and any other caller refuses a
     /// batch that [`has_assets`](Self::has_assets). An assertion carries
-    /// its pick into the instruction: the tree elects among the cell's
-    /// stored claims when it applies one under a choosing pick.
+    /// its cardinality into the instruction: the tree elects among the cell's
+    /// stored claims when it applies one under cardinality one.
     ///
     /// The instructions come in entity then attribute order, a cell's
     /// in the order they were recorded. A batch records its facts in a
@@ -835,14 +805,14 @@ impl Changes {
             for (attribute, operations) in attributes {
                 for operation in operations {
                     let instruction = match operation {
-                        Change::Assert(value, policy) => Instruction::Assert(
+                        Change::Assert(value, cardinality) => Instruction::Assert(
                             Fact {
                                 the: attribute.clone(),
                                 of: entity.clone(),
                                 is: value,
                                 cause: None,
                             },
-                            policy,
+                            cardinality,
                         ),
                         Change::Retract(value) => Instruction::Retract(Fact {
                             the: attribute.clone(),
@@ -864,33 +834,32 @@ impl Changes {
     }
 }
 
-/// Record an assertion of `is` under `policy` in `cell`.
-fn associate_cell(cell: &mut Vec<Change>, is: Value, policy: Pick) {
-    // A write under `last` succeeds the cell's newest claim. The
-    // writes of one batch stand at one edition, so the batch's own
-    // earlier `last` write is that claim only when it is the cell's
+/// Record an assertion of `is` under `cardinality` in `cell`.
+fn associate_cell(cell: &mut Vec<Change>, is: Value, cardinality: Cardinality) {
+    // A write under cardinality one succeeds the cell's newest claim.
+    // The writes of one batch stand at one edition, so the batch's own
+    // earlier such write is that claim only when it is the cell's
     // latest change and no other assertion of the cell came before
     // it: then it would be retracted the moment it landed, and this
     // write succeeds what it succeeded, so it takes its place. With
     // another assertion of the cell in the batch the two claims
     // stand equal and either may be the one elected, so every write
-    // stays, in order, and is replayed as written. Every other
-    // pick elects by value, where the earlier write may stand.
-    if policy == Pick::Last
-        && let Some((Change::Assert(_, Pick::Last), before)) = cell.split_last()
+    // stays, in order, and is replayed as written.
+    if cardinality == Cardinality::One
+        && let Some((Change::Assert(_, Cardinality::One), before)) = cell.split_last()
         && before
             .iter()
             .all(|change| matches!(change, Change::Retract(_)))
     {
         cell.pop();
     }
-    cell.push(Change::Assert(is, policy));
+    cell.push(Change::Assert(is, cardinality));
 }
 
 impl Update for Changes {
-    fn associate(&mut self, the: Relation, of: Entity, is: Value, policy: Pick) {
+    fn associate(&mut self, the: Relation, of: Entity, is: Value, cardinality: Cardinality) {
         let cell = self.facts.entry(of).or_default().entry(the).or_default();
-        associate_cell(cell, is, policy);
+        associate_cell(cell, is, cardinality);
     }
 
     fn dissociate(&mut self, the: Relation, of: Entity, is: Value) {
@@ -902,7 +871,14 @@ impl Update for Changes {
             .push(Change::Retract(is));
     }
 
-    fn associate_in(&mut self, layer: Entity, the: Relation, of: Entity, is: Value, policy: Pick) {
+    fn associate_in(
+        &mut self,
+        layer: Entity,
+        the: Relation,
+        of: Entity,
+        is: Value,
+        cardinality: Cardinality,
+    ) {
         let cell = self
             .layers
             .entry(layer)
@@ -911,7 +887,7 @@ impl Update for Changes {
             .or_default()
             .entry(the)
             .or_default();
-        associate_cell(cell, is, policy);
+        associate_cell(cell, is, cardinality);
     }
 
     fn dissociate_in(&mut self, layer: Entity, the: Relation, of: Entity, is: Value) {
@@ -955,7 +931,9 @@ impl FromIterator<Instruction> for Changes {
         let mut changes = Changes::new();
         for instruction in instructions {
             match instruction {
-                Instruction::Assert(a, policy) => changes.associate(a.the, a.of, a.is, policy),
+                Instruction::Assert(a, cardinality) => {
+                    changes.associate(a.the, a.of, a.is, cardinality)
+                }
                 Instruction::Retract(a) => changes.dissociate(a.the, a.of, a.is),
             }
         }
@@ -1068,14 +1046,14 @@ pub fn sort_key(fact: &Fact, manifest: &Manifest) -> SortKey {
 /// Lets a `Changes` value act anywhere a single statement does: e.g.
 /// folding pre-built changes into another transaction, or asserting
 /// a changes-shaped overlay into a query session. `Assert` maps to
-/// `associate` on the target, with its pick; `Retract` maps to
+/// `associate` on the target, with its cardinality; `Retract` maps to
 /// `dissociate`.
 ///
 /// Retracting a batch inverts its asset changes as it inverts its facts:
 /// an import becomes a discard and a discard an import.
 impl Statement for Changes {
     /// Replay every change into `update` as it was recorded, each
-    /// assertion under its pick, so a batch asserted into another
+    /// assertion under its cardinality, so a batch asserted into another
     /// keeps what its writes meant.
     fn assert(mut self, update: &mut impl Update) {
         for change in self.take_assets() {
@@ -1088,8 +1066,8 @@ impl Statement for Changes {
             for (attribute, changes) in attributes {
                 for change in changes {
                     match change {
-                        Change::Assert(value, policy) => {
-                            update.associate(attribute.clone(), entity.clone(), value, policy)
+                        Change::Assert(value, cardinality) => {
+                            update.associate(attribute.clone(), entity.clone(), value, cardinality)
                         }
                         Change::Retract(value) => {
                             update.dissociate(attribute.clone(), entity.clone(), value)
@@ -1103,12 +1081,12 @@ impl Statement for Changes {
                 for (attribute, changes) in attributes {
                     for change in changes {
                         match change {
-                            Change::Assert(value, policy) => update.associate_in(
+                            Change::Assert(value, cardinality) => update.associate_in(
                                 layer.clone(),
                                 attribute.clone(),
                                 entity.clone(),
                                 value,
-                                policy,
+                                cardinality,
                             ),
                             Change::Retract(value) => update.dissociate_in(
                                 layer.clone(),
@@ -1140,7 +1118,7 @@ impl Statement for Changes {
                         update.dissociate_in(layer.clone(), a.the, a.of, a.is)
                     }
                     Instruction::Retract(a) => {
-                        update.associate_in(layer.clone(), a.the, a.of, a.is, Pick::All)
+                        update.associate_in(layer.clone(), a.the, a.of, a.is, Cardinality::Many)
                     }
                 }
             }
@@ -1148,7 +1126,7 @@ impl Statement for Changes {
         for instruction in self.into_instructions() {
             match instruction {
                 Instruction::Assert(a, _) => update.dissociate(a.the, a.of, a.is),
-                Instruction::Retract(a) => update.associate(a.the, a.of, a.is, Pick::All),
+                Instruction::Retract(a) => update.associate(a.the, a.of, a.is, Cardinality::Many),
             }
         }
     }
@@ -1161,7 +1139,7 @@ mod tests {
     /// values compare: the order a `last` election runs on.
     #[dialog_common::test]
     fn a_successor_stands_after_its_claim_and_before_a_newer_one() {
-        use super::{Cause, Edition, Pick, Standing, Value};
+        use super::{Cardinality, Cause, Edition, Standing, Value};
         let claim = Standing::new(Some((Edition::new(3), [1; 32])), Cause([1; 32]));
         let at = |succession: u32| Standing {
             succession,
@@ -1178,11 +1156,11 @@ mod tests {
         assert_eq!(twice.succession, 2);
         // The successor's lesser value does not hold it back.
         let (todo, triage) = (Value::String("todo".into()), Value::String("triage".into()));
-        assert!(Pick::newer(
+        assert!(Cardinality::newer(
             (&todo, Some(&successor)),
             (&triage, Some(&claim))
         ));
-        assert!(!Pick::newer(
+        assert!(!Cardinality::newer(
             (&triage, Some(&claim)),
             (&todo, Some(&successor))
         ));
@@ -1195,7 +1173,7 @@ mod tests {
     /// (the natural 3 and the float 3.0) is a tie neither wins.
     #[dialog_common::test]
     fn an_equal_standing_ties_by_the_hash_of_the_value() {
-        use super::{Cause, Edition, Pick, Standing, Value};
+        use super::{Cardinality, Cause, Edition, Standing, Value};
         let standing = Standing::new(Some((Edition::new(3), [1; 32])), Cause([1; 32]));
         let texts: Vec<Value> = (b'a'..=b'z')
             .map(|letter| Value::String(char::from(letter).to_string()))
@@ -1205,26 +1183,26 @@ mod tests {
             .flat_map(|a| texts.iter().map(move |b| (a, b)))
             .find(|(a, b)| a < b && a.tiebreak() > b.tiebreak())
             .expect("two letters whose hashes order them the other way");
-        assert!(Pick::newer(
+        assert!(Cardinality::newer(
             (lesser, Some(&standing)),
             (greater, Some(&standing))
         ));
-        assert!(!Pick::newer(
+        assert!(!Cardinality::newer(
             (greater, Some(&standing)),
             (lesser, Some(&standing))
         ));
         let claims = [(greater, Some(&standing)), (lesser, Some(&standing))];
-        assert_eq!(Pick::Last.elect(claims), Some(1));
+        assert_eq!(Cardinality::One.elect(claims), Some(1));
         let claims = [(lesser, Some(&standing)), (greater, Some(&standing))];
-        assert_eq!(Pick::Last.elect(claims), Some(0));
+        assert_eq!(Cardinality::One.elect(claims), Some(0));
 
         let (natural, float) = (Value::UnsignedInt(3), Value::Float(3.0));
         assert_eq!(natural.tiebreak(), float.tiebreak());
-        assert!(!Pick::newer(
+        assert!(!Cardinality::newer(
             (&natural, Some(&standing)),
             (&float, Some(&standing))
         ));
-        assert!(!Pick::newer(
+        assert!(!Cardinality::newer(
             (&float, Some(&standing)),
             (&natural, Some(&standing))
         ));
@@ -1236,7 +1214,7 @@ mod tests {
     /// process to the next.
     #[dialog_common::test]
     fn it_orders_a_batchs_instructions() {
-        use super::{Changes, Instruction, Pick, Value};
+        use super::{Cardinality, Changes, Instruction, Value};
         let fact = |of: &str, the: &str, is: &str| -> Instruction {
             Instruction::Assert(
                 super::Fact {
@@ -1245,7 +1223,7 @@ mod tests {
                     is: Value::String(is.into()),
                     cause: None,
                 },
-                Pick::All,
+                Cardinality::Many,
             )
         };
         let recorded = || {
@@ -1317,19 +1295,19 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Pick::All,
+            crate::Cardinality::Many,
         );
         changes.associate(
             name_attr(),
             alice(),
             Value::String("Ally".into()),
-            crate::Pick::All,
+            crate::Cardinality::Many,
         );
         changes.associate(
             role_attr(),
             alice(),
             Value::String("admin".into()),
-            crate::Pick::Last,
+            crate::Cardinality::One,
         );
         changes.dissociate(name_attr(), bob(), Value::String("Bob".into()));
 
@@ -1345,7 +1323,7 @@ mod tests {
             replaced,
             Some(Change::Assert(
                 Value::String("admin".into()),
-                crate::Pick::Last
+                crate::Cardinality::One
             )),
             "a replacement stays a replacement"
         );
@@ -1364,7 +1342,7 @@ mod tests {
         ];
         for value in values {
             let mut changes = Changes::new();
-            changes.associate(name_attr(), alice(), value.clone(), crate::Pick::Last);
+            changes.associate(name_attr(), alice(), value.clone(), crate::Cardinality::One);
             let bytes = serde_ipld_dagcbor::to_vec(&changes).expect("encode changes");
             let decoded: Changes = serde_ipld_dagcbor::from_slice(&bytes).expect("decode changes");
             let written = decoded
@@ -1387,37 +1365,31 @@ mod tests {
             role_attr(),
             alice(),
             Value::String("staff".into()),
-            crate::Pick::All,
+            crate::Cardinality::Many,
         );
         changes.associate(
             role_attr(),
             alice(),
             Value::String("member".into()),
-            crate::Pick::Last,
+            crate::Cardinality::One,
         );
         changes.associate(
             role_attr(),
             alice(),
             Value::String("admin".into()),
-            crate::Pick::Last,
-        );
-        changes.associate(
-            role_attr(),
-            alice(),
-            Value::String("owner".into()),
-            crate::Pick::Max,
+            crate::Cardinality::One,
         );
         changes.associate(
             role_attr(),
             bob(),
             Value::String("visitor".into()),
-            crate::Pick::Last,
+            crate::Cardinality::One,
         );
         changes.associate(
             role_attr(),
             bob(),
             Value::String("guest".into()),
-            crate::Pick::Last,
+            crate::Cardinality::One,
         );
 
         let of_alice: Vec<Change> = changes
@@ -1428,10 +1400,9 @@ mod tests {
         assert_eq!(
             of_alice,
             vec![
-                Change::Assert(Value::String("staff".into()), crate::Pick::All),
-                Change::Assert(Value::String("member".into()), crate::Pick::Last),
-                Change::Assert(Value::String("admin".into()), crate::Pick::Last),
-                Change::Assert(Value::String("owner".into()), crate::Pick::Max),
+                Change::Assert(Value::String("staff".into()), crate::Cardinality::Many),
+                Change::Assert(Value::String("member".into()), crate::Cardinality::One),
+                Change::Assert(Value::String("admin".into()), crate::Cardinality::One),
             ],
             "staff stands at the batch's edition beside member, so admin may elect either: every write is replayed"
         );
@@ -1444,9 +1415,50 @@ mod tests {
             of_bob,
             vec![Change::Assert(
                 Value::String("guest".into()),
-                crate::Pick::Last
+                crate::Cardinality::One
             )]
         );
+    }
+
+    /// A batch an earlier release wrote, whose assertions carry the
+    /// pick their attribute was read under, reads with the cardinality
+    /// each pick stood for: `all` adds, and every other pick, `top`
+    /// with the values it ranked among them, succeeds a claim.
+    #[dialog_common::test]
+    fn it_reads_the_picks_an_earlier_release_wrote_into_a_batch() {
+        let text = |text: &str| serde_json::to_value(Value::String(text.into())).expect("a value");
+        let earlier = serde_json::json!({
+            "id:alice": {
+                "test/name": [
+                    { "assert": [text("Alice"), "all:"] },
+                    { "assert": [text("Ally"), "last:"] },
+                    { "assert": [text("Al"), "max:"] },
+                    { "assert": [text("A"), { "top:": [text("A")] }] },
+                    { "assert": [text("Alicia"), "all"] }
+                ]
+            }
+        });
+        let decoded: Changes = serde_json::from_value(earlier).expect("decode changes");
+        let cardinalities: Vec<Cardinality> = decoded
+            .iter()
+            .filter_map(|(_, _, change)| match change {
+                Change::Assert(_, cardinality) => Some(*cardinality),
+                Change::Retract(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            cardinalities,
+            vec![
+                Cardinality::Many,
+                Cardinality::One,
+                Cardinality::One,
+                Cardinality::One,
+                Cardinality::Many,
+            ]
+        );
+        let written = serde_json::to_value(&decoded).expect("encode changes");
+        assert_eq!(written["id:alice"]["test/name"][0]["assert"][1], "many");
+        assert_eq!(written["id:alice"]["test/name"][1]["assert"][1], "one");
     }
 
     /// Staging the same asset twice stages it once, and an asset change
@@ -1497,7 +1509,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Pick::All,
+            crate::Cardinality::Many,
         );
         changes.import(Asset::new(b"avatar".to_vec()));
 
@@ -1532,7 +1544,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Pick::All,
+            crate::Cardinality::Many,
         );
         batch.import(Asset::new(b"avatar".to_vec()));
 
@@ -1556,7 +1568,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Pick::All,
+            crate::Cardinality::Many,
         );
 
         let bytes = serde_ipld_dagcbor::to_vec(&changes).expect("encode changes");
@@ -1576,7 +1588,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Pick::All,
+            crate::Cardinality::Many,
         );
         changes.dissociate(name_attr(), bob(), Value::String("Bob".into()));
         changes.import(Asset::new(b"avatar".to_vec()));
@@ -1639,7 +1651,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Pick::All,
+            crate::Cardinality::Many,
         );
         source.dissociate(name_attr(), bob(), Value::String("Bob".into()));
 
@@ -1652,7 +1664,7 @@ mod tests {
         assert!(
             instructions
                 .iter()
-                .any(|i| matches!(i, Instruction::Assert(.., crate::Pick::All)))
+                .any(|i| matches!(i, Instruction::Assert(.., crate::Cardinality::Many)))
         );
         assert!(
             instructions
@@ -1668,7 +1680,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Pick::All,
+            crate::Cardinality::Many,
         );
 
         let mut target = Changes::new();

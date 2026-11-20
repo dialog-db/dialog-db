@@ -1180,7 +1180,7 @@ mod tests {
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ))
         };
         let command = Command(vec!["storage".to_string()]).to_string();

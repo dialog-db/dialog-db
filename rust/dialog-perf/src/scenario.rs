@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_corpus::Pick;
+use dialog_corpus::Cardinality;
 use dialog_query::ConceptDescriptor;
 
 use crate::env::{Env, assert_all, concept, entity, fact, text};
@@ -368,7 +368,7 @@ fn stuff_name() -> ConceptDescriptor {
 }
 
 /// Commit `count` stuff entities, their two facts under `policy`.
-async fn seed_stuff(env: &Env, count: usize, policy: Pick) -> Result<()> {
+async fn seed_stuff(env: &Env, count: usize, policy: Cardinality) -> Result<()> {
     let facts = (0..count).flat_map(|index| {
         let this = entity("stuff", index);
         [

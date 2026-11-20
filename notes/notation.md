@@ -12,7 +12,7 @@ Dialog uses two notations for describing domain models:
 
 Both attributes and concepts are structurally identified. Their identity is derived from their components, not from a name. However, attributes contain a nominal component (`the`) that captures semantic intent, identifying the relation in `domain/name` format and distinguishing attributes that would otherwise be structurally identical.
 
-An attribute's identity is a hash of its relations, type and pick. A concept's identity is derived from the sorted set of its constituent attribute identities. Two definitions with the same structure are the same thing, regardless of how they are referred to.
+An attribute's identity is a hash of its relation, cardinality, type and listed values. A concept's identity is derived from the sorted set of its constituent attribute identities. Two definitions with the same structure are the same thing, regardless of how they are referred to.
 
 The `the` component within an attribute is nominal: it carries meaning beyond structure. `diy.cook/quantity` and `diy.cook/price` may both be `(*, Integer, one)` structurally, but they are distinct attributes because `the` denotes the kind of relation they form, which is what makes it part of the identity in the first place.
 
@@ -105,7 +105,7 @@ omits the constraint to take both and split them downstream.
 
 ### References
 
-In the formal notation, all references are structural: attributes are described inline by their full definition `{ the, as, pick }` and concepts by their full set of constituent attributes. There are no names to look up; everything is self-describing.
+In the formal notation, all references are structural: attributes are described inline by their full definition `{ the, as, cardinality }` and concepts by their full set of constituent attributes. There are no names to look up; everything is self-describing.
 
 A relation is referenced by its qualified form `domain/name` with `/` as separator. The combined selector must not exceed 64 bytes:
 
@@ -118,7 +118,7 @@ io.gozala.person/name
 
 ### Attribute
 
-An attribute is a relation qualified by a value type and a pick. It extends a relation's `domain/name` identifier with what kind of values the relation is read as (`as`) and which of an entity's claims a read returns (`pick`). An attribute's identity is structural: a hash of the relations it reads, its type, its pick and the values its pick ranks. The `description` field is part of the attribute definition but not part of its identity; two attributes with the same structure but different descriptions are the same attribute.
+An attribute is a relation, a value type and a cardinality. It extends a relation's `domain/name` identifier with what kind of values the relation is read as (`as`) and how many claims a cell holds (`cardinality`). An attribute's identity is structural: a hash of the relation it reads, its cardinality, its type and the values it lists. The `description` field is part of the attribute definition but not part of its identity; two attributes with the same structure but different descriptions are the same attribute.
 
 ```json
 {
@@ -134,22 +134,20 @@ the: io.gozala.person/name
 as: "text:"
 ```
 
-`pick` is one of these entities:
+`cardinality` is one of:
 
-- `last:` (the default): the newest claim;
-- `all:`: every claim, as a set;
-- `top:`: the best ranked of the values listed in `as` or the relations listed in `the`; a list in either implies `top:`;
-- `max:`, `min:`: the greatest or least value of an ordered type.
+- `one` (the default, and not written): a read returns the cell's newest claim;
+- `many`: a read returns every claim, as a set.
 
 ```yaml
 the: io.gozala.person/email
 as: "text:"
-pick: "all:"
+cardinality: many
 ```
 
-A pick is an entity for the same reason a type is: it is a name the descriptor refers to, not text, and an attribute's identity hashes it as such. The plain names 0.2 wrote (`all`) are read, never written.
+A read that ranks a cell's claims, the greatest, the least or the first listed, is not a property of an attribute but of the concept field that reads it: the field picks `max`, `min` or `top` over a cardinality-many attribute (`"pick": "top"`, from which the field's cardinality follows; see [aggregation](./aggregation.md#selective-aggregators-on-concept-fields)). A listed `as` ranks its values best first.
 
-`cardinality: one` and `cardinality: many` are the older spellings of `last:` and `all:`. They are read, never written, and `pick` wins when both are given.
+The releases 0.3 and 0.4 spelled a `pick` (`last:`, `all:`, `top:`, `max:`, `min:`) where an attribute now spells its cardinality, and could list relations under `the`, a ranked chain. A descriptor spelling either is refused by name, so it is never read with another meaning. `Branch::upgrade_rules` rewrites a stored rule whose attributes read under `last` or `all` (cardinality one and many), and reports one reading under `max`, `min` or `top`, or over a chain, which it leaves inert.
 
 <details>
 <summary>Attribute</summary>
@@ -157,7 +155,7 @@ A pick is an entity for the same reason a type is: it is a name the descriptor r
 {
   "Attribute": {
     "type": "object",
-    "description": "A relation qualified by a value type and a pick.",
+    "description": "A relation, a value type and a cardinality.",
     "properties": {
       "description": {
         "type": "string",
@@ -167,11 +165,11 @@ A pick is an entity for the same reason a type is: it is a name the descriptor r
         "type": "string",
         "description": "The relation in domain/name format (e.g. 'diy.cook/quantity')."
       },
-      "pick": {
+      "cardinality": {
         "type": "string",
-        "enum": ["last:", "all:", "top:", "max:", "min:"],
-        "description": "Which of an entity's claims the attribute reads, named by an entity. Defaults to 'last:', or to 'top:' when 'the' or 'as' is a list. The plain names 0.2 wrote ('all') are read, never written.",
-        "default": "last:"
+        "enum": ["one", "many"],
+        "description": "How many claims a cell holds: under 'one' a read returns the newest and a write succeeds it, under 'many' a read returns every claim and a write adds one.",
+        "default": "one"
       },
       "optional": {
         "type": "boolean",
@@ -183,9 +181,11 @@ A pick is an entity for the same reason a type is: it is a name the descriptor r
         "description": "A concept the field's target entity must satisfy, as its 'concept:{hash}' URI. Entity-valued attributes only; mutually exclusive with 'optional'."
       },
       "as": {
-        "description": "Value type of the attribute. If omitted, any type is allowed.",
-        "type": "string",
-        "enum": ["bytes:", "entity:", "boolean:", "text:", "natural:", "integer:", "float:", "record:", "symbol:"]
+        "description": "Value type of the attribute, or the list of values it holds (an enumerated type, listed best first). If omitted, any type is allowed.",
+        "oneOf": [
+          { "type": "string", "enum": ["bytes:", "entity:", "boolean:", "text:", "natural:", "integer:", "float:", "record:", "symbol:"] },
+          { "type": "array", "minItems": 1 }
+        ]
       }
     },
     "required": ["the"]
@@ -218,10 +218,9 @@ lives on the field inside a concept's `with`, not on the attribute itself: an
 attribute is reusable across concepts, and conformance is a demand one concept
 makes of its own field.
 
-#### Future Attribute Extensions
+#### Listed values
 
-**Not yet supported.** An attribute will be able to constrain values to a
-fixed set of symbols:
+An attribute can constrain its values to a fixed list, an enumerated type. The list is ordered best first: a concept field with `"pick": "top"` over the attribute reads the claim holding the first listed value.
 
 ```json
 {
@@ -231,14 +230,14 @@ fixed set of symbols:
 }
 ```
 
-#### Writing under a pick
+#### Writing under a cardinality
 
-A pick governs what happens when a new claim is asserted through an attribute an entity already has a value for.
+A cardinality governs what happens when a new claim is asserted through an attribute an entity already has a value for.
 
-- `all`: the new claim is added alongside the existing ones.
-- Every other pick: the new claim succeeds the claim a read under the pick returns, which is retracted, so a read returns the value just written unless another claim outranks it (a greater value under `max`, a better ranked one under `top`).
+- `many`: the new claim is added alongside the existing ones.
+- `one`: the new claim succeeds the newest claim, the one a read returns, which is retracted, so a read returns the value just written.
 
-The associative layer beneath is indifferent to picks; it is the semantic layer that decides what to do with prior claims before asserting new ones.
+A batch carries the cardinality beside every assertion, and the tree elects the claim a cardinality-one write succeeds as it lands the write.
 
 ### Concept
 
@@ -370,7 +369,7 @@ symbol-named half is a **dictionary**, the position-named half a
     "member": {
       "description": "The list's members, in order",
       "the": { "domain": "todo.list", "keyed": "sequence" },
-      "pick": "all:",
+      "cardinality": "many",
       "as": "text:"
     }
   }
@@ -379,8 +378,8 @@ symbol-named half is a **dictionary**, the position-named half a
 
 The facts behind such a field are ordinary claims whose attribute's name half
 is the entry's key: `todo.list/N` and `todo.list/N5` are two members. A
-collection field is therefore *many facts* by construction; its `pick` is
-per entry (whether one key may hold two values), not about the collection.
+collection field is therefore *many facts* by construction; its
+`cardinality` is per entry (whether one key may hold two values), not about the collection.
 
 A collection field cannot be optional: it is zero-or-more already, and an
 entity with no entries simply yields no rows.
@@ -1545,7 +1544,7 @@ The abbreviated notation is a YAML-only shorthand that expands into the formal n
 
 Since `domain/name` is usually unique enough to identify an attribute in a single application context it serves as a practical shorthand.
 
-> ℹ️ It is highly unlikely to have several attributes for same relation, but with different types or picks.
+> ℹ️ It is highly unlikely to have several attributes for same relation, but with different types or cardinalities.
 
 All abbreviated addresses expand to structural reference in the formal notation.
 
@@ -1568,7 +1567,7 @@ the: diy.cook/quantity
 as: "natural:"
 ```
 
-The label `quantity` becomes the name, the enclosing key `diy.cook` becomes the domain, and `pick` defaults to `last`.
+The label `quantity` becomes the name, the enclosing key `diy.cook` becomes the domain, and `cardinality` defaults to `one`.
 
 #### Relative addressing
 
@@ -1653,7 +1652,7 @@ The field `name` in this concept is backed by an attribute from a completely dif
 
 ### Attribute
 
-The abbreviated notation infers `the` from document structure. An immediate name implies attribute name, and enclosing key implies attribute domain. `pick` when omitted defaults to `last`.
+The abbreviated notation infers `the` from document structure. An immediate name implies attribute name, and enclosing key implies attribute domain. `cardinality` when omitted defaults to `one`.
 
 #### Overriding name
 

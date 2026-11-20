@@ -18,15 +18,15 @@
 //! strongly connected components; a concept is *recursive* when its
 //! component is non-trivial.
 //!
-//! Outside a component, negation, optional reads and elections have
+//! Outside a component, negation, optional reads and folds have
 //! stratified semantics: the premise reads a relation derived in full
-//! before the rule runs. A ranked election is a negation too: a read
-//! under `top`, a relation chain, `max` or `min` returns a candidate
-//! *and nothing better*. Inside a component such a premise would read a
+//! before the rule runs. Inside a component such a premise would read a
 //! set the cycle is still deriving, which has no stratified meaning. A
-//! read under `last` inside its own component is not treated as one: it
-//! reads every candidate the fixpoint derives, and its readers elect
-//! the newest at the exit, so the component stays positive.
+//! cardinality-one read inside its own component is an absence test
+//! only when the rule decides on the value read (see [`decides`]): a
+//! rule passing the value along reads every candidate the fixpoint
+//! derives, and its readers elect the newest at the exit, so the
+//! component stays positive.
 //!
 //! A merge of rule sets each fine on its own can close a cycle through
 //! an absence test, so it is never refused at install: the analysis
@@ -35,18 +35,18 @@
 //! The rule chosen is the one of the cycle installed last
 //! ([`Installed`]): every read was well defined before it arrived.
 //! Among rules installed together it is the one inside the cycle
-//! deriving what the cycle's plainest absence test reads (an `unless`
-//! or an optional read before a ranked election), so the test keeps
+//! deriving what the cycle's plainest absence test reads (an `unless`,
+//! an optional read or a fold before a decided read), so the test keeps
 //! the meaning it had over everything outside the cycle; when the
 //! test's own rule derives what it tests, that rule. Then the greatest
 //! identity. Install order comes from the commits indexing the rules,
 //! which every replica sees the same, so replicas with the same history
 //! quarantine the same rules, and a quarantine lifts by itself once a
 //! rule of the cycle is retracted.
-//! An aggregating edge inside a component remains a violation: a fold
-//! has no deterministic reading over a set still growing. A deductive
-//! rule refuses `reduce` at compile time, so the violation is
-//! unreachable for authored rules and kept for the structure.
+//! An aggregating edge inside a component is an absence test like any
+//! other, as plain as an `unless`: a fold has no reading over a set
+//! still growing, so a rule of the cycle is quarantined. One left over
+//! in a cycle with no rule to set aside is a violation.
 //!
 //! Callers consume the analysis three ways:
 //!
@@ -58,30 +58,33 @@
 //! - [`RuleRegistry::acquire`](super::rule_registry::RuleRegistry::acquire)
 //!   runs the targeted [`ProgramAnalysis::check`] over the queried
 //!   concept's dependency closure, so a recursive region of the
-//!   program is evaluated by the fixpoint and an aggregating one
-//!   fails the queries that touch it (and only those).
+//!   program is evaluated by the fixpoint and an aggregating one no
+//!   quarantine could break fails the queries that touch it (and only
+//!   those).
 
+use crate::Cardinality;
 use crate::Entity;
-use crate::Pick;
-use crate::attribute::AttributeDescriptor;
-use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
-use crate::concept::query::{ConceptRules, Installed};
+use crate::concept::descriptor::ConceptDescriptor;
+use crate::concept::query::{ConceptQuery, ConceptRules, Installed};
+use crate::constraint::Constraint;
 use crate::error::EvaluationError;
 use crate::negation::Negation;
+use crate::pattern::Pattern;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::rule::deductive::DeductiveRule;
 use crate::rule::statement::Reach;
+use crate::term::Term;
+use crate::types::Any;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter;
 
 /// Polarity of a dependency edge: whether the rule body references
 /// the concept positively (an ordinary premise), under `unless`,
-/// set-widened, or from a *reducing* rule whose fold must read the
-/// complete relation, or under a choosing pick. A negative, optional
-/// or electing edge inside a dependency cycle is an absence test the
-/// analysis quarantines a rule over; an aggregating one is a
-/// stratification violation.
+/// set-widened, from a *reducing* rule whose fold must read the
+/// complete relation, or under cardinality one. A negative, optional,
+/// aggregating or deciding edge inside a dependency cycle is an absence
+/// test the analysis quarantines a rule over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Polarity {
     /// The body asserts the concept.
@@ -97,35 +100,52 @@ pub enum Polarity {
     /// clause: the rule's folds consume the premise's full
     /// relation, so the reference demands a complete lower stratum.
     Aggregating,
-    /// The body reads the relation under a choosing pick: the
-    /// candidate it returns, and nothing better, which negates the
-    /// better candidates. `ranked` for an explicit ranking (`top`, a
-    /// relation chain, `max`, `min`) rather than `last`, the default.
+    /// The body reads the relation under cardinality one: the newest
+    /// candidate, and nothing newer. `decides` when the rule decides on
+    /// the value read rather than passing it along to its head (see
+    /// [`decides`]).
     Electing {
-        /// Whether the read ranks candidates rather than taking the
-        /// newest.
-        ranked: bool,
+        /// Whether the rule decides on the value the read returns.
+        decides: bool,
     },
 }
 
 impl Polarity {
     /// Whether the edge tests for something's absence inside a cycle: a
-    /// negation, an optional read or a ranked election. A `last` read is
-    /// not: inside its cycle it reads every candidate, and its readers
-    /// elect the newest once the cycle is derived in full.
+    /// negation, an optional read, a fold, or a cardinality-one read
+    /// whose value the rule decides on. A cardinality-one read whose
+    /// value the rule only passes along is not: inside its cycle it reads every
+    /// candidate, each derivation stands by the candidate it carried,
+    /// and its readers elect the newest once the cycle is derived in
+    /// full. A rule deciding on the value would act on a candidate no
+    /// reader elects, and its conclusion would outlive the election.
     fn tests_absence(self) -> bool {
         matches!(
             self,
-            Polarity::Negative | Polarity::Optional | Polarity::Electing { ranked: true }
+            Polarity::Negative
+                | Polarity::Optional
+                | Polarity::Aggregating
+                | Polarity::Electing { decides: true }
         )
     }
 
-    /// How plainly the edge tests for absence: an `unless` or an
-    /// optional read most, a ranked election next.
+    /// How the edge tests for absence, when it does.
+    fn absence(self) -> Option<Absence> {
+        match self {
+            Polarity::Negative => Some(Absence::Negated),
+            Polarity::Optional => Some(Absence::Optional),
+            Polarity::Electing { decides: true } => Some(Absence::Decided),
+            Polarity::Aggregating => Some(Absence::Folded),
+            Polarity::Electing { .. } | Polarity::Positive => None,
+        }
+    }
+
+    /// How plainly the edge tests for absence: an `unless`, an
+    /// optional read or a fold most, a decided read next.
     fn strength(self) -> u8 {
         match self {
-            Polarity::Negative | Polarity::Optional => 2,
-            Polarity::Electing { ranked: true } => 1,
+            Polarity::Negative | Polarity::Optional | Polarity::Aggregating => 2,
+            polarity if polarity.tests_absence() => 1,
             _ => 0,
         }
     }
@@ -139,8 +159,22 @@ pub enum Absence {
     Negated,
     /// A set-widened (optional) read.
     Optional,
-    /// A read under a choosing pick.
-    Elected,
+    /// A cardinality-one read whose value the rule decides on.
+    Decided,
+    /// A read a `reduce` clause folds over.
+    Folded,
+}
+
+/// The absence test a quarantined rule's cycle ran through: what made
+/// the cycle one with no stratified meaning.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tested {
+    /// The rule making the test; `None` for a concept's selecting read.
+    pub by: Option<Entity>,
+    /// The relation or concept tested, inside the cycle.
+    pub target: Entity,
+    /// How it is tested.
+    pub absence: Absence,
 }
 
 /// A rule the analysis set aside: it closed a cycle through an absence
@@ -154,6 +188,9 @@ pub struct Quarantine {
     pub concept: Entity,
     /// The concepts of the cycle it closed, sorted.
     pub cycle: Vec<Entity>,
+    /// The cycle's plainest absence test, the one the rule was set
+    /// aside over: which rule tests what, and how.
+    pub tested: Option<Tested>,
 }
 
 /// An absence test inside a dependency cycle: some rule concluding
@@ -202,23 +239,31 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
     };
     rule.analysis()
         .premises()
-        .filter_map(|premise| match premise {
+        .enumerate()
+        .filter_map(|(index, premise)| match premise {
             Premise::Assert(Proposition::Concept(query)) if query.widens() => {
                 Some((query.predicate.clone(), Polarity::Optional))
             }
             Premise::Assert(Proposition::Concept(query)) => {
-                let select = query
+                let one = query
                     .predicate
                     .attribute_field()
-                    .filter(|(_, field)| !field.descriptor().is_chain())
-                    .map(|(_, field)| field.descriptor().pick());
-                let polarity = match select {
-                    Some(pick) if positive == Polarity::Positive && pick.elects() => {
-                        Polarity::Electing {
-                            ranked: !matches!(pick, Pick::Last),
-                        }
+                    .is_some_and(|(_, field)| field.cardinality() == Cardinality::One);
+                // A concept of several fields is read through its
+                // selecting rule, which elects each field's claim: a
+                // premise deciding on one of them tests an election
+                // the concept made.
+                let several = query.predicate.attribute_field().is_none();
+                let polarity = if positive != Polarity::Positive {
+                    positive
+                } else if one {
+                    Polarity::Electing {
+                        decides: decides(rule, index, query),
                     }
-                    _ => positive,
+                } else if several && decides(rule, index, query) {
+                    Polarity::Electing { decides: true }
+                } else {
+                    positive
                 };
                 Some((query.predicate.clone(), polarity))
             }
@@ -228,6 +273,153 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
             _ => None,
         })
         .collect()
+}
+
+/// Whether `rule` decides on the value its premise `index`, a read of
+/// an attribute concept under cardinality one, returns, rather than
+/// passing the value along.
+///
+/// A rule passes a value along when the value reaches its head and
+/// nothing else: bound to a head field, or fed to a formula or an
+/// equality whose result is. A rule decides on it when the read is
+/// pinned to a constant, or the value (or anything computed from it)
+/// is compared, joined on by another read, negated over, or checked
+/// against a constant.
+///
+/// The distinction matters inside a recursive component only. There a
+/// read sees every candidate the fixpoint derives, so a rule passing a
+/// value along derives one candidate per candidate read, each standing
+/// by the one it carried, and the election at the component's exit
+/// picks the same one a stratified read would have. A rule deciding on
+/// the value fires for a candidate no reader elects, and nothing at
+/// the exit takes its conclusion back.
+///
+/// One decision is exempt: a rule reading the cell it concludes (its
+/// own relation, of its own entity) is a rewrite. Its conclusion
+/// succeeds the value it read, and the exit ranks the cell's candidates
+/// by those successions.
+///
+/// A premise reading a concept of several fields decides when it
+/// decides on any field the concept reads one claim of: a field of
+/// cardinality one, or one that declares a selective aggregator. It
+/// has no cell of its own to rewrite.
+fn decides(rule: &DeductiveRule, index: usize, query: &ConceptQuery) -> bool {
+    let named = |term: &Term<Any>| term.name().map(str::to_string);
+    let Some((name, _)) = query.predicate.attribute_field() else {
+        return query.predicate.with().iter().any(|(name, field)| {
+            (field.pick().is_some() || field.cardinality() == Cardinality::One)
+                && decides_on(rule, index, query.terms.get(name))
+        });
+    };
+    let this = query.terms.get("this").and_then(named);
+    let node = ProgramAnalysis::node(&query.predicate);
+    let rewrites = this.as_deref() == Some("this")
+        && rule.conclusion().with().iter().any(|(_, field)| {
+            ProgramAnalysis::node(&ConceptDescriptor::of_attribute(field)) == node
+        });
+    if rewrites {
+        return false;
+    }
+    decides_on(rule, index, query.terms.get(name))
+}
+
+/// Whether `rule` decides on the value `term` binds in its premise
+/// `index` (see [`decides`]).
+fn decides_on(rule: &DeductiveRule, index: usize, term: Option<&Term<Any>>) -> bool {
+    let named = |term: &Term<Any>| term.name().map(str::to_string);
+    let mut carried: HashSet<String> = match term {
+        None => return false,
+        Some(Term::Constant(_)) => return true,
+        Some(term) => match named(term) {
+            Some(variable) => HashSet::from([variable]),
+            None => return false,
+        },
+    };
+    let premises: Vec<&Premise> = rule.analysis().premises().collect();
+    loop {
+        let before = carried.len();
+        for (other, premise) in premises.iter().enumerate() {
+            if other == index {
+                continue;
+            }
+            let carries = |term: &Term<Any>| term.name().is_some_and(|name| carried.contains(name));
+            match premise {
+                Premise::Assert(Proposition::Formula(_)) => {
+                    let parameters = premise.parameters();
+                    let schema = premise.schema();
+                    let derived = |operand: &str| {
+                        schema
+                            .get(operand)
+                            .is_some_and(|field| !field.requirement().is_required())
+                    };
+                    let feeds = parameters
+                        .iter()
+                        .any(|(operand, term)| !derived(operand) && carries(term));
+                    let checks = parameters
+                        .iter()
+                        .any(|(operand, term)| derived(operand) && carries(term));
+                    // The carried value standing in for a result is a
+                    // check of what the formula computes.
+                    if !feeds && checks {
+                        return true;
+                    }
+                    if !feeds {
+                        continue;
+                    }
+                    let mut results = Vec::new();
+                    for (operand, term) in parameters.iter() {
+                        if !derived(operand) {
+                            continue;
+                        }
+                        // A result the body pins is a check.
+                        if matches!(term, Term::Constant(_)) {
+                            return true;
+                        }
+                        results.extend(named(term));
+                    }
+                    carried.extend(results);
+                }
+                Premise::Assert(Proposition::Constraint(Constraint::Equality(equality))) => {
+                    let mut aliases = Vec::new();
+                    for (one, other) in [
+                        (&equality.this, &equality.is),
+                        (&equality.is, &equality.this),
+                    ] {
+                        // A side carries the value when it is the
+                        // carried variable or holds it, a part of a map
+                        // or a list.
+                        if !one.terms().into_iter().any(carries) {
+                            continue;
+                        }
+                        match (one, other) {
+                            (_, Pattern::Term(Term::Constant(_))) => return true,
+                            // A whole built from what is carried: the
+                            // other side is that whole.
+                            (_, Pattern::Term(term)) => aliases.extend(named(term)),
+                            // A carried value taken apart by a shape
+                            // drops the rows it does not match: a check.
+                            _ => return true,
+                        }
+                    }
+                    carried.extend(aliases);
+                }
+                Premise::Assert(Proposition::Constraint(Constraint::Coalesce(coalesce))) => {
+                    let feeds = carries(&coalesce.source) || carries(&coalesce.fallback);
+                    if feeds {
+                        carried.extend(named(&coalesce.is));
+                    }
+                }
+                other => {
+                    if other.parameters().iter().any(|(_, term)| carries(term)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        if carried.len() == before {
+            return false;
+        }
+    }
 }
 
 /// The dependency edges a concept contributes with no rules of its own:
@@ -240,33 +432,21 @@ fn selecting_edges(
     derived: &HashSet<Entity>,
 ) -> Vec<(ConceptDescriptor, Polarity)> {
     let mut edges = structural_edges(descriptor);
-    if let Some((_, field)) = descriptor.attribute_field() {
-        // A ranked chain elects among every relation it lists.
-        if field.descriptor().is_chain() {
-            for relation in field.descriptor().relations() {
-                let single = AttributeDescriptor::over(
-                    relation.clone(),
-                    "",
-                    field.cardinality(),
-                    field.content_type(),
-                );
-                edges.push((
-                    ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(single)),
-                    Polarity::Electing { ranked: true },
-                ));
-            }
-        }
+    if descriptor.attribute_field().is_some() {
         return edges;
     }
     for (_, field) in descriptor.with().iter() {
         let attribute = ConceptDescriptor::of_attribute(field);
         if derived.contains(&ProgramAnalysis::node(&attribute)) {
-            let polarity = if field.is_optional() {
+            // A field that declares a selective aggregator folds every
+            // claim of the relation, so it needs the relation derived
+            // in full, as any fold does.
+            let polarity = if field.pick().is_some() {
+                Polarity::Aggregating
+            } else if field.is_optional() {
                 Polarity::Optional
-            } else if field.descriptor().pick().elects() {
-                Polarity::Electing {
-                    ranked: !matches!(field.descriptor().pick(), Pick::Last),
-                }
+            } else if field.cardinality() == Cardinality::One {
+                Polarity::Electing { decides: false }
             } else {
                 Polarity::Positive
             };
@@ -649,10 +829,18 @@ impl ProgramAnalysis {
                 .find(|edges| edges.rule.as_ref() == Some(&rule))
                 .map(|edges| edges.concept.clone())
                 .expect("the chosen rule is one of the program's");
+            let tested = test.and_then(|test| {
+                Some(Tested {
+                    absence: test.polarity.absence()?,
+                    by: test.owner,
+                    target: test.target,
+                })
+            });
             quarantined.push(Quarantine {
                 rule,
                 concept,
                 cycle: cycle.clone(),
+                tested,
             });
         };
 
@@ -689,19 +877,15 @@ impl ProgramAnalysis {
                 if component[index_of[node]] != component[index_of[target]] {
                     continue;
                 }
-                let absence = match polarity {
-                    Polarity::Negative => Absence::Negated,
-                    Polarity::Optional => Absence::Optional,
-                    Polarity::Electing { ranked: true } => Absence::Elected,
-                    Polarity::Electing { ranked: false } => continue,
-                    Polarity::Aggregating => {
-                        violations.push(AggregationViolation {
-                            concept: node.clone(),
-                            aggregated: target.clone(),
-                        });
-                        continue;
-                    }
-                    Polarity::Positive => continue,
+                if *polarity == Polarity::Aggregating {
+                    violations.push(AggregationViolation {
+                        concept: node.clone(),
+                        aggregated: target.clone(),
+                    });
+                    continue;
+                }
+                let Some(absence) = polarity.absence() else {
+                    continue;
                 };
                 absences.push(AbsenceInCycle {
                     concept: node.clone(),
@@ -750,14 +934,12 @@ impl ProgramAnalysis {
     }
 
     /// The node a concept is analysed as: an attribute concept is its
-    /// relation, `on:<domain>/<name>`, whatever type or pick it reads
-    /// the relation under, since every rule deriving the relation and
-    /// every read of it meet there; any other concept is itself.
+    /// relation, `on:<domain>/<name>`, whatever type or cardinality it
+    /// reads the relation under, since every rule deriving the relation
+    /// and every read of it meet there; any other concept is itself.
     pub fn node(concept: &ConceptDescriptor) -> Entity {
         match concept.attribute_field() {
-            // A ranked chain of relations is a concept of its own with
-            // an edge to each relation (see `selecting_edges`).
-            Some((_, field)) if !field.descriptor().is_chain() => Reach::of(field.the())
+            Some((_, field)) => Reach::of(field.the())
                 .on_entity()
                 .unwrap_or_else(|| concept.this()),
             _ => concept.this(),
@@ -1067,6 +1249,11 @@ mod tests {
                 rule: closing.this(),
                 concept: ProgramAnalysis::node(&a),
                 cycle,
+                tested: Some(Tested {
+                    by: Some(negating.this()),
+                    target: ProgramAnalysis::node(&a),
+                    absence: Absence::Negated,
+                }),
             }]
         );
         assert!(analysis.absences().is_empty(), "no cycle is left to report");

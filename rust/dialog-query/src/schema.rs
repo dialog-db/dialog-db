@@ -10,7 +10,6 @@
 //! `Some(vt)` becomes `Type::Primitive(singleton(vt))`.
 
 use crate::type_system;
-use dialog_corpus::Pick;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -102,92 +101,62 @@ pub const VERIFICATION_COST: usize = 100;
 /// Concepts may have associated deductive rules that need to be checked and evaluated.
 pub const CONCEPT_OVERHEAD: usize = 1_000;
 
-/// Whether an attribute holds a single value or multiple values per entity.
+/// Whether an attribute holds a single value or multiple values per
+/// entity: see [`dialog_corpus::Cardinality`].
 ///
 /// Cardinality directly affects query cost estimation: a `Many` attribute
 /// may return multiple rows for the same `(attribute, entity)` pair, so
-/// scans over it are more expensive. The cost model in
-/// [`Cardinality::estimate`] uses this to assign costs that the planner
-/// uses when ordering premises.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Cardinality {
-    /// The attribute holds a single value per entity.
-    #[default]
-    One,
-    /// The attribute holds multiple values per entity.
-    Many,
-}
+/// scans over it are more expensive. The cost model in [`estimate_cost`]
+/// uses this to assign costs that the planner uses when ordering
+/// premises.
+pub use dialog_corpus::Cardinality;
 
-impl Cardinality {
-    /// The arity of `pick`: a set for `all`, one value for every other
-    /// pick.
-    pub fn of(pick: &Pick) -> Self {
-        if pick.is_set() {
-            Cardinality::Many
-        } else {
-            Cardinality::One
-        }
-    }
+/// Estimates the cost of a fact query on an attribute of `cardinality`
+/// given what's known about the triple (the, of, is).
+///
+/// # Parameters
+/// - `the`: Is the attribute known?
+/// - `of`: Is the entity known?
+/// - `is`: Is the value known?
+///
+/// # Cost Model
+/// The cost depends on how many components are known and the cardinality:
+/// - 3 known (lookup): Precise lookup, low cost
+/// - 2 known (select): Index-based selection
+/// - 1 known (scan): Index scan
+/// - 0 known: Unbound (should be rejected)
+pub fn estimate_cost(cardinality: Cardinality, the: bool, of: bool, is: bool) -> Option<usize> {
+    match (the, of, is, cardinality) {
+        // {the, of, is}: EAV full prefix
+        (true, true, true, Cardinality::One) => Some(LOOKUP_COST),
+        (true, true, true, Cardinality::Many) => Some(LOOKUP_COST),
 
-    /// The pick an attribute of this arity has when none is declared:
-    /// `last` for one value, `all` for many. `cardinality: one | many`
-    /// is the older spelling of the two.
-    pub fn pick(self) -> Pick {
-        match self {
-            Cardinality::One => Pick::Last,
-            Cardinality::Many => Pick::All,
-        }
-    }
-}
+        // {of, the}: EAV prefix (entity + attribute)
+        (true, true, false, Cardinality::One) => Some(LOOKUP_COST),
+        (true, true, false, Cardinality::Many) => Some(RANGE_READ_COST),
 
-impl Cardinality {
-    /// Estimates the cost of a fact query given what's known about the triple (the, of, is).
-    ///
-    /// # Parameters
-    /// - `the`: Is the attribute known?
-    /// - `of`: Is the entity known?
-    /// - `is`: Is the value known?
-    ///
-    /// # Cost Model
-    /// The cost depends on how many components are known and the cardinality:
-    /// - 3 known (lookup): Precise lookup, low cost
-    /// - 2 known (select): Index-based selection
-    /// - 1 known (scan): Index scan
-    /// - 0 known: Unbound (should be rejected)
-    pub fn estimate(&self, the: bool, of: bool, is: bool) -> Option<usize> {
-        match (the, of, is, self) {
-            // {the, of, is}: EAV full prefix
-            (true, true, true, Cardinality::One) => Some(LOOKUP_COST),
-            (true, true, true, Cardinality::Many) => Some(LOOKUP_COST),
+        // {the, is}: VAE prefix (value + attribute, no entity → verification)
+        (true, false, true, Cardinality::One) => Some(RANGE_READ_COST + VERIFICATION_COST),
+        (true, false, true, Cardinality::Many) => Some(RANGE_READ_COST),
 
-            // {of, the}: EAV prefix (entity + attribute)
-            (true, true, false, Cardinality::One) => Some(LOOKUP_COST),
-            (true, true, false, Cardinality::Many) => Some(RANGE_READ_COST),
+        // {of, is}: EAV scan (entity known, value constraint post-filtered)
+        (false, true, true, Cardinality::One) => Some(RANGE_READ_COST),
+        (false, true, true, Cardinality::Many) => Some(RANGE_SCAN_COST),
 
-            // {the, is}: VAE prefix (value + attribute, no entity → verification)
-            (true, false, true, Cardinality::One) => Some(RANGE_READ_COST + VERIFICATION_COST),
-            (true, false, true, Cardinality::Many) => Some(RANGE_READ_COST),
+        // {of}: EAV prefix (entity only)
+        (false, true, false, Cardinality::One) => Some(RANGE_READ_COST),
+        (false, true, false, Cardinality::Many) => Some(RANGE_SCAN_COST),
 
-            // {of, is}: EAV scan (entity known, value constraint post-filtered)
-            (false, true, true, Cardinality::One) => Some(RANGE_READ_COST),
-            (false, true, true, Cardinality::Many) => Some(RANGE_SCAN_COST),
+        // {the}: AEV prefix (attribute only, entity unknown → needs verification)
+        (true, false, false, Cardinality::One) => Some(RANGE_SCAN_COST + VERIFICATION_COST),
+        (true, false, false, Cardinality::Many) => Some(INDEX_SCAN_COST),
 
-            // {of}: EAV prefix (entity only)
-            (false, true, false, Cardinality::One) => Some(RANGE_READ_COST),
-            (false, true, false, Cardinality::Many) => Some(RANGE_SCAN_COST),
+        // {is}: VAE prefix (value only)
+        (false, false, true, Cardinality::One) => Some(INDEX_SCAN_COST + VERIFICATION_COST),
+        (false, false, true, Cardinality::Many) => Some(INDEX_SCAN_COST),
 
-            // {the}: AEV prefix (attribute only, entity unknown → needs verification)
-            (true, false, false, Cardinality::One) => Some(RANGE_SCAN_COST + VERIFICATION_COST),
-            (true, false, false, Cardinality::Many) => Some(INDEX_SCAN_COST),
-
-            // {is}: VAE prefix (value only)
-            (false, false, true, Cardinality::One) => Some(INDEX_SCAN_COST + VERIFICATION_COST),
-            (false, false, true, Cardinality::Many) => Some(INDEX_SCAN_COST),
-
-            // No constraints: unbound
-            (false, false, false, _) => None,
-        }
+        // No constraints: unbound
+        (false, false, false, _) => None,
     }
 }
 

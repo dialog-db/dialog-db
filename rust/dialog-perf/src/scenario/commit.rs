@@ -10,7 +10,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_corpus::{Pick, Value};
+use dialog_corpus::{Cardinality, Value};
 use dialog_query::InductiveRule;
 
 use super::{Outcome, Prepared, seed_stuff};
@@ -28,7 +28,7 @@ impl Prepared for Batch {
 
     fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
         Box::pin(async move {
-            seed_stuff(&self.env, self.size, Pick::All).await?;
+            seed_stuff(&self.env, self.size, Cardinality::Many).await?;
             Ok(Outcome::from([("facts".into(), 2 * self.size as u64)]))
         })
     }
@@ -59,7 +59,9 @@ impl Prepared for Rows {
                     fact(&this, "stuff/name", text(format!("name-{index}"))),
                     fact(&this, "stuff/role", text(format!("role-{}", index % 8))),
                 ];
-                self.env.commit(assert_all(facts, Pick::All)).await?;
+                self.env
+                    .commit(assert_all(facts, Cardinality::Many))
+                    .await?;
             }
             Ok(Outcome::from([("commits".into(), self.size as u64)]))
         })
@@ -95,7 +97,9 @@ impl Prepared for HotKey {
                     fact(&this, "stuff/name", text(format!("name-{index}"))),
                     fact(&marker, "marker/context", text("current")),
                 ];
-                self.env.commit(assert_all(facts, Pick::All)).await?;
+                self.env
+                    .commit(assert_all(facts, Cardinality::Many))
+                    .await?;
             }
             Ok(Outcome::from([("commits".into(), self.size as u64)]))
         })
@@ -128,7 +132,7 @@ impl Prepared for Succeed {
                     text(format!("renamed-{index}")),
                 )
             });
-            self.env.commit(assert_all(facts, Pick::Last)).await?;
+            self.env.commit(assert_all(facts, Cardinality::One)).await?;
             Ok(Outcome::from([("facts".into(), self.size as u64)]))
         })
     }
@@ -138,7 +142,7 @@ impl Prepared for Succeed {
 /// transaction renaming every one.
 pub async fn succeed(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
-    seed_stuff(&env, size, Pick::Last).await?;
+    seed_stuff(&env, size, Cardinality::One).await?;
     env.reopen().await?;
     Ok(Box::new(Succeed { env, size }))
 }
@@ -162,7 +166,7 @@ impl Prepared for Derived {
                     text(format!("stored-{index}")),
                 )
             });
-            self.env.commit(assert_all(facts, Pick::Last)).await?;
+            self.env.commit(assert_all(facts, Cardinality::One)).await?;
             Ok(Outcome::from([("facts".into(), self.size as u64)]))
         })
     }
@@ -181,7 +185,7 @@ pub async fn derived(size: usize) -> Result<Box<dyn Prepared>> {
         }]
     }));
     env.install(&[copy]).await?;
-    seed_stuff(&env, size, Pick::Last).await?;
+    seed_stuff(&env, size, Cardinality::One).await?;
     env.reopen().await?;
     Ok(Box::new(Derived { env, size }))
 }
@@ -224,7 +228,9 @@ impl Prepared for Dispatch {
                     Value::Entity(entity("target", index)),
                 )
             });
-            self.env.commit(assert_all(facts, Pick::All)).await?;
+            self.env
+                .commit(assert_all(facts, Cardinality::Many))
+                .await?;
             Ok(Outcome::from([(
                 "facts".into(),
                 ((RELAYS + 1) * self.size) as u64,

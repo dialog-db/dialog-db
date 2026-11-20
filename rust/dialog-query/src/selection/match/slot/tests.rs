@@ -30,7 +30,6 @@ async fn contains_does_not_hydrate_a_scanned_value() -> anyhow::Result<()> {
             is: Value::String("hello".into()),
             cause: None,
             cardinality: None,
-            pick: None,
         })
         .commit()
         .publish()
@@ -102,7 +101,6 @@ async fn agrees_answers_as_the_bindings_compare() -> anyhow::Result<()> {
             is: value.clone(),
             cause: None,
             cardinality: None,
-            pick: None,
         });
     }
     transaction.commit().publish().perform(&operator).await?;

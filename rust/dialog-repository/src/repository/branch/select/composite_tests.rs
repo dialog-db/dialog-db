@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use dialog_corpus::helpers::composite_decodes;
 use dialog_corpus::selector::Constrained;
-use dialog_corpus::{Composite, Entity, Fact, Instruction, Pick, Selector, Value};
+use dialog_corpus::{Cardinality, Composite, Entity, Fact, Instruction, Selector, Value};
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use dialog_peer::{Peer, PeerSpace, Session};
 use futures_util::{TryStreamExt as _, stream};
@@ -62,7 +62,7 @@ async fn commit<S: PeerSpace>(
         .commit(stream::iter(
             facts
                 .into_iter()
-                .map(|fact| Instruction::Assert(fact, Pick::All)),
+                .map(|fact| Instruction::Assert(fact, Cardinality::Many)),
         ))
         .perform(session)
         .await?;

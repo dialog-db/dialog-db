@@ -15,7 +15,7 @@ use crate::key::fact_index_keys;
 use crate::key::varkey::parse_key_ref;
 use crate::selector::Constrained;
 use crate::{
-    ArchiveDelta, Entity, Fact, Instruction, NUMBER_BAND, Pick, Relation, Selector, Value,
+    ArchiveDelta, Cardinality, Entity, Fact, Instruction, NUMBER_BAND, Relation, Selector, Value,
     ValueDataType,
 };
 
@@ -30,7 +30,7 @@ async fn tree(value_encoding: u32, facts: Vec<Fact>) -> anyhow::Result<(Corpus, 
     let mut delta = ArchiveDelta::zero();
     let instructions = facts
         .into_iter()
-        .map(|fact| Instruction::Assert(fact, Pick::All));
+        .map(|fact| Instruction::Assert(fact, Cardinality::Many));
     tree.apply(&store, &mut delta, stream::iter(instructions))
         .await?;
     delta.flush_into(&store);

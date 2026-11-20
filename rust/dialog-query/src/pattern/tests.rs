@@ -596,7 +596,7 @@ fn shape(entries: &[(&str, Pattern)]) -> MapPattern {
 /// A concept of one field over `the`, declared `as`.
 fn concept(field: &str, the: &str, declared: &str) -> ConceptDescriptor {
     serde_json::from_value(serde_json::json!({
-        "with": { field: { "the": the, "as": declared, "pick": "all:" } }
+        "with": { field: { "the": the, "as": declared, "cardinality": "many" } }
     }))
     .expect("a concept")
 }
@@ -627,7 +627,6 @@ async fn store(
             is: is.clone(),
             cause: None,
             cardinality: None,
-            pick: None,
         });
     }
     transaction.commit().publish().perform(operator).await?;
@@ -778,7 +777,7 @@ async fn it_passes_over_a_value_of_no_shape() -> anyhow::Result<()> {
     )
     .await?;
     let untyped: ConceptDescriptor = serde_json::from_value(serde_json::json!({
-        "with": { "is": { "the": "mixed/value", "pick": "all:" } }
+        "with": { "is": { "the": "mixed/value", "cardinality": "many" } }
     }))?;
     let reading = || {
         let mut terms = Parameters::new();

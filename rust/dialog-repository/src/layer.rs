@@ -415,7 +415,7 @@ mod tests {
             "test/name".parse()?,
             alice.clone(),
             Value::String("Alice".into()),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
         changes.dissociate(
             "test/name".parse()?,
@@ -461,7 +461,7 @@ mod tests {
             stream::iter(
                 facts
                     .into_iter()
-                    .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All)),
+                    .map(|fact| Instruction::Assert(fact, dialog_corpus::Cardinality::Many)),
             ),
         )
         .await?;

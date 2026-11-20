@@ -25,7 +25,7 @@ fn text(text: &str) -> Value {
 /// A concept of the one field `field` over `the`, read as `declared`.
 fn concept(field: &str, the: &str, declared: &str) -> ConceptDescriptor {
     serde_json::from_value(serde_json::json!({
-        "with": { field: { "the": the, "as": declared, "pick": "all:" } }
+        "with": { field: { "the": the, "as": declared, "cardinality": "many" } }
     }))
     .expect("a concept")
 }

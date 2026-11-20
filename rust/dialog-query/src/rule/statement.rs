@@ -84,6 +84,17 @@ pub fn quarantined_attr() -> CorpusRelation {
     the!("dialog.rule/quarantined").into()
 }
 
+/// The `dialog.rule/invalid` attribute: a stored rule body a branch does
+/// not read, valued with why. A rule in a format older than this
+/// release reads is waiting for `Branch::upgrade_rules`; one in a newer
+/// format, for a newer release; one that does not decode, or is stored
+/// under an identity it does not hash to, is not a rule. None of them
+/// is evaluated, and no query fails over one. Never stored: a branch
+/// answers it from the rule bodies its layers hold.
+pub fn invalid_attr() -> CorpusRelation {
+    the!("dialog.rule/invalid").into()
+}
+
 /// The `on:<domain>/<name>` trigger-index entity for an attribute.
 /// Derivable from a runtime instruction alone — no schema lookup —
 /// which is what keeps dispatch probing cheap.
@@ -194,10 +205,8 @@ fn premise_trigger_entities<'p>(
     for proposition in propositions {
         if let Proposition::Concept(query) = proposition {
             for (_, field) in query.predicate.with().iter() {
-                for relation in field.descriptor().relations() {
-                    if let Some(entity) = Reach::of(relation).on_entity() {
-                        entities.insert(entity);
-                    }
+                if let Some(entity) = Reach::of(field.the()).on_entity() {
+                    entities.insert(entity);
                 }
             }
         }
@@ -238,13 +247,7 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
     concept
         .with()
         .iter()
-        .flat_map(|(_, field)| {
-            field
-                .descriptor()
-                .relations()
-                .filter_map(|relation| Reach::of(relation).on_entity())
-                .collect::<Vec<_>>()
-        })
+        .filter_map(|(_, field)| Reach::of(field.the()).on_entity())
         .collect()
 }
 
@@ -316,14 +319,14 @@ impl Statement for &DeductiveRule {
             conclusion_attr(),
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
         if let Some(body) = body {
             update.associate(
                 source_attr(),
                 rule_entity.clone(),
                 Value::Bytes(body),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             );
         }
         for reads in reads_entities(self) {
@@ -331,7 +334,7 @@ impl Statement for &DeductiveRule {
                 reads_attr(),
                 rule_entity.clone(),
                 Value::Entity(reads),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             );
         }
         for derives in derives_entities(self) {
@@ -339,7 +342,7 @@ impl Statement for &DeductiveRule {
                 derives_attr(),
                 rule_entity.clone(),
                 Value::Entity(derives),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             );
         }
     }
@@ -387,20 +390,20 @@ impl Statement for &InductiveRule {
             source_attr(),
             rule_entity.clone(),
             Value::Bytes(self.encode()),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
         update.associate(
             induces_attr(),
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
         for on in on_entities(self) {
             update.associate(
                 on_attr(),
                 rule_entity.clone(),
                 Value::Entity(on),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             );
         }
     }
