@@ -1657,7 +1657,21 @@ impl ValueDataType {
 
     /// Whether this is a sized number type (`natural:8` through `float:64`).
     pub fn is_view(self) -> bool {
-        self.storage() != self && !self.is_composite()
+        matches!(
+            self,
+            ValueDataType::U8
+                | ValueDataType::U16
+                | ValueDataType::U32
+                | ValueDataType::U64
+                | ValueDataType::U128
+                | ValueDataType::I8
+                | ValueDataType::I16
+                | ValueDataType::I32
+                | ValueDataType::I64
+                | ValueDataType::I128
+                | ValueDataType::F32
+                | ValueDataType::F64
+        )
     }
 
     /// Whether this is one of the composite types: `composite:` and the
@@ -1683,29 +1697,38 @@ impl ValueDataType {
         if matches!(value, Value::Float(float) if float.is_nan()) {
             return false;
         }
-        let actual = value.data_type();
-        if self.is_composite() {
-            let Value::Composite(composite) = value else {
-                return false;
-            };
-            return match self {
-                ValueDataType::CompositeMap => composite.is_map(),
-                ValueDataType::CompositeRecord => composite.is_record(),
-                ValueDataType::CompositeList => composite.is_list(),
-                _ => true,
-            };
-        }
         if self == ValueDataType::Number {
-            return actual.is_number();
+            return value.data_type().is_number();
         }
         if self.is_number() {
-            return actual.is_number()
+            return value.data_type().is_number()
                 && value
                     .clone()
                     .viewed_as(self)
                     .is_some_and(|viewed| viewed.same_number(value));
         }
-        actual == self
+        // The composite types last and out of line, so the scalar types'
+        // check is the one main makes.
+        if self.is_composite() {
+            return self.holds_composite(value);
+        }
+        value.data_type() == self
+    }
+
+    /// [`holds`](Self::holds) for the composite types: any composite for
+    /// `composite:`, and the kind each other one names.
+    #[cold]
+    #[inline(never)]
+    fn holds_composite(self, value: &Value) -> bool {
+        let Value::Composite(composite) = value else {
+            return false;
+        };
+        match self {
+            ValueDataType::CompositeMap => composite.is_map(),
+            ValueDataType::CompositeRecord => composite.is_record(),
+            ValueDataType::CompositeList => composite.is_list(),
+            _ => true,
+        }
     }
 
     /// Whether this is one of the number types.
@@ -1724,15 +1747,15 @@ impl ValueDataType {
     /// as [`Number`](Self::Number); otherwise each number type keeps its own
     /// band. A sized number type is keyed as its storage type's band.
     pub fn band(self, value_encoding: u32) -> Self {
-        if self.is_composite() {
-            return ValueDataType::Composite;
-        }
         match self.storage() {
             ValueDataType::UnsignedInt | ValueDataType::SignedInt | ValueDataType::Float
                 if value_encoding == NUMBER_BAND =>
             {
                 ValueDataType::Number
             }
+            // Every composite is keyed in the composite's band (a record's
+            // storage is the map's).
+            ValueDataType::CompositeMap | ValueDataType::CompositeList => ValueDataType::Composite,
             other => other,
         }
     }
@@ -2283,6 +2306,47 @@ mod view_tests {
         }
         for (a, b) in [(U8, I8), (I8, U16), (U32, F32), (U64, F64), (F64, U64)] {
             assert!(!a.nests_in(b), "{a} not in {b}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    #![allow(unexpected_cfgs)]
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use std::borrow::Cow;
+    use std::mem::{align_of, size_of};
+
+    use super::*;
+    use crate::ValueView;
+
+    /// A tag beside the largest scalar payload, the size `Value` and
+    /// `ValueView` had before composites: 32 bytes on a 64-bit target.
+    fn scalar_size(payload: usize) -> usize {
+        (payload.max(size_of::<u128>()) + 1).next_multiple_of(align_of::<u128>())
+    }
+
+    /// A composite costs no value that is not one: `Value`, `ValueView`
+    /// and an absent `Value` stay the size their scalars give them (32
+    /// bytes on a 64-bit target), and a `Composite` is no larger than the
+    /// `Vec` a `Value::Bytes` holds. Every row a scan, a commit or a query
+    /// moves holds these, so a larger composite would cost every one.
+    #[dialog_common::test]
+    fn it_keeps_values_the_size_their_scalars_give_them() {
+        assert!(size_of::<Composite>() <= size_of::<Vec<u8>>());
+        assert_eq!(size_of::<Value>(), scalar_size(size_of::<Vec<u8>>()));
+        assert_eq!(size_of::<Option<Value>>(), size_of::<Value>());
+        assert_eq!(
+            size_of::<ValueView<'static>>(),
+            scalar_size(size_of::<Cow<'static, [u8]>>())
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            assert_eq!(size_of::<Value>(), 32);
+            assert_eq!(size_of::<ValueView<'static>>(), 32);
         }
     }
 }
