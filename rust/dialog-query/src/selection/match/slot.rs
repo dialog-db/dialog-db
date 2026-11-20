@@ -176,6 +176,7 @@ impl Slot {
                     (ValueView::Bytes(a), ValueView::Bytes(b))
                     | (ValueView::Record(a), ValueView::Record(b)) => Some(a == b),
                     (ValueView::Boolean(a), ValueView::Boolean(b)) => Some(a == b),
+                    (ValueView::Composite(a), ValueView::Composite(b)) => Some(a == b),
                     // Numbers and mixed types agree as values do.
                     _ => None,
                 }

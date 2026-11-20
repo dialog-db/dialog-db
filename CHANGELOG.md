@@ -14,6 +14,83 @@ says how to cut a release.
 
 ## Unreleased
 
+### A value can be a composite: a map, a record or a list, held as one value and read in place
+
+[#843](https://github.com/dialog-db/dialog-db/pull/843).
+
+From the record values research ([#748](https://github.com/dialog-db/dialog-db/pull/748)),
+replacing the draft [#812](https://github.com/dialog-db/dialog-db/pull/812);
+the layout and its measurements are in
+[design/composite-value.md](design/composite-value.md).
+
+A value that is compound but atomic (a location's latitude and longitude, a
+table a view resolved, a syntax tree) had nowhere to go but an opaque
+`record:`, each writer inventing its own encoding and its own tag. A
+composite is a value type of its own, written and replaced whole like any
+value. It is a map, whose keys are any values but composites (text the
+usual one) and whose key may hold several values, or a list, whose items
+keep their order and repeats. A record is the map whose every key is an
+attribute: the same kind, told by its keys, as a natural is a number. Two
+composites are equal exactly when they hold the same content, whatever
+order it was given in, and the natural `3` and the float `3.0` are one value
+in a composite as anywhere.
+
+A composite has one canonical encoding: a table of every key it and the
+maps nested in it use, once, then its body; a sequence of more than
+`SCAN_LIMIT` items carries a table of offsets, and every nested body says
+its size. Bytes that are not that encoding are refused, so equal composites
+have equal bytes and a composite is keyed in the tree by them. A
+`Composite` is a view, its buffer shared and the place of its body, so a
+nested composite, a field or an item is read where it sits: the length,
+a field by key, an item by index and iteration decode only what they
+return. Its identity is its merkle reference: for a map, a map under
+`composite:` from each key's reference to its value's (or to the `set:` of
+its values'); for a list, the `list:` of its items' references. No part of
+the layout enters it.
+
+What this changes for you:
+
+- `Value` has a new variant, `Composite`, keyed with type byte 22.
+  `ValueDataType` (the query layer's `Type`) has `Composite`
+  (`composite:`, any composite, the band every composite is keyed under),
+  and in its band `CompositeMap` (`composite:map`), `CompositeRecord`
+  (`composite:record`) and `CompositeList` (`composite:list`), which type
+  slots and never keys, as the sized number types do. A composite value's
+  `data_type()` is `CompositeMap` or `CompositeList`. A `match` over either
+  enum needs arms. `Value::Record` and `record:` are unchanged, identities
+  included.
+- Build with `Composite::map`, `Composite::record` (`Composite::new` is the
+  same) and `Composite::list`; read with `len`, `kind`, `is_record`, `get`
+  and `first` by key, `field` by attribute, `item` by index, `entries`,
+  `items` and `fields`, and `first_view` and `item_view` for a value whose
+  text borrows from the buffer. `Composite::from_bytes` refuses any bytes
+  but the canonical ones with a `CompositeError` saying why;
+  `Composite::to_bytes` gives them; `Composite::reference` gives the
+  identity. Refused on construction: a composite as a key
+  (`CompositeError::CompositeKey`), NaN (`NotANumber`) and nesting past
+  `MAX_DEPTH`, 128 (`TooDeep`).
+- `ValueView` has a `Composite` variant: a scanned row holding a composite
+  binds in place, as every other value does.
+- An attribute declared `as: composite:`, `composite:map`,
+  `composite:record` or `composite:list` holds what its type says; a write
+  of a list where a record is declared is refused. The query layer's
+  `Primitive` gives maps and lists a bit each (a record is on the map's),
+  `Primitive::ALL` includes both, and the wire names them `map` and `list`.
+  A query cannot yet read a field out of a composite it bound; that comes
+  with destructuring.
+- In JSON a composite is `{"composite:map": {"map": [[key, value], ...]}}`
+  or `{"composite:list": {"list": [...]}}`, its entries in canonical order;
+  in a binary format, its canonical bytes; in a CSV export, `composite` with
+  its bytes in base58.
+- `ValueDataType::max()`, the largest type a key carries, is now
+  `Composite`, so a scan bound from it covers composites.
+
+Why: a value that has to change as a whole was either split into claims,
+which concurrent writers can leave half updated, or packed into opaque
+bytes no query could read and no two writers spelled alike. The notation
+keeps its syntax trees as maps and lists, and a composite that is read
+without decoding all of it is what lets a rule reach one node of one.
+
 ### A poll scopes its diff to the cover as it stands, copying none of it
 
 [#844](https://github.com/dialog-db/dialog-db/pull/844).
@@ -393,6 +470,13 @@ and names the rule.
 
 ### Compatibility and migration
 
+- Composites: nothing an existing space holds is rewritten or read
+  differently, and opaque `record:` values keep their encoding and identity.
+  No release up to and including 0.5.0 wrote a composite (the draft #812 was
+  never released), so there is nothing to migrate. A space that stores a
+  composite cannot be read by an older release, which takes a key with type
+  byte 22 for corruption: once a replica writes one, every replica reading
+  that space needs this release. Nothing an embedder has to run.
 - A rule an older release stored spells its attributes under picks (0.3 to 0.5) or under the older `cardinality` (0.2), and sits under an
   identity that hashed them. This release reads a rule body only in its
   own format and only under the identity it gives it now,

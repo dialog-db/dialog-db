@@ -515,6 +515,22 @@ fn render_value(value: &Value) -> String {
         Value::Float(number) => format!("{number:?}"),
         Value::Bytes(bytes) => hex(bytes),
         Value::Record(bytes) => format!("record:{}", hex(bytes)),
+        Value::Composite(composite) if composite.is_list() => format!(
+            "[{}]",
+            composite
+                .items()
+                .map(|item| render_value(&item))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        Value::Composite(composite) => format!(
+            "{{{}}}",
+            composite
+                .entries()
+                .map(|(key, value)| format!("{} {}", render_value(&key), render_value(&value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

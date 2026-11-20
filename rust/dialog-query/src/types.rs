@@ -26,7 +26,7 @@ use std::marker::PhantomData;
 
 use crate::attribute::Relation;
 use crate::corpus::CorpusTypeError;
-pub use crate::corpus::{Cause, CorpusRelation, Entity, Type, Value};
+pub use crate::corpus::{Cause, Composite, CorpusRelation, Entity, Type, Value};
 
 /// Trait implemented by type descriptors: named ZSTs that
 /// represent a runtime type at the Rust type level.
@@ -187,6 +187,31 @@ define_descriptor!(
     Type::Record
 );
 
+define_descriptor!(
+    /// Descriptor for composite values: any map or list.
+    CompositeType,
+    Type::Composite
+);
+
+define_descriptor!(
+    /// Descriptor for composite maps, records among them.
+    CompositeMapType,
+    Type::CompositeMap
+);
+
+define_descriptor!(
+    /// Descriptor for records: composite maps whose every key is an
+    /// attribute.
+    CompositeRecordType,
+    Type::CompositeRecord
+);
+
+define_descriptor!(
+    /// Descriptor for composite lists.
+    CompositeListType,
+    Type::CompositeList
+);
+
 /// Descriptor for dynamically-typed values: carries an optional
 /// runtime type kind. `Term<Any>` is the type-erased term whose
 /// kind is decided at runtime.
@@ -267,6 +292,7 @@ impl_typed!(CorpusRelation, Symbol);
 impl_typed!(Relation, Symbol);
 impl_typed!(Cause, Bytes);
 impl_typed!(Value, Any);
+impl_typed!(Composite, CompositeType);
 
 /// `Option<U>: Typed` for any [`Scalar`] `U`. Maps to
 /// [`OptionalOf<U::Descriptor>`].
@@ -308,7 +334,8 @@ impl_scalar!(
     Vec<u8>,
     Cause,
     Relation,
-    RecordBytes
+    RecordBytes,
+    Composite
 );
 
 /// The opaque payload of a [`Value::Record`] fact, as a typed term

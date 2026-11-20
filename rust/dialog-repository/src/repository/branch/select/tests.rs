@@ -1550,6 +1550,10 @@ async fn it_spills_and_round_trips_every_value_type() -> Result<()> {
         // Exercises the 0x00-escape in the encoding.
         Value::Bytes(vec![0u8; n]),
         Value::Record(vec![7u8; n]),
+        Value::Composite(dialog_corpus::Composite::new([
+            ("doc/body".parse()?, Value::String("c".repeat(n))),
+            ("doc/tag".parse()?, Value::String("a".into())),
+        ])?),
     ];
     for value in values {
         assert!(
@@ -1568,6 +1572,60 @@ async fn it_spills_and_round_trips_every_value_type() -> Result<()> {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].is, value, "{value:?} round-trips through spill");
     }
+    Ok(())
+}
+
+/// An attribute declared `composite:` reads the composites a branch holds
+/// under it and nothing else: a value of another type at the same relation
+/// is not one it reads.
+#[dialog_common::test]
+async fn it_reads_composites_through_an_attribute_declared_composite() -> Result<()> {
+    use dialog_query::query::Output as _;
+    use dialog_query::types::Any;
+    use dialog_query::{ConceptDescriptor, ConceptQuery, Parameters, Term};
+
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let place = Value::Composite(dialog_corpus::Composite::new([
+        ("geo/lat".parse()?, Value::Float(37.77)),
+        ("geo/lon".parse()?, Value::Float(-122.42)),
+    ])?);
+    let (home, office) = (Entity::new()?, Entity::new()?);
+    assert_all(
+        &branch,
+        [
+            fact("x/where", home.clone(), place.clone())?,
+            fact("x/where", office.clone(), Value::String("downtown".into()))?,
+        ],
+        &operator,
+    )
+    .await?;
+
+    let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "place": { "the": "x/where", "as": "composite:" }
+    }}))?;
+    let mut terms = Parameters::new();
+    terms.insert("this".to_string(), Term::<Any>::var("this"));
+    terms.insert("place".to_string(), Term::<Any>::var("place"));
+    let rows = branch
+        .select(ConceptQuery { predicate, terms })
+        .perform(&operator)
+        .try_vec()
+        .await?;
+    let read: Vec<(Entity, dialog_corpus::Composite)> = rows
+        .iter()
+        .map(|row| {
+            Ok((
+                row.get::<Entity>("this")?,
+                row.get::<dialog_corpus::Composite>("place")?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let Value::Composite(expected) = place else {
+        unreachable!()
+    };
+    assert_eq!(read, vec![(home, expected)]);
     Ok(())
 }
 

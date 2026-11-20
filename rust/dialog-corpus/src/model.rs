@@ -39,6 +39,9 @@ pub use symbol::*;
 mod value;
 pub use value::*;
 
+mod composite;
+pub use composite::*;
+
 mod view;
 pub use view::*;
 
