@@ -231,6 +231,28 @@ bytes no query could read and no two writers spelled alike. The notation
 keeps its syntax trees as maps and lists, and a composite that is read
 without decoding all of it is what lets a rule reach one node of one.
 
+### Compatibility and migration
+
+- Nothing stored or synced changes for patterns: the stored rule format
+  is the one this release writes for every rule and has no way to write
+  a pattern (a stored form for patterns is format 5, which this release
+  does not have), so a rule that holds one is never stored, and an
+  older replica never meets one.
+  Laid over a branch for a query, such a rule is kept in memory beside
+  the query's changes and no fact holds its body. Nothing is rewritten
+  on upgrade and an embedder runs nothing. A pattern with no variable is
+  the composite it builds, a constant a stored rule holds as it holds
+  any; the rule's identity names that constant by its
+  `Composite::reference`. No release before this one could hold one.
+- Composites: nothing an existing space holds is rewritten or read
+  differently, and opaque `record:` values keep their encoding and identity.
+  No release before this one wrote a composite (the draft #812 was never
+  released), so there is nothing to migrate. A space that stores a
+  composite cannot be read by an older release, which takes a key with type
+  byte 22 for corruption: once a replica writes one, every replica reading
+  that space needs this release. Nothing an embedder has to run.
+
+## 0.5.0 (2026-11-19)
 
 ### A subscription's poll costs the entities it touched, not its whole answer
 
@@ -2085,22 +2107,6 @@ most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
 
 ### Compatibility and migration
 
-- Nothing stored or synced changes for patterns: the stored rule format
-  is format 3 as before and has no way to write a pattern, so a rule
-  that holds one is never stored, and an older replica never meets one.
-  Laid over a branch for a query, such a rule is kept in memory beside
-  the query's changes and no fact holds its body. Nothing is rewritten
-  on upgrade and an embedder runs nothing. A pattern with no variable is
-  the composite it builds, a constant a stored rule holds as it holds
-  any; the rule's identity names that constant by its
-  `Composite::reference`. No release before this one could hold one.
-- Composites: nothing an existing space holds is rewritten or read
-  differently, and opaque `record:` values keep their encoding and identity.
-  No release before this one wrote a composite (the draft #812 was never
-  released), so there is nothing to migrate. A space that stores a
-  composite cannot be read by an older release, which takes a key with type
-  byte 22 for corruption: once a replica writes one, every replica reading
-  that space needs this release. Nothing an embedder has to run.
 - Nothing an existing space holds changes or is read differently for the
   single-file archive: it is a new provider a space opts into. A space
   opened with `Chronicle` does not read an `fs` archive's directory of
