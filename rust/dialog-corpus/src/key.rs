@@ -725,6 +725,57 @@ mod tests {
         Ok(())
     }
 
+    /// The upper bound of a scan whose value is unset sorts at or above
+    /// every fact's key in all three orderings, composites included: the
+    /// bound's value is the composite type and one filler byte, above every
+    /// composite's escaped table head, inline or spilled.
+    #[dialog_common::test]
+    async fn it_bounds_every_value_from_above_when_the_value_is_unset() -> anyhow::Result<()> {
+        use super::{
+            AttributeKeyPart, EntityKeyPart, Key, KeyType, KeyViewConstruct, KeyViewMut,
+            fact_index_keys,
+        };
+
+        let narrow = Manifest {
+            inline_n: 16,
+            spill_prefix: 4,
+            ..Manifest::default()
+        };
+        let mut values = vec![
+            Value::Bytes(vec![0xFE; 4]),
+            Value::String("\u{10FFFF}".into()),
+            Value::Float(f64::INFINITY),
+            Value::UnsignedInt(u128::MAX),
+            Value::Composite(crate::Composite::new([])?),
+            Value::Composite(crate::Composite::list([Value::Bytes(vec![0xFF; 4])])?),
+        ];
+        for length in [0, 17, 300] {
+            values.push(Value::Composite(crate::Composite::new([(
+                Relation::from_str("doc/body")?,
+                Value::Bytes(vec![0xFF; length]),
+            )])?));
+        }
+        for manifest in [Manifest::default(), narrow] {
+            for value in &values {
+                let fact = fact(value.clone());
+                let entity = <EntityKey<Key> as KeyViewConstruct>::max()
+                    .set_entity(EntityKeyPart::from(&fact.of))
+                    .set_attribute(AttributeKeyPart::from(&fact.the));
+                let attribute = <AttributeKey<Key> as KeyViewConstruct>::max()
+                    .set_attribute(AttributeKeyPart::from(&fact.the))
+                    .set_entity(EntityKeyPart::from(&fact.of));
+                let (eav, aev, vae) = fact_index_keys(&fact, &manifest);
+                assert!(eav.as_ref() <= entity.bytes(), "{value:?}");
+                assert!(aev.as_ref() <= attribute.bytes(), "{value:?}");
+                assert!(
+                    vae.as_ref() <= <ValueKey<Key> as KeyViewConstruct>::max().bytes(),
+                    "{value:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Every value type's key splits into exactly its schema's component
     /// count and parses back to the fields it was built from, across all
     /// three orderings. Pins the whole width table at once: the class of bug
