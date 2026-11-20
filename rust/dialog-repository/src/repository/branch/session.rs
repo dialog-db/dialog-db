@@ -4867,11 +4867,11 @@ mod resolver_tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::{Counting, test_repo};
-    use crate::{Branch, Repository};
+    use crate::{Branch, Repository, RepositoryExt as _};
     use dialog_common::Blake3Hash;
     use dialog_corpus::{Entity, Value};
     use dialog_peer::Peer;
-    use dialog_peer::helpers::test_session_with_peer;
+    use dialog_peer::helpers::{Seed, test_session_with_peer};
     use dialog_query::concept::query::ConceptQuery;
     use dialog_query::query::Output as _;
     use dialog_query::rule::DeductiveRuleDescriptor;
@@ -4909,9 +4909,37 @@ mod resolver_tests {
         Ok((branch, root))
     }
 
+    /// The seed every identity of a wide tree's run derives from. Each
+    /// test adds an offset of its own: the profile's custodian is kept in
+    /// a credential store the whole test process shares, so two tests
+    /// running at once in one process under one seed would both create
+    /// it.
+    const WIDE_SEED: u64 = 0x5769_6465;
+
+    /// A session, and a repository it opened, whose keys and names all
+    /// derive from `seed`: the profile's key, the session's key derived
+    /// from it, the repository's key and its name. With the seed's
+    /// [entropy](Seed::entropy) held, so is the line the branch's first
+    /// commit allocates, and the same facts committed write the same
+    /// tree, byte for byte, on every run.
+    async fn seeded_repo(
+        seed: &Seed,
+    ) -> anyhow::Result<(Operator, Repository<impl dialog_capability::Principal>)> {
+        let (operator, profile) = seed.session_with_peer().await;
+        let repo = profile
+            .space(seed.name("repo"))
+            .create()
+            .with_credential(seed.signer("repository").await?)
+            .perform(&operator)
+            .await?;
+        Ok((operator, repo))
+    }
+
     /// Commit `count` facts with padded values: enough leaf weight
     /// forces an index root, so spans and descent run against a real
-    /// multi-level tree.
+    /// multi-level tree. The entities and values are fixed, so in a
+    /// [seeded repository](seeded_repo) the tree is the same on every
+    /// run.
     async fn committed_wide_branch(
         repo: &Repository<impl dialog_capability::Principal>,
         operator: &Operator,
@@ -4923,7 +4951,7 @@ mod resolver_tests {
         for at in 0..count {
             tx = tx.assert(
                 the!("test/name")
-                    .of(Entity::new()?)
+                    .of(format!("id:wide-{at:04}").parse::<Entity>()?)
                     .is(format!("entry-{at}-{pad}")),
             );
         }
@@ -5088,6 +5116,46 @@ mod resolver_tests {
         .expect("a rule descriptor")
     }
 
+    /// The root of the tree [`committed_wide_branch`] writes of 800
+    /// facts in a repository seeded by [`WIDE_SEED`].
+    const WIDE_ROOT: &str = "node:HnVhoHSXJ2gtixeuDBz5a5KLzCV2MUS1oyFq1gPv1UfB";
+
+    /// How many children that root has.
+    const WIDE_CHILDREN: usize = 18;
+
+    /// The same facts committed under the same keys write the same tree.
+    /// The wide tree's root, and with it every node under it, is the one
+    /// pinned here, so the tests that read the wide tree's shape read the
+    /// same shape on every run.
+    ///
+    /// Nothing in it is random once the keys are seeded: a node boundary
+    /// is a coin drawn from the hash of an entry's key, weighed by the
+    /// key's length and the shape of its datum, and the keys hold the
+    /// fixed facts, the revision the commit names and the history of the
+    /// line, keyed by an origin derived from the branch and the issuer.
+    /// Under a random profile or repository key, those cut the tree
+    /// differently on every run, into anywhere from 2 to 24 children.
+    #[dialog_common::test]
+    async fn it_writes_the_same_wide_tree_on_every_run() -> anyhow::Result<()> {
+        let seed = Seed::new(WIDE_SEED);
+        let _entropy = seed.entropy();
+        let (operator, repo) = seeded_repo(&seed).await?;
+        let (branch, root) = committed_wide_branch(&repo, &operator, 800).await?;
+
+        let children: Vec<Entity> = rows(&branch, &operator, ask("tree/span", &root, &["node"]))
+            .await
+            .iter()
+            .map(|span| entity(span, "node"))
+            .collect();
+        assert_eq!(
+            root,
+            WIDE_ROOT.parse::<Entity>()?,
+            "the wide tree has the pinned root, with children {children:?}"
+        );
+        assert_eq!(children.len(), WIDE_CHILDREN, "{children:?}");
+        Ok(())
+    }
+
     /// `tree/node` says what a node is and the format it was written
     /// under, every field of it, in one row.
     #[dialog_common::test]
@@ -5137,12 +5205,13 @@ mod resolver_tests {
     /// buffered against, and the root's `novelty` counts them.
     #[dialog_common::test]
     async fn it_reads_the_operations_an_index_buffers() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
+        let seed = Seed::new(WIDE_SEED + 1);
+        let _entropy = seed.entropy();
+        let (operator, repo) = seeded_repo(&seed).await?;
         let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
         branch
             .transaction()
-            .assert(the!("test/name").of(Entity::new()?).is("late".to_string()))
+            .assert(the!("test/name").of("id:late".parse::<Entity>()?).is("late".to_string()))
             .commit()
             .publish()
             .perform(&operator)
@@ -5152,6 +5221,7 @@ mod resolver_tests {
         let node = rows(&branch, &operator, ask("tree/node", &root, NODE)).await;
         assert_eq!(text(&node[0], "kind"), "index");
         let buffered = unsigned(&node[0], "novelty");
+        println!("TEMPSHAPE ops {root} {buffered}"); // TEMPSHAPE
         assert!(buffered > 0, "the late write rides the root");
         let spans: Vec<Entity> = rows(&branch, &operator, ask("tree/span", &root, SPAN))
             .await
@@ -5176,8 +5246,9 @@ mod resolver_tests {
     /// entries come whole, one row each.
     #[dialog_common::test]
     async fn it_descends_a_multi_level_tree() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
+        let seed = Seed::new(WIDE_SEED + 2);
+        let _entropy = seed.entropy();
+        let (operator, repo) = seeded_repo(&seed).await?;
         let (branch, root) = committed_wide_branch(&repo, &operator, 800).await?;
 
         let node = rows(&branch, &operator, ask("tree/node", &root, NODE)).await;
@@ -5287,14 +5358,15 @@ mod resolver_tests {
     /// commit's entries carry their claim's origin and edition.
     #[dialog_common::test]
     async fn it_reads_an_entry_whole() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
+        let seed = Seed::new(WIDE_SEED + 3);
+        let _entropy = seed.entropy();
+        let (operator, repo) = seeded_repo(&seed).await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let big = "x".repeat(10 * 1024);
         branch
             .transaction()
-            .assert(the!("test/big").of(Entity::new()?).is(big.clone()))
+            .assert(the!("test/big").of("id:big".parse::<Entity>()?).is(big.clone()))
             .commit()
             .publish()
             .perform(&operator)
@@ -5370,8 +5442,9 @@ mod resolver_tests {
     /// again at all.
     #[dialog_common::test]
     async fn it_reads_a_node_once_for_every_part_asked() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
+        let seed = Seed::new(WIDE_SEED + 4);
+        let _entropy = seed.entropy();
+        let (operator, repo) = seeded_repo(&seed).await?;
         let (branch, root) = committed_wide_branch(&repo, &operator, 800).await?;
 
         let env = Counting::new(operator.clone());
@@ -5496,8 +5569,9 @@ mod resolver_tests {
     /// child's own entity.
     #[dialog_common::test]
     async fn it_derives_a_row_per_child_from_the_root() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
+        let seed = Seed::new(WIDE_SEED + 5);
+        let _entropy = seed.entropy();
+        let (operator, repo) = seeded_repo(&seed).await?;
         let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
 
         let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
@@ -5545,6 +5619,7 @@ mod resolver_tests {
         let root = root_of(&branch);
         let spans = rows(&branch, &operator, ask("tree/span", &root, &["node"])).await;
         assert!(spans.len() > 1, "the root is an index: {spans:?}");
+        println!("TEMPSHAPE derives {root} {}", spans.len()); // TEMPSHAPE
         let expected: BTreeSet<Entity> = spans.iter().map(|span| entity(span, "node")).collect();
 
         let mut terms = Parameters::new();
@@ -5581,8 +5656,9 @@ mod resolver_tests {
     /// already kept by the environment, so no read of one would show.
     #[dialog_common::test]
     async fn it_reads_only_the_nodes_a_fact_names() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
+        let seed = Seed::new(WIDE_SEED + 6);
+        let _entropy = seed.entropy();
+        let (operator, repo) = seeded_repo(&seed).await?;
         let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
 
         let rule = known(
@@ -5614,6 +5690,7 @@ mod resolver_tests {
             .iter()
             .map(|span| entity(span, "node"))
             .collect();
+        println!("TEMPSHAPE only {root} {}", children.len()); // TEMPSHAPE
         // The root and the first child are named; the second child is
         // a node no fact names. How many children the root has depends
         // on where the random entities cut the tree, and two is enough.
@@ -5669,8 +5746,9 @@ mod resolver_tests {
     /// alone, and reads none of the children.
     #[dialog_common::test]
     async fn it_lists_the_children_of_a_given_node_from_its_block() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
+        let seed = Seed::new(WIDE_SEED + 7);
+        let _entropy = seed.entropy();
+        let (operator, repo) = seeded_repo(&seed).await?;
         let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
 
         let rule = known(
@@ -5726,6 +5804,7 @@ mod resolver_tests {
         );
 
         let spans = rows(&branch, &operator, ask("tree/span", &root, &["node"])).await;
+        println!("TEMPSHAPE lists {root} {}", spans.len()); // TEMPSHAPE
         let expected: BTreeSet<Entity> = spans.iter().map(|span| entity(span, "node")).collect();
         assert_eq!(children, expected, "every child of the node, and no other");
         Ok(())
