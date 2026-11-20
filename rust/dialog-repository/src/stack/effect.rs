@@ -56,7 +56,7 @@ use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_corpus::{Change, Changes, Entity, Fact, Pick, Relation, Update as _, Value};
+use dialog_corpus::{Cardinality, Change, Changes, Entity, Fact, Relation, Update as _, Value};
 use dialog_query::attribute::The;
 use dialog_query::type_system::Type as Kind;
 use dialog_query::{ConceptDescriptor, EvaluationError};
@@ -149,7 +149,7 @@ pub(crate) fn invoked(transients: &Changes, tick: u32) -> Changes {
                 invoked_attr(),
                 of.clone(),
                 Value::UnsignedInt(tick.into()),
-                Pick::Last,
+                Cardinality::One,
             );
         }
     }
@@ -247,8 +247,8 @@ struct Shape {
 /// One required field of a concept, as a command's row satisfies it.
 #[derive(Clone)]
 struct Requirement {
-    /// The relations the field reads, the first ranked highest.
-    relations: Vec<The>,
+    /// The relation the field reads.
+    relation: The,
     /// The type the field's value is read as, when it declares one.
     kind: Option<Kind>,
 }
@@ -262,7 +262,7 @@ impl Shape {
                 .iter()
                 .filter(|(_, field)| !field.is_optional())
                 .map(|(_, field)| Requirement {
-                    relations: field.descriptor().relations().cloned().collect(),
+                    relation: field.descriptor().the().clone(),
                     kind: field.content_type().map(Kind::from),
                 })
                 .collect(),
@@ -279,13 +279,13 @@ impl Shape {
 }
 
 impl Requirement {
-    /// Whether `row` is a value of this field: of a relation it reads,
+    /// Whether `row` is a value of this field: of the relation it reads,
     /// with a value its type reads.
     fn holds(&self, row: &Fact) -> bool {
-        let related = self.relations.iter().any(|the| match the {
-            The::Relation(_) => the.attribute().as_ref() == Some(&row.the),
+        let related = match &self.relation {
+            the @ The::Relation(_) => the.attribute().as_ref() == Some(&row.the),
             The::Collection { domain, .. } => row.the.domain() == domain.as_str(),
-        });
+        };
         related
             && self
                 .kind
@@ -436,7 +436,12 @@ impl Command {
     /// on it copies it where it should stay.
     pub fn progress(&self, value: Value) -> Invocation {
         let mut row = Changes::new();
-        row.associate(progress_attr(), self.entity.clone(), value, Pick::Last);
+        row.associate(
+            progress_attr(),
+            self.entity.clone(),
+            value,
+            Cardinality::One,
+        );
         self.stack.invoke(row)
     }
 }
@@ -480,7 +485,7 @@ impl Stack {
                     provided_attr(),
                     session_layer(),
                     Value::Entity(concept),
-                    Pick::All,
+                    Cardinality::Many,
                 );
             }
             self.own().apply(rows)?;
@@ -621,7 +626,7 @@ impl Effect {
                             answered_attr(),
                             entity.clone(),
                             Value::Entity(concept.clone()),
-                            Pick::All,
+                            Cardinality::Many,
                         );
                         answered.push(entity.clone());
                     }
@@ -630,7 +635,7 @@ impl Effect {
                             failed_attr(),
                             entity.clone(),
                             Value::String(failure.reason.clone()),
-                            Pick::All,
+                            Cardinality::Many,
                         );
                         failed.push((entity.clone(), failure.reason));
                     }
@@ -641,7 +646,7 @@ impl Effect {
                     unhandled_attr(),
                     entity.clone(),
                     Value::Boolean(true),
-                    Pick::Last,
+                    Cardinality::One,
                 );
                 unhandled.push(entity);
             }

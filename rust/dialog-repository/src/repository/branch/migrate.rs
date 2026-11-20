@@ -333,7 +333,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use dialog_corpus::{Entity, NUMBER_BAND, Pick, Relation as CorpusRelation, Selector, Value};
+    use dialog_corpus::{Entity, NUMBER_BAND, Relation as CorpusRelation, Selector, Value};
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::Relation;
     use dialog_query::{AttributeStatement, Cardinality};
@@ -349,18 +349,13 @@ mod tests {
         "item/size".parse().expect("a relation")
     }
 
-    fn statement(of: &Entity, is: Value, pick: Pick) -> AttributeStatement {
+    fn statement(of: &Entity, is: Value, cardinality: Cardinality) -> AttributeStatement {
         AttributeStatement {
             the: Relation::from(size()),
             of: of.clone(),
             is,
             cause: None,
-            cardinality: Some(if pick == Pick::All {
-                Cardinality::Many
-            } else {
-                Cardinality::One
-            }),
-            pick: Some(pick),
+            cardinality: Some(cardinality),
         }
     }
 
@@ -404,24 +399,28 @@ mod tests {
             branch,
             operator,
             vec![
-                statement(&items[0], Value::UnsignedInt(3), Pick::All),
-                statement(&items[1], Value::SignedInt(-2), Pick::All),
-                statement(&items[2], Value::Float(2.5), Pick::All),
-                statement(&items[3], Value::UnsignedInt(10), Pick::Max),
+                statement(&items[0], Value::UnsignedInt(3), Cardinality::Many),
+                statement(&items[1], Value::SignedInt(-2), Cardinality::Many),
+                statement(&items[2], Value::Float(2.5), Cardinality::Many),
+                statement(&items[3], Value::UnsignedInt(10), Cardinality::One),
             ],
         )
         .await?;
-        // A succession under `max` and a retraction, so the history and
+        // A succession and a retraction, so the history and
         // coverage regions hold records the rewrite must carry.
         commit(
             branch,
             operator,
-            vec![statement(&items[3], Value::UnsignedInt(40), Pick::Max)],
+            vec![statement(
+                &items[3],
+                Value::UnsignedInt(40),
+                Cardinality::One,
+            )],
         )
         .await?;
         branch
             .transaction()
-            .retract(statement(&items[2], Value::Float(2.5), Pick::All))
+            .retract(statement(&items[2], Value::Float(2.5), Cardinality::Many))
             .commit()
             .publish()
             .perform(operator)
@@ -461,7 +460,11 @@ mod tests {
         let refused = commit(
             &branch,
             &operator,
-            vec![statement(&Entity::new()?, Value::UnsignedInt(7), Pick::All)],
+            vec![statement(
+                &Entity::new()?,
+                Value::UnsignedInt(7),
+                Cardinality::Many,
+            )],
         )
         .await
         .expect_err("a write into a tree the earlier release laid out is refused");
@@ -498,7 +501,11 @@ mod tests {
         commit(
             &branch,
             &operator,
-            vec![statement(&Entity::new()?, Value::UnsignedInt(7), Pick::All)],
+            vec![statement(
+                &Entity::new()?,
+                Value::UnsignedInt(7),
+                Cardinality::Many,
+            )],
         )
         .await?;
         assert_eq!(sizes(&branch, &operator).await?.len(), before.len() + 1);
@@ -553,7 +560,7 @@ mod tests {
         commit(
             &main,
             &operator,
-            vec![statement(&late, Value::UnsignedInt(99), Pick::All)],
+            vec![statement(&late, Value::UnsignedInt(99), Cardinality::Many)],
         )
         .await?;
         main.rekey_storage(0).perform(&operator).await?;
@@ -565,7 +572,7 @@ mod tests {
         commit(
             &feature,
             &operator,
-            vec![statement(&own, Value::Float(0.5), Pick::All)],
+            vec![statement(&own, Value::Float(0.5), Cardinality::Many)],
         )
         .await?;
         feature

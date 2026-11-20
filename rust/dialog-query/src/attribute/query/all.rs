@@ -9,6 +9,7 @@ use crate::formula::number::Numeric;
 use crate::hydration;
 use crate::query::Application;
 use crate::query::Output;
+use crate::schema::estimate_cost;
 use crate::selection::{Match, Part, Scanned, Selection, Standing};
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::{Any, Record};
@@ -629,7 +630,7 @@ impl AttributeQueryAll {
         let of = self.of.is_bound(env);
         let is = self.is.is_bound(env);
 
-        Cardinality::Many.estimate(the, of, is)
+        estimate_cost(Cardinality::Many, the, of, is)
     }
 
     /// Returns the parameters for this query.

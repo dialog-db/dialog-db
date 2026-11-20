@@ -47,8 +47,9 @@ use dialog_common::Blake3Hash;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::selector_range;
 use dialog_corpus::{
-    Cause, Changes, DialogCorpusError, Entity, EntityKey, Fact, Instruction, Key, KeyViewConstruct,
-    Pick, Relation, Selector, SortKey, Standing, Statement, Update, fact_index_keys, sort_key,
+    Cardinality, Cause, Changes, DialogCorpusError, Entity, EntityKey, Fact, Instruction, Key,
+    KeyViewConstruct, Relation, Selector, SortKey, Standing, Statement, Update, fact_index_keys,
+    sort_key,
 };
 use dialog_search_tree::Manifest;
 use parking_lot::RwLock;
@@ -591,9 +592,9 @@ impl Frozen {
 
     fn apply(&mut self, instruction: Instruction, delta: &mut Delta) {
         match instruction {
-            Instruction::Assert(fact, Pick::All) => self.insert(fact, delta),
-            // A write under a choosing pick among transients: the claim
-            // the pick elects of the cell gives way to the value.
+            Instruction::Assert(fact, Cardinality::Many) => self.insert(fact, delta),
+            // A write under cardinality one among transients: the claim
+            // the read elects of the cell gives way to the value.
             // Transients carry no version, so the election orders them by
             // cause, then value.
             Instruction::Assert(fact, policy) => {
@@ -1015,7 +1016,7 @@ impl Frozen {
                 fact.the.clone(),
                 fact.of.clone(),
                 fact.is.clone(),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             );
         }
         changes
@@ -1091,7 +1092,12 @@ mod tests {
 
     impl Statement for Claim {
         fn assert(self, update: &mut impl dialog_corpus::Update) {
-            update.associate(self.0.the, self.0.of, self.0.is, dialog_corpus::Pick::All);
+            update.associate(
+                self.0.the,
+                self.0.of,
+                self.0.is,
+                dialog_corpus::Cardinality::Many,
+            );
         }
 
         fn retract(self, update: &mut impl dialog_corpus::Update) {
@@ -1136,7 +1142,7 @@ mod tests {
         assert_eq!(line.len(), 1);
 
         // A second value accumulates; a write under `last` succeeds the
-        // one transient the pick elects and leaves the other.
+        // one transient the read elects and leaves the other.
         line.assert(
             the!("person/name")
                 .of("id:a".parse().unwrap())
@@ -1149,7 +1155,7 @@ mod tests {
             "person/name".parse().unwrap(),
             "id:a".parse().unwrap(),
             Value::String("C".into()),
-            dialog_corpus::Pick::Last,
+            dialog_corpus::Cardinality::One,
         );
         let succeeded = line.apply(changes).unwrap().expect("the write mints");
         assert_eq!(succeeded.retracted.len(), 1);
@@ -1162,7 +1168,7 @@ mod tests {
 
     /// A read naming an attribute is answered from the count of facts
     /// held per attribute when the store holds none of it, so the count
-    /// must follow every write: a replace under a choosing pick (the
+    /// must follow every write: a replace under cardinality one (the
     /// session write), a retract of the attribute's last fact and its
     /// re-assert, a tombstone over a fact held only beneath, and the
     /// lift of everything by `clear`.
@@ -1185,7 +1191,7 @@ mod tests {
             "person/name".parse().unwrap(),
             "id:a".parse().unwrap(),
             Value::String("B".into()),
-            dialog_corpus::Pick::Last,
+            dialog_corpus::Cardinality::One,
         );
         line.apply(replace).unwrap();
         assert_eq!(

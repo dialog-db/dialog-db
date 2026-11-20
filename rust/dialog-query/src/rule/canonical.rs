@@ -185,6 +185,7 @@ pub(crate) fn canonicalize(
             ReduceSpec {
                 apply: spec.apply,
                 of: rename_term(&spec.of, &holes),
+                listed: spec.listed.clone(),
             },
         ))?;
         let terms = [
@@ -247,6 +248,7 @@ pub(crate) fn canonicalize(
                 ReduceSpec {
                     apply: spec.apply,
                     of: rename_term(&spec.of, &working),
+                    listed: spec.listed.clone(),
                 },
             )
         })
@@ -446,6 +448,7 @@ fn spell(rule: &Rule<'_>, names: &Rename) -> Result<(Vec<u8>, Identity), TypeErr
                 ReduceSpec {
                     apply: spec.apply,
                     of: rename_term(&spec.of, names),
+                    listed: spec.listed.clone(),
                 },
             )
         })

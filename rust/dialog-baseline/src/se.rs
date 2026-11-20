@@ -362,9 +362,9 @@ pub fn se_instructions(commit: &[SeFact]) -> Result<Vec<Instruction>> {
             cause: None,
         };
         instructions.push(if is_multi_valued(&fact.the) {
-            Instruction::Assert(stated, dialog_corpus::Pick::All)
+            Instruction::Assert(stated, dialog_corpus::Cardinality::Many)
         } else {
-            Instruction::Assert(stated, dialog_corpus::Pick::Last)
+            Instruction::Assert(stated, dialog_corpus::Cardinality::One)
         });
     }
     Ok(instructions)

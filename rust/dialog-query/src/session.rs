@@ -6,6 +6,7 @@ pub mod dependencies;
 pub mod rule_registry;
 pub use dependencies::{
     Absence, AbsenceInCycle, AggregationViolation, Closure, Polarity, ProgramAnalysis, Quarantine,
+    Tested,
 };
 pub use rule_registry::*;
 

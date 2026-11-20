@@ -329,7 +329,7 @@ mod tests {
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -355,7 +355,7 @@ mod tests {
         let _hash = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 fact,
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -469,7 +469,7 @@ mod tests {
                     is: Value::String("Alice".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ),
             Instruction::Assert(
                 Fact {
@@ -478,7 +478,7 @@ mod tests {
                     is: Value::String("alice@example.com".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ),
             Instruction::Assert(
                 Fact {
@@ -487,7 +487,7 @@ mod tests {
                     is: Value::String("Bob".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ),
         ];
 
@@ -536,7 +536,7 @@ mod tests {
                     is: Value::String("Alice".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ),
             Instruction::Assert(
                 Fact {
@@ -545,7 +545,7 @@ mod tests {
                     is: Value::String("Bob".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ),
             Instruction::Assert(
                 Fact {
@@ -554,7 +554,7 @@ mod tests {
                     is: Value::String("alice@example.com".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ),
         ];
 
@@ -619,7 +619,7 @@ mod tests {
         branch
             .commit(stream::iter(vec![Instruction::Assert(
                 fact.clone(),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -958,7 +958,7 @@ mod tests {
             // (entity, attribute) inside a single transaction must keep
             // both — cardinality-many accumulates, it does not collapse.
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[pick(all)]
+            #[cardinality(many)]
             #[domain("app.meta")]
             pub struct Tag(pub String);
 
@@ -2235,7 +2235,12 @@ mod tests {
             // both the branch commit and the overlay from clones.
             let mut changes = Changes::new();
             for (e, a, v) in &facts {
-                changes.associate(a.clone(), e.clone(), v.clone(), dialog_corpus::Pick::All);
+                changes.associate(
+                    a.clone(),
+                    e.clone(),
+                    v.clone(),
+                    dialog_corpus::Cardinality::Many,
+                );
             }
 
             // Commit a clone to the branch (Changes itself is a Statement now).

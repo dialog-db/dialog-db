@@ -1,7 +1,7 @@
-//! Invariants the pick-write design claims, pinned as tests.
+//! Invariants the cardinality-one write design claims, pinned as tests.
 //!
 //! Each test states a property `notes/attribute-heads.md` or the
-//! changelog asserts of a write under a choosing pick, and checks it
+//! changelog asserts of a write under cardinality one, and checks it
 //! the way a caller would. A failing test here is a place where a
 //! transaction does not do what the design says.
 
@@ -11,7 +11,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::Branch;
 use crate::helpers::test_repo;
 use anyhow::Result;
-use dialog_corpus::{Entity, Pick, Relation as CorpusRelation, Value};
+use dialog_corpus::{Entity, Relation as CorpusRelation, Value};
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::Relation;
 use dialog_query::query::Output as _;
@@ -26,7 +26,7 @@ use dialog_storage::provider::storage::VolatileSpace;
 type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
 
 /// A write of `org/salary` under `policy`.
-fn salary(of: &Entity, value: u32, policy: Pick) -> AttributeStatement {
+fn salary(of: &Entity, value: u32, policy: Cardinality) -> AttributeStatement {
     AttributeStatement {
         the: Relation::from(
             "org/salary"
@@ -36,16 +36,11 @@ fn salary(of: &Entity, value: u32, policy: Pick) -> AttributeStatement {
         of: of.clone(),
         is: Value::UnsignedInt(value.into()),
         cause: None,
-        cardinality: Some(if policy == Pick::All {
-            Cardinality::Many
-        } else {
-            Cardinality::One
-        }),
-        pick: Some(policy),
+        cardinality: Some(policy),
     }
 }
 
-/// `org/salary` of `of` read under `select`, sorted.
+/// `org/salary` of `of` read under the cardinality `select` names, sorted.
 /// Of two salaries that stand equal, the one a `last` read returns: the
 /// one whose value hashes greater (`Value::tiebreak`).
 fn tie_winner(a: u32, b: u32) -> u32 {
@@ -55,7 +50,7 @@ fn tie_winner(a: u32, b: u32) -> u32 {
 
 fn salary_query(of: &Entity, select: &str) -> ConceptQuery {
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "salary": { "the": "org/salary", "as": "natural:", "pick": select }
+        "salary": { "the": "org/salary", "as": "natural:", "cardinality": select }
     }}))
     .expect("a descriptor");
     let mut terms = Parameters::new();
@@ -126,7 +121,7 @@ async fn a_transaction_reads_what_its_commit_leaves_when_a_derived_input_follows
     branch
         .transaction()
         .assert(&salary_from_bonus()?)
-        .assert(salary(&alice, 100, Pick::All))
+        .assert(salary(&alice, 100, Cardinality::Many))
         .commit()
         .publish()
         .perform(&operator)
@@ -135,12 +130,12 @@ async fn a_transaction_reads_what_its_commit_leaves_when_a_derived_input_follows
 
     let transaction = branch
         .transaction()
-        .assert(salary(&alice, 200, Pick::Last))
+        .assert(salary(&alice, 200, Cardinality::One))
         .assert(dialog_query::the!("org/bonus").of(alice.clone()).is(500u32));
     let read_all = salaries(
         transaction
             .query()
-            .select(salary_query(&alice, "all"))
+            .select(salary_query(&alice, "many"))
             .perform(&operator)
             .try_vec()
             .await?,
@@ -148,7 +143,7 @@ async fn a_transaction_reads_what_its_commit_leaves_when_a_derived_input_follows
     let read_last = salaries(
         transaction
             .query()
-            .select(salary_query(&alice, "last"))
+            .select(salary_query(&alice, "one"))
             .perform(&operator)
             .try_vec()
             .await?,
@@ -158,12 +153,12 @@ async fn a_transaction_reads_what_its_commit_leaves_when_a_derived_input_follows
 
     assert_eq!(
         read_all,
-        read_branch(&branch, &operator, &alice, "all").await?,
+        read_branch(&branch, &operator, &alice, "many").await?,
         "every candidate the transaction read under `all` is what the commit left"
     );
     assert_eq!(
         read_last,
-        read_branch(&branch, &operator, &alice, "last").await?,
+        read_branch(&branch, &operator, &alice, "one").await?,
         "the candidate the transaction read under `last` is what the commit left"
     );
     Ok(())
@@ -187,26 +182,26 @@ async fn a_last_write_of_a_value_the_cell_holds_reads_back_as_the_newest() -> Re
     for value in [100u32, 200] {
         branch
             .transaction()
-            .assert(salary(&alice, value, Pick::All))
+            .assert(salary(&alice, value, Cardinality::Many))
             .commit()
             .publish()
             .perform(&operator)
             .await?;
     }
     assert_eq!(
-        read_branch(&branch, &operator, &alice, "last").await?,
+        read_branch(&branch, &operator, &alice, "one").await?,
         vec![200]
     );
 
     branch
         .transaction()
-        .assert(salary(&alice, 100, Pick::Last))
+        .assert(salary(&alice, 100, Cardinality::One))
         .commit()
         .publish()
         .perform(&operator)
         .await?;
     assert_eq!(
-        read_branch(&branch, &operator, &alice, "last").await?,
+        read_branch(&branch, &operator, &alice, "one").await?,
         vec![100],
         "the newest write of the cell is what `last` returns"
     );
@@ -225,18 +220,20 @@ async fn a_transaction_reads_back_its_own_last_write_of_a_held_value() -> Result
     for value in [100u32, 200] {
         branch
             .transaction()
-            .assert(salary(&alice, value, Pick::All))
+            .assert(salary(&alice, value, Cardinality::Many))
             .commit()
             .publish()
             .perform(&operator)
             .await?;
     }
     let branch = repo.branch("main").open().perform(&operator).await?;
-    let transaction = branch.transaction().assert(salary(&alice, 100, Pick::Last));
+    let transaction = branch
+        .transaction()
+        .assert(salary(&alice, 100, Cardinality::One));
     let read = salaries(
         transaction
             .query()
-            .select(salary_query(&alice, "last"))
+            .select(salary_query(&alice, "one"))
             .perform(&operator)
             .try_vec()
             .await?,
@@ -272,7 +269,7 @@ async fn an_integrated_batch_lands_as_the_same_writes_asserted_in_order() -> Res
             .await?;
         branch
             .transaction()
-            .assert(salary(&alice, 100, Pick::All))
+            .assert(salary(&alice, 100, Cardinality::Many))
             .commit()
             .publish()
             .perform(&operator)
@@ -288,27 +285,27 @@ async fn an_integrated_batch_lands_as_the_same_writes_asserted_in_order() -> Res
                 the.clone(),
                 alice.clone(),
                 Value::UnsignedInt(200),
-                Pick::Last,
+                Cardinality::One,
             );
             changes.associate(
                 the.clone(),
                 alice.clone(),
                 Value::UnsignedInt(300),
-                Pick::All,
+                Cardinality::Many,
             );
             changes.associate(
                 the.clone(),
                 alice.clone(),
                 Value::UnsignedInt(400),
-                Pick::Last,
+                Cardinality::One,
             );
             branch.transaction().integrate(changes)
         } else {
             branch
                 .transaction()
-                .assert(salary(&alice, 200, Pick::Last))
-                .assert(salary(&alice, 300, Pick::All))
-                .assert(salary(&alice, 400, Pick::Last))
+                .assert(salary(&alice, 200, Cardinality::One))
+                .assert(salary(&alice, 300, Cardinality::Many))
+                .assert(salary(&alice, 400, Cardinality::One))
         };
         transaction.commit().publish().perform(&operator).await?;
         let branch = repo
@@ -316,7 +313,7 @@ async fn an_integrated_batch_lands_as_the_same_writes_asserted_in_order() -> Res
             .open()
             .perform(&operator)
             .await?;
-        lines.push(read_branch(&branch, &operator, &alice, "all").await?);
+        lines.push(read_branch(&branch, &operator, &alice, "many").await?);
     }
     assert!(
         !lines[0].contains(&100),
@@ -331,18 +328,13 @@ async fn an_integrated_batch_lands_as_the_same_writes_asserted_in_order() -> Res
 }
 
 /// A write of `the` under `policy`.
-fn write(the: &str, of: &Entity, value: u32, policy: Pick) -> AttributeStatement {
+fn write(the: &str, of: &Entity, value: u32, policy: Cardinality) -> AttributeStatement {
     AttributeStatement {
         the: Relation::from(the.parse::<CorpusRelation>().expect("an attribute")),
         of: of.clone(),
         is: Value::UnsignedInt(value.into()),
         cause: None,
-        cardinality: Some(if policy == Pick::All {
-            Cardinality::Many
-        } else {
-            Cardinality::One
-        }),
-        pick: Some(policy),
+        cardinality: Some(policy),
     }
 }
 
@@ -364,24 +356,26 @@ async fn a_transaction_reads_a_last_write_as_succeeding_the_stored_claim_under_a
     branch
         .transaction()
         .assert(&salary_from_bonus()?)
-        .assert(salary(&alice, 100, Pick::All))
+        .assert(salary(&alice, 100, Cardinality::Many))
         .commit()
         .publish()
         .perform(&operator)
         .await?;
     let branch = repo.branch("main").open().perform(&operator).await?;
-    let transaction = branch.transaction().assert(salary(&alice, 200, Pick::Last));
+    let transaction = branch
+        .transaction()
+        .assert(salary(&alice, 200, Cardinality::One));
     let read = salaries(
         transaction
             .query()
-            .select(salary_query(&alice, "all"))
+            .select(salary_query(&alice, "many"))
             .perform(&operator)
             .try_vec()
             .await?,
     )?;
     transaction.commit().publish().perform(&operator).await?;
     let branch = repo.branch("main").open().perform(&operator).await?;
-    let committed = read_branch(&branch, &operator, &alice, "all").await?;
+    let committed = read_branch(&branch, &operator, &alice, "many").await?;
     assert_eq!(committed, vec![200], "the write succeeded the stored claim");
     assert_eq!(read, committed, "the transaction read what its commit left");
     Ok(())
@@ -389,14 +383,13 @@ async fn a_transaction_reads_a_last_write_as_succeeding_the_stored_claim_under_a
 
 /// "What a write observes is the line and the writes before it in its
 /// own transaction, in order." Alice's bonus is 900 and her stored
-/// salary 100, and a rule derives her salary from her bonus. One
-/// transaction writes her bonus to 50 under `last`, then her salary to
-/// 120 under `max`. A reader after the bonus write sees the salary
-/// candidates `{100, 50}`, elects 100 under `max`, and the salary write
-/// succeeds it: the stored claims come to 120, and a read under `all`
-/// sees 120 beside the 50 the rule derives. Settling against the raw
-/// staged rows, where the bonus is still 900 beside 50, would elect the
-/// derived 900 and retract nothing.
+/// salary 100, and a rule derives her salary from her bonus, so the
+/// derived 900, standing past the bonus claim it reads, is the newest
+/// candidate of her salary. One transaction retracts her bonus, then
+/// writes her salary to 120. A reader after the retraction sees the
+/// stored 100 alone, which the salary write succeeds: the stored claims
+/// come to 120. Settling against the line without the retraction would
+/// elect the derived 900, which is no claim, and retract nothing.
 #[dialog_common::test]
 async fn a_write_succeeds_what_a_reader_after_the_earlier_writes_observes() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -406,8 +399,8 @@ async fn a_write_succeeds_what_a_reader_after_the_earlier_writes_observes() -> R
     branch
         .transaction()
         .assert(&salary_from_bonus()?)
-        .assert(write("org/bonus", &alice, 900, Pick::Last))
-        .assert(salary(&alice, 100, Pick::All))
+        .assert(write("org/bonus", &alice, 900, Cardinality::One))
+        .assert(salary(&alice, 100, Cardinality::Many))
         .commit()
         .publish()
         .perform(&operator)
@@ -415,17 +408,17 @@ async fn a_write_succeeds_what_a_reader_after_the_earlier_writes_observes() -> R
     let branch = repo.branch("main").open().perform(&operator).await?;
     branch
         .transaction()
-        .assert(write("org/bonus", &alice, 50, Pick::Last))
-        .assert(salary(&alice, 120, Pick::Max))
+        .retract(write("org/bonus", &alice, 900, Cardinality::One))
+        .assert(salary(&alice, 120, Cardinality::One))
         .commit()
         .publish()
         .perform(&operator)
         .await?;
     let branch = repo.branch("main").open().perform(&operator).await?;
     assert_eq!(
-        read_branch(&branch, &operator, &alice, "all").await?,
-        vec![50, 120],
-        "the salary write succeeded the stored 100, the only candidate above the new bonus"
+        read_branch(&branch, &operator, &alice, "many").await?,
+        vec![120],
+        "the salary write succeeded the stored 100, the only candidate once the bonus is gone"
     );
     Ok(())
 }
@@ -445,18 +438,15 @@ async fn a_transaction_that_retracts_an_overlay_row_reads_what_its_commit_leaves
     let alice: Entity = "id:alice".parse()?;
     branch
         .transaction()
-        .assert(salary(&alice, 300, Pick::Last))
+        .assert(salary(&alice, 300, Cardinality::One))
         .commit()
         .publish()
         .perform(&operator)
         .await?;
-    let overlay_row = AttributeStatement {
-        pick: None,
-        ..salary(&alice, 500, Pick::All)
-    };
+    let overlay_row = salary(&alice, 500, Cardinality::Many);
     branch.overlay().assert(overlay_row.clone())?;
     assert_eq!(
-        read_branch(&branch, &operator, &alice, "last").await?,
+        read_branch(&branch, &operator, &alice, "one").await?,
         vec![500]
     );
 
@@ -464,18 +454,18 @@ async fn a_transaction_that_retracts_an_overlay_row_reads_what_its_commit_leaves
         branch
             .transaction()
             .retract(overlay_row)
-            .assert(salary(&alice, 400, Pick::Last));
+            .assert(salary(&alice, 400, Cardinality::One));
     let read = salaries(
         transaction
             .query()
-            .select(salary_query(&alice, "last"))
+            .select(salary_query(&alice, "one"))
             .perform(&operator)
             .try_vec()
             .await?,
     )?;
     transaction.commit().publish().perform(&operator).await?;
     assert_eq!(
-        read_branch(&branch, &operator, &alice, "last").await?,
+        read_branch(&branch, &operator, &alice, "one").await?,
         read,
         "what the transaction read under `last` is what its commit left"
     );
@@ -522,15 +512,15 @@ async fn a_last_write_succeeds_the_claim_a_last_read_returns_among_equals() -> R
         let branch = repo.branch(&name).open().perform(&operator).await?;
         branch
             .transaction()
-            .assert(salary(&alice, first, Pick::All))
-            .assert(salary(&alice, second, Pick::All))
-            .assert(salary(&alice, 1, Pick::Last))
+            .assert(salary(&alice, first, Cardinality::Many))
+            .assert(salary(&alice, second, Cardinality::Many))
+            .assert(salary(&alice, 1, Cardinality::One))
             .commit()
             .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch(&name).open().perform(&operator).await?;
-        let stored = read_branch(&branch, &operator, &alice, "all").await?;
+        let stored = read_branch(&branch, &operator, &alice, "many").await?;
         let winner = tie_winner(first, second);
         let loser = if winner == first { second } else { first } as u64;
         if stored != vec![1, loser] {
@@ -544,39 +534,40 @@ async fn a_last_write_succeeds_the_claim_a_last_read_returns_among_equals() -> R
     Ok(())
 }
 
-/// "A write under `max` succeeds the claim a `max` read returns." The
-/// cell holds 100 and 200, both live, so `max` reads 200. A `max` write
-/// of 100 succeeds 200 and leaves 100 alone in the cell. The write
-/// finds 100 already held and writes nothing, so 200 stays and `max`
-/// keeps reading it: the held-value shortcut runs before the election,
-/// whatever the pick.
+/// "A write under cardinality one succeeds the claim a read returns."
+/// The cell holds 100 and, from a later commit, 200, both live, so a
+/// read returns 200. A write of 100 succeeds 200 and leaves 100 alone in
+/// the cell. The write finds 100 already held, but held is not what the
+/// read returns: the held-value shortcut applies only when the claim the
+/// read elects holds the value, so 200 is retracted all the same.
 #[dialog_common::test]
-async fn a_max_write_of_a_held_value_succeeds_the_claim_a_max_read_returns() -> Result<()> {
+async fn a_write_of_a_held_value_succeeds_the_claim_a_read_returns() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     let alice: Entity = "id:alice".parse()?;
-    branch
-        .transaction()
-        .assert(salary(&alice, 100, Pick::All))
-        .assert(salary(&alice, 200, Pick::All))
-        .commit()
-        .publish()
-        .perform(&operator)
-        .await?;
+    for value in [100, 200] {
+        branch
+            .transaction()
+            .assert(salary(&alice, value, Cardinality::Many))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+    }
     assert_eq!(
-        read_branch(&branch, &operator, &alice, "max").await?,
+        read_branch(&branch, &operator, &alice, "one").await?,
         vec![200]
     );
     branch
         .transaction()
-        .assert(salary(&alice, 100, Pick::Max))
+        .assert(salary(&alice, 100, Cardinality::One))
         .commit()
         .publish()
         .perform(&operator)
         .await?;
     assert_eq!(
-        read_branch(&branch, &operator, &alice, "all").await?,
+        read_branch(&branch, &operator, &alice, "many").await?,
         vec![100],
         "the write succeeded the claim the read elected"
     );
@@ -597,7 +588,7 @@ async fn an_overlay_row_stands_above_its_own_lines_commits_in_a_join() -> Result
     let alice: Entity = "id:alice".parse()?;
     let a = repo.branch("a").open().perform(&operator).await?;
     a.transaction()
-        .assert(salary(&alice, 1, Pick::All))
+        .assert(salary(&alice, 1, Cardinality::Many))
         .commit()
         .publish()
         .perform(&operator)
@@ -605,33 +596,30 @@ async fn an_overlay_row_stands_above_its_own_lines_commits_in_a_join() -> Result
     let b = repo.branch("b").open().perform(&operator).await?;
     for value in 290..300u32 {
         b.transaction()
-            .assert(write("org/other", &alice, value, Pick::All))
+            .assert(write("org/other", &alice, value, Cardinality::Many))
             .commit()
             .publish()
             .perform(&operator)
             .await?;
     }
     b.transaction()
-        .assert(salary(&alice, 300, Pick::All))
+        .assert(salary(&alice, 300, Cardinality::Many))
         .commit()
         .publish()
         .perform(&operator)
         .await?;
     let a = repo.branch("a").open().perform(&operator).await?;
     let b = repo.branch("b").open().perform(&operator).await?;
-    b.overlay().assert(AttributeStatement {
-        pick: None,
-        ..salary(&alice, 500, Pick::All)
-    })?;
+    b.overlay().assert(salary(&alice, 500, Cardinality::Many))?;
     assert_eq!(
-        read_branch(&b, &operator, &alice, "last").await?,
+        read_branch(&b, &operator, &alice, "one").await?,
         vec![500],
         "alone, b's overlay row is its newest fact"
     );
     let rows: Vec<ConceptConclusion> = a
         .query()
         .join(&b)
-        .select(salary_query(&alice, "last"))
+        .select(salary_query(&alice, "one"))
         .perform(&operator)
         .try_vec()
         .await?;
@@ -661,7 +649,7 @@ async fn concurrent_last_writes_settle_by_commit_across_every_cell() -> Result<(
         .collect::<Result<_, _>>()?;
     let mut base = a.transaction();
     for person in &people {
-        base = base.assert(salary(person, 1, Pick::Last));
+        base = base.assert(salary(person, 1, Cardinality::One));
     }
     base.commit().publish().perform(&operator).await?;
     b.pull(crate::Download::MinimalRanges)
@@ -679,8 +667,8 @@ async fn concurrent_last_writes_settle_by_commit_across_every_cell() -> Result<(
         } else {
             (200, 100)
         };
-        ours = ours.assert(salary(person, mine + index as u32, Pick::Last));
-        theirs = theirs.assert(salary(person, other + index as u32, Pick::Last));
+        ours = ours.assert(salary(person, mine + index as u32, Cardinality::One));
+        theirs = theirs.assert(salary(person, other + index as u32, Cardinality::One));
     }
     ours.commit().publish().perform(&operator).await?;
     theirs.commit().publish().perform(&operator).await?;
@@ -706,7 +694,7 @@ async fn concurrent_last_writes_settle_by_commit_across_every_cell() -> Result<(
     for branch in [&a, &b] {
         let mut winners = Vec::new();
         for (index, person) in people.iter().enumerate() {
-            let read = read_branch(branch, &operator, person, "last").await?;
+            let read = read_branch(branch, &operator, person, "one").await?;
             assert_eq!(read.len(), 1, "one value per cell under `last`");
             let ours_value = if index % 2 == 0 { 100 } else { 200 } + index as u64;
             winners.push(read[0] == ours_value);
@@ -741,34 +729,35 @@ async fn read_through_commit(
 }
 
 /// "A transaction reads what its commit will leave." The line holds 3
-/// and 6. A `max` write of 4 succeeds 6, and an `all` write then writes
-/// 6 back: the commit lands 4 and 6 at its own edition, the newest of
-/// the cell, standing equal, and 6 hashes greater, so a `last` read
-/// returns 6. The transaction read the line's older row of 6 instead and
-/// returned 4.
+/// and, from a later commit, 6. A cardinality one write of 4 succeeds 6,
+/// and a cardinality many write then writes 6 back: the commit lands 4
+/// and 6 at its own edition, the newest of the cell, standing equal, and
+/// 6 hashes greater, so a read returns 6. The transaction read the
+/// line's older row of 6 instead and returned 4.
 #[dialog_common::test]
 async fn a_value_written_back_after_its_succession_reads_as_the_commit_leaves_it() -> Result<()> {
     // The written-back value must win the tie, or a transaction that
-    // returned the `max` write's value would pass.
+    // returned the first write's value would pass.
     assert_eq!(tie_winner(4, 6), 6, "6 hashes greater than 4");
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     let alice: Entity = "id:alice".parse()?;
-    branch
-        .transaction()
-        .assert(salary(&alice, 3, Pick::All))
-        .assert(salary(&alice, 6, Pick::All))
-        .commit()
-        .publish()
-        .perform(&operator)
-        .await?;
+    for value in [3, 6] {
+        branch
+            .transaction()
+            .assert(salary(&alice, value, Cardinality::Many))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+    }
     let transaction = branch
         .transaction()
-        .assert(salary(&alice, 4, Pick::Max))
-        .assert(salary(&alice, 6, Pick::All));
+        .assert(salary(&alice, 4, Cardinality::One))
+        .assert(salary(&alice, 6, Cardinality::Many));
     let (read, committed) =
-        read_through_commit(&branch, transaction, &operator, &alice, "last").await?;
+        read_through_commit(&branch, transaction, &operator, &alice, "one").await?;
     assert_eq!(
         committed,
         vec![6],
@@ -792,15 +781,17 @@ async fn an_all_write_of_a_held_value_reads_as_the_commit_leaves_it() -> Result<
     for value in [2, 5] {
         branch
             .transaction()
-            .assert(salary(&alice, value, Pick::All))
+            .assert(salary(&alice, value, Cardinality::Many))
             .commit()
             .publish()
             .perform(&operator)
             .await?;
     }
-    let transaction = branch.transaction().assert(salary(&alice, 2, Pick::All));
+    let transaction = branch
+        .transaction()
+        .assert(salary(&alice, 2, Cardinality::Many));
     let (read, committed) =
-        read_through_commit(&branch, transaction, &operator, &alice, "last").await?;
+        read_through_commit(&branch, transaction, &operator, &alice, "one").await?;
     assert_eq!(
         committed,
         vec![2],
@@ -811,9 +802,9 @@ async fn an_all_write_of_a_held_value_reads_as_the_commit_leaves_it() -> Result<
 }
 
 /// "A transaction reads what its commit will leave." The line holds 6,
-/// 1 and 2, committed in that order. A `min` write of 6 succeeds 1, the
-/// claim `min` elects, and refreshes the held 6, which the commit lands
-/// at its own edition, so a `last` read returns 6. The settlement took
+/// 1 and 2, committed in that order. A cardinality one write of 6
+/// succeeds 2, the newest claim, and refreshes the held 6, which the
+/// commit lands at its own edition, so a read returns 6. The settlement took
 /// the held 6 for one the write left alone and hid the staged row, so
 /// the transaction read the line's older 6 and returned 2.
 #[dialog_common::test]
@@ -825,15 +816,17 @@ async fn a_held_value_a_write_refreshes_reads_as_the_commit_leaves_it() -> Resul
     for value in [6, 1, 2] {
         branch
             .transaction()
-            .assert(salary(&alice, value, Pick::All))
+            .assert(salary(&alice, value, Cardinality::Many))
             .commit()
             .publish()
             .perform(&operator)
             .await?;
     }
-    let transaction = branch.transaction().assert(salary(&alice, 6, Pick::Min));
+    let transaction = branch
+        .transaction()
+        .assert(salary(&alice, 6, Cardinality::One));
     let (read, committed) =
-        read_through_commit(&branch, transaction, &operator, &alice, "last").await?;
+        read_through_commit(&branch, transaction, &operator, &alice, "one").await?;
     assert_eq!(
         committed,
         vec![6],

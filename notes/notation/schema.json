@@ -33,7 +33,7 @@
     },
     "Attribute": {
       "type": "object",
-      "description": "A relation qualified by a value type and a pick. An attribute's identity is structural: a hash of the relations it reads, its type, its pick and the values its pick ranks.",
+      "description": "A relation, a value type and a cardinality. An attribute's identity is structural: a hash of the relation it reads, its cardinality, its type and the values it lists.",
       "properties": {
         "description": {
           "type": "string",
@@ -51,17 +51,13 @@
             { "$ref": "#/$defs/Collection" }
           ]
         },
-        "pick": {
-          "$ref": "#/$defs/Pick",
-          "description": "Which of the claims the relation holds for an entity the attribute reads. Defaults to 'last:', or to 'top:' when 'the' or 'as' is a list."
-        },
         "cardinality": {
           "$ref": "#/$defs/Cardinality",
-          "description": "The older spelling of 'pick': 'one' reads as 'last:' and 'many' as 'all:'. Read, never written; 'pick' wins when both are given."
+          "description": "How many claims a cell holds: under 'one' (the default) a read returns the newest and a write succeeds it; under 'many' a read returns every claim and a write adds one."
         },
         "as": {
           "$ref": "#/$defs/Assert",
-          "description": "Value type of the attribute. If omitted, any type is allowed."
+          "description": "Value type of the attribute. If omitted, any type is allowed. A list of values is an enumerated type ranked least first, left to right."
         },
         "optional": {
           "type": "boolean",
@@ -71,28 +67,16 @@
         "conforms": {
           "type": "string",
           "description": "A concept the field's target entity must satisfy \u2014 a concept-typed field, written as the target's `concept:{hash}` URI. Entity-valued attributes only, and mutually exclusive with `optional`: the join over \"edge exists AND target conforms\" is absence over a derived predicate, which stratification has to own first. Enforced structurally, by conjoining the target's premises onto the field."
+        },
+        "aggregate": {
+          "type": "string",
+          "enum": ["last", "max", "min", "top"],
+          "description": "The selective aggregator the field reads one of its relation's claims per entity with: 'last' the newest, 'max' the greatest value, 'min' the least, 'top' the value listed last in the attribute's listed `as`, which ranks its values least first. 'max', 'min' and 'top' read a cardinality-many attribute; 'top' needs a listed `as`. Declaring one changes the concept's identity."
         }
       },
       "required": [
         "the"
       ]
-    },
-    "Pick": {
-      "type": "string",
-      "enum": [
-        "last:",
-        "all:",
-        "top:",
-        "max:",
-        "min:",
-        "last",
-        "all",
-        "top",
-        "max",
-        "min"
-      ],
-      "description": "Each pick is named by an entity: 'last:' reads the newest claim; 'all:' every claim, as a set; 'top:' the best ranked of the values listed in 'as' or the relations listed in 'the'; 'max:' and 'min:' the greatest or least value of an ordered type. A write under any pick but 'all:' succeeds the claim a read under it returns. The plain names 0.2 wrote ('last', 'all', ...) are read, never written.",
-      "default": "last:"
     },
     "Cardinality": {
       "type": "string",

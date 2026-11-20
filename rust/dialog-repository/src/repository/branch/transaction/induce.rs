@@ -44,8 +44,8 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
-    Change, Changes, DialogCorpusError, Entity, Fact, Instruction, Pick, Relation, Select,
-    Selector, Statement, Value,
+    Change, Changes, DialogCorpusError, Entity, Fact, Instruction, Relation, Select, Selector,
+    Statement, Value,
 };
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -983,7 +983,7 @@ where
             continue;
         }
         lag.push(if arriving {
-            Instruction::Assert(fact, dialog_corpus::Pick::All)
+            Instruction::Assert(fact, dialog_corpus::Cardinality::Many)
         } else {
             Instruction::Retract(fact)
         });
@@ -1365,7 +1365,7 @@ fn seed_groups(query: &dialog_query::ConceptQuery, rows: &[Fact]) -> Vec<Vec<usi
             continue;
         };
         let combinable = field.descriptor().the().attribute().is_some()
-            && matches!(field.descriptor().pick(), Pick::Last);
+            && field.cardinality() == dialog_query::Cardinality::One;
         if !combinable {
             groups.push(vec![at]);
             continue;
@@ -1470,8 +1470,11 @@ fn bind_seed(
 }
 
 /// What a head writes, as `emit_matches` tells two heads apart: its
-/// subject, then each field's attribute, value and pick.
-type WrittenHead = (Entity, Vec<(Relation, Value, Pick, Option<Entity>)>);
+/// subject, then each field's attribute, value, cardinality and layer.
+type WrittenHead = (
+    Entity,
+    Vec<(Relation, Value, dialog_corpus::Cardinality, Option<Entity>)>,
+);
 
 /// Emit a rule's head for every produced match: the cells landing in
 /// `control:` into `transients`, the rest (novelty-checked against the
@@ -1518,10 +1521,10 @@ async fn emit_matches<'a>(
         let mut dispatched = Changes::new();
         // The cells whose descriptor names a layer (`in:`) other than
         // the primary. The layer elects among its own rows of a cell,
-        // so a head landing there keeps its pick and succeeds no claim
-        // of the line.
+        // so a head landing there keeps its cardinality and succeeds no
+        // claim of the line.
         let mut shared: Vec<(Entity, Instruction)> = Vec::new();
-        for (attribute, value, pick, layer) in cells {
+        for (attribute, value, cardinality, layer) in cells {
             let fact = Fact {
                 the: attribute,
                 of: this.clone(),
@@ -1545,7 +1548,7 @@ async fn emit_matches<'a>(
                         fact.the,
                         fact.of,
                         fact.is,
-                        pick,
+                        cardinality,
                     ),
                 }
                 continue;
@@ -1567,7 +1570,7 @@ async fn emit_matches<'a>(
                         fact.the,
                         fact.of,
                         fact.is,
-                        pick,
+                        cardinality,
                     ),
                 }
                 continue;
@@ -1579,12 +1582,12 @@ async fn emit_matches<'a>(
                 (Some(layer), Polarity::Assert) => {
                     // The session's own layer is read live, and its row of
                     // the cell stands above a write staged for it: a head
-                    // under `last` landing there retracts that row, so the
+                    // of cardinality one landing there retracts that row, so the
                     // rounds after read the head as the publish will leave
                     // it. A memory layer the composite holds needs none of
                     // this: the round view reads it with the ticks applied.
                     if layer == session_layer()
-                        && matches!(pick, Pick::Last)
+                        && cardinality == dialog_corpus::Cardinality::One
                         && let Some(own) = view.session_store()
                     {
                         let cell = Selector::new().the(fact.the.clone()).of(fact.of.clone());
@@ -1594,18 +1597,24 @@ async fn emit_matches<'a>(
                             }
                         }
                     }
-                    shared.push((layer, Instruction::Assert(fact, pick)));
+                    shared.push((layer, Instruction::Assert(fact, cardinality)));
                 }
                 // A retracting head dissociates the exact bound
                 // triple, cardinality-independent.
                 (_, Polarity::Retract) => {
                     dialog_corpus::Update::dissociate(&mut head, fact.the, fact.of, fact.is);
                 }
-                // An asserting head writes as the field's pick says: a
-                // set appends, and a choosing pick succeeds the claim
-                // it elects, resolved against the view at commit.
+                // An asserting head writes as the field's cardinality
+                // says: many appends, and one succeeds the newest
+                // claim, resolved against the view at commit.
                 (_, Polarity::Assert) => {
-                    dialog_corpus::Update::associate(&mut head, fact.the, fact.of, fact.is, pick);
+                    dialog_corpus::Update::associate(
+                        &mut head,
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                        cardinality,
+                    );
                 }
             }
         }
@@ -1617,8 +1626,13 @@ async fn emit_matches<'a>(
         for (layer, instruction) in shared {
             if is_novel_in(view, &instruction, Some(&layer)).await? {
                 match instruction {
-                    Instruction::Assert(a, policy) => dialog_corpus::Update::associate_in(
-                        novelty, layer, a.the, a.of, a.is, policy,
+                    Instruction::Assert(a, cardinality) => dialog_corpus::Update::associate_in(
+                        novelty,
+                        layer,
+                        a.the,
+                        a.of,
+                        a.is,
+                        cardinality,
                     ),
                     Instruction::Retract(a) => {
                         dialog_corpus::Update::dissociate_in(novelty, layer, a.the, a.of, a.is)
@@ -1708,14 +1722,14 @@ fn written_heads(
                 None => None,
             }
             .filter(|layer| *layer != memory_layer());
-            cells.push((attribute, value, field.descriptor().pick().clone(), layer));
+            cells.push((attribute, value, field.cardinality(), layer));
         }
         heads.push((this, cells));
     }
     Ok(heads)
 }
 
-/// What the writes of `share` under `last` into the session's own layer
+/// What the writes of `share` of cardinality one into the session's own layer
 /// succeed: the rows `own` holds of each such cell, other than the one
 /// written, as retractions. The session's own layer is read live and
 /// its row of a cell stands above a write staged for it, so without the
@@ -1723,7 +1737,7 @@ fn written_heads(
 pub(crate) fn succession_in_own(own: &Ephemeral, share: &Changes) -> Changes {
     let mut retractions = Changes::new();
     for (of, the, change) in share.iter() {
-        let Change::Assert(is, Pick::Last) = change else {
+        let Change::Assert(is, dialog_corpus::Cardinality::One) = change else {
             continue;
         };
         for held in own.scan(&Selector::new().the(the.clone()).of(of.clone())) {
@@ -1754,7 +1768,7 @@ fn layered_instructions(changes: &Changes) -> Vec<Instruction> {
                 cause: None,
             };
             match change {
-                Change::Assert(is, policy) => Instruction::Assert(fact(is), policy.clone()),
+                Change::Assert(is, cardinality) => Instruction::Assert(fact(is), *cardinality),
                 Change::Retract(is) => Instruction::Retract(fact(is)),
             }
         })
@@ -2274,7 +2288,7 @@ mod tests {
                     is: Value::SignedInt(1),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3527,7 +3541,7 @@ mod tests {
                     is: Value::String(audience.into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ))
         };
 
@@ -3555,7 +3569,7 @@ mod tests {
                     is: Value::String("hello".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3635,7 +3649,7 @@ mod tests {
                     is: Value::String("hello".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3721,7 +3735,7 @@ mod tests {
                     is: Value::String("p".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3780,7 +3794,7 @@ mod tests {
                     is: Value::String("old".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3808,7 +3822,7 @@ mod tests {
                     is: Value::String("new".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -4084,7 +4098,7 @@ mod tests {
             "description": "Record who an assign command names",
             "assert!": {
                 "with": {
-                    "assignee": { "the": "issue/assignee", "as": "text:", "pick": "all:" }
+                    "assignee": { "the": "issue/assignee", "as": "text:", "cardinality": "many" }
                 }
             },
             "when": [
@@ -4173,7 +4187,7 @@ mod tests {
     fn it_groups_rows_that_bind_distinct_last_fields() -> Result<()> {
         let rule: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "seen": { "the": "seen/who", "as": "text:", "pick": "all:" } }
+                "with": { "seen": { "the": "seen/who", "as": "text:", "cardinality": "many" } }
             },
             "when": [
                 {
@@ -4181,7 +4195,7 @@ mod tests {
                         "with": {
                             "issue": { "the": "cmd.assign/issue", "as": "entity:" },
                             "who": { "the": "cmd.assign/who", "as": "text:" },
-                            "tag": { "the": "cmd.assign/tag", "as": "text:", "pick": "all:" }
+                            "tag": { "the": "cmd.assign/tag", "as": "text:", "cardinality": "many" }
                         }
                     },
                     "where": {
@@ -4234,7 +4248,7 @@ mod tests {
             "description": "Record who an assign command names",
             "assert!": {
                 "with": {
-                    "assignee": { "the": "issue/assignee", "as": "text:", "pick": "all:" }
+                    "assignee": { "the": "issue/assignee", "as": "text:", "cardinality": "many" }
                 }
             },
             "when": [
@@ -4609,7 +4623,7 @@ mod tests {
                     is: Value::Entity(issue.clone()),
                     cause: None,
                 },
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             )]))
             .perform(&operator)
             .await?;
@@ -4658,13 +4672,13 @@ mod tests {
         let rule: InductiveRule = serde_json::from_value(json!({
             "description": "Record each tag a titled document holds",
             "assert!": {
-                "with": { "tag": { "the": "seen/tag", "as": "text:", "pick": "all:" } }
+                "with": { "tag": { "the": "seen/tag", "as": "text:", "cardinality": "many" } }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "tag": { "the": "doc/tag", "as": "text:", "pick": "all:" },
+                            "tag": { "the": "doc/tag", "as": "text:", "cardinality": "many" },
                             "title": { "the": "doc/title", "as": "text:" }
                         }
                     },

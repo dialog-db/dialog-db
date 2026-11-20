@@ -6,7 +6,7 @@ use super::Seeded;
 use super::codec::{Field, Record};
 use anyhow::{Context, Result, anyhow};
 use dialog_corpus::history::RevisionRecord;
-use dialog_corpus::{Entity, Pick, Relation as CorpusRelation, Value};
+use dialog_corpus::{Entity, Relation as CorpusRelation, Value};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_query::attribute::Relation;
 use dialog_query::query::Output as _;
@@ -17,18 +17,13 @@ use dialog_query::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-fn salary(of: &Entity, value: u64, pick: Pick) -> AttributeStatement {
+fn salary(of: &Entity, value: u64, cardinality: Cardinality) -> AttributeStatement {
     AttributeStatement {
         the: Relation::from("org/salary".parse::<CorpusRelation>().expect("relation")),
         of: of.clone(),
         is: Value::UnsignedInt(value.into()),
         cause: None,
-        cardinality: Some(if pick == Pick::All {
-            Cardinality::Many
-        } else {
-            Cardinality::One
-        }),
-        pick: Some(pick),
+        cardinality: Some(cardinality),
     }
 }
 
@@ -53,12 +48,13 @@ pub async fn revisions(steps: usize, seed: u64) -> Result<Vec<Vec<u8>>> {
             let mut transaction = branches[at].transaction();
             for _ in 0..1 + random.below(3) {
                 let person = &people[random.below(people.len())];
-                let pick = if random.below(4) == 0 {
-                    Pick::All
+                let cardinality = if random.below(4) == 0 {
+                    Cardinality::Many
                 } else {
-                    Pick::Last
+                    Cardinality::One
                 };
-                transaction = transaction.assert(salary(person, 1 + random.below(50) as u64, pick));
+                transaction =
+                    transaction.assert(salary(person, 1 + random.below(50) as u64, cardinality));
             }
             // One writer replays this history, so no commit loses a race,
             // which is what the deprecation of `perform` is about.

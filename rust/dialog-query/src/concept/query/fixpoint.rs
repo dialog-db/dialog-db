@@ -2216,7 +2216,8 @@ mod tests {
         let ranked: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
             "top": {
                 "the": "family/ancestor",
-                "as": [a.to_string(), b.to_string(), c.to_string(), d.to_string()]
+                "as": [a.to_string(), b.to_string(), c.to_string(), d.to_string()],
+                "pick": "top"
             }
         }}))?;
         let mut terms = Parameters::new();

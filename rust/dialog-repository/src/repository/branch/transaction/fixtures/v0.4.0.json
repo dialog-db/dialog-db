@@ -1,0 +1,245 @@
+{
+  "attributes": {
+    "job/state last [todo, done]": "the:9eBg5KNN4WYEzf4AdhZ2gb1WwkYKyHaiiyGpJuvPoejZ",
+    "org/salary last natural": "the:Hu7Btoaga8ptcLFdiPX7TAxq93rr3QHAvrrdvCX8M5Cg",
+    "org/tag all text": "the:zaHKHF2rjvpfqe36Hoxo1FzZmmAUNEmHV7h7S8KBJLm"
+  },
+  "concepts": {
+    "{salary: org/salary last natural, tag: org/tag all text}": "concept:79tvwGhcqBHFdKXodbs4nKiJf6gCFppjd5S7ZNfbkNHh",
+    "{target: cmd.stage/target entity}": "concept:CDJ5veQ44f7VanfyugnyzV4gZtvHXevEvKQgDWU5Gdpx"
+  },
+  "release": "v0.4.0",
+  "rules": {
+    "flag_from_ranked_state": {
+      "entity": "rule:4GneBXqoan3VCySjuhBD1sM2vBfJzQRWg4phUniE1w3d",
+      "facts": [
+        {
+          "is": {
+            "bytes": "a26472756c65a2647768656e81a2657768657265a2622330a1613fa1646e616d65627e306474686973a1613fa1646e616d65647468697366617373657274a16477697468a1622330a262617382a165746578743a64746f646fa165746578743a64646f6e6563746865696a6f622f737461746566646564756365a16477697468a1627e30a262617365746578743a63746865686a6f622f666c616766666f726d617403"
+          },
+          "of": "rule:4GneBXqoan3VCySjuhBD1sM2vBfJzQRWg4phUniE1w3d",
+          "the": "dialog.rule/source"
+        },
+        {
+          "is": {
+            "entity": "concept:6Cn3jcUiw3HPBG4vMkQfY6wTp8r6fR5Q64BGMUpEoRQD"
+          },
+          "of": "rule:4GneBXqoan3VCySjuhBD1sM2vBfJzQRWg4phUniE1w3d",
+          "the": "dialog.rule/conclusion"
+        },
+        {
+          "is": {
+            "entity": "on:job/flag"
+          },
+          "of": "rule:4GneBXqoan3VCySjuhBD1sM2vBfJzQRWg4phUniE1w3d",
+          "the": "dialog.rule/derives"
+        },
+        {
+          "is": {
+            "entity": "on:job/state"
+          },
+          "of": "rule:4GneBXqoan3VCySjuhBD1sM2vBfJzQRWg4phUniE1w3d",
+          "the": "dialog.rule/reads"
+        }
+      ]
+    },
+    "reach_from_contact": {
+      "entity": "rule:7xiyVjZWtfTDzXnbHrx4tWE36viKL733x2ht236iSEk9",
+      "facts": [
+        {
+          "is": {
+            "bytes": "a26472756c65a2647768656e81a2657768657265a2622330a1613fa1646e616d65627e306474686973a1613fa1646e616d65647468697366617373657274a16477697468a1622330a262617365746578743a63746865826a757365722f656d61696c6a757365722f70686f6e6566646564756365a16477697468a1627e30a262617365746578743a637468656a757365722f726561636866666f726d617403"
+          },
+          "of": "rule:7xiyVjZWtfTDzXnbHrx4tWE36viKL733x2ht236iSEk9",
+          "the": "dialog.rule/source"
+        },
+        {
+          "is": {
+            "entity": "concept:7nTFSgoEiozYryS6qnAZrNmQtWC8G1iJTxZx35mBebCR"
+          },
+          "of": "rule:7xiyVjZWtfTDzXnbHrx4tWE36viKL733x2ht236iSEk9",
+          "the": "dialog.rule/conclusion"
+        },
+        {
+          "is": {
+            "entity": "on:user/email"
+          },
+          "of": "rule:7xiyVjZWtfTDzXnbHrx4tWE36viKL733x2ht236iSEk9",
+          "the": "dialog.rule/reads"
+        },
+        {
+          "is": {
+            "entity": "on:user/phone"
+          },
+          "of": "rule:7xiyVjZWtfTDzXnbHrx4tWE36viKL733x2ht236iSEk9",
+          "the": "dialog.rule/reads"
+        },
+        {
+          "is": {
+            "entity": "on:user/reach"
+          },
+          "of": "rule:7xiyVjZWtfTDzXnbHrx4tWE36viKL733x2ht236iSEk9",
+          "the": "dialog.rule/derives"
+        }
+      ]
+    },
+    "salary_from_bonus": {
+      "entity": "rule:D2pcSd5eB6dKc1ucZxEsdws4hZooLwsFj7VtuVAZPSaF",
+      "facts": [
+        {
+          "is": {
+            "bytes": "a26472756c65a2647768656e81a2657768657265a2622330a1613fa1646e616d65627e306474686973a1613fa1646e616d65647468697366617373657274a16477697468a1622330a2626173686e61747572616c3a63746865696f72672f626f6e757366646564756365a16477697468a1627e30a2626173686e61747572616c3a637468656a6f72672f73616c61727966666f726d617403"
+          },
+          "of": "rule:D2pcSd5eB6dKc1ucZxEsdws4hZooLwsFj7VtuVAZPSaF",
+          "the": "dialog.rule/source"
+        },
+        {
+          "is": {
+            "entity": "concept:4SPt1pY5AEjkJEivCoX71R2655mb2AMkM445khDMt5cx"
+          },
+          "of": "rule:D2pcSd5eB6dKc1ucZxEsdws4hZooLwsFj7VtuVAZPSaF",
+          "the": "dialog.rule/conclusion"
+        },
+        {
+          "is": {
+            "entity": "on:org/bonus"
+          },
+          "of": "rule:D2pcSd5eB6dKc1ucZxEsdws4hZooLwsFj7VtuVAZPSaF",
+          "the": "dialog.rule/reads"
+        },
+        {
+          "is": {
+            "entity": "on:org/salary"
+          },
+          "of": "rule:D2pcSd5eB6dKc1ucZxEsdws4hZooLwsFj7VtuVAZPSaF",
+          "the": "dialog.rule/derives"
+        }
+      ]
+    },
+    "state_from_raw": {
+      "entity": "rule:GpEqaS6iCSPHCp8wSHYqbLgHXm5Afz3wazaFSqznoe1J",
+      "facts": [
+        {
+          "is": {
+            "bytes": "a26472756c65a2647768656e81a2657768657265a2622330a1613fa1646e616d65627e306474686973a1613fa1646e616d65647468697366617373657274a16477697468a1622330a262617365746578743a63746865676a6f622f72617766646564756365a16477697468a1627e30a362617382a165746578743a64746f646fa165746578743a64646f6e6563746865696a6f622f7374617465647069636b656c6173743a66666f726d617403"
+          },
+          "of": "rule:GpEqaS6iCSPHCp8wSHYqbLgHXm5Afz3wazaFSqznoe1J",
+          "the": "dialog.rule/source"
+        },
+        {
+          "is": {
+            "entity": "concept:FovbUg4MRH3nvQRF9ih2U1WDpnsPBjV14rXWC8CWuxTz"
+          },
+          "of": "rule:GpEqaS6iCSPHCp8wSHYqbLgHXm5Afz3wazaFSqznoe1J",
+          "the": "dialog.rule/conclusion"
+        },
+        {
+          "is": {
+            "entity": "on:job/raw"
+          },
+          "of": "rule:GpEqaS6iCSPHCp8wSHYqbLgHXm5Afz3wazaFSqznoe1J",
+          "the": "dialog.rule/reads"
+        },
+        {
+          "is": {
+            "entity": "on:job/state"
+          },
+          "of": "rule:GpEqaS6iCSPHCp8wSHYqbLgHXm5Afz3wazaFSqznoe1J",
+          "the": "dialog.rule/derives"
+        }
+      ]
+    },
+    "tag_from_label": {
+      "entity": "rule:7Z9eWmJxL61NvLUTwtZMc7WtcC9THpiEiY8twgE3W421",
+      "facts": [
+        {
+          "is": {
+            "bytes": "a26472756c65a2647768656e81a2657768657265a2622330a1613fa1646e616d65627e306474686973a1613fa1646e616d65647468697366617373657274a16477697468a1622330a362617365746578743a6374686569646f632f6c6162656c647069636b64616c6c3a66646564756365a16477697468a1627e30a362617365746578743a63746865676f72672f746167647069636b64616c6c3a66666f726d617403"
+          },
+          "of": "rule:7Z9eWmJxL61NvLUTwtZMc7WtcC9THpiEiY8twgE3W421",
+          "the": "dialog.rule/source"
+        },
+        {
+          "is": {
+            "entity": "concept:Fty25m826uj7PDnvxFBfPgAMHvnPEF3EK5DnqFswCjbS"
+          },
+          "of": "rule:7Z9eWmJxL61NvLUTwtZMc7WtcC9THpiEiY8twgE3W421",
+          "the": "dialog.rule/conclusion"
+        },
+        {
+          "is": {
+            "entity": "on:doc/label"
+          },
+          "of": "rule:7Z9eWmJxL61NvLUTwtZMc7WtcC9THpiEiY8twgE3W421",
+          "the": "dialog.rule/reads"
+        },
+        {
+          "is": {
+            "entity": "on:org/tag"
+          },
+          "of": "rule:7Z9eWmJxL61NvLUTwtZMc7WtcC9THpiEiY8twgE3W421",
+          "the": "dialog.rule/derives"
+        }
+      ]
+    },
+    "tagger": {
+      "entity": "rule:7e9dSG66gZ3ZSbkWAfMr5D1p1zVH19RvstomHDPPiVri",
+      "facts": [
+        {
+          "is": {
+            "bytes": "a26472756c65a2647768656e81a2657768657265a2622330a1613fa1646e616d65627e306474686973a1613fa1646e616d65647468697366617373657274a16477697468a1622330a262617365746578743a6374686569646f632f7469746c656761737365727421a16477697468a1627e30a362617365746578743a637468656b646572697665642f746167647069636b64616c6c3a66666f726d617403"
+          },
+          "of": "rule:7e9dSG66gZ3ZSbkWAfMr5D1p1zVH19RvstomHDPPiVri",
+          "the": "dialog.rule/source"
+        },
+        {
+          "is": {
+            "entity": "concept:AAhN6T6Mf5iR9pzCqtpDYbdMgYmQ1zjmdUKNHdgVkRVQ"
+          },
+          "of": "rule:7e9dSG66gZ3ZSbkWAfMr5D1p1zVH19RvstomHDPPiVri",
+          "the": "dialog.rule/induces"
+        },
+        {
+          "is": {
+            "entity": "on:doc/title"
+          },
+          "of": "rule:7e9dSG66gZ3ZSbkWAfMr5D1p1zVH19RvstomHDPPiVri",
+          "the": "dialog.rule/on"
+        }
+      ]
+    },
+    "top_from_salary": {
+      "entity": "rule:9MKWSnCZebYWb21kY1eXHEfME3gsTfY51EscW9xVFZDs",
+      "facts": [
+        {
+          "is": {
+            "bytes": "a26472756c65a2647768656e81a2657768657265a2622330a1613fa1646e616d65627e306474686973a1613fa1646e616d65647468697366617373657274a16477697468a1622330a3626173686e61747572616c3a637468656a6f72672f73616c617279647069636b646d61783a66646564756365a16477697468a1627e30a2626173686e61747572616c3a63746865676f72672f746f7066666f726d617403"
+          },
+          "of": "rule:9MKWSnCZebYWb21kY1eXHEfME3gsTfY51EscW9xVFZDs",
+          "the": "dialog.rule/source"
+        },
+        {
+          "is": {
+            "entity": "concept:5M8yqvuDFqBWqxHy4UyDS6UieVLDZEKTaCiUdW8DtRQW"
+          },
+          "of": "rule:9MKWSnCZebYWb21kY1eXHEfME3gsTfY51EscW9xVFZDs",
+          "the": "dialog.rule/conclusion"
+        },
+        {
+          "is": {
+            "entity": "on:org/salary"
+          },
+          "of": "rule:9MKWSnCZebYWb21kY1eXHEfME3gsTfY51EscW9xVFZDs",
+          "the": "dialog.rule/reads"
+        },
+        {
+          "is": {
+            "entity": "on:org/top"
+          },
+          "of": "rule:9MKWSnCZebYWb21kY1eXHEfME3gsTfY51EscW9xVFZDs",
+          "the": "dialog.rule/derives"
+        }
+      ]
+    }
+  }
+}
