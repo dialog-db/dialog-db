@@ -396,6 +396,10 @@ fn decides_on(rule: &DeductiveRule, index: usize, term: Option<&Term<Any>>) -> b
                             // A whole built from what is carried: the
                             // other side is that whole.
                             (_, Pattern::Term(term)) => aliases.extend(named(term)),
+                            // The same equality read the other way, once
+                            // the whole is carried: the shape holds what
+                            // it was built from, and checks nothing.
+                            (_, shape) if shape.terms().into_iter().any(carries) => {}
                             // A carried value taken apart by a shape
                             // drops the rows it does not match: a check.
                             _ => return true,
