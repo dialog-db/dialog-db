@@ -1,3 +1,4 @@
+use super::commit::session_delegation;
 use dialog_corpus::history::{
     Record as HistoryRecord, RevisionRecord, TreeHistory, Version, novelty,
 };
@@ -1155,6 +1156,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     branch_entity.clone(),
                     authority.did(),
                 );
+                let delegation = session_delegation(&authority);
                 let mut record = RevisionRecord::create(
                     &revision,
                     authority.profile(),
@@ -1182,6 +1184,13 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         held(&upstream_revision, theirs),
                     ],
                 ));
+                // The session's delegation goes in with the record the first time
+                // this tree holds it.
+                if let Some(delegation) = &delegation
+                    && !delegation.is_in(&merged, &store, &delta).await?
+                {
+                    entries = entries.and(delegation.entries(&manifest)?);
+                }
                 merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 revision.publish_region(own_count(&revision, &context));
@@ -1330,6 +1339,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     branch_entity.clone(),
                     authority.did(),
                 );
+                let delegation = session_delegation(&authority);
                 let mut record = RevisionRecord::create(
                     &revision,
                     authority.profile(),
@@ -1354,6 +1364,13 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     &context,
                     &[held(&upstream_revision, theirs)],
                 ));
+                // The session's delegation goes in with the record the first time
+                // this tree holds it.
+                if let Some(delegation) = &delegation
+                    && !delegation.is_in(&merged, &store, &delta).await?
+                {
+                    entries = entries.and(delegation.entries(&manifest)?);
+                }
                 merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 revision.publish_region(own_count(&revision, &context));
@@ -1538,6 +1555,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // parent (see `dialog_corpus::history::skip`). Sign the
                 // record before it enters the tree, and the head once the
                 // merged root is final — same order as `Commit`.
+                let delegation = session_delegation(&authority);
                 let mut record =
                     RevisionRecord::create(&revision, authority.profile(), parents, Vec::new());
                 record.signature = Attest::new(record.payload()?).perform(env).await?;
@@ -1558,6 +1576,13 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 entries
                     .entries
                     .extend(region_writes(revision.version(), &context, &[started]));
+                // The session's delegation goes in with the record the first time
+                // this tree holds it.
+                if let Some(delegation) = &delegation
+                    && !delegation.is_in(&merged, &store, &delta).await?
+                {
+                    entries = entries.and(delegation.entries(&manifest)?);
+                }
                 merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 revision.publish_region(own_count(&revision, &context));

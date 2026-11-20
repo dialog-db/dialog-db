@@ -86,6 +86,9 @@ pub use log::*;
 mod revision_record;
 pub use revision_record::*;
 
+mod delegation_record;
+pub use delegation_record::*;
+
 /// The attribute under which a repository's revision lineage claims are
 /// recorded. The claim's entity is the repository DID and its value is the
 /// content-addressed entity of the [`Revision`].

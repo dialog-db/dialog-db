@@ -50,8 +50,8 @@ pub use logic::{And, Not, Or};
 pub use math::{Difference, Floor, Modulo, Product, Quotient, Round, Sum, Truncate};
 pub use position::{Position as PositionFormula, PositionParts as PositionPartsFormula};
 pub use revision::{
-    Revision as RevisionFormula, RevisionParent as RevisionParentFormula,
-    RevisionSlot as RevisionSlotFormula,
+    Revision as RevisionFormula, RevisionAttestation as RevisionAttestationFormula,
+    RevisionParent as RevisionParentFormula, RevisionSlot as RevisionSlotFormula,
 };
 pub use string::{Concatenate, Length, Like, Lowercase, Uppercase};
 
