@@ -12,24 +12,24 @@
     "archive.get": 0,
     "archive.get.bytes": 0,
     "archive.put": 1,
-    "archive.put.bytes": 12492,
+    "archive.put.bytes": 12476,
     "span.apply_batch_reusing": 1,
     "span.buffer_records": 2,
     "span.commit": 1,
     "span.hydrate_rule": 0,
-    "span.resolve_bundle": 9,
-    "span.resolve_rules": 9,
+    "span.resolve_bundle": 4,
+    "span.resolve_rules": 4,
     "span.seal_batch": 1,
     "span.settle": 1,
     "span.write_instructions": 1
   },
-  "instructions": 12612275,
-  "instructions_outside_allocator": 9495350,
+  "instructions": 11281229,
+  "instructions_outside_allocator": 8513548,
   "allocations": {
-    "alloc.bytes": 8072184,
-    "alloc.calls": 13579,
-    "free.calls": 12916,
-    "realloc.calls": 1187,
-    "realloc.from.bytes": 247071
+    "alloc.bytes": 7556083,
+    "alloc.calls": 12481,
+    "free.calls": 11882,
+    "realloc.calls": 779,
+    "realloc.from.bytes": 205178
   }
 }
