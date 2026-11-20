@@ -188,14 +188,16 @@ impl KeyParts {
         let (value_type, value) = value.unwrap_or_else(|| {
             // The filler plus its terminator; the filler has no zero bytes
             // to escape.
-            let mut payload = Vec::with_capacity(if upper { MAX_FILLER + 1 } else { 1 });
+            let mut payload = Vec::with_capacity(2);
             if upper {
                 // The maximum type is the composite, keyed as a terminated
-                // string, and the filler sorts above every composite's
-                // escaped bytes, as it does above every entity and
-                // attribute. (`set_value_*` replaces it with a real payload;
-                // this is only the unset bound.)
-                encode_bytes(&filler(), &mut payload);
+                // string. Every composite's bytes start with its table's
+                // head, `0x00`, escaped as `0x00 0xFF`, so one filler byte
+                // and the terminator sort above every composite, inline or
+                // spilled, and keep the bound as short as the number band's
+                // one-byte infinity it replaced. (`set_value_*` replaces it
+                // with a real payload; this is only the unset bound.)
+                payload.extend_from_slice(&[MAX_FILLER_BYTE, 0x00]);
                 (ValueDataType::max(), ValuePayload::Inline(payload))
             } else {
                 // The minimum value type is a terminated-string type, whose
@@ -420,15 +422,19 @@ pub fn build_key(parts: &KeyParts) -> Vec<u8> {
 /// numerics are fixed-width and strings/bytes are `0x00`-terminated, mirroring
 /// the [`ordvalue`](crate::model::ordvalue) decoders without allocating.
 /// (A spilled value's slot holds its encoded prefix, delimited identically.)
+#[inline(always)]
 fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
-    // An unknown discriminant is corruption: reject the key rather than
-    // guessing a width (`ValueDataType::from` would silently default to
-    // Bytes and misparse the tail).
-    if type_byte > u8::from(ValueDataType::Number)
-        && type_byte != u8::from(ValueDataType::Composite)
-    {
-        return None;
-    }
+    // Every type byte past the number band's is a composite's, delimited as
+    // a byte string is, or corruption. It is told out of line, so a scalar
+    // type byte takes the path it took before composites. An unknown
+    // discriminant is corruption: reject the key rather than guessing a
+    // width (`ValueDataType::from` would silently default to Bytes and
+    // misparse the tail).
+    let type_byte = if type_byte > u8::from(ValueDataType::Number) {
+        delimited_as(type_byte)?
+    } else {
+        type_byte
+    };
     match ValueDataType::from(type_byte) {
         // The one number band: dialog-number's self-delimiting encoding.
         ValueDataType::Number => dialog_number::encoded_len(bytes.get(at..)?),
@@ -445,12 +451,21 @@ fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
         | ValueDataType::Bytes
         | ValueDataType::Record
         | ValueDataType::Entity
-        | ValueDataType::Symbol
-        | ValueDataType::Composite => terminated_len(bytes, at),
-        // The sized number types type slots, not keys: their bytes are
-        // rejected above.
+        | ValueDataType::Symbol => terminated_len(bytes, at),
+        // Every byte up to the number band's names one of the above.
         _ => None,
     }
+}
+
+/// The scalar type byte whose payload is delimited as a key's type byte
+/// past the number band is: [`Bytes`](ValueDataType::Bytes)' for a
+/// composite's, a `0x00`-escaped, `0x00`-terminated byte string, and `None`
+/// for any other (the sized number types and the composite's map, record
+/// and list type slots, never keys).
+#[cold]
+#[inline(never)]
+fn delimited_as(type_byte: u8) -> Option<u8> {
+    (type_byte == u8::from(ValueDataType::Composite)).then_some(u8::from(ValueDataType::Bytes))
 }
 
 /// The length of one `0x00`-escaped, `0x00`-terminated byte string starting at
@@ -462,6 +477,7 @@ fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
 /// terminator. This sat at ~7% of a profiled commit as a scalar loop —
 /// values average hundreds of bytes and every key parse and every columnar
 /// split crosses them.
+#[inline(always)]
 fn terminated_len(bytes: &[u8], at: usize) -> Option<usize> {
     let start = at;
     let mut at = at;
@@ -763,8 +779,13 @@ pub fn parse_key_layout(bytes: &[u8]) -> Option<KeyLayout> {
     let &tag = bytes.first()?;
 
     // Reads the value slot at `at`: one type byte plus its self-delimiting
-    // payload (full inline encoding or spilled prefix).
-    let value_slot = |at: usize| -> Option<(ValueDataType, (u32, u32), usize)> {
+    // payload (full inline encoding or spilled prefix). It, the payload's
+    // length and a byte string's are inlined into each ordering's arm, as
+    // they were before composites: every key read takes them, and the
+    // composite's arms tipped the inliner into calls an export walk paid
+    // 3 to 4% more instructions for.
+    #[inline(always)]
+    fn value_slot(bytes: &[u8], at: usize) -> Option<(ValueDataType, (u32, u32), usize)> {
         let &type_byte = bytes.get(at)?;
         let length = value_payload_len(type_byte, bytes, at + 1)?;
         let end = (at + 1).checked_add(length)?;
@@ -772,18 +793,25 @@ pub fn parse_key_layout(bytes: &[u8]) -> Option<KeyLayout> {
             return None;
         }
         let payload = (u32::try_from(at + 1).ok()?, u32::try_from(length).ok()?);
-        Some((ValueDataType::from(type_byte), payload, end))
-    };
+        // The payload read, so a byte past the number band's is the
+        // composite's, and one up to it names its type as before composites.
+        let kind = if type_byte > u8::from(ValueDataType::Number) {
+            ValueDataType::Composite
+        } else {
+            ValueDataType::from(type_byte)
+        };
+        Some((kind, payload, end))
+    }
 
     let (versioned, entity, attribute, value_type, payload, end) = match tag {
         ATTRIBUTE_KEY_TAG => {
             let (attribute, at) = Span::read(bytes, 1)?;
             let (entity, at) = Span::read(bytes, at)?;
-            let (value_type, payload, end) = value_slot(at)?;
+            let (value_type, payload, end) = value_slot(bytes, at)?;
             (false, entity, attribute, value_type, payload, end)
         }
         VALUE_KEY_TAG => {
-            let (value_type, payload, at) = value_slot(1)?;
+            let (value_type, payload, at) = value_slot(bytes, 1)?;
             let (attribute, at) = Span::read(bytes, at)?;
             let (entity, end) = Span::read(bytes, at)?;
             (false, entity, attribute, value_type, payload, end)
@@ -798,7 +826,7 @@ pub fn parse_key_layout(bytes: &[u8]) -> Option<KeyLayout> {
             }
             let (entity, at) = Span::read(bytes, at)?;
             let (attribute, at) = Span::read(bytes, at)?;
-            let (value_type, payload, end) = value_slot(at)?;
+            let (value_type, payload, end) = value_slot(bytes, at)?;
             (true, entity, attribute, value_type, payload, end)
         }
         // ENTITY_KEY_TAG and unknown tags share the EAV shape, a safe
@@ -806,7 +834,7 @@ pub fn parse_key_layout(bytes: &[u8]) -> Option<KeyLayout> {
         _ => {
             let (entity, at) = Span::read(bytes, 1)?;
             let (attribute, at) = Span::read(bytes, at)?;
-            let (value_type, payload, end) = value_slot(at)?;
+            let (value_type, payload, end) = value_slot(bytes, at)?;
             (false, entity, attribute, value_type, payload, end)
         }
     };

@@ -172,7 +172,7 @@ nesting past 128 (`TooDeep`). Random and mutated bytes never panic.
 
 ## Tests
 
-In `dialog-corpus` (`model/composite/tests.rs`, 35, and `tree.rs`, 1):
+In `dialog-corpus` (`model/composite/tests.rs`, 37, and `tree.rs`, 1):
 against a plain model of maps and lists over 3,000 generated composites
 (construction in any order and with repeats, every key and item, length,
 identity); every layout read alike and only the canonical one accepted;
@@ -181,7 +181,9 @@ tree, no key a prefix of another; a nested view equal to, hashing and
 ordering as its copy, sharing the buffer; a read decoding only what it
 returns (a counter); the record told by its keys and typed by the band;
 a map of attributes and a record one value; the bytes the drawing shows;
-every refusal by its variant; 20,000 random and mutated byte strings
+every refusal by its variant; the bytes of fixed composites pinned, and a
+varint past `u32::MAX` refused, so the encoding reads alike on a 32-bit
+target (wasm32) and a 64-bit one; 20,000 random and mutated byte strings
 without a panic; every serde form; a tree storing records, maps and lists,
 one spilled. In `dialog-repository` (`branch/select/composite_tests.rs`,
 3): a round trip through a branch loaded afresh, by entity, attribute and
@@ -194,6 +196,41 @@ writes, is stored in a branch and read back; `operand.terms.where.entries[0][1].
 is reached five composites down with one decode, the name returned; built
 with every map's fields and the labels in the other order, it is one value
 with one reference.
+
+## What a composite costs a value that is not one
+
+Nothing, measured. The first push of this change cost scenarios that never
+build a composite up to 4% (Perf gate on 63075926c, against main's sweep):
+`export-walk` +3.97% instructions, `number-range-wide` +3.62%,
+`number-range-narrow` +2.97%, and 1 to 2.3% more bytes allocated in
+`number-commit`, `query-member`, `rule-point`, `rule-session` and
+`transaction-reads`. The types did not grow: `Value`, `ValueView`, a
+checked row's value, `Fact` and `Datum` are the size they are on main
+(32, 32, 32, 96 and 160 bytes on a 64-bit target), since a `Composite`
+(a shared buffer and an offset, 24 bytes) is no larger than the `Vec` a
+`Value::Bytes` holds; a test pins that. Callgrind put the cost in three
+places, each fixed where it was:
+
+- **A scan's upper bound.** With the composite the largest type a key
+  carries, the bound for an unset value became the composite type and a
+  256-byte filler, built in a fresh allocation for every bound of every
+  scan. One filler byte above the composite's escaped table head (`0x00
+  0xFF`) bounds every composite as well, and the bound is again two bytes
+  in the allocation it already had. That was the allocations.
+- **A key's value slot.** The check of the composite's type byte, and its
+  arms in `ValueDataType::from`, tipped the inliner: reading a key's value
+  slot became a call, on every key parsed. The composite's type byte is
+  now told out of line, a byte up to the number band's takes the scalar
+  path main has, and the slot's reading is inlined as it was. That was
+  `export-walk`.
+- **A refinement's views.** A set of sized number views walked every
+  type, 22 before and 26 now, testing each for being a view. It walks the
+  twelve sized number types alone. That was the number ranges.
+
+Against main's sweep of the same commit, every one of the 31 scenarios is
+now at or under main: `export-walk` -0.7%, `number-range-wide` -1.2%,
+`number-range-narrow` -1.9%, the allocations within a call and a few
+hundred bytes of main or under it.
 
 ## What bytes allowed to vary would take
 

@@ -436,11 +436,29 @@ impl Views {
         self.0 == 0
     }
 
-    /// The views, in type order.
+    /// Every sized number type, in type order: what a set can hold.
+    const SIZED: [ValueType; 12] = [
+        ValueType::U8,
+        ValueType::U16,
+        ValueType::U32,
+        ValueType::U64,
+        ValueType::U128,
+        ValueType::I8,
+        ValueType::I16,
+        ValueType::I32,
+        ValueType::I64,
+        ValueType::I128,
+        ValueType::F32,
+        ValueType::F64,
+    ];
+
+    /// The views, in type order. It walks the sized number types alone,
+    /// not every type, so a refinement's check costs what the set holds
+    /// however many other types there are.
     pub fn iter(&self) -> impl Iterator<Item = ValueType> + '_ {
-        ValueType::ALL
+        Self::SIZED
             .into_iter()
-            .filter(|view| view.is_view() && self.0 & Self::bit(*view) != 0)
+            .filter(|view| self.0 & Self::bit(*view) != 0)
     }
 }
 
@@ -1277,6 +1295,25 @@ mod tests {
     }
     fn o(vt: ValueType) -> Type {
         Type::from(vt).optional()
+    }
+
+    /// A set of views walks exactly the sized number types, in type
+    /// order, and yields each it holds: its list is every type that is a
+    /// view and no other.
+    #[dialog_common::test]
+    fn it_walks_every_sized_number_type_and_no_other() {
+        let sized: Vec<ValueType> = ValueType::ALL
+            .into_iter()
+            .filter(|kind| kind.is_view())
+            .collect();
+        assert_eq!(Views::SIZED.to_vec(), sized);
+        let all = Views::from_iter(sized.iter().copied());
+        assert_eq!(all.iter().collect::<Vec<_>>(), sized);
+        let some = Views::from_iter([ValueType::U16, ValueType::F64]);
+        assert_eq!(
+            some.iter().collect::<Vec<_>>(),
+            [ValueType::U16, ValueType::F64]
+        );
     }
 
     /// The band reads an integer a lower bound proves non-negative as
