@@ -613,18 +613,139 @@ fn it_refuses_a_varint_past_what_four_byte_offsets_reach() {
     assert!(matches!(refused(&largest), CompositeError::Malformed));
 }
 
-/// The bytes of a few fixed composites, so an encoding that differs between
-/// a 32-bit target (wasm32) and a 64-bit one cannot pass. The list of
-/// `SCAN_LIMIT + 1` texts carries one-byte offsets.
+/// Fixed composites, one of each shape: a small record, a map with text
+/// keys (one held twice), a list past [`SCAN_LIMIT`] (so it carries
+/// offsets, two bytes wide), one nested three levels deep, and an empty
+/// map and list.
+fn pinned() -> [(&'static str, Composite); 6] {
+    let record = Composite::record([
+        (relation("geo/lat"), Value::Float(37.77)),
+        (relation("geo/lon"), Value::Float(-122.42)),
+        (relation("x/count"), natural(3)),
+        (relation("x/ok"), Value::Boolean(true)),
+    ])
+    .unwrap();
+    let map = Composite::map([
+        (text("b"), natural(2)),
+        (text("a"), text("one")),
+        (text("a"), Value::SignedInt(-5)),
+    ])
+    .unwrap();
+    let list = Composite::list((0..30).map(|n| text(&format!("entry {n}")))).unwrap();
+    let nested = Composite::record([
+        (relation("place/name"), text("home")),
+        (
+            relation("place/visits"),
+            Value::Composite(
+                Composite::list([
+                    Value::Composite(location(1.5, -2.25)),
+                    Value::Composite(location(3.0, 4.0)),
+                ])
+                .unwrap(),
+            ),
+        ),
+    ])
+    .unwrap();
+    [
+        ("record", record),
+        ("map", map),
+        ("list", list),
+        ("nested", nested),
+        ("empty map", Composite::map([]).unwrap()),
+        ("empty list", Composite::list([]).unwrap()),
+    ]
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The bytes and the identity of each [`pinned`] composite, as written on a
+/// 64-bit target. A composite's bytes are canonical and key it in the tree,
+/// and its reference is its identity, so a replica on a 32-bit target
+/// (wasm32) and one on a 64-bit target must agree on both to the bit.
+const PINNED: [(&str, &str, &str); 6] = [
+    (
+        "record",
+        concat!(
+            "0004210867656f2f6c6174000867656f2f6c6f6e0008782f636f756e74000878",
+            "2f6f6b000104120009184b9a010911fcd2ab02091806030201",
+        ),
+        "50ded4219243f1c813257bf01cf27a8a4ed98d036db724181a286202364b6aeb",
+    ),
+    (
+        "map",
+        "00020603610003620001030e00036f6e6500000912f501091804",
+        "507f2af804513e2aeb7c9f4d7cf6aa22c3d59e21c6d855f0617a6d1eaa745bc0",
+    ),
+    (
+        "list",
+        concat!(
+            "0000000a1edc0200090012001b0024002d0036003f00480051005a0064006e00",
+            "780082008c009600a000aa00b400be00c800d200dc00e600f000fa0104010e01",
+            "1803656e74727920300003656e74727920310003656e74727920320003656e74",
+            "727920330003656e74727920340003656e74727920350003656e747279203600",
+            "03656e74727920370003656e74727920380003656e74727920390003656e7472",
+            "792031300003656e7472792031310003656e7472792031320003656e74727920",
+            "31330003656e7472792031340003656e7472792031350003656e747279203136",
+            "0003656e7472792031370003656e7472792031380003656e7472792031390003",
+            "656e7472792032300003656e7472792032310003656e7472792032320003656e",
+            "7472792032330003656e7472792032340003656e7472792032350003656e7472",
+            "792032360003656e7472792032370003656e7472792032380003656e74727920",
+            "323900",
+        ),
+        "0d3d1d606bc5137764482542ee31f38917510661669151f1f0d2d64be76c6a66",
+    ),
+    (
+        "nested",
+        concat!(
+            "00042c0867656f2f6c6174000867656f2f6c6f6e0008706c6163652f6e616d65",
+            "0008706c6163652f766973697473000102260203686f6d6500031602021a1601",
+            "020a0009180364010912facd160102080009180601091808",
+        ),
+        "34cad9fcd5b93b9bab76713956213614674465aa6da254179a924ec6e4cbda14",
+    ),
+    (
+        "empty map",
+        "000000010000",
+        "7e9f034ad1c981199f1a7d0e6dd594c0957d8ecf239f3cdb60cf56b4fb7a69ee",
+    ),
+    (
+        "empty list",
+        "000000020000",
+        "10fc213d5e98202cf24d703ca1eb188a1620d49206822f4560efedcd24dc645c",
+    ),
+];
+
+/// Every [`pinned`] composite writes the bytes and has the reference
+/// [`PINNED`] holds, on every target, and reads back from those bytes as
+/// itself.
 #[dialog_common::test]
-fn it_writes_the_same_bytes_on_every_target() {
-    assert_eq!(
-        Composite::list([text("a"), text("b")])
-            .unwrap()
-            .to_bytes()
-            .as_ref(),
-        [TABLE, 0, 0, LIST, 2, 6, 3, b'a', 0, 3, b'b', 0]
-    );
+fn it_writes_and_names_fixed_composites_alike_on_every_target() {
+    for ((name, composite), (pinned, bytes, reference)) in pinned().into_iter().zip(PINNED) {
+        assert_eq!(name, pinned);
+        let written = composite.to_bytes();
+        assert_eq!(hex(&written), bytes, "{name}'s bytes");
+        assert_eq!(
+            composite.reference().to_string(),
+            reference,
+            "{name}'s reference"
+        );
+        assert_eq!(
+            Composite::from_bytes(&written).unwrap(),
+            composite,
+            "{name}"
+        );
+    }
+}
+
+/// The list [`pinned`] holds carries two-byte offsets, and the one of
+/// `SCAN_LIMIT + 1` texts one-byte offsets, read where the layout puts them.
+#[dialog_common::test]
+fn it_writes_offsets_alike_on_every_target() {
+    let [_, _, (_, list), ..] = pinned();
+    let bytes = list.to_bytes();
+    assert_eq!(bytes[..4], [TABLE, 0, 0, layout::head(LIST, 2)]);
     let many: Vec<String> = (0..=SCAN_LIMIT).map(|n| format!("i{n}")).collect();
     let bytes = Composite::list(many.iter().map(|t| text(t)))
         .unwrap()
