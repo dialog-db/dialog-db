@@ -106,21 +106,19 @@ The maintainer's, unless marked:
 
 ```
  composite := table · body                     a buffer of one composite
- table     := seq(0) of key*                   every key the composite and
-                                               all it nests use, once, sorted
+ table     := seq(0) of atom*                  every key and scalar value the
+                                               composite and all it nests use,
+                                               once, sorted by canonical bytes
  body      := seq(1) of (index · slot)*        a map: by key, then by value
             | seq(2) of slot*                  a list: in order
- slot      := type · payload                   a scalar as a tree key holds it
+ slot      := 26 · index                        a scalar's place in the table
             | 22 · body                        a nested composite
  seq(kind) := head · count · size · offsets · items
  head      := kind | width << 2                width: none, or 1, 2 or 4 bytes
 
- {type: :tuple, items: ["a" "b"]} :
-
- 00 02 0d │ 03 items 00 │ 03 type 00 │ 01 02 14 │ 00 16 02 02 06 03 a 00 03 b 00 │ 01 01 tuple: 00
- table: 2 keys in 13 bytes,          map: 2     key 0: a list of 2 in       key 1: an entity
- text type 03                        entries    6 bytes, text type 03
-                                     in 20
+ The table holds complete scalar key/value encodings. Every scalar slot in
+ every nested body is a type-26 reference to that table; repeated strings
+ such as two `"hello world"` values occupy one table entry.
 ```
 
 - **Scan or offsets.** A sequence of more than `SCAN_LIMIT` items carries
@@ -134,8 +132,17 @@ The maintainer's, unless marked:
 - **Values under one key** are ordered by their canonical bytes on their
   own, so their order does not depend on the table of the composite
   holding them.
-- **Keys once.** The table serves the composite and everything nested in
-  it, attributes and text keys alike: a syntax tree writes `type` once.
+- **Atoms once.** The table serves the composite and everything nested in
+  it, for keys and values alike: a syntax tree writes `type` once, and the
+  same string used in several fields appears once.
+
+**Chronicle.** When Chronicle stores a composite, it interns each table
+atom through the same token dictionary it uses for ordinary key values.
+Its local composite token holds those shared token IDs followed by the body
+of references; the canonical table and body are rebuilt when a key or block
+is realized. Thus equal atoms share tokens across composites and with
+standalone values. A spilled composite whose key carries only a prefix stays
+opaque until its full value is available.
 
 **Record as a sub-band.** One kind, told by its keys and never by a flag:
 the table sorts by type byte first, so the attributes are one run of it,
@@ -315,7 +322,8 @@ CompositeRecord, CompositeList}`. To do there:
 - keep a struct's entries as a list of `[key, value]` pairs (a key is a
   node, and a composite's key is a scalar), as `syntax.rs` does now.
 
-Not done here: a composite in a key is still its canonical bytes escaped
-as one string, so a key cannot be read in place and a tree's node does not
-split a composite into the archive's tokens (#748, design sections 1 and
-4).
+This PR extends #843's canonical in-memory and wire layout with atom
+references, then splits those atoms into Chronicle's archive-wide token
+dictionary, following #748's proposed buffer-table design (sections 0, 2,
+and 4). Chronicle's row still names the composite as one value; only its
+local storage token is a list of shared atom-token IDs plus the body.

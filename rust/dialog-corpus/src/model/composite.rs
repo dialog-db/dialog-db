@@ -17,12 +17,12 @@
 //!
 //! ```text
 //! composite := table · body              a composite on its own: a buffer of one
-//! table     := seq(TABLE) of keys        every key the composite and every map
-//!                                        nested in it uses, once, sorted by bytes
+//! table     := seq(TABLE) of atoms       every key and scalar value the
+//!                                        composite and its nested values use,
+//!                                        once, sorted by bytes
 //! body      := seq(MAP) of (index · slot)   entries sorted by key, then by value
 //!            | seq(LIST) of slot             items in order
-//! slot      := type · payload            a scalar as a tree key holds it, every
-//!                                        number in the one band
+//! slot      := 26 · index                 a scalar's place in the table
 //!            | 22 · body                 a nested composite, its keys in the table
 //! seq(kind) := head · count · size · offsets · items
 //! head      := kind | width << 2         width: no offsets, or 1, 2 or 4 bytes
@@ -70,7 +70,7 @@ use merkle_reference::{Reference, Type};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeSeq};
 use thiserror::Error;
 
-use self::encode::{Node, canonical, node, scalar};
+use self::encode::{Node, TOKEN_REF, canonical, node, scalar};
 use self::layout::{LIST, MAP, Seq, TABLE, read_varint, seq, slot_end};
 use crate::identity::COMPOSITE;
 use crate::{
@@ -223,6 +223,17 @@ impl Composite {
         Ok(read)
     }
 
+    /// Rebuilds canonical bytes from an ordered header table and the body
+    /// that refers to it. Used by tokenized stores when realizing a value
+    /// from their shared token table.
+    pub fn from_token_parts(tokens: &[&[u8]], body: &[u8]) -> Result<Self, CompositeError> {
+        let table: Vec<Vec<u8>> = tokens.iter().map(|token| token.to_vec()).collect();
+        let mut bytes = Vec::new();
+        encode::write_seq(TABLE, &table, SCAN_LIMIT, &mut bytes);
+        bytes.extend_from_slice(body);
+        Self::from_bytes(&bytes)
+    }
+
     /// The composite in `bytes`, read with every check
     /// [`Composite::from_bytes`] makes but the last: whether they are the
     /// canonical layout. Only measurement uses it, to read layouts with
@@ -338,6 +349,25 @@ impl Composite {
         };
         let end = slot_end(&self.buffer, start, table.end)?;
         self.buffer.get(start..end)
+    }
+
+    /// The composite's canonical scalar tokens, in byte order. These are
+    /// the entries of its shared header table: map keys and scalar values,
+    /// each exactly once, including values used by nested composites.
+    pub fn atom_tokens(&self) -> Vec<&[u8]> {
+        let Some(table) = self.table() else {
+            return Vec::new();
+        };
+        (0..table.count)
+            .filter_map(|index| self.key_bytes(index))
+            .collect()
+    }
+
+    /// The root body's canonical bytes, whose scalar references index
+    /// [`atom_tokens`](Self::atom_tokens).
+    pub fn token_body(&self) -> &[u8] {
+        let end = self.seq().map_or(self.body, |body| body.end);
+        &self.buffer[self.body..end]
     }
 
     /// The place of `key` (a slot's bytes) in the table: by halving where
@@ -459,6 +489,16 @@ impl Composite {
     /// composite as a view of this buffer.
     fn value_at(&self, slot: usize, end: usize) -> Option<Value> {
         let kind = *self.buffer.get(slot)?;
+        if kind == TOKEN_REF {
+            let (index, after) = read_varint(&self.buffer, slot + 1)?;
+            if after != end {
+                return None;
+            }
+            let bytes = self.key_bytes(index)?;
+            counted();
+            let (value, rest) = decode_value(ValueDataType::from(bytes[0]), &bytes[1..])?;
+            return rest.is_empty().then_some(value);
+        }
         if kind == ValueDataType::Composite as u8 {
             return Some(Value::Composite(self.nested(slot)));
         }
@@ -471,6 +511,15 @@ impl Composite {
     /// from the buffer.
     fn view_at(&self, slot: usize, end: usize) -> Option<ValueView<'_>> {
         let kind = *self.buffer.get(slot)?;
+        if kind == TOKEN_REF {
+            let (index, after) = read_varint(&self.buffer, slot + 1)?;
+            if after != end {
+                return None;
+            }
+            let bytes = self.key_bytes(index)?;
+            counted();
+            return decode_value_view(ValueDataType::from(bytes[0]), &bytes[1..]).ok();
+        }
         if kind == ValueDataType::Composite as u8 {
             return Some(ValueView::Composite(self.nested(slot)));
         }
@@ -660,7 +709,18 @@ impl Composite {
                 (None, cursor)
             };
             let end = slot_end(&self.buffer, slot, body.end).ok_or(CompositeError::Malformed)?;
-            let value = if self.buffer[slot] == ValueDataType::Composite as u8 {
+            let value = if self.buffer[slot] == TOKEN_REF {
+                let (token, after) =
+                    read_varint(&self.buffer, slot + 1).ok_or(CompositeError::Malformed)?;
+                if after != end {
+                    return Err(CompositeError::Malformed);
+                }
+                Node::Slot(
+                    self.key_bytes(token)
+                        .ok_or(CompositeError::Malformed)?
+                        .to_vec(),
+                )
+            } else if self.buffer[slot] == ValueDataType::Composite as u8 {
                 self.read_node_checked(slot + 1, depth + 1)?
             } else {
                 self.check_scalar(slot, end)?;
@@ -700,7 +760,13 @@ impl Composite {
                 (None, cursor)
             };
             let end = slot_end(&self.buffer, slot, body.end)?;
-            let value = if self.buffer[slot] == ValueDataType::Composite as u8 {
+            let value = if self.buffer[slot] == TOKEN_REF {
+                let (token, after) = read_varint(&self.buffer, slot + 1)?;
+                if after != end {
+                    return None;
+                }
+                Node::Slot(self.key_bytes(token)?.to_vec())
+            } else if self.buffer[slot] == ValueDataType::Composite as u8 {
                 self.read_node(slot + 1)?
             } else {
                 Node::Slot(self.buffer[slot..end].to_vec())
