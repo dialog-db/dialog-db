@@ -172,7 +172,7 @@ nesting past 128 (`TooDeep`). Random and mutated bytes never panic.
 
 ## Tests
 
-In `dialog-corpus` (`model/composite/tests.rs`, 35, and `tree.rs`, 1):
+In `dialog-corpus` (`model/composite/tests.rs`, 38, and `tree.rs`, 1):
 against a plain model of maps and lists over 3,000 generated composites
 (construction in any order and with repeats, every key and item, length,
 identity); every layout read alike and only the canonical one accepted;
@@ -181,7 +181,11 @@ tree, no key a prefix of another; a nested view equal to, hashing and
 ordering as its copy, sharing the buffer; a read decoding only what it
 returns (a counter); the record told by its keys and typed by the band;
 a map of attributes and a record one value; the bytes the drawing shows;
-every refusal by its variant; 20,000 random and mutated byte strings
+every refusal by its variant; a varint past `u32::MAX` refused; the bytes
+and the merkle reference of six fixed composites (a record, a map with
+text keys, a list with two-byte offsets, one nested three levels deep, an
+empty map and an empty list) pinned as constants, which the wasm32 build
+run in a browser matches as the 64-bit one does; 20,000 random and mutated byte strings
 without a panic; every serde form; a tree storing records, maps and lists,
 one spilled. In `dialog-repository` (`branch/select/composite_tests.rs`,
 3): a round trip through a branch loaded afresh, by entity, attribute and
@@ -194,6 +198,62 @@ writes, is stored in a branch and read back; `operand.terms.where.entries[0][1].
 is reached five composites down with one decode, the name returned; built
 with every map's fields and the labels in the other order, it is one value
 with one reference.
+
+## What a composite costs a value that is not one
+
+Nothing the Perf gate can see. The first push of this change (63075926c)
+cost scenarios that build no composite up to 4%: `export-walk` +3.97%
+instructions, the number ranges +2.4 to +3.6%, and 0.9 to 2.3% more bytes
+and up to 1.5% more calls into the allocator in a dozen others. The types
+did not grow: `Value`, `Option<Value>`, `ValueView`, a checked row's value
+and the tree's entry are 32, 32, 32, 32 and 184 bytes on a 64-bit target
+on main and here, since a `Composite` (a shared buffer and an offset, 24
+bytes) is no larger than the `Vec` a `Value::Bytes` holds; a test pins
+`Value` and `ValueView` at the size their scalars give them. Callgrind put
+the cost in three places:
+
+- **A scan's upper bound.** With the composite the largest type a key
+  carries, the bound for an unset value became the composite type and a
+  256-byte filler, in an allocation of its own, for every bound of every
+  scan. Every composite's bytes start with its table's head, a byte below
+  `0x10`, so one filler byte and the terminator bound them all, in the
+  two-byte allocation the bound reserves. Main reserved 257 bytes for its
+  one-byte infinity, so the bytes allocated are now under main's.
+- **A key's value slot.** The composite's type byte in the key parser
+  moved the reading of a value slot out of line, a call on every key
+  parsed (`parse_key_layout`'s closure, 1.75M instructions in
+  `export-walk`). The composite's byte is told in a cold function and the
+  slot is read inline again.
+- **A refinement's views.** A set of sized number views walked every
+  type, 26 now against 22, testing each for being a view
+  (`Refinement::admits`, +674K in `number-range-wide`). It walks the
+  twelve sized number types alone.
+
+Measured with `perf sweep` under callgrind, as the gate measures: the
+first push against the main it was measured on (875cc7f15), and this
+change merged on main (181b8bd61) against that main. Instructions outside
+the allocator:
+
+| scenario | main 875cc7f15 | 63075926c | main 181b8bd61 | now |
+|---|--:|--:|--:|--:|
+| export-walk | 22,723,071 | 23,624,289 | 22,723,073 | 22,563,042 (-0.70%) |
+| number-range-wide | 20,173,192 | 20,905,591 | 20,179,484 | 19,931,486 (-1.23%) |
+| number-range-narrow | 4,277,749 | 4,404,134 | 4,276,754 | 4,197,557 (-1.85%) |
+| number-range-mixed | 6,638,925 | 6,799,851 | 6,640,044 | 6,597,610 (-0.64%) |
+
+Bytes allocated, the calls into the allocator back to main's within one:
+
+| scenario | main 875cc7f15 | 63075926c | main 181b8bd61 | now |
+|---|--:|--:|--:|--:|
+| query-member | 28,043,552 | 28,690,824 | 28,048,738 | 27,793,719 (-0.91%) |
+| number-commit | 421,037,100 | 428,206,560 | 419,364,868 | 418,371,888 (-0.24%) |
+| transaction-reads | 80,350,950 | 81,732,930 | 79,556,140 | 79,179,424 (-0.47%) |
+| subscribe-repoll | 7,842,709 | 7,975,061 | 7,555,755 | 7,527,947 (-0.37%) |
+| rule-point | 30,785,124 | 31,199,484 | 30,439,096 | 30,234,008 (-0.67%) |
+
+No scenario of the 31 grows past the gate's tolerance: the most any grows
+is 32,933 instructions (`query-join`, +0.07%, under the gate's 50,000) and
+5 calls into the allocator.
 
 ## What bytes allowed to vary would take
 
