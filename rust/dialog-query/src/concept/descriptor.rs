@@ -28,6 +28,7 @@ use crate::identity::{self, CONCEPT, field};
 use crate::memo::Memo;
 use crate::planner::Conjunction;
 use crate::rule::DeductiveRule;
+use dialog_corpus::identity::SYMBOL;
 use merkle_reference::{Reference, Type as ReferenceType};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -227,10 +228,29 @@ impl ConceptDescriptor {
     pub fn attribute_field(&self) -> Option<(&str, &ConceptFieldDescriptor)> {
         let mut fields = self.with().iter();
         let (name, field) = fields.next()?;
-        if fields.next().is_some() || field.is_optional() || field.conforms().is_some() {
+        if fields.next().is_some()
+            || field.is_optional()
+            || field.conforms().is_some()
+            || field.pick().is_some()
+        {
             return None;
         }
         Some((name, field))
+    }
+
+    /// The relation this concept picks one claim of per entity, when it
+    /// is a concept of one required field that picks: the attribute
+    /// concept of that field, which reads every claim. What such a
+    /// concept answers for an entity moves exactly when that relation's
+    /// claims for the entity do.
+    pub fn picked_relation(&self) -> Option<&ConceptDescriptor> {
+        let mut fields = self.with().iter();
+        let (_, field) = fields.next()?;
+        if fields.next().is_some() || field.is_optional() || field.conforms().is_some() {
+            return None;
+        }
+        field.pick()?;
+        Some(field.attribute_concept())
     }
 
     /// The keyed-collection fields of this concept.
@@ -251,7 +271,8 @@ impl ConceptDescriptor {
     /// It maps each attribute, by the attribute's
     /// [reference](AttributeDescriptor::reference), to the field's options:
     /// `optional` to `true` for an optional field, and `conforms` to the
-    /// reference of the concept a concept-typed field's value conforms to.
+    /// reference of the concept a concept-typed field's value conforms to,
+    /// and `pick` to the pick's name for a field that declares one.
     /// A required plain field's options are the empty map. Field names and
     /// the description are not part of it, and the attributes and the target
     /// concept enter by reference, so the concept is the same whether they
@@ -268,6 +289,12 @@ impl ConceptDescriptor {
             }
             if let Some(target) = field.conforms() {
                 options.push((field::CONFORMS, target.reference()));
+            }
+            if let Some(aggregate) = field.pick() {
+                options.push((
+                    field::PICK,
+                    SYMBOL.reference_of(aggregate.name().as_bytes()),
+                ));
             }
             (
                 field.descriptor().reference(),
@@ -608,10 +635,10 @@ impl ConceptStatement {
 
 impl Statement for ConceptStatement {
     fn assert(self, update: &mut impl Update) {
-        // Each field is written under its own pick, as an attribute
-        // statement spelling that pick is: a `last` field's write
-        // succeeds the claim its cell holds, and is a no-op when the
-        // cell already reads as the written value.
+        // Each field is written under its own cardinality, as an
+        // attribute statement is: a cardinality one field's write
+        // succeeds the newest claim its cell holds, and is a no-op when
+        // the cell already reads as the written value.
         for attribution in self.with {
             match attribution.layer {
                 Some(layer) => update.associate_in(
@@ -619,13 +646,13 @@ impl Statement for ConceptStatement {
                     attribution.the,
                     self.this.clone(),
                     attribution.is,
-                    attribution.pick,
+                    attribution.cardinality,
                 ),
                 None => update.associate(
                     attribution.the,
                     self.this.clone(),
                     attribution.is,
-                    attribution.pick,
+                    attribution.cardinality,
                 ),
             }
         }

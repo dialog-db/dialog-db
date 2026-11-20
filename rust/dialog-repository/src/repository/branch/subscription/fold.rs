@@ -32,6 +32,15 @@
 //! queries, concept queries and folds give. A poll that meets a
 //! conclusion without them fails.
 //!
+//! A fold with an entry that orders by standing (`last`, `top`; see
+//! [`Aggregator::orders_by_standing`]) is not folded again from the
+//! rows kept here, which carry no standing: a poll in which a row of
+//! either query moved evaluates the whole fold afresh, as a `select`
+//! does, and reports how its rows differ from the ones last reported.
+//! Each such evaluation counts as a recompute.
+//!
+//! [`Aggregator::orders_by_standing`]: dialog_query::reduce::Aggregator::orders_by_standing
+//!
 //! An inner subscription reports a row once, however many derivations
 //! it has, so the rows kept here are a set: a query whose evaluation
 //! yields one row twice is folded once here and twice by a `select`.
@@ -88,6 +97,12 @@ pub struct FoldSubscription<G: Application, Q: Application> {
     initialized: bool,
     /// Groups folded again in memory so far.
     refolds: usize,
+    /// Whether an entry of the fold orders by standing, so that a poll
+    /// that moved a row evaluates the fold afresh (see the [module
+    /// docs](self)).
+    afresh: bool,
+    /// Fresh evaluations of the whole fold so far.
+    evaluations: usize,
 }
 
 impl Branch {
@@ -127,6 +142,11 @@ impl Stack {
 
 impl<G: Application, Q: Application> FoldSubscription<G, Q> {
     fn new(groups: Subscription<G>, inputs: Subscription<Q>, fold: Fold<G, Q>) -> Self {
+        let afresh = fold
+            .reduce()
+            .entries
+            .iter()
+            .any(|entry| entry.aggregator.orders_by_standing());
         Self {
             fold,
             groups,
@@ -137,6 +157,8 @@ impl<G: Application, Q: Application> FoldSubscription<G, Q> {
             pending: BTreeSet::new(),
             initialized: false,
             refolds: 0,
+            afresh,
+            evaluations: 0,
         }
     }
 
@@ -210,10 +232,11 @@ where
     Q: Application + Clone + ConditionalSync,
     Q::Conclusion: Conclusion + PartialEq + Clone + ConditionalSync,
 {
-    /// Full evaluations of the inner queries so far, of both together:
-    /// each one's first poll and every fallback from its maintenance.
+    /// Full evaluations so far: of the inner queries, both together,
+    /// each one's first poll and every fallback from its maintenance;
+    /// and of the whole fold, for one that orders by standing.
     pub fn recomputes(&self) -> usize {
-        self.groups.recomputes() + self.inputs.recomputes()
+        self.groups.recomputes() + self.inputs.recomputes() + self.evaluations
     }
 
     /// Polls of the inner queries maintained incrementally so far, of
@@ -298,6 +321,9 @@ where
         if self.initialized && !reported && self.pending.is_empty() {
             return Ok(None);
         }
+        if self.afresh {
+            return self.evaluate_afresh(env).await.map(Some);
+        }
 
         // Every fallible step runs before what was reported changes, so
         // a fold that fails leaves the last reported rows in place.
@@ -344,6 +370,76 @@ where
         }
         self.initialized = true;
         Ok(Some(delta))
+    }
+
+    /// Evaluate the whole fold afresh, over what the inner queries read,
+    /// and report how its rows differ from the ones last reported: what
+    /// a poll of a fold that orders by standing does.
+    async fn evaluate_afresh<'a, Env>(
+        &'a mut self,
+        env: &'a Env,
+    ) -> Result<Delta<FoldConclusion>, EvaluationError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + ConditionalSync
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + ConditionalSync
+            + Provider<BlobLoad>
+            + Provider<dialog_corpus::Preload>
+            + Provider<dialog_corpus::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
+            + ConditionalSync
+            + 'static,
+    {
+        // A subscription's first poll is a whole evaluation, read as the
+        // inner subscriptions read: the same branch, and the same stack.
+        let mut whole = Subscription::over(
+            self.inputs.branch.clone(),
+            self.inputs.stack.clone(),
+            self.fold.clone(),
+        );
+        let rows = whole
+            .poll(env)
+            .await?
+            .map(|delta| delta.asserted)
+            .unwrap_or_default();
+        let mut now = HashMap::with_capacity(rows.len());
+        for row in rows {
+            let bindings = self
+                .fold
+                .bindings(&row)
+                .ok_or_else(|| EvaluationError::Planning {
+                    message: "a folded row gives its bindings".to_string(),
+                })?;
+            now.insert(self.fold.key(&bindings)?, row);
+        }
+        self.evaluations += 1;
+        let mut delta = Delta {
+            asserted: Vec::new(),
+            retracted: Vec::new(),
+        };
+        for (key, before) in &self.folded {
+            if now.get(key) != Some(before) {
+                delta.retracted.push(before.clone());
+            }
+        }
+        for (key, row) in &now {
+            if self.folded.get(key) != Some(row) {
+                delta.asserted.push(row.clone());
+            }
+        }
+        self.folded = now;
+        self.pending.clear();
+        self.initialized = true;
+        Ok(delta)
     }
 }
 

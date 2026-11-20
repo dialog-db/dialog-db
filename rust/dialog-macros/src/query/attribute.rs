@@ -8,7 +8,7 @@
 //! ```rust,ignore
 //! /// A person's full name
 //! #[derive(Attribute)]
-//! #[pick(last)]
+//! #[cardinality(one)]
 //! struct FullName(String);
 //! ```
 //!
@@ -20,9 +20,9 @@
 //!     type Type = String;
 //!
 //!     fn descriptor() -> AttributeDescriptor {
-//!         // Builds descriptor from domain/name with description, type and pick
+//!         // Builds descriptor from domain/name with description, cardinality and type
 //!         AttributeDescriptor::new(/* domain/full-name */, "A person's full name",
-//!             Cardinality::One, <String as Typed>::DECLARED).with_pick(Pick::Last)
+//!             Cardinality::One, <String as Typed>::DECLARED)
 //!     }
 //!
 //!     fn value(&self) -> &String { &self.0 }
@@ -39,7 +39,7 @@ use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 use super::helpers::{
-    extract_doc_comments, parse_domain_attribute, parse_pick_attribute, to_kebab_case,
+    extract_doc_comments, parse_cardinality_attribute, parse_domain_attribute, to_kebab_case,
 };
 
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -93,8 +93,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let description = extract_doc_comments(&input.attrs);
     let description_lit = syn::LitStr::new(&description, proc_macro2::Span::call_site());
 
-    // Parse the pick
-    let pick = match parse_pick_attribute(&input.attrs) {
+    // Parse the cardinality
+    let cardinality = match parse_cardinality_attribute(&input.attrs) {
         Ok(c) => c,
         Err(e) => return e.to_compile_error().into(),
     };
@@ -230,10 +230,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     dialog_query::AttributeDescriptor::new(
                         the,
                         #description_lit,
-                        dialog_query::Cardinality::One,
+                        #cardinality,
                         <#wrapped_type as dialog_query::Typed>::DECLARED,
                     )
-                    .with_pick(#pick)
                 })
             }
         }

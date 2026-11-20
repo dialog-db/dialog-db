@@ -47,7 +47,7 @@ fn fact(of: &str) -> Fact {
 }
 
 fn assert_one(of: &str) -> Instruction {
-    Instruction::Assert(fact(of), dialog_corpus::Pick::All)
+    Instruction::Assert(fact(of), dialog_corpus::Cardinality::Many)
 }
 
 pub mod note {
@@ -108,7 +108,7 @@ macro_rules! passing_writers {
                         is: Value::String("passing".to_string()),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )]))
                 .perform($env)
                 .await?;

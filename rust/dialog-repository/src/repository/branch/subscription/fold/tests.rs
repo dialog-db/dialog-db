@@ -30,13 +30,16 @@ fn read(the: Term<Relation>, is: &str, cause: &str) -> AttributeQuery {
 
 /// Each to-do with a title, its inputs of `the` folded by `aggregator`.
 fn folded(the: Term<Relation>, aggregator: Aggregator) -> Fold<AttributeQuery, AttributeQuery> {
+    folded_by(the, ReduceEntry::new("tags", aggregator, Term::var("g")))
+}
+
+/// Each to-do with a title, its inputs of `the` folded by `entry`, whose
+/// field is `tags` and whose input is `?g`.
+fn folded_by(the: Term<Relation>, entry: ReduceEntry) -> Fold<AttributeQuery, AttributeQuery> {
     Fold::new(
         read(Term::from(the!("todo/title")), "title", "c1"),
         read(the, "g", "c2"),
-        Reduce::new(
-            vec!["t".into()],
-            vec![ReduceEntry::new("tags", aggregator, Term::var("g"))],
-        ),
+        Reduce::new(vec!["t".into()], vec![entry]),
     )
 }
 
@@ -285,10 +288,23 @@ async fn equivalence(
     values: &[Datum],
     seed: u64,
 ) -> anyhow::Result<()> {
+    let entry = ReduceEntry::new("tags", aggregator, Term::var("g"));
+    equivalence_of(the, entry, values, seed).await
+}
+
+/// [`equivalence`], folding with `entry` (its field `tags`, its input
+/// `?g`).
+async fn equivalence_of(
+    the: Relation,
+    entry: ReduceEntry,
+    values: &[Datum],
+    seed: u64,
+) -> anyhow::Result<()> {
     const STEPS: usize = 200;
     const TODOS: usize = 20;
+    let aggregator = entry.aggregator;
     let (operator, branch) = opened().await?;
-    let fold = folded(Term::from(the.clone()), aggregator);
+    let fold = folded_by(Term::from(the.clone()), entry);
     let mut subscription = branch.subscribe_fold(fold.clone());
     let mut random = Random(seed);
     let titles = [
@@ -416,11 +432,21 @@ async fn equivalence(
         refused < STEPS / 2,
         "{refused} of {STEPS} steps refused: the comparison compared little"
     );
-    assert_eq!(
-        subscription.recomputes(),
-        2,
-        "every later poll maintained both inner queries"
-    );
+    if aggregator.orders_by_standing() {
+        // A fold that orders by standing is evaluated afresh on every
+        // poll a row moved in: the inner queries' first polls, and more.
+        assert!(
+            subscription.recomputes() > 2,
+            "a fold under `{aggregator}` was evaluated afresh"
+        );
+        assert_eq!(subscription.refolds(), 0, "no group folded from kept rows");
+    } else {
+        assert_eq!(
+            subscription.recomputes(),
+            2,
+            "every later poll maintained both inner queries"
+        );
+    }
     Ok(())
 }
 
@@ -458,6 +484,92 @@ fn floats() -> Vec<Datum> {
         .into_iter()
         .map(Datum::Float)
         .collect()
+}
+
+/// `last` over tags: the tag bound from the newest fact. A retraction
+/// of the tag it chose folds the group again over the tags left, and
+/// the newest of them stands.
+#[dialog_common::test]
+async fn it_keeps_the_newest_equal_to_a_select() -> anyhow::Result<()> {
+    equivalence(the!("todo/tag"), Aggregator::Last, &texts(), 0x5eed_0009).await
+}
+
+/// `top` over tags, ranked by a listing best first. A retraction of the
+/// tag it chose folds the group again over the tags left, and the best
+/// listed of them stands.
+#[dialog_common::test]
+async fn it_keeps_the_top_listed_equal_to_a_select() -> anyhow::Result<()> {
+    let mut entry = ReduceEntry::new("tags", Aggregator::Top, Term::var("g"));
+    entry.listed = ["work", "call", "errand", "home"]
+        .into_iter()
+        .map(|text| Value::String(text.to_string()))
+        .collect();
+    equivalence_of(the!("todo/tag"), entry, &texts(), 0x5eed_000a).await
+}
+
+/// `top` over tags whose listing leaves two of them out: among the
+/// unlisted ones the newest stands, which only rows carrying their
+/// standing can tell, so the standing fold still equals a select.
+#[dialog_common::test]
+async fn it_keeps_the_top_of_a_partial_listing_equal_to_a_select() -> anyhow::Result<()> {
+    let mut entry = ReduceEntry::new("tags", Aggregator::Top, Term::var("g"));
+    entry.listed = ["work", "call"]
+        .into_iter()
+        .map(|text| Value::String(text.to_string()))
+        .collect();
+    equivalence_of(the!("todo/tag"), entry, &texts(), 0x5eed_000b).await
+}
+
+/// A `sum` is maintained per group: after its first poll no poll
+/// evaluates anything whole, and only the moved group is folded again.
+/// A `last` over the same changes is evaluated afresh on each poll that
+/// moved a row, and folds no group from kept rows.
+#[dialog_common::test]
+async fn it_maintains_a_sum_per_group_and_evaluates_a_last_afresh() -> anyhow::Result<()> {
+    let (operator, branch) = opened().await?;
+    let mut sum = branch.subscribe_fold(folded(Term::from(the!("todo/size")), Aggregator::Sum));
+    let mut last = branch.subscribe_fold(folded(Term::from(the!("todo/size")), Aggregator::Last));
+    let one = || Move {
+        assert: true,
+        title: true,
+        of: 1,
+        is: Datum::Text("Buy milk".into()),
+    };
+    let size = |is: i64, assert: bool| Move {
+        assert,
+        title: false,
+        of: 1,
+        is: Datum::Integer(is),
+    };
+    let steps = [
+        vec![one()],
+        vec![size(3, true)],
+        vec![size(5, true)],
+        vec![size(5, false)],
+    ];
+    for (step, moves) in steps.iter().enumerate() {
+        commit(&branch, &operator, &the!("todo/size"), moves).await?;
+        sum.poll(&operator).await?;
+        last.poll(&operator).await?;
+        if step == 0 {
+            assert_eq!(sum.recomputes(), 2, "the first poll evaluates each query");
+        }
+    }
+    assert_eq!(sum.recomputes(), 2, "every later poll was maintained");
+    assert_eq!(sum.refolds(), 4, "the one group, folded once per poll");
+    assert_eq!(
+        last.recomputes(),
+        2 + steps.len(),
+        "each poll evaluated the fold afresh"
+    );
+    assert_eq!(last.refolds(), 0);
+    let newest: Vec<_> = last.results().filter_map(|row| row.get("tags")).collect();
+    assert_eq!(
+        newest,
+        vec![&Value::UnsignedInt(3)],
+        "5 taken back, 3 stands"
+    );
+    Ok(())
 }
 
 /// `count` over tags.

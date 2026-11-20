@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_corpus::{Fact, Pick};
+use dialog_corpus::{Cardinality, Fact};
 use dialog_query::query::Output as _;
 use dialog_query::{ConceptConclusion, ConceptQuery};
 use dialog_repository::{Branch, Delta, Subscription};
@@ -37,7 +37,7 @@ impl Prepared for Repoll {
                     text("yes"),
                 )
             });
-            self.env.commit(assert_all(facts, Pick::Last)).await?;
+            self.env.commit(assert_all(facts, Cardinality::One)).await?;
             let delta = self.subscription.poll(&self.env.operator).await?;
             let (asserted, retracted) = delta
                 .as_ref()
@@ -92,7 +92,7 @@ impl Prepared for Fanout {
     fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
         Box::pin(async move {
             self.env
-                .commit(assert_all(added_note(self.size), Pick::Last))
+                .commit(assert_all(added_note(self.size), Cardinality::One))
                 .await?;
             let mut changed = 0u64;
             for subscription in &mut self.subscriptions {
@@ -159,7 +159,7 @@ async fn note_subscriptions(
 /// list; then a commit adding a note and a poll of every subscription.
 pub async fn fanout(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
-    env.commit(assert_all((0..size).flat_map(note_facts), Pick::Last))
+    env.commit(assert_all((0..size).flat_map(note_facts), Cardinality::One))
         .await?;
     env.reopen().await?;
     let subscriptions = note_subscriptions(&env.branch, &env.operator, size).await?;
@@ -215,7 +215,7 @@ impl Prepared for Pulled {
 /// for it; then the device's pull and the poll of every subscription.
 pub async fn pulled(size: usize) -> Result<Box<dyn Prepared>> {
     let env = Env::open().await?;
-    env.commit(assert_all((0..size).flat_map(note_facts), Pick::Last))
+    env.commit(assert_all((0..size).flat_map(note_facts), Cardinality::One))
         .await?;
     let Adopter {
         reader,
@@ -228,7 +228,8 @@ pub async fn pulled(size: usize) -> Result<Box<dyn Prepared>> {
     // which the device's session shares. Forget them all, then read the
     // device's own tree once more, so that tree is warm and the commit's
     // blocks are the cold ones, as a write from another device is.
-    env.commit(assert_all(added_note(size), Pick::Last)).await?;
+    env.commit(assert_all(added_note(size), Cardinality::One))
+        .await?;
     env.forget();
     adopter
         .select(query(&note(), &["title", "body"], None))

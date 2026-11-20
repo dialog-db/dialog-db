@@ -295,7 +295,7 @@ mod tests {
                 is: Value::String(is.to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         ))
     }
 

@@ -163,6 +163,9 @@ pub struct DialogFieldAttributes {
     /// `conforms = SomeConcept`: marks a concept-typed field; the
     /// path names the target concept type.
     pub conforms: Option<syn::Path>,
+    /// `pick = max`: the pick the field reads its
+    /// claim with: `last`, `max` or `min`.
+    pub pick: Option<syn::Ident>,
 }
 
 /// Parse the field-level `#[dialog(...)]` attribute.
@@ -172,8 +175,12 @@ pub struct DialogFieldAttributes {
 ///   specific string
 /// - `#[dialog(conforms = Employee)]` - concept-typed field whose
 ///   target entity must conform to the named concept
+/// - `#[dialog(pick = max)]` - the pick the field
+///   reads its claim with: `last`, `max` or `min`. `top` ranks by a
+///   listed `as`, which `#[derive(Attribute)]` cannot declare, so it is
+///   refused here.
 ///
-/// Both parameters may appear together.
+/// The parameters may appear together.
 pub fn parse_dialog_field_attributes(
     attrs: &[Attribute],
 ) -> Result<DialogFieldAttributes, syn::Error> {
@@ -194,9 +201,29 @@ pub fn parse_dialog_field_attributes(
                     let value = meta.value()?;
                     parsed.conforms = Some(value.parse::<syn::Path>()?);
                     Ok(())
+                } else if meta.path.is_ident("pick") {
+                    let value = meta.value()?;
+                    let aggregate: syn::Ident = value.parse()?;
+                    match aggregate.to_string().as_str() {
+                        "last" | "max" | "min" => {
+                            parsed.pick = Some(aggregate);
+                            Ok(())
+                        }
+                        "top" => Err(syn::Error::new_spanned(
+                            aggregate,
+                            "`top` ranks by the values an attribute's `as` lists, which \
+                             `#[derive(Attribute)]` cannot declare; use `max` or `min`, or \
+                             declare the concept in the notation",
+                        )),
+                        _ => Err(syn::Error::new_spanned(
+                            aggregate,
+                            "a field's pick is `last`, `max` or `min`",
+                        )),
+                    }
                 } else {
                     Err(meta.error(
-                        "unknown dialog attribute parameter; expected `rename` or `conforms`",
+                        "unknown dialog attribute parameter; expected `rename`, `conforms` \
+                         or `pick`",
                     ))
                 }
             })?;
@@ -205,53 +232,54 @@ pub fn parse_dialog_field_attributes(
     Ok(parsed)
 }
 
-/// Parse the `#[pick(last)]`, `#[pick(all)]`, `#[pick(max)]` or
-/// `#[pick(min)]` attribute into the `dialog_query::Pick` the attribute
-/// is read under, defaulting to `Last`. `#[cardinality(..)]`, the
-/// spelling before picks, is refused with the pick that replaces it.
-pub fn parse_pick_attribute(attrs: &[Attribute]) -> Result<TokenStream, syn::Error> {
+/// Parse the `#[cardinality(one)]` (the default) or
+/// `#[cardinality(many)]` attribute into the `dialog_query::Cardinality`
+/// the attribute is read and written under. `#[pick(last)]` and
+/// `#[pick(all)]` say the same as cardinality one and many; a ranking
+/// pick is how a concept's field reads an attribute, and is refused
+/// here with where it goes.
+pub fn parse_cardinality_attribute(attrs: &[Attribute]) -> Result<TokenStream, syn::Error> {
     for attr in attrs {
-        if attr.path().is_ident("cardinality") {
-            let mut replacement = "last";
-            attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("many") {
-                    replacement = "all";
-                }
-                Ok(())
-            })?;
-            return Err(syn::Error::new_spanned(
-                attr,
-                format!("`#[cardinality(..)]` is now `#[pick({replacement})]`"),
-            ));
-        }
         if attr.path().is_ident("pick") {
-            let mut pick = None;
+            let mut cardinality = None;
             attr.parse_nested_meta(|meta| {
                 let variant = if meta.path.is_ident("last") {
-                    quote! { Last }
+                    quote! { One }
                 } else if meta.path.is_ident("all") {
-                    quote! { All }
-                } else if meta.path.is_ident("max") {
-                    quote! { Max }
-                } else if meta.path.is_ident("min") {
-                    quote! { Min }
-                } else if meta.path.is_ident("top") {
-                    return Err(meta.error(
-                        "`top` ranks listed values, which a derived attribute cannot list; \
-                         build the descriptor with `with_pick`",
-                    ));
+                    quote! { Many }
                 } else {
-                    return Err(meta.error("pick must be `last`, `all`, `max` or `min`"));
+                    return Err(meta.error(
+                        "an attribute's pick is `last` or `all`: a ranking pick is how a \
+                         concept's field reads a `#[pick(all)]` attribute \
+                         (`#[dialog(pick = max)]` on the field)",
+                    ));
                 };
-                pick = Some(variant);
+                cardinality = Some(variant);
                 Ok(())
             })?;
-            let variant = pick.ok_or_else(|| {
-                syn::Error::new_spanned(attr, "pick must be `last`, `all`, `max` or `min`")
+            let variant = cardinality
+                .ok_or_else(|| syn::Error::new_spanned(attr, "pick must be `last` or `all`"))?;
+            return Ok(quote! { dialog_query::Cardinality::#variant });
+        }
+        if attr.path().is_ident("cardinality") {
+            let mut cardinality = None;
+            attr.parse_nested_meta(|meta| {
+                let variant = if meta.path.is_ident("one") {
+                    quote! { One }
+                } else if meta.path.is_ident("many") {
+                    quote! { Many }
+                } else {
+                    return Err(meta.error("cardinality must be `one` or `many`"));
+                };
+                cardinality = Some(variant);
+                Ok(())
             })?;
-            return Ok(quote! { dialog_query::Pick::#variant });
+            let variant = cardinality.ok_or_else(|| {
+                syn::Error::new_spanned(attr, "cardinality must be `one` or `many`")
+            })?;
+            return Ok(quote! { dialog_query::Cardinality::#variant });
         }
     }
 
-    Ok(quote! { dialog_query::Pick::Last })
+    Ok(quote! { dialog_query::Cardinality::One })
 }

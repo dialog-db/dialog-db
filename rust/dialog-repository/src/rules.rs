@@ -83,8 +83,8 @@ use dialog_common::Blake3Hash;
 // rule types themselves; this module re-uses them for its selectors,
 // caches, and dispatch probing.
 pub(crate) use dialog_query::rule::statement::{
-    conclusion_attr, derives_attr, head_entities, on_attr, quarantined_attr, reads_attr,
-    source_attr,
+    conclusion_attr, derives_attr, head_entities, invalid_attr, on_attr, quarantined_attr,
+    reads_attr, source_attr,
 };
 
 /// Whether facts of `the` are rule facts: every `dialog.rule/*` attribute
@@ -126,7 +126,7 @@ impl Statement for Transient {
             transient_attr(),
             self.0,
             Value::Boolean(true),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
     }
 
@@ -969,7 +969,7 @@ pub(crate) fn assemble(
 
 /// The head of `rule` deriving the relation indexed by `on`, if it has
 /// one: the head concluding that relation's attribute concept, whatever
-/// type or pick the reader declares over it.
+/// type or cardinality the reader declares over it.
 pub(crate) fn head_onto(
     rule: &DeductiveRule,
     on: &Entity,
