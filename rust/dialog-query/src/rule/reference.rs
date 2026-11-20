@@ -683,6 +683,78 @@ mod tests {
         );
     }
 
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn team_lead() -> serde_json::Value {
+        serde_json::json!({
+            "deduce": { "with": {
+                "manager": { "the": "org/manager-of", "as": "entity:" }
+            } },
+            "when": [
+                {
+                    "assert": { "with": {
+                        "team": { "the": "org/member-of", "as": "entity:" }
+                    } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "team": { "?": { "name": "team" } }
+                    }
+                },
+                {
+                    "assert": { "with": {
+                        "lead": { "the": "org/team-lead", "as": "entity:" }
+                    } },
+                    "where": {
+                        "this": { "?": { "name": "team" } },
+                        "lead": { "?": { "name": "manager" } }
+                    }
+                }
+            ]
+        })
+    }
+
+    /// A rule format 3 wrote keeps its name and its bytes. Both are
+    /// written out here, so that a change to how a rule is spelled, or
+    /// a format that can say more, shows as a failure of this test when
+    /// it moves a rule that uses none of what was added. A stored rule
+    /// is found by its entity and read by its body, so either moving
+    /// strands what a replica holds.
+    #[dialog_common::test]
+    fn it_keeps_the_name_and_the_bytes_of_a_rule_format_3_wrote() {
+        let constant = compile(employee("", serde_json::json!({ "integer:": 5 })));
+        assert_eq!(
+            constant.this().to_string(),
+            "rule:jy5fVr2HUJMqTfSU8R55LSVERSxYketm51KUKixf8Au"
+        );
+        assert_eq!(
+            hex(&constant.try_encode().expect("a body")),
+            "a26472756c65a2647768656e81a2657768657265a3622330a168696e74656765723a05\
+             622331a1613fa1646e616d65627e306474686973a1613fa1646e616d65647468697366\
+             617373657274a16477697468a2622330a163746865706f72672f706572736f6e2d6c65\
+             76656c622331a262617365746578743a637468656f6f72672f706572736f6e2d6e616d\
+             6566646564756365a16477697468a1627e30a262617365746578743a63746865716f72\
+             672f656d706c6f7965652d6e616d6566666f726d617403"
+        );
+
+        let join = compile(team_lead());
+        assert_eq!(
+            join.this().to_string(),
+            "rule:8Hww7aJ9mifiBmiKvr7vYrCbtyYTmRdTbhhorEeFuXRk"
+        );
+        assert_eq!(
+            hex(&join.try_encode().expect("a body")),
+            "a26472756c65a2647768656e82a2657768657265a2622330a1613fa1646e616d65627e\
+             306474686973a1613fa1646e616d65627e3166617373657274a16477697468a1622330\
+             a262617367656e746974793a637468656d6f72672f7465616d2d6c656164a265776865\
+             7265a2622330a1613fa1646e616d65627e316474686973a1613fa1646e616d65647468\
+             697366617373657274a16477697468a1622330a262617367656e746974793a63746865\
+             6d6f72672f6d656d6265722d6f6666646564756365a16477697468a1627e30a2626173\
+             67656e746974793a637468656e6f72672f6d616e616765722d6f6666666f726d617403"
+        );
+    }
+
     /// With several variables, the canonical labeling orders them by the
     /// shapes of the premises they occur in; a description must not
     /// reorder them.
