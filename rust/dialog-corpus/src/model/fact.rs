@@ -546,7 +546,7 @@ impl FactView {
     /// to the hash of the value ([`Value::tiebreak`](crate::Value::tiebreak)),
     /// the greater winning, so the tie favours no value over another. This
     /// is the order
-    /// [`Pick::prefers`](crate::Pick::prefers) elects by under `last`,
+    /// [`Cardinality::newer`](crate::Cardinality::newer) elects by,
     /// in the tree, in a commit's settlement and in a concept read, so
     /// every read of a cell under `last` returns the same claim. Every
     /// tier is deterministic and commutative: folding any set of rows in

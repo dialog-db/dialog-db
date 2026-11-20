@@ -298,12 +298,12 @@ impl RetainDelegation<'_> {
 
             let entity = Entity::from_blob(&index_hash)?;
             for fact in field_facts(&entity, &certificate)? {
-                instructions.push(Instruction::Assert(fact, dialog_corpus::Pick::All));
+                instructions.push(Instruction::Assert(fact, dialog_corpus::Cardinality::Many));
             }
             let envelope = Asset::stored(index_hash, bytes.len() as u64);
             instructions.push(Instruction::Assert(
                 envelope.fact()?,
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             ));
             retained.push(entity);
         }
@@ -535,7 +535,7 @@ mod tests {
                         is: Value::UnsignedInt(fact),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )
             });
             branch
@@ -790,7 +790,7 @@ mod tests {
             let hash = *sink.finish().await?.as_bytes();
             let entity = Entity::from_legacy_blob(&hash)?;
             for fact in field_facts(&entity, &certificate)? {
-                instructions.push(Instruction::Assert(fact, dialog_corpus::Pick::All));
+                instructions.push(Instruction::Assert(fact, dialog_corpus::Cardinality::Many));
             }
             entries.push(BlobRecord::new(bytes.len() as u64).legacy_entry(&hash));
             legacy.push(entity);
@@ -850,7 +850,7 @@ mod tests {
                     is: Value::String("did:key:zForged".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await;

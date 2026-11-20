@@ -988,7 +988,6 @@ mod tests {
             is: dialog_corpus::Value::UnsignedInt(value.into()),
             cause: None,
             cardinality: Some(Cardinality::One),
-            pick: Some(dialog_corpus::Pick::Last),
         }
         .at(at.clone())
     }
@@ -1208,7 +1207,7 @@ mod tests {
     }
 
     /// A rule's head whose descriptor names a memory layer lands there,
-    /// with its pick:
+    /// with its cardinality:
     /// a dispatched command increments a count the layer holds, and the
     /// commit, which writes nothing to the tree, still publishes.
     #[dialog_common::test]
@@ -1744,13 +1743,13 @@ mod tests {
             store.clone(),
             "session:state".parse()?,
             dialog_corpus::Value::String("memory".into()),
-            dialog_corpus::Pick::Last,
+            dialog_corpus::Cardinality::One,
         );
         declarations.associate(
             store,
             "memory:notes".parse()?,
             dialog_corpus::Value::String("durable".into()),
-            dialog_corpus::Pick::Last,
+            dialog_corpus::Cardinality::One,
         );
         branch
             .transaction()
@@ -3271,7 +3270,6 @@ mod tests {
             is: dialog_corpus::Value::Entity(node.clone()),
             cause: None,
             cardinality: None,
-            pick: None,
         }
     }
 
@@ -4210,7 +4208,6 @@ mod tests {
             is: dialog_corpus::Value::String(text.to_string()),
             cause: None,
             cardinality: Some(Cardinality::One),
-            pick: Some(dialog_corpus::Pick::Last),
         }
         .at(at.clone())
     }
@@ -5560,7 +5557,6 @@ mod tests {
             is: dialog_corpus::Value::UnsignedInt(value.into()),
             cause: None,
             cardinality: Some(Cardinality::One),
-            pick: Some(dialog_corpus::Pick::Last),
         }
     }
 
@@ -6219,7 +6215,7 @@ mod tests {
                     .expect("an attribute"),
                 of.clone(),
                 is.clone(),
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             );
         }
         changes

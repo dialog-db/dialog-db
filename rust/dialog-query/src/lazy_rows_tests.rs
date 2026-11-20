@@ -51,7 +51,6 @@ async fn store(
             is,
             cause: None,
             cardinality: None,
-            pick: None,
         });
     }
     transaction.commit().publish().perform(operator).await?;
@@ -449,7 +448,6 @@ async fn every_scan_reads_alike_in_place_and_eagerly() -> anyhow::Result<()> {
         is: Value::String("b".into()),
         cause: None,
         cardinality: None,
-        pick: None,
     });
     transaction.commit().publish().perform(&operator).await?;
     let source = TestEnv::new(&branch, &operator, RuleRegistry::new());

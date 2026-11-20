@@ -37,8 +37,8 @@ use dialog_corpus::history::{
 };
 use dialog_corpus::tree::{CorpusNode, WriteScope, fetch_spilled};
 use dialog_corpus::{
-    AttributeKey, AttributeKeyPart, Changes, DialogCorpusError, Entity, EntityKeyPart, Fact, Index,
-    Key, KeyViewMut as _, Pick, Relation, State, Statement as _, Update as _, Value,
+    AttributeKey, AttributeKeyPart, Cardinality, Changes, DialogCorpusError, Entity, EntityKeyPart,
+    Fact, Index, Key, KeyViewMut as _, Relation, State, Statement as _, Update as _, Value,
     make_reference,
 };
 use dialog_effects::archive::Load as ArchiveLoad;
@@ -590,7 +590,7 @@ struct Touched {
 /// it wrote, read from where `ours` left each cell. A value we asserted
 /// that `ours` still holds is asserted; one we retracted that `ours`
 /// no longer holds is retracted; and a cell one of our writes succeeded
-/// (a write under a choosing pick) is ours alone, so every claim `onto`
+/// (a write of cardinality one) is ours alone, so every claim `onto`
 /// holds in it that `ours` does not is retracted. The other cells keep
 /// what `onto` holds. The machinery under `dialog.` is never replayed.
 async fn replay<Env: TreeEnv>(
@@ -642,7 +642,7 @@ async fn replay<Env: TreeEnv>(
             .collect();
         for value in asserted {
             if held.contains(&value) {
-                changes.associate(the.clone(), of.clone(), value, Pick::All);
+                changes.associate(the.clone(), of.clone(), value, Cardinality::Many);
             }
         }
         for value in retracted {

@@ -31,7 +31,7 @@ pub struct Item {
 }
 ```
 
-The domain comes from `#[domain]` and the name from the type, kebab-cased, so `grocery::Name` is an attribute over the relation `demo.grocery/name`. The doc comment becomes its description, the wrapped type its value type, and it reads one value, the newest, unless it says another pick such as `#[pick(all)]`. A wrapped `String` declares `text:` and a `bool` declares `boolean:`. A Rust number declares the number type of its own width, so a `u8` declares `natural:8`. Each field of the concept is one pattern, and `this` is the entity they share. Writing an `Item` asserts its facts. Querying for `Item` with blanks in every field asks for every item:
+The domain comes from `#[domain]` and the name from the type, kebab-cased, so `grocery::Name` is an attribute over the relation `demo.grocery/name`. The doc comment becomes its description, the wrapped type its value type, and it reads one value, the newest, unless it says `#[cardinality(many)]`. A wrapped `String` declares `text:` and a `bool` declares `boolean:`. A Rust number declares the number type of its own width, so a `u8` declares `natural:8`. Each field of the concept is one pattern, and `this` is the entity they share. Writing an `Item` asserts its facts. Querying for `Item` with blanks in every field asks for every item:
 
 ```rust
 use dialog_query::query::Output;
@@ -50,7 +50,7 @@ let items: Vec<Item> = branch
 
 A concept is a way of reading facts, not a table. The facts do not know which concepts they belong to. Any entity with a `demo.grocery/name` and a `demo.grocery/done` is an `Item`, and a second app can declare its own concept over the same relations without asking the first.
 
-Attributes and concepts have identities of their own. An attribute is named by a hash of what it means: the relation it reads, its type and its pick. A concept is named by a hash of the attributes its fields hold, and whether each is optional. Descriptions and field names are left out, so rewording a description or renaming a field changes no name. The names are entities, written `the:…` and `concept:…`, so two apps that declare the same attribute have declared the same thing.
+Attributes and concepts have identities of their own. An attribute is named by a hash of what it means: the relation it reads, its type and its cardinality. A concept is named by a hash of the attributes its fields hold, and whether each is optional. Descriptions and field names are left out, so rewording a description or renaming a field changes no name. The names are entities, written `the:…` and `concept:…`, so two apps that declare the same attribute have declared the same thing.
 
 ## Planning
 
@@ -108,11 +108,11 @@ Which index a pattern reads follows directly from the [Keys](./keys.md) chapter:
 
 When one pattern is much narrower than the other, say `done` pinned to `false`, the planner drives from that pattern instead and looks up each row's other fields in EAV. Either way, every step is a range scan over sorted keys, streamed. A query never loads a whole index. On a phone that has fetched only part of the tree, a query fetches only the nodes along the ranges it reads: its patterns' ranges, plus the range where rules are stored.
 
-## Picks
+## Cardinality
 
-An attribute is declared with a pick, which says which of an entity's facts a read returns (see [Facts](./facts.md)). `demo.grocery/name` reads under `last`, which is the default, and `demo.grocery/tag` could be declared with `#[pick(all)]`. Under `last`, a query that finds two values runs the election from the [Sync](./sync.md) chapter and returns one. Every replica elects the same value. Under `all`, a query returns every value.
+An attribute is declared with a cardinality, which says how many of an entity's facts a read returns (see [Facts](./facts.md)). `demo.grocery/name` has cardinality one, which is the default, and `demo.grocery/tag` could be declared with `#[cardinality(many)]`. Under one, a query that finds two values runs the election from the [Sync](./sync.md) chapter and returns the newest. Every replica elects the same value. Under many, a query returns every value.
 
-The other picks also return one value. `max` and `min` return the greatest and the least. `top` takes a list, of values or of relations, and returns the first on the list that the entity has: a status that is `"urgent"` if any fact says so, or a display name that falls back to a username.
+A read that ranks an entity's facts is a rule. A rule's `reduce` folds what its body reads with `max` or `min`, for the greatest and the least, or with `top`, for the first value on a list the entity has: a status that is `"urgent"` if any fact says so. The relation keeps every fact, and the rule says how to read it.
 
 A number is compared the way its attribute's type reads it (see [Facts](./facts.md#numbers)). A query for a quantity of `2` through an attribute declared `natural:` also finds a stored `2.5`, because that is what a reader of the attribute sees there.
 
@@ -134,7 +134,7 @@ Most rules run at query time. A rule can also run when a commit is made, and wri
 
 ### Rules that say "not"
 
-The urgent rule asks for something to be absent: the item is *not* done. A rule can say that with `unless`, and an optional field or a pick like `top` asks the same kind of question, since "the best one" means "this one, and nothing better".
+The urgent rule asks for something to be absent: the item is *not* done. A rule can say that with `unless`, and an optional field or a fold like `top` asks the same kind of question, since "the best one" means "this one, and nothing better".
 
 Absence is only well defined once everything that could be there has been derived. Usually that is easy: Dialog derives what a rule tests in full before running the rule. It stops being possible when rules form a loop through such a test, where a rule tests for the absence of something that depends on the rule's own conclusion. No single author has to write that loop. Alice and Bob can each install rules that are fine alone and close a loop when their replicas merge.
 

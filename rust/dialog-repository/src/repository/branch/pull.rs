@@ -1937,7 +1937,7 @@ mod tests {
                 is: Value::String("Seed".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -1966,7 +1966,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2007,7 +2007,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2020,7 +2020,7 @@ mod tests {
                 is: Value::String("dev@test.com".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2106,7 +2106,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2122,7 +2122,7 @@ mod tests {
                     is: Value::String("feature@test.com".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -2175,7 +2175,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2197,7 +2197,7 @@ mod tests {
                     is: Value::String("feature@test.com".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -2279,7 +2279,7 @@ mod tests {
                     is: Value::String(of.to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ))
         };
 
@@ -2342,7 +2342,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2394,7 +2394,7 @@ mod tests {
                     is: Value::String(name.to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )])
         };
 
@@ -2472,7 +2472,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2542,7 +2542,7 @@ mod tests {
                         is: Value::String(value.to_string()),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )]))
                 .perform(&operator)
                 .await?;
@@ -2605,7 +2605,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -2665,7 +2665,7 @@ mod tests {
                         is: Value::String(name.to_string()),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )]))
                 .perform(&operator)
                 .await?;
@@ -2789,7 +2789,7 @@ mod history_tests {
                 is: Value::String(value.to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )
     }
 
@@ -3393,7 +3393,7 @@ mod history_tests {
                     is: Value::String("Hi".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             )]))
             .perform(&operator)
             .await?;
@@ -3564,7 +3564,7 @@ mod history_tests {
                     is: Value::String("Hi".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             )]))
             .perform(&operator)
             .await?;
@@ -3783,7 +3783,7 @@ mod history_tests {
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             ))
         };
         main.commit(stream::iter(vec![replace("MainSide")?]))
@@ -3959,7 +3959,7 @@ mod history_tests {
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )
         };
 
@@ -4084,7 +4084,7 @@ mod history_tests {
         let bob = repo.branch("bob").open().perform(&operator).await?;
         bob.commit(stream::iter(vec![Instruction::Assert(
             urgent(),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -4104,7 +4104,7 @@ mod history_tests {
         mallory
             .commit(stream::iter(vec![Instruction::Assert(
                 urgent(),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -4297,7 +4297,7 @@ mod history_tests {
                 is: Value::String("Bob".to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::Last,
+            dialog_corpus::Cardinality::One,
         )]))
         .perform(&operator)
         .await?;
@@ -5234,8 +5234,8 @@ mod history_tests {
                     cause: None,
                 };
                 let instruction = match next(3) {
-                    0 => Instruction::Assert(fact, dialog_corpus::Pick::All),
-                    1 => Instruction::Assert(fact, dialog_corpus::Pick::Last),
+                    0 => Instruction::Assert(fact, dialog_corpus::Cardinality::Many),
+                    1 => Instruction::Assert(fact, dialog_corpus::Cardinality::One),
                     _ => Instruction::Retract(fact),
                 };
                 // A retract of an absent fact is a no-op commit; both

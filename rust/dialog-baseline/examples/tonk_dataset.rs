@@ -479,8 +479,11 @@ mod native {
                 if let Some(kind) = one("db.attribute/as", attribute) {
                     descriptor.insert("as".into(), kind.into());
                 }
-                if let Some(pick) = one("db.attribute/pick", attribute) {
-                    descriptor.insert("pick".into(), pick.into());
+                // The space records the pick an earlier release read an
+                // attribute under: `all:` is what cardinality many reads,
+                // and every other pick is written as cardinality one.
+                if one("db.attribute/pick", attribute).as_deref() == Some("all:") {
+                    descriptor.insert("cardinality".into(), "many".into());
                 }
                 if *optional {
                     descriptor.insert("optional".into(), true.into());

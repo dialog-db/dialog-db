@@ -31,34 +31,82 @@ pub use crate::{Predicate, Premise, Term};
 /// For schema metadata, see [`Descriptor<AttributeDescriptor>`](crate::Descriptor).
 /// For the fluent `::of()` expression builder, see [`StaticAttributeExpressionBuilder`].
 ///
-/// The derive reads the pick from `#[pick(last)]` (the default),
-/// `#[pick(all)]`, `#[pick(max)]` or `#[pick(min)]`:
+/// The derive reads the cardinality from `#[cardinality(one)]` (the
+/// default) or `#[cardinality(many)]`:
 ///
 /// ```rust
 /// use dialog_query::Descriptor;
 ///
 /// #[derive(dialog_macros::Attribute, Clone)]
 /// #[domain("note")]
+/// #[cardinality(many)]
+/// pub struct Tag(pub String);
+///
+/// assert_eq!(Tag::descriptor().cardinality(), dialog_query::Cardinality::Many);
+/// ```
+///
+/// `#[pick(last)]` and `#[pick(all)]` say the same as cardinality one
+/// and many:
+///
+/// ```no_run
+/// use dialog_query::Attribute;
+///
+/// #[derive(dialog_macros::Attribute, Clone)]
 /// #[pick(all)]
 /// pub struct Tag(pub String);
 ///
-/// assert_eq!(Tag::descriptor().pick(), &dialog_query::Pick::All);
+/// assert_eq!(Tag::descriptor().cardinality(), dialog_query::Cardinality::Many);
 /// ```
 ///
-/// The spelling before picks no longer compiles:
+/// A ranking pick does not compile on an attribute: a ranked read is a
+/// concept field over a cardinality-many attribute that picks `max`,
+/// `min` or `top`.
 ///
 /// ```compile_fail
 /// #[derive(dialog_macros::Attribute, Clone)]
-/// #[cardinality(many)]
-/// pub struct Tag(pub String);
+/// #[pick(max)]
+/// pub struct Grade(pub u32);
 /// ```
 ///
-/// Nor does `top`, which ranks values a derived attribute cannot list:
+/// A concept field reads such an attribute with the pick:
+///
+/// ```no_run
+/// use dialog_query::{Attribute, Concept, Entity};
+///
+/// mod exam {
+///     /// Every grade a student was given.
+///     #[derive(dialog_macros::Attribute, Clone)]
+///     #[cardinality(many)]
+///     pub struct Grade(pub u32);
+/// }
+///
+/// /// A student and their best grade.
+/// #[derive(Concept, Clone, Debug)]
+/// pub struct Best {
+///     pub this: Entity,
+///     #[dialog(pick = max)]
+///     pub grade: exam::Grade,
+/// }
+/// ```
+///
+/// `top` ranks by a listed `as`, which `#[derive(Attribute)]` cannot
+/// declare, so a derived field refuses it:
 ///
 /// ```compile_fail
-/// #[derive(dialog_macros::Attribute, Clone)]
-/// #[pick(top)]
-/// pub struct Status(pub String);
+/// use dialog_query::{Attribute, Concept, Entity};
+///
+/// mod exam {
+///     #[derive(dialog_macros::Attribute, Clone)]
+///     #[cardinality(many)]
+///     pub struct Grade(pub u32);
+/// }
+///
+/// #[derive(Concept, Clone, Debug)]
+/// pub struct Best {
+///     pub this: Entity,
+///     #[dialog(pick = top)]
+///     pub grade: exam::Grade,
+/// }
 /// ```
 pub trait Attribute: Predicate + Sized {
     /// The Rust scalar type of this attribute's values.
@@ -167,13 +215,8 @@ mod tests {
 
         /// Employees managed by this person
         #[derive(Attribute, Clone)]
-        #[pick(all)]
+        #[cardinality(many)]
         pub struct Manages(pub crate::Entity);
-
-        /// The person's highest grade
-        #[derive(Attribute, Clone)]
-        #[pick(max)]
-        pub struct Grade(pub u32);
     }
 
     #[dialog_common::test]
@@ -253,14 +296,9 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_derives_the_pick_it_names() {
-        assert_eq!(person_derive::Grade::descriptor().pick(), &crate::Pick::Max);
-        assert_eq!(person_derive::Grade::cardinality(), Cardinality::One);
-        assert_eq!(person_derive::Name::descriptor().pick(), &crate::Pick::Last);
-        assert_eq!(
-            person_derive::Manages::descriptor().pick(),
-            &crate::Pick::All
-        );
+    fn it_derives_the_cardinality_it_names() {
+        assert_eq!(person_derive::Name::cardinality(), Cardinality::One);
+        assert_eq!(person_derive::Manages::cardinality(), Cardinality::Many);
     }
 
     #[dialog_common::test]

@@ -245,25 +245,44 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // implemented only for required, entity-valued attribute
         // newtypes, so a non-entity or `Option<_>` field fails to
         // compile rather than producing an invalid descriptor.
-        match &dialog_attrs.conforms {
-            Some(target) => descriptor_pair_pushes.push(quote! {
-                __fields.push((
-                    #field_name_lit.to_string(),
-                    <#field_type as dialog_query::ConformingField>::conforming_descriptor(
-                        <#target as dialog_query::Descriptor<
-                            dialog_query::ConceptDescriptor,
-                        >>::descriptor()
-                        .clone(),
-                    ),
-                ));
-            }),
-            None => descriptor_pair_pushes.push(quote! {
-                __fields.push((
-                    #field_name_lit.to_string(),
-                    <#field_type as dialog_query::ConceptField>::field_descriptor(),
-                ));
-            }),
-        }
+        //
+        // A `#[dialog(pick = max)]` field reads its claim with that
+        // pick. Whether the attribute can be read under
+        // it (a ranking pick needs a cardinality-many attribute, an
+        // ordered type) is known only once the attribute's descriptor is,
+        // so a mismatch fails when the concept's descriptor is first
+        // built, naming the attribute.
+        let field_descriptor = match &dialog_attrs.conforms {
+            Some(target) => quote! {
+                <#field_type as dialog_query::ConformingField>::conforming_descriptor(
+                    <#target as dialog_query::Descriptor<
+                        dialog_query::ConceptDescriptor,
+                    >>::descriptor()
+                    .clone(),
+                )
+            },
+            None => quote! {
+                <#field_type as dialog_query::ConceptField>::field_descriptor()
+            },
+        };
+        let field_descriptor = match &dialog_attrs.pick {
+            Some(aggregate) => {
+                let variant = match aggregate.to_string().as_str() {
+                    "last" => quote! { Last },
+                    "max" => quote! { Max },
+                    _ => quote! { Min },
+                };
+                quote! {
+                    #field_descriptor
+                        .picking(dialog_query::selective::Selective::#variant)
+                        .unwrap_or_else(|error| panic!("{error}"))
+                }
+            }
+            None => field_descriptor,
+        };
+        descriptor_pair_pushes.push(quote! {
+            __fields.push((#field_name_lit.to_string(), #field_descriptor));
+        });
 
         // Statement emission via the trait method. The concept's
         // `this` field is an `Entity` (concept structs always have

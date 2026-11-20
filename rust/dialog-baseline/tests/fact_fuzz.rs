@@ -81,7 +81,7 @@ fn generate(seed: u64, op_count: usize) -> Vec<Instruction> {
                     cause: None,
                 };
                 live.push(fact.clone());
-                Instruction::Assert(fact, dialog_corpus::Pick::All)
+                Instruction::Assert(fact, dialog_corpus::Cardinality::Many)
             }
             // Replace: cardinality-one supersession (cause chains from the
             // superseded fact — the ordering-sensitive path).
@@ -102,10 +102,10 @@ fn generate(seed: u64, op_count: usize) -> Vec<Instruction> {
                 if held <= 1 {
                     live.retain(|held| !(held.the == the && held.of == of));
                     live.push(fact.clone());
-                    Instruction::Assert(fact, dialog_corpus::Pick::Last)
+                    Instruction::Assert(fact, dialog_corpus::Cardinality::One)
                 } else {
                     live.push(fact.clone());
-                    Instruction::Assert(fact, dialog_corpus::Pick::All)
+                    Instruction::Assert(fact, dialog_corpus::Cardinality::Many)
                 }
             }
             // Retract a real fact when one exists...

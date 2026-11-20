@@ -255,6 +255,26 @@ pub struct JuniorLed(pub String);
 #[domain("report")]
 pub struct JuniorTaught(pub String);
 
+/// What [`reports_rule`] derives (`report/reports`): each entity that
+/// names this one their manager.
+#[derive(Attribute, Clone, PartialEq)]
+#[domain("report")]
+#[cardinality(many)]
+pub struct Reports(pub Entity);
+
+/// A manager and the newest of those reporting to them: a field
+/// picking one claim of a relation a rule derives, whose claims are
+/// keyed by another entity than the ones whose facts they come from,
+/// so a change to one report's manager moves two managers' rows.
+#[derive(Concept, Debug, Clone, PartialEq)]
+pub struct Headed {
+    /// The manager.
+    pub this: Entity,
+    /// The newest of the entities naming them their manager.
+    #[dialog(pick = last)]
+    pub reports: Reports,
+}
+
 /// An entity's name.
 #[derive(Concept, Debug, Clone, PartialEq)]
 pub struct Named {
@@ -344,7 +364,7 @@ pub struct JuniorTaughtReport {
 /// the attribute is read under `all`.
 #[derive(Attribute, Clone, PartialEq)]
 #[domain("report")]
-#[pick(all)]
+#[cardinality(many)]
 pub struct Above(pub Entity);
 
 /// What [`alone_led_rule`] derives (`report/alone-led`): the name of
@@ -534,9 +554,9 @@ fn junior_taught_rule() -> anyhow::Result<DeductiveRule> {
     }))
 }
 
-/// The `report/above` field, read under `all`.
+/// The `report/above` field, read under cardinality many.
 fn above_field() -> serde_json::Value {
-    serde_json::json!({ "above": { "the": "report/above", "as": "entity:", "pick": "all" } })
+    serde_json::json!({ "above": { "the": "report/above", "as": "entity:", "cardinality": "many" } })
 }
 
 /// `report/above(this) := up :- report/<edge>(this) = up` and
@@ -633,8 +653,23 @@ fn alone_by_mentors_badge_rule() -> anyhow::Result<DeductiveRule> {
 }
 
 /// The rules every run installs with its first commit.
+/// `report/reports(this) := who :- report/manager(who) = this`: every
+/// report of a manager, derived under the manager.
+fn reports_rule() -> anyhow::Result<DeductiveRule> {
+    rule(serde_json::json!({
+        "deduce": { "with": { "reports": {
+            "the": "report/reports", "as": "entity:", "cardinality": "many"
+        } } },
+        "when": [{
+            "assert": { "with": { "manager": { "the": "report/manager", "as": "entity:" } } },
+            "where": { "this": var("reports"), "manager": var("this") }
+        }]
+    }))
+}
+
 fn installed_rules() -> anyhow::Result<Vec<DeductiveRule>> {
     let mut rules = vec![
+        reports_rule()?,
         unvouched_rule()?,
         junior_rule()?,
         junior_led_rule()?,
@@ -1147,6 +1182,7 @@ struct Watched {
     alone_led: Watches<AloneLedReport>,
     vouched_mentee_led: Watches<VouchedMenteeLed>,
     alone_led_led: Watches<AloneLedLedReport>,
+    headed: Watches<Headed>,
 }
 
 impl Watched {
@@ -1161,6 +1197,7 @@ impl Watched {
             alone_led: Watches::new("AloneLedReport", branch, operator).await?,
             vouched_mentee_led: Watches::new("VouchedMenteeLed", branch, operator).await?,
             alone_led_led: Watches::new("AloneLedLedReport", branch, operator).await?,
+            headed: Watches::new("Headed", branch, operator).await?,
         })
     }
 
@@ -1202,6 +1239,10 @@ impl Watched {
         self.alone_led_led
             .check(step, extra, branch, operator, log)
             .await?;
+        // Last, so the watches before it draw from `extra` as they did.
+        self.headed
+            .check(step, extra, branch, operator, log)
+            .await?;
         Ok(())
     }
 
@@ -1215,6 +1256,7 @@ impl Watched {
         self.alone_led.ensure_maintained(seed)?;
         self.vouched_mentee_led.ensure_maintained(seed)?;
         self.alone_led_led.ensure_maintained(seed)?;
+        self.headed.ensure_maintained(seed)?;
         Ok(())
     }
 }
@@ -1980,7 +2022,7 @@ async fn a_rule_installed_through_the_overlay_moves_the_subscription() -> anyhow
 
 /// Two writers each commit a manager for p1 on their own first commit;
 /// one pulls the other, and the merge leaves both claims in the cell,
-/// with the pick electing one. A subscription on the puller sees the
+/// with the read electing one. A subscription on the puller sees the
 /// merge as a poll over the pulled changes; retracting the elected
 /// claim then makes the other readable, which the diff does not report.
 #[dialog_common::test]
@@ -2049,7 +2091,7 @@ async fn a_merge_leaving_two_claims_in_a_cell_keeps_a_recursive_subscription_fre
     assert_eq!(
         expected.len(),
         1,
-        "the cell holds two claims and the pick elects one"
+        "the cell holds two claims and the read elects one"
     );
     assert_eq!(maintained, expected, "after the merge");
     let elected = fresh::<Superior>(&w1, &one).await?[0].above.0.clone();

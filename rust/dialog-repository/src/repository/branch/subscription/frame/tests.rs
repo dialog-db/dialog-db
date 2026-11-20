@@ -484,19 +484,19 @@ fn todo_read(the: &str, is: &str, cause: &str) -> AttributeQuery {
     )
 }
 
-/// Each to-do with a title, and how many tags it has.
-fn tag_counts() -> Fold<AttributeQuery, AttributeQuery> {
+/// Each to-do with a title, and its tags folded by `aggregator`.
+fn tags_folded(aggregator: Aggregator) -> Fold<AttributeQuery, AttributeQuery> {
     Fold::new(
         todo_read("todo/title", "title", "c1"),
         todo_read("todo/tag", "g", "c2"),
         Reduce::new(
             vec!["t".into()],
-            vec![ReduceEntry::new("tags", Aggregator::Count, Term::var("g"))],
+            vec![ReduceEntry::new("tags", aggregator, Term::var("g"))],
         ),
     )
 }
 
-/// Each folded row as its to-do and its count, ordered.
+/// Each folded row as its to-do and its folded tags, ordered.
 fn tallied<'a>(rows: impl IntoIterator<Item = &'a FoldConclusion>) -> Vec<(String, String)> {
     let mut rows: Vec<(String, String)> = rows
         .into_iter()
@@ -564,9 +564,23 @@ const SECOND: [(&str, usize, &str); 2] = [("todo/tag", 3, "garden"), ("todo/titl
 /// between it and the inputs query's.
 #[dialog_common::test]
 async fn it_folds_one_frame_when_a_commit_lands_between_its_inner_polls() -> anyhow::Result<()> {
+    folds_one_frame(Aggregator::Count).await
+}
+
+/// The same for a fold that orders by standing, which a poll that moved
+/// a row evaluates whole: the whole evaluation reads the frame the inner
+/// polls read, wherever the commit lands, the evaluation included.
+#[dialog_common::test]
+async fn it_evaluates_a_fold_by_standing_at_the_frame_of_its_inner_polls() -> anyhow::Result<()> {
+    folds_one_frame(Aggregator::Last).await
+}
+
+/// A commit landing at each read of a fold's poll that asks for an
+/// identity is not in what the poll reports, and is in the next.
+async fn folds_one_frame(aggregator: Aggregator) -> anyhow::Result<()> {
     let calls = {
         let (operator, branch) = listed().await?;
-        let mut fold = branch.subscribe_fold(tag_counts());
+        let mut fold = branch.subscribe_fold(tags_folded(aggregator));
         fold.poll(&operator).await?.expect("initial");
         todos(&branch, &operator, &FIRST).await?;
         let counting = Interleaved::counting(operator.clone());
@@ -580,13 +594,13 @@ async fn it_folds_one_frame_when_a_commit_lands_between_its_inner_polls() -> any
 
     for at in 0..calls {
         let (operator, branch) = listed().await?;
-        let mut fold = branch.subscribe_fold(tag_counts());
+        let mut fold = branch.subscribe_fold(tags_folded(aggregator));
         fold.poll(&operator).await?.expect("initial");
         todos(&branch, &operator, &FIRST).await?;
         let selected = |branch: Branch, operator: Operator| async move {
             let rows: Vec<FoldConclusion> = branch
                 .query()
-                .select(tag_counts())
+                .select(tags_folded(aggregator))
                 .perform(&operator)
                 .try_vec()
                 .await?;

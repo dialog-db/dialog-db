@@ -181,7 +181,7 @@ pub(crate) fn entity_facts(index: usize) -> Result<Vec<Instruction>> {
                     is,
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ))
         })
         .collect()
@@ -196,7 +196,7 @@ pub(crate) fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
             is: Value::String("soak space".into()),
             cause: None,
         },
-        dialog_corpus::Pick::All,
+        dialog_corpus::Cardinality::Many,
     )];
     for member in 0..members {
         let of: dialog_corpus::Entity = format!("member:{member}").parse()?;
@@ -207,7 +207,7 @@ pub(crate) fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
                 is: Value::String(format!("Member {member}")),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         ));
         facts.push(Instruction::Assert(
             Fact {
@@ -216,7 +216,7 @@ pub(crate) fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
                 is: Value::String(if member == 0 { "owner" } else { "editor" }.into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         ));
     }
     Ok(facts)
@@ -278,7 +278,7 @@ fn claim_facts() -> Result<Vec<Instruction>> {
                 is: Value::String("The Joiner".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         ),
         Instruction::Assert(
             Fact {
@@ -287,7 +287,7 @@ fn claim_facts() -> Result<Vec<Instruction>> {
                 is: Value::String("editor".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         ),
         Instruction::Assert(
             Fact {
@@ -296,7 +296,7 @@ fn claim_facts() -> Result<Vec<Instruction>> {
                 is: Value::String("2026-09-01".into()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         ),
     ])
 }

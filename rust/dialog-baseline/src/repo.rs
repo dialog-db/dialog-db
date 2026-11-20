@@ -171,7 +171,7 @@ where
         for row in rows {
             let changes: Changes = facts_for(row)?
                 .into_iter()
-                .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
+                .map(|fact| Instruction::Assert(fact, dialog_corpus::Cardinality::Many))
                 .collect();
             self.branch
                 .transaction()
