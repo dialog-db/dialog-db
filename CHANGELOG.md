@@ -23,8 +23,8 @@ merged its fact and rule ranges into a new list to scope the diff, the
 diff checked that list's order twice, and the poll then dropped it: a
 cover of ten thousand ranges cost tens of thousands of range copies,
 comparisons and frees per poll, whatever changed. The cover is now kept
-as shared sorted sets (`dialog_search_tree::KeyRanges`), and the poll's
-diff borrows them as they stand
+as one shared sorted list (`dialog_search_tree::KeyRanges`), and the
+poll's diff borrows it as it stands
 (`PersistentTree::differentiate_covered`). A range a re-derivation
 records again, which the cover already holds, changes nothing.
 
@@ -47,6 +47,7 @@ dropping that scope.
 
 - Nothing stored or synced changes.
 
+## 0.5.0 (2026-11-19)
 
 ### A subscription's poll costs the entities it touched, not its whole answer
 
