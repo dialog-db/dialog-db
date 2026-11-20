@@ -303,8 +303,10 @@ pub enum TypeError {
     },
 
     /// A rule holds a pattern of a map or a list, and the
-    /// stored rule format has no way to write one. The rule runs where
-    /// it was built, and cannot be installed.
+    /// stored rule format this release writes has no way to write one.
+    /// The rule runs where it was built, and cannot be installed. A
+    /// stored form for patterns is format 5, which this release does
+    /// not have.
     #[error(
         "The rule holds the pattern {pattern} and cannot be stored: format {format} of a rule body writes a variable or a constant where a parameter stands, and has no way to write a pattern"
     )]

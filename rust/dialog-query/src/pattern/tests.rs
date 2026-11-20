@@ -1436,8 +1436,10 @@ fn it_types_a_pattern_by_its_shape() {
 }
 
 /// A rule that holds a pattern runs where it was built and cannot be
-/// stored: format 3 of a rule body has no way to write a pattern, and
-/// says so. The rule has an identity, by its parts, and no body.
+/// stored: the rule body format this release writes has no way to
+/// write a pattern, and says so by its number. A stored form for
+/// patterns is format 5, which this release does not have. The rule has
+/// an identity, by its parts, and no body.
 #[dialog_common::test]
 fn it_refuses_to_store_a_rule_that_holds_a_pattern() {
     let rule = card_rule([0, 1, 2]).expect("compiles");
@@ -1449,7 +1451,10 @@ fn it_refuses_to_store_a_rule_that_holds_a_pattern() {
         "{refused:?}"
     );
     let reason = refused.to_string();
-    assert!(reason.contains("format 3"), "{reason}");
+    assert!(
+        reason.contains(&format!("format {}", body::FORMAT)),
+        "{reason}"
+    );
     assert!(reason.contains("no way to write a pattern"), "{reason}");
 
     // Two rules that differ only inside their patterns are two rules.

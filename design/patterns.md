@@ -32,6 +32,6 @@ A rule cannot say a value by its shape: dialog has no value made of values, and 
 - **A parameter holds a pattern.** Where the value is bound, the pattern takes it apart and binds what is inside it. Where everything inside it is bound, the pattern is the value. One thing, both ways.
 - **A composite value first.** `Value::Composite` (#843, [composite-value](composite-value.md)): a map of scalar keys, a record its sub-band, and a list, read in place. It replaces the dag-cbor composite kept as a `Value::Record` that this topic first built (Irakli, 2026-11-20); what a pattern means over it is [design-on-composite](patterns/design-on-composite.md).
 - **The planner and inference look inside.** A pattern is feasible by the variables in it, not as one variable. Its type follows from its shape.
-- **No stored format and no wire form changes for it now.** Rules of tonk's notation never hold a pattern. What installing a rule that holds one does is to be said, not left to happen.
+- **No stored format and no wire form changes for it now.** Rules of tonk's notation never hold a pattern. What installing a rule that holds one does is to be said, not left to happen. A stored form for patterns is format 5 (Irakli, 2026-11-19: format 4 is the cardinality work's, #827, and "stuff with patterns becomes 5"); #799 builds it.
 
 Out of scope: the layout of a record's bytes beyond the first version (#748's), and rules of several heads ([rule-heads](rule-heads.md), #776).
