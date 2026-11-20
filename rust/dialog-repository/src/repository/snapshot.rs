@@ -1237,7 +1237,7 @@ mod tests {
 
         let mut facts: Vec<Instruction> = generate_data(20)?
             .into_iter()
-            .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
+            .map(|fact| Instruction::Assert(fact, dialog_corpus::Cardinality::Many))
             .collect();
         let large = Value::String(
             "spilled".repeat(dialog_search_tree::Manifest::default().inline_n as usize + 1),
@@ -1249,7 +1249,7 @@ mod tests {
                 is: large,
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         ));
         branch.commit(stream::iter(facts)).perform(&env).await?;
 

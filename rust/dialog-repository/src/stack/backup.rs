@@ -227,8 +227,8 @@ fn own_rows(rows: &Changes, dropped: &HashSet<Entity>) -> Changes {
             continue;
         }
         match change {
-            Change::Assert(is, pick) => {
-                kept.associate(the.clone(), of.clone(), is.clone(), pick.clone())
+            Change::Assert(is, cardinality) => {
+                kept.associate(the.clone(), of.clone(), is.clone(), *cardinality)
             }
             Change::Retract(is) => kept.dissociate(the.clone(), of.clone(), is.clone()),
         }

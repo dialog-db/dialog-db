@@ -123,7 +123,6 @@ impl DeductiveRuleDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Pick;
     use serde_json::json;
 
     #[dialog_common::test]
@@ -194,8 +193,8 @@ mod tests {
     }
 
     /// A rule stored by the release before picks decodes: its
-    /// attributes spell `cardinality` and a single `the`, which read as
-    /// `last` and `all` over that relation. The bytes are the dag-cbor
+    /// attributes spell `cardinality` and a single `the`, which is how
+    /// this release spells them too. The bytes are the dag-cbor
     /// of the descriptor as that release wrote it, which is what a
     /// replica holds for every rule a user installed under it.
     #[dialog_common::test]
@@ -262,8 +261,6 @@ mod tests {
                 .expect("the field")
         };
         let (name, tags) = (field("name"), field("tags"));
-        assert_eq!(name.descriptor().pick(), &Pick::Last);
-        assert_eq!(tags.descriptor().pick(), &Pick::All);
         assert_eq!(name.descriptor().cardinality(), crate::Cardinality::One);
         assert_eq!(tags.descriptor().cardinality(), crate::Cardinality::Many);
         // Re-encoded, the rule never writes the older spelling back.
@@ -271,9 +268,8 @@ mod tests {
         let decoded: serde_json::Value =
             serde_ipld_dagcbor::from_slice(&again).expect("the re-encoding is a map");
         assert!(
-            decoded.to_string().contains("\"pick\"")
-                || !decoded.to_string().contains("cardinality"),
-            "the branch spells picks as `pick`: {decoded}"
+            !decoded.to_string().contains("\"pick\""),
+            "no pick is written: {decoded}"
         );
     }
 

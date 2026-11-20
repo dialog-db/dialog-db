@@ -124,7 +124,7 @@ async fn it_pushes_and_pulls_via_fs_remote() -> Result<()> {
         .integrate(
             vec![Instruction::Assert(
                 fact("user:1", "Alice")?,
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]
             .into_iter()
             .collect(),
@@ -171,7 +171,7 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
         .integrate(
             vec![Instruction::Assert(
                 fact("user:alice", "Alice")?,
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]
             .into_iter()
             .collect(),
@@ -278,7 +278,7 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
         .integrate(
             vec![Instruction::Assert(
                 fact("user:alice", "Alice")?,
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]
             .into_iter()
             .collect(),
@@ -296,7 +296,7 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
         .integrate(
             vec![Instruction::Assert(
                 fact("user:bob", "Bob")?,
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]
             .into_iter()
             .collect(),

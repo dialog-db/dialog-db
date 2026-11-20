@@ -854,7 +854,7 @@ mod tests {
                 is: Value::String(value.to_string()),
                 cause: None,
             },
-            crate::Pick::All,
+            crate::Cardinality::Many,
         )
     }
 
@@ -866,7 +866,7 @@ mod tests {
                 is: Value::String(value.to_string()),
                 cause: None,
             },
-            crate::Pick::Last,
+            crate::Cardinality::One,
         )
     }
 
@@ -1356,7 +1356,10 @@ mod tests {
             .then_apply(
                 &store,
                 Stamp::Amend(asset_version()),
-                stream::iter(vec![Instruction::Assert(asset.fact()?, crate::Pick::All)]),
+                stream::iter(vec![Instruction::Assert(
+                    asset.fact()?,
+                    crate::Cardinality::Many,
+                )]),
                 WriteScope::Machinery,
             )
             .await?;
@@ -1387,7 +1390,10 @@ mod tests {
             &Corpus::empty_in(test_catalog()),
             &store,
             Some(asset_version()),
-            stream::iter(vec![Instruction::Assert(asset.fact()?, crate::Pick::All)]),
+            stream::iter(vec![Instruction::Assert(
+                asset.fact()?,
+                crate::Cardinality::Many,
+            )]),
             WriteScope::Application,
         )
         .await;
@@ -1417,7 +1423,10 @@ mod tests {
                 &Corpus::empty_in(test_catalog()),
                 &store,
                 Some(asset_version()),
-                stream::iter(vec![Instruction::Assert(fact(the)?, crate::Pick::All)]),
+                stream::iter(vec![Instruction::Assert(
+                    fact(the)?,
+                    crate::Cardinality::Many,
+                )]),
                 WriteScope::Application,
             )
             .await?;
@@ -1429,7 +1438,7 @@ mod tests {
             Some(asset_version()),
             stream::iter(vec![Instruction::Assert(
                 fact("dialog.commands/unhandled")?,
-                crate::Pick::All,
+                crate::Cardinality::Many,
             )]),
             WriteScope::Application,
         )

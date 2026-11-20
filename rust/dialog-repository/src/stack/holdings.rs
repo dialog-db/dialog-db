@@ -54,7 +54,7 @@
 use dialog_capability::Provider as Performs;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 use dialog_corpus::tree::CorpusNode;
-use dialog_corpus::{Changes, Pick, Statement as _, Update as _, Value};
+use dialog_corpus::{Changes, Statement as _, Update as _, Value};
 use dialog_effects::archive::prelude::CatalogScope;
 use dialog_query::attribute::{Cardinality, Relation};
 use dialog_query::{AttributeDescriptor, ConceptDescriptor};
@@ -144,7 +144,7 @@ where
             the.parse().expect("a node command's attribute"),
             command.entity().clone(),
             is,
-            Pick::All,
+            Cardinality::Many,
         );
     }
     // Into `control:`, so the answer is a command a rule can capture and

@@ -1153,7 +1153,7 @@ mod tests {
                 Relation::try_from("test.profile/name".to_string())?,
                 Entity::new()?,
                 Value::String(note.to_string()),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             );
             elsewhere
                 .transaction()

@@ -147,7 +147,7 @@ mod tests {
                     is: Value::String(name.into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(env)
             .await?;

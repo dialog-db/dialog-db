@@ -951,7 +951,7 @@ mod screen_tests {
                     facts
                         .iter()
                         .cloned()
-                        .map(|fact| Instruction::Assert(fact, crate::Pick::All)),
+                        .map(|fact| Instruction::Assert(fact, crate::Cardinality::Many)),
                 ),
             )
             .await?;

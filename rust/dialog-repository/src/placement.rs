@@ -68,7 +68,7 @@ use std::sync::{Arc, LazyLock};
 
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
-    Change, Changes, DialogCorpusError, Entity, Fact, FactView, Pick, Relation, Selector,
+    Cardinality, Change, Changes, DialogCorpusError, Entity, Fact, FactView, Relation, Selector,
     Statement, Update, Value,
 };
 use dialog_effects::branch::invalid_name;
@@ -215,7 +215,7 @@ impl Statement for Selection {
             selection_attr(),
             session_layer(),
             Value::Entity(self.0),
-            Pick::Last,
+            Cardinality::One,
         );
     }
 
@@ -410,7 +410,7 @@ impl Recorded<'_> {
         let mut rows = Changes::new();
         for ((of, the, is), _) in self.moved() {
             if !self.is_primary(&of, &the) && keep(&of) {
-                rows.associate(the, of, is, Pick::Last);
+                rows.associate(the, of, is, Cardinality::One);
             }
         }
         rows
@@ -442,7 +442,7 @@ impl Recorded<'_> {
             for value in recorded {
                 rows.dissociate(the.clone(), of.clone(), value);
             }
-            rows.associate(the, of, is, Pick::Last);
+            rows.associate(the, of, is, Cardinality::One);
         }
         rows
     }
@@ -484,7 +484,7 @@ impl Recorded<'_> {
                 .of(of.clone())
                 .is(is.clone());
             if self.own.scan(&selector).is_empty() {
-                implied.associate(the, of, is, Pick::Last);
+                implied.associate(the, of, is, Cardinality::One);
             }
         }
         implied
@@ -608,7 +608,12 @@ impl LayerDeclaration {
 
 impl Statement for LayerDeclaration {
     fn assert(self, update: &mut impl Update) {
-        update.associate(layer_type_attr(), self.layer, self.kind.value(), Pick::Last);
+        update.associate(
+            layer_type_attr(),
+            self.layer,
+            self.kind.value(),
+            Cardinality::One,
+        );
     }
 
     fn retract(self, update: &mut impl Update) {
@@ -644,7 +649,7 @@ impl Pointer<'_> {
 impl Statement for Pointer<'_> {
     fn assert(self, update: &mut impl Update) {
         for (the, is) in self.facts() {
-            update.associate(the, self.layer.clone(), is, Pick::Last);
+            update.associate(the, self.layer.clone(), is, Cardinality::One);
         }
     }
 
@@ -885,7 +890,7 @@ mod tests {
         let facts: Vec<(Entity, Relation, Value)> = changes
             .iter()
             .filter_map(|(of, the, change)| match change {
-                Change::Assert(is, pick) if *pick == Pick::Last => {
+                Change::Assert(is, cardinality) if *cardinality == Cardinality::One => {
                     Some((of.clone(), the.clone(), is.clone()))
                 }
                 _ => None,
@@ -949,20 +954,25 @@ mod tests {
         let of: Entity = "cmd:1".parse()?;
         let state: Entity = "session:state".parse()?;
         let mut changes = Changes::new();
-        changes.associate(the.clone(), of.clone(), Value::Boolean(true), Pick::All);
+        changes.associate(
+            the.clone(),
+            of.clone(),
+            Value::Boolean(true),
+            Cardinality::Many,
+        );
         changes.associate_in(
             control_layer(),
             the.clone(),
             of.clone(),
             Value::Boolean(false),
-            Pick::All,
+            Cardinality::Many,
         );
         changes.associate_in(
             state.clone(),
             the.clone(),
             of.clone(),
             Value::UnsignedInt(1u32.into()),
-            Pick::All,
+            Cardinality::Many,
         );
         let dispatched = take_dispatched(&mut changes);
         assert_eq!(dispatched.iter().count(), 1);

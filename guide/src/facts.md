@@ -57,9 +57,9 @@ A relation is a name and nothing more. It does not say what type its values have
 
 - a **description**, for people reading the data;
 - the **value type**, such as `text:` or `boolean:`;
-- a **pick**: which of an entity's facts in the relation a read returns.
+- a **cardinality**: how many of an entity's facts in the relation the attribute holds.
 
-The pick an attribute gets unless it says otherwise is `last`, the newest fact, so the attribute reads one value. The pick `all` reads every fact, so the attribute reads many. A grocery item has one name and one done flag, and any number of tags: the name and the done flag are read under `last`, the tags under `all`. The other picks, `max`, `min` and `top`, also read one value: the greatest, the least, or the best ranked of a list.
+The cardinality an attribute gets unless it says otherwise is one: a read returns the newest fact, so the attribute reads one value. Cardinality many reads every fact, so the attribute reads many. A grocery item has one name and one done flag, and any number of tags: the name and the done flag have cardinality one, the tags cardinality many. A read that ranks facts, the greatest, the least or the best of a list, is a rule (see [Queries](./queries.md)).
 
 Two apps can declare different attributes over the same relation, one reading a quantity as a whole number and another as it is. The facts do not change. Most of this guide can say attribute for both, since the grocery list reads each relation one way. The indexes in the next chapter do too: the relation's place in a key is called the attribute, which is where EAV, AEV and VAE get their A.
 
@@ -103,7 +103,7 @@ A type has a range, and a number outside it does not fit the attribute's definit
 
 A number inside the range is viewed at the precision of the type. A relation holding `4.3` is observed as `4` by an attribute that reads it as `integer:`, and as `4.3` by one that reads it as `float:`. A fraction is always rounded down, so `-4.3` is observed as `-5`.
 
-> ℹ️ Writes go through the same lens. Under the pick `last`, asserting `4` through an `integer:` attribute does nothing when the value observed through that attribute is already `4`, so a stored `4.3` stays `4.3`. Asserting `5` replaces the `4.3` with `5`.
+> ℹ️ Writes go through the same lens. Under cardinality one, asserting `4` through an `integer:` attribute does nothing when the value observed through that attribute is already `4`, so a stored `4.3` stays `4.3`. Asserting `5` replaces the `4.3` with `5`.
 
 Dialog works this way so that apps using different lenses on the same relation can share it. An app with lower precision does not destroy detail that an app with higher precision cares about, because writing back what it read changes nothing. And the app with lower precision still observes the data at the level of precision it is able to handle, instead of failing on a number it did not expect.
 
@@ -114,7 +114,7 @@ An app never edits a fact in place. Facts cannot change. Instead, an app asserts
 - **Assert** says *"this is true."* It adds the fact.
 - **Retract** says *"this is no longer true."* It removes the fact.
 
-What an assertion does to the facts already there depends on the attribute's pick. Under `all`, the new fact joins the others. Under any other pick, the new fact supersedes one fact: the one a read under that pick would have returned. Asserting that the eggs are done removes the fact that they were not.
+What an assertion does to the facts already there depends on the attribute's cardinality. Under many, the new fact joins the others. Under one, the new fact supersedes one fact: the newest, the one a read would have returned. Asserting that the eggs are done removes the fact that they were not.
 
 Here is item 2 changing under two assertions and a retraction. Each panel shows the item's facts after the change above it:
 
@@ -148,7 +148,7 @@ Here is item 2 changing under two assertions and a retraction. Each panel shows 
 </svg>
 </figure>
 
-The stored facts carry no pick of their own. It comes from the attribute's declaration, and Dialog applies it twice: when an assertion is written, and again when a query reads the attribute (see [Queries](./queries.md)). A write follows the read. Whatever a reader of the attribute would have seen is what the assertion supersedes, and nothing else. If two devices had each given the eggs a done flag without seeing the other's, a read elects one of the two, and the next assertion supersedes that one. The other stays stored. A read under `last` never notices it, and a read under `all` can still find it.
+The stored facts carry no cardinality of their own. It comes from the attribute's declaration, and Dialog applies it twice: when an assertion is written, and again when a query reads the attribute (see [Queries](./queries.md)). A write follows the read. Whatever a reader of the attribute would have seen is what the assertion supersedes, and nothing else. If two devices had each given the eggs a done flag without seeing the other's, a read elects one of the two, and the next assertion supersedes that one. The other stays stored. A read under cardinality one never notices it, and a read under many can still find it.
 
 Retracting a fact that is not there does nothing. Asserting a value that a read already returns writes nothing at all. Asserting a fact that is already there does not make a second copy: two writers asserting the same entity, attribute and value share one stored fact.
 

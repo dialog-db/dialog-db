@@ -9,8 +9,9 @@ use crate::environment::Environment;
 use crate::hydration;
 use crate::query::Application;
 use crate::query::Output;
-use crate::schema::Cardinality;
+use crate::schema::{Cardinality, estimate_cost};
 use crate::selection::{Match, Selection};
+use crate::selective::{Ranking, Selective};
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
@@ -19,6 +20,7 @@ use dialog_corpus::history::Edition;
 use dialog_corpus::{
     Cause, DialogCorpusError, Fact, FactView, LayerIndex, Layered, Select, SelectIn,
 };
+use std::cmp::Ordering;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::pin::Pin;
@@ -43,6 +45,30 @@ fn materialize_winner(winner: FactView) -> Result<Option<Winner>, DialogCorpusEr
         }
         Err(error) => Err(error),
     }
+}
+
+/// The claim of a cell `ranking` elects between `current` and
+/// `challenger`: by the ranking's order of their values, and by
+/// [`FactView::elect`], the order every cardinality-one read shares,
+/// where the values do not decide. With no ranking, that order alone.
+/// A row whose value cannot be read falls to [`FactView::elect`], which
+/// ranks a corrupt row below any readable one.
+fn elect(
+    ranking: Option<&Ranking>,
+    current: FactView,
+    challenger: FactView,
+) -> Result<FactView, DialogCorpusError> {
+    let Some(ranking) = ranking.filter(|ranking| ranking.aggregate != Selective::Last) else {
+        return current.elect(challenger);
+    };
+    let (Ok(mine), Ok(theirs)) = (current.value(), challenger.value()) else {
+        return current.elect(challenger);
+    };
+    Ok(match ranking.order(&mine, &theirs) {
+        Ordering::Greater => current,
+        Ordering::Less => challenger,
+        Ordering::Equal => current.elect(challenger)?,
+    })
 }
 
 /// The `(attribute, entity)` lookup [`challenge`] verifies `candidate`
@@ -85,8 +111,9 @@ trait Windowed: Sized {
             && self.view().of_bytes()? == other.view().of_bytes()?)
     }
 
-    /// The row of the cell that stands, of this one and `challenger`.
-    fn elect(self, challenger: Self) -> Result<Self, DialogCorpusError>;
+    /// The row of the cell that stands, of this one and `challenger`,
+    /// under `ranking` when the read picks by one.
+    fn elect(self, challenger: Self, ranking: Option<&Ranking>) -> Result<Self, DialogCorpusError>;
 
     /// The row and the index of its layer, when it carries one.
     fn into_parts(self) -> (FactView, Option<LayerIndex>);
@@ -99,8 +126,8 @@ impl Windowed for FactView {
     }
 
     #[inline(always)]
-    fn elect(self, challenger: Self) -> Result<Self, DialogCorpusError> {
-        FactView::elect(self, challenger)
+    fn elect(self, challenger: Self, ranking: Option<&Ranking>) -> Result<Self, DialogCorpusError> {
+        elect(ranking, self, challenger)
     }
 
     #[inline(always)]
@@ -121,8 +148,8 @@ impl Windowed for (FactView, LayerIndex) {
     }
 
     #[inline(always)]
-    fn elect(self, challenger: Self) -> Result<Self, DialogCorpusError> {
-        Ok((self.0.elect(challenger.0)?, self.1))
+    fn elect(self, challenger: Self, ranking: Option<&Ranking>) -> Result<Self, DialogCorpusError> {
+        Ok((elect(ranking, self.0, challenger.0)?, self.1))
     }
 
     #[inline(always)]
@@ -137,12 +164,16 @@ impl Windowed for (FactView, LayerIndex) {
 /// Inlined, as the window was before it was written once for both
 /// kinds of row: called per row, with the row moved in.
 #[inline(always)]
-fn slide<R: Windowed>(window: &mut Option<R>, row: R) -> Result<Option<R>, DialogCorpusError> {
+fn slide<R: Windowed>(
+    window: &mut Option<R>,
+    row: R,
+    ranking: Option<&Ranking>,
+) -> Result<Option<R>, DialogCorpusError> {
     if let Some(current) = window
         && current.shares_cell(&row)?
     {
         let current = window.take().expect("the window holds the cell's row");
-        *window = Some(current.elect(row)?);
+        *window = Some(current.elect(row, ranking)?);
         return Ok(None);
     }
     Ok(window.replace(row))
@@ -230,6 +261,7 @@ fn elect_layered<'a, 'b, Env>(
     base: &'b Match,
     input: Selector<Constrained>,
     constraint: Option<&'b Value>,
+    ranking: Option<&'b Ranking>,
 ) -> impl Selection + 'b
 where
     Env: crate::Scope<'a>,
@@ -240,7 +272,7 @@ where
         let mut window: Option<(FactView, LayerIndex)> = None;
         let mut placement: Option<Placement> = None;
         for await row in rows {
-            let Some(closed) = slide(&mut window, row?)? else {
+            let Some(closed) = slide(&mut window, row?, ranking)? else {
                 continue;
             };
             let (winner, at) = closed.into_parts();
@@ -269,6 +301,7 @@ where
 fn challenge<'a, Env>(
     env: &'a Env,
     selector: AttributeQueryAll,
+    ranking: Option<Ranking>,
     candidate: Match,
 ) -> impl Selection + 'a
 where
@@ -302,7 +335,7 @@ where
             // through it.
             winner = Some(match winner {
                 None => challenger,
-                Some(winner) => winner.elect(challenger)?,
+                Some(winner) => elect(ranking.as_ref(), winner, challenger)?,
             });
         }
 
@@ -325,13 +358,16 @@ where
 /// Winner-selecting attribute query for `Cardinality::One`.
 ///
 /// Wraps an [`AttributeQueryAll`] and yields one value per
-/// `(attribute, entity)` pair. Which row survives is not this layer's
-/// decision: competing rows fold through [`FactView::elect`], the
-/// value layer's cardinality-one election, and the engine encodes no
-/// policy of its own.
+/// `(attribute, entity)` pair. Competing rows fold through
+/// [`FactView::elect`], the value layer's cardinality-one election,
+/// unless the query reads for a concept field that declares a selective
+/// aggregator: then by the aggregator's order of the values first (see
+/// [`Selective`]), and by that election where the values do not decide.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct AttributeQueryOnly {
     query: AttributeQueryAll,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ranking: Option<Ranking>,
 }
 
 impl AttributeQueryOnly {
@@ -340,6 +376,7 @@ impl AttributeQueryOnly {
     pub fn new(the: Term<Relation>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         Self {
             query: AttributeQueryAll::new(the, of, is, cause),
+            ranking: None,
         }
     }
 
@@ -363,6 +400,7 @@ impl AttributeQueryOnly {
     pub(crate) fn with_type(self, kind: Kind) -> Self {
         Self {
             query: self.query.with_type(kind),
+            ranking: self.ranking,
         }
     }
 
@@ -370,7 +408,22 @@ impl AttributeQueryOnly {
     pub(crate) fn with_subject_kinds(self, the: Option<Kind>, of: Option<Kind>) -> Self {
         Self {
             query: self.query.with_subject_kinds(the, of),
+            ranking: self.ranking,
         }
+    }
+
+    /// This query choosing each cell's claim by `ranking` rather than
+    /// the newest.
+    pub(crate) fn ranked(self, ranking: Ranking) -> Self {
+        Self {
+            query: self.query,
+            ranking: Some(ranking),
+        }
+    }
+
+    /// The ranking the query elects by, when it is not the newest.
+    pub fn ranking(&self) -> Option<&Ranking> {
+        self.ranking.as_ref()
     }
 
     /// Get the 'cause' term.
@@ -387,6 +440,7 @@ impl AttributeQueryOnly {
     pub fn with_layer(self, layer: Term<Entity>) -> Self {
         Self {
             query: self.query.with_layer(layer),
+            ranking: self.ranking,
         }
     }
 
@@ -415,7 +469,7 @@ impl AttributeQueryOnly {
         let of = self.of().is_bound(env);
         let is = self.is().is_bound(env);
 
-        Cardinality::One.estimate(the, of, is)
+        estimate_cost(Cardinality::One, the, of, is)
     }
 
     /// Returns the parameters for this query.
@@ -445,6 +499,7 @@ impl AttributeQueryOnly {
         Env: crate::Scope<'a>,
     {
         let selector = self.query;
+        let ranking = self.ranking;
         // Pipeline the probes: while this loop awaits one row's scan, the
         // scans the next rows will issue are offered as preload hints, so
         // a cold replica replicates them concurrently instead of paying
@@ -529,6 +584,7 @@ impl AttributeQueryOnly {
                             &base,
                             input,
                             value_constraint.as_ref(),
+                            ranking.as_ref(),
                         ));
                         for await extension in layered {
                             yield extension?;
@@ -538,7 +594,7 @@ impl AttributeQueryOnly {
                         let stream = Provider::<Select<'_>>::execute(env, input).await?;
                         let mut window: Option<FactView> = None;
                         for await fact in stream {
-                            let Some(winner) = slide(&mut window, fact?)? else {
+                            let Some(winner) = slide(&mut window, fact?, ranking.as_ref())? else {
                                 continue;
                             };
                             if let Some(extension) = admitted(&selector, &mut placement, &base, winner, value_constraint.as_ref(), pinned)? {
@@ -573,7 +629,7 @@ impl AttributeQueryOnly {
                     }));
                     for await candidate in candidates {
                         let candidate = candidate?;
-                        let verified = Box::pin(challenge(env, selector.clone(), candidate));
+                        let verified = Box::pin(challenge(env, selector.clone(), ranking.clone(), candidate));
                         for await v in verified {
                             yield v?;
                         }

@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_corpus::{Entity, Pick};
+use dialog_corpus::{Cardinality, Entity};
 use dialog_query::query::Output as _;
 use dialog_query::{ConceptConclusion, ConceptDescriptor};
 use dialog_repository::Branch;
@@ -68,7 +68,7 @@ impl Prepared for Point {
 /// `read-point`: `size` entities, then `PROBES` single-entity reads.
 pub async fn point(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
-    seed_stuff(&env, size, Pick::Last).await?;
+    seed_stuff(&env, size, Cardinality::One).await?;
     env.reopen().await?;
     Ok(Box::new(Point { env, size }))
 }
@@ -111,7 +111,7 @@ impl Prepared for Sibling {
 /// single-entity reads through the second branch.
 pub async fn sibling(size: usize) -> Result<Box<dyn Prepared>> {
     let env = Env::open().await?;
-    seed_stuff(&env, size, Pick::Last).await?;
+    seed_stuff(&env, size, Cardinality::One).await?;
     let sibling = env.branch("sibling").await?;
     sibling
         .pull(dialog_repository::Download::MinimalRanges)
@@ -141,7 +141,7 @@ impl Prepared for Scan {
 /// `read-scan`: `size` entities, then one read of every name.
 pub async fn scan(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
-    seed_stuff(&env, size, Pick::Last).await?;
+    seed_stuff(&env, size, Cardinality::One).await?;
     env.reopen().await?;
     Ok(Box::new(Scan { env }))
 }
@@ -166,7 +166,7 @@ impl Prepared for Join {
 /// `query-join`: `size` entities, then one read of name and role.
 pub async fn join(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
-    seed_stuff(&env, size, Pick::Last).await?;
+    seed_stuff(&env, size, Cardinality::One).await?;
     env.reopen().await?;
     Ok(Box::new(Join { env }))
 }
@@ -290,7 +290,8 @@ async fn seed_issues(env: &Env, count: usize) -> Result<()> {
             ));
         }
     }
-    env.commit(crate::env::assert_all(facts, Pick::Last)).await
+    env.commit(crate::env::assert_all(facts, Cardinality::One))
+        .await
 }
 
 struct Optional {

@@ -3,6 +3,7 @@ use crate::attribute::query::DynamicAttributeQuery;
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::selection::{Match, Selection};
+use crate::selective::Ranking;
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::Any;
 use crate::{
@@ -60,6 +61,14 @@ impl OptionalAttributeQuery {
     ) -> Self {
         Self {
             query: DynamicAttributeQuery::new(the, of, is, cause, cardinality),
+        }
+    }
+
+    /// This left-join electing one claim of each cell by `ranking` (see
+    /// [`DynamicAttributeQuery::ranked`]).
+    pub(crate) fn ranked(self, ranking: Ranking) -> Self {
+        Self {
+            query: self.query.ranked(ranking),
         }
     }
 

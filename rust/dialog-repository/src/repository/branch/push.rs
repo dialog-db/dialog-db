@@ -1643,7 +1643,7 @@ mod tests {
         let _hash = feature
             .commit(stream::iter(vec![Instruction::Assert(
                 fact,
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -1688,7 +1688,7 @@ mod tests {
                         is: value.clone(),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 ),
                 Instruction::Assert(
                     Fact {
@@ -1697,7 +1697,7 @@ mod tests {
                         is: value.clone(),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 ),
             ]))
             .perform(&operator)
@@ -1760,7 +1760,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -1820,7 +1820,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -1887,7 +1887,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -1947,7 +1947,7 @@ mod tests {
                     is: Value::String("Existing".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -1961,7 +1961,7 @@ mod tests {
                     is: Value::String("New".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -1989,7 +1989,7 @@ mod tests {
                     is: Value::String("Main data".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -2005,7 +2005,7 @@ mod tests {
                     is: Value::String("feature@example.com".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -2082,7 +2082,7 @@ mod tests {
                     is: Value::String("Alice".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -2130,7 +2130,7 @@ mod tests {
                         is: Value::String(value.into()),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )]))
                 .perform(&operator)
                 .await?;
@@ -2155,7 +2155,7 @@ mod tests {
                 is: Value::String(of.to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )
     }
 

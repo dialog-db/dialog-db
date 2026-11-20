@@ -1015,7 +1015,7 @@ mod tests {
                         is: Value::String("Elsewhere".into()),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )]
                 .into_iter()
                 .collect(),
