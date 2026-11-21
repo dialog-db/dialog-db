@@ -60,6 +60,10 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
   list, one canonical encoding with keys once, a size on every nested
   body and offsets on a long sequence, read as a view of its buffer, and
   named by its merkle reference.
+- [A parameter holds one variable or one constant](patterns.md):
+  **Designing.** Patterns build and take apart the canonical composite
+  values from #843; Chronicle shares their scalar atoms through tokens
+  in #849. The [plan](patterns/plan.md) is for the remaining work.
 - [A read follows the head it should have pinned](query-isolation.md):
   **Building.** Every unit of isolation (a query, a select, a poll, a
   transaction) reads one revision, and the types make a live read
