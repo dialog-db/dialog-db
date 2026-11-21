@@ -363,6 +363,17 @@ impl Composite {
             .collect()
     }
 
+    /// The canonical scalar bytes held by a body slot, resolving a table
+    /// reference when the slot uses the tokenized layout.
+    fn atom_at(&self, slot: usize, end: usize) -> Option<&[u8]> {
+        if self.buffer.get(slot) == Some(&TOKEN_REF) {
+            let (index, after) = read_varint(&self.buffer, slot + 1)?;
+            (after == end).then(|| self.key_bytes(index)).flatten()
+        } else {
+            self.buffer.get(slot..end)
+        }
+    }
+
     /// The root body's canonical bytes, whose scalar references index
     /// [`atom_tokens`](Self::atom_tokens).
     pub fn token_body(&self) -> &[u8] {
@@ -840,8 +851,10 @@ impl Composite {
             }
             if self.buffer[slot] == ValueDataType::Composite as u8 {
                 self.nested(slot).walk(visit);
+            } else if let Some(atom) = self.atom_at(slot, end) {
+                visit(atom);
             } else {
-                visit(&self.buffer[slot..end]);
+                return;
             }
             at = end;
         }
@@ -900,7 +913,7 @@ impl Composite {
                     }
                 }
                 (false, false) => {
-                    if self.buffer[slot_a..end_a] != other.buffer[slot_b..end_b] {
+                    if self.atom_at(slot_a, end_a) != other.atom_at(slot_b, end_b) {
                         return false;
                     }
                 }
