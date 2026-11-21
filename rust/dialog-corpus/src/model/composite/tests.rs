@@ -752,19 +752,35 @@ fn it_writes_and_names_fixed_composites_alike_on_every_target() {
 fn it_writes_offsets_alike_on_every_target() {
     let [_, _, (_, list), ..] = pinned();
     let bytes = list.to_bytes();
-    assert_eq!(bytes[..4], [TABLE, 0, 0, layout::head(LIST, 2)]);
+    let body = list.seq().unwrap();
+    assert_eq!(body.kind, LIST);
+    assert_eq!(body.width, 1);
+    assert_eq!(
+        (1..body.count)
+            .map(|index| body.offset(&bytes, index).unwrap() - body.items)
+            .collect::<Vec<_>>(),
+        (1..body.count).map(|index| 2 * index).collect::<Vec<_>>()
+    );
     let many: Vec<String> = (0..=SCAN_LIMIT).map(|n| format!("i{n}")).collect();
-    let bytes = Composite::list(many.iter().map(|t| text(t)))
-        .unwrap()
-        .to_bytes()
-        .into_owned();
-    assert_eq!(bytes[..4], [TABLE, 0, 0, layout::head(LIST, 1)]);
-    assert_eq!(usize::from(bytes[4]), SCAN_LIMIT + 1);
-    // Eight one-byte offsets and nine items of four bytes (`03 i 0 00`).
-    assert_eq!(bytes[5], 44);
-    assert_eq!(bytes[6..14], [4, 8, 12, 16, 20, 24, 28, 32]);
-    assert_eq!(bytes[14..18], [3, b'i', b'0', 0]);
-    assert_eq!(bytes.len(), 6 + 44);
+    let many = Composite::list(many.iter().map(|t| text(t))).unwrap();
+    let bytes = many.to_bytes();
+    let table = many.table().unwrap();
+    assert_eq!(table.count, SCAN_LIMIT + 1);
+    assert_eq!(table.width, 1);
+    assert_eq!(
+        (1..table.count)
+            .map(|index| table.offset(&bytes, index).unwrap() - table.items)
+            .collect::<Vec<_>>(),
+        (1..table.count).map(|index| 4 * index).collect::<Vec<_>>()
+    );
+    let body = many.seq().unwrap();
+    assert_eq!(body.width, 1);
+    assert_eq!(
+        (1..body.count)
+            .map(|index| body.offset(&bytes, index).unwrap() - body.items)
+            .collect::<Vec<_>>(),
+        (1..body.count).map(|index| 2 * index).collect::<Vec<_>>()
+    );
 }
 
 #[dialog_common::test]
