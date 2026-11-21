@@ -513,17 +513,21 @@ fn it_refuses_to_nest_deeper_than_its_limit() {
     ));
 }
 
-/// The canonical bytes of `items` texts in a list, laid out by hand.
+/// The bytes of `items` in a list with its body offsets written `width` bytes
+/// wide, including layouts the canonical writer refuses.
 fn list_bytes(items: &[&str], width: usize) -> Vec<u8> {
-    let mut body = Vec::new();
+    let composite = Composite::list(items.iter().map(|item| text(item))).unwrap();
+    let bytes = composite.to_bytes();
+    let seq = composite.seq().unwrap();
+    let mut slots = Vec::new();
     let mut starts = Vec::new();
-    for item in items {
-        starts.push(body.len());
-        body.push(ValueDataType::String as u8);
-        body.extend_from_slice(item.as_bytes());
-        body.push(0);
+    let mut cursor = seq.items;
+    for _ in 0..seq.count {
+        starts.push(slots.len());
+        let end = slot_end(&bytes, cursor, seq.end).unwrap();
+        slots.extend_from_slice(&bytes[cursor..end]);
+        cursor = end;
     }
-    let mut out = vec![TABLE, 0, 0, layout::head(LIST, width), items.len() as u8];
     let offsets: Vec<u8> = if width == 0 {
         Vec::new()
     } else {
@@ -532,9 +536,14 @@ fn list_bytes(items: &[&str], width: usize) -> Vec<u8> {
             .flat_map(|start| (*start as u64).to_be_bytes()[8 - width..].to_vec())
             .collect()
     };
-    out.push((offsets.len() + body.len()) as u8);
+    let mut out = bytes[..composite.body].to_vec();
+    out.extend_from_slice(&[
+        layout::head(LIST, width),
+        items.len() as u8,
+        (offsets.len() + slots.len()) as u8,
+    ]);
     out.extend(offsets);
-    out.extend(body);
+    out.extend(slots);
     out
 }
 
@@ -559,9 +568,10 @@ fn it_writes_the_layout_the_documentation_draws() {
     );
     // A record's keys are symbols in the table, its entries their places.
     let record = Composite::record([(relation("geo/lat"), Value::Boolean(true))]).unwrap();
-    let mut expected = vec![TABLE, 1, 9, ValueDataType::Symbol as u8];
+    let mut expected = vec![TABLE, 2, 11, ValueDataType::Boolean as u8, 1];
+    expected.extend_from_slice(&[ValueDataType::Symbol as u8]);
     expected.extend_from_slice(b"geo/lat\0");
-    expected.extend_from_slice(&[MAP, 1, 3, 0, ValueDataType::Boolean as u8, 1]);
+    expected.extend_from_slice(&[MAP, 1, 3, 1, TOKEN_REF, 0]);
     assert_eq!(record.to_bytes().as_ref(), expected);
 
     // The drawing in design/composite-value.md.
@@ -573,10 +583,31 @@ fn it_writes_the_layout_the_documentation_draws() {
         ),
     ])
     .unwrap();
-    let mut expected = vec![TABLE, 2, 13, 3];
-    expected.extend_from_slice(b"items\0\x03type\0");
-    expected.extend_from_slice(&[MAP, 2, 20, 0, 22, LIST, 2, 6, 3, b'a', 0, 3, b'b', 0, 1, 1]);
+    let mut expected = vec![TABLE, 5, 27, ValueDataType::Entity as u8];
     expected.extend_from_slice(b"tuple:\0");
+    expected.extend_from_slice(&[ValueDataType::String as u8, b'a', 0]);
+    expected.extend_from_slice(&[ValueDataType::String as u8, b'b', 0]);
+    expected.extend_from_slice(&[ValueDataType::String as u8]);
+    expected.extend_from_slice(b"items\0");
+    expected.extend_from_slice(&[ValueDataType::String as u8]);
+    expected.extend_from_slice(b"type\0");
+    expected.extend_from_slice(&[
+        MAP,
+        2,
+        12,
+        3,
+        ValueDataType::Composite as u8,
+        LIST,
+        2,
+        4,
+        TOKEN_REF,
+        1,
+        TOKEN_REF,
+        2,
+        4,
+        TOKEN_REF,
+        0,
+    ]);
     assert_eq!(drawn.to_bytes().as_ref(), expected);
 }
 
@@ -881,7 +912,9 @@ fn it_refuses_an_offset_that_is_not_where_its_item_is() {
     let many: Vec<&str> = many.iter().map(String::as_str).collect();
     let mut bytes = list_bytes(&many, 1);
     // The first offset, of the second item, one byte late.
-    bytes[6] += 1;
+    let table = layout::seq(&bytes, 0).unwrap();
+    let body = layout::seq(&bytes, table.end).unwrap();
+    bytes[body.offsets] += 1;
     assert!(matches!(refused(&bytes), CompositeError::Malformed));
 }
 
