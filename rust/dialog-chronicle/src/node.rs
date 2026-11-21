@@ -12,15 +12,18 @@ use std::sync::Arc;
 
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_corpus::{
-    ATTRIBUTE_KEY_TAG, ArchivedState, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum, ENTITY_KEY_TAG,
-    HISTORY_KEY_TAG, Key, State, VALUE_KEY_TAG, split_record_components,
+    ATTRIBUTE_KEY_TAG, ArchivedState, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Composite, Datum,
+    ENTITY_KEY_TAG, HISTORY_KEY_TAG, Key, State, VALUE_KEY_TAG, ValueDataType,
+    split_record_components,
 };
 use dialog_search_tree::{
     Entry, Key as TreeKey, Link, MIXED_LAYOUT, Manifest, NodeBody, NoveltyBuffer, NoveltyEntry,
     NoveltyOp, PersistentNode, PersistentNodeBody, PersistentSegment, Scale, Separator, into_owned,
 };
 
-use crate::rows::{DATUM, INDEX, NONE, Row, Rows, SEGMENT, SLOTS, invalid, slots_of};
+use crate::rows::{
+    DATUM, INDEX, NONE, Reader, Row, Rows, SEGMENT, SLOTS, invalid, put_varint, slots_of,
+};
 use crate::tokens::{Draft, TokenRead};
 
 /// A node of the artifact tree.
@@ -28,6 +31,9 @@ pub(crate) type TreeNode = PersistentNode<Key, State<Datum>>;
 
 /// The form of a key that does not split into tokens: the whole key is one.
 const FORM_OPAQUE: u8 = 0xFE;
+/// Chronicle's token-table form of a composite value. It is local to the
+/// archive; blocks continue to carry the canonical corpus encoding.
+const COMPOSITE_TOKEN_MAGIC: &[u8] = &[0xFF, b'C', b'T', 1];
 
 fn tree_error(error: impl std::fmt::Display) -> io::Error {
     invalid(&error.to_string())
@@ -77,15 +83,24 @@ fn key_tokens(key: &[u8]) -> (u8, [&[u8]; SLOTS], usize) {
 }
 
 /// Rebuilds a key from its form and tokens: the inverse of [`key_tokens`].
-fn key_from_tokens(form: u8, tokens: &[&[u8]]) -> io::Result<Vec<u8>> {
+fn key_from_tokens<T: TokenRead + ?Sized>(
+    form: u8,
+    parts: &[&[u8]],
+    tokens: &T,
+) -> io::Result<Vec<u8>> {
     let mut key = Vec::new();
-    key_into(form, tokens, &mut key)?;
+    key_into(form, parts, &mut key, tokens)?;
     Ok(key)
 }
 
 /// [`key_from_tokens`], into `key` (cleared first), so a caller rebuilding
 /// many keys reuses one buffer.
-fn key_into(form: u8, tokens: &[&[u8]], key: &mut Vec<u8>) -> io::Result<()> {
+fn key_into<T: TokenRead + ?Sized>(
+    form: u8,
+    tokens: &[&[u8]],
+    key: &mut Vec<u8>,
+    dictionary: &T,
+) -> io::Result<()> {
     key.clear();
     let parts: &[&[u8]] = match (form, tokens) {
         (ENTITY_KEY_TAG, [entity, attribute, value]) => &[entity, attribute, value],
@@ -102,8 +117,104 @@ fn key_into(form: u8, tokens: &[&[u8]], key: &mut Vec<u8>) -> io::Result<()> {
         _ => return Err(invalid("a key's form and its tokens disagree")),
     };
     key.push(form);
-    for part in parts {
-        key.extend_from_slice(part);
+    let value_index = match form {
+        VALUE_KEY_TAG => Some(0),
+        ENTITY_KEY_TAG | ATTRIBUTE_KEY_TAG | HISTORY_KEY_TAG | COVERAGE_KEY_TAG => {
+            Some(parts.len() - 1)
+        }
+        _ => None,
+    };
+    for (index, part) in parts.iter().enumerate() {
+        if Some(index) == value_index {
+            realize_value_token(part, dictionary, key)?;
+        } else {
+            key.extend_from_slice(part);
+        }
+    }
+    Ok(())
+}
+
+/// A composite token in Chronicle names the archive-wide atom tokens. Expand
+/// it back into the canonical, self-contained bytes used in blocks and keys.
+fn realize_value_token<T: TokenRead + ?Sized>(
+    value: &[u8],
+    dictionary: &T,
+    out: &mut Vec<u8>,
+) -> io::Result<()> {
+    if value.first() != Some(&(ValueDataType::Composite as u8))
+        || !value[1..].starts_with(COMPOSITE_TOKEN_MAGIC)
+    {
+        out.extend_from_slice(value);
+        return Ok(());
+    }
+    let mut reader = Reader::new(&value[1 + COMPOSITE_TOKEN_MAGIC.len()..]);
+    let count =
+        usize::try_from(reader.varint()?).map_err(|_| invalid("too many composite tokens"))?;
+    let mut atoms = Vec::with_capacity(count.min(1 << 20));
+    for _ in 0..count {
+        let id = u32::from_le_bytes(reader.take(4)?.try_into().expect("four bytes"));
+        atoms.push(
+            dictionary
+                .get(id)
+                .ok_or_else(|| invalid("a composite token is missing"))?,
+        );
+    }
+    let body = &value[1 + COMPOSITE_TOKEN_MAGIC.len() + reader.position()..];
+    let composite = Composite::from_token_parts(&atoms, body).map_err(tree_error)?;
+    out.push(ValueDataType::Composite as u8);
+    out.extend_from_slice(composite.to_bytes().as_ref());
+    Ok(())
+}
+
+/// Interns a canonical composite as a small list of archive-wide token ids
+/// followed by its canonical body. Other values are interned byte for byte.
+fn intern_value(tokens: &mut Draft<'_>, value: &[u8]) -> io::Result<u32> {
+    if value.first() != Some(&(ValueDataType::Composite as u8)) {
+        return Ok(tokens.intern(value));
+    }
+    // A spilled key has only the order-preserving prefix in its value slot;
+    // it cannot yield the composite's complete header until the blob is read.
+    let Ok(composite) = Composite::from_bytes(&value[1..]) else {
+        return Ok(tokens.intern(value));
+    };
+    let atoms = composite.atom_tokens();
+    let mut packed = Vec::new();
+    packed.push(ValueDataType::Composite as u8);
+    packed.extend_from_slice(COMPOSITE_TOKEN_MAGIC);
+    put_varint(&mut packed, atoms.len() as u64);
+    for atom in atoms {
+        packed.extend_from_slice(&tokens.intern(atom).to_le_bytes());
+    }
+    packed.extend_from_slice(composite.token_body());
+    Ok(tokens.intern(&packed))
+}
+
+/// Rewrites provisional token IDs inside a packed composite after Chronicle
+/// assigns the drafted tokens their permanent file offsets.
+pub(crate) fn remap_composite_token(
+    value: &mut [u8],
+    mut remap: impl FnMut(u32) -> io::Result<u32>,
+) -> io::Result<()> {
+    if value.first() != Some(&(ValueDataType::Composite as u8))
+        || !value[1..].starts_with(COMPOSITE_TOKEN_MAGIC)
+    {
+        return Ok(());
+    }
+    let mut reader = Reader::new(&value[1 + COMPOSITE_TOKEN_MAGIC.len()..]);
+    let count =
+        usize::try_from(reader.varint()?).map_err(|_| invalid("too many composite tokens"))?;
+    let start = 1 + COMPOSITE_TOKEN_MAGIC.len() + reader.position();
+    let end = start
+        .checked_add(
+            count
+                .checked_mul(4)
+                .ok_or_else(|| invalid("composite token table overflow"))?,
+        )
+        .filter(|end| *end <= value.len())
+        .ok_or_else(|| invalid("a composite token table ends early"))?;
+    for at in (start..end).step_by(4) {
+        let id = u32::from_le_bytes(value[at..at + 4].try_into().expect("four bytes"));
+        value[at..at + 4].copy_from_slice(&remap(id)?.to_le_bytes());
     }
     Ok(())
 }
@@ -113,7 +224,18 @@ fn entry_row(tokens: &mut Draft<'_>, key: &[u8], datum: Option<&State<Datum>>) -
     let (form, parts, count) = key_tokens(key);
     let mut row = [form as u32, 0, 0, 0, 0, NONE];
     for (slot, token) in parts[..count].iter().enumerate() {
-        row[1 + slot] = tokens.intern(token);
+        let value_slot = match form {
+            VALUE_KEY_TAG => Some(0),
+            ENTITY_KEY_TAG | ATTRIBUTE_KEY_TAG | HISTORY_KEY_TAG | COVERAGE_KEY_TAG => {
+                Some(count - 1)
+            }
+            _ => None,
+        };
+        row[1 + slot] = if Some(slot) == value_slot {
+            intern_value(tokens, token)?
+        } else {
+            tokens.intern(token)
+        };
     }
     if let Some(datum) = datum {
         row[DATUM] = SCRATCH.with_borrow_mut(|scratch| -> io::Result<u32> {
@@ -169,7 +291,7 @@ fn entry_of<T: TokenRead + ?Sized>(
         NONE => None,
         id => Some(datum_of(token(id)?)?),
     };
-    Ok((key_from_tokens(form, &parts)?, datum))
+    Ok((key_from_tokens(form, &parts, tokens)?, datum))
 }
 
 /// The rows of the node a node supersedes, walked beside the node's own
@@ -216,7 +338,7 @@ impl Predecessor {
             for slot in 0..count {
                 parts[slot] = tokens.get(row[1 + slot])?;
             }
-            key_into(form, &parts[..count], &mut self.key).ok()?;
+            key_into(form, &parts[..count], &mut self.key, tokens).ok()?;
             match self.key.as_slice().cmp(key) {
                 std::cmp::Ordering::Less => self.next += 1,
                 std::cmp::Ordering::Greater => return None,

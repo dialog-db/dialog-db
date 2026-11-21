@@ -2841,19 +2841,49 @@ impl Chronicle {
         let mut remembered = Vec::new();
         if !new.is_empty() {
             let body_offset = start + bytes.len() as u64 + HEADER;
-            let (body, places) = draft.record(body_offset, &new);
-            put_record(&mut bytes, Kind::Tokens, &body)?;
+            let (mut body, places) = draft.record(body_offset, &new);
+            // Composite token references use fixed-width IDs, so assigning
+            // file offsets cannot change token lengths or the places above.
+            for (id, place) in new.iter().zip(&places) {
+                tokens[(*id - first) as usize] = token_id(*place)?;
+            }
             for (id, place) in new.iter().zip(places) {
-                let named = token_id(place)?;
-                tokens[(*id - first) as usize] = named;
-                let token = draft.get(*id).expect("a drafted token");
-                let hash = draft.hash(*id).expect("a drafted token's hash");
+                let at = usize::try_from(place - body_offset)
+                    .map_err(|_| invalid("a token place is out of range"))?;
+                let len_at = at
+                    .checked_sub(4)
+                    .ok_or_else(|| invalid("a token length is missing"))?;
+                let len = u32::from_le_bytes(
+                    body.get(len_at..at)
+                        .ok_or_else(|| invalid("a token length is missing"))?
+                        .try_into()
+                        .expect("four bytes"),
+                ) as usize;
+                let end = at
+                    .checked_add(len)
+                    .filter(|end| *end <= body.len())
+                    .ok_or_else(|| invalid("a token ends early"))?;
+                let token = &mut body[at..end];
+                crate::node::remap_composite_token(token, |id| {
+                    if id < first {
+                        Ok(id)
+                    } else {
+                        tokens
+                            .get((id - first) as usize)
+                            .copied()
+                            .filter(|mapped| *mapped != 0)
+                            .ok_or_else(|| invalid("a composite token reference is unresolved"))
+                    }
+                })?;
+                let hash = crate::hash::hash(token);
+                let named = tokens[(*id - first) as usize];
                 let (_, key) = snapshot.probe_token(hash, token)?;
                 entries.push((free(snapshot, key, &mut taken)?, named));
                 remembered.push((hash, named));
                 slot.counts.tokens += 1;
                 slot.counts.token_bytes += token.len() as u64;
             }
+            put_record(&mut bytes, Kind::Tokens, &body)?;
         }
         let token = |id: u32| {
             if id < first {

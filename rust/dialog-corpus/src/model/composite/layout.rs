@@ -4,6 +4,7 @@
 //! storage, a block from a peer) and answers `None` for bytes it cannot
 //! read, never panicking and never reading past the end.
 
+use super::encode::TOKEN_REF;
 use crate::ValueDataType;
 
 /// The sequence that lists a composite's keys, at the front of its buffer.
@@ -151,6 +152,9 @@ pub(super) fn slot_end(bytes: &[u8], at: usize, end: usize) -> Option<usize> {
     let bytes = bytes.get(..end)?;
     let kind = *bytes.get(at)?;
     let rest = bytes.get(at + 1..)?;
+    if kind == TOKEN_REF {
+        return read_varint(bytes, at + 1).map(|(_, end)| end);
+    }
     let len = if kind == ValueDataType::Number as u8 {
         dialog_number::encoded_len(rest)?
     } else if kind == ValueDataType::Composite as u8 {
