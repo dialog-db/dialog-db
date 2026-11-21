@@ -777,9 +777,22 @@ fn it_refuses_keys_out_of_order() {
 #[dialog_common::test]
 fn it_refuses_a_key_no_entry_uses() {
     let used = Composite::map([(text("a"), natural(1))]).unwrap();
-    let mut bytes = vec![TABLE, 2, 6, 3, b'a', 0, 3, b'b', 0];
-    bytes.extend_from_slice(&used.to_bytes()[6..]);
-    assert!(matches!(refused(&bytes), CompositeError::NotCanonical));
+    let extra = Composite::map([(text("z"), natural(2))]).unwrap();
+    let mut tokens: Vec<Vec<u8>> = used.atom_tokens().iter().map(|token| token.to_vec()).collect();
+    tokens.push(
+        extra
+            .atom_tokens()
+            .into_iter()
+            .find(|token| token.first() == Some(&(ValueDataType::Number as u8)))
+            .unwrap()
+            .to_vec(),
+    );
+    tokens.sort();
+    let tokens: Vec<&[u8]> = tokens.iter().map(Vec::as_slice).collect();
+    assert!(matches!(
+        Composite::from_token_parts(&tokens, used.token_body()),
+        Err(CompositeError::NotCanonical)
+    ));
 }
 
 #[dialog_common::test]
