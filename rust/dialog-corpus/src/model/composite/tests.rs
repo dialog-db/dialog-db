@@ -778,7 +778,11 @@ fn it_refuses_keys_out_of_order() {
 fn it_refuses_a_key_no_entry_uses() {
     let used = Composite::map([(text("a"), natural(1))]).unwrap();
     let extra = Composite::map([(text("z"), natural(2))]).unwrap();
-    let mut tokens: Vec<Vec<u8>> = used.atom_tokens().iter().map(|token| token.to_vec()).collect();
+    let mut tokens: Vec<Vec<u8>> = used
+        .atom_tokens()
+        .iter()
+        .map(|token| token.to_vec())
+        .collect();
     tokens.push(
         extra
             .atom_tokens()
