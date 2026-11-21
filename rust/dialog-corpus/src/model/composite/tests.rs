@@ -452,13 +452,16 @@ fn it_keeps_each_key_once_for_everything_nested() {
         (
             text("items"),
             Value::Composite(
-                Composite::list((0..20).map(|n| Value::Composite(node(&format!("n{n}"))))).unwrap(),
+                Composite::list((0..20).map(|_| Value::Composite(node("nested")))).unwrap(),
             ),
         ),
     ])
     .unwrap();
     let table = tree.table().unwrap();
-    assert_eq!(table.count, 3, "type, name and items, once each");
+    assert_eq!(
+        table.count, 6,
+        "three keys and three distinct scalar values, each once"
+    );
 }
 
 #[dialog_common::test]
