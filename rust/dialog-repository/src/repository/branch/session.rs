@@ -2,26 +2,24 @@ use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_search_tree::nodes;
-use std::any::Any;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::iter::once;
 
 use dialog_capability::{Capability, Fork, Provider, Resume, Subject};
-use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Held, Holds};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync, Held, Holds};
 use dialog_corpus::history::Edition;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::{
-    Asset, Changes, DialogCorpusError, Entity, Estimate, Fact, FactStream, FactView, Likelihood,
-    Pick, Preload, PreloadRequest, Select, Selector, SortKey, Speculation, Statement, Update,
-    sort_key,
+    Changes, DialogCorpusError, Entity, Estimate, Fact, FactStream, FactView, LayerIndex, Layered,
+    Likelihood, Preload, PreloadRequest, Select, SelectIn, Selector, SortKey, Speculation,
+    Statement, sort_key,
 };
 use dialog_corpus::{Relation as CorpusRelation, Standing, Value};
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
-use dialog_query::attribute::AttributeDescriptor;
 use dialog_query::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use dialog_query::concept::query::fixpoint::Continuation;
 use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
@@ -35,17 +33,19 @@ use dialog_query::{Claim, DeductiveRule, Negation, Premise, Proposition};
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_search_tree::Manifest;
 use futures_util::future::try_join_all;
-use futures_util::{TryStreamExt as _, stream};
+use futures_util::{StreamExt, TryStreamExt as _, stream};
+use std::future::Future;
 use std::sync::OnceLock;
 use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::OnceCell;
 
 use crate::CommitError;
 use crate::REGISTRY;
-use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped};
+use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped, merge_grouped_in};
+use crate::placement::{memory_layer, session_layer};
 use crate::repository::archive::TreeEnv;
 use crate::repository::branch::select::line_manifest;
-use crate::repository::ephemeral::{Bodies, Window};
+use crate::repository::ephemeral::Window;
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Live, Source, View};
 use crate::repository::{CellSettlement, ReadObservation};
@@ -54,7 +54,8 @@ use crate::rules::is_rule_attribute;
 use crate::rules::{
     RuleKey, RuleRead, Selecting, assemble, builtin, builtin_derives, builtin_deriving,
     conclusion_attr, derives_attr, derives_keys, derives_selector, head_onto, hydrate,
-    quarantined_attr, rule_entities, source_attr, source_bytes, source_selector,
+    hydrate_inductive, invalid_attr, quarantined_attr, rule_entities, source_attr, source_bytes,
+    source_selector,
 };
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
@@ -109,43 +110,53 @@ use crate::{Branch, Ephemeral, RemoteSite, Snapshot, Staged};
 #[derive(Default, Clone)]
 pub struct QueryLayer<'a> {
     lines: Vec<Live<'a>>,
+    /// The layers of a session read beside the lines, held out of line
+    /// and `None` for a read of branches alone, so a plain read's query,
+    /// and the stream that holds it, is no larger than it was before
+    /// layers.
+    layers: Option<Box<StackLayers<'a>>>,
     changes: Changes,
-    /// The rules laid over the lines that have no stored body, each as
-    /// it was given (see [`Bodies`]).
-    bodies: Option<Bodies>,
 }
 
-/// A layer's overlay as a statement is laid into it. Its facts go into
-/// the layer's changes. What the statement has no bytes for and asks
-/// its target to hold (see [`Update::hold`]) is kept beside them when
-/// it is a deductive rule: a layer runs a rule and never stores it, so
-/// it needs the rule's name, which its facts carry, and the rule.
-struct Laying<'x> {
-    changes: &'x mut Changes,
-    bodies: &'x mut Option<Bodies>,
+/// The layers of a session a [`QueryLayer`] reads beside its lines.
+#[derive(Default, Clone)]
+struct StackLayers<'a> {
+    /// Memory layers read beside the lines, live, each by the name a
+    /// row's `in` binds to.
+    memories: Vec<(Entity, &'a Ephemeral)>,
+    /// Lines read after `lines`, each a layer of a stack read by the
+    /// name a row's `in` binds to: its durable layers, each pinned at the
+    /// tree its primary points at.
+    named: Vec<(Entity, Source)>,
 }
 
-impl Update for Laying<'_> {
-    fn associate(&mut self, the: CorpusRelation, of: Entity, is: Value, policy: Pick) {
-        self.changes.associate(the, of, is, policy);
-    }
+/// The lines a query env reads, owned: every tree line, pinned, plus
+/// every memory layer, live. What a [`QueryLayer`] resolves to when a
+/// query is performed, and what a [`Stack`](crate::Stack) hands its
+/// induction.
+#[derive(Default, Clone)]
+pub(crate) struct Composite {
+    pub(crate) sources: Vec<Source>,
+    /// The memory layers, each by the name a row's `in` binds to.
+    pub(crate) memories: Vec<(Entity, Ephemeral)>,
+    /// The name a row of each of `sources` binds its `in` to, by index:
+    /// a durable layer's. A line with none named here is named as
+    /// [`QueryEnv::line_layer`] says.
+    pub(crate) names: Vec<Option<Entity>>,
+    /// The channels of the stack the composite is read through, by name,
+    /// the loopback among them: a rule head landing in one is stimulus
+    /// of the next round, as one landing in [`control:`](crate::CONTROL)
+    /// is, and is never written into a layer.
+    pub(crate) channels: Vec<Entity>,
+}
 
-    fn dissociate(&mut self, the: CorpusRelation, of: Entity, is: Value) {
-        self.changes.dissociate(the, of, is);
-    }
-
-    fn import(&mut self, asset: Asset) {
-        self.changes.import(asset);
-    }
-
-    fn discard(&mut self, asset: Asset) {
-        self.changes.discard(asset);
-    }
-
-    fn hold(&mut self, entity: &Entity, body: Box<dyn Any>) -> Result<(), Box<dyn Any>> {
-        let rule = body.downcast::<DeductiveRule>()?;
-        Arc::make_mut(self.bodies.get_or_insert_default()).insert(entity.clone(), *rule);
-        Ok(())
+impl Composite {
+    /// A composite of one tree line.
+    pub(crate) fn of(source: Source) -> Self {
+        Self {
+            sources: vec![source],
+            ..Self::default()
+        }
     }
 }
 
@@ -163,15 +174,9 @@ impl<'a> QueryLayer<'a> {
     ///
     /// A deductive rule is a `Statement` too, so `.with(rule)` folds it
     /// into the overlay — the query resolves it as a transient rule
-    /// without persisting it. A rule that cannot be stored, one that
-    /// holds a map or a list of terms, is laid over too: the
-    /// overlay keeps the rule as it is, under the name its facts give
-    /// it, and nothing is written of its body.
+    /// without persisting it.
     pub fn with<S: Statement>(mut self, statement: S) -> Self {
-        statement.assert(&mut Laying {
-            changes: &mut self.changes,
-            bodies: &mut self.bodies,
-        });
+        statement.assert(&mut self.changes);
         self
     }
 
@@ -182,15 +187,70 @@ impl<'a> QueryLayer<'a> {
     pub fn join(mut self, other: impl Into<QueryLayer<'a>>) -> Self {
         let other = other.into();
         self.lines.extend(other.lines);
-        other.changes.assert(&mut self.changes);
-        if let Some(bodies) = other.bodies {
-            Arc::make_mut(self.bodies.get_or_insert_default()).extend(
-                bodies
-                    .iter()
-                    .map(|(entity, rule)| (entity.clone(), rule.clone())),
-            );
+        if let Some(theirs) = other.layers {
+            let ours = self.layers.get_or_insert_with(Box::default);
+            ours.memories.extend(theirs.memories);
+            ours.named.extend(theirs.named);
         }
+        other.changes.assert(&mut self.changes);
         self
+    }
+
+    /// Read `memory` beside the lines, live, as the layer named `layer`:
+    /// a layer of a session.
+    pub(crate) fn with_memory(mut self, layer: Entity, memory: &'a Ephemeral) -> Self {
+        self.layers
+            .get_or_insert_with(Box::default)
+            .memories
+            .push((layer, memory));
+        self
+    }
+
+    /// Read `source` after the lines, pinned, as the durable layer named
+    /// `layer`: a layer of a stack, at the tree its primary points at.
+    pub(crate) fn with_pinned(mut self, layer: Entity, source: Source) -> Self {
+        self.layers
+            .get_or_insert_with(Box::default)
+            .named
+            .push((layer, source));
+        self
+    }
+
+    /// The lines pinned as `views` (see [`pin`](Self::pin)), with the
+    /// memory layers, owned: what one query reads.
+    pub(crate) fn composite(&self, views: Vec<View<'a>>) -> Composite {
+        // Collected from the views alone, then extended: collecting the
+        // pinned views can reuse their buffer, which a chained iterator does
+        // not, so a read with no durable layer allocates nothing for it.
+        let mut sources: Vec<Source> = views.into_iter().map(View::into_source).collect();
+        let Some(layers) = self.layers.as_deref() else {
+            return Composite {
+                sources,
+                ..Composite::default()
+            };
+        };
+        // A line with no name reads as no entry at all, so a read with no
+        // durable layer allocates nothing for the names.
+        let names = if layers.named.is_empty() {
+            Vec::new()
+        } else {
+            self.lines
+                .iter()
+                .map(|_| None)
+                .chain(layers.named.iter().map(|(layer, _)| Some(layer.clone())))
+                .collect()
+        };
+        sources.extend(layers.named.iter().map(|(_, source)| source.clone()));
+        Composite {
+            sources,
+            memories: layers
+                .memories
+                .iter()
+                .map(|(layer, memory)| (layer.clone(), (*memory).clone()))
+                .collect(),
+            names,
+            channels: Vec::new(),
+        }
     }
 
     /// The branches this layer reads from, in join order.
@@ -227,7 +287,8 @@ impl<'a> QueryLayer<'a> {
     }
 
     /// Pin every line of this layer at the head it stands at now: what
-    /// one query of the layer reads throughout.
+    /// one query of the layer reads throughout. A durable layer is pinned
+    /// already, and is not among them.
     pub(crate) fn pin(&self) -> Vec<View<'a>> {
         self.lines.iter().map(|line| line.pin()).collect()
     }
@@ -265,7 +326,7 @@ impl<'a> QueryLayer<'a> {
         }
         let mut overlay = self.changes.clone();
         metadata.export().assert(&mut overlay);
-        Ephemeral::holding(overlay).keeping(self.bodies.clone())
+        Ephemeral::holding(overlay)
     }
 
     /// Stage a query application. Call `.perform(&operator)` to execute.
@@ -372,8 +433,20 @@ impl<'a> From<Live<'a>> for QueryLayer<'a> {
     fn from(line: Live<'a>) -> Self {
         Self {
             lines: vec![line],
-            changes: Changes::new(),
-            bodies: None,
+            ..Self::default()
+        }
+    }
+}
+
+impl<'a> From<&'a Ephemeral> for QueryLayer<'a> {
+    /// A memory layer read alone, as the session's own layer.
+    fn from(memory: &'a Ephemeral) -> Self {
+        Self {
+            layers: Some(Box::new(StackLayers {
+                memories: vec![(session_layer(), memory)],
+                named: Vec::new(),
+            })),
+            ..Self::default()
         }
     }
 }
@@ -393,9 +466,8 @@ impl<'a> From<&'a Snapshot> for QueryLayer<'a> {
 impl From<Changes> for QueryLayer<'_> {
     fn from(changes: Changes) -> Self {
         Self {
-            lines: Vec::new(),
             changes,
-            bodies: None,
+            ..Self::default()
         }
     }
 }
@@ -456,8 +528,9 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             // revisions the lines stood at now.
             let views = layer.pin();
             let overlay = layer.overlay_at(&views, &operator);
-            let sources: Vec<Source> = views.into_iter().map(View::into_source).collect();
-            let query_env = QueryEnv::new(sources.clone(), overlay, env);
+            let composite = layer.composite(views);
+            let sources = composite.sources.clone();
+            let query_env = QueryEnv::over(composite, overlay, env);
             let results = Box::pin(query.perform(&query_env));
             // The query's own stream drives the env's preload queue:
             // evaluator hints (its own and any concurrent evaluation's)
@@ -542,6 +615,11 @@ pub(crate) struct QueryEnv<'a> {
     /// erased lifetimes in `QueryEnv<'0>: Provider<Select<'1>>` hit
     /// rustc's #100013 limitation; a named lifetime does not).
     sources: Vec<Source>,
+    /// What the env reads beside its lines, held out of line and `None`
+    /// for a read of branches alone, so a plain read's env, and every
+    /// future and stream that holds one, is no larger than it was before
+    /// layers.
+    layered: Option<Arc<SessionLayers>>,
     /// The query's own overlay: caller-asserted facts and the
     /// auto-injected metadata, held as a line (see
     /// [`QueryLayer::overlay`]) and read under the lines' format.
@@ -594,6 +672,15 @@ impl Holds for QueryEnv<'_> {
     }
 }
 
+/// What a query env reads beside its lines: the memory layers, the names
+/// of the lines a stack names, and the stack's channels. Shared by the
+/// env's clones.
+struct SessionLayers {
+    memories: Vec<(Entity, Ephemeral)>,
+    names: Vec<Option<Entity>>,
+    channels: Vec<Entity>,
+}
+
 /// The format [`Manifest`]s of the trees a [`QueryEnv`] reads, and the
 /// tombstone sets keyed under them.
 ///
@@ -615,6 +702,10 @@ struct Format {
     /// Per line, in line order: its manifest and the tombstone sets its
     /// streams are filtered with.
     lines: Vec<LineFormat>,
+    /// Every fact the per-query changes and the staged layers retract,
+    /// keyed under `manifest`: what a memory layer's stream is filtered
+    /// with.
+    staged: Hidden,
 }
 
 /// One line's manifest and the tombstone sets its streams are filtered
@@ -633,11 +724,19 @@ struct LineFormat {
 }
 
 impl<'a> QueryEnv<'a> {
+    /// A runtime env over `sources` alone (see [`layered`](Self::layered)):
+    /// what the tests build directly.
+    #[cfg(test)]
+    pub(crate) fn new(sources: Vec<Source>, overlay: Ephemeral, env: &'a Erased) -> Self {
+        Self::layered(sources, None, overlay, env)
+    }
+
     /// Build a runtime env from already-resolved parts: the lines to
-    /// read, the per-query overlay (caller changes + injected metadata),
-    /// and the underlying capability env. The tombstones are lifted
-    /// on first read, once the lines' format is known: the per-query
-    /// retracts, keyed under each line's manifest.
+    /// read, what is read beside them (`None` for a read of branches
+    /// alone), the per-query overlay (caller changes + injected
+    /// metadata), and the underlying capability env, in place. The
+    /// tombstones are lifted on first read, once the lines' format is
+    /// known: the per-query retracts, keyed under each line's manifest.
     ///
     /// `Branch::query`, `Snapshot::query`, and the transaction-query
     /// paths all construct through here so there is exactly one query
@@ -653,9 +752,15 @@ impl<'a> QueryEnv<'a> {
     /// the branch has moved the head to since (dialog-db/dialog-db#757).
     /// A line's session overlay is not pinned: it is read live, as every
     /// read of the branch reads it.
-    pub(crate) fn new(sources: Vec<Source>, overlay: Ephemeral, env: &'a Erased) -> Self {
+    fn layered(
+        sources: Vec<Source>,
+        layered: Option<Arc<SessionLayers>>,
+        overlay: Ephemeral,
+        env: &'a Erased,
+    ) -> Self {
         Self {
             sources,
+            layered,
             overlay,
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
@@ -665,6 +770,106 @@ impl<'a> QueryEnv<'a> {
             fetches: Arc::default(),
             memo: Memo::default(),
             env,
+        }
+    }
+
+    /// A runtime env over `composite`: its lines and its memory layers
+    /// (see [`layered`](Self::layered)).
+    pub(crate) fn over(composite: Composite, overlay: Ephemeral, env: &'a Erased) -> Self {
+        let Composite {
+            sources,
+            memories,
+            names,
+            channels,
+        } = composite;
+        let layered =
+            (!(memories.is_empty() && names.is_empty() && channels.is_empty())).then(|| {
+                Arc::new(SessionLayers {
+                    memories,
+                    names,
+                    channels,
+                })
+            });
+        Self::layered(sources, layered, overlay, env)
+    }
+
+    /// The memory layers read beside the lines, live, each by its name.
+    /// Their rows stand where a line's session overlay's do, and their
+    /// tombstones hide facts in every line.
+    fn memories(&self) -> &[(Entity, Ephemeral)] {
+        self.layered
+            .as_deref()
+            .map_or(&[], |layered| &layered.memories)
+    }
+
+    /// The name a row of each line binds its `in` to, by index, where the
+    /// composite named one: a durable layer's (see [`Composite::names`]).
+    fn names(&self) -> &[Option<Entity>] {
+        self.layered
+            .as_deref()
+            .map_or(&[], |layered| &layered.names)
+    }
+
+    /// The channels of the stack read through (see [`Composite::channels`]).
+    fn channels(&self) -> &[Entity] {
+        self.layered
+            .as_deref()
+            .map_or(&[], |layered| &layered.channels)
+    }
+
+    /// Whether `layer` is a channel of the stack read through, the
+    /// loopback, [`control:`](crate::CONTROL), always among them.
+    pub(crate) fn is_channel(&self, layer: &Entity) -> bool {
+        *layer == crate::control_layer() || self.channels().contains(layer)
+    }
+
+    /// Whether a stack's own layer is read here, as a memory layer named
+    /// [`session:`](crate::SESSION): then that is what `session:` is, and
+    /// the primary's session overlay is read as a part of the primary.
+    fn holds_own_layer(&self) -> bool {
+        self.memories()
+            .iter()
+            .any(|(layer, _)| *layer == session_layer())
+    }
+
+    /// The primary's session store when it is read as
+    /// [`session:`](crate::SESSION), live: the first line's overlay.
+    /// `None` for a read over no line, and for one through a stack, whose
+    /// own layer is `session:`, a memory layer read with the ticks
+    /// applied.
+    pub(crate) fn session_store(&self) -> Option<&Ephemeral> {
+        if self.holds_own_layer() {
+            return None;
+        }
+        self.sources.first().map(Source::overlay)
+    }
+
+    /// The name a row of the line at `index` binds its `in` to: the
+    /// primary is [`memory:`](crate::MEMORY); a durable layer of a
+    /// session is named as it is declared, `memory:<name>`; another line
+    /// is named by its subject.
+    fn line_layer(&self, index: usize) -> Entity {
+        if index == 0 {
+            return memory_layer();
+        }
+        match self.names().get(index) {
+            Some(Some(layer)) => layer.clone(),
+            _ => self.sources[index].as_view().subject().did().this(),
+        }
+    }
+
+    /// The name a row of the line at `index`'s session overlay binds its
+    /// `in` to: the primary's is [`session:`](crate::SESSION), but
+    /// through a stack, whose own layer is `session:`, it is a part of
+    /// the primary, [`memory:`](crate::MEMORY); another line's is read as
+    /// the line's own.
+    fn overlay_layer(&self, index: usize) -> Entity {
+        if index == 0 && !self.holds_own_layer() {
+            session_layer()
+        } else if index == 0 {
+            memory_layer()
+        } else {
+            self.line_layer(index)
         }
     }
 
@@ -697,6 +902,7 @@ impl<'a> QueryEnv<'a> {
         self.sources
             .iter()
             .map(Source::overlay)
+            .chain(self.memories().iter().map(|(_, memory)| memory))
             .chain(once(&self.overlay))
     }
 
@@ -728,7 +934,13 @@ impl<'a> QueryEnv<'a> {
                 .unwrap_or_else(|| super::transaction::ReadSettlement::new(self.pending_edition()));
             // A settlement that failed partway is not kept: the next
             // read starts it again.
-            Box::pin(settlement.advance(&self.sources, &self.overlay, layer, self.env))
+            let composite = Composite {
+                sources: self.sources.clone(),
+                memories: self.memories().to_vec(),
+                names: self.names().to_vec(),
+                channels: self.channels().to_vec(),
+            };
+            Box::pin(settlement.advance(&composite, &self.overlay, layer, self.env))
                 .await
                 .map_err(failed)?;
             let settlements: Vec<CellSettlement> = cells
@@ -769,6 +981,7 @@ impl<'a> QueryEnv<'a> {
 
     /// Record a selector's demanded range under `manifest`, when
     /// recording is on.
+    #[inline(always)]
     fn record_demand(&self, selector: &Selector<Constrained>, manifest: &Manifest) {
         if let Some(demand) = &self.demand {
             demand.record(selector, manifest);
@@ -838,7 +1051,11 @@ impl QueryEnv<'_> {
                         for layer in layers {
                             staged = staged.facts(layer.tombstones(&line));
                         }
-                        let tombstones = staged.clone().facts(source.overlay().tombstones(&line));
+                        let mut tombstones =
+                            staged.clone().facts(source.overlay().tombstones(&line));
+                        for (_, memory) in self.memories() {
+                            tombstones = tombstones.facts(memory.tombstones(&line));
+                        }
                         LineFormat {
                             manifest: line,
                             staged,
@@ -846,10 +1063,20 @@ impl QueryEnv<'_> {
                         }
                     })
                     .collect();
+                // Only a memory layer's stream is filtered with these, so a
+                // read with none skips them.
+                let mut staged = Hidden::default();
+                if !self.memories().is_empty() {
+                    staged = staged.facts(self.overlay.tombstones(&manifest));
+                    for layer in &self.layers {
+                        staged = staged.facts(layer.tombstones(&manifest));
+                    }
+                }
                 Ok(Format {
                     manifest,
                     keys,
                     lines,
+                    staged,
                 })
             })
             .await
@@ -860,6 +1087,7 @@ impl Clone for QueryEnv<'_> {
     fn clone(&self) -> Self {
         Self {
             sources: self.sources.clone(),
+            layered: self.layered.clone(),
             overlay: self.overlay.clone(),
             layers: self.layers.clone(),
             format: self.format.clone(),
@@ -897,7 +1125,6 @@ pub(crate) async fn select_from_source<'a>(
     Ok(select.execute_boxed(reads).await?)
 }
 
-#[dialog_capability::provider]
 // Deliberately implemented for the *same* lifetime on both sides
 // (`QueryEnv<'a>: Provider<Select<'a>>`), never a decoupled pair
 // (`impl<'a, 's> ... where 'a: 's`). Auto-trait (`Send`) checking of
@@ -911,179 +1138,400 @@ pub(crate) async fn select_from_source<'a>(
 // `&QueryEnv<'a>` to `&QueryEnv<'s>` implicitly — the strict impl
 // is what forces region inference to unify the two into one
 // variable.
+//
+// Written out, not through `#[dialog_capability::provider]`: the
+// answer is the one future [`QueryEnv::select`] makes, and not a
+// future awaiting or wrapping it. A scan is issued per row of a join,
+// and a future awaited in another, or wrapped by one, is built apart
+// and moved into it, its whole state copied, every time.
 impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
-    async fn execute(
+    fn execute(
         &self,
         input: Selector<Constrained>,
-    ) -> Result<FactStream<'a>, DialogCorpusError> {
-        if input.attribute() == Some(&*QUARANTINED) {
-            return Box::pin(self.select_quarantined(input)).await;
-        }
-        let format = self.format().await?;
-        let manifest = format.manifest.clone();
-        self.record_demand(&input, &manifest);
-        // One fact can reach the merge from more than one stream: a value
-        // the line holds that the session overlay or a staged write holds
-        // too. The merge keeps the first stream's row of such a fact, so
-        // the streams go in by precedence, newest standing first: the
-        // session overlays, the staged writes, the lines, and the
-        // per-query changes, which stand at no version.
-        let mut sessions: Vec<FactStream<'a>> = Vec::new();
-        let mut staged: Vec<FactStream<'a>> = Vec::new();
-        let mut lines: Vec<FactStream<'a>> = Vec::with_capacity(self.sources.len());
-        let mut changes: Vec<FactStream<'a>> = Vec::new();
+    ) -> Resume<'_, Result<FactStream<'a>, DialogCorpusError>> {
+        Resume::later(self.select::<Bare>(input))
+    }
+}
 
-        // The choosing writes this read meets, settled cell by cell:
-        // the line's claims they succeed, or succeed and write back, are
-        // hidden from every line, and the values the cells already held
-        // are hidden from the layers' own rows, as the commit would
-        // write nothing for them.
-        let settled = self.settle_within(&input).await?;
-        let succeeded: Vec<&Fact> = settled
-            .iter()
-            .flat_map(|(_, cells)| {
-                cells
-                    .iter()
-                    .flat_map(|cell| cell.succeeded.iter().chain(cell.replaced.iter()))
-            })
+// The same lifetime on both sides, and written out, as
+// `Provider<Select<'a>>` above.
+impl<'a> Provider<SelectIn<'a>> for QueryEnv<'a> {
+    fn execute(
+        &self,
+        input: Selector<Constrained>,
+    ) -> Resume<'_, Result<Layered<'a>, DialogCorpusError>> {
+        Resume::later(self.select::<Named>(input))
+    }
+}
+
+/// How [`QueryEnv::select`] answers: with the rows bare, or each with
+/// its layer. A type, not a flag, so each provider's future is the
+/// read's own, and a read that names no layer never holds the layers.
+trait Answer<'a>: ConditionalSend + 'static {
+    /// Whether each stream's layer is named, for the rows to carry.
+    const NAMED: bool;
+    /// What the read answers with.
+    type Out: ConditionalSend;
+    /// The answer, from the rows bare: every read when the layers are
+    /// not named, and the quarantined rows, read apart, in any case.
+    fn rows(rows: FactStream<'a>) -> Self::Out;
+    /// The answer, from the streams with their layers.
+    fn layered(reads: Reads<'a>) -> Self::Out;
+}
+
+/// The rows bare: a [`Select`].
+struct Bare;
+
+impl<'a> Answer<'a> for Bare {
+    const NAMED: bool = false;
+    type Out = FactStream<'a>;
+
+    fn rows(rows: FactStream<'a>) -> Self::Out {
+        rows
+    }
+
+    fn layered(reads: Reads<'a>) -> Self::Out {
+        merge_grouped(reads.streams, reads.manifest, reads.keys)
+    }
+}
+
+/// Each row with its layer: a [`SelectIn`].
+struct Named;
+
+impl<'a> Answer<'a> for Named {
+    const NAMED: bool = true;
+    type Out = Layered<'a>;
+
+    fn rows(rows: FactStream<'a>) -> Self::Out {
+        Layered::primary(rows)
+    }
+
+    fn layered(reads: Reads<'a>) -> Self::Out {
+        reads.layered()
+    }
+}
+
+/// The streams a read that names its layers merges, in precedence
+/// order (see [`QueryEnv::select`]), with the layer each is read from,
+/// under the lines' format.
+struct Reads<'a> {
+    streams: Vec<FactStream<'a>>,
+    layers: Vec<Entity>,
+    manifest: Manifest,
+    keys: MergeKeys,
+}
+
+impl<'a> Reads<'a> {
+    /// The streams merged, each row with the index of its layer among
+    /// the layers read (see [`Layered`]).
+    fn layered(self) -> Layered<'a> {
+        let Reads {
+            streams,
+            layers,
+            manifest,
+            keys,
+        } = self;
+        // Each stream's layer, as the index of its first stream: the
+        // merge tells the streams apart, and a row carries the index
+        // of its layer.
+        let mut named: Vec<Entity> = Vec::new();
+        let stamps: Vec<LayerIndex> = layers
+            .into_iter()
+            .map(
+                |layer| match named.iter().position(|known| *known == layer) {
+                    Some(at) => at,
+                    None => {
+                        named.push(layer);
+                        named.len() - 1
+                    }
+                },
+            )
+            .map(|at| LayerIndex::try_from(at).expect("a read has fewer layers than u16::MAX"))
             .collect();
-        let hidden_in = |line: &Manifest| -> Arc<HashSet<SortKey>> {
-            Arc::new(succeeded.iter().map(|fact| sort_key(fact, line)).collect())
-        };
-
-        // Line streams — each filtered by tombstones from the
-        // overlay's retracts so a `tx.retract(x)` (or any user-asserted
-        // retract in `with(..)`) suppresses matching source facts, and
-        // by the line's session tombstones. Each line's stream is
-        // filtered with the tombstones keyed under its own manifest, and
-        // borrows only `self.env`.
-        for (source, line) in self.sources.iter().zip(&format.lines) {
-            let raw = select_from_source(source, self.env, input.clone()).await?;
-            let mut hidden = line.tombstones.within(&input);
-            if !succeeded.is_empty() {
-                hidden = hidden.facts(hidden_in(&line.manifest));
-            }
-            lines.push(filter_hidden(raw, hidden, line.manifest.clone()));
+        let rows = merge_grouped_in(streams, manifest, keys);
+        Layered {
+            layers: named,
+            rows: Box::pin(rows.map(move |row| row.map(|(view, index)| (view, stamps[index])))),
         }
+    }
+}
 
-        // Each line's session overlay, read live. Filtered by the
-        // staged retracts only: the overlay's own tombstones hide facts
-        // *beneath* it, never its own. Pushed only when it has rows,
-        // for the same reason the per-query stream is below. An
-        // overlay row is the newest fact of its cell: it stands past
-        // the edition the next commit mints, above every committed row
-        // and every staged write, so a read elects it under `last` and
-        // ranks it with the rest under any other pick, until the
-        // session takes it back.
-        // The edition the next commit mints, found only for a read that
-        // meets an overlay or staged row: it reads the first line's
-        // revision.
-        let minted = Cell::new(None);
-        let pending = || {
-            minted.get().unwrap_or_else(|| {
-                let edition = self.pending_edition();
-                minted.set(Some(edition));
-                edition
-            })
-        };
-        // Past every line's head, not only the first's: a join reads
-        // lines of different lengths, and an overlay row is newer than
-        // every committed row of every line it is read beside. Found
-        // only for a read that meets an overlay row, since it reads
-        // every line's revision.
-        // One window for every in-memory store this read meets, so the
-        // key range is built once, and not at all when they are empty.
-        let window = Window::new(&input);
-        let mut session = None;
-        for (source, line) in self.sources.iter().zip(&format.lines) {
-            let rows = source.overlay().select_within(&window, &line.manifest);
-            if rows.is_empty() {
-                continue;
+impl<'a> QueryEnv<'a> {
+    /// A read of `input`: the quarantined rows read apart, or the
+    /// streams the read merges, by precedence, newest standing first:
+    /// the session overlays, the staged writes, the lines, and the
+    /// per-query changes, which stand at no version. One fact can reach
+    /// the merge from more than one stream (a value the line holds that
+    /// the session overlay or a staged write holds too), and the merge
+    /// keeps the first stream's row of such a fact.
+    ///
+    /// A read naming one layer (`in:` bound, [`Selector::layer`]) takes
+    /// that layer's streams alone. Answered [`Named`], each stream comes
+    /// with the layer it reads, for a read that binds each row's layer
+    /// ([`SelectIn`]); answered [`Bare`], the read names no layer and
+    /// pays nothing for one, per stream or per row.
+    ///
+    /// An `async move` block, not an `async fn`: the body of an `async
+    /// fn` holds an argument it takes by value twice, as the argument
+    /// and as the local it is moved into, and `input` is 304 bytes. The
+    /// future is boxed per scan, a scan is issued per row of a join,
+    /// and the block holds `input` once.
+    #[allow(clippy::manual_async_fn)]
+    fn select<A: Answer<'a>>(
+        &self,
+        input: Selector<Constrained>,
+    ) -> impl Future<Output = Result<A::Out, DialogCorpusError>> + ConditionalSend + '_ {
+        async move {
+            if input.attribute() == Some(&*QUARANTINED) {
+                let rows = Box::pin(self.select_quarantined(input)).await?;
+                return Ok(A::rows(rows));
             }
-            let session = *session.get_or_insert_with(|| {
+            if input.attribute() == Some(&*INVALID) {
+                let rows = Box::pin(self.select_invalid(input)).await?;
+                return Ok(A::rows(rows));
+            }
+            let format = self.format().await?;
+            let manifest = format.manifest.clone();
+            self.record_demand(&input, &manifest);
+            let wanted = input.layer().cloned();
+            let named = A::NAMED || wanted.is_some();
+            let mut sessions: Vec<FactStream<'a>> = Vec::new();
+            let mut staged: Vec<FactStream<'a>> = Vec::new();
+            let mut lines: Vec<FactStream<'a>> = Vec::with_capacity(self.sources.len());
+            let mut changes: Vec<FactStream<'a>> = Vec::new();
+            // The layer of every stream, by the group the stream goes in:
+            // empty unless the read names them.
+            let mut layers: Vec<(Group, Entity)> = Vec::new();
+            // The layer a stream reads, when the read asks for it, and
+            // whether the read takes the stream: every stream, unless the
+            // read names one layer.
+            let layer = |of: &dyn Fn() -> Entity| -> Option<Option<Entity>> {
+                if !named {
+                    return Some(None);
+                }
+                let layer = of();
+                match &wanted {
+                    Some(wanted) if *wanted != layer => None,
+                    _ => Some(Some(layer)),
+                }
+            };
+
+            // The choosing writes this read meets, settled cell by cell:
+            // the line's claims they succeed, or succeed and write back, are
+            // hidden from every line, and the values the cells already held
+            // are hidden from the layers' own rows, as the commit would
+            // write nothing for them.
+            // Settled only when a staged layer has a choosing write: a read
+            // that meets none takes nothing from the settlement, and does
+            // not enter it.
+            let settled = if self.layers().iter().any(Staged::has_successions) {
+                self.settle_within(&input).await?
+            } else {
+                Vec::new()
+            };
+            let succeeded: Vec<&Fact> = settled
+                .iter()
+                .flat_map(|(_, cells)| {
+                    cells
+                        .iter()
+                        .flat_map(|cell| cell.succeeded.iter().chain(cell.replaced.iter()))
+                })
+                .collect();
+            let hidden_in = |line: &Manifest| -> Arc<HashSet<SortKey>> {
+                Arc::new(succeeded.iter().map(|fact| sort_key(fact, line)).collect())
+            };
+
+            // Line streams — each filtered by tombstones from the
+            // overlay's retracts so a `tx.retract(x)` (or any user-asserted
+            // retract in `with(..)`) suppresses matching source facts, and
+            // by the line's session tombstones. Each line's stream is
+            // filtered with the tombstones keyed under its own manifest, and
+            // borrows only `self.env`.
+            for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
+                let Some(layer) = layer(&|| self.line_layer(index)) else {
+                    continue;
+                };
+                let raw = select_from_source(source, self.env, input.clone()).await?;
+                let mut hidden = line.tombstones.within(&input);
+                if !succeeded.is_empty() {
+                    hidden = hidden.facts(hidden_in(&line.manifest));
+                }
+                lines.push(filter_hidden(raw, hidden, line.manifest.clone()));
+                layers.extend(layer.map(|layer| (Group::Lines, layer)));
+            }
+
+            // Each line's session overlay, read live. Filtered by the
+            // staged retracts only: the overlay's own tombstones hide facts
+            // *beneath* it, never its own. Pushed only when it has rows,
+            // for the same reason the per-query stream is below. An
+            // overlay row is the newest fact of its cell: it stands past
+            // the edition the next commit mints, above every committed row
+            // and every staged write, so a cardinality-one read elects it,
+            // until the session takes it back.
+            // The edition the next commit mints, found only for a read that
+            // meets an overlay or staged row: it reads the first line's
+            // revision.
+            let minted = Cell::new(None);
+            let pending = || {
+                minted.get().unwrap_or_else(|| {
+                    let edition = self.pending_edition();
+                    minted.set(Some(edition));
+                    edition
+                })
+            };
+            // Past every line's head, not only the first's: a join reads
+            // lines of different lengths, and an overlay row is newer than
+            // every committed row of every line it is read beside. Found
+            // only for a read that meets an overlay row, since it reads
+            // every line's revision.
+            // One window for every in-memory store this read meets, so the
+            // key range is built once, and not at all when they are empty.
+            let window = Window::new(&input);
+            let mut session = None;
+            let newest = || {
                 self.sources
                     .iter()
                     .filter_map(|source| source.revision())
                     .map(|revision| revision.edition.successor())
                     .fold(pending(), |newest, edition| newest.max(edition))
                     .successor()
-            });
-            let rows: FactStream<'a> = Box::pin(stream::iter(
-                rows.into_iter()
-                    .map(move |fact| Ok(FactView::pending(fact, session))),
-            ));
-            sessions.push(filter_hidden(
-                rows,
-                line.staged.clone(),
-                line.manifest.clone(),
-            ));
-        }
-
-        // Overlay stream — the per-query changes, read in the lines'
-        // format so the rows order as the tree's own. The overlay always
-        // carries facts (session metadata at minimum), but MATCHES the
-        // typical fact selector rarely: a join's inner premise probes one
-        // entity per outer binding, and pushing an empty overlay stream
-        // anyway forced the k-way merge (and its per-row sort keys) on
-        // every one of those probes. Push the overlay's materialized
-        // result only when it has rows, so the single-source common case
-        // flows through `merge_grouped`'s passthrough arm.
-        let overlay = self.overlay.select_within(&window, &manifest);
-        if !overlay.is_empty() {
-            changes.push(Box::pin(stream::iter(
-                overlay.into_iter().map(|fact| Ok(fact.into())),
-            )));
-        }
-
-        // Staged layers — a range read each, in the lines' format, and
-        // pushed only when they have rows, for the same reason. A staged
-        // row is a write the transaction will commit, so it stands at
-        // the edition that commit mints, equal to every other write of
-        // the transaction: a read over the transaction elects as a read
-        // after the commit will.
-        for (index, layer) in self.layers().iter().enumerate() {
-            let rows = layer.select_within(&window, &manifest);
-            if rows.is_empty() {
-                continue;
-            }
-            let held: HashSet<SortKey> = settled
-                .iter()
-                .filter(|(settled_index, _)| *settled_index == index)
-                .flat_map(|(_, cells)| cells.iter())
-                .flat_map(|cell| cell.held.iter().chain(cell.succeeded.iter()))
-                .map(|fact| sort_key(fact, &manifest))
-                .collect();
-            let pending = pending();
-            let rows: FactStream<'a> = Box::pin(stream::iter(
-                rows.into_iter()
-                    .map(move |fact| Ok(FactView::pending(fact, pending))),
-            ));
-            if held.is_empty() {
-                staged.push(rows);
-            } else {
-                staged.push(filter_hidden(
-                    rows,
-                    Hidden::default().facts(Arc::new(held)),
-                    manifest.clone(),
-                ));
-            }
-        }
-
-        // Most reads meet the lines alone, and take their streams as
-        // they are.
-        let streams: Vec<FactStream<'a>> =
-            if sessions.is_empty() && staged.is_empty() && changes.is_empty() {
-                lines
-            } else {
-                sessions
-                    .into_iter()
-                    .chain(staged)
-                    .chain(lines)
-                    .chain(changes)
-                    .collect()
             };
-        Ok(merge_grouped(streams, manifest, format.keys))
+            for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
+                let Some(layer) = layer(&|| self.overlay_layer(index)) else {
+                    continue;
+                };
+                let rows = source.overlay().select_within(&window, &line.manifest);
+                if rows.is_empty() {
+                    continue;
+                }
+                let session = *session.get_or_insert_with(newest);
+                let rows: FactStream<'a> = Box::pin(stream::iter(
+                    rows.into_iter()
+                        .map(move |fact| Ok(FactView::pending(fact, session))),
+                ));
+                sessions.push(filter_hidden(
+                    rows,
+                    line.staged.clone(),
+                    line.manifest.clone(),
+                ));
+                layers.extend(layer.map(|layer| (Group::Sessions, layer)));
+            }
+
+            // Each memory layer, read live and filtered the same way: a
+            // layer's own tombstones hide facts beneath it, never its own. Its
+            // rows stand where a session overlay's do.
+            for (name, memory) in self.memories() {
+                let Some(layer) = layer(&|| name.clone()) else {
+                    continue;
+                };
+                let rows = memory.select_within(&window, &manifest);
+                if rows.is_empty() {
+                    continue;
+                }
+                let session = *session.get_or_insert_with(newest);
+                let rows: FactStream<'a> = Box::pin(stream::iter(
+                    rows.into_iter()
+                        .map(move |fact| Ok(FactView::pending(fact, session))),
+                ));
+                sessions.push(filter_hidden(rows, format.staged.clone(), manifest.clone()));
+                layers.extend(layer.map(|layer| (Group::Sessions, layer)));
+            }
+
+            // Overlay stream — the per-query changes, read in the lines'
+            // format so the rows order as the tree's own. The overlay always
+            // carries facts (session metadata at minimum), but MATCHES the
+            // typical fact selector rarely: a join's inner premise probes one
+            // entity per outer binding, and pushing an empty overlay stream
+            // anyway forced the k-way merge (and its per-row sort keys) on
+            // every one of those probes. Push the overlay's materialized
+            // result only when it has rows, so the single-source common case
+            // flows through `merge_grouped`'s passthrough arm.
+            if let Some(layer) = layer(&session_layer) {
+                let overlay = self.overlay.select_within(&window, &manifest);
+                if !overlay.is_empty() {
+                    changes.push(Box::pin(stream::iter(
+                        overlay.into_iter().map(|fact| Ok(fact.into())),
+                    )));
+                    layers.extend(layer.map(|layer| (Group::Changes, layer)));
+                }
+            }
+
+            // Staged layers — a range read each, in the lines' format, and
+            // pushed only when they have rows, for the same reason. A staged
+            // row is a write the transaction will commit, so it stands at
+            // the edition that commit mints, equal to every other write of
+            // the transaction: a read over the transaction elects as a read
+            // after the commit will.
+            for (index, store) in self.layers().iter().enumerate() {
+                let Some(layer) = layer(&|| store.layer().cloned().unwrap_or_else(memory_layer))
+                else {
+                    continue;
+                };
+                let rows = store.select_within(&window, &manifest);
+                if rows.is_empty() {
+                    continue;
+                }
+                let held: HashSet<SortKey> = settled
+                    .iter()
+                    .filter(|(settled_index, _)| *settled_index == index)
+                    .flat_map(|(_, cells)| cells.iter())
+                    .flat_map(|cell| cell.held.iter().chain(cell.succeeded.iter()))
+                    .map(|fact| sort_key(fact, &manifest))
+                    .collect();
+                let pending = pending();
+                let rows: FactStream<'a> = Box::pin(stream::iter(
+                    rows.into_iter()
+                        .map(move |fact| Ok(FactView::pending(fact, pending))),
+                ));
+                if held.is_empty() {
+                    staged.push(rows);
+                } else {
+                    staged.push(filter_hidden(
+                        rows,
+                        Hidden::default().facts(Arc::new(held)),
+                        manifest.clone(),
+                    ));
+                }
+                layers.extend(layer.map(|layer| (Group::Staged, layer)));
+            }
+
+            // Most reads meet the lines alone, and take their streams as
+            // they are.
+            let streams: Vec<FactStream<'a>> =
+                if sessions.is_empty() && staged.is_empty() && changes.is_empty() {
+                    lines
+                } else {
+                    sessions
+                        .into_iter()
+                        .chain(staged)
+                        .chain(lines)
+                        .chain(changes)
+                        .collect()
+                };
+            if !A::NAMED {
+                return Ok(A::rows(merge_grouped(streams, manifest, format.keys)));
+            }
+            // The layers in the streams' order: the groups are gathered in
+            // another order than they are merged in.
+            layers.sort_by_key(|(group, _)| *group);
+            let layers = layers.into_iter().map(|(_, layer)| layer).collect();
+            Ok(A::layered(Reads {
+                streams,
+                layers,
+                manifest,
+                keys: format.keys,
+            }))
+        }
     }
+}
+
+/// The groups a read's streams go into the merge by, in that order.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Group {
+    Sessions,
+    Staged,
+    Lines,
+    Changes,
 }
 
 // A range-size estimate for the planner's merge-versus-fold choice:
@@ -1365,10 +1813,6 @@ impl<'a> QueryEnv<'a> {
             let sources = source_selector(&rule_entity);
             self.read_rules(&sources, manifest);
             let Some(bytes) = source_bytes(overlay.scan(&sources)) else {
-                // A rule with no stored body is held as it is.
-                if let Some(rule) = overlay.body(&rule_entity) {
-                    rules.push((rule, Installed::Pending));
-                }
                 continue;
             };
             if let Some(rule) = self.pending_body(rule_entity, &bytes)? {
@@ -1409,6 +1853,9 @@ impl<'a> QueryEnv<'a> {
     /// were decoded before. A body under an entity it does not hash to is
     /// forged, corrupt, or stored by an earlier release (which
     /// `Branch::upgrade_rules` re-installs), and is inert, as at commit.
+    /// So is a body this release does not decode: one spelling the picks
+    /// 0.3 and 0.4 wrote, which the upgrade rewrites where it can, or one
+    /// in a later format. No read fails over it.
     fn pending_body(
         &self,
         rule_entity: Entity,
@@ -1424,7 +1871,9 @@ impl<'a> QueryEnv<'a> {
         {
             return Ok(Some(body));
         }
-        let rule = hydrate(bytes)?;
+        let Ok(rule) = hydrate(bytes) else {
+            return Ok(None);
+        };
         if !rule.stored_as(&rule_entity) {
             return Ok(None);
         }
@@ -1659,18 +2108,55 @@ fn rule_spellings(bundle: &ConceptRules) -> Vec<String> {
 }
 
 /// The entity of the attribute concept of `field`'s relation read
-/// under no pick: what a rule installed before the `derives` index
-/// concluded, and what a concept's derived fields are keyed by, so a
-/// reader's pick never changes which rules it finds.
+/// plainly, with no listed domain: what a concept's derived fields are
+/// keyed by.
 fn relation_concept(field: &ConceptFieldDescriptor) -> Entity {
     ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
-        field.descriptor().clone().without_pick(),
+        field.descriptor().clone().plain(),
     ))
     .this()
 }
 
 /// The `dialog.rule/quarantined` attribute, compared on every select.
 static QUARANTINED: LazyLock<CorpusRelation> = LazyLock::new(quarantined_attr);
+
+/// The `dialog.rule/invalid` attribute, compared on every select.
+static INVALID: LazyLock<CorpusRelation> = LazyLock::new(invalid_attr);
+
+/// Why a stored rule body is not read, or `None` when it is: a rule
+/// this release decodes, stored under the identity it hashes to. The
+/// body's format is probed before it is decoded, so a body an older or
+/// a newer release wrote is told apart from one that is no rule at all.
+fn invalid_reason(entity: &Entity, bytes: &[u8]) -> Option<String> {
+    use dialog_query::rule::body::{FORMAT, format_of};
+    match format_of(bytes) {
+        Some(format) if format > FORMAT => {
+            return Some(format!(
+                "newer: the body is in format {format}, and this release reads up to {FORMAT}"
+            ));
+        }
+        Some(format) if format < FORMAT => {
+            // A body an earlier format spelled the same way still reads.
+            if hydrate(bytes).is_ok_and(|rule| rule.stored_as(entity))
+                || hydrate_inductive(bytes).is_ok()
+            {
+                return None;
+            }
+            return Some(format!(
+                "older: the body is in format {format}, which `upgrade_rules` rewrites to {FORMAT}"
+            ));
+        }
+        _ => {}
+    }
+    match hydrate(bytes) {
+        Ok(rule) if rule.stored_as(entity) => None,
+        Ok(_) => Some("forged: the body does not hash to the identity it is stored under".into()),
+        Err(error) => match hydrate_inductive(bytes) {
+            Ok(_) => None,
+            Err(_) => Some(format!("undecodable: {error}")),
+        },
+    }
+}
 
 impl<'a> QueryEnv<'a> {
     /// The rule facts of the layers this query reads rules from.
@@ -1727,6 +2213,43 @@ impl<'a> QueryEnv<'a> {
                     && input.value().is_none_or(|is| *is == row.is)
             })
             .collect();
+        Ok(Box::pin(stream::iter(
+            rows.into_iter().map(|row| Ok(row.into())),
+        )))
+    }
+
+    /// `dialog.rule/invalid` rows: one per stored rule body the layers
+    /// hold and this release does not read, of the rule's entity and
+    /// valued with why (see [`invalid_reason`]), narrowed by the
+    /// selector's entity and value. Nothing stored under the attribute
+    /// is read. Such a rule is left out of every evaluation, and this is
+    /// where an application learns that it was, and why.
+    async fn select_invalid(
+        &self,
+        input: Selector<Constrained>,
+    ) -> Result<FactStream<'a>, DialogCorpusError> {
+        let bodies = self
+            .rule_bodies()
+            .await
+            .map_err(|error| DialogCorpusError::Storage(format!("invalid rules: {error}")))?;
+        let mut seen: HashSet<Entity> = HashSet::new();
+        let mut rows: Vec<Fact> = bodies
+            .into_iter()
+            .filter(|(entity, _)| seen.insert(entity.clone()))
+            .filter_map(|(entity, bytes)| {
+                Some(Fact {
+                    the: INVALID.clone(),
+                    is: Value::String(invalid_reason(&entity, &bytes)?),
+                    of: entity,
+                    cause: None,
+                })
+            })
+            .filter(|row| {
+                input.entity().is_none_or(|of| *of == row.of)
+                    && input.value().is_none_or(|is| *is == row.is)
+            })
+            .collect();
+        rows.sort_by(|a, b| a.of.cmp(&b.of));
         Ok(Box::pin(stream::iter(
             rows.into_iter().map(|row| Ok(row.into())),
         )))
@@ -1805,6 +2328,36 @@ impl<'a> QueryEnv<'a> {
     /// per-query changes. A body under an entity it does not hash to is
     /// inert, as at resolution.
     async fn every_rule(&self) -> Result<Vec<DeductiveRule>, EvaluationError> {
+        let bodies = self.rule_bodies().await?;
+        let cache = self
+            .sources
+            .first()
+            .map(|source| source.as_view().rule_cache());
+        let mut rules: Vec<DeductiveRule> = Vec::new();
+        let mut seen: HashSet<Entity> = HashSet::new();
+        for (entity, bytes) in bodies {
+            if !seen.insert(entity.clone()) {
+                continue;
+            }
+            let cached = cache.as_ref().and_then(|cache| cache.body(&entity, &bytes));
+            let rule = match cached {
+                Some(rule) => rule,
+                // Inductive rules share the attribute and do not decode.
+                None => match hydrate(&bytes) {
+                    Ok(rule) if rule.stored_as(&entity) => rule,
+                    _ => continue,
+                },
+            };
+            rules.push(rule);
+        }
+        Ok(rules)
+    }
+
+    /// Every stored rule body the layers hold, by the entity it is
+    /// stored under: each line's committed rules and session overlay,
+    /// the staged layers and the per-query changes. An entity a later
+    /// layer also holds appears once per layer, the line's first.
+    async fn rule_bodies(&self) -> Result<Vec<(Entity, Vec<u8>)>, EvaluationError> {
         let attribute = source_attr();
         let selector = Selector::new().the(attribute.clone());
         let manifest = &self.format().await?.manifest;
@@ -1829,40 +2382,7 @@ impl<'a> QueryEnv<'a> {
             take(layer.scan(&selector));
         }
         take(self.overlay.scan(&selector));
-
-        let cache = self
-            .sources
-            .first()
-            .map(|source| source.as_view().rule_cache());
-        let mut rules: Vec<DeductiveRule> = Vec::new();
-        let mut seen: HashSet<Entity> = HashSet::new();
-        for (entity, bytes) in bodies {
-            if !seen.insert(entity.clone()) {
-                continue;
-            }
-            let cached = cache.as_ref().and_then(|cache| cache.body(&entity, &bytes));
-            let rule = match cached {
-                Some(rule) => rule,
-                // Inductive rules share the attribute and do not decode.
-                None => match hydrate(&bytes) {
-                    Ok(rule) if rule.stored_as(&entity) => rule,
-                    _ => continue,
-                },
-            };
-            rules.push(rule);
-        }
-        // The rules an overlay holds as they are have no body to scan.
-        for overlay in self.overlays() {
-            let Some(bodies) = overlay.bodies() else {
-                continue;
-            };
-            for (entity, rule) in bodies.iter() {
-                if seen.insert(entity.clone()) {
-                    rules.push(rule.clone());
-                }
-            }
-        }
-        Ok(rules)
+        Ok(bodies)
     }
 }
 
@@ -1904,6 +2424,9 @@ impl<'a> QueryEnv<'a> {
         for source in &self.sources {
             rules.extend(self.durable_rules(source, index, key).await?);
             rules.extend(self.overlay_rules(source.overlay(), index, key, manifest)?);
+        }
+        for (_, memory) in self.memories() {
+            rules.extend(self.overlay_rules(memory, index, key, manifest)?);
         }
         rules.extend(self.overlay_rules(&self.overlay, index, key, manifest)?);
         for layer in &self.layers {
@@ -2016,28 +2539,14 @@ impl<'a> QueryEnv<'a> {
                     (Some(Some(_)), Some(_)) => None,
                 });
             };
-            // A ranked chain scans every relation it lists and takes the
-            // rules deriving any of them; it is never exact.
-            for scan in ConceptRules::chain_scans(field) {
-                note(&scan);
-                bundle.install(scan);
-            }
-            // The rules deriving each relation the field reads, found
-            // by the `derives` index, whatever type or pick this read
-            // declares over the relation: the key is the relation's
-            // `on:` entity, spelled from a pick-less read of it.
-            for relation in field.descriptor().relations() {
-                let single = ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
-                    AttributeDescriptor::over(
-                        relation.clone(),
-                        "",
-                        field.cardinality(),
-                        field.descriptor().content_type(),
-                    ),
-                ));
-                let Some(on) = derives_keys(&single).into_iter().next() else {
-                    continue;
-                };
+            // The rules deriving the relation the field reads, found by
+            // the `derives` index, whatever type or cardinality this
+            // read declares over the relation: the key is the relation's
+            // `on:` entity.
+            let single = ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
+                field.descriptor().clone().plain(),
+            ));
+            if let Some(on) = derives_keys(&single).into_iter().next() {
                 for (rule, installed) in self.resolve_rules(Index::Deriving, &on).await? {
                     if let Some(head) = self.head_for(&rule, &on)? {
                         note(&head);
@@ -2079,8 +2588,8 @@ impl<'a> QueryEnv<'a> {
         let mut sole: Option<Option<(DeductiveRule, Vec<dialog_corpus::Relation>)>> = None;
         for (_, field) in descriptor.with().iter() {
             let attribute = ConceptDescriptor::of_attribute(field);
-            // Keyed by the relation's own attribute concept, read under
-            // no pick, which is what a legacy rule concluded.
+            // Keyed by the relation's own attribute concept, read
+            // plainly, which is what a legacy rule concluded.
             let entity = relation_concept(field);
             let builtins = builtin_deriving(&entity);
             let mut rules = builtins.clone();
@@ -2092,10 +2601,7 @@ impl<'a> QueryEnv<'a> {
                         .map(|(rule, _)| rule),
                 );
             }
-            // A field whose pick is not the plain stored read is read
-            // through its attribute concept whether or not a rule
-            // derives it, so its candidates are gathered and elected.
-            if !rules.is_empty() || field.descriptor().reads_elected() {
+            if !rules.is_empty() {
                 derived.insert(entity.clone());
             }
             if !rules.is_empty() {
@@ -2310,6 +2816,7 @@ mod rule_tests {
     use super::*;
     use crate::helpers::{Counting, connect, test_repo};
     use crate::{Branch, Repository, Transaction};
+    use dialog_corpus::Update as _;
     use dialog_credentials::Credential;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_peer::{Peer, Session};
@@ -2887,11 +3394,19 @@ mod rule_tests {
         Ok(())
     }
 
-    /// A committed rule derives a relation a query elects over: the
+    /// A department's highest salary: a concept whose field reads the
+    /// relation the salary rules derive, `org/dept-salary`, and picks
+    /// its greatest claim.
+    fn dept_top() -> anyhow::Result<ConceptDescriptor> {
+        Ok(serde_json::from_value(serde_json::json!({ "with": {
+            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max" }
+        }}))?)
+    }
+
+    /// A committed rule derives a relation a ranked field reads: the
     /// rule stores, discovers and hydrates through the `db.rule/*`
-    /// rail, and a read of its relation under `max` chooses among the
-    /// candidates it derives over committed facts, found by the
-    /// relation whatever pick the read declares over it.
+    /// rail, and a field picking `max` over its relation chooses among
+    /// the candidates it derives over committed facts.
     #[dialog_common::test]
     async fn it_elects_over_a_relation_a_committed_rule_derives() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -2902,7 +3417,7 @@ mod rule_tests {
         let rule = {
             let json = serde_json::json!({
                 "deduce": { "with": {
-                    "salary": { "the": "org/dept-salary", "as": "natural:", "pick": "all:" }
+                    "salary": { "the": "org/dept-salary", "as": "natural:", "cardinality": "many" }
                 }},
                 "when": [{
                     "assert": { "with": {
@@ -2920,9 +3435,7 @@ mod rule_tests {
                 serde_json::from_value(json).expect("descriptor parses");
             descriptor.compile().expect("rule compiles")
         };
-        let dept_top: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max:" }
-        }}))?;
+        let dept_top = dept_top()?;
 
         let dept: Entity = "id:dept-a".parse()?;
         let alice: Entity = "id:alice".parse()?;
@@ -2962,9 +3475,9 @@ mod rule_tests {
         Ok(())
     }
 
-    /// An election reads every rule's candidates: the committed rule is
-    /// found first and the query's overlay rule after it, and a `max`
-    /// read over their relation chooses among what both derive per
+    /// A ranked field reads every rule's candidates: the committed rule is found
+    /// first and the query's overlay rule after it, and a rule folding
+    /// their relation with `max` chooses among what both derive per
     /// entity, never taking either rule alone for the whole answer.
     #[dialog_common::test]
     async fn it_elects_over_a_committed_and_an_overlay_rule_together() -> anyhow::Result<()> {
@@ -2973,7 +3486,7 @@ mod rule_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let salary = serde_json::json!({ "with": {
-            "salary": { "the": "org/dept-salary", "as": "natural:", "pick": "all:" }
+            "salary": { "the": "org/dept-salary", "as": "natural:", "cardinality": "many" }
         }});
         let committed: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
             "deduce": salary,
@@ -3003,9 +3516,7 @@ mod rule_tests {
             }]
         }))?;
         let overlay = overlay.compile()?;
-        let dept_top: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max:" }
-        }}))?;
+        let dept_top = dept_top()?;
 
         let dept_a: Entity = "id:dept-a".parse()?;
         let dept_b: Entity = "id:dept-b".parse()?;
@@ -3499,7 +4010,7 @@ mod rule_tests {
             "account/active".parse()?,
             account.clone(),
             Value::String("yes".into()),
-            dialog_corpus::Pick::Last,
+            dialog_corpus::Cardinality::One,
         );
         branch
             .transaction()
@@ -3675,7 +4186,7 @@ mod rule_tests {
         let other = Value::Bytes(rule_with_person_attr("org/person-alias").encode());
         let mut forged = Changes::new();
         for (of, the, change) in genuine.iter() {
-            let dialog_corpus::Change::Assert(value, pick) = change else {
+            let dialog_corpus::Change::Assert(value, cardinality) = change else {
                 continue;
             };
             let value = if *the == source_attr() {
@@ -3683,7 +4194,7 @@ mod rule_tests {
             } else {
                 value.clone()
             };
-            forged.associate(the.clone(), of.clone(), value, pick.clone());
+            forged.associate(the.clone(), of.clone(), value, *cardinality);
         }
 
         let employees = |overlay: Changes| {
@@ -4278,11 +4789,12 @@ mod rule_tests {
     }
 
     /// Tonk's `space/presence` shape: a concept whose optional field
-    /// is derived by rules whose bodies read the concept itself for a
-    /// required field. The field lists its cases best first, so every
-    /// space with a subject is `case:remote` and the one whose subject
-    /// has a replica is `case:replicated`, the better-ranked case
-    /// winning: no rule negates anything.
+    /// reads a relation derived by rules whose bodies read the concept
+    /// itself for a required field. Two rules offer cases, every space
+    /// with a subject `case:remote` and the one whose subject has a
+    /// replica `case:replicated`, and the field elects among them with
+    /// `top`, the first listed best: the better-ranked case wins, and
+    /// no rule negates anything.
     #[dialog_common::test]
     async fn it_derives_an_optional_field_from_a_rule_reading_the_concept() -> anyhow::Result<()> {
         use dialog_query::rule::deductive::descriptor::DeductiveRuleDescriptor;
@@ -4294,29 +4806,35 @@ mod rule_tests {
         let cases = serde_json::json!(["case:replicated", "case:remote"]);
         let space = serde_json::json!({ "with": {
             "subject": { "the": "load.space/subject", "as": "entity:" },
-            "presence": { "the": "load.space/presence", "as": cases, "optional": true }
+            "presence": {
+                "the": "load.space/case",
+                "as": cases,
+                "cardinality": "many",
+                "optional": true,
+                "pick": "top"
+            }
         } });
         let replica = serde_json::json!({ "with": {
             "subject": { "the": "load.replica/subject", "as": "entity:" },
             "profile": { "the": "load.replica/profile", "as": "entity:" }
         } });
-        let presence = serde_json::json!({ "with": {
-            "presence": { "the": "load.space/presence", "as": "entity:" }
+        let case = serde_json::json!({ "with": {
+            "case": { "the": "load.space/case", "as": "entity:", "cardinality": "many" }
         } });
         let remote: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-            "deduce": presence,
+            "deduce": case,
             "when": [
                 { "assert": space, "where": {
                     "this": { "?": { "name": "this" } },
                     "subject": { "?": { "name": "subject" } } } },
                 { "assert": "==", "where": {
-                    "this": { "?": { "name": "presence" } },
+                    "this": { "?": { "name": "case" } },
                     "is": "case:remote" } }
             ]
         }))?;
         let remote = remote.compile()?;
         let replicated: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-            "deduce": presence,
+            "deduce": case,
             "when": [
                 { "assert": space, "where": {
                     "this": { "?": { "name": "this" } },
@@ -4324,12 +4842,11 @@ mod rule_tests {
                 { "assert": replica, "where": {
                     "subject": { "?": { "name": "subject" } } } },
                 { "assert": "==", "where": {
-                    "this": { "?": { "name": "presence" } },
+                    "this": { "?": { "name": "case" } },
                     "is": "case:replicated" } }
             ]
         }))?;
         let replicated = replicated.compile()?;
-
         let here: Entity = "id:space-here".parse()?;
         let away: Entity = "id:space-away".parse()?;
         let device: Entity = "id:device".parse()?;
@@ -4361,38 +4878,6 @@ mod rule_tests {
             .publish()
             .perform(&operator)
             .await?;
-
-        // The relation read under the ranked cases.
-        let ranked: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "presence": { "the": "load.space/presence", "as": cases }
-        } }))?;
-        let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("this"));
-        terms.insert("presence".into(), Term::var("presence"));
-        let mut presences: Vec<(Entity, String)> = branch
-            .select(ConceptQuery {
-                predicate: ranked,
-                terms,
-            })
-            .perform(&operator)
-            .try_vec()
-            .await?
-            .into_iter()
-            .map(|row| {
-                Ok((
-                    row.entity().clone(),
-                    row.get::<Entity>("presence")?.to_string(),
-                ))
-            })
-            .collect::<anyhow::Result<_>>()?;
-        presences.sort();
-        assert_eq!(
-            presences,
-            vec![
-                (away.clone(), "case:remote".to_string()),
-                (here.clone(), "case:replicated".to_string()),
-            ]
-        );
 
         // Read through the concept itself: each space carries the
         // best-ranked case a rule derives for it.
@@ -4432,26 +4917,35 @@ mod resolver_tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::test_repo;
+    use crate::helpers::{Counting, test_repo};
     use crate::{Branch, Repository};
-    use base58::ToBase58;
+    use dialog_common::Blake3Hash;
     use dialog_corpus::{Entity, Value};
     use dialog_peer::Peer;
     use dialog_peer::helpers::test_session_with_peer;
+    use dialog_query::concept::query::ConceptQuery;
     use dialog_query::query::Output as _;
+    use dialog_query::rule::DeductiveRuleDescriptor;
     use dialog_query::{
-        ResolverConclusion, ResolverQuery, Term, TreeEntryQuery, TreeKeyQuery, TreeNodeQuery,
-        TreeSpanQuery, TreeValueQuery, the,
+        ConceptConclusion, Parameters, ResolverConclusion, ResolverQuery, Term, the,
     };
     use dialog_storage::provider::storage::VolatileSpace;
+    use std::collections::BTreeSet;
 
-    /// Commit a handful of facts and return the branch + the committed
-    /// root's node reference (base58, exactly as `dialog.branch/tree`
-    /// carries it).
+    type Operator = Peer<VolatileSpace, dialog_peer::Session>;
+
+    /// The handle of the branch's root node.
+    fn root_of(branch: &Branch) -> Entity {
+        let revision = branch.revision().expect("branch has a revision");
+        Entity::from_node(revision.tree.hash()).expect("a node entity")
+    }
+
+    /// Commit a handful of facts and return the branch and its root's
+    /// handle.
     async fn committed_branch(
         repo: &Repository<impl dialog_capability::Principal>,
-        operator: &Peer<VolatileSpace, dialog_peer::Session>,
-    ) -> anyhow::Result<(Branch, String)> {
+        operator: &Operator,
+    ) -> anyhow::Result<(Branch, Entity)> {
         let branch = repo.branch("main").open().perform(operator).await?;
         let mut tx = branch.transaction();
         for at in 0..8 {
@@ -4462,69 +4956,125 @@ mod resolver_tests {
             );
         }
         tx.commit().publish().perform(operator).await?;
-        let revision = branch
-            .revision()
-            .expect("branch has a revision after commit");
-        let tree_bytes: &[u8] = revision.tree.hash();
-        Ok((branch, ToBase58::to_base58(tree_bytes)))
+        let root = root_of(&branch);
+        Ok((branch, root))
     }
 
-    /// `tree/node` with every output free, over a constant reference.
-    fn tree_node(reference: &str) -> ResolverQuery {
-        ResolverQuery::TreeNode(TreeNodeQuery {
-            of: Term::from(Value::String(reference.into())).into(),
-            kind: Term::var("kind"),
-            size: Term::var("size"),
-            count: Term::var("count"),
-            scale: Term::var("scale"),
-            novelty: Term::var("novelty"),
-        })
+    /// Commit `count` facts with padded values: enough leaf weight
+    /// forces an index root, so spans and descent run against a real
+    /// multi-level tree.
+    async fn committed_wide_branch(
+        repo: &Repository<impl dialog_capability::Principal>,
+        operator: &Operator,
+        count: usize,
+    ) -> anyhow::Result<(Branch, Entity)> {
+        let branch = repo.branch("main").open().perform(operator).await?;
+        let pad = "p".repeat(160);
+        let mut tx = branch.transaction();
+        for at in 0..count {
+            tx = tx.assert(
+                the!("test/name")
+                    .of(Entity::new()?)
+                    .is(format!("entry-{at}-{pad}")),
+            );
+        }
+        tx.commit().publish().perform(operator).await?;
+        let root = root_of(&branch);
+        Ok((branch, root))
     }
 
-    fn tree_span(reference: &str) -> ResolverQuery {
-        ResolverQuery::TreeSpan(TreeSpanQuery {
-            of: Term::from(Value::String(reference.into())).into(),
-            at: Term::var("at"),
-            node: Term::var("node"),
-            separator: Term::var("separator"),
-            until: Term::var("until"),
-            scale: Term::var("scale"),
-            rank: Term::var("rank"),
-            novelty: Term::var("novelty"),
-        })
+    /// The resolver `name` over the handle `of`, with each of `slots`
+    /// bound to a variable of its own name.
+    fn ask(name: &str, of: &Entity, slots: &[&str]) -> ResolverQuery {
+        let mut wanted = serde_json::Map::new();
+        for slot in slots {
+            wanted.insert(
+                slot.to_string(),
+                serde_json::json!({ "?": { "name": slot } }),
+            );
+        }
+        let query: ResolverQuery =
+            serde_json::from_value(serde_json::json!({ "assert": name, "where": wanted }))
+                .unwrap_or_else(|error| panic!("{name} deserializes: {error}"));
+        let mut terms = Parameters::new();
+        terms.insert("of".into(), Term::from(of.clone()).into());
+        query.with_parameters(&terms)
     }
 
-    fn tree_entry(reference: &str) -> ResolverQuery {
-        ResolverQuery::TreeEntry(TreeEntryQuery {
-            of: Term::from(Value::String(reference.into())).into(),
-            at: Term::var("at"),
-            key: Term::var("key"),
-            state: Term::var("state"),
-            retraction: Term::var("retraction"),
-            origin: Term::var("origin"),
-            edition: Term::var("edition"),
-            cause: Term::var("cause"),
-            collapsed: Term::var("collapsed"),
-            supersedes: Term::var("supersedes"),
-            spill: Term::var("spill"),
-        })
+    const NODE: &[&str] = &[
+        "kind",
+        "size",
+        "count",
+        "scale",
+        "novelty",
+        "version",
+        "fanout-exponent",
+        "max-separator",
+        "inline-n",
+        "spill-prefix",
+        "max-segment",
+        "frame-ceiling-factor",
+        "anchor-selector",
+        "entry-overhead",
+        "key-overhead",
+        "link-overhead",
+    ];
+    const SPAN: &[&str] = &[
+        "span",
+        "at",
+        "node",
+        "separator",
+        "until",
+        "scale",
+        "rank",
+        "novelty",
+    ];
+    const ENTRY: &[&str] = &[
+        "entry",
+        "at",
+        "key",
+        "rank",
+        "state",
+        "retraction",
+        "origin",
+        "edition",
+        "cause",
+        "collapsed",
+        "supersedes",
+        "spill",
+        "blob",
+        "blob-size",
+        "blob-version",
+        "span",
+    ];
+
+    async fn rows(
+        branch: &Branch,
+        operator: &Operator,
+        query: ResolverQuery,
+    ) -> Vec<ResolverConclusion> {
+        branch
+            .query()
+            .select(query)
+            .perform(operator)
+            .try_vec()
+            .await
+            .expect("the resolver answers")
     }
 
-    fn tree_value(reference: &str) -> ResolverQuery {
-        ResolverQuery::TreeValue(TreeValueQuery {
-            of: Term::from(Value::String(reference.into())).into(),
-            size: Term::var("size"),
-            bytes: Term::var("bytes"),
-        })
-    }
-
-    fn tree_key(reference: &str) -> ResolverQuery {
-        ResolverQuery::TreeKey(TreeKeyQuery {
-            of: Term::from(Value::String(reference.into())).into(),
-            at: Term::var("at"),
-            key: Term::var("key"),
-            rank: Term::var("rank"),
-        })
+    /// [`rows`] through an environment that counts block reads.
+    async fn counted(
+        branch: &Branch,
+        env: &Counting<Operator>,
+        query: ResolverQuery,
+    ) -> Vec<ResolverConclusion> {
+        branch
+            .query()
+            .select(query)
+            .perform(env)
+            .try_vec()
+            .await
+            .expect("the resolver answers")
     }
 
     fn unsigned(row: &ResolverConclusion, slot: &str) -> u128 {
@@ -4541,388 +5091,253 @@ mod resolver_tests {
         }
     }
 
-    /// Commit `count` facts with padded values and return the branch +
-    /// root reference: enough leaf weight forces an index root, so the
-    /// span/descent surface runs against a real multi-level tree.
-    async fn committed_wide_branch(
-        repo: &Repository<impl dialog_capability::Principal>,
-        operator: &Peer<VolatileSpace, dialog_peer::Session>,
-        count: usize,
-    ) -> anyhow::Result<(Branch, String)> {
-        let branch = repo.branch("main").open().perform(operator).await?;
-        let pad = "p".repeat(160);
-        let mut tx = branch.transaction();
-        for at in 0..count {
-            tx = tx.assert(
-                the!("test/name")
-                    .of(Entity::new()?)
-                    .is(format!("entry-{at}-{pad}")),
-            );
+    fn bytes(row: &ResolverConclusion, slot: &str) -> Vec<u8> {
+        match row.get(slot) {
+            Some(Value::Bytes(value)) => value.clone(),
+            other => panic!("expected bytes `{slot}`, got {other:?}"),
         }
-        tx.commit().publish().perform(operator).await?;
-        let revision = branch
-            .revision()
-            .expect("branch has a revision after commit");
-        let tree_bytes: &[u8] = revision.tree.hash();
-        Ok((branch, ToBase58::to_base58(tree_bytes)))
     }
 
-    /// A blank `of` (a query that never names the node reference) is
-    /// scheduled but matches nothing: zero rows, no error. The planner
-    /// only refuses an unbound *variable* input.
+    fn entity(row: &ResolverConclusion, slot: &str) -> Entity {
+        match row.get(slot) {
+            Some(Value::Entity(value)) => value.clone(),
+            other => panic!("expected entity `{slot}`, got {other:?}"),
+        }
+    }
+
+    /// Every node the root reaches, by reading spans one node at a time.
+    async fn reachable(branch: &Branch, operator: &Operator, root: &Entity) -> BTreeSet<Entity> {
+        let mut all = BTreeSet::new();
+        let mut frontier = vec![root.clone()];
+        while let Some(next) = frontier.pop() {
+            for span in rows(branch, operator, ask("tree/span", &next, &["node"])).await {
+                frontier.push(entity(&span, "node"));
+            }
+            all.insert(next);
+        }
+        all
+    }
+
+    /// A rule that names its nodes by a fact, `probe/known`, and reads
+    /// `resolver` over each, concluding `conclusion`.
+    fn known(conclusion: serde_json::Value, premise: serde_json::Value) -> DeductiveRuleDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "deduce": { "with": conclusion },
+            "when": [
+                {
+                    "assert": { "with": {
+                        "known": { "the": "probe/known", "as": "text:" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "known": { "?": { "name": "known" } }
+                    }
+                },
+                premise
+            ]
+        }))
+        .expect("a rule descriptor")
+    }
+
+    /// `tree/node` says what a node is and the format it was written
+    /// under, every field of it, in one row.
     #[dialog_common::test]
-    async fn it_yields_nothing_for_a_blank_reference() -> anyhow::Result<()> {
+    async fn it_reads_what_a_node_is() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
-        let (branch, _root) = committed_branch(&repo, &operator).await?;
+        let (branch, root) = committed_branch(&repo, &operator).await?;
 
-        let rows: Vec<ResolverConclusion> = branch
-            .query()
-            .select(ResolverQuery::TreeNode(TreeNodeQuery {
-                of: Term::<Value>::blank().into(),
-                kind: Term::var("kind"),
-                size: Term::var("size"),
-                count: Term::var("count"),
-                scale: Term::var("scale"),
-                novelty: Term::var("novelty"),
-            }))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        assert!(
-            rows.is_empty(),
-            "a blank reference matches nothing: {rows:?}"
+        let answered = rows(&branch, &operator, ask("tree/node", &root, NODE)).await;
+        assert_eq!(answered.len(), 1, "one row per node: {answered:?}");
+        let row = &answered[0];
+        assert!(["index", "segment"].contains(&text(row, "kind").as_str()));
+        assert!(unsigned(row, "size") > 0, "the node has a byte size");
+        assert!(unsigned(row, "count") > 0, "the node has slots");
+        for slot in NODE {
+            assert!(row.contains_key(*slot), "`{slot}` is yielded: {row:?}");
+        }
+        assert!(unsigned(row, "fanout-exponent") > 0, "a tree branches");
+        assert!(unsigned(row, "version") > 0, "a node has a layout");
+        Ok(())
+    }
+
+    /// `tree/block` yields the node's block as stored: it hashes to the
+    /// node's handle and is as long as `tree/node` says.
+    #[dialog_common::test]
+    async fn it_reads_a_nodes_block() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_branch(&repo, &operator).await?;
+
+        let node = rows(&branch, &operator, ask("tree/node", &root, &["size"])).await;
+        let block = rows(&branch, &operator, ask("tree/block", &root, &["bytes"])).await;
+        assert_eq!(block.len(), 1, "one row per node");
+        let block = bytes(&block[0], "bytes");
+        assert_eq!(block.len() as u128, unsigned(&node[0], "size"));
+        assert_eq!(
+            Some(*Blake3Hash::hash(&block).as_bytes()),
+            root.node_hash(),
+            "the block is the one the handle names"
         );
         Ok(())
     }
 
-    /// A tree wide enough for an index root runs the whole span
-    /// surface end to end: one contiguous span row per child, and the
-    /// descent chain (span node -> tree/node -> tree/key) reaches real
-    /// segment entries.
+    /// A write to a tree with an index root can ride the root as a
+    /// buffered operation rather than reach a segment. `tree/entry` of
+    /// the root yields each such operation whole, naming the span it is
+    /// buffered against, and the root's `novelty` counts them.
+    #[dialog_common::test]
+    async fn it_reads_the_operations_an_index_buffers() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
+        branch
+            .transaction()
+            .assert(the!("test/name").of(Entity::new()?).is("late".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let root = root_of(&branch);
+
+        let node = rows(&branch, &operator, ask("tree/node", &root, NODE)).await;
+        assert_eq!(text(&node[0], "kind"), "index");
+        let buffered = unsigned(&node[0], "novelty");
+        assert!(buffered > 0, "the late write rides the root");
+        let spans: Vec<Entity> = rows(&branch, &operator, ask("tree/span", &root, SPAN))
+            .await
+            .iter()
+            .map(|row| entity(row, "span"))
+            .collect();
+        let entries = rows(&branch, &operator, ask("tree/entry", &root, ENTRY)).await;
+        assert_eq!(entries.len() as u128, buffered, "one row per buffered op");
+        for row in &entries {
+            assert!(
+                spans.contains(&entity(row, "span")),
+                "a buffered op names a span of the node: {row:?}"
+            );
+            assert_eq!(text(row, "state"), "asserted");
+        }
+        Ok(())
+    }
+
+    /// A tree wide enough for an index root: one span per child, the
+    /// ranges contiguous, each span named by its node and position and
+    /// each child by a handle, and the descent reaches segments whose
+    /// entries come whole, one row each.
     #[dialog_common::test]
     async fn it_descends_a_multi_level_tree() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_wide_branch(&repo, &operator, 800).await?;
 
-        let node: Vec<ResolverConclusion> = branch
-            .query()
-            .select(tree_node(&root))
-            .perform(&operator)
-            .try_vec()
-            .await?;
+        let node = rows(&branch, &operator, ask("tree/node", &root, NODE)).await;
         assert_eq!(
             text(&node[0], "kind"),
             "index",
-            "800 padded entries must outgrow one segment: {node:?}"
+            "800 padded entries outgrow a segment"
         );
-        let children = unsigned(&node[0], "count") as usize;
-
-        let spans: Vec<ResolverConclusion> = branch
-            .query()
-            .select(tree_span(&root))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        assert_eq!(spans.len(), children, "one span row per child");
+        let spans = rows(&branch, &operator, ask("tree/span", &root, SPAN)).await;
+        assert_eq!(
+            spans.len() as u128,
+            unsigned(&node[0], "count"),
+            "one span per child"
+        );
+        assert_eq!(
+            rows(&branch, &operator, ask("tree/entry", &root, ENTRY))
+                .await
+                .len() as u128,
+            unsigned(&node[0], "novelty"),
+            "an index's entries are the operations it buffers"
+        );
+        assert!(
+            bytes(&spans[0], "separator").is_empty(),
+            "the first span starts at the least key"
+        );
+        assert!(
+            bytes(spans.last().unwrap(), "until").is_empty(),
+            "the last span runs to the end"
+        );
         for pair in spans.windows(2) {
             assert_eq!(
-                pair[0].get("until"),
-                pair[1].get("separator"),
-                "spans tile the key space: {spans:?}"
+                bytes(&pair[0], "until"),
+                bytes(&pair[1], "separator"),
+                "a span ends where the next begins"
+            );
+        }
+        let root_hash = base58::ToBase58::to_base58(&root.node_hash().unwrap()[..]);
+        for (at, span) in spans.iter().enumerate() {
+            assert_eq!(unsigned(span, "at"), at as u128);
+            assert_eq!(
+                entity(span, "span").as_str(),
+                format!("span:{root_hash}/{at}"),
+                "a span is named by its node and its position"
+            );
+            assert!(
+                entity(span, "node").node_hash().is_some(),
+                "a child is a handle"
             );
         }
 
-        // Descend to the leaves whatever the depth: the fixture's
-        // entities are random, so the tree's shape is probabilistic and
-        // a child may itself be an index (the depth-3 draw that made
-        // the one-level version of this walk flaky).
-        let mut entries = 0usize;
-        let mut frontier: Vec<String> = spans.iter().map(|span| text(span, "node")).collect();
+        let mut entries = 0;
+        let mut frontier: Vec<Entity> = spans.iter().map(|span| entity(span, "node")).collect();
         while let Some(child) = frontier.pop() {
-            let child_node: Vec<ResolverConclusion> = branch
-                .query()
-                .select(tree_node(&child))
-                .perform(&operator)
-                .try_vec()
-                .await?;
-            assert_eq!(child_node.len(), 1, "child answers tree/node");
+            let child_node = rows(
+                &branch,
+                &operator,
+                ask("tree/node", &child, &["kind", "count"]),
+            )
+            .await;
+            assert_eq!(child_node.len(), 1, "a child answers tree/node");
+            let below = rows(&branch, &operator, ask("tree/span", &child, &["node"])).await;
             if text(&child_node[0], "kind") == "segment" {
-                let keys: Vec<ResolverConclusion> = branch
-                    .query()
-                    .select(tree_key(&child))
-                    .perform(&operator)
-                    .try_vec()
-                    .await?;
+                assert!(below.is_empty(), "a segment has no spans");
+                let found = rows(&branch, &operator, ask("tree/entry", &child, ENTRY)).await;
                 assert_eq!(
-                    keys.len(),
-                    unsigned(&child_node[0], "count") as usize,
-                    "one key row per segment entry"
+                    found.len() as u128,
+                    unsigned(&child_node[0], "count"),
+                    "one row per entry"
                 );
-                entries += keys.len();
+                let named: BTreeSet<Entity> =
+                    found.iter().map(|row| entity(row, "entry")).collect();
+                assert_eq!(named.len(), found.len(), "no two entries share an entity");
+                for (at, entry) in found.iter().enumerate() {
+                    assert_eq!(unsigned(entry, "at"), at as u128);
+                    assert!(!bytes(entry, "key").is_empty(), "an entry has a key");
+                    assert!(entry.contains_key("rank"), "and its key a rank");
+                    assert_eq!(text(entry, "state"), "asserted");
+                }
+                entries += found.len();
             } else {
-                let child_spans: Vec<ResolverConclusion> = branch
-                    .query()
-                    .select(tree_span(&child))
-                    .perform(&operator)
-                    .try_vec()
-                    .await?;
-                frontier.extend(child_spans.iter().map(|span| text(span, "node")));
+                frontier.extend(below.iter().map(|span| entity(span, "node")));
             }
         }
         assert!(
             entries >= 800,
-            "the leaves carry at least the committed facts, got {entries}"
+            "the descent reaches every fact's entries: {entries}"
         );
         Ok(())
     }
 
-    /// The flagship join shape: a premise binds the node reference as
-    /// a VARIABLE and the resolver consumes it — through a deductive
-    /// rule, so this also covers resolver premises in rule bodies and
-    /// the planner ordering the resolver after its binding premise.
-    #[dialog_common::test]
-    async fn it_joins_resolvers_on_a_bound_reference() -> anyhow::Result<()> {
-        use dialog_query::concept::query::ConceptQuery;
-        use dialog_query::rule::DeductiveRuleDescriptor;
-        use dialog_query::{ConceptConclusion, Parameters};
-
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let (branch, root) = committed_branch(&repo, &operator).await?;
-
-        // A committed fact carries the root reference; the rule joins
-        // it into `tree/node` through the `?root` variable.
-        let probe = Entity::new()?;
-        branch
-            .transaction()
-            .assert(the!("probe/tree").of(probe.clone()).is(root.clone()))
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-
-        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-            "deduce": { "with": {
-                "root": { "the": "probe/described-root", "as": "text:" },
-                "kind": { "the": "probe/described-kind", "as": "text:" }
-            }},
-            "when": [
-                {
-                    "assert": { "with": {
-                        "root": { "the": "probe/tree", "as": "text:" }
-                    }},
-                    "where": {
-                        "this": { "?": { "name": "this" } },
-                        "root": { "?": { "name": "root" } }
-                    }
-                },
-                {
-                    "assert": "tree/node",
-                    "where": {
-                        "of": { "?": { "name": "root" } },
-                        "kind": { "?": { "name": "kind" } }
-                    }
-                }
-            ]
-        }))?;
-        let rule = descriptor.compile().expect("the joining rule compiles");
-        let conclusion = rule.conclusion().clone();
-        branch
-            .transaction()
-            .assert(&rule)
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-
-        let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("this"));
-        terms.insert("root".into(), Term::var("root"));
-        terms.insert("kind".into(), Term::var("kind"));
-        let rows: Vec<ConceptConclusion> = branch
-            .query()
-            .select(ConceptQuery {
-                predicate: conclusion,
-                terms,
-            })
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        assert_eq!(rows.len(), 1, "the join yields one row: {rows:?}");
-        Ok(())
-    }
-
-    /// The committed root answers `tree/node` through the ordinary
-    /// query path: one row, a real kind, a positive size, and a count.
-    #[dialog_common::test]
-    async fn it_reads_the_root_node_through_resolvers() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let (branch, root) = committed_branch(&repo, &operator).await?;
-
-        let rows: Vec<ResolverConclusion> = branch
-            .query()
-            .select(tree_node(&root))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        assert_eq!(rows.len(), 1, "one row per node: {rows:?}");
-        let row = &rows[0];
-        let kind = text(row, "kind");
-        assert!(kind == "index" || kind == "segment", "kind set: {row:?}");
-        assert!(unsigned(row, "size") > 0, "node has a byte size");
-        assert!(unsigned(row, "count") > 0, "node has slots");
-        Ok(())
-    }
-
-    /// Structure is consistent between resolvers: a segment's
-    /// `tree/key` rows match its count and `tree/span` yields nothing;
-    /// an index's `tree/span` rows match its count, chain into
-    /// contiguous ranges, and each child answers `tree/node` in turn
-    /// (the descent chain).
-    #[dialog_common::test]
-    async fn it_descends_consistently() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let (branch, root) = committed_branch(&repo, &operator).await?;
-
-        let node: Vec<ResolverConclusion> = branch
-            .query()
-            .select(tree_node(&root))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        let count = unsigned(&node[0], "count") as usize;
-
-        let spans: Vec<ResolverConclusion> = branch
-            .query()
-            .select(tree_span(&root))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        let keys: Vec<ResolverConclusion> = branch
-            .query()
-            .select(tree_key(&root))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-
-        match text(&node[0], "kind").as_str() {
-            "segment" => {
-                assert_eq!(keys.len(), count, "one key row per entry");
-                assert!(spans.is_empty(), "a segment has no spans");
-                assert!(
-                    keys.iter().all(|row| matches!(row.get("key"), Some(Value::Bytes(bytes)) if !bytes.is_empty())),
-                    "keys carry bytes: {keys:?}"
-                );
-            }
-            "index" => {
-                assert_eq!(spans.len(), count, "one span row per child");
-                assert!(keys.is_empty(), "an index has no entries");
-                // Spans tile the key space: each span ends where the
-                // next begins, and the outer bounds are open.
-                for pair in spans.windows(2) {
-                    assert_eq!(
-                        pair[0].get("until"),
-                        pair[1].get("separator"),
-                        "spans are contiguous: {spans:?}"
-                    );
-                }
-                let child = text(&spans[0], "node");
-                let child_node: Vec<ResolverConclusion> = branch
-                    .query()
-                    .select(tree_node(&child))
-                    .perform(&operator)
-                    .try_vec()
-                    .await?;
-                assert_eq!(child_node.len(), 1, "the child answers tree/node");
-            }
-            other => panic!("unexpected kind {other}"),
+    /// Every entry of every segment the root reaches.
+    async fn entries_under(
+        branch: &Branch,
+        operator: &Operator,
+        root: &Entity,
+    ) -> Vec<ResolverConclusion> {
+        let mut entries = Vec::new();
+        for node in reachable(branch, operator, root).await {
+            entries.extend(rows(branch, operator, ask("tree/entry", &node, ENTRY)).await);
         }
-        Ok(())
+        entries
     }
 
-    /// Absent (well-formed but unknown) and malformed references
-    /// contribute nothing — zero rows, no error.
+    /// An entry comes whole. A value past the inline threshold spills,
+    /// and its entry names it as an `asset:` that `tree/value` reads
+    /// back; an inline value's entry has no `spill` at all. A versioned
+    /// commit's entries carry their claim's origin and edition.
     #[dialog_common::test]
-    async fn it_yields_nothing_for_absent_or_malformed_references() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let (branch, _root) = committed_branch(&repo, &operator).await?;
-
-        let absent = ToBase58::to_base58(&[7u8; 32][..]);
-        for reference in [absent.as_str(), "not-base58-!!!", ""] {
-            let rows: Vec<ResolverConclusion> = branch
-                .query()
-                .select(tree_node(reference))
-                .perform(&operator)
-                .try_vec()
-                .await?;
-            assert!(rows.is_empty(), "no rows for {reference:?}: {rows:?}");
-        }
-        Ok(())
-    }
-
-    /// Content addressing keeps history navigable: after a second
-    /// commit the old root still answers, and the new root differs.
-    #[dialog_common::test]
-    async fn it_keeps_old_roots_queryable() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let (branch, first) = committed_branch(&repo, &operator).await?;
-
-        branch
-            .transaction()
-            .assert(the!("test/name").of(Entity::new()?).is("later".to_string()))
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        let revision = branch.revision().expect("second revision");
-        let tree_bytes: &[u8] = revision.tree.hash();
-        let second = ToBase58::to_base58(tree_bytes);
-        assert_ne!(first, second, "the root moved");
-
-        for reference in [&first, &second] {
-            let rows: Vec<ResolverConclusion> = branch
-                .query()
-                .select(tree_node(reference))
-                .perform(&operator)
-                .try_vec()
-                .await?;
-            assert_eq!(rows.len(), 1, "root {reference} answers");
-        }
-        Ok(())
-    }
-
-    /// Transaction queries construct the same `QueryEnv`, so the tree
-    /// resolvers are available in the as-if-committed view too.
-    #[dialog_common::test]
-    async fn it_serves_resolvers_in_transaction_queries() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let (branch, root) = committed_branch(&repo, &operator).await?;
-
-        let tx = branch.transaction();
-        let rows: Vec<ResolverConclusion> = tx
-            .query()
-            .select(tree_node(&root))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        assert_eq!(rows.len(), 1, "tx query serves tree/node: {rows:?}");
-        Ok(())
-    }
-
-    /// A value past the inline threshold spills to a content-addressed
-    /// block; `tree/entry` names its reference and `tree/value` reads
-    /// it back — and versioned commits stamp claim metadata (origin,
-    /// edition) that `tree/entry` surfaces, which is what makes the
-    /// history region legible.
-    #[dialog_common::test]
-    async fn it_reads_spilled_values_and_claim_metadata() -> anyhow::Result<()> {
+    async fn it_reads_an_entry_whole() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -4935,66 +5350,435 @@ mod resolver_tests {
             .publish()
             .perform(&operator)
             .await?;
-        let revision = branch.revision().expect("committed");
-        let tree_bytes: &[u8] = revision.tree.hash();
-        let root = ToBase58::to_base58(tree_bytes);
-
-        // Walk every segment reachable from the root, collecting entry
-        // rows — shape-agnostic (the root may be a segment or index).
-        let mut queue = vec![root];
-        let mut entries: Vec<ResolverConclusion> = Vec::new();
-        while let Some(node) = queue.pop() {
-            entries.extend(
-                branch
-                    .query()
-                    .select(tree_entry(&node))
-                    .perform(&operator)
-                    .try_vec()
-                    .await?,
-            );
-            for span in branch
-                .query()
-                .select(tree_span(&node))
-                .perform(&operator)
-                .try_vec()
-                .await?
-            {
-                queue.push(text(&span, "node"));
-            }
-        }
+        let root = root_of(&branch);
+        let entries = entries_under(&branch, &operator, &root).await;
         assert!(!entries.is_empty(), "the committed tree has entries");
-
         assert!(
-            entries.iter().any(
-                |row| matches!(row.get("origin"), Some(Value::Bytes(bytes)) if !bytes.is_empty())
-            ),
-            "versioned commits stamp claim versions: {entries:?}"
+            entries
+                .iter()
+                .any(|row| !bytes(row, "origin").is_empty() && row.contains_key("edition")),
+            "a versioned commit stamps its claims: {entries:?}"
         );
 
         let spill = entries
             .iter()
             .find_map(|row| match row.get("spill") {
-                Some(Value::String(reference)) if !reference.is_empty() => Some(reference.clone()),
+                Some(Value::Entity(asset)) => Some(asset.clone()),
                 _ => None,
             })
             .expect("the 10 KiB value spilled");
+        assert!(
+            spill.as_str().starts_with("asset:"),
+            "a spill is an asset: {spill}"
+        );
 
-        let values: Vec<ResolverConclusion> = branch
-            .query()
-            .select(tree_value(&spill))
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        assert_eq!(values.len(), 1, "one row per value block");
+        let values = rows(
+            &branch,
+            &operator,
+            ask("tree/value", &spill, &["size", "bytes"]),
+        )
+        .await;
+        assert_eq!(values.len(), 1, "one row per value");
         let size = unsigned(&values[0], "size");
         assert!(
             size >= big.len() as u128,
-            "the block holds the whole value ({size} bytes)"
+            "the value is whole ({size} bytes)"
         );
-        match values[0].get("bytes") {
-            Some(Value::Bytes(bytes)) => assert_eq!(bytes.len() as u128, size),
-            other => panic!("expected value bytes, got {other:?}"),
+        assert_eq!(bytes(&values[0], "bytes").len() as u128, size);
+
+        // A node's handle names no spilled value, and a spilled value's
+        // names no node.
+        assert!(
+            rows(&branch, &operator, ask("tree/value", &root, &["size"]))
+                .await
+                .is_empty()
+        );
+        assert!(
+            rows(&branch, &operator, ask("tree/node", &spill, &["kind"]))
+                .await
+                .is_empty()
+        );
+
+        // Enough small facts to fill segments: their entries have no
+        // spill, and none is a blob record.
+        let (branch, root) = committed_wide_branch(&repo, &operator, 800).await?;
+        let entries = entries_under(&branch, &operator, &root).await;
+        assert!(
+            entries.iter().any(|row| !row.contains_key("spill")),
+            "an inline value's entry has no spill"
+        );
+        assert!(
+            entries.iter().all(|row| !row.contains_key("blob")
+                && !row.contains_key("blob-size")
+                && !row.contains_key("blob-version")),
+            "an entry that is no blob record has no blob slots"
+        );
+        Ok(())
+    }
+
+    /// However many resolvers a query asks of one node, the environment
+    /// reads its block once at most: a node it already keeps is not read
+    /// again at all.
+    #[dialog_common::test]
+    async fn it_reads_a_node_once_for_every_part_asked() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_wide_branch(&repo, &operator, 800).await?;
+
+        let env = Counting::new(operator.clone());
+        counted(&branch, &env, ask("tree/node", &root, NODE)).await;
+        counted(&branch, &env, ask("tree/span", &root, SPAN)).await;
+        counted(&branch, &env, ask("tree/block", &root, &["bytes"])).await;
+        assert!(
+            env.block_reads() <= 1,
+            "three parts of one node are one read of its block at most: {}",
+            env.block_reads()
+        );
+        Ok(())
+    }
+
+    /// A handle that names no node the environment can reach, an entity
+    /// that is no handle, and a value that is no entity each yield no
+    /// rows and no error.
+    #[dialog_common::test]
+    async fn it_yields_nothing_for_what_is_not_a_reachable_node() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_branch(&repo, &operator).await?;
+
+        let unknown = Entity::from_node(&[7u8; 32])?;
+        let other: Entity = "user:alice".parse()?;
+        for handle in [&unknown, &other] {
+            let answered = rows(&branch, &operator, ask("tree/node", handle, NODE)).await;
+            assert!(answered.is_empty(), "no rows for {handle}: {answered:?}");
         }
+
+        let reference = base58::ToBase58::to_base58(&root.node_hash().unwrap()[..]);
+        let mut terms = Parameters::new();
+        terms.insert("of".into(), Term::from(Value::String(reference)).into());
+        let by_string = ask("tree/node", &root, NODE).with_parameters(&terms);
+        assert!(
+            rows(&branch, &operator, by_string).await.is_empty(),
+            "a node is asked for by its handle, not by a string of its hash"
+        );
+
+        let mut terms = Parameters::new();
+        terms.insert("of".into(), Term::<Value>::blank().into());
+        let blank = ask("tree/node", &root, NODE).with_parameters(&terms);
+        assert!(
+            rows(&branch, &operator, blank).await.is_empty(),
+            "a resolver given no handle finds no node of its own accord"
+        );
+        Ok(())
+    }
+
+    /// Content addressing keeps history navigable: after a second
+    /// commit the old root still answers, and the new root differs.
+    #[dialog_common::test]
+    async fn it_keeps_old_roots_readable() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, first) = committed_branch(&repo, &operator).await?;
+
+        branch
+            .transaction()
+            .assert(the!("test/name").of(Entity::new()?).is("later".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let second = root_of(&branch);
+        assert_ne!(first, second, "the root moved");
+        for root in [&first, &second] {
+            let answered = rows(&branch, &operator, ask("tree/node", root, &["kind"])).await;
+            assert_eq!(answered.len(), 1, "root {root} answers");
+        }
+        Ok(())
+    }
+
+    /// A transaction's query reads through the same environment, so the
+    /// resolvers answer in its as-if-committed view too.
+    #[dialog_common::test]
+    async fn it_serves_resolvers_in_transaction_queries() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_branch(&repo, &operator).await?;
+
+        let tx = branch.transaction();
+        let answered: Vec<ResolverConclusion> = tx
+            .query()
+            .select(ask("tree/node", &root, &["kind"]))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(answered.len(), 1, "a transaction's query serves tree/node");
+        Ok(())
+    }
+
+    /// A rule whose body is a resolver alone cannot be installed: nothing
+    /// in it says which nodes, and a resolver does not go looking.
+    #[dialog_common::test]
+    fn it_refuses_a_rule_that_names_no_nodes() {
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": {
+                "kind": { "the": "probe/node-kind", "as": "text:" }
+            }},
+            "when": [{
+                "assert": "tree/node",
+                "where": {
+                    "of": { "?": { "name": "this" } },
+                    "kind": { "?": { "name": "kind" } }
+                }
+            }]
+        }))
+        .expect("a rule descriptor");
+        let refused = descriptor
+            .compile()
+            .expect_err("the rule needs its node given");
+        assert!(
+            format!("{refused:?}").contains("RequiredBindings"),
+            "refused for the handle nothing binds: {refused:?}"
+        );
+    }
+
+    /// The branch's root reaches a rule as a handle: `dialog.branch/tree`
+    /// is the root's entity, and a rule joins it into `tree/span` and
+    /// each child on into `tree/node`, deriving one row per child on the
+    /// child's own entity.
+    #[dialog_common::test]
+    async fn it_derives_a_row_per_child_from_the_root() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
+
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": {
+                "parent": { "the": "probe/child-parent", "as": "entity:" },
+                "kind": { "the": "probe/child-kind", "as": "text:" }
+            }},
+            "when": [
+                {
+                    "assert": { "with": {
+                        "tree": { "the": "dialog.branch/tree", "as": "entity:" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "branch" } },
+                        "tree": { "?": { "name": "parent" } }
+                    }
+                },
+                {
+                    "assert": "tree/span",
+                    "where": {
+                        "of": { "?": { "name": "parent" } },
+                        "node": { "?": { "name": "this" } }
+                    }
+                },
+                {
+                    "assert": "tree/node",
+                    "where": {
+                        "of": { "?": { "name": "this" } },
+                        "kind": { "?": { "name": "kind" } }
+                    }
+                }
+            ]
+        }))?;
+        let rule = descriptor.compile().expect("the rule compiles");
+        let conclusion = rule.conclusion().clone();
+        branch
+            .transaction()
+            .assert(&rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        // Installing the rule committed, so read the root it left.
+        let root = root_of(&branch);
+        let spans = rows(&branch, &operator, ask("tree/span", &root, &["node"])).await;
+        assert!(spans.len() > 1, "the root is an index: {spans:?}");
+        let expected: BTreeSet<Entity> = spans.iter().map(|span| entity(span, "node")).collect();
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("parent".into(), Term::var("parent"));
+        terms.insert("kind".into(), Term::var("kind"));
+        let derived: Vec<ConceptConclusion> = branch
+            .query()
+            .select(ConceptQuery {
+                predicate: conclusion,
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let children: BTreeSet<Entity> = derived.iter().map(|row| row.entity().clone()).collect();
+        assert_eq!(derived.len(), spans.len(), "one row per child: {derived:?}");
+        assert_eq!(children, expected, "each row is on its own child");
+        for row in &derived {
+            let parent: Entity = row.get("parent")?;
+            assert_eq!(parent, root, "every child names the root as its parent");
+        }
+        Ok(())
+    }
+
+    /// A concept of nodes whose rule names its nodes by a fact: the rule
+    /// installs with no resolver listing anything, answers for the nodes
+    /// the facts name and for no other, and looks one up by `this`.
+    ///
+    /// That a node no fact names is never read is the planner's doing
+    /// and is pinned where a plan can be seen
+    /// (`it_is_planned_after_the_fact_that_names_its_node` in
+    /// `dialog-query`): here every node of a tree this replica wrote is
+    /// already kept by the environment, so no read of one would show.
+    #[dialog_common::test]
+    async fn it_reads_only_the_nodes_a_fact_names() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
+
+        let rule = known(
+            serde_json::json!({ "kind": { "the": "probe/node-kind", "as": "text:" } }),
+            serde_json::json!({
+                "assert": "tree/node",
+                "where": {
+                    "of": { "?": { "name": "this" } },
+                    "kind": { "?": { "name": "kind" } }
+                }
+            }),
+        )
+        .compile()
+        .expect("a rule that names its nodes compiles");
+        let conclusion = rule.conclusion().clone();
+        branch
+            .transaction()
+            .assert(&rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        // Name two nodes of the tree as it now stands: its root and one
+        // child. The facts are session facts, so naming them moves no root.
+        let root = root_of(&branch);
+        let children: Vec<Entity> = rows(&branch, &operator, ask("tree/span", &root, &["node"]))
+            .await
+            .iter()
+            .map(|span| entity(span, "node"))
+            .collect();
+        // The root and the first child are named; the second child is
+        // a node no fact names. How many children the root has depends
+        // on where the random entities cut the tree, and two is enough.
+        assert!(
+            children.len() > 1,
+            "the root is an index with a child no fact will name: {children:?}"
+        );
+        let named = children[0].clone();
+        let unnamed = children[1].clone();
+        branch
+            .overlay()
+            .assert(the!("probe/known").of(root.clone()).is("yes".to_string()))?
+            .assert(the!("probe/known").of(named.clone()).is("yes".to_string()))?;
+
+        let select = |this: Term<Entity>| {
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), this.into());
+            terms.insert("kind".into(), Term::var("kind"));
+            ConceptQuery {
+                predicate: conclusion.clone(),
+                terms,
+            }
+        };
+        let answer = async |this: Term<Entity>| -> anyhow::Result<BTreeSet<Entity>> {
+            let derived: Vec<ConceptConclusion> = branch
+                .query()
+                .select(select(this))
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            Ok(derived.iter().map(|row| row.entity().clone()).collect())
+        };
+
+        assert_eq!(
+            answer(Term::var("this")).await?,
+            BTreeSet::from([root, named.clone()]),
+            "asked for everything, the nodes the facts name"
+        );
+        assert_eq!(
+            answer(Term::from(named.clone())).await?,
+            BTreeSet::from([named]),
+            "a named node is its one row"
+        );
+        assert!(
+            answer(Term::from(unnamed)).await?.is_empty(),
+            "a node no fact names is no row"
+        );
+        Ok(())
+    }
+
+    /// A node's children are read through the node: a concept keyed by
+    /// the parent lists the children of one node from that node's block
+    /// alone, and reads none of the children.
+    #[dialog_common::test]
+    async fn it_lists_the_children_of_a_given_node_from_its_block() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _) = committed_wide_branch(&repo, &operator, 800).await?;
+
+        let rule = known(
+            serde_json::json!({
+                "child": { "the": "probe/node-child", "as": "entity:", "pick": "all" }
+            }),
+            serde_json::json!({
+                "assert": "tree/span",
+                "where": {
+                    "of": { "?": { "name": "this" } },
+                    "node": { "?": { "name": "child" } }
+                }
+            }),
+        )
+        .compile()
+        .expect("a rule keyed by the parent compiles");
+        let conclusion = rule.conclusion().clone();
+        branch
+            .transaction()
+            .assert(&rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let root = root_of(&branch);
+        branch
+            .overlay()
+            .assert(the!("probe/known").of(root.clone()).is("yes".to_string()))?;
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::from(root.clone()).into());
+        terms.insert("child".into(), Term::var("child"));
+        let env = Counting::new(operator.clone());
+        let derived: Vec<ConceptConclusion> = branch
+            .query()
+            .select(ConceptQuery {
+                predicate: conclusion,
+                terms,
+            })
+            .perform(&env)
+            .try_vec()
+            .await?;
+        let mut children = BTreeSet::new();
+        for row in &derived {
+            children.insert(row.get::<Entity>("child")?);
+        }
+        assert!(children.len() > 1, "the root is an index: {derived:?}");
+        assert!(
+            env.block_reads() <= 1,
+            "the node's own block at most; no child's is read: {}",
+            env.block_reads()
+        );
+
+        let spans = rows(&branch, &operator, ask("tree/span", &root, &["node"])).await;
+        let expected: BTreeSet<Entity> = spans.iter().map(|span| entity(span, "node")).collect();
+        assert_eq!(children, expected, "every child of the node, and no other");
         Ok(())
     }
 }
@@ -5034,7 +5818,6 @@ mod ordered_relation_tests {
             is: Value::Entity(member.clone()),
             cause: None,
             cardinality: None,
-            pick: None,
         }
     }
 
@@ -5084,7 +5867,6 @@ mod ordered_relation_tests {
                 is: Value::String("Groceries".into()),
                 cause: None,
                 cardinality: None,
-                pick: None,
             })
             .commit()
             .publish()

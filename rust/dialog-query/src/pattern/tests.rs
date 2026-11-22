@@ -127,15 +127,18 @@ fn it_binds_the_entries_a_map_pattern_did_not_name() {
     let row = unify(&pattern, &note()).expect("matches");
     assert_eq!(row.value_of("title"), Some(&text("Buy milk")));
     let rest = row.value_of("rest").expect("the rest is bound");
+    let Value::Composite(rest) = rest else {
+        panic!("the rest is a composite")
+    };
     assert_eq!(
-        rest.composite(),
-        Ok(Some(
-            Composite::map([
-                (text("done"), Value::Boolean(false)),
-                (text("priority"), Value::UnsignedInt(2)),
-            ])
-            .expect("a map")
-        ))
+        rest.entries().collect::<Vec<_>>(),
+        Composite::map([
+            (text("done"), Value::Boolean(false)),
+            (text("priority"), Value::UnsignedInt(2)),
+        ])
+        .expect("a map")
+        .entries()
+        .collect::<Vec<_>>()
     );
 
     let open = Pattern::Map(named.with_rest(Term::blank()));
@@ -180,7 +183,9 @@ fn it_matches_constants_and_bound_variables() {
 /// list, and with no run matches a list of exactly its items.
 #[dialog_common::test]
 fn it_takes_a_list_apart_and_binds_a_run() {
-    let list: Value = Composite::list([text("a"), text("b"), text("c")]).into();
+    let list: Value = Composite::list([text("a"), text("b"), text("c")])
+        .expect("a list")
+        .into();
 
     let exact = Pattern::list([var("x"), var("y"), var("z")]);
     let row = unify(&exact, &list).expect("matches");
@@ -201,7 +206,11 @@ fn it_takes_a_list_apart_and_binds_a_run() {
     assert_eq!(row.value_of("first"), Some(&text("a")));
     assert_eq!(
         row.value_of("others"),
-        Some(&Composite::list([text("b"), text("c")]).into())
+        Some(
+            &Composite::list([text("b"), text("c")])
+                .expect("a list")
+                .into()
+        )
     );
 
     // A map is no list.
@@ -217,11 +226,15 @@ fn it_takes_nested_shapes_apart() {
         (text("name"), text("Home")),
         (
             text("at"),
-            Composite::list([Value::Float(45.5), Value::Float(-122.5)]).into(),
+            Composite::list([Value::Float(45.5), Value::Float(-122.5)])
+                .expect("a list")
+                .into(),
         ),
         (
             text("tags"),
-            Composite::list([text("quiet"), text("green")]).into(),
+            Composite::list([text("quiet"), text("green")])
+                .expect("a list")
+                .into(),
         ),
     ])
     .expect("a map")
@@ -299,11 +312,18 @@ fn it_is_the_value_once_its_variables_are_bound() {
     };
     let mut row = Match::new();
     row.bind(&Term::var("title"), text("a")).expect("binds");
-    row.bind(&Term::var("others"), Composite::list([text("b")]).into())
-        .expect("binds");
+    row.bind(
+        &Term::var("others"),
+        Composite::list([text("b")]).expect("a list").into(),
+    )
+    .expect("binds");
     assert_eq!(
         Pattern::List(head.with_run(Term::var("others"))).build(&row),
-        Some(Composite::list([text("a"), text("b")]).into())
+        Some(
+            Composite::list([text("a"), text("b")])
+                .expect("a list")
+                .into()
+        )
     );
 }
 
@@ -362,28 +382,18 @@ fn it_is_a_constant_with_no_variable() {
     assert_eq!(open.as_value(), None);
 }
 
-/// A record under a version this release does not read is refused
-/// by its number, where a record of before simply does not match.
+/// Opaque record bytes are not parsed as composites and do not match
+/// a structural pattern.
 #[dialog_common::test]
-fn it_refuses_a_record_of_a_later_version_by_its_number() {
+fn it_does_not_take_apart_opaque_record_bytes() {
     let pattern = Pattern::map([("title".to_string(), var("title"))]).expect("a pattern");
 
-    let Value::Record(mut bytes) = note() else {
-        panic!("a record");
-    };
-    bytes[0] = 9;
     let mut row = Match::new();
-    let refused = pattern.unify(&Value::Record(bytes), &mut row);
-    assert!(
-        matches!(refused, Err(EvaluationError::RecordVersion { version: 9 })),
-        "{refused:?}"
-    );
-
-    let before = Value::Record(vec![0xa1, 0x61, 0x61, 0x01]);
-    assert!(unify(&pattern, &before).is_none());
-    // A leaf takes any record whole, whatever its version.
+    let record = Value::Record(vec![0xa1, 0x61, 0x61, 0x01]);
+    assert!(!pattern.unify(&record, &mut row).expect("decides"));
+    // A leaf takes any opaque record whole.
     let mut row = Match::new();
-    assert!(var("x").unify(&before, &mut row).expect("decides"));
+    assert!(var("x").unify(&record, &mut row).expect("decides"));
 }
 
 /// A pattern knows the variables inside it, and whether they are
@@ -430,7 +440,7 @@ fn it_is_written_one_way() {
 
     assert!(matches!(
         Pattern::map([("a".to_string(), var("x")), ("a".to_string(), var("y"))]),
-        Err(CompositeError::DuplicateKey(_))
+        Err(MapPatternError::DuplicateKey(_))
     ));
 }
 
@@ -478,7 +488,7 @@ fn shape(entries: &[(&str, Pattern)]) -> MapPattern {
 /// A concept of one field over `the`, declared `as`.
 fn concept(field: &str, the: &str, declared: &str) -> ConceptDescriptor {
     serde_json::from_value(serde_json::json!({
-        "with": { field: { "the": the, "as": declared, "pick": "all:" } }
+        "with": { field: { "the": the, "as": declared, "cardinality": "many" } }
     }))
     .expect("a concept")
 }
@@ -509,7 +519,6 @@ async fn store(
             is: is.clone(),
             cause: None,
             cardinality: None,
-            pick: None,
         });
     }
     transaction.commit().publish().perform(operator).await?;
@@ -540,7 +549,9 @@ async fn notes(branch: &Branch, operator: &Operator) -> anyhow::Result<()> {
             (
                 the!("note/payload"),
                 &entity("id:list"),
-                Composite::list([text("not"), text("a"), text("map")]).into(),
+                Composite::list([text("not"), text("a"), text("map")])
+                    .expect("a list")
+                    .into(),
             ),
         ],
     )
@@ -557,7 +568,7 @@ async fn payloads(
     terms.insert("this".into(), Term::var("this"));
     terms.set("payload".into(), pattern);
     let rows = ConceptQuery {
-        predicate: concept("payload", "note/payload", "record:"),
+        predicate: concept("payload", "note/payload", "composite:map"),
         terms,
     }
     .evaluate(Match::new().seed(), source)
@@ -660,7 +671,7 @@ async fn it_passes_over_a_value_of_no_shape() -> anyhow::Result<()> {
     )
     .await?;
     let untyped: ConceptDescriptor = serde_json::from_value(serde_json::json!({
-        "with": { "is": { "the": "mixed/value", "pick": "all:" } }
+        "with": { "is": { "the": "mixed/value", "cardinality": "many" } }
     }))?;
     let reading = || {
         let mut terms = Parameters::new();
@@ -737,7 +748,7 @@ async fn it_reads_a_pattern_with_nothing_to_bind_as_a_constant() -> anyhow::Resu
 
 /// The head of the rule below: a card, kept as a record.
 fn card() -> ConceptDescriptor {
-    concept("card", "note/card", "record:")
+    concept("card", "note/card", "composite:map")
 }
 
 /// `card(this, card) :- title(this, title), body(this, body),
@@ -928,7 +939,7 @@ async fn it_takes_a_record_apart_in_either_order_of_premises() -> anyhow::Result
     let payload = || {
         read(
             "note/payload",
-            "record:",
+            "composite:map",
             shape(&[
                 ("title", var("title")),
                 ("done", Pattern::from(Value::Boolean(false))),
@@ -1007,7 +1018,7 @@ async fn it_derives_a_fact_from_inside_a_stored_record() -> anyhow::Result<()> {
         heading.clone(),
         vec![read(
             "note/payload",
-            "record:",
+            "composite:map",
             shape(&[("title", var("heading"))]).with_rest(Term::blank()),
         )],
     )?;
@@ -1048,8 +1059,8 @@ async fn it_negates_a_premise_that_holds_a_pattern() -> anyhow::Result<()> {
     // Every note whose payload is not a map that says it is done.
     let done = shape(&[("done", Pattern::from(Value::Boolean(true)))]).with_rest(Term::blank());
     let premises = vec![
-        read("note/payload", "record:", var("payload")),
-        !read("note/payload", "record:", done),
+        read("note/payload", "composite:map", var("payload")),
+        !read("note/payload", "composite:map", done),
     ];
     let (rows, _) = solve(
         &source,
@@ -1104,7 +1115,7 @@ async fn it_negates_a_pattern_over_many_candidates() -> anyhow::Result<()> {
         ),
         !read(
             "note/payload",
-            "record:",
+            "composite:map",
             shape(&[("label", var("label"))]).with_rest(Term::blank()),
         ),
     ];
@@ -1164,7 +1175,7 @@ fn it_refuses_a_rule_whose_pattern_can_never_be_bound() {
         ),
         !read(
             "note/payload",
-            "record:",
+            "composite:map",
             shape(&[("title", var("unbound"))]),
         ),
     ];
@@ -1214,7 +1225,7 @@ fn it_refuses_adding_a_number_to_a_text_bound_inside_a_map() {
         vec![
             read(
                 "note/payload",
-                "record:",
+                "composite:map",
                 shape(&[("title", Pattern::Term(title))]).with_rest(Term::blank()),
             ),
             add_one(Term::var("title")),
@@ -1234,7 +1245,7 @@ fn it_refuses_adding_a_number_to_a_text_bound_inside_a_map() {
         vec![
             read(
                 "note/payload",
-                "record:",
+                "composite:map",
                 shape(&[("count", Pattern::Term(count))]).with_rest(Term::blank()),
             ),
             add_one(Term::var("count")),
@@ -1271,7 +1282,7 @@ fn it_types_a_pattern_by_its_shape() {
         card(),
         vec![read(
             "note/payload",
-            "record:",
+            "composite:map",
             shape(&[("title", var("title"))]).with_rest(Term::var("card")),
         )],
     )
@@ -1283,7 +1294,7 @@ fn it_types_a_pattern_by_its_shape() {
         vec![
             read(
                 "note/payload",
-                "record:",
+                "composite:map",
                 shape(&[("title", var("title"))]).with_rest(Term::var("rest")),
             ),
             add_one(Term::var("rest")),
@@ -1297,7 +1308,7 @@ fn it_types_a_pattern_by_its_shape() {
 }
 
 /// A rule that holds a pattern runs where it was built and cannot be
-/// stored: format 3 of a rule body has no way to write a pattern, and
+/// stored: the current rule body format has no way to write a pattern, and
 /// says so. The rule has an identity, by its parts, and no body.
 #[dialog_common::test]
 fn it_refuses_to_store_a_rule_that_holds_a_pattern() {
@@ -1310,7 +1321,10 @@ fn it_refuses_to_store_a_rule_that_holds_a_pattern() {
         "{refused:?}"
     );
     let reason = refused.to_string();
-    assert!(reason.contains("format 3"), "{reason}");
+    assert!(
+        reason.contains(&format!("format {}", body::FORMAT)),
+        "{reason}"
+    );
     assert!(reason.contains("no way to write a pattern"), "{reason}");
 
     // Two rules that differ only inside their patterns are two rules.
@@ -1346,9 +1360,9 @@ fn it_refuses_to_store_a_rule_that_holds_a_pattern() {
     assert!(plain.try_encode().is_some());
 }
 
-/// Installing a rule that holds a pattern is refused, with the reason:
-/// asserting it stages nothing and panics, since an assertion has no
-/// error to return.
+/// Installing a rule that holds a pattern into durable changes is refused:
+/// asserting it stages nothing and panics, since an assertion has no error
+/// to return.
 ///
 /// Native only: the test catches the panic, and a wasm test cannot
 /// unwind. What a wasm build does is the same refusal, which
@@ -1370,7 +1384,10 @@ fn it_refuses_to_install_a_rule_that_holds_a_pattern() {
         .downcast_ref::<String>()
         .cloned()
         .unwrap_or_default();
-    assert!(reason.contains("no way to write a pattern"), "{reason}");
+    assert!(
+        reason.contains("rule body must encode in formal notation"),
+        "{reason}"
+    );
     assert_eq!(changes, Changes::new(), "nothing was staged");
 }
 

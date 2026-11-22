@@ -62,11 +62,14 @@ fn value(dice: &mut Dice, depth: usize) -> Value {
                 .map(|_| value(dice, depth - 1))
                 .collect::<Vec<_>>(),
         )
+        .expect("a list")
         .into()
     } else {
-        Composite::map((0..size).map(|at| (format!("k{at}"), value(dice, depth - 1))))
-            .expect("no key twice")
-            .into()
+        Composite::map(
+            (0..size).map(|at| (Value::String(format!("k{at}")), value(dice, depth - 1))),
+        )
+        .expect("no key twice")
+        .into()
     }
 }
 
@@ -101,20 +104,25 @@ fn pattern(dice: &mut Dice, depth: usize, row: &mut Match, names: &mut usize) ->
                 let others = (0..dice.below(3))
                     .map(|_| value(dice, 1))
                     .collect::<Vec<_>>();
-                let run = variable(row, names, Composite::list(others).into());
+                let run = variable(row, names, Composite::list(others).expect("a list").into());
                 list.with_run(run).into()
             }
         }
     } else {
-        let entries: Vec<(String, Pattern)> = (0..size)
-            .map(|at| (format!("k{at}"), pattern(dice, depth - 1, row, names)))
+        let entries: Vec<(Value, Pattern)> = (0..size)
+            .map(|at| {
+                (
+                    Value::String(format!("k{at}")),
+                    pattern(dice, depth - 1, row, names),
+                )
+            })
             .collect();
         let map = MapPattern::new(entries).expect("no key twice");
         match dice.below(2) {
             0 => map.into(),
             _ => {
                 let others = (0..dice.below(3))
-                    .map(|at| (format!("other{at}"), value(dice, 1)))
+                    .map(|at| (Value::String(format!("other{at}")), value(dice, 1)))
                     .collect::<Vec<_>>();
                 let rest = variable(
                     row,

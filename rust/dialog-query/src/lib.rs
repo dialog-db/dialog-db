@@ -147,7 +147,7 @@ pub use formula::*;
 pub use negation::*;
 pub use optional::OptionalAttributeQuery;
 pub use parameters::*;
-pub use pattern::{ListPattern, MapPattern, Pattern, Shape};
+pub use pattern::{ListPattern, MapPattern, MapPatternError, Pattern, Shape};
 pub use planner::*;
 pub use predicate::*;
 pub use premise::*;

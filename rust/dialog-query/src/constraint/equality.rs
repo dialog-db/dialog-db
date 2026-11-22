@@ -11,6 +11,7 @@
 
 use std::fmt;
 
+use crate::corpus::Type as ValueType;
 use crate::pattern::Pattern;
 use crate::selection::Match;
 use crate::type_system::Type as Kind;
@@ -19,7 +20,6 @@ pub use crate::{
     Binding, Cardinality, Environment, EvaluationError, Field, Parameters, Requirement, Schema,
     Selection, Term, Value, try_stream,
 };
-use dialog_corpus::ValueDataType;
 use std::fmt::Display;
 
 /// Cost for evaluating an equality constraint (simple comparison operation)
@@ -65,7 +65,7 @@ pub struct Equality {
 fn kind_of(side: &Pattern) -> Option<Kind> {
     match side {
         Pattern::Term(term) => term.kind(),
-        _ => Some(Kind::from(ValueDataType::Record)),
+        _ => Some(Kind::from(ValueType::CompositeMap).union(&Kind::from(ValueType::CompositeList))),
     }
 }
 

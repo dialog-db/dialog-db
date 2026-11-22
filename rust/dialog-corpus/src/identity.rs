@@ -10,11 +10,9 @@
 //! - raw bytes, referenced by their BLAKE3 hash like any blob;
 //! - [`ENTITY`], [`SYMBOL`] and [`RECORD`], whose content is their text or
 //!   bytes;
-//! - a composite, a record that holds a map or a list of values (see
-//!   [`Composite`](crate::Composite)): a map under [`Type::MAP`] and a
-//!   list under [`Type::LIST`], whose content is its parts' references. Its name is its parts', not its bytes', so
-//!   no layout of the bytes moves it. Any other record is named by its
-//!   bytes under [`RECORD`], as every record was before.
+//! - [`COMPOSITE`], a map from each attribute to its value's reference, or
+//!   to the `set:` of its values' references (see
+//!   [`Composite::reference`](crate::Composite::reference)).
 //!
 //! A number's identity is its value alone, not the band the value index
 //! keeps it in today or how it was written: a natural `5`, an integer `5` and
@@ -26,7 +24,6 @@
 use merkle_reference::{Reference, ToReference, Type};
 
 use crate::Value;
-use crate::model::NAMED_DEPTH;
 
 /// The type of text, `text:`: UTF-8, as written.
 pub const TEXT: Type = Type::from_reference(Reference::from_hex(
@@ -53,6 +50,11 @@ pub const RECORD: Type = Type::from_reference(Reference::from_hex(
     "419cfed454524033b3fc368ea2d718640f0ac99760c033353c4120c822c19589",
 ));
 
+/// The type of composites, `composite:`: a map from attributes to values.
+pub const COMPOSITE: Type = Type::from_reference(Reference::from_hex(
+    "4f81b6a038fc4e7210e89d04c7b985bc4f8a9c46cd6cac5f5797aa67a233e727",
+));
+
 /// A number's identity content: its [`dialog_number`] encoding.
 fn number(encode: impl FnOnce(&mut Vec<u8>)) -> Reference {
     let mut content = Vec::with_capacity(12);
@@ -62,16 +64,7 @@ fn number(encode: impl FnOnce(&mut Vec<u8>)) -> Reference {
 
 impl Value {
     /// The value's identity: its merkle reference under its value type.
-    /// A record that holds a composite is named by its parts (see
-    /// [`Composite::reference`](crate::Composite::reference)); any other
-    /// record by its bytes.
     pub fn reference(&self) -> Reference {
-        self.reference_within(NAMED_DEPTH)
-    }
-
-    /// The value's reference by its own bytes under its value type, a
-    /// record's included.
-    pub(crate) fn scalar_reference(&self) -> Reference {
         match self {
             Value::Bytes(bytes) => Reference::hash(bytes),
             Value::Entity(entity) => ENTITY.reference_of(entity.as_str().as_bytes()),
@@ -81,6 +74,7 @@ impl Value {
             Value::SignedInt(value) => number(|out| dialog_number::encode_i128(*value, out)),
             Value::Float(value) => number(|out| dialog_number::encode_f64(*value, out)),
             Value::Record(bytes) => RECORD.reference_of(bytes),
+            Value::Composite(composite) => composite.reference(),
             Value::Symbol(symbol) => SYMBOL.reference_of(symbol.to_string().as_bytes()),
         }
     }
@@ -106,6 +100,7 @@ mod tests {
             ("entity:", ENTITY),
             ("symbol:", SYMBOL),
             ("record:", RECORD),
+            ("composite:", COMPOSITE),
         ] {
             assert_eq!(Type::named(name), Ok(ty), "{name}");
         }

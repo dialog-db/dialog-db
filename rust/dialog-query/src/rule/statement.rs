@@ -24,7 +24,6 @@ use std::collections::BTreeSet;
 
 use crate::attribute::The;
 use crate::corpus::{Entity, Value};
-use crate::error::TypeError;
 use crate::rule::{DeductiveRule, InductiveRule, Rule};
 use crate::{Proposition, Statement, Update, the};
 use dialog_corpus::{NameShape, Relation as CorpusRelation, Symbol};
@@ -82,6 +81,17 @@ pub fn derives_attr() -> CorpusRelation {
 /// moves as rules are installed and retracted.
 pub fn quarantined_attr() -> CorpusRelation {
     the!("dialog.rule/quarantined").into()
+}
+
+/// The `dialog.rule/invalid` attribute: a stored rule body a branch does
+/// not read, valued with why. A rule in a format older than this
+/// release reads is waiting for `Branch::upgrade_rules`; one in a newer
+/// format, for a newer release; one that does not decode, or is stored
+/// under an identity it does not hash to, is not a rule. None of them
+/// is evaluated, and no query fails over one. Never stored: a branch
+/// answers it from the rule bodies its layers hold.
+pub fn invalid_attr() -> CorpusRelation {
+    the!("dialog.rule/invalid").into()
 }
 
 /// The `on:<domain>/<name>` trigger-index entity for an attribute.
@@ -194,10 +204,8 @@ fn premise_trigger_entities<'p>(
     for proposition in propositions {
         if let Proposition::Concept(query) = proposition {
             for (_, field) in query.predicate.with().iter() {
-                for relation in field.descriptor().relations() {
-                    if let Some(entity) = Reach::of(relation).on_entity() {
-                        entities.insert(entity);
-                    }
+                if let Some(entity) = Reach::of(field.the()).on_entity() {
+                    entities.insert(entity);
                 }
             }
         }
@@ -238,35 +246,8 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
     concept
         .with()
         .iter()
-        .flat_map(|(_, field)| {
-            field
-                .descriptor()
-                .relations()
-                .filter_map(|relation| Reach::of(relation).on_entity())
-                .collect::<Vec<_>>()
-        })
+        .filter_map(|(_, field)| Reach::of(field.the()).on_entity())
         .collect()
-}
-
-/// The entity a rule is installed under, once the rule is known to have
-/// a stored form.
-///
-/// A rule the stored rule format cannot write is refused here, with the
-/// reason [`DeductiveRule::storable`] gives: one that holds a map or
-/// a list of terms, which format 3 has no way to write. An
-/// assertion has no error to return, so the refusal is a panic that
-/// carries that reason, as it already is for a rule whose body reads an
-/// attribute through a raw scan. Ask
-/// [`storable`](DeductiveRule::storable) first to be told without one.
-///
-/// Asserting a deductive rule does not come here: a target that is
-/// never stored may hold such a rule as it is (see
-/// [`Update::hold`]). Retracting one, and an inductive rule, do.
-fn stored(storable: Result<(), TypeError>, entity: impl FnOnce() -> Entity) -> Entity {
-    storable
-        .map_err(|refusal| refusal.to_string())
-        .expect("a rule its stored body cannot write is not installed");
-    entity()
 }
 
 /// Asserting a [`DeductiveRule`] installs it as `dialog.rule/*` facts:
@@ -276,13 +257,6 @@ fn stored(storable: Result<(), TypeError>, entity: impl FnOnce() -> Entity) -> E
 /// over the body's attributes that lets commit-time dispatch close its
 /// trigger footprint over derivation. Retracting the same rule erases
 /// those facts, uninstalling it.
-///
-/// A rule the stored format cannot write (one that holds a map
-/// or a list of terms) has no `source` to assert. A target that is
-/// never stored, the changes a query lays over a line, is asked to
-/// hold the rule itself ([`Update::hold`]) and is given the other
-/// facts, which name it. A target that is committed refuses, and the
-/// assertion panics with the reason before it asserts anything.
 ///
 /// ```no_run
 /// # use dialog_query::DeductiveRule;
@@ -294,44 +268,28 @@ fn stored(storable: Result<(), TypeError>, entity: impl FnOnce() -> Entity) -> E
 /// ```
 impl Statement for &DeductiveRule {
     fn assert(self, update: &mut impl Update) {
-        // A rule the stored format writes is asserted with its body.
-        // One it cannot write (see [`DeductiveRule::storable`]) has a
-        // name and no bytes: a target that keeps the rule as it is,
-        // the changes laid over a line for one query, holds it under
-        // that name, and the facts it is found by are asserted without
-        // a body. A target that is committed gives it back, and the
-        // rule is refused before anything is asserted.
-        let (rule_entity, body) = match self.storable() {
-            Ok(()) => (self.this(), Some(self.encode())),
-            Err(refusal) => {
-                let rule_entity = self.this();
-                update
-                    .hold(&rule_entity, Box::new(self.clone()))
-                    .map_err(|_| refusal.to_string())
-                    .expect("a rule its stored body cannot write is not installed");
-                (rule_entity, None)
-            }
-        };
+        // Validate before writing index facts: a durable Changes target
+        // cannot keep an in-memory body for a pattern rule.
+        let body = self.encode();
+        let rule_entity = self.this();
         update.associate(
             conclusion_attr(),
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
-        if let Some(body) = body {
-            update.associate(
-                source_attr(),
-                rule_entity.clone(),
-                Value::Bytes(body),
-                dialog_corpus::Pick::All,
-            );
-        }
+        update.associate(
+            source_attr(),
+            rule_entity.clone(),
+            Value::Bytes(body),
+            dialog_corpus::Cardinality::Many,
+        );
         for reads in reads_entities(self) {
             update.associate(
                 reads_attr(),
                 rule_entity.clone(),
                 Value::Entity(reads),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             );
         }
         for derives in derives_entities(self) {
@@ -339,13 +297,13 @@ impl Statement for &DeductiveRule {
                 derives_attr(),
                 rule_entity.clone(),
                 Value::Entity(derives),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             );
         }
     }
 
     fn retract(self, update: &mut impl Update) {
-        let rule_entity = stored(self.storable(), || self.this());
+        let rule_entity = self.this();
         update.dissociate(
             conclusion_attr(),
             rule_entity.clone(),
@@ -382,31 +340,31 @@ impl Statement for DeductiveRule {
 /// the same rule erases those facts, uninstalling it.
 impl Statement for &InductiveRule {
     fn assert(self, update: &mut impl Update) {
-        let rule_entity = stored(self.storable(), || self.this());
+        let rule_entity = self.this();
         update.associate(
             source_attr(),
             rule_entity.clone(),
             Value::Bytes(self.encode()),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
         update.associate(
             induces_attr(),
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
         for on in on_entities(self) {
             update.associate(
                 on_attr(),
                 rule_entity.clone(),
                 Value::Entity(on),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             );
         }
     }
 
     fn retract(self, update: &mut impl Update) {
-        let rule_entity = stored(self.storable(), || self.this());
+        let rule_entity = self.this();
         update.dissociate(
             source_attr(),
             rule_entity.clone(),

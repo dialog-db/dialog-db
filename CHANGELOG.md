@@ -14,144 +14,2689 @@ says how to cut a release.
 
 ## Unreleased
 
-### A parameter holds a pattern: a term, or a map or a list of terms
+### A value can be a composite: a map, a record or a list, held as one value and read in place
 
-[#778](https://github.com/dialog-db/dialog-db/pull/778),
-[design/patterns.md](./design/patterns.md),
-[design/patterns/design-parameters.md](./design/patterns/design-parameters.md),
-[design/patterns/design-pattern-meaning.md](./design/patterns/design-pattern-meaning.md),
-[design/patterns/design-feasibility.md](./design/patterns/design-feasibility.md),
-[design/patterns/design-typing.md](./design/patterns/design-typing.md),
-[design/patterns/design-rule-identity.md](./design/patterns/design-rule-identity.md),
-[design/patterns/design-leaf-cost.md](./design/patterns/design-leaf-cost.md)
+[#843](https://github.com/dialog-db/dialog-db/pull/843).
 
-A premise was applied to parameters that each held one variable or one
-constant, so a rule could not say a value by its shape. A parameter now
-holds a `Pattern`: a term, or a map or a list of patterns.
-Where the value is bound the pattern takes it apart and binds the
-variables inside it, and a value that does not match drops the row.
-Where every variable inside it is bound the pattern is the value, a
-composite kept as a record. A rule's body runs it whichever way the
-plan puts first.
+From the record values research ([#748](https://github.com/dialog-db/dialog-db/pull/748)),
+replacing the draft [#812](https://github.com/dialog-db/dialog-db/pull/812);
+the layout and its measurements are in
+[design/composite-value.md](design/composite-value.md).
+
+A value that is compound but atomic (a location's latitude and longitude, a
+table a view resolved, a syntax tree) had nowhere to go but an opaque
+`record:`, each writer inventing its own encoding and its own tag. A
+composite is a value type of its own, written and replaced whole like any
+value. It is a map, whose keys are any values but composites (text the
+usual one) and whose key may hold several values, or a list, whose items
+keep their order and repeats. A record is the map whose every key is an
+attribute: the same kind, told by its keys, as a natural is a number. Two
+composites are equal exactly when they hold the same content, whatever
+order it was given in, and the natural `3` and the float `3.0` are one value
+in a composite as anywhere.
+
+A composite has one canonical encoding: a table of every key it and the
+maps nested in it use, once, then its body; a sequence of more than
+`SCAN_LIMIT` items carries a table of offsets, and every nested body says
+its size. Bytes that are not that encoding are refused, so equal composites
+have equal bytes and a composite is keyed in the tree by them. A
+`Composite` is a view, its buffer shared and the place of its body, so a
+nested composite, a field or an item is read where it sits: the length,
+a field by key, an item by index and iteration decode only what they
+return. Its identity is its merkle reference: for a map, a map under
+`composite:` from each key's reference to its value's (or to the `set:` of
+its values'); for a list, the `list:` of its items' references. No part of
+the layout enters it.
 
 What this changes for you:
 
-- `Pattern`, `MapPattern` and `ListPattern` build one. A map pattern
-  with no rest is the map of exactly its entries; `with_rest` binds the
-  entries it did not name, as a map, and a blank rest takes them and
-  binds nothing. A list pattern with no run is the list of exactly its
-  items; `with_run` binds the ones after them, as a list.
-- Inside a map or a list a number matches by the number it is. A scan
-  reads a value through a type, so the natural 4, and a variable typed
-  a natural, read a stored 4.3 as 4. In a pattern `{n: 4}` does not
-  match a record that holds 4.3, and a variable typed a natural does
-  not bind there: a pattern matches only a value it builds, whichever
-  of a rule's premises runs first.
-- `Parameters::set` binds a name to a pattern, and `shape`, `pattern`,
-  `slot`, `shapes`, `leaves` and `map_terms` look inside. `insert`, `get` and
-  `iter` take and give terms as before: for a name that holds a map or
-  a list, `get` gives the variable that stands for the whole
-  value. Code that collects the variables a premise mentions from
-  `iter` should collect them from `leaves`.
-- `Equality`'s `this` and `is` are `Pattern`s, were `Term<Any>`.
-  `Equality::new` still takes two terms, `Equality::between` takes two
-  patterns, and `Pattern::is` writes one as a premise. A `Pattern`
-  compares with a `Term<Any>` and answers `name` and `is_constant`, so
-  reading the sides of an equality between terms compiles as before;
-  matching on them as `Term::Variable` does not.
-- A concept premise that holds a pattern is planned as the concept over
-  a variable and an equality between that variable and the pattern, so
-  `DeductiveRule::analysis().premises()` lists one premise more than
-  was written.
-- A pattern has no wire form. Serializing `Parameters`, a
-  `ConceptQuery`, an `Equality` or a rule that holds a map or a list
-  of terms is an error that says so. A pattern with no variable
-  is the constant it builds and is written as one.
-- A rule that holds a pattern has an identity and runs registered, and
-  cannot be stored: `DeductiveRule::storable` and
-  `InductiveRule::storable` return `TypeError::UnstorablePattern`,
-  `try_encode` returns `None`, and asserting the rule into a
-  transaction panics with that reason, as asserting a rule whose body
-  reads an attribute through a raw scan already did.
-- Such a rule is laid over a branch for one query and run:
-  `Branch::with(rule)` and `QueryLayer::with(rule)` keep the rule as it
-  is, under the name its facts give it, and write nothing of its body.
-  `Update` has a new method for that, `hold`, which a target that is
-  never stored answers by keeping what it is given. Its default gives
-  the thing back, so an implementation of `Update` that is committed
-  needs no change and goes on refusing the rule.
-- A premise is feasible by the variables inside its patterns: a
-  parameter that holds a map or a list is bound when every
-  variable inside it is, and a premise that binds it binds each of them.
-  A rule whose pattern can never be bound fails to compile with
-  `TypeError::RequiredBindings`, which names the variables inside the
-  pattern that nothing binds. A negated premise may hold a pattern, and
-  a blank inside it stands for any value.
-- A pattern's type follows from its shape and its leaves. A variable
-  inside one keeps the type it was written with, so a rule that binds a
-  text inside a map and adds a number to it fails to compile with
-  `TypeError::TypeInference`, as one that adds a number to a text field
-  does. A map or a list under a field that reads only text, and
-  a rest or a run another premise needs to be a number, fail the same
-  way. A variable written with no type inside a pattern is any present
+- `Value` has a new variant, `Composite`, keyed with type byte 22.
+  `ValueDataType` (the query layer's `Type`) has `Composite`
+  (`composite:`, any composite, the band every composite is keyed under),
+  and in its band `CompositeMap` (`composite:map`), `CompositeRecord`
+  (`composite:record`) and `CompositeList` (`composite:list`), which type
+  slots and never keys, as the sized number types do. A composite value's
+  `data_type()` is `CompositeMap` or `CompositeList`. A `match` over either
+  enum needs arms. `Value::Record` and `record:` are unchanged, identities
+  included.
+- Build with `Composite::map`, `Composite::record` (`Composite::new` is the
+  same) and `Composite::list`; read with `len`, `kind`, `is_record`, `get`
+  and `first` by key, `field` by attribute, `item` by index, `entries`,
+  `items` and `fields`, and `first_view` and `item_view` for a value whose
+  text borrows from the buffer. `Composite::from_bytes` refuses any bytes
+  but the canonical ones with a `CompositeError` saying why;
+  `Composite::to_bytes` gives them; `Composite::reference` gives the
+  identity. Refused on construction: a composite as a key
+  (`CompositeError::CompositeKey`), NaN (`NotANumber`) and nesting past
+  `MAX_DEPTH`, 128 (`TooDeep`).
+- `ValueView` has a `Composite` variant: a scanned row holding a composite
+  binds in place, as every other value does.
+- An attribute declared `as: composite:`, `composite:map`,
+  `composite:record` or `composite:list` holds what its type says; a write
+  of a list where a record is declared is refused. The query layer's
+  `Primitive` gives maps and lists a bit each (a record is on the map's),
+  `Primitive::ALL` includes both, and the wire names them `map` and `list`.
+  A query cannot yet read a field out of a composite it bound; that comes
+  with destructuring.
+- In JSON a composite is `{"composite:map": {"map": [[key, value], ...]}}`
+  or `{"composite:list": {"list": [...]}}`, its entries in canonical order;
+  in a binary format, its canonical bytes; in a CSV export, `composite` with
+  its bytes in base58.
+- `ValueDataType::max()`, the largest type a key carries, is now
+  `Composite`, so a scan bound from it covers composites.
+
+Why: a value that has to change as a whole was either split into claims,
+which concurrent writers can leave half updated, or packed into opaque
+bytes no query could read and no two writers spelled alike. The notation
+keeps its syntax trees as maps and lists, and a composite that is read
+without decoding all of it is what lets a rule reach one node of one.
+
+### A poll scopes its diff to the cover as it stands, copying none of it
+
+[#844](https://github.com/dialog-db/dialog-db/pull/844).
+
+A subscription's cover was kept sorted and disjoint, but every poll
+merged its fact and rule ranges into a new list to scope the diff, the
+diff checked that list's order twice, and the poll then dropped it: a
+cover of ten thousand ranges cost tens of thousands of range copies,
+comparisons and frees per poll, whatever changed. The cover is now kept
+as one shared sorted list (`dialog_search_tree::KeyRanges`), and the
+poll's diff borrows it as it stands
+(`PersistentTree::differentiate_covered`). A range a re-derivation
+records again, which the cover already holds, changes nothing.
+
+What this changes for you:
+
+- Nothing in the API of a subscription. A poll's delta, its order and
+  `results()` read as they did.
+- A poll does work in the log of its cover, not its size: one changed
+  fact under a cover of ten thousand ranges costs what it does under a
+  hundred.
+- `dialog_search_tree` adds `KeyRanges`, a set of key ranges kept sorted
+  and disjoint as ranges are added, and `PersistentTree::differentiate_covered`,
+  a scoped difference over a union of them.
+
+Why: after #838 the diff searched its scope, so what a poll over a large
+answer still paid in the size of its cover was building, copying and
+dropping that scope.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes.
+
+
+### A read that names a derived value no longer fails with an unbound variable
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793)
+
+A read of a relation some rule derives tests the value its caller
+names against what the relation's cardinality keeps; the value never
+seeds the rule's body. The body was still planned as if it did, so a
+premise reading the value could be ordered ahead of the one binding
+it, and the read failed with `Unbound variable "is"`.
+
+What this changes for you:
+
+- A query, a negation (`unless`) or an inductive rule that reads a
+  derived relation with both its entity and its value given now
+  answers where the rule's body compares or computes with that value.
+  A commit that failed with `Commit-time induction failed: rule body:
+  Unbound variable "is"` goes through.
+- No answer that was returned before differs.
+
+Why: the plan and the row it runs on have to agree on what is bound.
+A rule's body is now planned for the terms that seed it.
+
+### A rule body a branch cannot read is skipped, and listed with why
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793)
+
+A stored rule body is whatever some peer wrote: one in a format an
+older release stored, one in a format this release does not know yet,
+bytes that are no rule, or a rule's body under an entity it does not
+hash to. None of them is evaluated, and no query fails over one: a
+query that met an undecodable body used to fail with `rule hydrate`,
+so one bad rule arriving by merge stopped every read of its relation.
+
+A branch now answers `dialog.rule/invalid`: one row per stored body it
+does not read, of the rule's entity, valued with the reason. The reason
+begins with its kind:
+
+- `older:` the body is in a format before this release's, which
+  `Branch::upgrade_rules` rewrites;
+- `newer:` the body is in a format after this release's, which a newer
+  release reads;
+- `undecodable:` the bytes do not decode as a rule, followed by what
+  the decoder said;
+- `forged:` the body decodes, and does not hash to the entity it is
+  stored under.
+
+The body's format is probed before it is decoded, so the first two are
+told apart from the third. Like `dialog.rule/quarantined`, the relation
+is never stored: it is answered from the rule bodies the branch's
+layers hold, and facts written under it are not read.
+
+What this changes for you:
+
+- A query over a relation some undecodable rule body would derive
+  answers from the rules that do read, where it failed.
+- An application lists the rules a branch skipped by querying
+  `dialog.rule/invalid`, as it lists the rules set aside by querying
+  `dialog.rule/quarantined`. `dialog_query::rule::statement::invalid_attr`
+  names the attribute.
+
+Why: rules are replicated facts, and a merge must never be able to stop
+a program that worked before it. Skipping a rule is only safe if the
+skip can be seen.
+
+### A concept field reads one claim with a `pick`, and its cardinality follows from the pick
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
+[`notes/aggregation.md`](./notes/aggregation.md) ("Selective
+aggregators").
+
+An aggregator is selective when its result is always one of its
+inputs, as `max` and `min` are; a computing aggregator (`count`,
+`count-distinct`, `sum`, `avg`) produces a value none of its inputs
+holds. A concept field's `pick` names a selective one, which chooses
+one of its relation's claims per entity: `last` the newest, `max` the
+greatest value, `min` the least, and `top` the value listed first in
+the attribute's `as`, which ranks its values best first as 0.4 did. The
+attribute says what a write does, the pick what a read returns, so a
+ranking field reads a cardinality-many attribute, whose cell keeps every
+claim to rank:
+
+```json
+{ "with": { "status": {
+  "the": "account/status",
+  "as": ["suspended", "active", "registered"],
+  "pick": "top"
+} } }
+```
+
+A field's cardinality is derived from its pick unless it is written:
+`last`, or no pick, is cardinality one, and `all`, `max`, `min` and
+`top` are many. Written beside a pick it has to be one the pick can
+read: `"pick": "last", "cardinality": "many"` keeps every claim and
+reads the newest, and `"cardinality": "one"` beside any other pick is
+refused. An attribute on its own takes `pick: last` or `pick: all` in
+place of its cardinality, and refuses a ranking pick.
+
+Writing `active` to an account that holds `suspended` adds a claim and
+does not displace it; un-suspending is retracting `suspended`. The
+aggregator ranks stored and derived claims alike, and among values it
+holds equal it falls back on the order a cardinality-one read elects by.
+
+What this changes for you:
+
+- `ConceptFieldDescriptor` has a pick, set with `picking` and read with
+  `pick` and `ranking`; `"pick": "top"` on the wire. `last` over a
+  cardinality-one attribute is what the field reads anyway and declares
+  nothing. A field refuses a pick its attribute cannot be read under
+  (`TypeError::SelectiveAggregate`): `max`, `min` or `top` over
+  cardinality one, `top` over an attribute that lists no values, `max`
+  or `min` over a type with no order, or any aggregator on a keyed
+  collection.
+- `#[derive(Concept)]` takes `#[dialog(pick = last | max | min)]`
+  on a field. `top` is refused at compile time, since
+  `#[derive(Attribute)]` cannot declare a listed `as`; a ranking
+  aggregator over a `#[cardinality(one)]` attribute fails when the
+  concept's descriptor is first built.
+- A concept's identity hashes each field's aggregator beside its
+  optionality and conformance, so a field reading `top` and one reading
+  without an aggregator over the same attribute are two concepts, and a
+  one-field concept with an aggregator is not the attribute's relation.
+- `dialog_query::selective::{Selective, Ranking}` are new, and
+  `ReduceEntry::selects` is `is_selective`.
+- A listed `as` is ordered: `[registered, active, suspended]` and
+  `[suspended, active, registered]` are two types, and the second ranks
+  `suspended` best.
+- `top` is no longer an aggregator a rule's `reduce` spells, and
+  `ReduceSpec` and `ReduceEntry` lose `among`: a ranked read is a field
+  with a selective aggregator.
+- A read of a field over stored claims chooses in the scan, as a
+  cardinality-one read does. A field over a relation some rule derives
+  folds the relation's claims, which is set aside like any fold if the
+  field's concept closes a cycle through the relation.
+
+Why: a rule concluding a ranked value into a relation of its own put
+that value in competition with the relation's stored claims, so a
+status set by hand outranked the fold until a newer state arrived. A
+field with a selective aggregator reads the one relation the claims are
+in, and a write through it adds to that relation. The ordering is the
+type's, so a comparison in a rule body and the aggregator agree on it.
+
+### An attribute is a relation, a type and a cardinality, and a ranked read is a concept field's pick
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793) and
+[#759](https://github.com/dialog-db/dialog-db/issues/759), detail in
+[`notes/glossary.md`](./notes/glossary.md) and
+[`notes/notation.md`](./notes/notation.md).
+
+An attribute no longer reads under a ranking pick. It is a relation, a
+value type and a cardinality, `one` (the default) or `many`, which
+`pick: last` and `pick: all` also spell. Under one a read returns the
+cell's newest claim, built in, recursion included, and a write succeeds
+that claim: what `last` did. Under many a read returns every claim and
+a write adds one: what `all` did.
+
+```json
+{ "the": "person/email", "as": "text:", "cardinality": "many" }
+```
+
+No attribute reads under `max`, `min` or `top` any more, and `the` names
+one relation: a list of relations, ranked, is gone. A read that ranks a
+cell's claims is a concept field picking `max`, `min` or `top` (see the
+previous entry). A listed `as: [a, b]` stays, as an enumerated type
+ordered best first.
+
+An attribute spelled with a ranking pick, `select`, the entity spelling
+0.3 to 0.5 wrote (`"pick": "top:"`), or a list of relations under
+`the` is refused by name, so a definition in the format those releases
+wrote is never read with another meaning. A rule
+those releases stored is inert until `Branch::upgrade_rules` rewrites
+it (see Compatibility and migration).
+
+What this changes for you:
+
+- `dialog_corpus::Pick` and `dialog_query::Pick` are gone.
+  `dialog_corpus::Cardinality`, re-exported as `dialog_query::Cardinality`,
+  takes their place on the write path: `Change::Assert(Value,
+  Cardinality)`, `Instruction::Assert(Fact, Cardinality)` and
+  `Update::associate(.., Cardinality)`. `Cardinality::One` succeeds the
+  newest claim and `Cardinality::Many` adds. `Pick::newer` is
+  `Cardinality::newer`, the one order the tree, a transaction's
+  settlement, a cardinality-one read and the selective aggregators share, and
+  `Cardinality::elect` is what `Pick::Last.elect` was. A batch spells
+  the cardinality `one` or `many`, and reads the picks 0.3 to 0.5 wrote
+  there (`last` and `max`, `min`, `top` as one, `all` as many).
+- `Cardinality::estimate` is `dialog_query::estimate_cost(cardinality,
+  ..)`.
+- `AttributeDescriptor` loses `pick`, `with_pick`, `pick_error`,
+  `with_then`, `relations`, `is_chain`, `reads_elected`,
+  `scan_cardinality`, `writes`, `adding` and `adds`. `cardinality` is
+  what both a read and a write go by, `with_cardinality` sets it, and
+  `without_pick` is `plain`. `Attribution::pick` is `cardinality`, and
+  `AttributeStatement` (`DynamicAttributeExpression`) has no `pick`
+  field: its `cardinality` says how it writes, many when it is `None`.
+  `TypeError::UnfitPick` is gone.
+- `#[derive(Attribute)]` reads `#[cardinality(one)]` (the default) or
+  `#[cardinality(many)]`, which `#[pick(last)]` and `#[pick(all)]` also
+  say. A ranking `#[pick(..)]` no longer compiles on an attribute, and
+  says to put the pick on the concept field.
+- A query over `{ "the": .., "pick": "max:" }` fails to parse. Read a
+  field `{ "the": .., "pick": "max" }`.
+- `Election` elects by cardinality alone; `Election::elect_claims`,
+  `ConceptRules::chain_scans` and `ConceptRules::ranks` are gone.
+- An attribute's identity hashes its relation, its cardinality, its type
+  and its listed values, where it hashed the list of relations it read
+  and its pick. Every attribute's identity moved, and every concept's
+  and every rule's with it. `dialog_query::migration` reproduces the
+  identities of 0.3 to 0.5 (`attribute_reference_v1`,
+  `attribute_uri_v1`, `concept_reference_v1`, `concept_identity_v1`).
+- A rule body is stored in format 4, which spells cardinalities.
+- `RulesUpgraded::unmapped` lists the rules the upgrade left inert, with
+  why (`dialog_query::migration::Unmapped`), and
+  `dialog_query::migration::rewrite_body` is the rewrite it runs.
+  `dialog_query::rule::body::format_of` reads the format a stored body
+  names.
+- A stored rule body this release does not decode, a body spelling
+  picks or one in a later format, is inert on a read as it already was
+  at commit: a query that finds it no longer fails with `rule hydrate`.
+
+Why: a pick made one attribute decide both how a relation is read and
+what a write to it retires, so the relation's contents depended on how
+each writer read it, and a ranked read forced a succeeding write. A
+cardinality says only how many claims a cell holds. How to rank them is
+the reading concept field's selective aggregator, which reads the relation as it is and
+can be changed without rewriting it.
+
+### A ranked field over a derived relation picks among its candidates, and a cycle through one is set aside
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
+[`notes/aggregation.md`](./notes/aggregation.md).
+
+A concept field with a `pick` may read a relation rules derive: it
+picks among every candidate the rules offer and every stored claim.
+The value it picks stands as the fact it was picked from, a derived
+candidate as the newest fact its derivation consumed, so `last` over a
+derived relation reads the newest derivation.
+
+A deductive rule an author writes still takes no `reduce`
+(`TypeError::ReduceInOpenRule`), as since
+[#580](https://github.com/dialog-db/dialog-db/pull/580). A computed
+value (`count`, `sum`, `avg`) is none of the claims it was computed
+from, so concluded into an attribute it would compete with the claims
+stored there; it belongs in a query that folds
+([#839](https://github.com/dialog-db/dialog-db/pull/839)), and is still
+refused in a deductive rule.
+
+What this changes for you:
+
+- A concept whose ranked field closes a cycle through the relation it
+  reads is not evaluated in the cycle: the rule of the cycle installed
+  last is quarantined, and `Quarantine::tested` carries
+  `Absence::Folded`. The queries touching such a cycle used to fail
+  (`AggregationThroughRecursion`), which remains for a cycle with no
+  rule to set aside.
+- `max` and `min` over values that compare equal pick the one from the
+  newest fact, where they picked the one of the smaller encoding;
+  values that also stand equal still fall to the encoding.
+- A subscription over a concept with a ranked field on a derived
+  relation is maintained per entity: a change picks again for the
+  entities whose candidates it touches, and no other. Inside a
+  recursion it is still recomputed.
+- A concept of one field that picks, over a relation rules derive
+  outside any cycle, is answered by gathering the relation's
+  candidates and picking among them, without a selecting rule and a
+  fold between, and a subscription over one discovers what a change
+  touches over that relation. `ConceptDescriptor::picked_relation`
+  names it.
+- `Aggregator::Last` is new and `ReduceEntry::is_selective` tells a
+  picking fold from a computing one. A sum of naturals is a natural.
+- A query that folds with `last` or `top`
+  (`Aggregator::orders_by_standing`) is evaluated afresh, under a
+  standing fold, on each poll that moved one of its rows: a row the
+  subscription keeps carries no standing, which those two choose by.
+  Every other fold is still maintained per group.
+
+Why: a status ranked among the cases several rules derive is the read
+tonk's library needed, and it has to answer the same on every replica
+whatever order the candidates arrive in.
+
+### A rule deciding on a cardinality-one value inside its own cycle is set aside
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
+[`notes/attribute-heads.md`](./notes/attribute-heads.md).
+
+Inside a recursive component a cardinality-one read sees every
+candidate the fixpoint derives, and readers elect the newest once the
+component is derived in full. That is exact for a rule that passes the
+value along: each candidate it derives stands by the one it carried, so
+the election at the exit picks what a stratified read would have. It is
+not for a rule that decides on the value. Such a rule fires for a
+candidate no reader elects, and nothing at the exit takes its
+conclusion back: with `b` reading `own` over a losing `end`, a rule
+concluding a label for `a` from `x/label(next) = "end"` concluded it,
+though every read of `b` returned `own`. The same body under another
+head, outside the cycle, concluded nothing.
+
+A cardinality-one read whose value the rule decides on is now an
+absence test, so a rule closing a cycle through one is quarantined. A
+rule decides on a value when the read is pinned to a constant, or when
+the value, or anything a formula or an equality computes from it, is
+compared, joined on by another read, negated over, or checked against a
+constant. A rule passes a value along when it reaches the head and
+nothing else, directly or through formulas.
+
+What this changes for you:
+
+- A rule that reads its own relation under cardinality one, of another
+  entity, and decides on the value read is set aside, and listed by
+  `ProgramAnalysis::quarantined` and `dialog.rule/quarantined`. A query
+  over the relation returns what the remaining rules derive. Before, it
+  returned that rule's conclusions too, the ones drawn from losing
+  candidates among them.
+- So is a rule deciding on a field of a concept of several fields,
+  where the field is of cardinality one or declares a selective
+  aggregator: the concept elects the field's claim, and the premise
+  tests that election. A rule deriving a relation from the claim a
+  field's aggregator elects of that same relation closes its cycle
+  through a fold, and is set aside as one.
+- A rule carrying a value down a chain, or computing from it (a
+  position from a successor's position, a depth from a parent's), is
+  unaffected.
+- A rule rewriting the cell it reads, `x/status(e) := "todo" :-
+  x/status(e) = "triage"`, is unaffected: it reads its own relation of
+  its own entity, and its conclusion succeeds the value it read.
+- The same rule outside a cycle is unaffected: there the read is of a
+  relation derived in full.
+- To decide on a value inside a recursion, conclude into another
+  relation, which takes the decision out of the cycle, or make the
+  decision in an inductive rule, which runs at commit over the settled
   value.
-- Matching a pattern against a record under a version this release
-  does not read is `EvaluationError::RecordVersion`, not a dropped row.
-- A rule's identity names a record constant that holds a composite by
-  its parts, as `Value::reference` does.
+- A quarantine says what it was made over. `Quarantine::tested` names
+  the cycle's plainest absence test: the rule making it (`by`), the
+  relation tested (`target`) and how (`absence`). `Tested` is new, and
+  `Absence::Decided` is a cardinality-one read the rule decides on.
+  `Absence::Elected`, a ranked read, is gone with ranked reads. Code
+  building a `Quarantine` by its fields names the new one.
+- `Polarity::Electing` carries `decides`, and no longer `ranked`.
 
-A premise whose parameters are all terms costs what it did: a concept
-read is the stream it was, field for field, and parameters of terms
-are the map of terms they were, with one place beside it for the
-patterns.
+Why: a rule set has to mean one thing whatever else is installed. The
+same body gave a different answer when an unrelated rule closed a cycle
+around it, with nothing reported. Setting the rule aside is reported,
+and names the rule.
 
-Why: a rule that issues a command, derives an entity from a row or
-takes a form apart needs a value made of values where a term stands.
-One pattern that both builds and takes apart lets the planner order the
-premises, as it does for every other premise.
+### Compatibility and migration
 
-### A record can hold a map or a list of values
+- Composites: nothing an existing space holds is rewritten or read
+  differently, and opaque `record:` values keep their encoding and identity.
+  No release up to and including 0.5.0 wrote a composite (the draft #812 was
+  never released), so there is nothing to migrate. A space that stores a
+  composite cannot be read by an older release, which takes a key with type
+  byte 22 for corruption: once a replica writes one, every replica reading
+  that space needs this release. Nothing an embedder has to run.
+- A rule an older release stored spells its attributes under picks (0.3 to 0.5) or under the older `cardinality` (0.2), and sits under an
+  identity that hashed them. This release reads a rule body only in its
+  own format and only under the identity it gives it now,
+  so every such rule is inert: it derives nothing, fires at no commit,
+  and no read fails over it. Nothing is rewritten on upgrade.
+  `Branch::upgrade_rules` (or `Branch::migrate`) is what an embedder
+  runs: it rewrites each rule whose attributes read under `last` or
+  `all` (spelled, or implied by a plain attribute) into cardinality one
+  or many, asserts it in format 4 under its identity now, and retracts
+  every rule fact the older release wrote for it. An attribute read
+  under `max`, `min` or `top` (including a listed `as` without a pick,
+  which read as `top`) is rewritten into a field with that pick over a
+  cardinality-many attribute, a `top`'s list kept in its order, best
+  first. A rule
+  over a chain of relations has no rewriting with the same meaning: it
+  is left as it is, inert, and listed in `RulesUpgraded::unmapped` with
+  why. Its author replaces it with a rule deriving one relation from
+  each, read by a field with a selective aggregator. When to run the upgrade,
+  once after a full replication or on every pull, is the embedder's
+  decision, as before.
+- The upgrade also moves a `dialog.concept/transient` marker keyed by a
+  concept's 0.3 to 0.5 identity, as it moves one keyed by its 0.2
+  identity. An application that keyed its own facts by an attribute or
+  concept identity moves them with `dialog_query::migration`.
+- An older release cannot read what this one writes: a rule body in
+  format 4 is refused by name, and a rule stored under its new identity
+  is inert there, as an older release's rules are here. A batch this
+  release encodes spells `one` and `many`, which an older release does
+  not read; this release reads the batches an older one encoded.
+- What the tree stores is unchanged: a cell's claims, and how a
+  cardinality-one write elects the claim it succeeds, are as `last`
+  left them. A write a 0.3 to 0.5 replica made under `max`, `min` or
+  `top` succeeded the claim that pick elected; those claims stay as
+  written. A field the upgrade rewrote to read with that pick's aggregator
+  reads the same claim; any other read under cardinality one returns the
+  cell's newest.
+- A rule the analysis sets aside for deciding on a cardinality-one value
+  in its own cycle stays installed and is evaluated again once the cycle
+  it closed is gone. Replicas on releases either side of this one can
+  answer a query over such a cycle differently.
 
-[#778](https://github.com/dialog-db/dialog-db/pull/778),
-[design/patterns.md](./design/patterns.md),
-[design/patterns/design-composite-bytes.md](./design/patterns/design-composite-bytes.md)
 
-A value was a scalar or a `Record`, bytes dialog did not look into. A
-`Composite` is a value made of values: a map from a value to a value
-that holds no key twice, or a list, nested as deep as it is written,
-as the IPLD data model has them. There is no tuple: a notation that has
-one writes it as a list. It is kept whole as a `Value::Record`: one version byte,
-`0x01`, then the dag-cbor of its parts. So a composite is a claim's
-value like any other: it is stored, keyed, compared, spilled and synced
-as the bytes it is. Its name is not a hash of those bytes. A composite
-is named by the merkle reference of its parts, a map under `map:` and
-a list under `list:`, each part by its own reference, so a later layout of the bytes moves no name.
+## 0.5.0 (2026-11-19)
+
+### A subscription's poll costs the entities it touched, not its whole answer
+
+[#838](https://github.com/dialog-db/dialog-db/pull/838).
+
+A subscription keeps a range of its cover per entity it read, and a
+poll gates the tree difference by that cover. Every node, buffered
+operation and changed entry the difference walked was tested against
+every range, so one changed fact under a cover of ten thousand ranges
+cost tens of thousands of comparisons per node. The scope is now sorted
+and merged once and each test is a binary search. A maintained poll
+then compared each re-derived entity with the kept answer by scanning
+every kept row; the kept answer is now indexed by entity, so the
+comparison reads that entity's rows only.
 
 What this changes for you:
 
-- `dialog_corpus::Composite`, `CompositeMap` and `CompositeItems` build
-  one, and `Value::from` keeps it as a record. `Value::composite` reads
-  one back: `Ok(None)` for a scalar and for a record that starts with
-  no version byte, the composite for a record this release wrote, and
-  `Err(CompositeError::UnknownVersion { version })` for a record under a
-  version this release does not read.
-- One value has one byte string. A map's entries are written in one
-  order whatever order they were given in, a key given twice is refused
-  (`CompositeError::DuplicateKey`), and a number is kept under the
-  narrowest type that holds it, as a tree under the number band reads
-  one back: the natural `3`, the integer `3` and the float `3.0` are
-  one part, and read back as the natural `3`.
-- `Value::reference` of a record that holds a composite is the
-  reference of its parts. Of any other record it is what it was,
-  `RECORD.reference_of(bytes)`.
-- Equality, ordering, `Value::to_bytes`, `Value::to_reference` (the
-  address a spilled value is stored under) and the key encoding treat a
-  record as its bytes, as before.
+- Nothing in the API. A poll's delta, its order and `results()` read as
+  they did.
+- A poll over a large cover, and a poll that re-derives many entities of
+  a large answer, does work in the touched entities and the log of the
+  cover, where it did work in their product.
 
-Why: a rule could not hold a value made of other values, and everything
-that needed one waited on the layout of a record's bytes. A name that is
-a function of the parts does not depend on that layout, and the version
-byte leaves the layout free to change.
+Why: a subscription's answer grows with the data it watches, and the
+cost of a poll that changed one fact grew with the square of it.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes.
+
+### An ephemeral line can be read as it stood, at no cost to take: `Ephemeral::frozen`
+
+[#841](https://github.com/dialog-db/dialog-db/pull/841).
+
+`Ephemeral::frozen` returns a `Frozen`: the line's facts, tombstones and
+revision as they stood when it was taken, answering the reads the line
+answers (`scan`, `select`, `export`, `len`, `is_empty`, `revision`) and
+never changing after. The line now holds its facts in chunks shared by
+reference count, so taking one copies nothing, and a write to the line
+while one is held copies the chunk it changes rather than every fact.
+
+What this changes for you:
+
+- New: `Ephemeral::frozen() -> Frozen`, and the `Frozen` type.
+- Nothing a read of a live line answers changes.
+
+Why: a subscription's poll is to read one fixed state of every layer,
+so that subscriptions of one view agree and a channel's facts, which
+last one tick, are read by a retry as they stood. Until now the state of
+a session overlay or a memory layer at an earlier point was had only by
+copying the whole line and undoing its instants.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten.
+
+### A query can fold, and a fold can be kept current
+
+[#839](https://github.com/dialog-db/dialog-db/pull/839).
+
+Decided in [dialog-db/dialog-db#830](https://github.com/dialog-db/dialog-db/pull/830)
+(a fold is a query type, not a rule) and
+[dialog-db/dialog-db#837](https://github.com/dialog-db/dialog-db/pull/837)
+(how it is kept current).
+
+`Fold::new(groups, inputs, reduce)` is a query in `dialog-query` that
+folds the rows of `inputs` with a `Reduce`, one row for each row of
+`groups`, joined on the grouping fields of the `Reduce`. A group no input
+joins is folded over inputs all absent, so `count` gives 0 for it. A fold
+is asked and subscribed to as any query is; it has no name and installs
+no rule, so an authored deductive rule still cannot fold.
+
+What this changes for you:
+
+- New: `Fold` and `FoldConclusion`, a folded row with the value of each
+  grouping field and each fold.
+- New: `Branch::subscribe_fold(fold)` and `Stack::fold_subscription(fold)`
+  give a `FoldSubscription`, polled as a `Subscription` is and giving
+  `Delta<FoldConclusion>`. It keeps a subscription of each of the fold's
+  two queries and the rows they report, and folds again in memory only the
+  groups a change moved a row of: a group whose row changed reports the
+  old row retracted and the new one asserted, and what it reports adds up
+  to what asking the fold whole gives. Both inner subscriptions are polled
+  at one state of the branch.
+- `Branch::subscribe(fold)` works too, and asks the whole fold again on
+  each poll that touches what it read; `Branch::subscribe_fold` is the
+  one that keeps it current.
+- New: `Application::bindings`, with a default of `None`: the bindings a
+  conclusion was realized from. Attribute queries, concept queries and
+  folds give them, and a `FoldSubscription` needs them of both its
+  queries; one over a query that gives none fails to poll.
+- New: `Fold::groups`, `Fold::inputs`, `Fold::key`, `Fold::fold_groups`
+  (the fold of a set of groups, which asking a fold and a
+  `FoldSubscription` both fold with) and `Reduce::fold_rows`.
+
+Why: a rule cannot fold, and a fold asked again whole on every change
+folds every group for a change to one. A query that folds needs no name
+and no stored value beside its own, and kept current it costs the two
+inner polls and the groups a change moved.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: a fold is a query asked in memory and
+  nothing of it is written. Nothing is rewritten on upgrade, and an older
+  release reads what this one writes.
+
+### A concept read binds stored values in place, and reads optional fields in one pass
+
+[#825](https://github.com/dialog-db/dialog-db/pull/825). Research: [zero-copy answers](research/zero-copy-answers.md)
+
+A concept read used to turn every row it scanned into owned values (an
+entity with a hash of its URI, an attribute, a value, a claim) and copy
+them again into each joined row. It now binds the scanned row in place
+and makes a value only when something reads it as one; a join compares
+the stored bytes. A concept with optional fields used to be read by
+probing every optional field once per entity; its optional fields are
+now read once each, in entity order, beside the required ones, and an
+entity a field lacks binds `Absent` as before.
+
+What this changes for you:
+
+- **List reads and subscriptions are faster.** On tonk-team at 10×, the
+  issue list reads in 82 ms where it took 288, the activity list in 106
+  where it took 486, and their subscription polls in 23 and 46 ms where
+  they took 939 and 1,398. Results are the same, row for row.
+- **New reads that do not hydrate:** `Match::view` and
+  `ConceptConclusion::view` return a `ValueView` borrowed from the stored
+  row; `Match::absent` answers without making the value;
+  `Conclusion::this_uri` (with a default) and
+  `ConceptConclusion::this_uri` give the entity's URI as stored.
+  `dialog_corpus` gains `ValueView`, `FactView::checked` and `CheckedRow`.
+- Nothing stored or synced changes.
+
+Why: copying values was most of a concept read's cost after the scan,
+and a concept with an optional field, which most of tonk's are, was
+never merged, so its list read probed every field of every entity.
+
+### A coverage entry spills nothing
+
+[#833](https://github.com/dialog-db/dialog-db/pull/833).
+
+A coverage key carries a hash of the covered value in the spilled form,
+whatever the value's size, so claims can be matched by it; no value is
+stored under that hash. `tree/entry` read it as a spilled value, so an
+inspector offered to read a value that could never be read, and waited
+on it.
+
+What this changes for you:
+
+- `tree/entry` yields no `spill` for an entry at a coverage key, and
+  `inspect::entries` no `spill` in its `EntrySummary`.
+- `dialog/key-part` reads a coverage key as its index, origin, edition,
+  entity and attribute and a part of kind `reference`, `value:<hash>`,
+  where it read a value type of `Bytes` and a `spill` part.
+
+Why: a spill names bytes a reader can fetch; a coverage key's hash names
+none.
+
+#### Compatibility and migration
+
+- Nothing stored changes.
+
+### An index node's buffered operations are its entries, and a separator reads as the key it is
+
+[#832](https://github.com/dialog-db/dialog-db/pull/832).
+
+An index node buffers writes headed for its children (`novelty`), and
+`tree/entry` gave no rows for an index, so a query could count them but
+not read them. A separator was split into its tag and one `prefix` part
+of lossy text, which for a history separator was the origin's raw bytes,
+and a forced seam's separator, the last key before the seam padded with
+zero bytes past the separator bound, read as a key whose value was the
+padding.
+
+What this changes for you:
+
+- `tree/entry` of an index node yields one row per operation it
+  buffers, with a new slot `span` naming the span the operation rides,
+  as `tree/span` names it. `span` is absent on a segment's entry. `at`
+  counts the node's buffered operations; `rank` is absent on them.
+- `dialog_corpus::inspect::entries` returns an index node's buffered
+  operations, and `EntrySummary` has a new field `span: Option<u64>`.
+- `dialog/separator-part` reads a separator field by field as far as it
+  reaches, as `dialog/key-part` reads a key: `entity`, `attribute`,
+  `vtype` and `value` parts in the ordering's order, the value-type byte
+  on its own, and a Bytes or Record value as hex. A history or coverage
+  separator yields its `origin` (hex) and `edition`. The `prefix` part is
+  gone.
+- A separator that is a whole key reads as that key. A forced seam's
+  separator reads as the key before the seam and a part of kind
+  `padding`.
+
+Why: an inspector shows what a node holds, and the operations an index
+buffers and where its boundaries fall are part of that.
+
+#### Compatibility and migration
+
+- Nothing stored changes: both read blocks as they are.
+
+### A revision is named by `revision:`, not by a `did:key:`
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829).
+
+A revision's entity was `did:key:z6Mk<base58(hash)>`: the shape of a key
+DID around a blake3 hash of the revision's version. It read as a
+principal and was none, and nothing could tell a revision from a branch,
+a replica or an operator by its name.
+
+It is now `revision:<base58(hash)>`, over the same hash
+(`Version::entity`, `Revision::entity`). A commit writes the revision's
+signed record under that entity, `dialog.branch/revision` carries it, and
+the built-in `Revision`, `RevisionParent` and `RevisionAncestor` concepts
+yield it for `this`, `parent` and `ancestor`.
+
+What this changes for you:
+
+- A revision entity you read from a query starts with `revision:`. Code
+  that told revisions apart by parsing `did:key:z6Mk` has to change; an
+  entity compared whole needs nothing.
+- `Version::entity_did` is `Version::entity_uri`. `Version::legacy_entity`
+  and `Version::legacy_entity_uri` give the name a revision had before,
+  and `Version::legacy_of` turns the current name into it.
+- A new formula, `dialog/revision-slot`, takes a revision entity as `of`
+  and yields as `is` each entity its record may be stored under: the
+  entity itself, then its older name.
+- A fact your space wrote about a revision under its older name (a
+  comment on a commit, say) still names the older entity, and no longer
+  joins the `this` of `Revision`. Join through `dialog/revision-slot`,
+  or rewrite those facts.
+
+Why: an entity's scheme is what a reader, a rule and a view have to tell
+kinds of thing apart, and a node (`node:`) and an asset (`asset:`)
+already say what they are. A name shaped like a key invites treating it
+as one.
+
+#### Compatibility and migration
+
+- A replica written by an older release holds each revision's record
+  under `did:key:z6Mk…`. Nothing is rewritten on upgrade: this release
+  reads a record under either name (the history reader, the built-in
+  revision concepts and a stack's durable layers all do) and writes new
+  ones under `revision:`, so one tree can hold both. An embedder runs
+  nothing.
+- A durable layer's pointer, the `dialog.branch/revision` of
+  `memory:<name>` stored in the primary's tree, names its revision by
+  the name the release that wrote it used. This release follows a
+  pointer an older release wrote, by either name, and opens the layer;
+  the layer's next move points the primary at the new revision by its
+  `revision:` name and retires the older claim, as any move does.
+- An older release cannot find a record written under `revision:`, so
+  it cannot read the history of what this release committed, nor follow
+  a durable layer's pointer this release wrote. Upgrade every replica of
+  a space before any of them commits with this release.
+
+### A tree node is a handle, and five resolvers read it
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829), argued in [design/tree-exploration.md](./design/tree-exploration.md).
+
+The seven `tree/*` resolvers each loaded a node's block and decoded one
+part of it, so a query asking three things of one node decoded it three
+times. A segment's entries were split across three of them (`tree/key`,
+`tree/entry`, `tree/blob`) and paired by position. A node was named by
+the base58 string of its hash, which is not an entity, so a rule could
+not derive a concept whose rows were nodes.
+
+A node is now opaque to a query, which holds its handle: the entity
+`node:<base58(hash)>` (`Entity::from_node`, `Entity::node_hash`).
+`dialog.branch/tree` carries the root's handle and `tree/span` yields
+each child's. A resolver takes the handle as `of`, asks the environment
+for the decoded node (`nodes::Read`, as the tree's own reads do), and
+yields one part of it. The environment decodes a node once and keeps it.
+
+```text
+tree/node   what the node is, and the format it was written under
+tree/span   an index node's children, with what the node holds about each
+tree/entry  a segment node's entries, each whole
+tree/block  the node's block as stored
+tree/value  a spilled value's bytes, by its asset: entity
+```
+
+What this changes for you:
+
+- `dialog/key-part` and `dialog/separator-part` yield `part`, each
+  component's own entity (`part:<base58(blake3(key))>/<at>`), so a rule
+  can derive one row per component. A query asking either formula
+  names `part` among its terms too.
+- `tree/key`, `tree/blob` and `tree/manifest` are gone, with
+  `TreeKeyQuery`, `TreeBlobQuery` and `TreeManifestQuery`. A key and its
+  rank, and a blob record's fields, are slots of `tree/entry`; the
+  manifest's fields are slots of `tree/node`. `tree/block` is new.
+- `of` is an entity: a `node:` for every resolver but `tree/value`,
+  which takes an `asset:`. A base58 string or raw bytes, which `of`
+  used to take, match nothing.
+- `dialog.branch/tree` is an entity (`branch::Tree(Entity)`), not text.
+  A concept that reads it declares the field as an entity; the hash is
+  `tree.0.node_hash()`.
+- `tree/span` yields `node` as a `node:` entity, and a new slot `span`:
+  the span's own entity, `span:<base58(node)>/<position>`. `tree/entry`
+  yields `entry`, `entry:<base58(node)>/<position>`. A rule deriving a
+  concept of spans or of entries has an entity for each row.
+- `tree/entry` yields `spill` and `blob` as `asset:` entities. A slot
+  that does not apply to a row is absent: `spill` when the value is
+  inline (it was an empty string), `origin` and `edition` when the
+  write was unversioned (they were empty and 0), the blob slots on any
+  entry that is no blob record, and the claim slots on one that is.
+- Slot names are kebab-case: `max-separator`, `inline-n`,
+  `spill-prefix`, `max-segment`, `frame-ceiling-factor`,
+  `anchor-selector`. `fanout_n` is `fanout-exponent`. `tree/node` also
+  yields `entry-overhead`, `key-overhead` and `link-overhead`, which no
+  resolver did.
+- `RESOLVER_COST` is 50,000, from 200. Where a rule's body has a fact
+  that decides whether a node is read, the planner now asks the fact
+  first, whether or not the caller gave the node.
+- `dialog_corpus::inspect` has a reading of each part that takes a
+  decoded node (`summary`, `spans`, `keys`, `entries`, `blob_records`,
+  `manifest`) beside the `inspect_*` functions that take bytes.
+- A resolver still requires its handle. A rule whose body is a resolver
+  alone is refused at install as before; a rule that names its nodes by
+  a fact installs, and reads those nodes and no others.
+
+Why: a query should be able to read everything a node holds without the
+embedder decoding blocks for it, and the reading and decoding of a node
+belong to the environment, which already does both for the tree. A
+handle that is an entity is what a rule needs to make a node, a span or
+an entry the subject of a concept.
+
+#### Compatibility and migration
+
+- Nothing stored changes. A branch's `dialog.branch/tree` is derived
+  when a query runs and never written; it now reads as a `node:`
+  entity. A durable layer's pointer does write `dialog.branch/tree`, of
+  `memory:<name>` in the primary's tree, and still writes it as the
+  tree's base58 text, so the same attribute reads as an entity of a
+  branch and as text of a layer: a rule reading a layer's pointer reads
+  text. Resolver rows are read off blocks. An older release reads
+  everything this one writes. A rule stored on a branch that uses `tree/key`,
+  `tree/blob` or `tree/manifest`, a snake_case manifest slot, or a
+  base58 string as `of`, or that reads `dialog.branch/tree` as text, no
+  longer compiles or no longer matches, and has to be re-authored.
+
+### A stack learns what its replica holds of a tree by command
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829), argued in [design/tree-exploration.md](./design/tree-exploration.md).
+Built on the stack's providers
+([#816](https://github.com/dialog-db/dialog-db/pull/816)).
+
+A tree resolver fetches a node the replica lacks, so that what a query
+answers does not depend on what happened to be local. That left a
+consumer no way to know, before it asked, whether asking for a node
+would fetch it.
+
+`dialog_repository::holdings` has two commands for that and the
+providers that answer them (`holdings::provide(&stack, env)`):
+
+- `dialog.node.probe/node`, the node to ask about, is answered with
+  `dialog.node.probed/node` and `dialog.node.probed/local`: whether the
+  replica holds the node, with nothing fetched.
+- `dialog.node.fetch/node`, the node to bring local, is answered with
+  `dialog.node.fetched/node` and `dialog.node.fetched/local`: whether
+  the replica holds it, having tried.
+
+What this changes for you:
+
+- `holdings::{provide, providers, probe, fetch}` and the attribute names
+  beside them are new. A stack they are not registered with reports
+  these commands as unhandled, like any command no provider claims.
+- An answer is written into `control:`, so it is a command for one tick
+  and nothing keeps it. A space keeps it with a rule, and where the
+  rule's attribute is placed is where it is kept: on a layer of the
+  session it is read and subscribed to through the stack, never
+  committed or synced, and gone with the session. A space with no such
+  rule gets nothing.
+- A command whose value is not a `node:` entity, and a read that fails,
+  fail the command: it gets a `dialog.command/failed` row with the
+  reason.
+
+Why: whether a block is held changes with no commit, so a query step
+that reported it would answer the same query differently from one
+moment to the next. As a command's answer captured by a rule, it enters
+a query as a fact of a layer the query has pinned.
+### A provider claims the commands whose rows satisfy its concept, and a command sees the rows of its tick
+
+[#823](https://github.com/dialog-db/dialog-db/pull/823). Refs
+tonk-labs/tonk#1318, issues 9 and 10.
+
+A provider now claims a landed command when the command's rows satisfy
+its concept, the test decoding the concept from them would pass: every
+required field of the concept has a row of the field's attribute and,
+when the field declares a type, a value of that type. Optional fields are
+not needed, and rows of other attributes do not disqualify. Every
+provider whose concept a command satisfies runs, in registration order,
+each writing its own `answered` or `failed` row. One provider can answer
+several concepts (`Provider::new(&current, handler).also(&legacy)`); it
+runs at most once per command, and its `answered` row names the first
+of its concepts the command satisfies. The rows of the `control:` entity
+itself that land in a tick are the tick's own facts (who asked, and
+whatever an embedder stamps on the loopback): they are no command, and
+each command carries them as `Command::tick`.
+
+What this changes for you:
+
+- A provider no longer claims a command because one of its rows has an
+  attribute of the provider's concept. A command that carries one shared
+  attribute (a time stamp, an email) and lacks the concept's other
+  required fields is no longer that provider's; a command no concept is
+  satisfied by is `unhandled`, where before the first provider sharing
+  an attribute ran.
+- A command whose rows satisfy several providers' concepts runs every
+  one of them, in registration order, where before only the first
+  registered ran. It gets one `dialog.command/answered` row per provider
+  that answered and one `dialog.command/failed` row per provider that
+  failed (both are now cardinality-many), and `EffectReport::answered`
+  and `EffectReport::failed` name it once per provider. A rule copying
+  `answered` should read it under `pick: all`.
+- `Provider::also(&concept)` adds a concept to a provider, and
+  `Provider::concepts()` lists them; `Provider::concept()` is the first.
+  Registering a provider writes one `dialog.provider/command` row per
+  concept no provider registered before, and replaces the first
+  registered provider that shares a concept with it.
+- `InvocationReport::commands()` and `Effect::commands()` leave out the
+  rows of the `control:` entity itself, so they are never a command,
+  never `unhandled` and never marked `dialog.command/invoked`.
+  `InvocationReport::tick()`, `Effect::tick()` and `Command::tick()`
+  return them.
+
+Why: three of tonk's command groups share an attribute
+(`dom.event/time-stamp`, `elements.email/value`, `current-target/value`),
+so the provider of the wrong one ran: CheckEmail answered
+RegisterAccount, ProfileRename renamed a profile with a space's name.
+Tonk's own registry ran every handler whose decode succeeded, once per
+handler, which is the rule now. And tonk writes the asking client as a
+row of `control:` for the tick, which no provider could read and every
+effect reported as an unhandled command.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: the rule is applied in memory when
+  an effect runs, and the lifecycle and tick rows live in `control:` for
+  one tick. Nothing is rewritten on upgrade, and an older release reads
+  what this one writes.
+
+### A stack transaction's publish reports like an invocation, so its commands reach the stack's providers
+
+[#821](https://github.com/dialog-db/dialog-db/pull/821).
+
+`Stack::transaction()` now returns a `StackTransaction`, the
+stack-bound counterpart of a branch `Transaction`, and its publish
+returns an `InvocationReport`, the type `Invocation::perform` returns:
+the revision the publish left the primary at, the ticks its induction
+ran, and the commands it landed on `control:`, with `effect()` to run
+the stack's providers over them. That holds for the one-step
+`.commit().publish().perform(&env)` and for a staged chain:
+`.commit().perform(&env)` returns a `StackBatch`, whose next links are
+stack transactions too, and its `publish().perform(&env)` reports the
+commands of every link. A publish that loses its compare-and-swap
+still fails with `PublishError::VersionMismatch`, lands nothing and
+reports nothing; it is not re-run. `Branch::transaction()` is
+unchanged, and its publish still returns a `Revision`.
+
+What this changes for you:
+
+- A stack transaction's publish returns an `InvocationReport`, not a
+  `Revision`: `let revision = stack.transaction()...publish().perform(&env).await?`
+  becomes `let report = ...; report.revision()`, and the same for a
+  staged chain's `batch.publish()`. This is breaking for callers that
+  read the revision.
+- `Stack::transaction()` returns `StackTransaction<&Branch>`, its
+  `commit()` a `StackCommit`, its staged batch a `StackBatch` and their
+  publishes `StackPublish` and `StackBatchPublish`. They carry the
+  methods of the branch types they wrap (`assert`, `retract`,
+  `dispatch`, `integrate`, `query`, `allow_empty`, `canonicalize`,
+  `amend`, `version`, `revision`, `induced`, `shares`, `claims`,
+  `select`); a signature that named `Transaction<&Branch>` for a stack
+  transaction names `StackTransaction<&Branch>`. Their `perform` takes
+  a `StackEnv`, as `Invocation::perform` does.
+- `report.effect().perform(&env)` after a stack transaction runs the
+  providers over its commands, as after an invocation; before, a
+  command asserted through a stack transaction landed on `control:`
+  but no report named it, so no provider answered it.
+- `dialog-stack` re-exports the five new types.
+
+Why: tonk's evaluate route and its "absent branch" transact path build
+the transaction themselves, resolved against a head they chose, and
+published it with `.commit().publish()`, which answered a `Revision`
+and nothing more, so a command asserted that way was never answered by
+a provider. Only its route through `Stack::assert(..).perform(&env)`
+got a report. A stack transaction's publish now reports what it landed
+the same way, so every route runs the providers.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: the publish writes what it wrote
+  before, and the report is computed in memory from the staged chain.
+  Nothing is rewritten on upgrade, and an older release reads what this
+  one writes.
+
+### A stack shares one evaluation of a query among its readers, and delivers to them after a dispatch
+
+[#819](https://github.com/dialog-db/dialog-db/pull/819).
+
+`Stack::subscribe(query)` now registers the stack's subscription to a
+query, or attaches to the one it holds, and returns a `Subscriber`: a
+second reader of the same query reads the same evaluation instead of
+running its own. A subscription is keyed by `QueryHash`, a new hash of
+the query's canonical encoding in `dialog-query`, and its type. A
+dispatch through the stack that published or wrote into a memory layer
+schedules a poll; `Stack::settle(&env)` polls every subscription once
+when one is scheduled, delivers each reader the `Delta` the poll made,
+and clears the mark, so the writes of one request cost one
+evaluation. `Effect::perform` settles after its answer dispatch. The
+evaluation is still dialog's demand-gated `Subscription`, unchanged.
+
+What this changes for you:
+
+- `Stack::subscribe` returns a `Subscriber<Q>`, not a `Subscription<Q>`,
+  and asks `Q: Serialize`. The unshared evaluation it returned is now
+  `Stack::subscription(query)`; `Branch::subscribe` is unchanged.
+- `Subscriber` has `poll()` (the deltas delivered since the last read,
+  without waiting), `next().await` (waits for a delivery), `hash()`,
+  `results()` (the whole current set), `evaluated()`, `recomputes()`,
+  `maintenances()` and `close()`. A reader's first delivery is the whole
+  result set as `asserted`; each later one is what a poll changed, and a
+  poll that changed nothing delivers nothing.
+- `Stack::settle`, `Stack::schedule_poll`, `Stack::poll_scheduled` and
+  `Stack::subscriptions_held` are new. A write the stack does not see,
+  into `Branch::overlay()` among them, is scheduled with
+  `schedule_poll`. A sync that moved the primary, `Stack::channel`
+  creating a channel and `Stack::provide` schedule one too; a write into
+  a channel does not.
+- A subscription lives as long as a reader of it: the stack holds it
+  weakly, and it goes when its last `Subscriber` is dropped or closed.
+- `Stack::settle` and `Effect::perform` need a `Clone` environment.
+- `Effect::perform` settles the stack, with or without commands to
+  perform. A failed poll does not fail the effect: it is reported by
+  `EffectReport::unsettled()` and stays scheduled.
+- `dialog_query::QueryHash` is new: `QueryHash::of(&query)` hashes the
+  query's DAG-CBOR encoding with its fresh variables (`__<n>`) named
+  again by where they first occur, so two queries built alike hash
+  alike.
+- `dialog-stack` re-exports `Subscriber`, `Subscription`, `Delta` and
+  `QueryHash`, and `dialog-repository` re-exports `QueryHash`.
+
+Why: tonk kept this registry, the fan-out and the poll scheduling in a
+reactive layer of its own over dialog, keyed by a query hash it
+computed itself. They are generic: one evaluation per query, delivery
+to every reader, and polls scheduled by writes and drained once per
+turn belong beside the stack's channels, so an embedder keeps only its
+transport.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: subscriptions and their deliveries
+  live in memory, and the stack writes no fact for them.
+- A caller of `Stack::subscribe` that polled the returned
+  `Subscription` itself calls `Stack::subscription` instead, or moves
+  to the `Subscriber` and `Stack::settle`.
+
+### The stack has a crate of its own, `dialog-stack`, which re-exports it from `dialog-repository`
+
+[#818](https://github.com/dialog-db/dialog-db/pull/818), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+point 1).
+
+The maintainer decided that the stack gets a separate crate later and
+its name now. `dialog-stack` is that crate's seam: it re-exports the
+stack from `dialog-repository` under one roof, and its README is the
+crate's front page, a guide for an embedder, with every example
+compiled as a doc test. No code moved. When it does, an embedder that
+imports from `dialog_stack` changes no import.
+
+What this changes for you:
+
+- `dialog-stack` is a new workspace crate, released with the others at
+  the workspace version. It re-exports `Stack`, `OpenStack`,
+  `StackEnv`, `OpenStackEnv`, `SyncStack`, `SyncEnv`, `SyncError`,
+  `Layer`, `LayerType`, `LayerDeclaration`, `Durable`, `Ephemeral`,
+  `Channel`, `Arrivals`, `Invocation`, `Attempt`, `InvocationReport`,
+  `MAX_RERUNS`, `Effect`, `EffectReport`, `Provider`, `Command`,
+  `Failure`, `Backup`, `LayerBackup`, `CommitError`, `Download`, the
+  layer names (`MEMORY`, `SESSION`, `CONTROL`, `memory_layer`,
+  `session_layer`, `control_layer`) and the attribute functions of the
+  facts a stack writes (`layer_type_attr`, `layer_branch_attr`,
+  `revision_attr`, `selection_attr`, `invoked_attr`, `answered_attr`,
+  `failed_attr`, `unhandled_attr`, `progress_attr`, `provided_attr`).
+- Nothing in `dialog-repository` changes: every name above is still
+  exported there.
+
+Why: the stack is moving into its own crate, and an embedder (tonk is
+the first) should take its imports from where the stack will live, so
+the move does not touch them. The README gives the stack one place
+that explains it from opening to backup.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes. `dialog_repository::Stack` and
+  `dialog_stack::Stack` are the same type, as is every other name the
+  crate re-exports, so the two imports mix freely.
+
+### A stack's `session:` is its own store, apart from `Branch::overlay`, and `Stack::backup` and `OpenStack::restore` carry it to another stack
+
+[#817](https://github.com/dialog-db/dialog-db/pull/817), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+point 8).
+
+A stack's own layer, `session:`, was the primary's session overlay,
+`Branch::overlay()`, so everything the stack records (revision rows,
+`dialog.layer/*` facts, the selection, `dialog.provider/command`
+discovery) landed in the store an embedder keeps its own session facts
+in, and an embedder that snapshots, clears or prunes the overlay had to
+filter dialog's rows out by hand. A stack now mints its own store for
+`session:` when it opens. `Branch::overlay()` is the embedder's: the
+stack writes nothing into it, and a read through the stack binds its
+rows to the primary, `memory:`. `session:` is the stack's own rows and
+the branch metadata (`dialog.branch/*`, `dialog.replica/*`,
+`dialog.peer/*`), and holds one row per cell: the primary's
+`dialog.branch/revision` is the metadata's row alone, where the stack
+used to record a second one that read differently between a head move
+and the next dispatch. `Stack::backup()` takes `session:` and every
+declared session layer as a serializable `Backup`, and
+`branch.stack().restore(backup)` opens a stack holding them again.
+
+What this changes for you:
+
+- `Backup` and `LayerBackup` (`Serialize + Deserialize + Clone +
+  Debug`), `Stack::backup()` and `OpenStack::restore(backup)` are new. A
+  backup holds each session layer's rows (tombstones too), the revision
+  it stood at, the primary's branch entity, and the revision the stack
+  last recorded the primary at. It leaves out channels, durable layers
+  and `Branch::overlay()`. Restoring replays the rows, records again the
+  layers that stood where their rows said, and leaves a layer that had
+  moved unrecorded, like a primary committed or pulled through another
+  handle while the backup was away, to be the first dispatch's stimulus,
+  so a rule premised on its revision fires once. Providers' discovery
+  rows and channels created at run time are not restored: register and
+  create them again. A layer the schema no longer declares is dropped
+  and the rest is restored.
+- `CommitError::ForeignBackup` is new: a backup restored on a stack of
+  another branch, refused before any layer is built, with nothing
+  written.
+- `Branch::overlay()` holds none of dialog's rows: `Stack::layer` of
+  `session_layer()` returns the stack's own store, a write
+  `.at(session_layer())` through a stack lands there, and
+  `Stack::channel` and `Stack::provide` write there. A row of the
+  overlay is read through a stack as `in: memory:`, not `session:`. A
+  branch read or committed without a stack is unchanged.
+- A second stack opened on a branch has a `session:` of its own, with
+  its own revision rows, selection and created channels; it no longer
+  sees what the first one wrote there. Restore a backup to carry them.
+- The stack records no `dialog.branch/revision` row of the primary in
+  `session:`: the metadata's row is the one, reading the head the read
+  stands at. A rule premised on it needs no `dialog.layer/branch` join
+  to tell a stack from a plain branch, and fires once per move. Since
+  the metadata row is read on a plain branch too, such a rule fires
+  when installed on one; install it through the stack.
+- Tonk's overlay operations map onto the stack: `export_overlays` /
+  `import_overlays` is `stack.backup()` / `branch.stack().restore(..)`;
+  `retain_overlay_entities` and `clear_overlay` stay
+  `Branch::overlay().retain_entities` and `Branch::overlay().clear()`,
+  which now meet only the embedder's rows and leave `session:` intact.
+
+Why: the embedder's session store and dialog's bookkeeping were one
+cell, so neither could be exported, cleared or pruned without the
+other, and the primary's revision cell held two rows. Tonk needed to
+carry a session across workers, which `backup` and `restore` provide.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten:
+  `session:` and a `Backup` are process-local, held and carried by the
+  embedder. An embedder that filtered `dialog.*` rows out of
+  `Branch::overlay()` can stop; one that read its overlay rows through a
+  stack with `in: session:` reads them with `in: memory:`, or writes
+  them `.at(session_layer())` through the stack instead.
+
+### A stack transacts through a closure re-run on a moved head, an invocation reports what it landed, and providers run as a separate effect
+
+[#816](https://github.com/dialog-db/dialog-db/pull/816), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+points 6 and 7).
+
+`Stack::transact` took the facts to write, so a write computed from a
+read was published against whatever head the dispatch re-ran on. It now
+takes a closure, run once per attempt against an `Attempt` that reads
+the stack at the head the attempt begins at and stages writes and
+commands; a lost compare-and-swap runs the closure again from the new
+head and drops what the lost attempt staged. The public verb is
+*invoke*: nothing in the API is "dispatched" any more (a dispatch is
+the unit of publication an invocation runs). `Invocation::perform`
+returns an `InvocationReport` instead of the bare revision: the head it
+left the primary at, the ticks it ran and the commands it landed on
+`control:`'s outside end. Its `effect()` is the next step, performed
+when the embedder chooses (a worker's `waitUntil`): it runs the
+providers registered with `Stack::provide` over those commands, writes
+their answers in one more dispatch with each command's lifecycle rows,
+and says whether that dispatch landed commands of its own. Every change
+in a command's life is a row of the command's entity in `control:` for
+one tick, which a rule copies into a layer that keeps it, and a
+registered provider is recorded in `session:`.
+
+What this changes for you:
+
+- `Stack::transact(|tx| async move { .. })` replaces
+  `Stack::transact(facts)`: the closure returns `Result<(),
+  CommitError>`, is `ConditionalSend + ConditionalSync + 'static`, and
+  its future `ConditionalSend`. `Attempt` (`query`, `assert`,
+  `retract`, `invoke`, `number`, `stack`) is new; `.at(layer)` on a
+  statement places it as before. `Stack::assert(facts)` is the
+  one-statement shorthand, for writes with no read.
+- `Invocation::dispatch` is renamed `Invocation::invoke`.
+- `Invocation::perform` returns `InvocationReport` (`revision()`,
+  `ticks()`, `commands()`, `effect()`) instead of `Revision`: take
+  `report.revision()` where the revision was used. `commands()` leaves
+  out lifecycle rows.
+- `CommitError::Read` (a read in a transact body failed, converted from
+  `EvaluationError`) and `CommitError::Aborted(reason)` (the body gave
+  up) are new; either fails the invocation with nothing written.
+- `Stack::provide(Provider)`, `Provider::new(&concept, handler)`,
+  `Command` (`entity`, `rows`, `progress`), `Failure`, `Effect`
+  (`perform`, `commands`, `is_empty`) and `EffectReport` (`invocation`,
+  `answered`, `failed`, `unhandled`, `remaining`, `effect`) are new. A
+  provider claims a command whose rows carry an attribute of its
+  concept; the first registered claiming one runs. Its answer is
+  written as a transact body's writes are, and a statement it places
+  `.at(control_layer())` is a command the next effect runs. A provider
+  that fails answers with the failure and does not stop the others; a
+  command no provider claims is answered `unhandled`, not an error.
+  `Invocation::perform` runs no provider.
+- Lifecycle rows, each of the command's entity in `control:` for one
+  tick: `dialog.command/invoked` (the tick of its dispatch it is
+  stimulus of, from 1, written beside the command's own rows),
+  `dialog.command/answered` (the provider's concept),
+  `dialog.command/failed` (the reason), `dialog.command/unhandled`
+  (`true`), all three by the effect's answer dispatch, and
+  `dialog.command/progress` (`Command::progress`). Their attributes
+  are exported (`invoked_attr` and the rest).
+- `session: dialog.provider/command <concept>`, cardinality-many, is
+  written when a concept is first provided; providing it again
+  replaces the handler and writes nothing (`provided_attr`).
+- The corpus write gate admits `dialog.command/*` and
+  `dialog.provider/*` from application writes, as it admits
+  `dialog.layer/*`.
+
+Why: a write that depends on a read must be computed again when the head
+it read moved, which only a closure can be. An embedder answering
+commands in a request cannot block the response on every provider, so
+running them is a step it performs later, and it needs to know whether
+anything is left; a command's life written as rows lets rules keep what
+an embedder wants to show, and the discovery rows say what this
+process can perform.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: the lifecycle rows live one tick on
+  `control:`, which is process-local, and the discovery rows are in
+  `session:`, which is too. A tree written by this release holds them
+  only if an application asserts them durably, which an older release
+  refuses with `ReservedRelation`.
+
+### A channel is a layer of its own type, with two ends, whose rows live one tick
+
+[#815](https://github.com/dialog-db/dialog-db/pull/815), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+point 5).
+
+A channel was an `Ephemeral` layer like a session layer: a table whose
+rows stayed until its consumer retracted them, with an instant chain a
+reader followed. It is now a `Channel`, simpler than `Ephemeral`: it
+keeps no table, and a row of it lives one tick. It has two ends. What
+the outside end sends (`Channel::send`) is read by the next dispatch
+through the stack at its first tick, as rows of the channel, and by no
+tick after; a send while a dispatch runs is the next dispatch's. What a
+dispatch writes into the channel, `.at(channel)` or through a rule head
+naming it, is the next tick's stimulus inside the dispatch, and once its
+publish has won lands on the outside end as one tick of a log, each
+tick a sequence and its rows. A lost publish lands nothing. `control:`
+is the built-in channel, the loopback: `Stack::invoke` sends its
+command into it and runs a dispatch, and what lands on its outside end
+is what the stack's providers read. The log keeps every tick some
+reader has not passed and drops a tick every reader has; while no
+reader exists, it keeps the latest tick alone. A channel is any entity
+but one under `memory:` or `session:`, and `Stack::channel` creates one
+at run time.
+
+What this changes for you:
+
+- `Channel` is new (`dialog_repository::Channel`): `send`,
+  `send_changes`, `entity`, `sequence`, `revision` (a hash over the
+  sequence of the last tick that landed), `is_waiting`.
+- `Stack::channel(&entity)` is new: it returns the stack's channel of
+  that name, the loopback for `control_layer()`, creating one if the
+  stack holds none and asserting `<entity> dialog.layer/type channel:`
+  into `session:` as one instant. It returns `Result<Channel,
+  CommitError>`: a name under `memory:` or `session:` is refused with
+  `CommitError::InvalidPlacement` and nothing is written. `layers()`
+  lists a channel it created after the durable layers.
+- `Stack::layer(&entity)` returns `Option<Layer<'_>>` instead of
+  `Option<&Ephemeral>`: `Layer::Ephemeral(&Ephemeral)` for `session:`
+  and the declared session layers, `Layer::Durable(Durable)` (its
+  `name()` and the `revision()` it stands at) for `memory:` and the
+  declared durable layers, and `Layer::Channel(Channel)` for
+  `control:` and every other channel. `Layer::ephemeral()`,
+  `durable()` and `channel()` pick one out.
+- A channel is no longer required to be named `control:<name>`: any
+  entity outside `memory:` and `session:` names one. A declared
+  channel named under either is refused at open with
+  `CommitError::InvalidPlacement`.
+- The rows-until-retracted model is gone: a channel's rows are no rows
+  of any layer after their tick, a query through the stack reads none
+  of them, and a consumer retracts nothing. A reader built late reads
+  every tick the log holds, once.
+- `Arrivals` keeps its API (`poll`, `next`, `rows`, `next_rows`,
+  `layer`); it reads the channel's log from its position, and
+  `Stack::arrivals` returns `None` for a layer that is no channel.
+- `Stack::invoke` and `Invocation::invoke` (`Invocation::dispatch`
+  before #816) send into `control:`,
+  and every dispatch takes what each channel's outside end was sent;
+  what a caller observes of `invoke` is unchanged. A dispatch that
+  fails puts back what the channels were sent, not its own commands.
+- A channel's `dialog.layer/revision` row in `session:` names the
+  channel's revision, the base58 of the hash over its last tick's
+  sequence, and moves when a tick lands in it.
+
+Why: a channel is state of one tick with a transport, so the place it
+lives is a layer with two ends, and the simplest one: nothing to
+rewind, nothing to retract. A log read from each reader's own position
+gives a reader that was not reading every tick, which the retained
+rows gave before, without keeping rows in a layer a query reads.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: a channel's declaration is still
+  `dialog.layer/type channel:` on its entity, and its rows were never
+  stored. A schema declaring `control:<name>` channels keeps working.
+  A schema declaring a channel under `memory:` or `session:`, which no
+  earlier build could have used as a channel either, now fails the
+  open with `CommitError::InvalidPlacement`.
+
+### A durable layer is the tree the primary points at, with no head of its own, and a pull merges a layer two replicas moved
+
+[#814](https://github.com/dialog-db/dialog-db/pull/814), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+point 4).
+
+A durable layer `memory:<name>` was a branch with a head of its own
+beside the primary's pointer to it, so the two could disagree: a
+partial publish moved one and not the other, and a pull could race
+them. Now the primary's pointer is the only head. The layer is the
+tree named by two facts of the layer's own entity in the primary,
+`memory:<name> dialog.branch/revision <revision entity>` and
+`memory:<name> dialog.branch/tree "<tree hash, base58>"`, written
+together under `last`. A dispatch that writes into the layer mints
+the layer's next tree on the one the primary pointed at, uploads its
+blocks to the local store, and names it in the same commit of the
+primary: one compare-and-swap, the primary's. A lost one leaves the
+minted tree an orphan nothing names, and the dispatch re-runs from the
+new head, reading the layer where that head points it. The pointer is
+keyed by the layer's entity because a branch entity is derived from
+the replica, so a pointer keyed by one is never the same cell on two
+replicas.
+
+`Stack::sync` pulls and pushes the primary alone. Its pull downloads
+the trees the incoming primary points the layers at, to the
+`Download` given, before the primary's head moves, as it downloads
+the primary's own tree, so a replica that goes offline after a pull
+reads every layer. When the pull merged two primaries that each moved
+a layer, the pointer cells hold a claim of each; rather than `last`
+picking one, the sync replays this replica's changes to the layer
+since the two met onto the other's tree, as a branch pull rebases
+local commits: our writes win on the cells they touch (a write that
+succeeded a cell's claims replaces theirs there), theirs stand
+elsewhere. The merged tree is minted locally and the primary pointed
+at it alone. The push uploads the pointed trees' blocks before the
+primary's head.
+
+What this changes for you:
+
+- `LayerType::Branch` carries no entity: declare a durable layer with
+  `LayerDeclaration::new("memory:notes".parse()?, LayerType::Branch)`,
+  which writes `dialog.layer/type branch:` alone. `LayerType` is
+  `Copy`. `LayerType::branch()` is gone.
+- `Stack::durable(name)` and `Stack::durables()` are gone: a durable
+  layer has no branch to hand out, and no upstreams of its own; the
+  primary's `dialog.branch/pull` and `dialog.branch/push` carry it.
+  `Stack::layers()` still lists it, and `Stack::layer` still answers
+  `None` for it.
+- `Stack::branch_of(name)` answers for `memory:` alone; `None` for a
+  durable layer.
+- The `dialog.layer/branch` refusal of a durable layer naming another
+  branch's entity, and the acceptance of one naming another replica's,
+  are gone with the fact. A durable layer named outside `memory:`
+  still fails the open with `CommitError::InvalidPlacement`.
+- A write into a durable layer no longer commits on a branch `<name>`:
+  no such branch is opened or written. A rule premised on the layer's
+  `dialog.branch/revision` reads the fact of the layer's entity.
+- A `Stack::query` reads a durable layer at the tree the primary
+  pointed it at when the stack last read the primary (at open, after
+  each dispatch and sync through it, and before a dispatch that finds
+  the primary moved). A transaction from `Stack::transaction` whose
+  primary moved since the stack last read the pointers is refused with
+  `PublishError::VersionMismatch`, after reading them again, so its
+  retry builds on fresh ones.
+- `SyncError::Upstreams` and `SyncError::Pull` and `SyncError::Push`
+  now speak of the primary alone; `SyncError::Commit` also covers
+  minting a merged layer.
+- The corpus write gate admits `dialog.branch/tree` from an application
+  write, beside `dialog.branch/revision`.
+
+Why: two heads for one layer can disagree, and nothing can say which
+is right; one head cannot. A pull of the primary already downloads
+what it adopts before moving, so the trees it points at are part of
+that download, and a merge of the primary that leaves two pointers has
+to rebase the layer the way a branch pull rebases commits, not drop
+one replica's writes.
+
+#### Compatibility and migration
+
+- A primary written by an earlier pre-release build of this line
+  holds `dialog.branch/revision` facts of its layer branches' entities,
+  and those branches have heads. This build reads the pointer facts of
+  the layer's own entity and ignores the branch heads: such a primary
+  opens its durable layers empty until a dispatch writes into them,
+  and the rows on the old branches stay there, unread. Nothing is
+  rewritten. A build from before this change refuses a durable layer
+  declared by this one, which names no `dialog.layer/branch`, with
+  `CommitError::InvalidPlacement` when it opens a stack.
+- Nothing already released is affected: no release carries durable
+  layers.
+
+### A `Session` is a `Stack`, every stack lists and records its three implied layers from open, and a layer is declared by its type
+
+[#813](https://github.com/dialog-db/dialog-db/pull/813), argued in
+[notes/layers.md](./notes/layers.md) ("Decisions of 2026-11-15",
+points 1 to 3).
+
+The layers an embedder opens on a branch are a `Stack`, opened with
+`branch.stack()`: `schema::Session` (`db:session`) already names
+something else. Every stack has three layers whatever its schema
+says, `memory:` (the primary), `session:` (its own) and `control:`
+(the loopback), and now lists all three; their revision rows exist
+from the moment it opens, written with the facts that describe the
+three layers. A layer is declared by its type, a bare-scheme entity,
+`dialog.layer/type session:`, `channel:` or `branch:`, in place of
+`dialog.layer/store "memory"`, `"control"` or `"durable"`. A branch's
+revision is the meta branch's `dialog.branch/revision`, naming the
+revision entity: the primary's row in `session:` is that attribute of
+the primary's branch entity (the branch metadata's row, since the entry
+above that separates `session:` from `Branch::overlay`), the one the meta branch derives from
+`(replica, name)`, where it was `dialog.layer/revision` of `memory:`
+with the tree's hash as text. A durable layer's pointer facts are the
+same attribute of the layer's own entity (see the entry above).
+
+What this changes for you:
+
+- Renamed: `Session` to `Stack`, `OpenSession` to `OpenStack`,
+  `OpenSessionEnv` to `OpenStackEnv`, `SessionEnv` to `StackEnv`,
+  `SyncSession` to `SyncStack`, `Branch::session()` to
+  `Branch::stack()`, and the module `session` to `stack`
+  (`dialog_repository::stack::invoke`, `stack::arrivals`,
+  `stack::sync`). `Store` is `LayerType`: `Store::Memory` is
+  `LayerType::Session`, `Store::Control` is `LayerType::Channel`, and
+  `Store::Durable` is `LayerType::Branch`. `LayerDeclaration`'s
+  `store` field is `kind`.
+  `CommitError::UnboundLayer` says "stack" where it said "session".
+- `LayerDeclaration::new(layer, kind)` writes `dialog.layer/type`, under
+  `last`. `layer_type_attr()` and `layer_branch_attr()` are new, the
+  latter naming the primary's branch entity of `memory:`;
+  `LayerType::entity` is the type's bare-scheme entity. `dialog.layer/store` is no longer
+  read: a schema declaring its layers that way opens a stack with the
+  three implied layers alone.
+- `Stack::branch_of(layer)` is new: the branch entity of `memory:`.
+- `Stack::layers()` lists `memory:`, `session:` and `control:` first,
+  then the session layers and channels the schema declares, then its
+  durable layers. It used to list `session:` first and leave the other
+  two out.
+- Opening a stack writes, as one instant of `session:`, the revision
+  row of the primary, `session:`, `control:` and each declared memory
+  layer, and the implied layers' facts: `control: dialog.layer/type
+  channel:`, `session: dialog.layer/type session:`, `memory:
+  dialog.layer/type branch:` and `memory: dialog.layer/branch <the
+  primary's branch entity>`. Each stack writes them into a `session:`
+  of its own, which a second stack on the branch does not share. A
+  rule premised on a layer's revision therefore no longer fires on a
+  stack's first dispatch; it fires when the layer moved since the row
+  was written.
+- The primary's revision row is `<the primary's branch entity>
+  dialog.branch/revision <the revision's entity>` in `session:`, the
+  branch metadata's row of that cell, in place of `memory: dialog.layer/revision "<tree, base58>"`, and the
+  stimulus a dispatch takes of it changes the same way. A memory
+  layer's row (`session:`, `control:`, a declared session layer or
+  channel) stays `<layer> dialog.layer/revision "<chain hash,
+  base58>"`: an in-memory layer's revision has no entity form yet.
+- A durable layer's pointer fact in the primary is
+  `dialog.branch/revision` naming the revision's entity, in place of
+  `memory:<name> dialog.layer/revision "<tree, base58>"` (its form is
+  in the entry above). `session:` holds no row for a durable layer any
+  more: the primary's pointer fact is the record. A rule premised on a
+  durable layer's revision reads the pointer fact.
+- `control:` is recorded like any memory layer, after the dispatch's
+  commands land in it: a dispatch whose commands land there rewrites
+  `control:`'s row, as one instant of `session:`.
+- `OpenStackEnv` also requires `Provider<Identify>`: the stack derives
+  the primary's branch entity from the operator's profile when it
+  opens. Every env that attests already provides it.
+- The corpus write gate admits `dialog.branch/revision` from an
+  application write, as it admits `dialog.layer/*`: the pointer fact is
+  written by the stack's dispatch.
+
+Why: the thing an embedder opens is a stack of layers, and naming it
+a session collided with the session the schema already has. A layer's
+revision row is where it stands, so it exists as soon as the stack
+does. A revision is the meta branch's `dialog.branch/revision`, the
+fact a pull and a push already read, rather than a second vocabulary
+of layer facts and base58 text.
+
+#### Compatibility and migration
+
+- The `dialog.layer/store` declarations and the `dialog.layer/revision`
+  pointer facts that earlier pre-release builds of this line stored
+  are no longer read: a primary holding them opens a stack with the
+  three implied layers alone, and its durable layers' pointer facts
+  are written afresh under `dialog.branch/revision` by the next
+  dispatch that moves them. Re-declare the layers with
+  `LayerDeclaration` to keep them. Nothing is rewritten. A build from
+  before this change reads the new declarations as facts it does not
+  understand and opens no layer from them.
+- Nothing already released is affected: no release carries layers, and
+  0.4.0 and earlier read every fact this change writes as an ordinary
+  one. The rows a stack writes into `session:` are process-local and
+  never stored or synced.
+
+### A stack writes a layer's revision row only when the layer moved, and `Stack::sync` writes the rows its pulls moved
+
+[#810](https://github.com/dialog-db/dialog-db/pull/810).
+
+A stack's own layer, `session:`, holds a revision row for each of its
+layers. Every dispatch used to rewrite all of them
+after it published, so `session:` minted an instant on every dispatch
+even when no layer had moved, and its own row moved every time, since
+the recording itself moved it. Now a dispatch writes only the rows of
+the layers whose revision is not the one `session:` holds, and writes
+nothing when none moved. Writing the rows is no longer a move of
+`session:`: its own row names the revision it stood at before the
+recordings that followed its last change, and moves only when
+something was written into it. `Stack::sync` did not write the rows
+at all; it now writes those its pulls moved, and after its pushes
+those the pushes moved, through a dispatch that takes them as
+stimulus.
+
+What this changes for you:
+
+- A dispatch that writes nothing into `session:` and moves no other
+  layer (an empty transaction) writes no revision row and mints no
+  instant in `session:`. One that moves the primary alone rewrites the
+  primary's row alone. A command landing in `control:` moves that
+  layer, so its row is rewritten (see the entry above).
+- A rule premised on the `dialog.layer/revision` of `session:` fires on
+  a stack's first dispatch and when something wrote into `session:`
+  outside a dispatch, no longer on every dispatch after the first.
+- A rule premised on the primary's `dialog.branch/revision` in
+  `session:`, or on a durable layer's pointer fact, fires when a
+  `Stack::sync` pull moved it, as it does when a commit did. A sync that moves nothing dispatches nothing.
+
+Why: a revision row says where a layer stands, so it changes when the
+layer moves, by a commit, a pull or a push, and not on every dispatch.
+A reader of `session:`'s instants, and a rule premised on a revision,
+then sees one change per move.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten: the rows
+  live in `session:`, which is process-local. `session:` mints fewer
+  instants.
+
+### A stack's transaction lands its commands when it publishes, a stack opens through a read-only environment, and a whole layer is a legal scan
+
+[#809](https://github.com/dialog-db/dialog-db/pull/809).
+
+Three gaps an embedder met moving onto stacks. A transaction a
+stack hands out (`Stack::transaction`), committed and published
+through the transaction API, never landed what it dispatched in
+`control:`: only `Invocation::perform` did. Now its publish lands them,
+as an invocation's does. Opening a stack asked for an environment
+that can commit, though opening only reads the primary and opens
+branches; it now asks for what a read needs. And a scan whose every
+term is a variable but a constant `in` was refused as an empty
+selector; a constant layer now constrains a scan, so it reads every row
+of that layer, and `Arrivals` can yield the arrived facts themselves,
+without a query.
+
+What this changes for you:
+
+- A transaction from `Stack::transaction`, published with
+  `.commit().publish().perform(env)` or staged and then
+  `TransactionBatch::publish`, lands the commands it dispatched (with
+  `Transaction::dispatch`, or written `.at(control_layer())`) and the
+  ones its rules dispatched in the stack's `control:` once the publish
+  wins, as one instant gone in the next, and wakes every `Arrivals`
+  waiting. A publish that loses its compare-and-swap lands nothing. It
+  is still not re-run on a moved head; `Stack::invoke` and
+  `Stack::transact` are.
+- `OpenStackEnv` is new: the providers opening a stack and reading
+  through it need, with nothing that commits. `OpenStack::perform`,
+  `Arrivals::poll` and `Arrivals::next` are bounded on it rather than on
+  `StackEnv`, which now extends it with what a commit needs (`Attest`,
+  `Publish`, `Import`, blob import and size). Every environment that
+  met the old bounds meets the new ones.
+- A scan with a constant `in` and every other term a variable, an
+  `AttributeQuery` with `.with_layer(Term::from(layer))`, reads every
+  row of that layer: of a memory layer, `control:` or a channel, its
+  rows alone; of the primary or a durable layer, the whole tree, which
+  is legal and costs what reading the whole tree costs. Before, it
+  failed with `EvaluationError::EmptySelector`. A scan with nothing
+  constant at all, the layer included, still does.
+- `Selector::only_in(layer)` is new: a selector the layer alone
+  constrains. A tree reads it as its whole entity index.
+- `Arrivals::rows` and `Arrivals::next_rows` are new: every fact the
+  layer's assertions since the last read assert, each once, oldest
+  first, with no query; `Stack::arrivals_rows(layer)` builds a reader
+  for them. Rows and `poll` read the same arrivals, so a row one yields
+  the other does not. `Arrivals` takes its query type as a default
+  parameter, `Arrivals<Q = ()>`.
+
+Why: an embedder resolves its commands with its own transactions, so
+the commands a stack's transaction dispatched must reach the
+stack's providers whichever way it was published; it opens branches
+with an environment that only reads, and the stack beside them needs
+no more; and its providers tell a command apart by the attributes its
+entity carries, so they need every row of the arrived instant, not one
+concept's.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten:
+  `control:` is process-local, and a scan of a whole layer reads what
+  is already stored.
+
+### A durable layer is a tree the primary points at, and `Stack::sync` carries it with the primary
+
+[#808](https://github.com/dialog-db/dialog-db/pull/808), argued in
+[notes/layers.md](./notes/layers.md) (points 1, 11 and 13, and
+"Durable layers" under "Open"); the model is the one
+[#814](https://github.com/dialog-db/dialog-db/pull/814) settled (see
+the first entry above).
+
+A stack's layers were all in memory. A layer can now be durable,
+declared in the primary as `memory:<name> dialog.layer/type branch:`
+(`LayerType::Branch`): a tree the primary points at. A stack reads it
+as a line whose rows bind `in` to `memory:<name>`. A write `in:
+memory:<name>`, a rule head whose descriptor names it, and a write
+while it is selected are minted as the layer's next tree as part of
+the dispatch, and nothing of them lives in memory. The primary records
+the tree each durable layer stands at as pointer facts of the layer's
+entity, `dialog.branch/revision <its revision's entity>` and
+`dialog.branch/tree "<its tree, base58>"`, under `last`, written by
+the dispatch that moved the layer, so the primary's history says which
+tree of each layer goes with each of its own, and the primary's
+compare-and-swap is the layer's. `Stack::sync` pulls the primary,
+downloading the trees it points at, and pushes it, uploading them.
+
+What this changes for you:
+
+- `LayerType::Branch` is new; `LayerDeclaration::new("memory:notes".parse()?,
+  LayerType::Branch)` declares one. A durable layer named under another
+  store (`session:notes`) or with no name (`memory:`) fails the
+  stack's open with `CommitError::InvalidPlacement`.
+- `Stack::layers` lists the durable layers after the memory layers.
+  `Stack::layer` answers `None` for a durable layer, which holds no
+  memory cell.
+- A dispatch that writes a durable layer publishes on the primary,
+  with the pointer facts, even when it wrote nothing else there. A
+  rule premised on a durable layer's pointer fact fires when the
+  dispatch that moved the layer writes it.
+- `CommitError::UnboundLayer` refuses a write into `memory:<name>` the
+  primary does not declare, before anything is minted.
+- `Stack::sync(download)` and `SyncStack`, `SyncEnv` and
+  `SyncError` are new. A sync names its `Download`, as every pull does.
+- A query through a stack, `Stack::query`, a transaction through
+  it, and `Stack::subscribe` read the durable layers too. A
+  subscription re-evaluates when a durable layer moved.
+
+Why: a device-local or replicated table beside the primary is a layer,
+not a separate mechanism, and its history has to be tied to the
+primary's, the way a submodule pointer ties a submodule to its
+superproject, so one revision of the primary names the whole
+composite.
+
+#### Compatibility and migration
+
+- `dialog.layer/type branch:` and the pointer facts
+  `dialog.branch/revision` and `dialog.branch/tree` of the layer's
+  entity are new stored facts in the primary, replicated with it; the
+  layer's rows are in the tree they name, synced with the primary.
+  0.4.0 and earlier know no layer declarations and read them as
+  ordinary facts, and read the primary without the layer's rows.
+  Nothing already stored is rewritten, and nothing has to be run.
+- What a durable layer syncs to is the primary's upstreams. The
+  declaration carries no upstream.
+
+### `control:` is the layer a command lives in for one tick, a channel is a layer whose rows live one tick, and a provider reads what arrives in either
+
+[#807](https://github.com/dialog-db/dialog-db/pull/807), argued in
+[notes/layers.md](./notes/layers.md) (points 7 to 18, and "Open").
+
+A command used to be a fact apart: dispatched into a transaction, read
+by the rules of one tick, then kept by the stack in a command feed
+that handlers and readers drained. It is now a row of a layer.
+`control:`, the loopback every stack has, holds what a dispatch
+writes into it for one tick: a command dispatched, a write
+`.at(control_layer())`, and a rule head landing there. Each is the
+next tick's stimulus, read as a row of `control:`, and is gone after
+that tick. Once a dispatch has published, its commands stand in the
+stack's `control:` layer for one instant and leave it in the next, so
+the layer's instants are every command, in order, once, and nothing of
+them stays. A channel is a layer for a consumer outside the invoke
+loop or the process; since #815 (see its entry above),
+its rows live one tick too, and what a dispatch writes into it lands
+on its outside end as one tick of a log every reader reads in full. A
+provider reads either through `Stack::arrivals`, which yields each
+row of its query that arrived, once, and answers by invoking.
+
+What this changes for you:
+
+- A rule premise whose descriptor names `in: control:` reads the
+  tick's commands alone; one binding `in` to a variable binds a
+  command's to `control:`. A transaction's query reads its dispatched
+  transients as rows of `control:` too. A premise naming no layer reads
+  them as before.
+- A rule head cell whose descriptor names `in: control:`, and a write
+  `.at(control_layer())`, are dispatches: the next tick's stimulus, in
+  no layer and never committed, whether or not the concept carries the
+  `dialog.concept/transient` marker. A command head (one whose concept
+  carries the marker) lands its cells that name no layer in `control:`
+  as before, and now lands a cell that names another layer, a channel
+  say, in that layer, where before the layer it named was ignored.
+- `LayerType::Channel` is new: `LayerDeclaration::new(entity,
+  LayerType::Channel)` declares a channel, stored as `dialog.layer/type
+  channel:`. A stack builds it as a `Channel` (see #815 below):
+  a write into it is the next tick's stimulus, read as a row of the
+  channel, and lands on its outside end once the dispatch has
+  published. Declaring bare `control:` builds nothing apart.
+- `Stack::arrivals(layer, query)` and `Arrivals` are new: a reader
+  of what arrives in `control:` or a channel. `poll` yields the rows of
+  the query the ticks landed since the last read make, evaluated over
+  those rows alone; `next` waits for the stack's next dispatch while
+  there are none. `Stack::layer(&control_layer())` hands out the
+  loopback, which holds nothing between dispatches.
+- `Stack::commands()`, `Commands`, `Dispatched`, `Lost` and
+  `FEED_CAPACITY` are gone: read `control:` with
+  `Stack::arrivals(&control_layer(), query)` instead, or a channel with
+  `Stack::arrivals(&channel, query)`. A reader loses nothing: the log
+  keeps every tick some reader has not passed.
+- `Handler`, `HandlerError`, `Answering`, `Stack::handle` and
+  `MAX_ANSWERS` are gone: a provider reads its commands with
+  `Stack::arrivals` and answers with `Stack::invoke`, a dispatch
+  with its own compare-and-swap. `Invocation::perform` publishes once
+  and no longer chains answers. Since #816 a provider is registered
+  with `Stack::provide` and run by a report's effect, a step apart
+  from the invocation; `Stack::arrivals` stays for a consumer that
+  reads the log itself.
+- `CommitError::AnswerDivergence` and `CommitError::Handler` are gone:
+  nothing runs an answer inside an invocation, so neither can happen.
+  A provider's own failure is the provider's to report.
+
+Why: a command is state of one tick, so the place it lives is a layer,
+and observing it is reading that layer, not a mechanism apart. A
+channel's log keeps every tick for a reader that was not polling, where
+a view polled after a one-tick row came and went sees nothing. Commands reach `control:`
+only after their dispatch has published, so a dispatch re-run from a
+moved head re-runs no effect, and an answer needs no isolation of its
+own.
+
+#### Compatibility and migration
+
+- A channel's declaration, `dialog.layer/type channel:` on the
+  channel's entity, is a new stored value, replicated with the
+  primary like every layer declaration. 0.4.0 and earlier know no
+  layer declarations and read it as an ordinary fact. A build of this
+  release line from before this change opens no stack on a primary
+  that declares a channel: it refuses the declaration with
+  `CommitError::InvalidPlacement`. Nothing already stored is
+  rewritten, and nothing has to be run.
+- Commands were never stored and still are not: `control:` and every
+  channel are process-local, as memory layers are.
+
+### A memory layer mints one instant per tick that changed it
+
+[#805](https://github.com/dialog-db/dialog-db/pull/805), argued in
+[notes/layers.md](./notes/layers.md) (point 12).
+
+A dispatch through a stack runs in ticks: the transaction's own
+writes are the first, and each induction round after it is one more.
+A memory layer used to take a dispatch's writes as one instant holding
+the merged result, so a reader of its instants could not see the states
+the rules saw in between. It now takes each tick's writes as an
+instant of its own, in tick order. The instants are still minted only
+once the primary's commit publishes: a dispatch is one unit of
+publication, and a refused publish shows in no layer.
+
+What this changes for you:
+
+- A dispatch whose rules write a memory layer in several rounds mints
+  that many instants there, and `Ephemeral::since` yields each
+  intermediate state in order. A tick that writes no layer mints
+  nothing in it.
+- `TransactionBatch::shares` returns the shares tick by tick,
+  `&[Vec<(Entity, Changes)>]`, one entry per tick that wrote a layer,
+  in place of one merged entry per layer.
+- An induction round now reads what the rounds before it wrote into a
+  layer, as that layer will hold it once the ticks land: a rule
+  premised on a memory layer's row fires on an earlier round's head
+  there, and a head under `last` succeeds the layer's own row of the
+  cell. Before, a round read only the layer as the dispatch began, so
+  such a rule did not fire within the dispatch.
+- The transaction's own writes into a layer are read the same way and
+  are stimulus of the first round: a rule premised on the layer's row
+  fires on them in the same dispatch. Before, they were routed away
+  before induction and no rule saw them until the next dispatch.
+- A write under `last` into `session:`, the transaction's own or a
+  rule's head, succeeds the row the layer already holds within the
+  dispatch, so a chain of rules over `session:` runs as one over a
+  declared layer does. Before, the held row stood above the write and
+  the next round read it instead.
+- A maintained subscription over a stack reads the several instants
+  in order and still equals a fresh evaluation.
+
+Why: a subscriber, or a rule premised on a layer's revision, should see
+the ticks the rules ran through, so a maintained view equals a fresh
+evaluation after any sequence of ticks.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten: memory
+  layers are process-local. A stack's memory layers mint more
+  instants per dispatch, which a reader pinned to an older sequence
+  sees as more instants, not a different state.
+
+### Every stack has its own layer, `session:`, which records the layers' revisions and which layer is selected
+
+[#803](https://github.com/dialog-db/dialog-db/pull/803), argued in
+[notes/layers.md](./notes/layers.md) ("The `session:` layer").
+
+A stack now holds its own layer, `session:`, whether or not the
+primary's schema declares it: a process-local store of the stack's
+own, apart from `Branch::overlay`. After each dispatch publishes, the
+stack writes into it, under `last`, the `dialog.layer/revision` hash
+of the instant chain of each declared memory layer and of `session:`
+itself; the primary's revision is read there too, as the branch
+metadata's `dialog.branch/revision` of its branch entity. Of the same rows, as the layers stood when
+the dispatch began, those the stack has not recorded are the
+dispatch's stimulus, so a rule premised on a layer's revision fires
+when the layer moved (and on the first dispatch, which finds nothing
+recorded). A row
+`session: dialog.session/layer <layer>` selects a layer: while one is
+selected, a write with no layer named, and a rule head whose descriptor
+names none, lands in it instead of the primary. Machinery under
+`dialog.` (rules, layer declarations, the revision rows) never follows
+the selection.
+
+What this changes for you:
+
+- `Stack::layers()` lists `session:` first, and `Stack::layer` of
+  `session_layer()` returns the stack's own store. A declaration of
+  `session:` in the schema no longer builds a second store.
+- `Stack::select(Option<Entity>)` and `Stack::selected()` are new.
+  A selection takes effect from the next dispatch; selecting a layer the
+  stack does not hold makes a commit that would land a write in it
+  fail with `CommitError::UnboundLayer`, and nothing is written.
+- `revision_attr()` (`dialog.layer/revision`) and `selection_attr()`
+  (`dialog.session/layer`) are new.
+- Every dispatch through a stack now mints one instant in `session:`
+  and runs induction even when it writes nothing else. A commit on a
+  branch outside a stack writes no revision rows and ignores the
+  selection.
+
+Why: the stack's own layer is addressed like any other layer, so a
+layer's revision becomes a row a rule or a subscription
+reads like any other, and the layer a write lands in becomes data a
+rule or the embedder sets, the way an image editor's stroke lands on
+the selected layer.
+
+#### Compatibility and migration
+
+- The `session:` rows are process-local: they live in the stack's own
+  store, which is never committed or synced. Nothing stored or synced
+  changes, and nothing is rewritten.
+
+### A stack's handlers answer a dispatch's commands
+
+[#797](https://github.com/dialog-db/dialog-db/pull/797), argued in
+[notes/layers.md](./notes/layers.md) ("Handlers").
+
+A command is scratch: it lives one tick and lands on no layer, so
+nothing could react to it with an effect. Now a stack holds
+handlers (`Stack::handle`), built into dialog or registered by the
+embedder through the same `Handler` trait. Once a dispatch has
+published, every command of it, the one invoked and the ones its rules
+dispatched in any tick, is offered to each handler; what they answer is
+dispatched as the next tick's stimulus, where a rule captures what it
+wants of the answer on the layer its attribute is placed on, and a
+subscription through the stack sees the capture. The chain ends when
+no handler answers.
+
+What this changes for you:
+
+- `Handler`, `HandlerError`, `Answering` (a handler over a function) and
+  `Stack::handle` are new. A handler sees commands as `Changes` and
+  answers with `Changes`; an answer names the command it answers by that
+  command's entity.
+- `Invocation::perform` now runs the handlers after each publish and
+  chains their answers, so one `invoke` can publish several times. It
+  still returns the head the last dispatch left the primary at.
+- `Stack::commands()` is new: a reader of the stack's command feed,
+  the control channel. Each `poll` yields every dispatch since the last,
+  in order and once, as `Dispatched { sequence, revision, commands }`.
+  A consumer outside the stack's process, or one that answers in its
+  own time, reads it and answers by invoking through the stack; the
+  feed holds `FEED_CAPACITY` dispatches, and a reader it moved past is
+  told with `Lost` and starts over with `catch_up`.
+- `CommitError::AnswerDivergence` is new: handlers that keep answering
+  are stopped after `MAX_ANSWERS` dispatches. `CommitError::Handler` is
+  new: a handler's failure fails the invocation. Both come after the
+  dispatch they follow has published; what it wrote stands.
+- A stack with no handler behaves as before.
+
+Why: an embedder's command handlers (tonk's command providers) and
+dialog's own effects, such as fetching a tree node a page asked for,
+need one way to observe a command and answer it, and the answer has to
+enter the stack as a fact on a pinned layer rather than as something
+a query could observe outside any revision. Running handlers after the
+publish keeps a dispatch a function of head and stimulus, so a lost
+compare-and-swap re-runs no effect.
+
+### A row has a layer, `in`, and a stack reads and writes its layers as one
+
+[#795](https://github.com/dialog-db/dialog-db/pull/795) and
+[#800](https://github.com/dialog-db/dialog-db/pull/800), argued in
+[notes/layers.md](./notes/layers.md).
+
+Where a fact lies is now a dimension of the row, beside `the`, `of` and
+`is`: its layer, `in`. An attribute descriptor may name it (`in:`), a
+constant layer or a variable a concept field binds; a statement may
+name it for every fact it writes (`Statement::at`). A read with `in`
+unbound reads every layer and binds each row's layer as `in` in the
+match, `memory:` for the primary's rows; one with `in` bound reads that
+layer alone; a write lands in the layer named, the primary with none. A
+claim carries no layer: a reader that asks where a row lies names `in`
+and reads the binding. `LayerDeclaration` (`dialog.layer/type`) declares a layer
+beside the primary, backed for now by memory. `Branch::stack()` opens
+a `Stack` over the primary: it mints a memory layer for every declared
+layer, reads the composite, and commits a transaction by routing each
+write to its layer. `Stack::invoke` drives it: one dispatch is one
+publication, re-run from the new head when the head moved under it.
+The primary's share is minted and published as before; a layer's share
+is applied only after the publish wins its compare-and-swap, so a lost
+head leaves no layer changed. A rule head whose descriptor names a
+layer lands there, keeping its pick, and succeeds no claim of the
+primary. The layers every stack has are named: `memory:` is the
+primary, `session:` the stack's own process-local store, `control:`
+the loopback a command lands in.
+
+What this changes for you:
+
+- `AttributeDescriptor::in_layer` and `layer`, the descriptor's `in` on
+  the wire, `Attribution::layer`, and `Statement::at` are new. `Claim`
+  is unchanged: the layer a row was read from is the match's `in`
+  binding, bound only when the scan names `in:`. `AttributeQuery::with_layer` reads a layer by a term.
+  `Selector::in_layer` reads one layer of a store that reads several,
+  and `SelectIn` reads every row with the layer it came from, for a
+  scan that binds `in`; a `Select` reads the rows bare, as before, and
+  a `FactView` carries no layer.
+- `Changes` keeps writes into layers apart (`associate_in`,
+  `dissociate_in`, `take_shares`, `iter_in`, `into_layer`), serialized
+  under an `in` key beside `facts` and `assets`. `into_instructions`
+  yields the writes bound for the primary alone.
+- `Branch::stack()`, `OpenStack::declare`, `Stack::{query,
+  transaction, layer, layers, declare, declared}` are new. A branch
+  read or committed directly, with no stack, behaves as before, and
+  a write `.at(session:)` through it lands in the branch's overlay
+  (through a stack, in the stack's own `session:`).
+- `Stack::invoke(command)` and `Stack::transact(facts)` drive a
+  session (since #816, `Stack::transact` takes a closure and
+  `Stack::assert(facts)` takes the facts): each returns an
+  `Invocation` whose `perform` commits and publishes as one unit, and re-runs the whole dispatch from the new
+  head when the publish loses its compare-and-swap, up to `MAX_RERUNS`
+  times before reporting `PublishError::VersionMismatch`. A dispatch
+  that writes only to memory layers publishes nothing and returns the
+  unchanged head.
+- `Stack::subscribe(query)` is new: a standing query over the primary
+  and every layer the stack holds. A commit to the primary, a share a
+  dispatch lands in a memory layer, and a write to the primary's session
+  overlay each propagate as a result delta on the next poll, maintained
+  incrementally from the layer's instants as an overlay change is. A
+  maintained subscription through a stack equals a fresh evaluation
+  after any sequence of dispatches (pinned by a seeded churn test).
+- `CommitError::UnboundLayer` is new: a write named for a layer the
+  stack does not hold is refused before anything is settled or
+  minted. `CommitError::InvalidPlacement` is new: a layer declaration
+  whose value names no store is refused.
+- The corpus write gate admits `dialog.layer/*` from an application
+  write, as it admits `dialog.rule/*`.
+
+Why: local state that moves at frame rate, replicated state and
+ephemeral state peers learn of are different layers, not different
+kinds of fact. A row's layer being a term lets one set of rules act
+across layers and choose where a write lands from data, the way a
+stroke lands on the layer an editor's tool is on, and lets a stack
+recreate every layer from the primary's declarations when it opens.
+
+#### Compatibility and migration
+
+- A replica that declares no layer stores and syncs exactly what it did.
+  Layer declarations are ordinary facts under `dialog.layer/`; an older
+  release reads them as facts it does not understand and ignores them.
+  A batch of `Changes` that writes into a layer serializes with an `in`
+  key an older release does not read; one that writes into none
+  serializes as before. Nothing is rewritten.
+
+### A rule that leaves a premise's subject unnamed fires for the entity a commit wrote
+
+[#802](https://github.com/dialog-db/dialog-db/pull/802), fixes
+[#801](https://github.com/dialog-db/dialog-db/issues/801)
+
+Commit-time induction starts a rule from each row a commit changed. It
+bound the row's value to the premise's field, and the row's entity to
+the variable the premise gives `this`. A premise that gave `this` no
+variable left the entity unbound, so the premise was read at every
+entity holding the value written, and the rule fired for entities the
+commit did not touch. Such a premise is now seeded with its subject
+named, in a variable nothing else in the rule reads, so the seed binds
+the entity the row is about.
+
+What this changes for you:
+
+- **A rule whose premise names no `this` fires for fewer entities.**
+  Writing one field of one entity no longer fires the rule for every
+  entity that holds the same value in that field. A command is no
+  longer issued again for them, and a durable head under `last` no
+  longer writes its value again over what was written since. It fires
+  for what the same rule with its subject named fired for already.
+- A commit that writes one field of an entity and a commit that writes
+  two now fire such a rule for the same entities. Before, the two
+  fields together found the entity written and the one field found
+  every holder of its value.
+- A rule fired in full is not seeded and is unchanged: a rule installed
+  over existing state, one whose premise changed through a deductive
+  rule, and one enabled by a retraction under `unless` fire for every
+  match, as before.
+- Nothing stored changes shape. A rule that relied on being fired for
+  every holder of a value has to be given a premise that says so.
+
+Why: a row is a fact of one entity, and the matches it newly makes are
+those where the premise is read at that entity. Reading by value alone
+found matches the commit did not make and fired for them again.
+
+### A tree write sizes its segments before filling them
+
+When a write regroups a window of entries into segments, each segment
+is now moved out in one step at its final size, and a merged stretch
+is allocated at its final size, where both grew entry by entry. The
+trees written are the same.
+
+What this changes for you:
+
+- A commit that rewrites many entries copies far less: the perf
+  scenario that succeeds a standing claim on 500 entities retires 26%
+  fewer instructions, and its reallocations start from 50 MB in all
+  where they started from 530 MB.
+
+Why: a growing vector is copied each time it outgrows its allocation,
+and a write regroups large windows many times over.
+
+### A tree reads a node from its block or from rows a store keeps it in
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./research/single-file-format/design.md)
+
+A node's body is now read through views, `IndexView` and `SegmentView`, that
+either a block or a store's rows back. A store that keeps nodes as rows
+implements `NodeRows`, and answers the tree's `nodes::Read` with nodes
+over them (see the entry on the tree asking its environment for nodes).
+Such a node is read in place: keys compare part by part, values
+are read as archives where the store keeps them, and no block is built,
+hashed or validated. `Chronicle` is such a source.
+
+What this changes for you:
+
+- `NodeBody::Index` and `NodeBody::Segment` hold `IndexView` and
+  `SegmentView` instead of `&ArchivedIndex` and `&ArchivedSegment`;
+  `PersistentNode::as_index` and `as_segment` return the views. The views
+  have the archived types' methods. `index.novelty` is `index.buffers()`,
+  a buffer's `child` is `child()`, its `count` is `count()`, and its
+  `polarity` is `is_assert(at)`.
+- `PersistentNode::buffer` returns `Result<&Buffer, _>`: a node read from
+  rows builds its block the first time it is asked, and that can fail.
+- A segment's `keys()` returns a `KeyCursor`, which has `next_key` as
+  `StreamingLeaf` does.
+- Nothing changes for a tree read through a store that keeps blocks.
+
+Why: a store that keeps nodes compactly need not rebuild a block for every
+read. Read in place, the single-file archive's cold reads match the `fs`
+archive's, where rebuilding made them about 2× slower, and its cached nodes
+take about a third of the memory of cached blocks.
+
+### A transaction that loses its branch's race runs again over the head that won
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+`Branch::transact(|transaction| async { ... })` takes the code that builds
+a transaction instead of the transaction. Each try hands it a fresh
+transaction on the branch's head as it is then, commits what it returns,
+and publishes that compare-and-swapped against the head it read. When
+another writer moved the head first, the head that won is read and the
+code runs again: its queries read over the winner, so a write computed
+from a read is computed again, as in a software transactional memory. It
+tries as many times as a commit does (64) before returning
+`VersionMismatch`.
+
+What this changes for you:
+
+- New: `Branch::transact(build).perform(&env)`, with `allow_empty()` and
+  `canonicalize()`; `build` returns `Result<Transaction, E>` where
+  `E: From<CommitError>`, and an error from it ends the transaction with
+  nothing written.
+- Deprecated: `branch.transaction()...commit().publish().perform(&env)`.
+  It keeps failing with `CommitError::Publish(PublishError::VersionMismatch)`
+  on a lost race, as it did. Move to `Branch::transact`, which builds the
+  same transaction inside the closure.
+- `Branch::induce` runs its rules again over the head that won.
+- A `TransactionBatch` its caller staged (`.commit().perform(..)`, then
+  `.publish()`) is still refused on a lost race: its caller read what it
+  staged on. The repository's own commits (delegations, migrations) apply
+  their instructions again over the winner, as before.
+- `dialog_corpus::Instruction` is `Clone`.
+
+Why: processes writing one branch concurrently should not each catch and
+retry every commit; and retrying the instructions a transaction computed
+reapplies writes derived from reads of a head that lost, where running the
+transaction again computes them over the head that won.
+
+### A space can keep its memory cells in its file, branch heads included
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+`Chronicle` provides the memory effects (`Resolve`, `Publish`,
+`Retract`, `List`), so a `Space` can name it as its memory as well as its
+archive: `Space<Chronicle, Chronicle, ...>` keeps a space's blocks and
+its cells, branch heads among them, in one file. A cell is kept as a
+log: each update appends a record with the cell's value, in the writer's
+turn, and the cells' own index files the cell at its newest record. The record names the writer's extents that
+still hold blocks, and recovery takes it as whole only with those
+extents' frames, so a power loss can undo the last updates (synced at the
+next sync point), never leave a head naming what is gone.
+
+What this changes for you:
+
+- A `Space` whose memory is a `Chronicle` keeps no `memory` directory:
+  its cells are in `archive.dialog`.
+- A cell's edition is the BLAKE3 hash of its value, as under `fs`, so a
+  `Publish` names the same version either way, and publishing the value a
+  cell already holds succeeds whatever edition the writer expected, as on
+  every memory store.
+- A cell's update takes the writer's turn for the append of one small
+  record: an update waits while another process holds the turn, for its
+  own appends' laying out and writing. Splitting and encoding an append, folding extents in and
+  syncing are done before or after the turn, not in it.
+  A `Resolve` takes no lock, and reads the newest update another process
+  made.
+- A value of any size is kept in its record.
+- `List` walks the cells' own index, not the blocks'.
+
+Why: a space that is one file is one thing to copy, back up and keep
+consistent, and a head kept apart from the blocks it names was a second
+thing to keep in step with them. Written in place, a head could reach the
+disk before the blocks it names, which the power-loss tests showed.
+
+### Writers to one space's file do not wait on one another
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./design/file-writers.md)
+
+A writer to a `Chronicle` tries the file's turn without waiting. With
+it, it appends as before. Without it, it writes its blocks whole into an
+extent of its own, space it claimed in an earlier turn, and they read back
+at once, in its process and in others. The next writer to get the turn,
+usually the same one after its commit, turns those blocks into frames and
+tokens, and the extent is freed once a sync point makes that durable. A
+process that holds the turn keeps an extent ready for itself; a process
+that opens the file with the turn free leaves one no process owns, and
+takes one back as it closes, so there is one for each process that has the
+file open. A process with none takes one of those, or one whose writer
+died, so a process that has never held the turn writes without waiting for
+it too. A writer waits for the turn only to claim an extent when there is
+none to take, or for a catalog the file has not numbered.
+
+What this changes for you:
+
+- Processes writing one space (separate branches, or the same one) no
+  longer queue behind each other's appends, as they did not on the `fs`
+  store either.
+- The writer's turn is a lock on one byte of the file rather than on the
+  whole file, on every platform.
+- `Options::extent` sets how many bytes of blocks an extent holds (1 MiB
+  by default). Each process that writes keeps one extent claimed while it
+  has the file open, and each process that has it open leaves one for
+  another; the last process to close the file retires them and cuts free
+  extents that end the file off it. One left before blocks were appended
+  stays free mid-file and is the next one claimed.
+- Claiming an extent writes its header and grows the file, without
+  writing the extent's bytes: an unused extent is a hole on file systems
+  that keep sparse files.
+- `Options::leave_extent` (on by default) is whether opening leaves an
+  extent for another process; a process that only reads can turn it off
+  and leave the file's length alone.
+- Opening the file no longer waits for another process's turn: the slot
+  it opens from was written in this boot, so there is nothing to repair.
+  After a reboot, or for a new file, opening still takes the turn.
+- A file reached by two names in one process (a hard link, a symbolic
+  link) is one handle, as a path reached two ways already was: two would
+  both hold the writer's turn.
+- A file whose making a power loss cut short opens, made again: one no
+  longer than its header, whose first bytes were never written or are the
+  format's with no durable slot. Any other file that is not an archive is
+  still refused.
+- A writer thread taking the turn just as another thread of its process
+  let it go no longer lets another process take it under it: the file's
+  lock is let go before the process's own. Two writers could append at
+  once before.
+- A block another process holds only in its extent is written again into
+  the writer's own, so a head it commits never names a block another
+  process has not yet folded into the file.
+- The file starts with a 16-byte header: `DIALOG`, the byte `0xB6` (not
+  valid UTF-8 on its own, so a file read as text fails at once), the
+  format version, 1, and zeros, reserved. A file written by an earlier
+  build of `dialog-chronicle` does not open.
+
+Why: many processes work on separate branches of one space at once, and on
+main they never wait on one another to write. A file whose every append
+took one turn made them wait, which would rule the file out wherever such
+processes run.
+
+### A space can keep its blocks in one file
+
+[#733](https://github.com/dialog-db/dialog-db/pull/733),
+[design](./research/single-file-format/design.md)
+
+The new `dialog-chronicle` crate adds `Chronicle`, an archive
+provider that keeps a space's blocks in one append-only file instead of a
+file per block. It answers `archive::Get`, `Put` and `Import` like the
+`fs` provider, and opens from a space's `Location` (`Resource<Location>`),
+so a `Space` can take it as its archive and keep memory, credentials and
+blobs where they were. A node of the artifact tree is kept as a frame:
+rows of ids into the file's tokens (each distinct entity, attribute, value
+and datum once, and each revision's version once, so a history record
+shares its fact's tokens), written against the node it supersedes. A frame is only
+written once it realizes to the exact block; anything else is kept whole.
+A read realizes the block. Native only.
+
+What this changes for you:
+
+- Nothing, unless you choose it: `Space<Chronicle, FileSystem,
+  FileSystem, FileSystem, FileSystem>` is a space whose blocks live in
+  `archive.dialog` in the space's directory. The tree, queries and sync
+  work through it unchanged.
+- Any number of processes can open one file. Writers take turns on a
+  lock on one byte of it, and a writer that finds the turn taken writes
+  into an extent of its own instead (see the entry on writers above);
+  readers take no lock. A file this process already has open is shared,
+  not opened twice.
+- The file is synced after an append once 64 appends have come since
+  the last sync or 2 seconds have passed, on `Chronicle::sync`, on the
+  last close, and by a sync thread once appends have waited 2 seconds
+  for a sync (`Options::sync_in_background`, on by default), so a commit
+  no other append follows is durable within about three seconds. The
+  thread is one per process, for every file it has open, and wakes once a
+  second. Dropping a handle waits for it only when that handle may be the
+  last. That is weaker than the `fs` provider, which syncs every
+  block it writes; call `Chronicle::sync` where a commit must be durable
+  before anything else happens. A power loss loses at most the appends
+  since the last sync, and never leaves the file damaged: opening goes back to the newest state
+  that is whole. The slot that state is read from is kept twice, and a
+  sync writes over the older copy, so a sync torn by power loss leaves
+  the previous copy whole.
+- Every frame is checked before it is written: one that does not realize
+  to the exact block it stands for (a node another peer wrote in another
+  layout, say) is kept whole, never written as rows that read back
+  different bytes.
+- A file shorter than its durable slot names (cut short by something
+  other than the archive, such as a copy that did not finish) does not
+  open, where it used to be filled back out with zeros and opened as an
+  older state.
+- A cell's update that names blocks still in its writer's extent names
+  their frames by a checksum, so a power loss that keeps the extent's new
+  count but loses a frame no longer leaves the cell naming a block the
+  file does not hold: an extent claimed again can still hold a whole frame
+  from its earlier claim in the same place.
+- What a sync point frees is taken up by a writer only once the durable
+  slot that frees it is on the disk, and a sync point made in the writer's
+  turn waits for one made without it, so two never write the same durable
+  copy.
+- Every write (`Put`, `Import`, the tree's `nodes::Write`, and a cell's
+  `Publish` and `Retract`) runs on tokio's blocking threads when a tokio
+  runtime runs the caller: it can wait for the writer's turn another
+  process holds and make a sync point, and holds up none of the runtime's
+  other tasks while it does. Reads (`Get`, `Resolve`, `List`, the tree's
+  node reads) answer at once from the file's mapping.
+- An append of more than 32 Ki blocks is committed in parts, so the index
+  pages one commit frees fit the slot that lists them.
+- An open of a file that has to be recovered holds up no open or close of
+  another file in the process. Two opens of one file in a process wait
+  for each other, by its path and, once it exists, by the file, so the
+  second shares the first's handle even when the first made the file.
+- An extent a process left behind when it closed or died is written into
+  again by the next writer that needs one, instead of a new one, so a
+  file opened and closed many times does not grow a dead extent each
+  time.
+- Opening reads small slots at the head of the file and nothing else.
+  The file's index is in the file, so a reader holds a few tens of KB,
+  not an index that grows with the file; its pages are written over once
+  nothing reads them. The format is still changing, and a file written
+  now may not open in the release.
+- `Options::frames = false` keeps every block whole.
+- The new `dialog-migration` crate holds migrations an application runs
+  before it opens a replica, each behind a feature of its own, and the
+  `dialog-migrate` binary that runs them. A migration is a `Step` that finds
+  its work by looking at the replica, so it is safe to run on every start:
+  `Migrations::plan` says what the steps would do, `Migrations::run` does
+  it, and an interrupted run picks up where it stopped. The `chronicle`
+  step (`chronicle::IntoChronicle`) moves every space of a replica the
+  `fs` provider wrote into the `archive.dialog` a file-archive space reads,
+  writing it under another name and renaming it once complete, or, for a
+  space that has an `archive.dialog` already, into that file through
+  `Chronicle` (so what it holds stays, and a process with it open goes on
+  using it), and then writing `archive.dialog.migrated`. A space is
+  migrated when that marker is there, not when it has an `archive.dialog`
+  (opening a `Chronicle` creates one). With `remove_source` it deletes
+  the `fs` archive after, unless a block's bytes did not match its name
+  or a file in it was not a block (`chronicle::strays`): then it fails and
+  keeps the `fs` archive. It moves blocks only: a space's cells, branch
+  heads among them, stay in its `memory` directory, so a migrated space
+  names `Chronicle` as its archive and not as its memory. It is a
+  conversion an application opts into, not an upgrade every replica
+  needs. Every block
+  reads back as the bytes it was; nodes in an older layout are kept whole.
+  `dialog-migrate [--dry-run] [--step <id>] [--remove-source] <replica>`
+  runs the steps; `--source`, `--target` and `--catalog` move one store.
+
+Why: a replica's history costs a file per block per version, which is
+most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
+`fs` archive takes about 1.2 GiB and the file 13 MiB.
+
+### Compatibility and migration
+
+- Nothing an existing space holds changes or is read differently for the
+  single-file archive: it is a new provider a space opts into. A space
+  opened with `Chronicle` does not read an `fs` archive's directory of
+  blocks, and the reverse; moving a space between the two means copying
+  its blocks with `Import`. The blocks are the same bytes in both, so an
+  older release reads any block this one stores.
+- A `Chronicle` file is format 1, the first released; one written by an
+  earlier, unreleased build of `dialog-chronicle` does not open, and is
+  moved again from the replica it came from with `dialog-migrate`. Nothing
+  else stored or synced changes: blocks, their hashes and what a replica
+  syncs are the same.
+
+## 0.4.0 (2026-11-14)
+
+### A prefetch hint a query took but did not finish is resumed by the next query
+
+[#770](https://github.com/dialog-db/dialog-db/pull/770), argued in
+[notes/fetch-scheduler.md](./notes/fetch-scheduler.md) ("A hint outlives
+the driver that took it").
+
+Every evaluation (a query, a subscription, a query inside a transaction)
+drives the env's queue of prefetch hints while it is polled, walking each
+hinted range so its blocks are local before a read asks for them. A hint
+it took lived only in that evaluation: when its stream ended or was
+dropped, an unfinished walk was dropped with it and no later evaluation
+saw the hint again. Now an evaluation that ends with walks unfinished
+hands their hints back to the queue, and whichever evaluation runs next
+resumes them. A resumed walk starts again from the root, but what earlier
+attempts fetched is already local, so it gets further each time.
+
+What this changes for you:
+
+- On a replica whose remote is slow relative to its queries, a hinted
+  range is fetched in full across the queries that follow, where before
+  it stayed partly remote and the range's own read fetched the rest.
+- `PreloadQueue::pending()` counts a hint a dropped evaluation handed
+  back; it no longer drops to zero the moment a driver takes a hint whose
+  walk never ends inside that evaluation.
+- A hint handed back goes through the same path as a new one: refused
+  with a zero `FetchBudget`, not enqueued twice while the same selector is
+  pending, and behind fresher hints under the same 1,024-per-rank bound.
+
+Why: speculation should be driven by whichever consumer is running, not
+lost with the one that popped it; on wasm a query regularly ended before
+its walk did, so the hint it existed for was wasted.
+
+### A read's warm walk picks children by the read's own routing, and decodes no buffer
+
+Refs [#762](https://github.com/dialog-db/dialog-db/issues/762).
+
+A query on a branch whose repository tracks a remote warms the ranges it
+is about to read with a scoped walk of the tree
+(`Traversable::traverse_available_within`). At each index node the walk
+decoded the write buffer of every link to see whether a buffered op fell
+in its scope. It now keeps exactly the children a read of the scope
+descends into, found by binary search on the node's separators
+(`ArchivedIndex::route` and `children_within`), with no buffer decoded and
+no separator rebuilt. A write buffers each op on the link that same rule
+picks, so the children kept are the ones that can hold in-scope content,
+buffered or stored.
+
+What this changes for you:
+
+- A view read on a member that tracks a remote and holds every block
+  costs a third fewer instructions (the `query-member` perf scenario:
+  181.8 M to 120.2 M), and no longer grows with how many links hold
+  buffered ops.
+- A scoped walk (a warm walk, or a download `within` a scope) may keep
+  child 0 of a node for a scope below its first separator, one path to the
+  leftmost leaf it did not keep before, because a read of that scope
+  descends there too.
+- `dialog_search_tree::helpers::buffer_decodes()` counts the novelty
+  buffers the calling thread has decoded, for tests.
+
+Why: on a member whose blocks are all local, the walk was most of a view
+read, and its cost rose with every change that left more ops buffered.
+
+### A typed variable reads the values of its type through a concept, as it does through a scan
+
+[#782](https://github.com/dialog-db/dialog-db/pull/782),
+[design/typed-read-of-untyped-field.md](./design/typed-read-of-untyped-field.md).
+
+A variable's type says which values it reads, and an attribute's type is
+part of which attribute it is. A scan of an attribute into a variable
+typed as text passes over a number stored under it, and so does a read of
+a recursive concept. A read of a concept that is not recursive did not: a
+value of another type under a field that declares no type failed the
+whole query with `Variable ?x of kind String cannot bind UnsignedInt(7)`.
+It now takes such a value for a fact of another attribute, so every way
+a concept is read agrees.
+
+What this changes for you:
+
+- A query that reads a concept field into a typed variable no longer
+  fails when the field holds a value of another type for some entity. It
+  yields the rows whose value the variable reads.
+- A variable that reads a type or nothing (`Option<T>`) is bound absent
+  for an entity whose only values are of another type, as it is for an
+  entity with no value. A value of the variable's type that disagrees
+  with what the variable is already bound to is still no row.
+- Where a pick elects one of an entity's values (`max:`, `top:`, a field
+  a rule derives), a typed variable elects among the values of its type.
+  A greater value of another type no longer takes the place of the one
+  the variable reads.
+
+Why: which of a concept's rows a caller's terms match should not depend
+on whether a rule makes the concept recursive, which the caller cannot
+see. `Match::bind` already says a value a type does not read is a
+mismatch that "callers that filter rows treat as a non-match"; the plain
+concept read was the one caller that did not.
+
+### A rule seeded by several rows of one entity is evaluated once when they agree
+
+[#763](https://github.com/dialog-db/dialog-db/pull/763), [#762](https://github.com/dialog-db/dialog-db/issues/762)
+
+Commit-time induction evaluated a seeded rule once per changed row a
+premise names. Rows of one entity that each bind one distinct field of
+the premise, a single attribute read under `last`, are now bound into
+one evaluation first. When it finds any match, it finds every match the
+rows find one by one: a seeded read yields a row's value only when the
+round view elects it, so every field then reads its row's value either
+way. When it finds none (an overlay row, a derived candidate or another
+claim stands above one of the rows, or the rest of the body fails), the
+rows are seeded one by one, as before. Every other row seeds alone.
+
+What this changes for you:
+
+- What induction writes is unchanged. The matches of one firing keep
+  the order seeding the rows one by one finds them in, so when two of
+  them write one transient cell under `last`, the same one wins. In
+  this crate's tests every seeded firing also seeds its rows one by one,
+  writes those matches the same way, and checks that the novelty and
+  transients are the same.
+- A command whose event names several fields of a premise evaluates the
+  rule once. On a tonk-shaped replica, a warm command's median fell from
+  6.9–8.7 ms to 4.7–5.9 ms; 1,861 of 1,900 groups found their match
+  together while building and pulling, 200 of 220 in warm commands.
+
+Why: an event's fields are one binding; evaluating it once per field
+repeated the same joins.
+
+### A rule seeded by several rows of one change writes its head once
+
+[#761](https://github.com/dialog-db/dialog-db/pull/761)
+
+Commit-time induction evaluates a rule once for each changed row a
+premise names, with that row bound. A command whose event carries
+several of a premise's fields seeds the rule once per field, and every
+evaluation finds the same binding. Each wrote the rule's head again: a
+`set assignee` event of eight fields wrote its assignee and its activity
+record eight times over, and each copy seeded the next round's rules
+again. A firing now writes each distinct head once.
+
+What this changes for you:
+
+- What a commit stores is unchanged: the copies were the same claims,
+  and a set holds a claim once.
+- A commit that fires rules writes fewer ops into the tree. On a
+  tonk-shaped replica, a warm command wrote 177–198 ops before and 26–33
+  now, and its median time fell from 12.7–14.1 ms to 7.1–9.2 ms.
+
+Why: the copies were most of what a warm command wrote, so they filled
+the tree's root buffer on nearly every commit, and each overflow
+rewrote the leaves it sheds into.
+
+### A pull says how much it downloads, and can bring along only what the replica holds
+
+[#775](https://github.com/dialog-db/dialog-db/pull/775),
+[design/held-across-pull.md](./design/held-across-pull.md).
+
+A pull that adopts an upstream head by root (a fast-forward, a rival
+merge settled, a reset brought forward) reads none of the head's tree, so
+every leaf the upstream changed is held by reference once the head lands,
+whether the replica held it before or not. A read or a write the replica
+had answered from its own blocks then waits on the peer that holds the
+block, and fails without one: a page rendered from a device's own store
+did not render offline after a sync it had no part in, and an edit that
+had been answered at once took a round trip after every pull. Whether a
+pull did that was decided by a modifier (`pull().download()`) that was
+easy to leave out, and was left out.
+
+How much a pull brings local is now an argument of the pull, with no
+default: `branch.pull(Download::…)`. `Download` is an enum:
+
+- `Download::MinimalRanges`: nothing. The head is adopted by reference,
+  as a bare `pull()` did.
+- `Download::QueriedRanges`: what the replica holds of its head, as the
+  head it would adopt has it. New. `PersistentTree::follow(held, env)`
+  walks the two trees in step and reads a node of the adopted one,
+  fetching what the replica lacks, only where the keys it is routed meet
+  those of a leaf the replica holds.
+- `Download::Operational`: the entity, attribute and value orders and the
+  blob index, as `pull().download().operational()` did.
+- `Download::Ranges(scope)`: the key ranges given, as
+  `pull().download().within(scope)` did.
+- `Download::Everything`: as `pull().download()` did.
+
+Whatever it names is fetched before the head moves, by `perform` and by
+`prepare` alike, and a download that fails leaves the head where it was.
+
+A pull can also be made again when a commit overtakes it.
+`Pull::retry(Limit)` makes a pull that lost its publish merge onto the
+head the commit left and publish that, `Limit::Times(n)` more times or
+`Limit::Unlimited`.
+
+What this changes for you:
+
+- `Branch::pull` takes a `Download`. Write `pull(Download::MinimalRanges)`
+  where you wrote `pull()`, to keep what it did.
+- `Pull::download`, `PullDownload` and its `within` and `operational` are
+  gone: the extent is the pull's argument. `PreparedPull` is already
+  downloaded when `prepare` hands it back, so a caller that ran a
+  download between `prepare` and `commit` drops it.
+- `Branch::download` takes a `Download` too, and its command struct is
+  `DownloadBranch` (it was `Download`, the name the enum now has).
+  `download().operational()` is `download(Download::Operational)`,
+  `download().within(scope)` is `download(Download::Ranges(scope))`, a
+  bare `download()` is `download(Download::Everything)`, and `.of(revision)`
+  is unchanged.
+- `Branch::replicate` takes a `Download`, which every pull it makes uses.
+- `Pull::perform` and `Pull::prepare` are bounded by `PullEnv`, which is
+  `ResolveEnv` and `Provider<Fork<RemoteSite, blob::Read>>`: a download
+  that brings blobs along reads them from the upstream's site. Every
+  environment that could run a pull download satisfies it.
+- With `Download::QueriedRanges`, every key a replica reads or writes
+  from its own blocks before a pull it reads or writes from them after
+  it. A replica that holds every leaf of its head ends holding every leaf
+  of the head it adopts. A range it never read stays by reference however
+  much of it changed, and a replica with no head, or one that holds none
+  of its head's leaves, fetches nothing.
+- `Download::QueriedRanges` brings tree nodes, not what they point at: a
+  spilled value or a blob that a changed leaf newly references is fetched
+  when it is read.
+- A replica's first write to a key it only read still fetches the leaves
+  of the orders it never read that key through. A write reads the leaves
+  it writes to, in the entity and attribute orders and in history.
+- The head stays where it was while a download runs, and reads and
+  commits go on against it. A commit that lands meanwhile makes the pull
+  lose its publish, as before. `Pull::retry` makes it again; without it
+  the pull fails with `PublishError::VersionMismatch`, the head where the
+  commit put it.
+- A `Download::QueriedRanges` that cannot fetch a node fails with
+  `DownloadError::Tree`, a new variant.
+- New: `PersistentTree::follow` in `dialog-search-tree`; `Download`,
+  `DownloadBranch`, `PullEnv`, `Pull::retry`, `Limit` and
+  `DownloadError::Tree` in `dialog-repository`.
+
+Why: a partial replica's promise is that what it read it can read again
+without the network. Adopting by root keeps the cost of a pull independent
+of what the upstream changed, and breaks that promise each time the
+upstream changes something the replica read. Bounding the fetch by what
+the replica holds keeps both. Which of the two a branch wants is not
+something a library can guess, and a modifier that is easy to miss made
+the cheap answer the one a caller got by not deciding: an argument makes
+every pull say. A pull is retried by the pull because a replica that keeps
+writing while it syncs would otherwise have every caller write the same
+loop.
+
+### `wbg-pool` gives every test's tab focus
+
+[#774](https://github.com/dialog-db/dialog-db/pull/774).
+
+`wbg-pool` runs each test in a tab of its own, many at once, and Chrome
+shows only the latest tab of a window. The rest are hidden: their
+`visibilityState` is `hidden`, `hasFocus()` is false, and animation frames
+and `ResizeObserver` deliveries are held back. `wbg-pool` now turns on
+focus emulation for a tab as it opens it, so each page acts as the focused,
+active one.
+
+What this changes for you:
+
+- A wasm test that waits on an animation frame, a `ResizeObserver`, focus
+  or visibility passes beside other tests as it does alone. Run eight at
+  once in headless Chromium and 15 of 24 tabs passed before; all 24 do now.
+- A tab that cannot be given focus is closed and its run fails with
+  `failed to give a test's tab focus`, where the tab would have run without
+  it.
+- A dependent that carries this as a patch against `wbg-pool` (tonk's
+  `wbg-pool-focus-tabs.patch`) drops it when it builds `wbg-pool` from this
+  release.
+
+Why: a test that depended on rendering failed or hung only in a full run,
+with nothing in its output to say its tab was in the background. Chrome's
+flags against backgrounding (`--disable-renderer-backgrounding` and its
+kin) do not change it; focus emulation does.
+
+### A provisioned wasm test is given its address when it runs
+
+[#774](https://github.com/dialog-db/dialog-db/pull/774).
+
+A test that takes a provisioned address (`#[dialog_common::test]` with a
+parameter) runs under `web-integration-tests` as a native test that starts
+the service and a wasm test that uses it. The wasm test read the address
+from `option_env!`, so it was compiled into the test binary. It now reads
+it when it runs: the native test names the variable in `WBG_POOL_PASS_ENV`,
+and `wbg-pool` defines the variables named there on
+`globalThis.__wbg_pool_env` in the page or worker the suite runs in.
+
+What this changes for you:
+
+- A package's wasm test binary is built once for all of its provisioned
+  tests, where every test rebuilt and relinked it. Nothing in a test
+  changes.
+- The wasm side needs the `wbg-pool` of this release as its runner. Under
+  an older `wbg-pool`, or `wasm-bindgen-test-runner`, a provisioned wasm
+  test fails with `Missing PROVISIONED_SERVICE_ADDRESS environment
+  variable`. A dependent that builds `wbg-pool` from this repository takes
+  both together; patches it carries against `wbg-pool`'s `shim.rs`,
+  `daemon/harness.rs`, `daemon/server.rs` or the scripts under `daemon/js`
+  may need rebasing.
+- `dialog_common::helpers::address` reads the passed variable on
+  `wasm32-unknown-unknown` and the process environment elsewhere.
+  `dialog_common::helpers::PASSED_VARIABLES` is the name of the variable
+  that lists what to pass.
+- `wbg-pool` passes any variable named in `WBG_POOL_PASS_ENV`, not only
+  this one (see its README).
+
+Why: cargo tracks a variable read with `option_env!` as a build input, and
+every provisioned test has its own address. Each test of
+`dialog-repository` therefore rebuilt and relinked the crate's wasm test
+binary, 82 seconds a test on a CI runner, and the cross-target job spent
+over an hour of its 79 minutes of tests there. Two tests of one package
+could also build over each other's binary.
 
 ### A read reads one revision, and a transaction reads and commits against the one it opened at
 
@@ -608,7 +3153,7 @@ module should not be pinned by a library that uses one call of it.
 
 ### A pull or a push that meets another revision under its own head's version is refused
 
-Fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
+[#707](https://github.com/dialog-db/dialog-db/pull/707), fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
 
 Two replicas writing with one key on one branch share an origin, since
 an origin derives from the branch and the issuer. When both build on the
@@ -712,6 +3257,8 @@ Why: the memo speaks for heads that landed, and a context remembered
 before the publish speaks for one that may never land.
 
 ### Distinct members inserted between the same neighbours get distinct positions
+
+[#729](https://github.com/dialog-db/dialog-db/pull/729).
 
 A position's fractional tail comes from a bias derived from the member's
 identity. The bias was the first six base62 digits of the identity bytes,
@@ -1198,7 +3745,7 @@ the walk read as it went, not because its reads depended on each other.
 
 ### A reset moves a branch forward only
 
-Fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
+[#686](https://github.com/dialog-db/dialog-db/pull/686), fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
 
 `Branch::reset` now refuses a revision that does not hold the branch's
 head, and the head does not move. A reset back to an older head, or onto
@@ -1580,6 +4127,10 @@ has a tree to canonicalize even when the link itself wrote nothing.
   the same bytes, nothing is rewritten on upgrade, and an older release
   reads everything this one writes. Only Rust names and the crate graph
   move.
+- `Download::QueriedRanges` changes nothing stored or synced: the blocks
+  it fetches are blocks the replica would have fetched at its next read
+  of them, nothing is rewritten on upgrade, and releases on either side
+  read what the other writes. Nothing for an embedder to run.
 - Bounding the caches changes nothing stored or synced: caches hold only
   what a replica can read again, nothing is rewritten on upgrade, and
   releases on either side read what the other writes. Nothing for an
@@ -2548,33 +5099,6 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
-- Nothing stored or synced changes for patterns: the stored rule format
-  is format 3 as before and has no way to write a pattern, so a rule
-  that holds one is never stored, and an older replica never meets one.
-  Laid over a branch for a query, such a rule is kept in memory beside
-  the query's changes and no fact holds its body. Nothing is rewritten
-  on upgrade and an embedder runs nothing. One
-  rule changes identity between releases: a rule whose body holds a
-  record constant that is a composite is named by the composite's parts
-  here and by its bytes in an older release, so each release finds the
-  body the other stored under an entity it does not derive and leaves
-  it inert. No release before this one could write such a constant.
-- A composite is a new kind of bytes under the existing `record:` value
-  type, so nothing is rewritten on upgrade and no tree, key or wire
-  format changes. What an older replica holds under `record:` is a
-  revision's record, a bare dag-cbor map whose first byte is `0xa7`, and
-  whatever bytes an embedder stored. This release reads a record as a
-  composite only when its first byte is `0x01` and the rest is exactly
-  the bytes a composite is written in; every other record reads,
-  compares, verifies and is named as before. An older release makes of a
-  versioned record what it makes of any record: bytes it stores, syncs
-  and compares, and names by a hash of the bytes, which is not the name
-  this release gives it. It cannot look inside. A record under a later
-  version than `0x01` is carried the same way by this release and refused
-  by its number when something looks into it. An embedder runs nothing.
-  One that stored records of its own starting with a byte from `0x01` to
-  `0x17` should say so before upgrading
-  ([design/patterns/design-version-byte.md](./design/patterns/design-version-byte.md)).
 - Nothing stored or synced changes for the file store's lock; only the
   lock files beside its cells do. A lock file the previous release left
   behind holds a bare PID, which this release reads as a holder: one
