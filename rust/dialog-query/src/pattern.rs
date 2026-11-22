@@ -26,6 +26,7 @@
 //! A pattern that holds a blank cannot be built, since a blank is never
 //! bound. It can only take a value apart.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -104,7 +105,7 @@ impl MapPattern {
         entries: impl IntoIterator<Item = (Value, Pattern)>,
     ) -> Result<Self, MapPatternError> {
         let entries: Vec<(Value, Pattern)> = entries.into_iter().collect();
-        let mut keys = std::collections::HashSet::with_capacity(entries.len());
+        let mut keys = HashSet::with_capacity(entries.len());
         for (key, _) in &entries {
             if !keys.insert(key.clone()) {
                 return Err(MapPatternError::DuplicateKey(key.clone()));
