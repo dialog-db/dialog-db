@@ -51,6 +51,7 @@ use dialog_corpus::{
     KeyViewConstruct, Relation, Selector, SortKey, Standing, Statement, Update, fact_index_keys,
     sort_key,
 };
+use dialog_query::DeductiveRule;
 use dialog_search_tree::Manifest;
 use parking_lot::RwLock;
 
@@ -59,6 +60,9 @@ mod chunks;
 use chunks::Chunks;
 
 use crate::rules::is_rule_attribute;
+
+/// Deductive rules held in memory when their bodies have no stored form.
+pub(crate) type Bodies = Arc<HashMap<Entity, DeductiveRule>>;
 
 /// How many instants the ring retains. A subscription pinned further
 /// back than this recomputes from the fold instead of maintaining.
@@ -136,6 +140,8 @@ struct State {
     /// The most recent instants, oldest first, at most
     /// [`LOG_CAPACITY`].
     log: VecDeque<Instant>,
+    /// Rule bodies kept beside this line's indexed facts.
+    bodies: Option<Bodies>,
 }
 
 /// An ephemeral line as it stood at one instant: its facts, its
@@ -677,6 +683,7 @@ impl State {
         Self {
             now,
             log: VecDeque::new(),
+            bodies: None,
         }
     }
 
@@ -719,6 +726,19 @@ impl Ephemeral {
             state.mint(delta);
         }
         line
+    }
+
+    /// Keep rules that have no serialized body alongside their index facts.
+    pub(crate) fn keeping(self, bodies: Option<Bodies>) -> Self {
+        if bodies.is_some() {
+            self.state.write().bodies = bodies;
+        }
+        self
+    }
+
+    /// A transient rule held under its index entity.
+    pub(crate) fn body(&self, entity: &Entity) -> Option<DeductiveRule> {
+        self.state.read().bodies.as_ref()?.get(entity).cloned()
     }
 
     /// A new line holding this one's facts and tombstones with the

@@ -2,6 +2,7 @@ use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_search_tree::nodes;
+use std::any::Any;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::iter::once;
@@ -12,11 +13,11 @@ use dialog_corpus::history::Edition;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::{
-    Changes, DialogCorpusError, Entity, Estimate, Fact, FactStream, FactView, LayerIndex, Layered,
-    Likelihood, Preload, PreloadRequest, Select, SelectIn, Selector, SortKey, Speculation,
-    Statement, sort_key,
+    Asset, Changes, DialogCorpusError, Entity, Estimate, Fact, FactStream, FactView, LayerIndex,
+    Layered, Likelihood, Preload, PreloadRequest, Select, SelectIn, Selector, SortKey, Speculation,
+    Statement, Update, sort_key,
 };
-use dialog_corpus::{Relation as CorpusRelation, Standing, Value};
+use dialog_corpus::{Cardinality, Relation as CorpusRelation, Standing, Value};
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
@@ -45,7 +46,7 @@ use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped, merge_groupe
 use crate::placement::{memory_layer, session_layer};
 use crate::repository::archive::TreeEnv;
 use crate::repository::branch::select::line_manifest;
-use crate::repository::ephemeral::Window;
+use crate::repository::ephemeral::{Bodies, Window};
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Live, Source, View};
 use crate::repository::{CellSettlement, ReadObservation};
@@ -116,6 +117,52 @@ pub struct QueryLayer<'a> {
     /// layers.
     layers: Option<Box<StackLayers<'a>>>,
     changes: Changes,
+    /// Transient rules whose patterns have no stored rule notation.
+    bodies: Option<Bodies>,
+}
+
+/// An overlay target that keeps non-serializable rule bodies in memory.
+struct Laying<'a> {
+    changes: &'a mut Changes,
+    bodies: &'a mut Option<Bodies>,
+}
+
+impl Update for Laying<'_> {
+    fn associate(&mut self, the: CorpusRelation, of: Entity, is: Value, cardinality: Cardinality) {
+        self.changes.associate(the, of, is, cardinality);
+    }
+
+    fn dissociate(&mut self, the: CorpusRelation, of: Entity, is: Value) {
+        self.changes.dissociate(the, of, is);
+    }
+
+    fn associate_in(
+        &mut self,
+        layer: Entity,
+        the: CorpusRelation,
+        of: Entity,
+        is: Value,
+        cardinality: Cardinality,
+    ) {
+        self.changes.associate_in(layer, the, of, is, cardinality);
+    }
+
+    fn dissociate_in(&mut self, layer: Entity, the: CorpusRelation, of: Entity, is: Value) {
+        self.changes.dissociate_in(layer, the, of, is);
+    }
+
+    fn import(&mut self, asset: Asset) {
+        self.changes.import(asset);
+    }
+    fn discard(&mut self, asset: Asset) {
+        self.changes.discard(asset);
+    }
+
+    fn hold(&mut self, entity: &Entity, body: Box<dyn Any>) -> Result<(), Box<dyn Any>> {
+        let rule = body.downcast::<DeductiveRule>()?;
+        Arc::make_mut(self.bodies.get_or_insert_default()).insert(entity.clone(), *rule);
+        Ok(())
+    }
 }
 
 /// The layers of a session a [`QueryLayer`] reads beside its lines.
@@ -176,7 +223,10 @@ impl<'a> QueryLayer<'a> {
     /// into the overlay — the query resolves it as a transient rule
     /// without persisting it.
     pub fn with<S: Statement>(mut self, statement: S) -> Self {
-        statement.assert(&mut self.changes);
+        statement.assert(&mut Laying {
+            changes: &mut self.changes,
+            bodies: &mut self.bodies,
+        });
         self
     }
 
@@ -193,6 +243,13 @@ impl<'a> QueryLayer<'a> {
             ours.named.extend(theirs.named);
         }
         other.changes.assert(&mut self.changes);
+        if let Some(bodies) = other.bodies {
+            Arc::make_mut(self.bodies.get_or_insert_default()).extend(
+                bodies
+                    .iter()
+                    .map(|(entity, rule)| (entity.clone(), rule.clone())),
+            );
+        }
         self
     }
 
@@ -326,7 +383,7 @@ impl<'a> QueryLayer<'a> {
         }
         let mut overlay = self.changes.clone();
         metadata.export().assert(&mut overlay);
-        Ephemeral::holding(overlay)
+        Ephemeral::holding(overlay).keeping(self.bodies.clone())
     }
 
     /// Stage a query application. Call `.perform(&operator)` to execute.
@@ -1810,6 +1867,10 @@ impl<'a> QueryEnv<'a> {
         let entities = rule_entities(overlay.scan(&conclusions));
         let mut rules = Vec::with_capacity(entities.len());
         for rule_entity in entities {
+            if let Some(rule) = overlay.body(&rule_entity) {
+                rules.push((rule, Installed::Pending));
+                continue;
+            }
             let sources = source_selector(&rule_entity);
             self.read_rules(&sources, manifest);
             let Some(bytes) = source_bytes(overlay.scan(&sources)) else {
@@ -2816,7 +2877,6 @@ mod rule_tests {
     use super::*;
     use crate::helpers::{Counting, connect, test_repo};
     use crate::{Branch, Repository, Transaction};
-    use dialog_corpus::Update as _;
     use dialog_credentials::Credential;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_peer::{Peer, Session};
@@ -5920,6 +5980,110 @@ mod ordered_relation_tests {
         assert!(
             at_eggs > at_milk,
             "the appended position sorts after every member"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod transient_pattern_tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use anyhow::Result;
+    use dialog_corpus::{Composite, Entity, Value};
+    use dialog_peer::helpers::test_session_with_peer;
+    use dialog_query::concept::query::ConceptQuery;
+    use dialog_query::query::Output as _;
+    use dialog_query::types::Any;
+    use dialog_query::{
+        ConceptDescriptor, DeductiveRule, MapPattern, Parameters, Pattern, Premise, Proposition,
+        Term, the,
+    };
+
+    use crate::helpers::test_repo;
+    use crate::rules::source_attr;
+
+    fn text(value: &str) -> Value {
+        Value::String(value.into())
+    }
+
+    fn concept(field: &str, relation: &str, value_type: &str) -> ConceptDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "with": { field: { "the": relation, "as": value_type, "cardinality": "many" } }
+        }))
+        .expect("a concept")
+    }
+
+    fn heading_rule() -> Result<DeductiveRule> {
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.set(
+            "payload".into(),
+            Pattern::Map(
+                MapPattern::new([(text("title"), Pattern::Term(Term::var("heading")))])?
+                    .with_rest(Term::<Any>::blank()),
+            ),
+        );
+        let premise = Premise::Assert(Proposition::Concept(ConceptQuery {
+            predicate: concept("payload", "note/payload", "composite:map"),
+            terms,
+        }));
+        Ok(DeductiveRule::new(
+            concept("heading", "note/heading", "text:"),
+            vec![premise],
+        )?)
+    }
+
+    #[dialog_common::test]
+    async fn it_runs_a_pattern_rule_from_a_transient_query_overlay() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let titled = Composite::map([
+            (text("title"), text("Buy milk")),
+            (text("done"), Value::Boolean(false)),
+        ])?;
+        let milk: Entity = "id:milk".parse()?;
+        branch
+            .transaction()
+            .assert(the!("note/payload").of(milk.clone()).is(titled))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let rule = heading_rule()?;
+        assert!(rule.storable().is_err());
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("heading".into(), Term::var("heading"));
+        let query = ConceptQuery {
+            predicate: concept("heading", "note/heading", "text:"),
+            terms,
+        };
+        let layer = branch.with(&rule);
+        let staged: Vec<_> = layer
+            .changes()
+            .clone()
+            .into_instructions()
+            .into_iter()
+            .collect();
+        assert!(staged.iter().any(|instruction| match instruction {
+            dialog_corpus::Instruction::Assert(fact, _)
+            | dialog_corpus::Instruction::Retract(fact) => fact.of == rule.this(),
+        }));
+        assert!(staged.iter().all(|instruction| match instruction {
+            dialog_corpus::Instruction::Assert(fact, _)
+            | dialog_corpus::Instruction::Retract(fact) => fact.the != source_attr(),
+        }));
+
+        let rows = layer.select(query).perform(&operator).try_vec().await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(*rows[0].entity(), milk);
+        assert_eq!(
+            rows[0].source().value_of("heading"),
+            Some(&text("Buy milk"))
         );
         Ok(())
     }

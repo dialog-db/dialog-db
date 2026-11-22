@@ -268,22 +268,33 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
 /// ```
 impl Statement for &DeductiveRule {
     fn assert(self, update: &mut impl Update) {
-        // Validate before writing index facts: a durable Changes target
-        // cannot keep an in-memory body for a pattern rule.
-        let body = self.encode();
-        let rule_entity = self.this();
+        // Persist a body when the stored notation can encode it. A query
+        // overlay can instead keep the rule itself for this evaluation.
+        let (rule_entity, body) = match self.storable() {
+            Ok(()) => (self.this(), Some(self.encode())),
+            Err(refusal) => {
+                let rule_entity = self.this();
+                update
+                    .hold(&rule_entity, Box::new(self.clone()))
+                    .map_err(|_| refusal.to_string())
+                    .expect("a stored rule format cannot encode a pattern");
+                (rule_entity, None)
+            }
+        };
         update.associate(
             conclusion_attr(),
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
             dialog_corpus::Cardinality::Many,
         );
-        update.associate(
-            source_attr(),
-            rule_entity.clone(),
-            Value::Bytes(body),
-            dialog_corpus::Cardinality::Many,
-        );
+        if let Some(body) = body {
+            update.associate(
+                source_attr(),
+                rule_entity.clone(),
+                Value::Bytes(body),
+                dialog_corpus::Cardinality::Many,
+            );
+        }
         for reads in reads_entities(self) {
             update.associate(
                 reads_attr(),

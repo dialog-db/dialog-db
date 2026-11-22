@@ -1384,10 +1384,7 @@ fn it_refuses_to_install_a_rule_that_holds_a_pattern() {
         .downcast_ref::<String>()
         .cloned()
         .unwrap_or_default();
-    assert!(
-        reason.contains("rule body must encode in formal notation"),
-        "{reason}"
-    );
+    assert!(reason.contains("no way to write a pattern"), "{reason}");
     assert_eq!(changes, Changes::new(), "nothing was staged");
 }
 
