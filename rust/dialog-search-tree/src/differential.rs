@@ -23,6 +23,12 @@
 
 use crate::nodes::{Preload, Read};
 use dialog_capability::Provider;
+
+mod scope;
+pub use scope::KeyRanges;
+use scope::Scope;
+#[cfg(any(test, feature = "helpers"))]
+pub(crate) use scope::probes as scope_probes;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
@@ -1069,7 +1075,7 @@ where
     fn settle_shared_segments(
         source: &mut Self,
         target: &mut Self,
-        scope: Option<&[core::ops::RangeInclusive<Key>]>,
+        scope: Option<&Scope<'_, Key>>,
     ) -> Result<(), DialogSearchTreeError> {
         let (mut ours, mut theirs) = (0, 0);
         while ours < source.nodes.len() && theirs < target.nodes.len() {
@@ -1365,7 +1371,7 @@ where
     /// per-side, so the entry walk may surface spurious out-of-scope
     /// changes where only one side dropped a shared region;
     /// [`TreeDifference::changes_within`] filters those.
-    fn retain_scope(&mut self, scope: &[core::ops::RangeInclusive<Key>]) {
+    fn retain_scope(&mut self, scope: &Scope<'_, Key>) {
         let uppers: Vec<Option<Vec<u8>>> = (0..self.nodes.len())
             .map(|at| {
                 self.nodes
@@ -1377,16 +1383,9 @@ where
         let mut dropped = None;
         for (node, upper) in self.nodes.drain(..).zip(uppers) {
             let lower = node.lower_bound();
-            let intersects = scope.iter().any(|range| {
-                // [lower, upper) ∩ [start, end] is non-empty iff
-                // lower <= end and upper > start (with upper = +∞
-                // for the last node).
-                lower <= range.end().as_ref()
-                    && match &upper {
-                        Some(upper) => upper.as_slice() > range.start().as_ref(),
-                        None => true,
-                    }
-            });
+            // [lower, upper) meets a range, with upper = +∞ for the last
+            // node.
+            let intersects = scope.intersects(lower, upper.as_deref());
             // A node's bound describes its *stored* content only, deliberately:
             // the bound is also the node's routing key and the input to its
             // rank, so a pending op must not move it (see
@@ -1404,11 +1403,7 @@ where
             // expansion routes the parent's ops down into exactly the children
             // that cover them, so anything pending for this subtree is already
             // attached as routed ops.
-            let in_scope = |key: &[u8]| {
-                scope
-                    .iter()
-                    .any(|range| key >= range.start().as_ref() && key <= range.end().as_ref())
-            };
+            let in_scope = |key: &[u8]| scope.contains(key);
             let pending_in_scope = pending_ops(&node)
                 .iter()
                 .any(|entry| in_scope(entry.key.as_slice()));
@@ -1923,7 +1918,7 @@ type SettledPair<Key, Value> = (SparseTreeNode<Key, Value>, SparseTreeNode<Key, 
 fn settle_shared_segment<Key, Value>(
     ours: &SparseTreeNode<Key, Value>,
     theirs: &SparseTreeNode<Key, Value>,
-    scope: Option<&[core::ops::RangeInclusive<Key>]>,
+    scope: Option<&Scope<'_, Key>>,
 ) -> Result<Option<SettledPair<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -1968,13 +1963,7 @@ where
         .iter()
         .chain(&theirs_ops)
         .map(|(key, _)| key.as_slice())
-        .filter(|key| {
-            scope.is_none_or(|scope| {
-                scope
-                    .iter()
-                    .any(|range| *key >= range.start().as_ref() && *key <= range.end().as_ref())
-            })
-        })
+        .filter(|key| scope.is_none_or(|scope| scope.contains(key)))
         .collect();
     keys.sort_unstable();
     keys.dedup();
@@ -2239,7 +2228,35 @@ where
             target_tree,
             source_storage,
             target_storage,
-            Some(scope),
+            Some(Scope::new(scope)),
+            MissingPolicy::default(),
+            prefetch.into(),
+        )
+        .await
+    }
+
+    /// [`compute_within_with`](Self::compute_within_with), scoped to the
+    /// union of `cover`: sets kept sorted and disjoint as they are recorded,
+    /// borrowed as they are, so the scope costs nothing to build or drop
+    /// however many ranges they hold. Consume via
+    /// [`changes_covered`](Self::changes_covered).
+    pub async fn compute_covered<D>(
+        source_tree: &PersistentTree<Key, Value, D>,
+        target_tree: &PersistentTree<Key, Value, D>,
+        source_storage: &'a Env,
+        target_storage: &'a Env,
+        cover: &[&KeyRanges<Key>],
+        prefetch: Prefetch,
+    ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
+    where
+        D: Distribution,
+    {
+        Self::compute_scoped(
+            source_tree,
+            target_tree,
+            source_storage,
+            target_storage,
+            Some(Scope::sets(cover)),
             MissingPolicy::default(),
             prefetch.into(),
         )
@@ -2251,7 +2268,7 @@ where
         target_tree: &PersistentTree<Key, Value, D>,
         source_storage: &'a Env,
         target_storage: &'a Env,
-        scope: Option<&[core::ops::RangeInclusive<Key>]>,
+        scope: Option<Scope<'_, Key>>,
         missing: MissingPolicy,
         reads: Reads,
     ) -> Result<TreeDifference<'a, Key, Value, Env>, DialogSearchTreeError>
@@ -2259,6 +2276,9 @@ where
         D: Distribution,
     {
         let planned = reads == Reads::Planned;
+        // Sorted and merged once (or borrowed sorted), so every test against
+        // it is a search.
+        let scope = scope.as_ref();
         let source_storage = source_tree.accessor(source_storage);
         let target_storage = target_tree.accessor(target_storage);
         // Identical trees (including two empty trees) share their root
@@ -2618,6 +2638,11 @@ where
     ) -> impl Differential<Key, Value> + 'a {
         let changes = self.changes();
         try_stream! {
+            // Built inside the stream, not captured by it: captured, it
+            // made the stream of `differentiate_within` copy its state
+            // twice more per difference, which cost a subscription's poll
+            // more than the search saved (subscribe-fanout in dialog-perf).
+            let scope = Scope::new(scope);
             futures_util::pin_mut!(changes);
             for await change in changes {
                 let change = change?;
@@ -2625,7 +2650,31 @@ where
                     Change::Add(entry) => &entry.key,
                     Change::Remove(entry) => &entry.key,
                 };
-                if scope.iter().any(|range| range.contains(key)) {
+                if scope.contains(key.as_ref()) {
+                    yield change;
+                }
+            }
+        }
+    }
+
+    /// [`changes_within`](Self::changes_within) for a difference built by
+    /// [`compute_covered`](Self::compute_covered): the changes inside the
+    /// union of `cover`, each tested by a search of every set.
+    pub fn changes_covered(
+        &'a self,
+        cover: &'a [&'a KeyRanges<Key>],
+    ) -> impl Differential<Key, Value> + 'a {
+        let changes = self.changes();
+        try_stream! {
+            let scope = Scope::sets(cover);
+            futures_util::pin_mut!(changes);
+            for await change in changes {
+                let change = change?;
+                let key = match &change {
+                    Change::Add(entry) => &entry.key,
+                    Change::Remove(entry) => &entry.key,
+                };
+                if scope.contains(key.as_ref()) {
                     yield change;
                 }
             }
@@ -2954,7 +3003,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
         Ok(tree)
@@ -2988,7 +3041,11 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
         Ok(tree)
@@ -3030,7 +3087,11 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -3068,6 +3129,62 @@ mod tests {
         Ok(())
     }
 
+    /// A subscription's cover holds a range per entity it read, so the scope
+    /// of its difference holds as many ranges as its answer has rows, while
+    /// the change it gates is one fact. The work of testing the walk against
+    /// the scope must grow with the log of the ranges, not with the ranges:
+    /// a hundred times the ranges costs a small multiple of the comparisons.
+    #[dialog_common::test]
+    async fn it_tests_a_scope_by_search_not_by_range() -> Result<()> {
+        const KEYS: u32 = 20_000;
+        let storage = CountingBackend::new();
+        let manifest = Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 0,
+            ..Manifest::default()
+        };
+        let mut edit =
+            crate::TransientTree::empty_with_manifest(crate::helpers::test_catalog(), manifest);
+        for at in 0..KEYS {
+            edit = edit.insert(at.to_be_bytes(), vec![0], &storage).await?;
+        }
+        let mut delta = Delta::zero();
+        let base = edit.persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().expect("a built node has one").clone());
+        }
+        let changed = KEYS / 2;
+        let target = base
+            .edit()
+            .insert(changed.to_be_bytes(), vec![1], &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (_, node) in delta.flush() {
+            storage.store(node.buffer().expect("a built node has one").clone());
+        }
+
+        let mut probes = Vec::new();
+        for ranges in [100u32, 1_000, 10_000] {
+            // One single-key range every `KEYS / ranges` keys, the changed
+            // key among them, as a cover of one range per entity is.
+            let scope: Vec<core::ops::RangeInclusive<[u8; 4]>> = (0..ranges)
+                .map(|at| (at * (KEYS / ranges)).to_be_bytes())
+                .map(|key| key..=key)
+                .collect();
+            let before = crate::helpers::scope_probes();
+            let changes = collect_scoped_changes(&base, &target, &scope, &storage).await?;
+            probes.push(crate::helpers::scope_probes() - before);
+            assert_eq!(changes.len(), 2, "the one changed key, Remove + Add");
+        }
+        let (few, many) = (probes[0], probes[2]);
+        assert!(
+            many <= few * 4,
+            "a hundred times the ranges must cost a few times the comparisons, \
+             not a hundred: {few} at 100 ranges, {many} at 10000"
+        );
+        Ok(())
+    }
+
     /// The point of scoping on a partial replica: subtrees whose key
     /// span misses the scope are never read, so a scoped diff reads
     /// strictly fewer blocks than the full diff when the
@@ -3100,7 +3217,11 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -3231,7 +3352,11 @@ mod tests {
         let mut delta = Delta::zero();
         let root = tree.persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         Ok(TestTree::seal(crate::helpers::test_catalog(), root))
     }
@@ -3256,7 +3381,11 @@ mod tests {
         let mut delta = Delta::zero();
         let canonical = tree.canonicalize(storage, &mut delta).await?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         Ok(canonical)
     }
@@ -3466,7 +3595,11 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         assert_eq!(
             merged.root(),
@@ -3496,7 +3629,11 @@ mod tests {
             .await?
             .persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         storage.reset();
@@ -3538,7 +3675,11 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -3681,7 +3822,11 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
         let base = tree.clone();
@@ -3694,7 +3839,11 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -3706,7 +3855,7 @@ mod tests {
             &tree,
             &storage,
             &storage,
-            Some(&scope),
+            Some(super::Scope::new(&scope)),
             super::MissingPolicy::default(),
             super::Reads::Serial,
         )
@@ -3760,7 +3909,11 @@ mod tests {
             .await?
             .persist(&mut delta_ours)?;
         for (_, node) in delta_ours.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         let mut theirs = base.clone();
@@ -3771,7 +3924,11 @@ mod tests {
             .await?
             .persist(&mut delta_theirs)?;
         for (_, node) in delta_theirs.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         // Integrate their changes into ours, and our changes into theirs;
@@ -3795,10 +3952,18 @@ mod tests {
             .persist(&mut delta_merged_theirs)?;
 
         for (_, node) in delta_merged_ours.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         for (_, node) in delta_merged_theirs.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
 
         assert_eq!(
@@ -3829,7 +3994,11 @@ mod tests {
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -3847,7 +4016,7 @@ mod tests {
             futures_util::pin_mut!(nodes);
             while let Some(node) = nodes.next().await {
                 let node = node?;
-                remote.store(node.buffer().clone());
+                remote.store(node.buffer()?.clone());
             }
         }
 
@@ -3858,7 +4027,7 @@ mod tests {
         let mut uploaded = 0;
         while let Some(node) = nodes.next().await {
             let node = node?;
-            remote.store(node.buffer().clone());
+            remote.store(node.buffer()?.clone());
             uploaded += 1;
         }
         assert!(uploaded > 0, "extension must produce novel nodes");
@@ -3951,7 +4120,11 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                origin.store(node.buffer().clone());
+                origin.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -3968,7 +4141,7 @@ mod tests {
             while let Some(node) = nodes.next().await {
                 let node = node?;
                 minted.insert(node.hash().clone());
-                device.local.store(node.buffer().clone());
+                device.local.store(node.buffer()?.clone());
             }
         }
 
@@ -4030,7 +4203,11 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                origin.store(node.buffer().clone());
+                origin.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -4045,7 +4222,7 @@ mod tests {
             while let Some(node) = nodes.next().await {
                 let node = node?;
                 minted.insert(node.hash().clone());
-                device.store(node.buffer().clone());
+                device.store(node.buffer()?.clone());
             }
         }
         assert!(!minted.is_empty(), "the extension must mint nodes");
@@ -4096,7 +4273,7 @@ mod tests {
             futures_util::pin_mut!(nodes);
             while let Some(node) = nodes.next().await {
                 let node = node?;
-                peer.store(node.buffer().clone());
+                peer.store(node.buffer()?.clone());
             }
         }
         for hash in &reported {
@@ -4986,7 +5163,11 @@ mod tests {
         storage: &mut CountingBackend,
     ) -> Result<()> {
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         Ok(())
     }
@@ -5622,7 +5803,11 @@ mod tests {
         let mut delta = Delta::zero();
         let root = tree.persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         Ok(TestTree::seal(crate::helpers::test_catalog(), root))
     }
@@ -5799,7 +5984,11 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -5812,7 +6001,11 @@ mod tests {
         let mut delta = Delta::zero();
         let root = buffered.persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         let next = TestTree::at(crate::helpers::test_catalog(), root);
 
@@ -5926,7 +6119,11 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
 
@@ -5941,7 +6138,11 @@ mod tests {
             let mut delta = Delta::zero();
             let root = tree.persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
             TestTree::at(crate::helpers::test_catalog(), root)
         };
@@ -6028,7 +6229,11 @@ mod tests {
             storage: &mut CountingBackend,
         ) -> Result<()> {
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
             Ok(())
         }
@@ -6142,7 +6347,11 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
         Ok(tree)
@@ -6165,7 +6374,11 @@ mod tests {
         let mut delta = Delta::zero();
         let root = tree.persist(&mut delta)?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         Ok(TestTree::seal(crate::helpers::test_catalog(), root))
     }
@@ -6187,7 +6400,11 @@ mod tests {
         let mut delta = Delta::zero();
         let canonical = tree.canonicalize(storage, &mut delta).await?;
         for (_, node) in delta.flush() {
-            storage.store(node.buffer().clone());
+            storage.store(
+                node.buffer()
+                    .expect("a node built from its block has one")
+                    .clone(),
+            );
         }
         Ok(canonical)
     }
@@ -6668,7 +6885,7 @@ mod tests {
                 futures_util::pin_mut!(stream);
                 while let Some(node) = stream.next().await {
                     let node = node?;
-                    remote.store(node.buffer().clone());
+                    remote.store(node.buffer()?.clone());
                 }
             }
 
@@ -6680,7 +6897,7 @@ mod tests {
                 futures_util::pin_mut!(stream);
                 while let Some(node) = stream.next().await {
                     let node = node?;
-                    remote.store(node.buffer().clone());
+                    remote.store(node.buffer()?.clone());
                 }
             }
 
@@ -7187,7 +7404,7 @@ mod tests {
             target,
             source_storage,
             target_storage,
-            scope,
+            scope.map(super::Scope::new),
             missing,
             reads,
         )
@@ -7576,7 +7793,27 @@ mod tests {
     /// prunes under shifted seams, and prunes of op lists that differ with
     /// the same winners all occur.
     #[dialog_common::test]
-    async fn it_matches_a_materialized_difference_under_divergent_flush_history() -> Result<()> {
+    async fn it_matches_a_materialized_difference_under_divergent_flush_history_part_1()
+    -> Result<()> {
+        divergent_flush_history_cases(0).await
+    }
+
+    /// The second half of the seeds of
+    /// [`it_matches_a_materialized_difference_under_divergent_flush_history_part_1`].
+    #[dialog_common::test]
+    async fn it_matches_a_materialized_difference_under_divergent_flush_history_part_2()
+    -> Result<()> {
+        divergent_flush_history_cases(1).await
+    }
+
+    /// Runs half `part` (0 or 1) of the divergent flush history seeds and
+    /// checks the census over that half. The seeds are split across two
+    /// tests so that each stays far under the wasm runner's per-test limit
+    /// on a slow runner, while together they run every seed the single test
+    /// ran. Halves, not smaller parts: prunes under shifted seams are rare,
+    /// and with the default 240 seeds a quarter can hold none, which would
+    /// fail the census though nothing is wrong.
+    async fn divergent_flush_history_cases(part: u64) -> Result<()> {
         use super::{MissingBlocks, MissingPolicy, Prefetch, prune_census};
 
         // `DIALOG_DIFF_ORACLE_CASES` runs more for a longer local soak.
@@ -7584,10 +7821,11 @@ mod tests {
             .ok()
             .and_then(|cases| cases.parse().ok())
             .unwrap_or(240);
+        let seeds = part * cases / 2..(part + 1) * cases / 2;
         prune_census::take();
         let mut heights: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         let mut shapes: BTreeMap<&str, usize> = BTreeMap::new();
-        for seed in 0..cases {
+        for seed in seeds.clone() {
             let mut rng = 0xD1B5_4A32_D192_ED03u64 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
             let mut next = move || {
                 rng ^= rng << 13;
@@ -7838,7 +8076,7 @@ mod tests {
             let nodes = difference.novel_nodes();
             futures_util::pin_mut!(nodes);
             while let Some(node) = nodes.next().await {
-                remote.store(node?.buffer().clone());
+                remote.store(node?.buffer()?.clone());
             }
             let restored = TestTree::at(crate::helpers::test_catalog(), target.root().clone());
             for (at, value) in &target_values {
@@ -7889,7 +8127,7 @@ mod tests {
             let nodes = difference.novel_nodes();
             futures_util::pin_mut!(nodes);
             while let Some(node) = nodes.next().await {
-                remote.store(node?.buffer().clone());
+                remote.store(node?.buffer()?.clone());
             }
             for (at, value) in &target_values {
                 assert_eq!(
@@ -7901,7 +8139,7 @@ mod tests {
         }
         let (routed, shifted, winners_only) = prune_census::take();
         eprintln!(
-            "{cases} cases (seeds 0..{cases}); shapes {shapes:?}; (source, target) heights \
+            "seeds {seeds:?} of {cases}; shapes {shapes:?}; (source, target) heights \
              {heights:?}; routed-op prunes {routed}, under shifted seams {shifted}, of \
              different lists with the same winners {winners_only}"
         );
@@ -7965,7 +8203,11 @@ mod tests {
             let mut delta = Delta::zero();
             base = edit.persist(&mut delta)?;
             for (_, node) in delta.flush() {
-                storage.store(node.buffer().clone());
+                storage.store(
+                    node.buffer()
+                        .expect("a node built from its block has one")
+                        .clone(),
+                );
             }
         }
         let shared_ops: Vec<(bool, u32, Vec<u8>)> =

@@ -52,6 +52,13 @@ runs, in the journal's "Where things stand"; they change together.
 - [Read stream size](read-stream-size.md): **Evaluating.** A concept read's
   stream, moved on every read, shrinks from 12 KB to 3 KB by boxing the
   paths a plain read does not take.
+- [Zero-copy answers](zero-copy-answers.md): **Evaluating**, on
+  [dialog-db/dialog-db#825](https://github.com/dialog-db/dialog-db/pull/825)
+  (the binary answer frame on
+  [#831](https://github.com/dialog-db/dialog-db/pull/831)). A query's
+  answer read in place from the leaves to the page: late materialization,
+  a join keyed on stored bytes, optional fields left-merged, and a binary
+  answer frame.
 - [Single-file format](single-file-format.md): **Building**, on
   [dialog-db/dialog-db#733](https://github.com/dialog-db/dialog-db/pull/733).
   A replica's blocks in one append-only file, every token stored once.

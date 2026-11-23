@@ -118,7 +118,7 @@ where
                     .ok_or_else(|| {
                         DialogCorpusError::Tree(format!("tree node missing at depth {depth}"))
                     })?;
-            let size = node.buffer().as_ref().len();
+            let size = node.buffer()?.as_ref().len();
             let stat = if let Ok(index) = node.as_index() {
                 let bound = node.manifest()?.max_separator as usize;
                 let mut forced_links = 0usize;
@@ -375,7 +375,7 @@ mod tests {
                     is: Value::String(name.into()),
                     cause: None,
                 },
-                crate::Pick::All,
+                crate::Cardinality::Many,
             )]),
         )
         .await?;

@@ -854,7 +854,7 @@ mod tests {
                 is: Value::String(value.to_string()),
                 cause: None,
             },
-            crate::Pick::All,
+            crate::Cardinality::Many,
         )
     }
 
@@ -866,7 +866,7 @@ mod tests {
                 is: Value::String(value.to_string()),
                 cause: None,
             },
-            crate::Pick::Last,
+            crate::Cardinality::One,
         )
     }
 
@@ -1356,7 +1356,10 @@ mod tests {
             .then_apply(
                 &store,
                 Stamp::Amend(asset_version()),
-                stream::iter(vec![Instruction::Assert(asset.fact()?, crate::Pick::All)]),
+                stream::iter(vec![Instruction::Assert(
+                    asset.fact()?,
+                    crate::Cardinality::Many,
+                )]),
                 WriteScope::Machinery,
             )
             .await?;
@@ -1387,7 +1390,56 @@ mod tests {
             &Corpus::empty_in(test_catalog()),
             &store,
             Some(asset_version()),
-            stream::iter(vec![Instruction::Assert(asset.fact()?, crate::Pick::All)]),
+            stream::iter(vec![Instruction::Assert(
+                asset.fact()?,
+                crate::Cardinality::Many,
+            )]),
+            WriteScope::Application,
+        )
+        .await;
+        assert!(matches!(
+            refused,
+            Err(DialogCorpusError::ReservedRelation(_))
+        ));
+        Ok(())
+    }
+
+    /// Application instructions may write a command's lifecycle rows
+    /// (`dialog.command/*`) and the commands a provider serves
+    /// (`dialog.provider/*`), and still not the rest of `dialog.`.
+    #[dialog_common::test]
+    async fn it_admits_command_and_provider_rows_from_an_application() -> Result<()> {
+        let store = store();
+        let fact = |the: &str| -> Result<crate::Fact> {
+            Ok(crate::Fact {
+                the: the.parse()?,
+                of: "cmd:1".parse()?,
+                is: crate::Value::Boolean(true),
+                cause: None,
+            })
+        };
+        for the in ["dialog.command/unhandled", "dialog.provider/command"] {
+            let batch = BufferedBatch::apply(
+                &Corpus::empty_in(test_catalog()),
+                &store,
+                Some(asset_version()),
+                stream::iter(vec![Instruction::Assert(
+                    fact(the)?,
+                    crate::Cardinality::Many,
+                )]),
+                WriteScope::Application,
+            )
+            .await?;
+            assert!(batch.changed(), "{the} is admitted");
+        }
+        let refused = BufferedBatch::apply(
+            &Corpus::empty_in(test_catalog()),
+            &store,
+            Some(asset_version()),
+            stream::iter(vec![Instruction::Assert(
+                fact("dialog.commands/unhandled")?,
+                crate::Cardinality::Many,
+            )]),
             WriteScope::Application,
         )
         .await;

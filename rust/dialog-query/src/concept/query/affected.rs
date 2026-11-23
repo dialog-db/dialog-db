@@ -329,15 +329,12 @@ where
         if bundle.recursion().is_some() {
             return Ok(None);
         }
-        // A reducing rule's fold spans entities: one changed fact
-        // moves its whole group's row, and a retraction can make a
-        // group's row disappear without any change to the head
-        // entity's own facts. Per-entity re-derivation cannot bound
-        // that, so the caller recomputes (A3's recompute-per-poll
-        // model; incremental aggregate maintenance is A5).
-        if bundle.rules().any(|rule| !rule.reduce().is_empty()) {
-            return Ok(None);
-        }
+        // A reducing rule folds each group of its body's rows, and a
+        // group is keyed by the head entity: a group's row moves only
+        // when a row of the body for that entity appears or goes. So
+        // the entities whose body rows a change touches, on either
+        // side, bound what the fold can change, as they do for a plain
+        // rule, and re-deriving one of them folds its group again.
         let rules: Vec<DeductiveRule> = bundle.rules().cloned().collect();
         let mut targets = BTreeSet::new();
         for rule in &rules {

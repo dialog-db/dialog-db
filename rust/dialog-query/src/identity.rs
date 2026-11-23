@@ -5,9 +5,10 @@
 //! values under the definition's own type, with an absent optional field left
 //! out:
 //!
-//! - an attribute, under [`ATTRIBUTE`], maps `the` to the relations it reads
-//!   (a list of symbols, best first), `as` to the entity naming its type,
-//!   `pick` to the entity naming its pick and `among` to the values it lists;
+//! - an attribute, under [`ATTRIBUTE`], maps `the` to the symbol of the
+//!   relation it reads, `cardinality` to the symbol naming its cardinality
+//!   (`one` or `many`), `as` to the entity naming its type and `among` to the
+//!   values it lists;
 //! - a concept, under [`CONCEPT`], maps each of its attributes, by the
 //!   attribute's reference, to the field's options: `optional` when the field
 //!   is optional and `conforms` to the reference of the concept its value must
@@ -53,12 +54,16 @@ pub(crate) mod field {
     /// `as`: the type an attribute declares.
     pub(crate) const AS: Reference =
         Reference::from_hex("2240668c6db6dabfff3e400bbc8376224209b067a2c991917ffde774797181cc");
-    /// `pick`: an attribute's pick.
+    /// `pick`: the pick the release before this one hashed an attribute
+    /// by, which [`migration`](crate::migration) reproduces.
     pub(crate) const PICK: Reference =
         Reference::from_hex("0f0d6b6545c99929aac5463ab8ad362a84bb0ada084aa06500a45ceafcb5d00f");
     /// `among`: the values an attribute lists.
     pub(crate) const AMONG: Reference =
         Reference::from_hex("d1e96125c25fead1a441f04f681c25cb095b08748fbabaf12b044ae4c0f65099");
+    /// `cardinality`: how many claims an attribute's cell holds.
+    pub(crate) const CARDINALITY: Reference =
+        Reference::from_hex("53fe9dc362646cad45a9bbbb2833ee4836f2ff436a48d7ee953d3a53788894ea");
     /// `optional`: a concept field that may be absent.
     pub(crate) const OPTIONAL: Reference =
         Reference::from_hex("01eef36ab3d2ace67169e6676162fcfe9e313b226dcb4b7b892ff75fe99b5524");
@@ -106,6 +111,7 @@ mod tests {
             ("as", field::AS),
             ("pick", field::PICK),
             ("among", field::AMONG),
+            ("cardinality", field::CARDINALITY),
             ("optional", field::OPTIONAL),
             ("conforms", field::CONFORMS),
         ] {

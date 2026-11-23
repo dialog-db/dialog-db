@@ -1,0 +1,31 @@
+{
+  "scenario": "concept-optional",
+  "size": 1000,
+  "profile": "release",
+  "outcome": {
+    "rows": 1000
+  },
+  "counters": {
+    "archive.get": 0,
+    "archive.get.bytes": 0,
+    "archive.put": 0,
+    "archive.put.bytes": 0,
+    "span.apply_batch_reusing": 0,
+    "span.buffer_records": 0,
+    "span.commit": 0,
+    "span.resolve_bundle": 1,
+    "span.resolve_rules": 13,
+    "span.seal_batch": 0,
+    "span.settle": 0,
+    "span.write_instructions": 0
+  },
+  "instructions": 163712204,
+  "instructions_outside_allocator": 133605707,
+  "allocations": {
+    "alloc.bytes": 33073647,
+    "alloc.calls": 82633,
+    "free.calls": 81904,
+    "realloc.calls": 19356,
+    "realloc.from.bytes": 6650448
+  }
+}

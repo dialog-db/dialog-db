@@ -53,7 +53,7 @@ impl<I: Importer + Unpin + ConditionalSend> Import<'_, I> {
     {
         let instructions = self.importer.filter_map(|result| async {
             match result {
-                Ok(fact) => Some(Instruction::Assert(fact, dialog_corpus::Pick::All)),
+                Ok(fact) => Some(Instruction::Assert(fact, dialog_corpus::Cardinality::Many)),
                 Err(error) => {
                     eprintln!("Skipping incompatible datum: {error}");
                     None

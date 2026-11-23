@@ -90,6 +90,9 @@ impl ValueBound {
 /// be very slow and is often not what you want). To avoid this, always be sure
 /// to specify at least one field of the [`Selector`] before submitting
 /// a query!
+///
+/// A layer constrains a selector too ([`Selector::only_in`]): one naming
+/// a layer and nothing else reads every [`Fact`] of that layer.
 #[derive(Debug, Clone)]
 pub struct Selector<State>
 where
@@ -146,6 +149,10 @@ where
     /// Upper bound on the value: selected [`Fact`]s' values must be
     /// `<=` (or `<`, when not inclusive) this.
     value_upper: Option<ValueBound>,
+    /// The layer selected [`Fact`]s must be read from, when a read is over
+    /// several. A store holding one layer ignores it; a read over several
+    /// takes rows from this one alone.
+    layer: Option<Entity>,
     state_type: PhantomData<State>,
 }
 
@@ -171,6 +178,7 @@ struct SelectorIdentity<'a> {
     value_prefix: Option<&'a str>,
     value_lower: Option<(Vec<u8>, bool)>,
     value_upper: Option<(Vec<u8>, bool)>,
+    layer: Option<&'a Entity>,
 }
 
 impl<State> Selector<State>
@@ -194,6 +202,7 @@ where
             value_prefix: self.value_prefix.as_deref(),
             value_lower: bound(&self.value_lower),
             value_upper: bound(&self.value_upper),
+            layer: self.layer.as_ref(),
         }
     }
 }
@@ -237,6 +246,7 @@ impl Selector<Unconstrained> {
             value_prefix: None,
             value_lower: None,
             value_upper: None,
+            layer: None,
             state_type: PhantomData,
         }
     }
@@ -270,6 +280,7 @@ where
             value_prefix: None,
             value_lower: None,
             value_upper: None,
+            layer: self.layer.clone(),
             state_type: PhantomData,
         })
     }
@@ -324,6 +335,44 @@ where
         self.value_upper.as_ref()
     }
 
+    /// The layer selected [`Fact`]s are read from, when one is named.
+    pub fn layer(&self) -> Option<&Entity> {
+        self.layer.as_ref()
+    }
+
+    /// Read from `layer` alone, where a read is over several layers. It
+    /// constrains no key range, so it leaves the selector's state as it
+    /// is.
+    pub fn in_layer(mut self, layer: Entity) -> Selector<State> {
+        self.layer = Some(layer);
+        self
+    }
+
+    /// Read every [`Fact`] of `layer`, and nothing of any other: like
+    /// [`in_layer`](Self::in_layer), but the layer alone constrains the
+    /// selector, so a selector naming nothing else is a scan of the whole
+    /// layer. A read over several layers takes that layer's rows alone,
+    /// which for a layer held in memory is cheap. A store holding one
+    /// layer reads all it holds, which for a tree is a scan of the whole
+    /// entity index: naming the primary, or a layer kept as a tree, so is
+    /// legal but costs what reading the whole tree costs.
+    pub fn only_in(self, layer: Entity) -> Selector<Constrained> {
+        Selector::<Constrained> {
+            entity: self.entity,
+            attribute: self.attribute,
+            value: self.value,
+            entity_prefix: self.entity_prefix,
+            attribute_prefix: self.attribute_prefix,
+            attribute_name: self.attribute_name,
+            name_shape: self.name_shape,
+            value_prefix: self.value_prefix,
+            value_lower: self.value_lower,
+            value_upper: self.value_upper,
+            layer: Some(layer),
+            state_type: PhantomData,
+        }
+    }
+
     /// Set the [`Relation`] field (the predicate) of the [`Selector`]
     pub fn the(self, attribute: Relation) -> Selector<Constrained> {
         Selector::<Constrained> {
@@ -337,6 +386,7 @@ where
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
+            layer: self.layer.clone(),
             state_type: PhantomData,
         }
     }
@@ -354,6 +404,7 @@ where
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
+            layer: self.layer.clone(),
             state_type: PhantomData,
         }
     }
@@ -371,6 +422,7 @@ where
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
+            layer: self.layer.clone(),
             state_type: PhantomData,
         }
     }
@@ -446,6 +498,7 @@ where
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
+            layer: self.layer.clone(),
             state_type: PhantomData,
         }
     }
@@ -466,6 +519,7 @@ where
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
+            layer: self.layer.clone(),
             state_type: PhantomData,
         }
     }
@@ -492,6 +546,7 @@ where
             value_prefix: Some(prefix.into()),
             value_lower: self.value_lower,
             value_upper: self.value_upper,
+            layer: self.layer.clone(),
             state_type: PhantomData,
         }
     }
@@ -559,6 +614,7 @@ where
             value_prefix: self.value_prefix,
             value_lower: Some(bound),
             value_upper: self.value_upper,
+            layer: self.layer.clone(),
             state_type: PhantomData,
         }
     }
@@ -575,6 +631,7 @@ where
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: Some(bound),
+            layer: self.layer.clone(),
             state_type: PhantomData,
         }
     }

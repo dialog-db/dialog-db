@@ -2,6 +2,14 @@ mod persistent;
 pub use persistent::*;
 
 mod archive;
+#[cfg(any(test, feature = "helpers"))]
+pub(crate) use archive::buffer_decodes;
+
+mod rows;
+pub use rows::{KeyParts, MAX_PARTS, NodeRows, RowsKind};
+
+mod view;
+pub use view::{BufferView, IndexView, KeyCursor, SegmentView};
 
 mod attribution;
 pub use attribution::*;
