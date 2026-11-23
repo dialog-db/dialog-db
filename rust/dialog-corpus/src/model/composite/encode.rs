@@ -7,6 +7,10 @@ use super::layout::{LIST, MAP, TABLE, head, varint};
 use super::{CompositeError, MAX_DEPTH, SCAN_LIMIT};
 use crate::{NUMBER_BAND, Value, ValueDataType, encode_key_value};
 
+/// A scalar slot in a composite body refers to its canonical token-table
+/// entry by index.
+pub(super) const TOKEN_REF: u8 = 26;
+
 /// A composite's content, its keys and scalar values already in the bytes a
 /// slot holds them in.
 #[derive(Clone, Debug, PartialEq)]
@@ -50,16 +54,18 @@ impl Node {
         }
     }
 
-    fn keys<'a>(&'a self, into: &mut BTreeSet<&'a [u8]>) {
+    fn tokens<'a>(&'a self, into: &mut BTreeSet<&'a [u8]>) {
         match self {
-            Node::Slot(_) => {}
             Node::Map(entries) => {
                 for (key, value) in entries {
                     into.insert(key);
-                    value.keys(into);
+                    value.tokens(into);
                 }
             }
-            Node::List(items) => items.iter().for_each(|item| item.keys(into)),
+            Node::List(items) => items.iter().for_each(|item| item.tokens(into)),
+            Node::Slot(bytes) => {
+                into.insert(bytes);
+            }
         }
     }
 }
@@ -79,7 +85,7 @@ pub(super) fn canonical(node: &Node) -> Result<Vec<u8>, CompositeError> {
 /// refuses, which only measurement uses.
 pub(super) fn encode(node: &Node, limit: usize) -> Vec<u8> {
     let mut keys = BTreeSet::new();
-    node.keys(&mut keys);
+    node.tokens(&mut keys);
     let index: BTreeMap<&[u8], usize> = keys
         .iter()
         .enumerate()
@@ -105,7 +111,7 @@ fn body(node: &Node, index: &BTreeMap<&[u8], usize>, limit: usize, out: &mut Vec
                 .iter()
                 .map(|(key, value)| (index[key.as_slice()], slot(value, index, limit), value))
                 .collect();
-            held.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| order(&a.1, a.2, &b.1, b.2)));
+            held.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| order(a.2, b.2)));
             // Equal values under one table are equal slots.
             held.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
             let items: Vec<Vec<u8>> = held
@@ -125,9 +131,11 @@ fn body(node: &Node, index: &BTreeMap<&[u8], usize>, limit: usize, out: &mut Vec
 /// The order of two values under one key: a scalar's slot bytes, and a
 /// nested composite by its canonical bytes on its own, so the order does not
 /// depend on the table of the composite that holds them.
-fn order(left: &[u8], left_node: &Node, right: &[u8], right_node: &Node) -> Ordering {
+fn order(left_node: &Node, right_node: &Node) -> Ordering {
     match (left_node, right_node) {
-        (Node::Slot(_), _) | (_, Node::Slot(_)) => left.cmp(right),
+        (Node::Slot(a), Node::Slot(b)) => a.cmp(b),
+        (Node::Slot(a), _) => [a[0]].cmp(&[ValueDataType::Composite as u8]),
+        (_, Node::Slot(b)) => [ValueDataType::Composite as u8].cmp(&[b[0]]),
         (left, right) => {
             let mut a = vec![ValueDataType::Composite as u8];
             a.extend(encode(left, SCAN_LIMIT));
@@ -140,7 +148,11 @@ fn order(left: &[u8], left_node: &Node, right: &[u8], right_node: &Node) -> Orde
 
 fn slot(node: &Node, index: &BTreeMap<&[u8], usize>, limit: usize) -> Vec<u8> {
     match node {
-        Node::Slot(bytes) => bytes.clone(),
+        Node::Slot(bytes) => {
+            let mut out = vec![TOKEN_REF];
+            varint(index[bytes.as_slice()], &mut out);
+            out
+        }
         nested => {
             let mut out = vec![ValueDataType::Composite as u8];
             body(nested, index, limit, &mut out);
@@ -151,7 +163,7 @@ fn slot(node: &Node, index: &BTreeMap<&[u8], usize>, limit: usize) -> Vec<u8> {
 
 /// `head · count · size · offsets · items`: offsets, each of the narrowest
 /// width that holds the last, when there are more than `limit` items.
-fn write_seq(kind: u8, items: &[Vec<u8>], limit: usize, out: &mut Vec<u8>) {
+pub(super) fn write_seq(kind: u8, items: &[Vec<u8>], limit: usize, out: &mut Vec<u8>) {
     let count = items.len();
     let mut starts = Vec::with_capacity(count);
     let mut total = 0usize;

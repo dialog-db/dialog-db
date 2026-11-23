@@ -452,13 +452,16 @@ fn it_keeps_each_key_once_for_everything_nested() {
         (
             text("items"),
             Value::Composite(
-                Composite::list((0..20).map(|n| Value::Composite(node(&format!("n{n}"))))).unwrap(),
+                Composite::list((0..20).map(|_| Value::Composite(node("nested")))).unwrap(),
             ),
         ),
     ])
     .unwrap();
     let table = tree.table().unwrap();
-    assert_eq!(table.count, 3, "type, name and items, once each");
+    assert_eq!(
+        table.count, 6,
+        "three keys and three distinct scalar values, each once"
+    );
 }
 
 #[dialog_common::test]
@@ -510,17 +513,21 @@ fn it_refuses_to_nest_deeper_than_its_limit() {
     ));
 }
 
-/// The canonical bytes of `items` texts in a list, laid out by hand.
+/// The bytes of `items` in a list with its body offsets written `width` bytes
+/// wide, including layouts the canonical writer refuses.
 fn list_bytes(items: &[&str], width: usize) -> Vec<u8> {
-    let mut body = Vec::new();
+    let composite = Composite::list(items.iter().map(|item| text(item))).unwrap();
+    let bytes = composite.to_bytes();
+    let seq = composite.seq().unwrap();
+    let mut slots = Vec::new();
     let mut starts = Vec::new();
-    for item in items {
-        starts.push(body.len());
-        body.push(ValueDataType::String as u8);
-        body.extend_from_slice(item.as_bytes());
-        body.push(0);
+    let mut cursor = seq.items;
+    for _ in 0..seq.count {
+        starts.push(slots.len());
+        let end = slot_end(&bytes, cursor, seq.end).unwrap();
+        slots.extend_from_slice(&bytes[cursor..end]);
+        cursor = end;
     }
-    let mut out = vec![TABLE, 0, 0, layout::head(LIST, width), items.len() as u8];
     let offsets: Vec<u8> = if width == 0 {
         Vec::new()
     } else {
@@ -529,9 +536,14 @@ fn list_bytes(items: &[&str], width: usize) -> Vec<u8> {
             .flat_map(|start| (*start as u64).to_be_bytes()[8 - width..].to_vec())
             .collect()
     };
-    out.push((offsets.len() + body.len()) as u8);
+    let mut out = bytes[..composite.body].to_vec();
+    out.extend_from_slice(&[
+        layout::head(LIST, width),
+        items.len() as u8,
+        (offsets.len() + slots.len()) as u8,
+    ]);
     out.extend(offsets);
-    out.extend(body);
+    out.extend(slots);
     out
 }
 
@@ -556,9 +568,10 @@ fn it_writes_the_layout_the_documentation_draws() {
     );
     // A record's keys are symbols in the table, its entries their places.
     let record = Composite::record([(relation("geo/lat"), Value::Boolean(true))]).unwrap();
-    let mut expected = vec![TABLE, 1, 9, ValueDataType::Symbol as u8];
+    let mut expected = vec![TABLE, 2, 11, ValueDataType::Boolean as u8, 1];
+    expected.extend_from_slice(&[ValueDataType::Symbol as u8]);
     expected.extend_from_slice(b"geo/lat\0");
-    expected.extend_from_slice(&[MAP, 1, 3, 0, ValueDataType::Boolean as u8, 1]);
+    expected.extend_from_slice(&[MAP, 1, 3, 1, TOKEN_REF, 0]);
     assert_eq!(record.to_bytes().as_ref(), expected);
 
     // The drawing in design/composite-value.md.
@@ -570,10 +583,31 @@ fn it_writes_the_layout_the_documentation_draws() {
         ),
     ])
     .unwrap();
-    let mut expected = vec![TABLE, 2, 13, 3];
-    expected.extend_from_slice(b"items\0\x03type\0");
-    expected.extend_from_slice(&[MAP, 2, 20, 0, 22, LIST, 2, 6, 3, b'a', 0, 3, b'b', 0, 1, 1]);
+    let mut expected = vec![TABLE, 5, 27, ValueDataType::Entity as u8];
     expected.extend_from_slice(b"tuple:\0");
+    expected.extend_from_slice(&[ValueDataType::String as u8, b'a', 0]);
+    expected.extend_from_slice(&[ValueDataType::String as u8, b'b', 0]);
+    expected.extend_from_slice(&[ValueDataType::String as u8]);
+    expected.extend_from_slice(b"items\0");
+    expected.extend_from_slice(&[ValueDataType::String as u8]);
+    expected.extend_from_slice(b"type\0");
+    expected.extend_from_slice(&[
+        MAP,
+        2,
+        12,
+        3,
+        ValueDataType::Composite as u8,
+        LIST,
+        2,
+        4,
+        TOKEN_REF,
+        1,
+        TOKEN_REF,
+        2,
+        4,
+        TOKEN_REF,
+        0,
+    ]);
     assert_eq!(drawn.to_bytes().as_ref(), expected);
 }
 
@@ -668,40 +702,44 @@ const PINNED: [(&str, &str, &str); 6] = [
     (
         "record",
         concat!(
-            "0004210867656f2f6c6174000867656f2f6c6f6e0008782f636f756e74000878",
-            "2f6f6b000104120009184b9a010911fcd2ab02091806030201",
+            "00082f02010867656f2f6c6174000867656f2f6c6f6e0008782f636f756e7400",
+            "08782f6f6b000911fcd2ab09180609184b9a01040c011a07021a05031a06041a",
+            "00",
         ),
         "50ded4219243f1c813257bf01cf27a8a4ed98d036db724181a286202364b6aeb",
     ),
     (
         "map",
-        "00020603610003620001030e00036f6e6500000912f501091804",
+        "000511036100036200036f6e65000912f5091804010309001a02001a03011a04",
         "507f2af804513e2aeb7c9f4d7cf6aa22c3d59e21c6d855f0617a6d1eaa745bc0",
     ),
     (
         "list",
         concat!(
-            "0000000a1edc0200090012001b0024002d0036003f00480051005a0064006e00",
-            "780082008c009600a000aa00b400be00c800d200dc00e600f000fa0104010e01",
-            "1803656e74727920300003656e74727920310003656e74727920320003656e74",
-            "727920330003656e74727920340003656e74727920350003656e747279203600",
-            "03656e74727920370003656e74727920380003656e74727920390003656e7472",
-            "792031300003656e7472792031310003656e7472792031320003656e74727920",
-            "31330003656e7472792031340003656e7472792031350003656e747279203136",
-            "0003656e7472792031370003656e7472792031380003656e7472792031390003",
-            "656e7472792032300003656e7472792032310003656e7472792032320003656e",
-            "7472792032330003656e7472792032340003656e7472792032350003656e7472",
-            "792032360003656e7472792032370003656e7472792032380003656e74727920",
-            "323900",
+            "081edc0200090012001c00260030003a0044004e00580062006c0076007f0089",
+            "0093009d00a700b100bb00c500cf00d900e300ec00f500fe0107011001190365",
+            "6e74727920300003656e74727920310003656e7472792031300003656e747279",
+            "2031310003656e7472792031320003656e7472792031330003656e7472792031",
+            "340003656e7472792031350003656e7472792031360003656e74727920313700",
+            "03656e7472792031380003656e7472792031390003656e74727920320003656e",
+            "7472792032300003656e7472792032310003656e7472792032320003656e7472",
+            "792032330003656e7472792032340003656e7472792032350003656e74727920",
+            "32360003656e7472792032370003656e7472792032380003656e747279203239",
+            "0003656e74727920330003656e74727920340003656e74727920350003656e74",
+            "727920360003656e74727920370003656e74727920380003656e747279203900",
+            "061e59020406080a0c0e10121416181a1c1e20222426282a2c2e30323436383a",
+            "1a001a011a0c1a171a181a191a1a1a1b1a1c1a1d1a021a031a041a051a061a07",
+            "1a081a091a0a1a0b1a0d1a0e1a0f1a101a111a121a131a141a151a16",
         ),
         "0d3d1d606bc5137764482542ee31f38917510661669151f1f0d2d64be76c6a66",
     ),
     (
         "nested",
         concat!(
-            "00042c0867656f2f6c6174000867656f2f6c6f6e0008706c6163652f6e616d65",
-            "0008706c6163652f766973697473000102260203686f6d6500031602021a1601",
-            "020a0009180364010912facd160102080009180601091808",
+            "040948060f182432363a3d03686f6d65000867656f2f6c6174000867656f2f6c",
+            "6f6e0008706c6163652f6e616d650008706c6163652f766973697473000912fa",
+            "cd0918036409180609180801021c031a00041602021416010206011a06021a05",
+            "16010206011a07021a08",
         ),
         "34cad9fcd5b93b9bab76713956213614674465aa6da254179a924ec6e4cbda14",
     ),
@@ -745,19 +783,35 @@ fn it_writes_and_names_fixed_composites_alike_on_every_target() {
 fn it_writes_offsets_alike_on_every_target() {
     let [_, _, (_, list), ..] = pinned();
     let bytes = list.to_bytes();
-    assert_eq!(bytes[..4], [TABLE, 0, 0, layout::head(LIST, 2)]);
+    let body = list.seq().unwrap();
+    assert_eq!(body.kind, LIST);
+    assert_eq!(body.width, 1);
+    assert_eq!(
+        (1..body.count)
+            .map(|index| body.offset(&bytes, index).unwrap() - body.items)
+            .collect::<Vec<_>>(),
+        (1..body.count).map(|index| 2 * index).collect::<Vec<_>>()
+    );
     let many: Vec<String> = (0..=SCAN_LIMIT).map(|n| format!("i{n}")).collect();
-    let bytes = Composite::list(many.iter().map(|t| text(t)))
-        .unwrap()
-        .to_bytes()
-        .into_owned();
-    assert_eq!(bytes[..4], [TABLE, 0, 0, layout::head(LIST, 1)]);
-    assert_eq!(usize::from(bytes[4]), SCAN_LIMIT + 1);
-    // Eight one-byte offsets and nine items of four bytes (`03 i 0 00`).
-    assert_eq!(bytes[5], 44);
-    assert_eq!(bytes[6..14], [4, 8, 12, 16, 20, 24, 28, 32]);
-    assert_eq!(bytes[14..18], [3, b'i', b'0', 0]);
-    assert_eq!(bytes.len(), 6 + 44);
+    let many = Composite::list(many.iter().map(|t| text(t))).unwrap();
+    let bytes = many.to_bytes();
+    let table = many.table().unwrap();
+    assert_eq!(table.count, SCAN_LIMIT + 1);
+    assert_eq!(table.width, 1);
+    assert_eq!(
+        (1..table.count)
+            .map(|index| table.offset(&bytes, index).unwrap() - table.items)
+            .collect::<Vec<_>>(),
+        (1..table.count).map(|index| 4 * index).collect::<Vec<_>>()
+    );
+    let body = many.seq().unwrap();
+    assert_eq!(body.width, 1);
+    assert_eq!(
+        (1..body.count)
+            .map(|index| body.offset(&bytes, index).unwrap() - body.items)
+            .collect::<Vec<_>>(),
+        (1..body.count).map(|index| 2 * index).collect::<Vec<_>>()
+    );
 }
 
 #[dialog_common::test]
@@ -774,9 +828,26 @@ fn it_refuses_keys_out_of_order() {
 #[dialog_common::test]
 fn it_refuses_a_key_no_entry_uses() {
     let used = Composite::map([(text("a"), natural(1))]).unwrap();
-    let mut bytes = vec![TABLE, 2, 6, 3, b'a', 0, 3, b'b', 0];
-    bytes.extend_from_slice(&used.to_bytes()[6..]);
-    assert!(matches!(refused(&bytes), CompositeError::NotCanonical));
+    let extra = Composite::map([(text("z"), natural(2))]).unwrap();
+    let mut tokens: Vec<Vec<u8>> = used
+        .atom_tokens()
+        .iter()
+        .map(|token| token.to_vec())
+        .collect();
+    tokens.push(
+        extra
+            .atom_tokens()
+            .into_iter()
+            .find(|token| token.first() == Some(&(ValueDataType::Number as u8)))
+            .unwrap()
+            .to_vec(),
+    );
+    tokens.sort();
+    let tokens: Vec<&[u8]> = tokens.iter().map(Vec::as_slice).collect();
+    assert!(matches!(
+        Composite::from_token_parts(&tokens, used.token_body()),
+        Err(CompositeError::NotCanonical)
+    ));
 }
 
 #[dialog_common::test]
@@ -841,7 +912,9 @@ fn it_refuses_an_offset_that_is_not_where_its_item_is() {
     let many: Vec<&str> = many.iter().map(String::as_str).collect();
     let mut bytes = list_bytes(&many, 1);
     // The first offset, of the second item, one byte late.
-    bytes[6] += 1;
+    let table = layout::seq(&bytes, 0).unwrap();
+    let body = layout::seq(&bytes, table.end).unwrap();
+    bytes[body.offsets] += 1;
     assert!(matches!(refused(&bytes), CompositeError::Malformed));
 }
 
