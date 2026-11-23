@@ -263,7 +263,7 @@ impl Extents {
         pick: impl FnOnce(&Owned) -> bool,
     ) -> Option<Owned> {
         let at = self.idle.iter().position(|owned| owned.record == record)?;
-        if !pick(&self.idle[at]) {
+        if !pick(self.idle.get(at)?) {
             return None;
         }
         let owned = self.idle.swap_remove(at);
