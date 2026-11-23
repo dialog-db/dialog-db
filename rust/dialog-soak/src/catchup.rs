@@ -71,10 +71,13 @@
 //! nothing is pending: those reads drive the hints, in the setup. What a
 //! measured poll enqueues runs in the next measured phase, as it would
 //! on a replica.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use anyhow::{Context as _, Result};
 use dialog_capability::Provider;
-use dialog_corpus::{Fact, Instruction, Pick, Selector, Value};
+use dialog_corpus::{Cardinality, Fact, Instruction, Selector, Value};
 use dialog_query::{Query, Term};
 use dialog_remote_fs::simulation;
 use dialog_repository::Branch;
@@ -115,7 +118,7 @@ fn toggle(entities: usize, k: usize, j: usize, round: usize) -> Result<Instructi
             is: Value::String(format!("touched-{round}")),
             cause: None,
         },
-        Pick::Last,
+        Cardinality::One,
     ))
 }
 

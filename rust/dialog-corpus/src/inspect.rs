@@ -1,11 +1,14 @@
-//! Tree-node inspection: pure decoders over node blocks an
-//! [`archive::Load`](dialog_effects::archive::Load) fetches.
+//! Tree-node inspection: pure readings of a search-tree node.
 //!
-//! Together these back the query engine's tree procedures (`tree/node`,
-//! `tree/span`, `tree/key`, `tree/manifest`): a `Load` fetches a raw
-//! node block by content hash through the evaluation environment, and
-//! the `inspect_*` functions project the node's *logical model* out of
-//! the fetched bytes without touching storage:
+//! Together these back the query engine's tree resolvers (`tree/node`,
+//! `tree/span`, `tree/entry`, `tree/block`): a resolver asks the
+//! evaluation environment for a node by its content hash, and the
+//! functions here project the node's *logical model* out of it without
+//! touching storage. Each reading comes in two forms: over a decoded
+//! node ([`summary`], [`spans`], [`keys`], [`entries`],
+//! [`blob_records`], [`manifest`]), which is what an environment hands
+//! out and keeps, and over a block's bytes (`inspect_*`), which decodes
+//! first.
 //!
 //! - a node is an index (a table of spans) or a segment (a run of
 //!   entries), with a byte size, a scale estimate, and pending novelty;
@@ -32,7 +35,7 @@
 
 use crate::Blake3Hash;
 use crate::tree::CorpusNode;
-use dialog_search_tree::{Buffer, Distribution, Geometric, Hashed, Manifest, Rank};
+use dialog_search_tree::{Buffer, Distribution, Geometric, Hashed, Manifest, NoveltyOp, Rank};
 use rkyv::deserialize;
 use rkyv::rancor::Error as RkyvError;
 
@@ -40,7 +43,7 @@ use crate::key::varkey::{self, ValuePayload};
 use crate::{
     ATTRIBUTE_KEY_TAG, AttributeKey, BLOB_KEY_TAG, BlobRecord, CONTEXT_KEY_LENGTH, CONTEXT_KEY_TAG,
     COVERAGE_KEY_TAG, Datum, DialogCorpusError, ENTITY_KEY_TAG, EntityKey, HISTORY_KEY_TAG, Key,
-    KeyView, State, VALUE_KEY_TAG, Value, ValueKey, decode_value,
+    KeyView, State, VALUE_KEY_TAG, Value, ValueDataType, ValueKey, decode_value,
 };
 
 /// The raw content hash a node's `Load` resolves: the same 32 bytes a
@@ -113,8 +116,12 @@ pub struct KeySummary {
 /// causes, and coverage all ride here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntrySummary {
-    /// Position within the segment.
+    /// Position within the segment, or among an index node's buffered
+    /// operations.
     pub at: u64,
+    /// For an operation an index node buffers, the position of the span
+    /// it is buffered against. `None` for a segment's entry.
+    pub span: Option<u64>,
     /// The entry's variable-length index key bytes.
     pub key: Vec<u8>,
     /// `"asserted"` for a stored datum, `"removed"` for a tombstone.
@@ -188,8 +195,18 @@ pub struct ManifestSummary {
 
 /// Decode the node behind `bytes` into its [`NodeSummary`].
 pub fn inspect_node(bytes: Vec<u8>) -> Result<NodeSummary, DialogCorpusError> {
-    let size = bytes.len() as u64;
-    let node = CorpusNode::try_from(Buffer::from(bytes))?;
+    summary(&CorpusNode::try_from(Buffer::from(bytes))?)
+}
+
+/// What `node` is: its kind, the size of its block, and its counts.
+///
+/// This and the functions beside it read a node already decoded, which
+/// is what an environment's node layer hands out and keeps
+/// ([`nodes::Read`](dialog_search_tree::nodes::Read)): a reader that asks
+/// for several parts of one node decodes it once. The `inspect_*`
+/// functions are the same readings for a caller holding only bytes.
+pub fn summary(node: &CorpusNode) -> Result<NodeSummary, DialogCorpusError> {
+    let size = node.buffer()?.as_ref().len() as u64;
     let scale = node.scale().as_u8() as u64;
 
     Ok(match node.as_index() {
@@ -217,7 +234,12 @@ pub fn inspect_node(bytes: Vec<u8>) -> Result<NodeSummary, DialogCorpusError> {
 /// span, in key order. A segment has no spans and yields an empty
 /// vector (not an error — queries union over mixed levels).
 pub fn inspect_spans(bytes: Vec<u8>) -> Result<Vec<SpanSummary>, DialogCorpusError> {
-    let node = CorpusNode::try_from(Buffer::from(bytes))?;
+    spans(&CorpusNode::try_from(Buffer::from(bytes))?)
+}
+
+/// One [`SpanSummary`] per span of the index node `node`, in key order;
+/// none for a segment.
+pub fn spans(node: &CorpusNode) -> Result<Vec<SpanSummary>, DialogCorpusError> {
     let Ok(index) = node.as_index() else {
         return Ok(Vec::new());
     };
@@ -247,7 +269,7 @@ pub fn inspect_spans(bytes: Vec<u8>) -> Result<Vec<SpanSummary>, DialogCorpusErr
             rank,
             novelty: index
                 .buffer_for(at)
-                .map(|buffer| buffer.count.to_native() as u64)
+                .map(|buffer| buffer.count() as u64)
                 .unwrap_or(0),
         });
     }
@@ -258,7 +280,12 @@ pub fn inspect_spans(bytes: Vec<u8>) -> Result<Vec<SpanSummary>, DialogCorpusErr
 /// entry, in entry order. An index node has no entries and yields an
 /// empty vector.
 pub fn inspect_keys(bytes: Vec<u8>) -> Result<Vec<KeySummary>, DialogCorpusError> {
-    let node = CorpusNode::try_from(Buffer::from(bytes))?;
+    keys(&CorpusNode::try_from(Buffer::from(bytes))?)
+}
+
+/// One [`KeySummary`] per entry of the segment node `node`, in entry
+/// order; none for an index.
+pub fn keys(node: &CorpusNode) -> Result<Vec<KeySummary>, DialogCorpusError> {
     if node.as_index().is_ok() {
         return Ok(Vec::new());
     }
@@ -274,77 +301,116 @@ pub fn inspect_keys(bytes: Vec<u8>) -> Result<Vec<KeySummary>, DialogCorpusError
     Ok(keys)
 }
 
-/// Decode the segment node behind `bytes` into one [`EntrySummary`]
-/// per entry, in entry order — the claim-metadata (value) side of each
-/// entry. Blob-index entries carry no claim metadata and surface
+/// Decode the node behind `bytes` into one [`EntrySummary`] per entry,
+/// in entry order — the claim-metadata (value) side of each entry; see
+/// [`entries`]. Blob-index entries carry no claim metadata and surface
 /// through [`inspect_blob_records`] instead; they still appear here
-/// (with empty metadata) so counts line up. An index node yields an
-/// empty vector.
+/// (with empty metadata) so counts line up.
 pub fn inspect_entries(bytes: Vec<u8>) -> Result<Vec<EntrySummary>, DialogCorpusError> {
-    let node = CorpusNode::try_from(Buffer::from(bytes))?;
-    if node.as_index().is_ok() {
-        return Ok(Vec::new());
+    entries(&CorpusNode::try_from(Buffer::from(bytes))?)
+}
+
+/// One [`EntrySummary`] per entry of the segment node `node`, in entry
+/// order. For an index node, one per operation it buffers, in span
+/// order and within a span in buffer order, each naming its span: the
+/// writes headed for a subtree that are not written down in it yet.
+pub fn entries(node: &CorpusNode) -> Result<Vec<EntrySummary>, DialogCorpusError> {
+    if let Ok(index) = node.as_index() {
+        let mut entries = Vec::with_capacity(index.novelty_len());
+        for buffer in index.buffers() {
+            let span = u64::from(buffer.child());
+            let mut cursor = buffer.keys::<Key>()?;
+            let mut op = 0;
+            while let Some((_, key)) = cursor.next_key()? {
+                let state = match buffer.op_at(op)? {
+                    NoveltyOp::Assert(state) => state,
+                    // A buffered retraction removes the key, as a
+                    // tombstone in a segment does.
+                    NoveltyOp::Retract => State::Removed,
+                };
+                op += 1;
+                let at = entries.len() as u64;
+                entries.push(entry(at, Some(span), key.to_vec(), state));
+            }
+        }
+        return Ok(entries);
     }
     let segment = node.as_segment()?;
     let mut entries = Vec::with_capacity(segment.len());
     let mut cursor = segment.keys::<Key>()?;
     while let Some((at, key)) = cursor.next_key()? {
-        let key = key.to_vec();
-        // Lenient spill detection: only fact-shaped keys carry a value
-        // payload; anything that does not parse is simply not spilled.
-        let spill = varkey::parse_key(&key).and_then(|parts| match parts.value {
+        let state: State<Datum> = deserialize::<State<Datum>, RkyvError>(segment.value_at(at)?)
+            .map_err(|error| DialogCorpusError::Tree(format!("entry decode: {error}")))?;
+        entries.push(entry(at as u64, None, key.to_vec(), state));
+    }
+    Ok(entries)
+}
+
+/// The summary of one entry, stored or buffered.
+fn entry(at: u64, span: Option<u64>, key: Vec<u8>, state: State<Datum>) -> EntrySummary {
+    // Lenient spill detection: only fact-shaped keys carry a value
+    // payload; anything that does not parse is simply not spilled. A
+    // coverage key carries a hash of the covered value in the spilled form
+    // whatever the value's size, to match claims by it; no value is stored
+    // under it, so it spills nothing.
+    let spill = varkey::parse_key(&key)
+        .filter(|parts| parts.tag != COVERAGE_KEY_TAG)
+        .and_then(|parts| match parts.value {
             ValuePayload::Spilled { hash, .. } => Blake3Hash::try_from(hash.as_slice()).ok(),
             ValuePayload::Inline(_) => None,
         });
-        let state: State<Datum> = deserialize::<State<Datum>, RkyvError>(segment.value_at(at)?)
-            .map_err(|error| DialogCorpusError::Tree(format!("entry decode: {error}")))?;
-        entries.push(match state {
-            State::Added(datum) => EntrySummary {
-                at: at as u64,
-                key,
-                state: "asserted",
-                retraction: datum.retraction,
-                origin: datum
-                    .version
-                    .as_ref()
-                    .map(|version| version.origin.0.to_vec())
-                    .unwrap_or_default(),
-                edition: datum
-                    .version
-                    .as_ref()
-                    .map(|version| version.edition.value())
-                    .unwrap_or_default(),
-                cause: datum
-                    .cause
-                    .as_ref()
-                    .map(|cause| cause.len() as u64)
-                    .unwrap_or_default(),
-                collapsed: datum.collapsed.len() as u64,
-                supersedes: datum.supersedes.len() as u64,
-                spill,
-            },
-            State::Removed => EntrySummary {
-                at: at as u64,
-                key,
-                state: "removed",
-                retraction: false,
-                origin: Vec::new(),
-                edition: 0,
-                cause: 0,
-                collapsed: 0,
-                supersedes: 0,
-                spill,
-            },
-        });
+    match state {
+        State::Added(datum) => EntrySummary {
+            at,
+            span,
+            key,
+            state: "asserted",
+            retraction: datum.retraction,
+            origin: datum
+                .version
+                .as_ref()
+                .map(|version| version.origin.0.to_vec())
+                .unwrap_or_default(),
+            edition: datum
+                .version
+                .as_ref()
+                .map(|version| version.edition.value())
+                .unwrap_or_default(),
+            cause: datum
+                .cause
+                .as_ref()
+                .map(|cause| cause.len() as u64)
+                .unwrap_or_default(),
+            collapsed: datum.collapsed.len() as u64,
+            supersedes: datum.supersedes.len() as u64,
+            spill,
+        },
+        State::Removed => EntrySummary {
+            at,
+            span,
+            key,
+            state: "removed",
+            retraction: false,
+            origin: Vec::new(),
+            edition: 0,
+            cause: 0,
+            collapsed: 0,
+            supersedes: 0,
+            spill,
+        },
     }
-    Ok(entries)
 }
 
 /// Decode the segment node behind `bytes` into one [`BlobEntrySummary`]
 /// per blob-index entry. Non-blob entries (and index nodes) yield no
 /// rows.
 pub fn inspect_blob_records(bytes: Vec<u8>) -> Result<Vec<BlobEntrySummary>, DialogCorpusError> {
-    let node = CorpusNode::try_from(Buffer::from(bytes))?;
+    blob_records(&CorpusNode::try_from(Buffer::from(bytes))?)
+}
+
+/// One [`BlobEntrySummary`] per blob-index entry of the segment node
+/// `node`; none for an index.
+pub fn blob_records(node: &CorpusNode) -> Result<Vec<BlobEntrySummary>, DialogCorpusError> {
     if node.as_index().is_ok() {
         return Ok(Vec::new());
     }
@@ -371,7 +437,11 @@ pub fn inspect_blob_records(bytes: Vec<u8>) -> Result<Vec<BlobEntrySummary>, Dia
 
 /// Decode the manifest embedded in the node behind `bytes`.
 pub fn inspect_manifest(bytes: Vec<u8>) -> Result<ManifestSummary, DialogCorpusError> {
-    let node = CorpusNode::try_from(Buffer::from(bytes))?;
+    manifest(&CorpusNode::try_from(Buffer::from(bytes))?)
+}
+
+/// The manifest `node` embeds.
+pub fn manifest(node: &CorpusNode) -> Result<ManifestSummary, DialogCorpusError> {
     let manifest: Manifest = node.manifest()?;
     Ok(ManifestSummary {
         version: node.layout_version(),
@@ -537,7 +607,22 @@ pub fn key_components(bytes: &[u8]) -> Vec<KeyComponent> {
                 synthetic.push(ENTITY_KEY_TAG);
                 synthetic.extend_from_slice(tail);
                 let tail_key = Key::from(synthetic);
-                push_fields(&mut out, [0, 1, 2, 3], fact_fields(&EntityKey(&tail_key)));
+                let fields = fact_fields(&EntityKey(&tail_key));
+                if tag == COVERAGE_KEY_TAG {
+                    // The covered value's hash, not a spilled value, under
+                    // a type byte fixed at `Bytes` (see `coverage_key`).
+                    let [entity, attribute, _, value] = fields;
+                    out.push(entity);
+                    out.push(attribute);
+                    let hash = value.text.trim_start_matches("spill:").to_owned();
+                    out.push(KeyComponent::new(
+                        "reference",
+                        format!("value:{hash}"),
+                        value.bytes,
+                    ));
+                    return out;
+                }
+                push_fields(&mut out, [0, 1, 2, 3], fields);
             }
         }
         // Context: tag ‖ origin, one watermark per origin.
@@ -564,27 +649,171 @@ pub fn key_components(bytes: &[u8]) -> Vec<KeyComponent> {
 }
 
 /// Decompose a span separator. A separator is a front-coded *prefix*
-/// of a full key: the column framing a full-key parse relies on lies
-/// past the truncation, so this is deliberately lenient — the tag
-/// component plus the post-tag prefix bytes as one `prefix` component
-/// (utf8-lossy text, since the leading columns are textual for every
-/// fact ordering). The empty separator is the leftmost span's boundary
-/// and yields the `min` marker.
+/// of a full key, cut wherever it stops telling its neighbors apart, so
+/// a full-key parse would fail past the cut. This reads it leniently,
+/// field by field as far as the prefix reaches: the tag, then the
+/// leading fields of the key's ordering, each named for what it is.
+/// The field the cut falls in is reported as far as it goes. The empty
+/// separator is the leftmost span's boundary and yields the `min`
+/// marker.
+///
+/// A separator that is itself a whole key, or a forced seam's separator
+/// (the last key before the seam padded with zero bytes past the bound),
+/// reads as that key, the padding as a part of kind `padding`.
 pub fn separator_components(bytes: &[u8]) -> Vec<KeyComponent> {
     if bytes.is_empty() {
         return vec![KeyComponent::new("min", "⊥ start".into(), Vec::new())];
     }
+    // A forced seam's separator is the last key before the seam, padded
+    // with zero bytes past the separator bound (`frame_separator`): the
+    // key reads as a key, and the padding says what it is.
+    // Asked first: a value that runs to the end of its key, as a string's
+    // does, would take the zeros in. A real key seldom ends in a run of
+    // zero bytes this long; a padded one is taken to the bound.
+    // A key may end in zero bytes of its own (a string's terminator), so
+    // the shortest whole key the zeros leave is the one padded.
+    let zeros = bytes.iter().rev().take_while(|byte| **byte == 0).count();
+    if zeros >= FORCED_PADDING {
+        let start = bytes.len() - zeros;
+        let end = (start..=start + KEY_ZEROS.min(zeros)).find(|end| whole_key(&bytes[..*end]));
+        if let Some(end) = end {
+            let mut parts = key_components(&bytes[..end]);
+            let padding = bytes.len() - end;
+            parts.push(KeyComponent::new(
+                "padding",
+                format!("+{padding} zero bytes: a forced seam after this key"),
+                bytes[end..].to_vec(),
+            ));
+            return parts;
+        }
+    }
+    // A separator that is a whole key reads as one.
+    if whole_key(bytes) {
+        return key_components(bytes);
+    }
     let tag = bytes[0];
     let mut out = vec![KeyComponent::new("index", tag_name(tag).into(), vec![tag])];
     let prefix = &bytes[1..];
-    if !prefix.is_empty() {
-        out.push(KeyComponent::new(
-            "prefix",
-            String::from_utf8_lossy(prefix).into_owned(),
+    if prefix.is_empty() {
+        return out;
+    }
+    match tag {
+        ENTITY_KEY_TAG => fields(&mut out, prefix, &FACT_FIELDS),
+        ATTRIBUTE_KEY_TAG => fields(&mut out, prefix, &["attribute", "entity", "vtype", "value"]),
+        VALUE_KEY_TAG => fields(&mut out, prefix, &["vtype", "value", "attribute", "entity"]),
+        // A history or coverage key opens with its version: a 32-byte
+        // origin and an 8-byte big-endian edition, binary that reads as
+        // nothing as text. Each is named only when wholly present; what
+        // follows is the fact in the entity ordering.
+        HISTORY_KEY_TAG | COVERAGE_KEY_TAG => match prefix.get(..32) {
+            None => out.push(KeyComponent::new("opaque", hex(prefix), prefix.to_vec())),
+            Some(origin) => {
+                out.push(KeyComponent::new(
+                    "origin",
+                    format!("origin:{}", hex(origin)),
+                    origin.to_vec(),
+                ));
+                let rest = &prefix[32..];
+                match rest.get(..8) {
+                    Some(edition) => {
+                        let number = edition
+                            .iter()
+                            .fold(0u64, |number, byte| (number << 8) | u64::from(*byte));
+                        out.push(KeyComponent::new(
+                            "edition",
+                            format!("@{number}"),
+                            edition.to_vec(),
+                        ));
+                        fields(&mut out, &rest[8..], &FACT_FIELDS);
+                    }
+                    None if !rest.is_empty() => {
+                        out.push(KeyComponent::new("opaque", hex(rest), rest.to_vec()))
+                    }
+                    None => {}
+                }
+            }
+        },
+        CONTEXT_KEY_TAG => out.push(KeyComponent::new(
+            "origin",
+            format!("origin:{}", hex(prefix)),
             prefix.to_vec(),
-        ));
+        )),
+        // Part of a content hash: binary, read as hex.
+        BLOB_KEY_TAG => out.push(KeyComponent::new(
+            "blob",
+            format!("blob:{}", hex(prefix)),
+            prefix.to_vec(),
+        )),
+        // An unknown tag has no field layout to read it by.
+        _ => out.push(KeyComponent::new("opaque", hex(prefix), prefix.to_vec())),
     }
     out
+}
+
+/// The fewest trailing zero bytes read as a forced seam's padding.
+const FORCED_PADDING: usize = 8;
+
+/// The most zero bytes a key ends in of its own.
+const KEY_ZEROS: usize = 4;
+
+/// Whether `bytes` is exactly one whole key, not a prefix of one.
+fn whole_key(bytes: &[u8]) -> bool {
+    match bytes.first() {
+        None => false,
+        Some(&BLOB_KEY_TAG) => bytes.len() == 33,
+        Some(&CONTEXT_KEY_TAG) => bytes.len() == CONTEXT_KEY_LENGTH,
+        Some(_) => varkey::parse_key_layout(bytes).is_some(),
+    }
+}
+
+/// A fact's fields in the entity ordering.
+const FACT_FIELDS: [&str; 4] = ["entity", "attribute", "vtype", "value"];
+
+/// Read the key fields in `bytes` in `order`, as far as they reach. A
+/// value-type tag is one byte; any other field runs to the next NUL, but
+/// a value that ends the ordering runs to the end, since a value may
+/// hold NULs.
+fn fields(out: &mut Vec<KeyComponent>, bytes: &[u8], order: &[&'static str]) {
+    let mut rest = bytes;
+    let mut vtype: Option<ValueDataType> = None;
+    for (at, kind) in order.iter().enumerate() {
+        if rest.is_empty() {
+            return;
+        }
+        if *kind == "vtype" {
+            let tag = ValueDataType::from(rest[0]);
+            out.push(KeyComponent::new("vtype", tag.to_string(), vec![rest[0]]));
+            vtype = Some(tag);
+            rest = &rest[1..];
+            continue;
+        }
+        let last = at + 1 == order.len();
+        let (field, tail) = match rest.iter().position(|byte| *byte == 0) {
+            Some(end) if !(last && *kind == "value") => (&rest[..end], &rest[end + 1..]),
+            _ => (rest, &rest[rest.len()..]),
+        };
+        rest = tail;
+        if field.is_empty() {
+            continue;
+        }
+        let text = match (*kind, vtype) {
+            ("value", Some(ValueDataType::Bytes | ValueDataType::Record)) => hex(field),
+            _ => legible(field),
+        };
+        out.push(KeyComponent::new(kind, text, field.to_vec()));
+    }
+    if !rest.is_empty() {
+        out.push(KeyComponent::new("opaque", hex(rest), rest.to_vec()));
+    }
+}
+
+/// `bytes` as text, a byte that is not printable read as `·`, so a
+/// separator cut mid-field never shows control characters.
+fn legible(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .map(|char| if char.is_control() { '·' } else { char })
+        .collect()
 }
 
 #[cfg(test)]
@@ -640,7 +869,7 @@ mod tests {
         // Datum construction. One op left, one right.
         let novelty = vec![
             NoveltyEntry {
-                key: low,
+                key: low.clone(),
                 op: NoveltyOp::Retract,
             },
             NoveltyEntry {
@@ -670,6 +899,20 @@ mod tests {
         assert_eq!(spans[1].separator, high);
         assert!(spans[1].until.is_empty(), "last span is +∞");
 
+        // The buffered ops are the index's entries, each on its span.
+        let entries = inspect_entries(bytes.clone())?;
+        let placed: Vec<(u64, Option<u64>, &str, &[u8])> = entries
+            .iter()
+            .map(|entry| (entry.at, entry.span, entry.state, entry.key.as_slice()))
+            .collect();
+        assert_eq!(
+            placed,
+            vec![
+                (0, Some(0), "removed", low.as_slice()),
+                (1, Some(1), "removed", high.as_slice()),
+            ]
+        );
+
         let manifest = inspect_manifest(bytes)?;
         assert_eq!(manifest.version, dialog_search_tree::TAGGED_LAYOUT);
         assert_eq!(manifest.fanout_n, Manifest::default().fanout_n as u64);
@@ -689,11 +932,137 @@ mod tests {
         );
         assert_eq!(components[2].text, "test/name");
 
-        let separator = separator_components(&key[..7]);
-        assert_eq!(separator[0].kind, "index");
-        assert_eq!(separator[1].kind, "prefix");
-
         assert_eq!(separator_components(&[])[0].kind, "min");
+    }
+
+    /// A separator cut inside the attribute reads as the fields it
+    /// reaches: the whole entity, then as much attribute as it carries.
+    #[dialog_common::test]
+    fn it_reads_a_separator_field_by_field() {
+        let key = fact_key("value");
+        let full = key_components(&key);
+        let entity = &full[1].bytes;
+        // tag, entity, its delimiter, and the attribute's first 3 bytes.
+        let cut = key.len().min(1 + entity.len() + 1 + 3);
+        let separator = separator_components(&key[..cut]);
+        let kinds: Vec<&str> = separator.iter().map(|part| part.kind).collect();
+        assert_eq!(kinds, vec!["index", "entity", "attribute"], "{separator:?}");
+        assert_eq!(&separator[1].bytes, entity);
+        assert_eq!(separator[2].text, "tes");
+    }
+
+    /// A value-type tag is one byte and no delimited field, so a
+    /// separator reads it on its own and the value after it whole: a
+    /// Bytes value as hex, NULs and all; a String value as text.
+    #[dialog_common::test]
+    fn it_reads_a_separators_value_by_its_type() {
+        let mut key = vec![ATTRIBUTE_KEY_TAG];
+        key.extend_from_slice(b"test/name\0did:key:z6Mk\0");
+        key.push(0);
+        key.extend_from_slice(&[0xff, 0x00, 0x01]);
+        let kinds = |parts: &[KeyComponent]| parts.iter().map(|part| part.kind).collect::<Vec<_>>();
+        let separator = separator_components(&key);
+        assert_eq!(
+            kinds(&separator),
+            vec!["index", "attribute", "entity", "vtype", "value"],
+            "{separator:?}"
+        );
+        assert_eq!(separator[3].text, "Bytes");
+        assert_eq!(separator[4].text, "ff0001");
+
+        let mut key = vec![VALUE_KEY_TAG, 3];
+        key.extend_from_slice(b"Alice\0test/na");
+        let separator = separator_components(&key);
+        assert_eq!(
+            kinds(&separator),
+            vec!["index", "vtype", "value", "attribute"]
+        );
+        assert_eq!(separator[1].text, "String");
+        assert_eq!(separator[2].text, "Alice");
+        assert_eq!(separator[3].text, "test/na");
+    }
+
+    /// A separator that is a whole key reads as that key. A forced seam's
+    /// separator, the last key before the seam padded with zero bytes
+    /// past the bound, reads as that key and its padding, never as the
+    /// zeros of a value or a field.
+    #[dialog_common::test]
+    fn it_reads_a_forced_seams_separator_as_the_key_before_it() {
+        let key = fact_key("left");
+        let whole = separator_components(&key);
+        assert_eq!(whole, key_components(&key), "a whole key reads as one");
+
+        let mut padded = key.clone();
+        padded.resize(513, 0);
+        let parts = separator_components(&padded);
+        let kinds: Vec<&str> = parts.iter().map(|part| part.kind).collect();
+        assert_eq!(
+            kinds,
+            vec!["index", "entity", "attribute", "vtype", "value", "padding"],
+            "{parts:?}"
+        );
+        assert_eq!(parts[2].text, "test/name");
+        assert_eq!(parts[5].bytes.len(), 513 - key.len());
+    }
+
+    /// A coverage key carries a hash of the covered value in the spilled
+    /// form, whatever the value's size, and nothing is stored under it: an
+    /// entry at a coverage key spills nothing, and its key reads the hash
+    /// as a reference to the value, not as a spilled value.
+    #[dialog_common::test]
+    fn it_reads_a_coverage_keys_value_as_a_reference() {
+        use crate::history::{Edition, Origin, Version};
+        let version = Version::new(Origin::from([7; 32]), Edition::new(3));
+        let of: Entity = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+            .parse()
+            .expect("entity parses");
+        let the = "test/name".parse().expect("attribute parses");
+        let key = crate::coverage_key(&version, &of, &the, &CorpusValue::String("a".into()));
+        let bytes = key.as_ref().to_vec();
+
+        let parts = key_components(&bytes);
+        let kinds: Vec<&str> = parts.iter().map(|part| part.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "index",
+                "origin",
+                "edition",
+                "entity",
+                "attribute",
+                "reference"
+            ],
+            "{parts:?}"
+        );
+        assert!(parts[5].text.starts_with("value:"), "{:?}", parts[5]);
+
+        let summary = entry(0, None, bytes, State::Removed);
+        assert_eq!(summary.spill, None, "a coverage entry spills nothing");
+    }
+
+    /// A history separator names its version rather than reading the
+    /// origin's binary as text, and reads the fact after it.
+    #[dialog_common::test]
+    fn it_reads_a_history_separator_as_its_version() {
+        let mut key = vec![HISTORY_KEY_TAG];
+        key.extend_from_slice(&[0xff; 32]);
+        key.extend_from_slice(&7u64.to_be_bytes());
+        key.extend_from_slice(b"did:key:z6Mk\0test/na");
+        let separator = separator_components(&key);
+        let kinds: Vec<&str> = separator.iter().map(|part| part.kind).collect();
+        assert_eq!(
+            kinds,
+            vec!["index", "origin", "edition", "entity", "attribute"],
+            "{separator:?}"
+        );
+        assert_eq!(separator[1].text, format!("origin:{}", "ff".repeat(32)));
+        assert_eq!(separator[2].text, "@7");
+        assert_eq!(separator[3].text, "did:key:z6Mk");
+
+        // Cut inside the origin: nothing in it is text.
+        let cut = separator_components(&key[..9]);
+        assert_eq!(cut[1].kind, "opaque");
+        assert_eq!(cut[1].text, "ff".repeat(8));
     }
 
     /// Blob-index entries decode into their content-derived records:

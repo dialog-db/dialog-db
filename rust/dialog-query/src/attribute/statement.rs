@@ -3,7 +3,7 @@ use crate::attribute::expression::dynamic::DynamicAttributeExpression;
 use crate::corpus::{Entity, Value};
 use crate::schema::Cardinality;
 use crate::statement::Statement;
-use dialog_corpus::{Pick, Update};
+use dialog_corpus::Update;
 
 /// A type-erased, attribute statement.
 ///
@@ -20,19 +20,8 @@ impl Statement for AttributeStatement {
     fn assert(self, update: &mut impl Update) {
         let the = self.the;
         let value = self.is;
-        match (self.pick, self.cardinality) {
-            (Some(policy), _) => {
-                update.associate(the.into(), self.of, value, policy);
-            }
-            // A cardinality-one write with no pick spelled is a
-            // `last` write.
-            (None, Some(Cardinality::One)) => {
-                update.associate(the.into(), self.of, value, Pick::Last);
-            }
-            (None, _) => {
-                update.associate(the.into(), self.of, value, dialog_corpus::Pick::All);
-            }
-        }
+        let cardinality = self.cardinality.unwrap_or(Cardinality::Many);
+        update.associate(the.into(), self.of, value, cardinality);
     }
 
     fn retract(self, update: &mut impl Update) {

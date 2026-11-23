@@ -2,12 +2,17 @@
 //! pulled everything, so its reads may warm ahead of demand, though every
 //! block they touch is already local.
 
+// The scenario commits through the one-shot publish, as the others here do:
+// what the gate measures stays what its baseline recorded, and moving it to
+// `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
+
 use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
 use dialog_capability::Did;
-use dialog_corpus::{Pick, Value};
+use dialog_corpus::{Cardinality, Value};
 use dialog_query::query::Output as _;
 use dialog_query::{ConceptQuery, InductiveRule, Parameters, Term};
 use dialog_repository::{Branch, Download, contact};
@@ -134,7 +139,7 @@ pub async fn view(size: usize) -> Result<Box<dyn Prepared>> {
         });
         env.branch
             .transaction()
-            .dispatch(assert_all(commands, Pick::All))
+            .dispatch(assert_all(commands, Cardinality::Many))
             .commit()
             .publish()
             .perform(&env.operator)

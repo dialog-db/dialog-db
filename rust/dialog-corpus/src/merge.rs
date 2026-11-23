@@ -896,7 +896,11 @@ mod screen_tests {
         let blocks: Vec<_> = delta
             .flush_nodes()
             .into_iter()
-            .map(|node| node.buffer().clone())
+            .map(|node| {
+                node.buffer()
+                    .expect("a staged node is read from its block")
+                    .clone()
+            })
             .collect();
         let blobs: Vec<_> = delta.flush_blobs().collect();
         for block in blocks.into_iter().chain(blobs) {
@@ -947,7 +951,7 @@ mod screen_tests {
                     facts
                         .iter()
                         .cloned()
-                        .map(|fact| Instruction::Assert(fact, crate::Pick::All)),
+                        .map(|fact| Instruction::Assert(fact, crate::Cardinality::Many)),
                 ),
             )
             .await?;

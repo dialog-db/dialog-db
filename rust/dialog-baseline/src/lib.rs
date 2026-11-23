@@ -35,6 +35,7 @@
 /// measurement crate can count the blocks a workload moves.
 pub use dialog_peer::helpers::metered;
 pub mod nodes;
+pub mod replica;
 pub mod repo;
 pub mod se;
 
@@ -344,7 +345,7 @@ pub(crate) fn instructions_for(rows: &[FactRow]) -> Result<Vec<Instruction>> {
     let mut instructions = Vec::with_capacity(rows.len() * 2);
     for row in rows {
         instructions.extend(
-            facts_for(row)?.map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All)),
+            facts_for(row)?.map(|fact| Instruction::Assert(fact, dialog_corpus::Cardinality::Many)),
         );
     }
     Ok(instructions)

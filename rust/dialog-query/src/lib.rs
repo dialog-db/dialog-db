@@ -6,6 +6,10 @@
 //! This crate implements the core query planning and execution functionality.
 
 #![warn(missing_docs)]
+// The tests exercise the one-shot `.commit().publish().perform(..)` a
+// commit used to be, which must keep failing on a lost race as it did;
+// code outside them commits through `Branch::transact`.
+#![cfg_attr(test, allow(deprecated))]
 #![warn(clippy::absolute_paths)]
 #![warn(clippy::default_trait_access)]
 #![warn(clippy::fallible_impl_from)]
@@ -34,6 +38,7 @@ pub mod concept;
 pub mod constraint;
 /// Static descriptor trait for attribute and concept metadata.
 pub mod descriptor;
+
 /// Variable binding environment used during query planning.
 pub mod environment;
 /// Error types for the query engine.
@@ -46,6 +51,8 @@ pub mod formula;
 /// dialog-query, so it can only ever be a dev-dependency here).
 #[cfg(test)]
 pub mod helpers;
+/// How a concept field chooses one of its relation's claims.
+pub mod selective;
 
 pub mod identity;
 /// The identities an earlier release gave attributes and concepts,
@@ -104,6 +111,14 @@ mod number_tests;
 #[cfg(test)]
 mod typed_read_tests;
 
+/// Scans binding rows in place against binding them eagerly, pinned as
+/// tests.
+#[cfg(test)]
+mod lazy_rows_tests;
+/// Concept fields that elect their claim, pinned as tests.
+#[cfg(test)]
+mod selective_tests;
+
 mod sort_order;
 pub use sort_order::*;
 
@@ -139,8 +154,6 @@ pub use reduce::{Aggregator, Reduce, ReduceEntry, ReduceSpec};
 pub use resolver::*;
 pub use rule::*;
 pub use schema::*;
-// The pick a field reads under, from the facts crate.
-pub use dialog_corpus::Pick;
 pub use scope::*;
 pub use selection::*;
 pub use session::*;

@@ -225,7 +225,7 @@ where
                         is: Value::String(format!("device-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_corpus::Pick::All,
+                    dialog_corpus::Cardinality::Many,
                 )
             })
             .collect();
@@ -887,7 +887,7 @@ mod prune_tests {
 
     use anyhow::Result;
     use dialog_capability::Subject;
-    use dialog_corpus::{DialogCorpusError, Exporter, Fact, Instruction, Pick, Value};
+    use dialog_corpus::{Cardinality, DialogCorpusError, Exporter, Fact, Instruction, Value};
     use dialog_effects::archive::prelude::DEFAULT_CATALOG;
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use futures_util::stream;
@@ -926,7 +926,7 @@ mod prune_tests {
                 is: Value::String("x".into()),
                 cause: None,
             },
-            Pick::All,
+            Cardinality::Many,
         )
     }
 

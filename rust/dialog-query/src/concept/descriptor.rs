@@ -11,7 +11,7 @@ use crate::concept::query::ConceptQuery;
 use crate::concept::{Concept, Conclusion};
 use crate::error::TypeError;
 use crate::query::{Application, Restriction};
-use crate::selection::{Match, Selection};
+use crate::selection::{Match, Part, Scanned, Selection};
 use crate::statement::Retraction;
 use crate::term::Term;
 use crate::type_system::{ConceptRef, Primitive, Type as Kind};
@@ -28,6 +28,7 @@ use crate::identity::{self, CONCEPT, field};
 use crate::memo::Memo;
 use crate::planner::Conjunction;
 use crate::rule::DeductiveRule;
+use dialog_corpus::identity::SYMBOL;
 use merkle_reference::{Reference, Type as ReferenceType};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -227,10 +228,29 @@ impl ConceptDescriptor {
     pub fn attribute_field(&self) -> Option<(&str, &ConceptFieldDescriptor)> {
         let mut fields = self.with().iter();
         let (name, field) = fields.next()?;
-        if fields.next().is_some() || field.is_optional() || field.conforms().is_some() {
+        if fields.next().is_some()
+            || field.is_optional()
+            || field.conforms().is_some()
+            || field.pick().is_some()
+        {
             return None;
         }
         Some((name, field))
+    }
+
+    /// The relation this concept picks one claim of per entity, when it
+    /// is a concept of one required field that picks: the attribute
+    /// concept of that field, which reads every claim. What such a
+    /// concept answers for an entity moves exactly when that relation's
+    /// claims for the entity do.
+    pub fn picked_relation(&self) -> Option<&ConceptDescriptor> {
+        let mut fields = self.with().iter();
+        let (_, field) = fields.next()?;
+        if fields.next().is_some() || field.is_optional() || field.conforms().is_some() {
+            return None;
+        }
+        field.pick()?;
+        Some(field.attribute_concept())
     }
 
     /// The keyed-collection fields of this concept.
@@ -251,7 +271,8 @@ impl ConceptDescriptor {
     /// It maps each attribute, by the attribute's
     /// [reference](AttributeDescriptor::reference), to the field's options:
     /// `optional` to `true` for an optional field, and `conforms` to the
-    /// reference of the concept a concept-typed field's value conforms to.
+    /// reference of the concept a concept-typed field's value conforms to,
+    /// and `pick` to the pick's name for a field that declares one.
     /// A required plain field's options are the empty map. Field names and
     /// the description are not part of it, and the attributes and the target
     /// concept enter by reference, so the concept is the same whether they
@@ -268,6 +289,12 @@ impl ConceptDescriptor {
             }
             if let Some(target) = field.conforms() {
                 options.push((field::CONFORMS, target.reference()));
+            }
+            if let Some(aggregate) = field.pick() {
+                options.push((
+                    field::PICK,
+                    SYMBOL.reference_of(aggregate.name().as_bytes()),
+                ));
             }
             (
                 field.descriptor().reference(),
@@ -352,10 +379,25 @@ impl ConceptDescriptor {
         let mut relations = vec![];
         for (name, field) in self.with().iter() {
             if let Some(value) = model.attributes.get(name) {
-                let relation = field
+                let mut relation = field
                     .descriptor()
                     .resolve(value.clone())
                     .map_err(|e| e.at(name.to_string()))?;
+                // A field whose descriptor reads a variable layer (`in:
+                // ?where`) lands where the instance binds that variable.
+                if let Some(layer) = field.descriptor().layer().and_then(Term::name) {
+                    match model.attributes.get(layer) {
+                        Some(Value::Entity(layer)) => relation.layer = Some(layer.clone()),
+                        Some(other) => {
+                            return Err(TypeError::TypeMismatch {
+                                binding: layer.to_string(),
+                                expected: Type::Entity,
+                                actual: Box::new(Term::Constant(other.clone())),
+                            });
+                        }
+                        None => {}
+                    }
+                }
                 relations.push(relation);
             } else if !field.is_optional() {
                 return Err(TypeError::OmittedRequirement {
@@ -507,6 +549,22 @@ impl From<&ConceptDescriptor> for Schema {
                     cardinality: field.cardinality(),
                 },
             );
+            // A variable layer (`in: ?where`) is a slot of the concept
+            // too: bound, it narrows the field's read to one layer;
+            // unbound, the read binds it to where each row came from.
+            if let Some(layer) = field.descriptor().layer().and_then(Term::name)
+                && !schema.contains(layer)
+            {
+                schema.insert(
+                    layer.into(),
+                    Field {
+                        description: format!("The layer `{name}` is read from"),
+                        content_type: Some(Kind::from(Type::Entity)),
+                        requirement: Requirement::Optional,
+                        cardinality: Cardinality::One,
+                    },
+                );
+            }
         }
 
         // A collection field's key rides as its own operand: the
@@ -577,22 +635,36 @@ impl ConceptStatement {
 
 impl Statement for ConceptStatement {
     fn assert(self, update: &mut impl Update) {
-        // Each field is written under its own pick, as an attribute
-        // statement spelling that pick is: a `last` field's write
-        // succeeds the claim its cell holds, and is a no-op when the
-        // cell already reads as the written value.
+        // Each field is written under its own cardinality, as an
+        // attribute statement is: a cardinality one field's write
+        // succeeds the newest claim its cell holds, and is a no-op when
+        // the cell already reads as the written value.
         for attribution in self.with {
-            update.associate(
-                attribution.the,
-                self.this.clone(),
-                attribution.is,
-                attribution.pick,
-            );
+            match attribution.layer {
+                Some(layer) => update.associate_in(
+                    layer,
+                    attribution.the,
+                    self.this.clone(),
+                    attribution.is,
+                    attribution.cardinality,
+                ),
+                None => update.associate(
+                    attribution.the,
+                    self.this.clone(),
+                    attribution.is,
+                    attribution.cardinality,
+                ),
+            }
         }
     }
     fn retract(self, update: &mut impl Update) {
         for attribution in self.with {
-            update.dissociate(attribution.the, self.this.clone(), attribution.is);
+            match attribution.layer {
+                Some(layer) => {
+                    update.dissociate_in(layer, attribution.the, self.this.clone(), attribution.is)
+                }
+                None => update.dissociate(attribution.the, self.this.clone(), attribution.is),
+            }
         }
     }
 }
@@ -650,9 +722,19 @@ impl<'a> Builder<'a> {
 /// used in the match.
 #[derive(Debug, Clone)]
 pub struct ConceptConclusion {
-    this: Entity,
+    this: This,
     terms: Parameters,
     source: Match,
+}
+
+/// A conclusion's entity: held, or the scanned row that holds it in place,
+/// whose cache builds the entity the first time it is asked for. A caller
+/// that hands rows on never builds it, and one that compares entities
+/// compares the stored URIs.
+#[derive(Debug, Clone)]
+enum This {
+    Held(Entity),
+    Scanned(Arc<Scanned>),
 }
 
 /// A conclusion is a row: its identity is the entity plus the value
@@ -664,7 +746,7 @@ pub struct ConceptConclusion {
 /// maintenance emits a retract-and-reassert of unchanged rows.
 impl PartialEq for ConceptConclusion {
     fn eq(&self, other: &Self) -> bool {
-        self.this == other.this && self.values() == other.values()
+        self.entity() == other.entity() && self.values() == other.values()
     }
 }
 
@@ -693,7 +775,41 @@ impl ConceptConclusion {
 impl ConceptConclusion {
     /// Returns the entity this conclusion describes.
     pub fn entity(&self) -> &Entity {
-        &self.this
+        match &self.this {
+            This::Held(entity) => entity,
+            This::Scanned(row) => match row.binding(Part::Of) {
+                Binding::Present(Value::Entity(entity)) => entity,
+                _ => unreachable!("a scanned row's entity is an entity"),
+            },
+        }
+    }
+
+    /// The URI of the entity this conclusion describes, as the row holds
+    /// it: no entity is built to answer.
+    pub fn this_uri(&self) -> &str {
+        match &self.this {
+            This::Held(entity) => entity.as_str(),
+            This::Scanned(row) => row.of_str(),
+        }
+    }
+
+    /// A field's value read in place: `None` when the field is not one
+    /// of the query's terms or its variable is unbound, `Some(None)` when
+    /// it is absent. Reads nothing into an owned [`Value`]: the reading
+    /// counterpart of [`Self::get`] for a caller that hands values on.
+    pub fn view(&self, field: &str) -> Option<Option<dialog_corpus::ValueView<'_>>> {
+        match self.terms.get(field)? {
+            Term::Constant(value) => Some(Some(dialog_corpus::ValueView::from(value))),
+            Term::Variable {
+                name: Some(name), ..
+            } => self.source.view(name),
+            Term::Variable { name: None, .. } => None,
+        }
+    }
+
+    /// The query's terms, by field.
+    pub fn terms(&self) -> &Parameters {
+        &self.terms
     }
 
     /// Look up a field value by its concept field name (e.g. "name", "age").
@@ -737,7 +853,11 @@ impl ConceptConclusion {
 
 impl Conclusion for ConceptConclusion {
     fn this(&self) -> &Entity {
-        &self.this
+        self.entity()
+    }
+
+    fn this_uri(&self) -> &str {
+        ConceptConclusion::this_uri(self)
     }
 }
 
@@ -801,20 +921,27 @@ impl Application for ConceptQuery {
         Some(&self.predicate)
     }
 
+    /// A concept conclusion keeps the match it was realized from, and
+    /// [`adopt`](Application::adopt) puts back the subject a
+    /// restriction pinned, so a maintained row gives the bindings a
+    /// recomputed one does.
+    fn bindings(&self, conclusion: &ConceptConclusion) -> Option<Match> {
+        Some(conclusion.source.clone())
+    }
+
     /// A restriction pins `this` to a constant, so the rows it realizes
     /// carry the restricted terms and a match with no binding for this
     /// query's `this` variable. Put both back: the row then reads, term
     /// by term and binding by binding, like the one this query realizes
     /// for the same facts.
     fn adopt(&self, conclusion: ConceptConclusion) -> Result<ConceptConclusion, EvaluationError> {
-        let ConceptConclusion {
-            this, mut source, ..
-        } = conclusion;
+        let this = conclusion.entity().clone();
+        let ConceptConclusion { mut source, .. } = conclusion;
         if let Some(term @ Term::Variable { name: Some(_), .. }) = self.terms.get("this") {
             source.bind(term, Value::Entity(this.clone()))?;
         }
         Ok(ConceptConclusion {
-            this,
+            this: This::Held(this),
             terms: self.terms.clone(),
             source,
         })
@@ -827,15 +954,21 @@ impl Application for ConceptQuery {
                 .ok_or_else(|| EvaluationError::UnboundVariable {
                     variable_name: "this".to_string(),
                 })?;
-        let entity: Entity = match this_param {
+        let this: This = match this_param {
             Term::Variable {
                 name: Some(name), ..
-            } => {
-                let typed_term: Term<Entity> = Term::var(name.clone());
-                Entity::try_from(source.lookup(&Term::from(&typed_term))?.content()?)?
-            }
+            } => match source.scanned(name) {
+                // In place: the scanned row's entity, built when asked for.
+                Some((row, Part::Of)) => This::Scanned(Arc::clone(row)),
+                _ => {
+                    let typed_term: Term<Entity> = Term::var(name.clone());
+                    This::Held(Entity::try_from(
+                        source.lookup(&Term::from(&typed_term))?.content()?,
+                    )?)
+                }
+            },
             Term::Constant(value) => match value {
-                Value::Entity(e) => e.clone(),
+                Value::Entity(e) => This::Held(e.clone()),
                 _ => {
                     return Err(EvaluationError::UnboundVariable {
                         variable_name: "this".to_string(),
@@ -849,7 +982,7 @@ impl Application for ConceptQuery {
             }
         };
         Ok(ConceptConclusion {
-            this: entity,
+            this,
             terms: self.terms.clone(),
             source,
         })

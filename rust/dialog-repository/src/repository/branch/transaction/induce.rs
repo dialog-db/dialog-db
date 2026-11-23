@@ -16,11 +16,14 @@
 //!    (branch ⊕ durable changes ⊕ this round's transients). Sibling
 //!    rules in a round read identical state.
 //! 3. Bound heads emit facts by cardinality (`Replace` for one,
-//!    `Assert` for many). A head concept carrying the
-//!    `dialog.concept/transient` marker routes to the next round's
-//!    stimulus and is never committed; a durable head passes a novelty
-//!    check (an instruction that leaves the view unchanged contributes
-//!    nothing) and folds into the commit.
+//!    `Assert` for many). A head cell landing in
+//!    [`control:`](crate::CONTROL), the loopback, routes to the next
+//!    round's stimulus and is never committed: one whose descriptor
+//!    names `in: control:`, and every cell naming no layer of a head
+//!    concept carrying the `dialog.concept/transient` marker (a
+//!    command). A durable head passes a novelty check (an instruction
+//!    that leaves the view unchanged contributes nothing) and folds into
+//!    the commit.
 //! 4. The loop ends when a round produces no novelty and no
 //!    transients, or errors after [`MAX_ROUNDS`] rounds — the runaway
 //!    guard for self-feeding cascades.
@@ -41,8 +44,8 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
-    Change, Changes, DialogCorpusError, Entity, Fact, Instruction, Pick, Relation, Select,
-    Selector, Statement, Value,
+    Change, Changes, DialogCorpusError, Entity, Fact, Instruction, Relation, Select, Selector,
+    Statement, Value,
 };
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -56,12 +59,17 @@ use dialog_query::{
 };
 use futures_util::{StreamExt as _, TryStreamExt};
 
+use crate::Ephemeral;
+use crate::placement::{
+    control_layer, follows_selection, memory_layer, session_layer, take_dispatched,
+};
 use crate::repository::archive::erased;
-use crate::repository::branch::session::{QueryEnv, shared_metadata};
+use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
 use crate::rules::{
     TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
 };
+use crate::stack::effect::invoked;
 use crate::{CommitError, RemoteSite, Revision, Staged};
 use std::slice::from_ref;
 
@@ -73,16 +81,36 @@ pub(crate) const MAX_ROUNDS: u32 = 16;
 
 /// Run commit-time induction over `changes` + `transients`, folding
 /// durable novelty into `changes`. Transients never enter `changes`;
-/// they are visible to rule bodies for exactly one round.
+/// they are visible to rule bodies for exactly one round, as rows of
+/// [`control:`](crate::CONTROL). A write of `changes` or of `transients`
+/// into `control:` is a transient too.
 ///
-/// Returns every transient a rule head emitted, across all rounds. The
-/// dispatched `transients` are not part of it.
+/// Returns every transient a rule head emitted, across all rounds, the
+/// writes each round's heads landed in a layer, one entry per round
+/// that wrote one, in round order, and how many rounds ran: each round
+/// is a tick, and a layer takes each tick's writes as an instant of its
+/// own. The dispatched `transients` are not part of the first two. The
+/// writes `transients` names for a layer are stimulus too, read as rows
+/// of that layer. The layered writes stay in `changes` as well, merged,
+/// which is how each round's view reads every earlier round's.
+///
+/// Through a stack (a composite holding the loopback), each command
+/// entity a round's stimulus carries in `control:` is marked as
+/// invoked in that round: its `dialog.command/invoked` row, naming the
+/// round, is a row of `control:` beside the command's own for that one
+/// round (see [`invoked`]), and is no emitted transient.
+///
+/// `selected` is the layer a session selects: a durable head cell whose
+/// descriptor names no layer lands there, unless its attribute is
+/// machinery under `dialog.`.
 pub(crate) async fn induce<Env>(
     view: &View<'_>,
+    composite: &Composite,
     changes: &mut Changes,
-    transients: Changes,
+    mut transients: Changes,
+    selected: Option<&Entity>,
     env: &Env,
-) -> Result<Changes, CommitError>
+) -> Result<(Changes, Vec<Vec<(Entity, Changes)>>, u32), CommitError>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
@@ -103,10 +131,24 @@ where
         + ConditionalSync
         + 'static,
 {
+    // A write into the loopback is a dispatch: it is this tick's
+    // stimulus, read as a row of `control:`, and lands nowhere.
+    let dispatched = take_dispatched(&mut transients);
+    transients.merge(dispatched);
+    let dispatched = take_dispatched(changes);
+    transients.merge(dispatched);
+
     // Transients never commit, so an asset among them would be dropped:
     // refuse the commit before anything is written instead.
     if transients.has_assets() {
         return Err(DialogCorpusError::AssetsUnsupported("a dispatched transient".into()).into());
+    }
+    // Through a stack, every command is marked in the round it is
+    // stimulus of: the first, for the ones dispatched.
+    let marks = composite.channels.contains(&control_layer());
+    if marks {
+        let marked = invoked(&transients, 1);
+        transients.merge(marked);
     }
 
     // Round 1 stimulus: everything the commit changes, plus the
@@ -115,11 +157,14 @@ where
     // and induce). Every head advance is an instant; the lag is how a
     // missed one is caught up.
     let mut stimulus: Vec<Instruction> = changes.clone().into_instructions();
+    stimulus.extend(layered_instructions(changes));
     stimulus.extend(transients.clone().into_instructions());
+    stimulus.extend(layered_instructions(&transients));
     stimulus.extend(lag_delta(view, env).await?);
     let mut induced = Changes::new();
+    let mut ticks = Vec::new();
     if stimulus.is_empty() {
-        return Ok(induced);
+        return Ok((induced, ticks, 0));
     }
 
     // Committed trigger structures, resolved once per induction: the
@@ -134,9 +179,11 @@ where
     // overlay of the round view, which does not change across rounds.
     let operator = Identify.perform(env).await?;
 
-    // This round's transient facts. Round 1 sees the dispatched
-    // commands; round N+1 sees only the transients round N emitted —
-    // a transient lives for exactly one round.
+    // This round's transient facts, the rows of `control:`. Round 1
+    // sees the dispatched commands; round N+1 sees only the transients
+    // round N emitted — a transient lives for exactly one round. Their
+    // writes into other layers (a session's revision rows) are read as
+    // those layers.
     let mut transient_overlay = transients;
 
     let mut round: u32 = 0;
@@ -180,6 +227,7 @@ where
                 }
             })
             .collect();
+        let direct = touched.clone();
 
         // The overlay's trigger slice: rules, markers, and support
         // edges staged in this transaction (including novelty from
@@ -210,19 +258,14 @@ where
                 }
             }
         }
-        // What changed derivedly this round: every attribute a
-        // deductive rule concludes from something touched, whether or
-        // not a row of the round also writes it. A candidate premised
-        // on one is evaluated in full.
-        let mut derived: BTreeSet<Reach> = BTreeSet::new();
         for entity in &installed_deductive {
             let Some(body) = dispatch.deductive(entity, &overlay, env).await? else {
                 continue;
             };
             for (_, field) in body.conclusion().with().iter() {
-                let reach = Reach::of(field.descriptor().the());
-                derived.insert(reach.clone());
-                touched.insert(reach);
+                // Inserted after the `direct` snapshot, so these land
+                // in the expanded set and force full evaluation.
+                touched.insert(Reach::of(field.descriptor().the()));
             }
         }
 
@@ -230,22 +273,42 @@ where
         // round's transients, through the same layered QueryEnv a
         // transaction query uses, so rule bodies read exactly what a
         // mid-transaction query would: the writes as staged layers
-        // beside the shared metadata.
-        let view = QueryEnv::new(
-            vec![view.to_source()],
-            shared_metadata(from_ref(view), &operator),
-            env,
-        )
-        .with_layers(vec![
-            Staged::from(changes.clone()),
-            Staged::from(transient_overlay.clone()),
-        ]);
+        // beside the shared metadata. Each layer's writes, the earlier
+        // rounds' heads landing in it among them, are read as that
+        // layer, so a round reads the state the ticks before it left. A
+        // memory layer the composite holds reads them as a copy of
+        // itself with them applied, as the ticks will land at publish,
+        // so a head under `last` succeeds the layer's own row of the
+        // cell; a layer it does not hold reads them as a staged layer.
+        let written = Staged::from(changes.clone());
+        let mut layered = composite.clone();
+        let mut shares: Vec<Staged> = Vec::new();
+        for (layer, share) in written.shares() {
+            match layered.memories.iter_mut().find(|(held, _)| held == layer) {
+                Some((_, memory)) => *memory = memory.extending(share.clone()),
+                None => shares.push(Staged::from(share.clone()).in_layer(layer.clone())),
+            }
+        }
+        let mut control = transient_overlay.clone();
+        let transient_shares = control.take_shares();
+        let view = QueryEnv::over(layered, shared_metadata(from_ref(view), &operator), env)
+            .with_layers(
+                [written, Staged::from(control).in_layer(control_layer())]
+                    .into_iter()
+                    .chain(shares)
+                    .chain(
+                        transient_shares
+                            .into_iter()
+                            .map(|(layer, share)| Staged::from(share).in_layer(layer)),
+                    )
+                    .collect(),
+            );
 
         // Close the touched set over derivation: a base-fact write
         // reaches inductive rules premised on the derived concepts it
         // (transitively) supports through deductive rules.
         dispatch
-            .expand_through_deduction(&mut touched, &mut derived, &overlay, env)
+            .expand_through_deduction(&mut touched, &overlay, env)
             .await?;
 
         // Trigger-indexed discovery: footprint gate, then one
@@ -259,15 +322,10 @@ where
         }
         candidates.extend(installed.iter().cloned());
 
-        // Attributes reached through the deductive closure: a
+        // Attributes only reachable through the deductive closure: a
         // candidate premised on one changed *derivedly*, which a base
-        // row cannot seed. An attribute a row of the round writes is
-        // among them when a deductive rule also concludes it from
-        // something touched (a rule that derives an attribute from
-        // itself, say): the row seeds the entity it is about, and the
-        // facts derived from it for other entities are found only by
-        // evaluating in full.
-        let expanded: BTreeSet<Reach> = derived;
+        // row cannot seed.
+        let expanded: BTreeSet<Reach> = touched.difference(&direct).cloned().collect();
 
         let mut novelty = Changes::new();
         let mut emitted_transients = Changes::new();
@@ -301,6 +359,7 @@ where
                 fire(
                     &rule,
                     transient_head,
+                    selected,
                     &view,
                     &mut novelty,
                     &mut emitted_transients,
@@ -310,6 +369,7 @@ where
                 fire_seeded(
                     &rule,
                     transient_head,
+                    selected,
                     &assert_rows,
                     &view,
                     &mut novelty,
@@ -323,14 +383,31 @@ where
         // emissions to the next round's stimulus. The incoming
         // transients simply expire — nothing entered `changes`, so
         // there is no sweep.
-        stimulus = novelty.clone().into_instructions();
+        // The round's writes into layers are its tick: kept apart, so
+        // each layer takes them as one instant, and folded into
+        // `changes` too, so the next round's view reads them.
+        stimulus = layered_instructions(&novelty);
+        stimulus.extend(novelty.clone().into_instructions());
         stimulus.extend(emitted_transients.clone().into_instructions());
+        stimulus.extend(layered_instructions(&emitted_transients));
+        let shares = novelty.take_shares();
+        for (layer, share) in &shares {
+            share.clone().into_layer(layer.clone()).assert(changes);
+        }
+        if !shares.is_empty() {
+            ticks.push(shares);
+        }
         novelty.assert(changes);
         emitted_transients.clone().assert(&mut induced);
+        if marks {
+            let marked = invoked(&emitted_transients, round + 1);
+            stimulus.extend(marked.clone().into_instructions());
+            emitted_transients.merge(marked);
+        }
         transient_overlay = emitted_transients;
     }
 
-    Ok(induced)
+    Ok((induced, ticks, round))
 }
 
 /// The committed side of trigger dispatch for one induction run: the
@@ -533,8 +610,7 @@ impl<'a> Dispatch<'a> {
     /// Close `touched` over the deductive support graph: for each
     /// touched attribute, `dialog.rule/reads` names the deductive rules
     /// whose bodies read it; their conclusions' attributes are
-    /// *derived-touched*, collected in `derived` whether or not they
-    /// were touched already, and recurse until the frontier is exhausted.
+    /// *derived-touched* and recurse until the frontier is exhausted.
     /// Composed from per-rule facts at dispatch time, never stored, so
     /// late-installed deductive rules are picked up automatically.
     /// Polarity is deliberately ignored across derived edges: through
@@ -542,7 +618,6 @@ impl<'a> Dispatch<'a> {
     async fn expand_through_deduction<Env>(
         &self,
         touched: &mut BTreeSet<Reach>,
-        derived: &mut BTreeSet<Reach>,
         overlay: &OverlayTriggers,
         env: &Env,
     ) -> Result<(), CommitError>
@@ -601,10 +676,9 @@ impl<'a> Dispatch<'a> {
                     continue;
                 };
                 for (_, field) in body.conclusion().with().iter() {
-                    let reach = Reach::of(field.descriptor().the());
-                    derived.insert(reach.clone());
-                    if touched.insert(reach.clone()) {
-                        frontier.push(reach);
+                    let derived = Reach::of(field.descriptor().the());
+                    if touched.insert(derived.clone()) {
+                        frontier.push(derived);
                     }
                 }
             }
@@ -909,7 +983,7 @@ where
             continue;
         }
         lag.push(if arriving {
-            Instruction::Assert(fact, dialog_corpus::Pick::All)
+            Instruction::Assert(fact, dialog_corpus::Cardinality::Many)
         } else {
             Instruction::Retract(fact)
         });
@@ -991,6 +1065,7 @@ async fn select<'a>(
 async fn fire<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    selected: Option<&Entity>,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
@@ -1004,7 +1079,16 @@ async fn fire<'a>(
     if matches.is_empty() {
         return Ok(());
     }
-    emit_matches(rule, transient_head, matches, view, novelty, transients).await
+    emit_matches(
+        rule,
+        transient_head,
+        selected,
+        matches,
+        view,
+        novelty,
+        transients,
+    )
+    .await
 }
 
 /// The reach of a rule's concept premises, split by polarity:
@@ -1044,6 +1128,7 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 async fn fire_seeded<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    selected: Option<&Entity>,
     rows: &[Fact],
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
@@ -1053,12 +1138,22 @@ async fn fire_seeded<'a>(
     #[cfg(test)]
     let before = (novelty.clone(), transients.clone());
     if !matches.is_empty() {
-        emit_matches(rule, transient_head, matches, view, novelty, transients).await?;
+        emit_matches(
+            rule,
+            transient_head,
+            selected,
+            matches,
+            view,
+            novelty,
+            transients,
+        )
+        .await?;
     }
     #[cfg(test)]
     oracle::agrees(
         rule,
         transient_head,
+        selected,
         rows,
         view,
         before,
@@ -1158,7 +1253,7 @@ async fn seeded_matches<'a>(
 async fn evaluate_seed<'a, 'r>(
     rule: &InductiveRule,
     premises: Option<&[Premise]>,
-    query: &dialog_query::ConceptQuery,
+    query: &ConceptQuery,
     rows: impl IntoIterator<Item = &'r Fact>,
     view: &QueryEnv<'a>,
 ) -> Result<Vec<Match>, CommitError> {
@@ -1192,10 +1287,6 @@ async fn evaluate_seed<'a, 'r>(
 /// what the unnamed subject matched and constrains nothing else, so a
 /// full evaluation finds the same matches with it or without.
 fn subject_named(rule: &InductiveRule, at: usize) -> Option<(Vec<Premise>, ConceptQuery)> {
-    #[cfg(test)]
-    if unnamed::is_as_before() {
-        return None;
-    }
     let premises = &rule.analysis().premises;
     let Premise::Assert(Proposition::Concept(query)) = &premises[at] else {
         return None;
@@ -1231,28 +1322,6 @@ fn subject_named(rule: &InductiveRule, at: usize) -> Option<(Vec<Premise>, Conce
     let mut premises = premises.clone();
     premises[at] = Premise::Assert(Proposition::Concept(query.clone()));
     Some((premises, query))
-}
-
-/// In tests: subjects left unnamed as they were before
-/// [`subject_named`], so a test can run one commit both ways and say
-/// what changed.
-#[cfg(test)]
-mod unnamed {
-    use std::cell::Cell;
-
-    // Per thread: the test runtime drives each test on one thread.
-    thread_local! {
-        static AS_BEFORE: Cell<bool> = const { Cell::new(false) };
-    }
-
-    /// Seed as before on this thread, or as now.
-    pub(super) fn as_before(on: bool) {
-        AS_BEFORE.with(|cell| cell.set(on));
-    }
-
-    pub(super) fn is_as_before() -> bool {
-        AS_BEFORE.with(Cell::get)
-    }
 }
 
 /// The rows of `rows` that may seed `query` together: the rows of one
@@ -1296,7 +1365,7 @@ fn seed_groups(query: &dialog_query::ConceptQuery, rows: &[Fact]) -> Vec<Vec<usi
             continue;
         };
         let combinable = field.descriptor().the().attribute().is_some()
-            && matches!(field.descriptor().pick(), Pick::Last);
+            && field.cardinality() == dialog_query::Cardinality::One;
         if !combinable {
             groups.push(vec![at]);
             continue;
@@ -1401,21 +1470,31 @@ fn bind_seed(
 }
 
 /// What a head writes, as `emit_matches` tells two heads apart: its
-/// subject, then each field's attribute, value and pick.
-type WrittenHead = (Entity, Vec<(Relation, Value, Pick)>);
+/// subject, then each field's attribute, value, cardinality and layer.
+type WrittenHead = (
+    Entity,
+    Vec<(Relation, Value, dialog_corpus::Cardinality, Option<Entity>)>,
+);
 
-/// Emit a rule's head for every produced match: transient heads into
-/// `transients`, durable heads (novelty-checked against the frozen
-/// view) into `novelty`.
+/// Emit a rule's head for every produced match: the cells landing in
+/// `control:` into `transients`, the rest (novelty-checked against the
+/// frozen view) into `novelty`. A cell lands in `control:` when its
+/// descriptor names it (`in: control:`), or names no layer and the head
+/// is a command (`transient_head`); a command's cell naming another
+/// layer, a channel say, lands there as any head does.
 async fn emit_matches<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    selected: Option<&Entity>,
     matches: Vec<Match>,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
-    let heads = written_heads(rule, &matches)?;
+    // A transient head is a command: a cell of it naming no layer lands
+    // in `control:`, so it never follows the selection.
+    let selected = selected.filter(|_| !transient_head);
+    let heads = written_heads(rule, selected, &matches)?;
 
     // A seeded rule is evaluated once per stimulus row a premise names,
     // so an event that carries several of a premise's fields finds the
@@ -1431,36 +1510,135 @@ async fn emit_matches<'a>(
         }
     }
 
+    let control = control_layer();
     for ((this, cells), first) in heads.into_iter().zip(first) {
         if !first {
             continue;
         }
         let mut head = Changes::new();
-        for (attribute, value, pick) in cells {
-            match rule.polarity() {
+        // The cells landing in the loopback, or another channel: the next
+        // round's stimulus.
+        let mut dispatched = Changes::new();
+        // The cells whose descriptor names a layer (`in:`) other than
+        // the primary. The layer elects among its own rows of a cell,
+        // so a head landing there keeps its cardinality and succeeds no
+        // claim of the line.
+        let mut shared: Vec<(Entity, Instruction)> = Vec::new();
+        for (attribute, value, cardinality, layer) in cells {
+            let fact = Fact {
+                the: attribute,
+                of: this.clone(),
+                is: value,
+                cause: None,
+            };
+            let layer = match layer {
+                None if transient_head => Some(control.clone()),
+                layer => layer,
+            };
+            if layer.as_ref() == Some(&control) {
+                match rule.polarity() {
+                    Polarity::Retract => dialog_corpus::Update::dissociate(
+                        &mut dispatched,
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                    ),
+                    Polarity::Assert => dialog_corpus::Update::associate(
+                        &mut dispatched,
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                        cardinality,
+                    ),
+                }
+                continue;
+            }
+            // A cell landing in another channel is the next round's
+            // stimulus too, read as a row of that channel.
+            if let Some(channel) = layer.as_ref().filter(|layer| view.is_channel(layer)) {
+                match rule.polarity() {
+                    Polarity::Retract => dialog_corpus::Update::dissociate_in(
+                        &mut dispatched,
+                        channel.clone(),
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                    ),
+                    Polarity::Assert => dialog_corpus::Update::associate_in(
+                        &mut dispatched,
+                        channel.clone(),
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                        cardinality,
+                    ),
+                }
+                continue;
+            }
+            match (layer, rule.polarity()) {
+                (Some(layer), Polarity::Retract) => {
+                    shared.push((layer, Instruction::Retract(fact)));
+                }
+                (Some(layer), Polarity::Assert) => {
+                    // The session's own layer is read live, and its row of
+                    // the cell stands above a write staged for it: a head
+                    // of cardinality one landing there retracts that row, so the
+                    // rounds after read the head as the publish will leave
+                    // it. A memory layer the composite holds needs none of
+                    // this: the round view reads it with the ticks applied.
+                    if layer == session_layer()
+                        && cardinality == dialog_corpus::Cardinality::One
+                        && let Some(own) = view.session_store()
+                    {
+                        let cell = Selector::new().the(fact.the.clone()).of(fact.of.clone());
+                        for held in own.scan(&cell) {
+                            if held.is != fact.is {
+                                shared.push((layer.clone(), Instruction::Retract(held)));
+                            }
+                        }
+                    }
+                    shared.push((layer, Instruction::Assert(fact, cardinality)));
+                }
                 // A retracting head dissociates the exact bound
                 // triple, cardinality-independent.
-                Polarity::Retract => {
-                    dialog_corpus::Update::dissociate(&mut head, attribute, this.clone(), value);
+                (_, Polarity::Retract) => {
+                    dialog_corpus::Update::dissociate(&mut head, fact.the, fact.of, fact.is);
                 }
-                // An asserting head writes as the field's pick says: a
-                // set appends, and a choosing pick succeeds the claim
-                // it elects, resolved against the view at commit.
-                Polarity::Assert => {
+                // An asserting head writes as the field's cardinality
+                // says: many appends, and one succeeds the newest
+                // claim, resolved against the view at commit.
+                (_, Polarity::Assert) => {
                     dialog_corpus::Update::associate(
                         &mut head,
-                        attribute,
-                        this.clone(),
-                        value,
-                        pick,
+                        fact.the,
+                        fact.of,
+                        fact.is,
+                        cardinality,
                     );
                 }
             }
         }
 
-        if transient_head {
-            head.assert(transients);
+        dispatched.assert(transients);
+        if shared.is_empty() && head.is_empty() {
             continue;
+        }
+        for (layer, instruction) in shared {
+            if is_novel_in(view, &instruction, Some(&layer)).await? {
+                match instruction {
+                    Instruction::Assert(a, cardinality) => dialog_corpus::Update::associate_in(
+                        novelty,
+                        layer,
+                        a.the,
+                        a.of,
+                        a.is,
+                        cardinality,
+                    ),
+                    Instruction::Retract(a) => {
+                        dialog_corpus::Update::dissociate_in(novelty, layer, a.the, a.of, a.is)
+                    }
+                }
+            }
         }
         // A head written by succession elects the claim it succeeds
         // against the round view, as a transaction's own writes do
@@ -1484,8 +1662,14 @@ async fn emit_matches<'a>(
 
 /// The head each of `matches` writes, in order: its subject and the
 /// cells of the fields it binds. A match that leaves `this` unbound
-/// writes nothing and is left out.
-fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenHead>, CommitError> {
+/// writes nothing and is left out. A cell whose descriptor names no
+/// layer lands in `selected`, the layer a session selects, unless its
+/// attribute is machinery under `dialog.`.
+fn written_heads(
+    rule: &InductiveRule,
+    selected: Option<&Entity>,
+    matches: &[Match],
+) -> Result<Vec<WrittenHead>, CommitError> {
     let conclusion = rule.conclusion();
     let mut heads: Vec<WrittenHead> = Vec::with_capacity(matches.len());
     for matched in matches {
@@ -1518,11 +1702,77 @@ fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenH
                     })?
                 }
             };
-            cells.push((attribute, value, field.descriptor().pick().clone()));
+            // The layer the cell lands in (`in:`): the descriptor's
+            // constant, or the layer the body bound its variable to, or,
+            // with none named, the selected one; the primary's own name
+            // is no layer apart.
+            let named = match field.descriptor().layer() {
+                Some(Term::Constant(layer)) => Entity::try_from(layer.clone()).ok(),
+                Some(Term::Variable {
+                    name: Some(name), ..
+                }) => match matched.lookup(&Term::<Any>::var(name.as_ref())) {
+                    Ok(Binding::Present(Value::Entity(layer))) => Some(layer),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let layer = match named {
+                Some(layer) => Some(layer),
+                None if follows_selection(&attribute) => selected.cloned(),
+                None => None,
+            }
+            .filter(|layer| *layer != memory_layer());
+            cells.push((attribute, value, field.cardinality(), layer));
         }
         heads.push((this, cells));
     }
     Ok(heads)
+}
+
+/// What the writes of `share` of cardinality one into the session's own layer
+/// succeed: the rows `own` holds of each such cell, other than the one
+/// written, as retractions. The session's own layer is read live and
+/// its row of a cell stands above a write staged for it, so without the
+/// retraction a round would read the row the layer held, not the write.
+pub(crate) fn succession_in_own(own: &Ephemeral, share: &Changes) -> Changes {
+    let mut retractions = Changes::new();
+    for (of, the, change) in share.iter() {
+        let Change::Assert(is, dialog_corpus::Cardinality::One) = change else {
+            continue;
+        };
+        for held in own.scan(&Selector::new().the(the.clone()).of(of.clone())) {
+            if held.is != *is {
+                dialog_corpus::Update::dissociate(
+                    &mut retractions,
+                    the.clone(),
+                    of.clone(),
+                    held.is,
+                );
+            }
+        }
+    }
+    retractions
+}
+
+/// The writes into layers among `changes`, as instructions: what a round's
+/// heads landing in a layer give the next round as stimulus, beside the
+/// writes bound for the primary.
+fn layered_instructions(changes: &Changes) -> Vec<Instruction> {
+    changes
+        .iter_in()
+        .map(|(_, of, the, change)| {
+            let fact = |is: &Value| Fact {
+                the: the.clone(),
+                of: of.clone(),
+                is: is.clone(),
+                cause: None,
+            };
+            match change {
+                Change::Assert(is, cardinality) => Instruction::Assert(fact(is), *cardinality),
+                Change::Retract(is) => Instruction::Retract(fact(is)),
+            }
+        })
+        .collect()
 }
 
 /// Whether applying `instruction` would change the view: asserting a
@@ -1533,13 +1783,26 @@ fn written_heads(rule: &InductiveRule, matches: &[Match]) -> Result<Vec<WrittenH
 /// frozen round view, so siblings within a round judge novelty against
 /// identical state.
 async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<bool, CommitError> {
+    is_novel_in(view, instruction, None).await
+}
+
+/// [`is_novel`], judged within `layer` when one is named: a head landing
+/// in a layer is novel unless that layer holds it.
+async fn is_novel_in<'a>(
+    view: &QueryEnv<'a>,
+    instruction: &Instruction,
+    layer: Option<&Entity>,
+) -> Result<bool, CommitError> {
     let fact = match instruction {
         Instruction::Assert(a, _) | Instruction::Retract(a) => a,
     };
-    let selector = Selector::new()
+    let mut selector = Selector::new()
         .the(fact.the.clone())
         .of(fact.of.clone())
         .is(fact.is.clone());
+    if let Some(layer) = layer {
+        selector = selector.in_layer(layer.clone());
+    }
     let present = !select(view, selector).await?.is_empty();
     Ok(match instruction {
         Instruction::Assert(_, _) => !present,
@@ -1560,7 +1823,7 @@ async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<
 mod oracle {
     use super::{InductiveRule, QueryEnv, Seeding, emit_matches, seeded_matches};
     use crate::CommitError;
-    use dialog_corpus::{Changes, Fact};
+    use dialog_corpus::{Changes, Entity, Fact};
     use std::cell::Cell;
 
     // Per thread: the test runtime drives each test on one thread.
@@ -1583,9 +1846,11 @@ mod oracle {
     /// grouped firing started from, writes the `novelty` and
     /// `transients` the grouped firing wrote; panics with both when it
     /// does not.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn agrees(
         rule: &InductiveRule,
         transient_head: bool,
+        selected: Option<&Entity>,
         rows: &[Fact],
         view: &QueryEnv<'_>,
         before: (Changes, Changes),
@@ -1598,6 +1863,7 @@ mod oracle {
             emit_matches(
                 rule,
                 transient_head,
+                selected,
                 per_row,
                 view,
                 &mut expected_novelty,
@@ -1627,6 +1893,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::Composite;
     use crate::helpers::test_repo;
     use crate::repository::source::Live;
     use crate::rules::Transient;
@@ -2021,7 +2288,7 @@ mod tests {
                     is: Value::SignedInt(1),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3274,7 +3541,7 @@ mod tests {
                     is: Value::String(audience.into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ))
         };
 
@@ -3302,7 +3569,7 @@ mod tests {
                     is: Value::String("hello".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3382,7 +3649,7 @@ mod tests {
                     is: Value::String("hello".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3468,7 +3735,7 @@ mod tests {
                     is: Value::String("p".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3527,7 +3794,7 @@ mod tests {
                     is: Value::String("old".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3555,7 +3822,7 @@ mod tests {
                     is: Value::String("new".into()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -3831,7 +4098,7 @@ mod tests {
             "description": "Record who an assign command names",
             "assert!": {
                 "with": {
-                    "assignee": { "the": "issue/assignee", "as": "text:", "pick": "all:" }
+                    "assignee": { "the": "issue/assignee", "as": "text:", "cardinality": "many" }
                 }
             },
             "when": [
@@ -3877,10 +4144,13 @@ mod tests {
             .assert(&mut transients);
 
         let mut changes = Changes::new();
+        let view = Live::from(&branch).pin();
         super::induce(
-            &Live::from(&branch).pin(),
+            &view,
+            &Composite::of(view.to_source()),
             &mut changes,
             transients,
+            None,
             &operator,
         )
         .await?;
@@ -3917,7 +4187,7 @@ mod tests {
     fn it_groups_rows_that_bind_distinct_last_fields() -> Result<()> {
         let rule: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "seen": { "the": "seen/who", "as": "text:", "pick": "all:" } }
+                "with": { "seen": { "the": "seen/who", "as": "text:", "cardinality": "many" } }
             },
             "when": [
                 {
@@ -3925,7 +4195,7 @@ mod tests {
                         "with": {
                             "issue": { "the": "cmd.assign/issue", "as": "entity:" },
                             "who": { "the": "cmd.assign/who", "as": "text:" },
-                            "tag": { "the": "cmd.assign/tag", "as": "text:", "pick": "all:" }
+                            "tag": { "the": "cmd.assign/tag", "as": "text:", "cardinality": "many" }
                         }
                     },
                     "where": {
@@ -3978,7 +4248,7 @@ mod tests {
             "description": "Record who an assign command names",
             "assert!": {
                 "with": {
-                    "assignee": { "the": "issue/assignee", "as": "text:", "pick": "all:" }
+                    "assignee": { "the": "issue/assignee", "as": "text:", "cardinality": "many" }
                 }
             },
             "when": [
@@ -4353,7 +4623,7 @@ mod tests {
                     is: Value::Entity(issue.clone()),
                     cause: None,
                 },
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             )]))
             .perform(&operator)
             .await?;
@@ -4402,13 +4672,13 @@ mod tests {
         let rule: InductiveRule = serde_json::from_value(json!({
             "description": "Record each tag a titled document holds",
             "assert!": {
-                "with": { "tag": { "the": "seen/tag", "as": "text:", "pick": "all:" } }
+                "with": { "tag": { "the": "seen/tag", "as": "text:", "cardinality": "many" } }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "tag": { "the": "doc/tag", "as": "text:", "pick": "all:" },
+                            "tag": { "the": "doc/tag", "as": "text:", "cardinality": "many" },
                             "title": { "the": "doc/title", "as": "text:" }
                         }
                     },

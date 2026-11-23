@@ -24,7 +24,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use anyhow::{Context as _, Result};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSend;
-use dialog_corpus::{Entity, Pick, Relation as ArtifactsRelation, Selector, Value};
+use dialog_corpus::{Entity, Relation as ArtifactsRelation, Selector, Value};
 use dialog_effects::authority::Identify;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_peer::{Peer, Session};
@@ -38,7 +38,7 @@ use std::iter::repeat_n;
 use std::pin::Pin;
 use std::slice::from_ref;
 
-use super::session::{QueryEnv, shared_metadata};
+use super::session::{Composite, QueryEnv, shared_metadata};
 use super::transaction::{settle, stored_claims};
 use crate::helpers::{Interposed, Interposing, Under, test_repo};
 use crate::repository::source::{Live, View};
@@ -356,7 +356,6 @@ fn succeed_age(of: &Entity, value: u64) -> AttributeStatement {
         is: Value::UnsignedInt(value.into()),
         cause: None,
         cardinality: Some(Cardinality::One),
-        pick: Some(Pick::Last),
     }
 }
 
@@ -377,7 +376,7 @@ fn succession<'a>(
         let view = Live::from(branch).pin();
         let operator = Identify.perform(env).await?;
         let overlay = shared_metadata(from_ref(&view), &operator);
-        let settled = settle(vec![view.into_source()], overlay, &staged, env).await?;
+        let settled = settle(Composite::of(view.into_source()), overlay, &staged, env).await?;
         let mut rows: Rows = settled
             .iter()
             .map(|(of, the, change)| format!("{of} {the} {change:?}"))

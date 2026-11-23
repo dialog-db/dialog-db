@@ -1,11 +1,14 @@
 //! A replica that faults blocks in on demand: what its first query costs
 //! once it has adopted a head by root and remembers nothing.
+// Measures the one-shot `.commit().publish().perform(..)` the gates were
+// recorded with; moving it to `Branch::transact` is the maintainer's call.
+#![allow(deprecated)]
 
 use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_corpus::Pick;
+use dialog_corpus::Cardinality;
 use dialog_query::query::Output as _;
 use dialog_repository::Branch;
 
@@ -54,7 +57,7 @@ impl Prepared for FirstQuery {
 /// adopts it by root and runs one point query.
 pub async fn first_query(size: usize) -> Result<Box<dyn Prepared>> {
     let env = Env::open().await?;
-    seed_stuff(&env, SEEDED, Pick::All).await?;
+    seed_stuff(&env, SEEDED, Cardinality::Many).await?;
     let mut previous = env.branch.clone();
     for index in 0..size {
         let writer = env.branch(&format!("writer-{index}")).await?;
@@ -70,7 +73,7 @@ pub async fn first_query(size: usize) -> Result<Box<dyn Prepared>> {
         )];
         writer
             .transaction()
-            .integrate(assert_all(facts, Pick::All))
+            .integrate(assert_all(facts, Cardinality::Many))
             .commit()
             .publish()
             .perform(&env.operator)

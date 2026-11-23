@@ -13,6 +13,9 @@
 //! 3. **On-disk wall-clock** — real-world latency where I/O dominates,
 //!    via an [`BenchEnv::temp`] environment backed by the platform temp
 //!    directory.
+// Exercises the one-shot `.commit().publish().perform(..)`, which keeps
+// failing on a lost race as it did; nothing here races.
+#![allow(deprecated)]
 
 // The runtime imports below use `::dialog_query::…`, but the
 // `#[derive(Concept)]`/`#[derive(Attribute)]` expansions emit bare
@@ -30,8 +33,8 @@ use dialog_common::{ConditionalSync, Held, Holdings, Holds};
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::{
-    DialogCorpusError, Fact, FactStream, Instruction, Relation as CorpusRelation, Select, Selector,
-    Value,
+    DialogCorpusError, Fact, FactStream, Instruction, Layered, Relation as CorpusRelation, Select,
+    SelectIn, Selector, Value,
 };
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::Load as ArchiveLoad;
@@ -522,6 +525,33 @@ where
     }
 }
 
+/// A branch holds one layer, the primary: every row is read from it.
+#[dialog_capability::provider]
+impl<'a, Env> Provider<SelectIn<'a>> for JoinEnv<'a, Env>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Import>
+        + Provider<ArchiveLoad>
+        + Provider<BlobLoad>
+        + Provider<dialog_corpus::Preload>
+        + Provider<dialog_corpus::Speculation>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    async fn execute(
+        &self,
+        input: Selector<Constrained>,
+    ) -> Result<Layered<'a>, DialogCorpusError> {
+        Ok(Layered::primary(
+            Provider::<Select<'a>>::execute(self, input).await?,
+        ))
+    }
+}
+
 #[dialog_capability::provider]
 impl<Env: ConditionalSync> Provider<SelectRules> for JoinEnv<'_, Env> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
@@ -786,7 +816,7 @@ where
 
         let instructions: Vec<Instruction> = data
             .into_iter()
-            .map(|fact| Instruction::Assert(fact, dialog_corpus::Pick::All))
+            .map(|fact| Instruction::Assert(fact, dialog_corpus::Cardinality::Many))
             .collect();
         branch
             .transaction()
@@ -1245,7 +1275,7 @@ where
                     is,
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             ));
         }
 

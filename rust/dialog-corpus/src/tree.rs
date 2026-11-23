@@ -48,11 +48,11 @@ use std::sync::{Arc, Mutex};
 use crate::history::{Cause as HistoryCause, Claim, Record, RecordEntries, Version};
 use crate::key::value_payload as build_value_payload;
 use crate::{
-    ATTRIBUTE_KEY_TAG, ArchiveDelta, AttributeKey, AttributeKeyPart, Cause, CorpusWriter, Datum,
-    DeltaOverlay, DialogCorpusError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart, Fact, FactView,
-    Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, Pick, Selector, SelectorMatch,
-    Standing, State, VALUE_KEY_TAG, Value, ValueDataType, ValueKey, decode_value_parts,
-    encode_bytes, encode_value_owned,
+    ATTRIBUTE_KEY_TAG, ArchiveDelta, AttributeKey, AttributeKeyPart, Cardinality, Cause,
+    CorpusWriter, Datum, DeltaOverlay, DialogCorpusError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart,
+    Fact, FactView, Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, Selector,
+    SelectorMatch, Standing, State, VALUE_KEY_TAG, Value, ValueDataType, ValueKey,
+    decode_value_parts, encode_bytes, encode_value_owned,
     key::varkey::{self, KeyLayout, KeyRef, ValuePayload, ValueRef, parse_key_layout},
     key::{EncodedValue, fact_index_keys, fact_index_keys_with, reproject_index_keys},
     make_reference, match_selector_and_key_ref,
@@ -586,7 +586,7 @@ pub trait CorpusExt {
     /// same key writes that a branch commit would.
     ///
     /// Each instruction touches all three EAV/AEV/VAE indexes; an
-    /// assertion under a choosing pick additionally scans the
+    /// assertion under cardinality one additionally scans the
     /// `(entity, attribute)` range to elect the prior it succeeds (and
     /// skips inserting when a same-valued prior is already in place,
     /// the no-op of writing a standing value).
@@ -1332,23 +1332,16 @@ pub fn selector_range(
         );
         Key::from(varkey::build_key(&parts))
     };
-    if selector.entity().is_some()
+    let by_entity = selector.entity().is_some()
         || (selector.entity_prefix().is_some()
             && selector.value().is_none()
             && selector.attribute().is_none()
-            && selector.attribute_prefix().is_none())
-    {
-        let (start, end) = apply_prefix_bounds(
-            EntityKey(exact_bound(ENTITY_KEY_TAG, false)),
-            EntityKey(exact_bound(ENTITY_KEY_TAG, true)),
-            selector,
-            manifest,
-        );
-        start.into_key()..=end.into_key()
-    } else if selector.value().is_some()
-        || selector.value_prefix().is_some()
-        || selector.value_lower().is_some()
-        || selector.value_upper().is_some()
+            && selector.attribute_prefix().is_none());
+    if !by_entity
+        && (selector.value().is_some()
+            || selector.value_prefix().is_some()
+            || selector.value_lower().is_some()
+            || selector.value_upper().is_some())
     {
         let (start, end) = apply_prefix_bounds(
             ValueKey(exact_bound(VALUE_KEY_TAG, false)),
@@ -1357,7 +1350,9 @@ pub fn selector_range(
             manifest,
         );
         start.into_key()..=end.into_key()
-    } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
+    } else if !by_entity
+        && (selector.attribute().is_some() || selector.attribute_prefix().is_some())
+    {
         let (start, end) = apply_prefix_bounds(
             AttributeKey(exact_bound(ATTRIBUTE_KEY_TAG, false)),
             AttributeKey(exact_bound(ATTRIBUTE_KEY_TAG, true)),
@@ -1366,8 +1361,15 @@ pub fn selector_range(
         );
         start.into_key()..=end.into_key()
     } else {
-        // `Constrained` guarantees at least one field is set.
-        unreachable!("Selector will always have at least one field specified")
+        // By entity, or by nothing but a layer (`Selector::only_in`):
+        // then every fact, the whole entity index.
+        let (start, end) = apply_prefix_bounds(
+            EntityKey(exact_bound(ENTITY_KEY_TAG, false)),
+            EntityKey(exact_bound(ENTITY_KEY_TAG, true)),
+            selector,
+            manifest,
+        );
+        start.into_key()..=end.into_key()
     }
 }
 
@@ -1458,7 +1460,7 @@ fn fold_record(earlier: &[Version], later: Record) -> Record {
 /// [`CorpusWriter::read`], which see the batch's own pending writes on both
 /// targets. On the buffered target that means the node buffers are merged into
 /// the scan: an election blind to a buffered prior would leave it live where
-/// the pick would have retired it, and a `Retract` blind to one would cite
+/// the write would have retired it, and a `Retract` blind to one would cite
 /// nothing and so cover nothing at merge time.
 ///
 /// `storage` loads the tree's nodes and spilled values; a value above the
@@ -1526,23 +1528,40 @@ where
         // records), written through [`CorpusExt::record`] or a
         // [`WriteScope::Machinery`] stream. At the library level such
         // facts therefore cannot be corrupted through the ordinary
-        // write path. Two prefixes are carved out of the application
-        // gate: `dialog.rule/*` (rule storage) and `dialog.concept/*`
-        // (concept markers), whose integrity is semantic rather than
-        // positional — rules are content-addressed, so a forged rule
-        // fact fails the hydration check upstream and is inert.
+        // write path. Three prefixes are carved out of the application
+        // gate: `dialog.rule/*` (rule storage), `dialog.concept/*`
+        // (concept markers) and `dialog.layer/*` (the layers a schema
+        // declares), whose integrity is semantic rather than positional — rules are
+        // content-addressed, so a forged rule fact fails the hydration
+        // check upstream and is inert, and a marker or a declaration only
+        // ever selects a behaviour for facts the writer could have written
+        // anyway. So are two attributes, `dialog.branch/revision` and
+        // `dialog.branch/tree`: the pointer a primary holds to the
+        // revision, and its tree, a durable layer of its schema stands
+        // at, which names a tree the writer could have minted anyway.
+        // So are `dialog.command/*`, the rows a stack writes of a
+        // command's life (invoked, answered, failed, unhandled,
+        // progress), and `dialog.provider/*`, the commands a stack's
+        // providers serve: they record what this process did and can
+        // do, and a rule copies them where they should stay, so they
+        // claim nothing the writer could not have claimed anyway.
         if scope == WriteScope::Application {
             let (Instruction::Assert(fact, _) | Instruction::Retract(fact)) = &instruction;
             let the = fact.the.as_str();
             if the.starts_with("dialog.")
                 && !the.starts_with("dialog.rule/")
                 && !the.starts_with("dialog.concept/")
+                && !the.starts_with("dialog.layer/")
+                && !the.starts_with("dialog.command/")
+                && !the.starts_with("dialog.provider/")
+                && the != "dialog.branch/revision"
+                && the != "dialog.branch/tree"
             {
                 return Err(DialogCorpusError::ReservedRelation(fact.the.to_string()));
             }
         }
         match instruction {
-            Instruction::Assert(fact, Pick::All) => {
+            Instruction::Assert(fact, Cardinality::Many) => {
                 changed = true;
                 // ONE value encode per instruction: the payload feeds all
                 // three index keys, and a spilling value's block bytes and
@@ -1605,7 +1624,7 @@ where
                     )
                     .await?;
             }
-            Instruction::Assert(fact, policy) => {
+            Instruction::Assert(fact, Cardinality::One) => {
                 let entity_key = EntityKey::from_fact(&fact, manifest);
 
                 // Scan the cell's claims against the in-flight write target,
@@ -1668,10 +1687,10 @@ where
                     }
                 }
 
-                // The elected claim is the one a read under the pick
+                // The elected claim is the one a read
                 // returns over these priors, the written value's own claim
                 // among them when the cell holds it.
-                let elected = policy.elect(
+                let elected = Cardinality::One.elect(
                     priors
                         .iter()
                         .map(|(_, _, value, standing)| (value, Some(standing))),
@@ -1904,7 +1923,7 @@ mod spill_cache_tests {
                 facts
                     .iter()
                     .cloned()
-                    .map(|fact| Instruction::Assert(fact, crate::Pick::All)),
+                    .map(|fact| Instruction::Assert(fact, crate::Cardinality::Many)),
             ),
         )
         .await?;
@@ -1990,7 +2009,10 @@ mod spill_cache_tests {
         tree.apply(
             &store,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(fact.clone(), crate::Pick::All)]),
+            stream::iter(vec![Instruction::Assert(
+                fact.clone(),
+                crate::Cardinality::Many,
+            )]),
         )
         .await
         .unwrap();
@@ -2051,7 +2073,10 @@ mod spill_cache_tests {
         tree.apply(
             &store,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(fact.clone(), crate::Pick::All)]),
+            stream::iter(vec![Instruction::Assert(
+                fact.clone(),
+                crate::Cardinality::Many,
+            )]),
         )
         .await?;
         let key = EntityKey::from_fact(&fact, &dialog_search_tree::Manifest::default()).into_key();
@@ -2280,6 +2305,19 @@ mod selector_range_tests {
             }
         }
     }
+
+    /// A selector constrained by its layer alone reads every fact: the
+    /// whole entity index, edge to edge.
+    #[dialog_common::test]
+    async fn it_reads_the_whole_entity_index_for_a_selector_naming_only_a_layer() {
+        let manifest = dialog_search_tree::Manifest::default();
+        let layer = Entity::from_str("control:").expect("valid entity");
+        let range = selector_range(&Selector::new().only_in(layer), &manifest);
+        let start = <EntityKey<Key> as KeyViewConstruct>::min().into_key();
+        let end = <EntityKey<Key> as KeyViewConstruct>::max().into_key();
+        assert_eq!(range.start().as_ref(), start.as_ref());
+        assert_eq!(range.end().as_ref(), end.as_ref());
+    }
 }
 
 #[cfg(test)]
@@ -2321,7 +2359,7 @@ mod corrupt_row_tests {
                         is: Value::String(of.to_string()),
                         cause: None,
                     },
-                    crate::Pick::All,
+                    crate::Cardinality::Many,
                 )
             })
             .collect();

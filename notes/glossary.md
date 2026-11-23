@@ -58,28 +58,26 @@ Causal references ground claims in time and establish partial order between them
 
 ### Attribute
 
-A relation qualified by a value type and a pick: how a relation is read. `person/name` read as `text:` under `last` is an attribute. Two attributes over one relation, read as different types or under different picks, are two attributes, each with its own identity.
+A relation, a value type and a cardinality: how a relation is read and written. `person/name` read as `text:` under cardinality one is an attribute. Two attributes over one relation, read as different types or under different cardinalities, are two attributes, each with its own identity.
 
 ```json
 { "the": "person/name", "as": "text:" }
-{ "the": "person/email", "as": "text:", "pick": "all:" }
+{ "the": "person/email", "as": "text:", "cardinality": "many" }
 { "the": "job/status", "as": ["case:suspended", "case:active"] }
 ```
 
-An attribute's identity is a hash of the relations it reads, its type, its pick and the values its pick ranks.
+A listed `as` is an enumerated type: the values the attribute holds, best first, the order a field picking `top` ranks them by. An attribute's identity is a hash of its relation, its cardinality, its type and the values it lists.
 
-#### Pick
+#### Cardinality
 
-Which of the claims a relation holds for an entity an attribute reads, spelled `pick`:
+How many claims a cell of an attribute holds, spelled `cardinality`:
 
-- `last` (the default): the newest claim;
-- `all`: every claim, as a set;
-- `top`: the best ranked of listed values (`as: [..]`) or relations (`the: [..]`), and a list implies `top`;
-- `max`, `min`: the greatest or least value of an ordered type.
+- `one` (the default): a read returns the cell's newest claim, and a write succeeds that claim, so the cell holds one live claim;
+- `many`: a read returns every claim, as a set, and a write adds a claim beside the others.
 
-Like a type, each pick is named by an entity, `last:`, `all:`, `top:`, `max:` and `min:`, which is how a descriptor spells it and what an attribute's identity hashes.
+A read that ranks a cell's claims, the greatest, the least or the first listed, is not a property of an attribute but of the concept field that reads it: the field picks `max`, `min` or `top` over a cardinality-many attribute (`"pick": "top"`, from which the field's cardinality follows; see [aggregation](./aggregation.md#selective-aggregators-on-concept-fields)). A listed `as` ranks its values best first. In Rust a cardinality is `dialog_corpus::Cardinality`, re-exported as `dialog_query::Cardinality`.
 
-A pick governs writes too: writing through an attribute under any pick but `all` succeeds the claim a read under that pick returns, and `all` adds a claim beside the others. In Rust a pick is `dialog_corpus::Pick`.
+The releases 0.3 and 0.4 spelled a `pick` in its place (`last`, `all`, `top`, `max`, `min`) and could list relations under `the`. This release refuses both by name; `Branch::upgrade_rules` rewrites a stored rule reading under `last` or `all` and reports one it cannot rewrite.
 
 ### Concept
 
@@ -276,7 +274,7 @@ Ability to replicate only needed subtrees rather than entire database. This feat
 
 ### Incremental View Maintenance
 
-DBSP-based approach to efficiently update query results when facts change. Instead of re-running complex queries after each transaction, incremental view maintenance computes only the delta (change) to the result set, dramatically improving performance for standing queries and subscriptions.
+How standing query subscriptions keep their results current. It is pull-driven demand transformation over the top-down engine, not DBSP dataflow: each evaluation records a demand cover (the index key ranges it read) at the `Select` boundary, and a poll diffs the pinned tree root against the new one scoped to that cover (`differentiate_within`), so writes outside the cover cost nothing. Changes inside the cover are maintained per entity with DRed, over-deleting the touched entities' rows and re-deriving them via `Application::restrict`; recursive concepts carry their fixpoint answer table forward as a semi-naive continuation. DBSP's algebra only informs what each step must compute. See [`incremental-subscriptions.md`](./incremental-subscriptions.md) and the module doc of `rust/dialog-repository/src/repository/branch/subscription.rs`.
 
 ### Top-Down Evaluation
 

@@ -20,8 +20,8 @@ use crate::error::TypeError;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
-use crate::rule::compile_internal;
 use crate::rule::deductive::{DeductiveRule, Origin};
+use crate::rule::{compile_internal, compile_selective};
 use crate::term::Term;
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::Any;
@@ -106,10 +106,9 @@ impl DeductiveRule {
                 }
             }
 
-            // The head derives into the relation, whatever pick the
-            // field it came from reads it under.
-            let relation =
-                ConceptFieldDescriptor::required(field.descriptor().clone().without_pick());
+            // The head derives into the relation, whatever domain the
+            // field it came from lists over it.
+            let relation = ConceptFieldDescriptor::required(field.descriptor().clone().plain());
             let conclusion = ConceptDescriptor::of_attribute(&relation);
             let mut body = rename_premises(&premises, &map)?;
             // An optional head field derives a value only where the
@@ -130,21 +129,13 @@ impl DeductiveRule {
                 .reduce()
                 .iter()
                 .filter(|entry| entry.field == name)
-                .map(|entry| {
-                    (
-                        value.clone(),
-                        ReduceSpec {
-                            apply: entry.aggregator,
-                            of: entry.input.clone(),
-                        },
-                    )
-                })
+                .map(|entry| (value.clone(), ReduceSpec::from(entry)))
                 .collect();
 
             let rule = if reduce.is_empty() {
                 compile_internal::<DeductiveRule>(conclusion, body)
             } else {
-                DeductiveRule::with_reduce(conclusion, body, reduce)
+                compile_selective::<DeductiveRule>(conclusion, body, reduce.into_iter().collect())
             };
             match rule {
                 Ok(rule) => {
