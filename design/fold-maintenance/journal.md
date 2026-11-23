@@ -115,3 +115,21 @@ So the cover itself is the next thing: a range for each entity is built, merged 
 **Learned.** Every number this topic has chased is of a replica that holds its data: instructions, allocations, milliseconds in memory. For a replica that does not, the cost a person feels is the number of waves, and a change can lower the first while raising the second. The bar for fast has two parts and only one was written.
 
 **Decided.** By the maintainer: measure. A research topic on its own branch, `research/rederive-window`: what decides the round trips of one poll on a replica that does not hold the data, across every replication report and network shape, for windows from 16 to unbounded with the cover as on main and smaller; what a wider window costs where nothing is fetched; and whether a poll that fetches in one wave what its re-derivations will read is better than tuning a number. Hypotheses and bars are written there before any run.
+
+## 2026-11-23, A rule fired in full fires for every match, and that is to be fixed by maintenance
+
+**Asked.** dialog-db/dialog-db#791 fixes what 0.5.0 misses: a rule over an attribute a deductive rule derives from what a commit writes was seeded with the row written, and a seed finds the row's value at the row's entity. Three shapes are missed by any seed: the attribute derived for another entity (an event mirroring another's kind), derived at the entity written but at another value (an alias beside a kind), and derived from another attribute written in the same commit (a kind from a tag). A narrower test, the agent's, was tried and is unsound: the second and third derive at the entity read. So such a rule is evaluated in full.
+
+**What that costs.** A full firing fires for every match, the old ones too. In this case a command is issued again for entities the commit did not touch, and a `last` head is written over a later write by hand. Main does the same already for an attribute that changed only derivedly. Measured, one row a commit, a rule over events and a deductive rule restating an event's kind: 283M instructions on main and 379M with the fix at 1,000 events, 2.79G and 3.76G at 10,000, against 4.3M and 5.6M with no deductive rule. So main was already proportional to the relation here, and the fix adds a third.
+
+**The maintainer:** "Things should be sound", and of the firing for every match: "we should followup with proper incremental maintenance fix".
+
+**Learned.** Induction has the problem subscriptions had. A subscription finds the affected entities by joining the change sideways at the old state and at the new, derives those again, and reports what was asserted and what was retracted. Induction fires on matches, has no old state to compare with, and so chooses between a seed that can miss and a scan that repeats.
+
+**Decided.** By the maintainer: follow #791 with the proper fix. What it has to hold, to be made a problem statement before any approach:
+
+- a rule fires for the matches a commit makes, and for no match that stood before it, whether the change reached the rule through a row or through a deductive rule;
+- the work is proportional to the change, not to the relation, also where a premise reads a derived attribute;
+- the tests of #791 that assert a firing for an untouched entity (`fired`, beside `made`) are the ones that change: `fired` becomes `made`.
+
+Not decided: whether induction keeps what it matched before, as a subscription keeps its answer, or derives the old matches again at the commit's base; and whether one mechanism can serve both a subscription's poll and a commit's induction.
