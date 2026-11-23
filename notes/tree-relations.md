@@ -353,11 +353,18 @@ one node's decoded summaries at a time — nodes are capped near
   node (bytes, in entry order). Entry *values*/states are v2 (see out
   of scope).
 
-Node references travel as the same base58 string `dialog.branch/tree`
-uses (`ToBase58` in `repository/branch/metadata.rs:76-79`) — no new
-entity scheme is needed now that rows are not EAV facts; whether to
-also mint a `tree:` URI form is a presentation choice, not a
-requirement.
+What follows in this note is the first cut and is kept as the record
+of it. The resolvers were redrawn in
+[design/tree-exploration.md](../design/tree-exploration.md): a node is
+a handle, the entity `node:<base58(hash)>`, which `dialog.branch/tree`
+carries and `tree/span` yields; a resolver asks the environment for the
+decoded node and yields one part of it; and there are five
+(`tree/node` with the manifest folded in, `tree/span`, `tree/entry`
+with what `tree/key` and `tree/blob` yielded, `tree/block`,
+`tree/value`). The first cut passed the base58 string on the grounds
+that resolver rows are not EAV facts and so need no entity; a rule that
+derives a concept from them needs one per row. What this note says of
+an unbound input still holds: it is non-viable until a join binds it.
 
 Pure formulas (ordinary `Formula`s in `dialog-query/src/formula/`,
 registered in `define_formulas!` beside `dialog/revision`):

@@ -23,6 +23,10 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use dialog_perf::{Against, SweepConfig, Tolerance, catalog, compare_dirs, run, sweep};
 
+/// Counts the measured phase's calls into the allocator.
+#[global_allocator]
+static ALLOCATOR: dialog_perf::allocator::Counting = dialog_perf::allocator::Counting;
+
 /// The engine's cost matrix: counters and instruction counts per scenario.
 #[derive(Debug, Parser)]
 #[command(name = "perf", version, about)]
@@ -77,7 +81,7 @@ struct CompareArgs {
     /// New sweep directory (e.g. `target/perf-current`).
     new: PathBuf,
 
-    /// Instruction growth allowed, in percent.
+    /// Growth allowed in instructions outside the allocator, in percent.
     #[arg(long, default_value_t = Tolerance::default().instructions_pct)]
     threshold: f64,
 
@@ -101,6 +105,12 @@ struct CompareArgs {
     /// when there are none).
     #[arg(long, conflicts_with = "base")]
     stale: Option<PathBuf>,
+
+    /// Write why the comparison fails, and what to do about it, to this
+    /// file as Markdown (empty when it passes), for the pull request's
+    /// report.
+    #[arg(long)]
+    failures: Option<PathBuf>,
 }
 
 fn main() -> Result<ExitCode> {
@@ -147,6 +157,21 @@ fn main() -> Result<ExitCode> {
             }
             if let Some(path) = &args.stale {
                 std::fs::write(path, comparison.stale_markdown().unwrap_or_default())?;
+            }
+            let what = if args.base {
+                "the base sweep"
+            } else {
+                "the baseline files"
+            };
+            if let Some(path) = &args.failures {
+                std::fs::write(path, comparison.failures_markdown(what).unwrap_or_default())?;
+            }
+            // In GitHub Actions, each failure is also an error annotation,
+            // so the checks page says why the gate failed.
+            if std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
+                for line in &comparison.regressions {
+                    println!("::error title=Perf gate, against {what}::{line}");
+                }
             }
             // In GitHub Actions, a stale baseline is also a warning
             // annotation on the run, so main's own gate shows it.

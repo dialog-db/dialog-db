@@ -35,7 +35,7 @@ use std::sync::{Arc, RwLock};
 pub struct RuleRegistry {
     /// The rules deriving each relation, keyed by the relation's
     /// `on:` entity: a rule derives into `(domain, name)`, and a read
-    /// declares its own type, cardinality and pick over it. Every
+    /// declares its own type and cardinality over it. Every
     /// rule here is attribute-headed.
     heads: Arc<RwLock<HashMap<Entity, Vec<DeductiveRule>>>>,
     /// The order rules were registered in, by each head's identity: what
@@ -56,16 +56,6 @@ fn relation_key(field: &ConceptFieldDescriptor) -> Entity {
     Reach::of(field.the())
         .on_entity()
         .expect("a relation names an entity")
-}
-
-/// The index entities of every relation a field reads: one, or each
-/// of a ranked chain.
-fn relation_keys(field: &ConceptFieldDescriptor) -> Vec<Entity> {
-    field
-        .descriptor()
-        .relations()
-        .filter_map(|relation| Reach::of(relation).on_entity())
-        .collect()
 }
 
 fn poisoned<E: Display>(error: E) -> EvaluationError {
@@ -146,9 +136,7 @@ impl RuleRegistry {
     /// Whether some registered rule derives the attribute of `field`.
     pub fn derives(&self, field: &ConceptFieldDescriptor) -> Result<bool, EvaluationError> {
         let index = self.heads.read().map_err(poisoned)?;
-        Ok(relation_keys(field)
-            .iter()
-            .any(|key| index.contains_key(key)))
+        Ok(index.contains_key(&relation_key(field)))
     }
 
     /// The relations some registered rule derives into, by `on:` entity.
@@ -172,23 +160,18 @@ impl RuleRegistry {
             // An attribute concept, under whatever field name the
             // caller spelled it: the bundle is built over the canonical
             // spelling every rule deriving it concludes, and the rules
-            // are those deriving the field's relation, whatever type,
-            // cardinality or pick the field reads it under.
+            // are those deriving the field's relation, whatever type
+            // or cardinality the field reads it under.
             let canonical = ConceptDescriptor::of_attribute(field);
             let mut bundle = ConceptRules::new(&canonical);
-            for rule in ConceptRules::chain_scans(field) {
-                bundle.install(rule);
-            }
             // A rule's body reads a relation some rule derives through
             // the attribute concept over it, so it sees the derived
             // candidates too.
             let derived = self.derived()?;
             let index = self.heads.read().map_err(poisoned)?;
-            for key in relation_keys(field) {
-                if let Some(rules) = index.get(&key) {
-                    for rule in rules {
-                        bundle.install_at(reading_derived(rule, &derived)?, self.installed(rule)?);
-                    }
+            if let Some(rules) = index.get(&relation_key(field)) {
+                for rule in rules {
+                    bundle.install_at(reading_derived(rule, &derived)?, self.installed(rule)?);
                 }
             }
             drop(index);
@@ -199,12 +182,8 @@ impl RuleRegistry {
         } else {
             let derived = self.derived()?;
             // A field reads through its attribute concept when a rule
-            // derives it, or when its pick is not the plain stored
-            // read: either way its candidates are gathered and elected.
-            let through = |field: &ConceptFieldDescriptor| {
-                field.descriptor().reads_elected()
-                    || relation_keys(field).iter().any(|key| derived.contains(key))
-            };
+            // derives it: its candidates are gathered and elected.
+            let through = |field: &ConceptFieldDescriptor| derived.contains(&relation_key(field));
             let reads_derived = predicate.with().iter().any(|(_, field)| through(field));
             if reads_derived {
                 let selecting = DeductiveRule::selecting(predicate, &through)
@@ -233,9 +212,6 @@ impl RuleRegistry {
         let mut source: Option<DeductiveRule> = None;
         let mut attributes = Vec::new();
         for (_, field) in predicate.with().iter() {
-            if field.descriptor().is_chain() {
-                return Ok(None);
-            }
             let key = relation_key(field);
             let Some(heads) = index.get(&key) else {
                 continue;
@@ -375,7 +351,7 @@ impl RuleRegistry {
     /// Callers decide what to do: surface as a warning after an
     /// install, refuse to proceed after a merge, or ignore and let
     /// queries fail individually. The absence tests the cycle
-    /// pick governs are listed by
+    /// analysis leaves over are listed by
     /// [`ProgramAnalysis::absences`] on [`Self::analysis`].
     pub fn validate(&self) -> Result<Vec<AggregationViolation>, EvaluationError> {
         Ok(self.analysis()?.violations().to_vec())

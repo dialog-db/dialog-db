@@ -93,8 +93,8 @@ use dialog_common::{Blake3Hash, Buffer};
 use dialog_corpus::history::{Edition, Record};
 use dialog_corpus::tree::{Corpus, fetch_spilled};
 use dialog_corpus::{
-    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, Datum, ENTITY_KEY_TAG, Fact, Instruction, Key, Pick, Relation,
-    State, VALUE_KEY_TAG, history_region_range,
+    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, Cardinality, Datum, ENTITY_KEY_TAG, Fact, Instruction, Key,
+    Relation, State, VALUE_KEY_TAG, history_region_range,
 };
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_search_tree::{
@@ -1145,8 +1145,8 @@ fn history(directory: &Path) -> anyhow::Result<Vec<Vec<Instruction>>> {
                 cause: None,
             };
             let instruction = match (assertion, superseding) {
-                (true, true) => Instruction::Assert(artifact, Pick::Last),
-                (true, false) => Instruction::Assert(artifact, Pick::All),
+                (true, true) => Instruction::Assert(artifact, Cardinality::One),
+                (true, false) => Instruction::Assert(artifact, Cardinality::Many),
                 (false, _) => Instruction::Retract(artifact),
             };
             revisions

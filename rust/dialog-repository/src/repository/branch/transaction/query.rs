@@ -62,7 +62,7 @@ use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
 use dialog_search_tree::nodes;
 
-use crate::repository::branch::session::{QueryEnv, shared_metadata};
+use crate::repository::branch::session::{Composite, QueryEnv, shared_metadata};
 use crate::repository::source::View;
 use crate::{RemoteSite, Staged};
 use std::slice::from_ref;
@@ -81,11 +81,25 @@ use std::slice::from_ref;
 pub struct TransactionQuery<'a> {
     view: View<'a>,
     layers: Vec<Staged>,
+    /// The layers a transaction through a session reads beside its
+    /// line, with the guide that leads the read; `None` for a transaction
+    /// on the line alone.
+    composite: Option<Composite>,
 }
 
 impl<'a> TransactionQuery<'a> {
     pub(crate) fn new(view: View<'a>, layers: Vec<Staged>) -> Self {
-        Self { view, layers }
+        Self {
+            view,
+            layers,
+            composite: None,
+        }
+    }
+
+    /// Read `composite`, a session's layers, instead of the line alone.
+    pub(crate) fn over(mut self, composite: Composite) -> Self {
+        self.composite = Some(composite);
+        self
     }
 
     /// Stage a query against this transaction's view. Call
@@ -94,6 +108,7 @@ impl<'a> TransactionQuery<'a> {
         TransactionSelectQuery {
             view: self.view,
             layers: self.layers,
+            composite: self.composite,
             query,
         }
     }
@@ -103,6 +118,7 @@ impl<'a> TransactionQuery<'a> {
 pub struct TransactionSelectQuery<'a, Q> {
     view: View<'a>,
     layers: Vec<Staged>,
+    composite: Option<Composite>,
     query: Q,
 }
 
@@ -141,6 +157,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
         let TransactionSelectQuery {
             view,
             layers,
+            composite,
             query,
         } = self;
         async_stream::try_stream! {
@@ -160,8 +177,9 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // uses is what guarantees identical behavior — fact reads,
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
-            let sources = vec![view.into_source()];
-            let query_env = QueryEnv::new(sources.clone(), overlay, env).with_layers(layers);
+            let composite = composite.unwrap_or_else(|| Composite::of(view.into_source()));
+            let sources = composite.sources.clone();
+            let query_env = QueryEnv::over(composite, overlay, env).with_layers(layers);
             let results = Box::pin(query.perform(&query_env));
             // Mid-transaction queries drive the ambient preload queue
             // like any other evaluation (see `crate::repository::fetch`).
@@ -716,11 +734,9 @@ mod tests {
     }
 
     /// An uncommitted rule staged on a transaction derives a relation
-    /// the transaction's query elects over: the pending view reads the
-    /// pending candidates under `max` without the rule or the data
-    /// being committed. The choice is the query's, read over the
-    /// relation the rule derives into, whatever pick the rule's own
-    /// head declared.
+    /// another staged rule folds with `max`: the pending view reads the
+    /// pending candidates without the rules or the data being
+    /// committed.
     #[dialog_common::test]
     async fn it_elects_over_a_derived_relation_pending_in_the_transaction() -> anyhow::Result<()> {
         use dialog_query::rule::DeductiveRuleDescriptor;
@@ -734,7 +750,7 @@ mod tests {
         let rule = {
             let json = serde_json::json!({
                 "deduce": { "with": {
-                    "salary": { "the": "org/dept-salary", "as": "natural:", "pick": "all:" }
+                    "salary": { "the": "org/dept-salary", "as": "natural:", "cardinality": "many" }
                 }},
                 "when": [{
                     "assert": { "with": {
@@ -752,8 +768,10 @@ mod tests {
                 serde_json::from_value(json).expect("descriptor parses");
             descriptor.compile().expect("rule compiles")
         };
+        // The department's highest salary: a field picking `max`
+        // over the relation the rule derives.
         let dept_top: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max:" }
+            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max" }
         }}))?;
 
         let dept: Entity = "id:dept-a".parse()?;
@@ -782,7 +800,7 @@ mod tests {
         assert_eq!(
             rows.len(),
             1,
-            "the query elects among the pending rule's candidates"
+            "the pick chooses among the pending rule's candidates"
         );
         assert_eq!(*rows[0].entity(), dept);
         assert_eq!(rows[0].get::<u64>("top")?, 4);

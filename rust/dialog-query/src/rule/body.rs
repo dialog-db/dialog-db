@@ -2,10 +2,19 @@
 //! envelope that names the format it is written in.
 //!
 //! ```text
-//! { "format": 3, "rule": { "deduce": ..., "when": [...] } }
+//! { "format": 4, "rule": { "deduce": ..., "when": [...] } }
 //! ```
 //!
-//! Format 3 writes the rule's canonical spelling (see
+//! Format 4 writes the rule's canonical spelling with each attribute
+//! under its cardinality (`one`, unwritten, or `many`). Format 3 wrote the
+//! same spelling with each attribute under a `pick`, which this release
+//! refuses by name (see
+//! [`AttributeDescriptor`](crate::attribute::AttributeDescriptor)), so a
+//! format 3 body spelling one decodes to an error and the rule is inert
+//! until `Branch::upgrade_rules` rewrites it. A format 3 body spelling no
+//! pick decodes as it was written.
+//!
+//! Format 3 wrote the rule's canonical spelling, as format 4 does (see
 //! [`canonical`](crate::rule::canonical)): the locals and the head's
 //! fields renamed by the labeling, a premise's fields named by what
 //! they read, the premises sorted, and no descriptions. The body then
@@ -18,10 +27,10 @@
 //! decodes as the type it was written as. Format 1 (0.2.0) and format
 //! 0 (the bare descriptor the release before formats wrote) wrote
 //! constants bare, and a bare constant reads as the first type its
-//! payload fits. All three are still read, and `Branch::upgrade_rules`
-//! rewrites them in format 3. A body in a later format than this
-//! release reads is refused by name rather than read as something it
-//! is not.
+//! payload fits. All three are still read, as format 3 is, and
+//! `Branch::upgrade_rules` rewrites them in format 4. A body in a later
+//! format than this release reads is refused by name rather than read
+//! as something it is not.
 //!
 //! dag-cbor holds integers of at most 64 bits and finite floats, so a
 //! rule whose constants exceed that is refused when it compiles (see
@@ -32,7 +41,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// The rule body format this release writes.
-pub const FORMAT: u64 = 3;
+pub const FORMAT: u64 = 4;
 
 #[derive(Serialize)]
 struct Envelope<'a, T> {
@@ -50,6 +59,15 @@ struct Stamped<T> {
 struct Stamp {
     #[serde(default)]
     format: Option<u64>,
+}
+
+/// The format a stored body names, `0` for the bare descriptor the
+/// release before formats wrote, or `None` when the bytes are no
+/// dag-cbor map.
+pub fn format_of(bytes: &[u8]) -> Option<u64> {
+    serde_ipld_dagcbor::from_slice::<Stamp>(bytes)
+        .ok()
+        .map(|stamp| stamp.format.unwrap_or(0))
 }
 
 /// `rule`, a canonical descriptor, as a stored body in [`FORMAT`].

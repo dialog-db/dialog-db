@@ -34,11 +34,16 @@ and anything else bumps the patch (see the top of
 ## Pre-releases
 
 To let a dependent such as tonk build against a change still in review,
-tag the pull request's head `v<next>-rc.<n>` (prepare it with
-`scripts/release.sh prepare <next>-rc.<n>` on that branch first) and pin
-the dependent to the tag rather than to the branch: a tag stays where it
-was put when the branch is rewritten or deleted. The `Release` workflow
-marks a version with a pre-release suffix as a pre-release.
+its own pull request may pin the exact revision of this repository's pull
+request head (`rev = "<sha>"`), never the branch: a revision stays
+reachable while the pull request is open, a branch may be rewritten or
+deleted. That pin never reaches the dependent's `main`, which takes tagged
+releases only. Tags are cut on `main` here, never on an arbitrary commit;
+a pre-release (`v<next>-rc.<n>`) is a tag on a `main` commit, prepared
+with `scripts/release.sh prepare <next>-rc.<n>` in a release pull request
+like any other, and is how a dependent gets a change that is on `main` but
+not yet in a release. The `Release` workflow marks a version with a
+pre-release suffix as a pre-release.
 
 ## Depending on a release
 

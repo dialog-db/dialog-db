@@ -990,7 +990,14 @@ where
         // The entries are appended to the batch's still open buffered tree:
         // they ride the same buffered write as the data, so the record costs
         // a buffer append instead of a second canonical spine-to-leaf edit.
+        #[cfg(not(test))]
         let mut entries = record.entries(batch.manifest())?;
+        #[cfg(test)]
+        let mut entries = if legacy::writing() {
+            record.legacy_entries(batch.manifest())?
+        } else {
+            record.entries(batch.manifest())?
+        };
         // The context region's changed entries ride with the record.
         entries.entries.extend(region);
         // The caller's machinery entries (blob-index tombstones) ride the same
@@ -1026,6 +1033,38 @@ where
             record,
             context,
         })))
+    }
+}
+
+/// A test's way to commit as a release before the `revision:` scheme
+/// did: with the revision's record under its older name.
+#[cfg(test)]
+pub(crate) mod legacy {
+    use std::cell::Cell;
+
+    thread_local! {
+        static WRITING: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Whether this thread's commits write a record under the older name.
+    pub(crate) fn writing() -> bool {
+        WRITING.with(Cell::get)
+    }
+
+    /// Commits on this thread write records under the older name until
+    /// the guard is dropped.
+    pub(crate) fn write() -> Writing {
+        WRITING.with(|writing| writing.set(true));
+        Writing
+    }
+
+    /// Ends [`write`] when dropped.
+    pub(crate) struct Writing;
+
+    impl Drop for Writing {
+        fn drop(&mut self) {
+            WRITING.with(|writing| writing.set(false));
+        }
     }
 }
 
@@ -1070,7 +1109,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             )]))
             .perform(&operator)
             .await?;
@@ -1083,7 +1122,7 @@ mod tests {
                     is: Value::String("Bob".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             )]))
             .perform(&operator)
             .await?;
@@ -1117,7 +1156,7 @@ mod tests {
 
         let instructions = stream::iter(vec![Instruction::Assert(
             fact.clone(),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]);
 
         let revision = branch.commit(instructions).perform(&operator).await?;
@@ -1176,7 +1215,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -1190,7 +1229,7 @@ mod tests {
                     is: Value::String("Bob".to_string()),
                     cause: None,
                 },
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -1306,7 +1345,7 @@ mod tests {
                 is: Value::String(name.to_string()),
                 cause: None,
             },
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]
         .into_iter()
         .collect())
@@ -1392,7 +1431,7 @@ mod history_tests {
         let first = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -1402,7 +1441,7 @@ mod history_tests {
         let second = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hi"),
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             )]))
             .perform(&operator)
             .await?;
@@ -1462,7 +1501,7 @@ mod history_tests {
         let third = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hello"),
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             )]))
             .perform(&operator)
             .await?;
@@ -1490,7 +1529,7 @@ mod history_tests {
         let revision = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -1536,8 +1575,8 @@ mod history_tests {
             cause: None,
         };
         for instruction in [
-            Instruction::Assert(forged.clone(), dialog_corpus::Pick::All),
-            Instruction::Assert(forged.clone(), dialog_corpus::Pick::Last),
+            Instruction::Assert(forged.clone(), dialog_corpus::Cardinality::Many),
+            Instruction::Assert(forged.clone(), dialog_corpus::Cardinality::One),
             Instruction::Retract(forged),
         ] {
             let result = branch
@@ -1570,7 +1609,7 @@ mod history_tests {
         let first = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -1620,7 +1659,7 @@ mod history_tests {
         let first = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;
@@ -1661,7 +1700,7 @@ mod history_tests {
         let seed = repo.branch("main").open().perform(&operator).await?;
         seed.commit(stream::iter(vec![Instruction::Assert(
             title("post:1", "Hej"),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         )]))
         .perform(&operator)
         .await?;
@@ -1684,7 +1723,7 @@ mod history_tests {
         let raced = reasserter
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             )]))
             .perform(&operator)
             .await;
@@ -1726,7 +1765,7 @@ mod history_tests {
         let revision = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]))
             .perform(&operator)
             .await?;

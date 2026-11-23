@@ -573,9 +573,12 @@ async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
     let result = snapshot
         .transaction()
         .integrate(
-            [Instruction::Assert(forged, dialog_corpus::Pick::All)]
-                .into_iter()
-                .collect(),
+            [Instruction::Assert(
+                forged,
+                dialog_corpus::Cardinality::Many,
+            )]
+            .into_iter()
+            .collect(),
         )
         .commit()
         .perform(&operator)
@@ -870,7 +873,7 @@ async fn it_commits_through_a_cold_handle() -> Result<()> {
         .integrate(
             [Instruction::Assert(
                 fact("user:bob", "Bob"),
-                dialog_corpus::Pick::All,
+                dialog_corpus::Cardinality::Many,
             )]
             .into_iter()
             .collect(),

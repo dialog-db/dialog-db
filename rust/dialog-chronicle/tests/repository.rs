@@ -10,7 +10,7 @@ use dialog_capability::Subject;
 use dialog_chronicle::{Chronicle, FILE_NAME, Options};
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_corpus::{
-    Changes, Entity, Fact, Instruction, Pick, Relation, Selector, Update as _, Value,
+    Cardinality, Changes, Entity, Fact, Instruction, Relation, Selector, Update as _, Value,
 };
 use dialog_effects::storage::{Directory, Location};
 use dialog_peer::helpers::{Seed, open_peer_as, test_owned, unique_name};
@@ -97,7 +97,7 @@ async fn commit_facts(at: &Directory, peer: &str, name: &str) -> anyhow::Result<
                 let entity = format!("did:test:person-{commit}-{row}");
                 Ok(Instruction::Assert(
                     fact(&entity, &format!("person {commit}.{row}"))?,
-                    Pick::All,
+                    Cardinality::Many,
                 ))
             })
             .collect::<anyhow::Result<_>>()?;
@@ -481,7 +481,7 @@ async fn it_takes_unchanged_rows_from_the_node_a_commit_supersedes() -> anyhow::
                 changes.dissociate(named.the, named.of, named.is);
             } else {
                 let renamed = fact(&entity, &format!("renamed {commit}.{row}"))?;
-                changes.associate(renamed.the, renamed.of, renamed.is, Pick::Last);
+                changes.associate(renamed.the, renamed.of, renamed.is, Cardinality::One);
             }
         }
         commit!(branch, &operator, changes)?;
@@ -497,7 +497,7 @@ async fn it_takes_unchanged_rows_from_the_node_a_commit_supersedes() -> anyhow::
                 let entity = format!("did:test:person-{commit}-{row}");
                 Ok(Instruction::Assert(
                     fact(&entity, &format!("renamed {commit}.{row}"))?,
-                    Pick::All,
+                    Cardinality::Many,
                 ))
             })
             .collect::<anyhow::Result<_>>()?;
@@ -649,7 +649,10 @@ async fn it_keeps_branch_heads_in_the_file() -> anyhow::Result<()> {
             let changes: Changes = (0..10)
                 .map(|row| {
                     let entity = format!("did:test:person-{commit}-{row}");
-                    Ok(Instruction::Assert(fact(&entity, "someone")?, Pick::All))
+                    Ok(Instruction::Assert(
+                        fact(&entity, "someone")?,
+                        Cardinality::Many,
+                    ))
                 })
                 .collect::<anyhow::Result<_>>()?;
             commit!(branch, &operator, changes)?;
@@ -707,7 +710,7 @@ fn tagged(tag: &str, commit: usize) -> anyhow::Result<Changes> {
             let entity = format!("did:test:{}-{commit}-{row}", tag.replace(' ', "-"));
             Ok(Instruction::Assert(
                 fact(&entity, &format!("{tag} {commit}.{row}"))?,
-                Pick::All,
+                Cardinality::Many,
             ))
         })
         .collect()
@@ -833,8 +836,7 @@ fn hold_turn(path: &Path) -> anyhow::Result<std::fs::File> {
 }
 
 /// Two processes commit to two branches of one repository at once. A
-/// head is updated in the file's writer's turn, as SQLite commits under its
-/// write lock, so while a third process holds the turn their commits wait;
+/// head is updated in the file's writer's turn, so while a third process holds the turn their commits wait;
 /// once it lets go both go on, taking turns with each other only to append
 /// each head. Every commit of each lands on its own branch.
 ///

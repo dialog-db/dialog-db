@@ -1,20 +1,19 @@
 //! A reference election, checked against the engine's.
 //!
-//! The picks are specified here on their own, over a cell's claims
-//! and their standings, apart from the code that implements them: `last`
-//! takes the newest claim, the greater standing and then, between claims
-//! that stand equal, the greater hash of the value's identity key; `max`
-//! and `min` the greater or the lesser value, then the newer; and a write
-//! under a choosing pick succeeds the claim the
-//! pick elects, leaving the cell alone when that claim holds the
-//! value written. A write under `all` succeeds nothing.
+//! The cardinalities are specified here on their own, over a cell's
+//! claims and their standings, apart from the code that implements them:
+//! a read under one takes the newest claim, the greater standing and
+//! then, between claims that stand equal, the greater hash of the
+//! value's identity key; a write under one succeeds that claim, leaving
+//! the cell alone when it holds the value written. A write under many
+//! succeeds nothing, and a read under many returns every claim.
 //!
 //! Generated histories of writes and pulls across three replicas then
 //! check every place the engine elects against the reference: the tree,
 //! which settles a commit's writes; the transaction's own settlement,
-//! which its reads see; and the reads of a branch, under every pick.
-//! Finally the replicas pull from each other until nothing changes, and
-//! must agree.
+//! which its reads see; and the reads of a branch, under each
+//! cardinality. Finally the replicas pull from each other until nothing
+//! changes, and must agree.
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -25,7 +24,7 @@ use crate::helpers::test_repo;
 use crate::repository::branch::session::{QueryEnv, QueryLayer};
 use crate::repository::source::Source;
 use anyhow::{Result, anyhow};
-use dialog_corpus::{Entity, Pick, Relation as CorpusRelation, Value, make_reference};
+use dialog_corpus::{Entity, Relation as CorpusRelation, Value, make_reference};
 use dialog_effects::authority::Identify;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::Relation;
@@ -41,8 +40,8 @@ use std::env;
 
 type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
 
-/// The picks a history writes and reads under.
-const POLICIES: [Pick; 4] = [Pick::Last, Pick::Max, Pick::Min, Pick::All];
+/// The cardinalities a history writes and reads under.
+const POLICIES: [Cardinality; 2] = [Cardinality::One, Cardinality::Many];
 
 /// Where a claim stands: as the line holds it, or staged by the
 /// transaction, newer than every claim of the line and equal to every
@@ -69,26 +68,16 @@ fn tiebreak(salary: u64) -> [u8; 32] {
     make_reference(Value::UnsignedInt(salary.into()).identity_key())
 }
 
-/// The claim `policy` elects among `entries`, by index. `None` over no
-/// claims and under `all`.
-fn elect(policy: &Pick, entries: &[Entry]) -> Option<usize> {
-    let better = |candidate: &Entry, incumbent: &Entry| match policy {
-        Pick::Last => newer(candidate, incumbent),
-        Pick::Max => {
-            candidate.0 > incumbent.0 || (candidate.0 == incumbent.0 && newer(candidate, incumbent))
-        }
-        Pick::Min => {
-            candidate.0 < incumbent.0 || (candidate.0 == incumbent.0 && newer(candidate, incumbent))
-        }
-        _ => false,
-    };
-    if *policy == Pick::All {
+/// The claim a read under `policy` elects among `entries`, by index:
+/// the newest under one. `None` over no claims and under many.
+fn elect(policy: &Cardinality, entries: &[Entry]) -> Option<usize> {
+    if *policy == Cardinality::Many {
         return None;
     }
     let mut best: Option<usize> = None;
     for (index, entry) in entries.iter().enumerate() {
         match best {
-            Some(incumbent) if !better(entry, &entries[incumbent]) => {}
+            Some(incumbent) if !newer(entry, &entries[incumbent]) => {}
             _ => best = Some(index),
         }
     }
@@ -96,12 +85,10 @@ fn elect(policy: &Pick, entries: &[Entry]) -> Option<usize> {
 }
 
 /// A write of `value` under `policy` to a cell holding `entries`: under
-/// a choosing pick, the claim the pick elects is succeeded unless it
-/// holds the value written; the value written stands as staged.
-fn write(policy: &Pick, value: u64, entries: &mut Vec<Entry>) {
-    if *policy != Pick::All
-        && let Some(elected) = elect(policy, entries)
-    {
+/// one, the newest claim is succeeded unless it holds the value
+/// written; the value written stands as staged.
+fn write(policy: &Cardinality, value: u64, entries: &mut Vec<Entry>) {
+    if let Some(elected) = elect(policy, entries) {
         if entries[elected].0 == value {
             return;
         }
@@ -112,27 +99,17 @@ fn write(policy: &Pick, value: u64, entries: &mut Vec<Entry>) {
 }
 
 /// What a read under `policy` returns for a cell holding `entries`: the
-/// elected value, or every value under `all`, sorted.
-fn read(policy: &Pick, entries: &[Entry]) -> Vec<u64> {
+/// elected value, or every value under many, sorted.
+fn read(policy: &Cardinality, entries: &[Entry]) -> Vec<u64> {
     match policy {
-        Pick::All => {
+        Cardinality::Many => {
             let mut values: Vec<u64> = entries.iter().map(|entry| entry.0).collect();
             values.sort();
             values
         }
-        _ => elect(policy, entries)
+        Cardinality::One => elect(policy, entries)
             .map(|index| vec![entries[index].0])
             .unwrap_or_default(),
-    }
-}
-
-/// The spelling a concept field selects `policy` under.
-fn select_of(policy: &Pick) -> &'static str {
-    match policy {
-        Pick::Last => "last",
-        Pick::Max => "max",
-        Pick::Min => "min",
-        _ => "all",
     }
 }
 
@@ -141,25 +118,20 @@ fn salary_attribute() -> CorpusRelation {
 }
 
 /// A write of `org/salary` under `policy`.
-fn salary(of: &Entity, value: u64, policy: &Pick) -> AttributeStatement {
+fn salary(of: &Entity, value: u64, policy: &Cardinality) -> AttributeStatement {
     AttributeStatement {
         the: Relation::from(salary_attribute()),
         of: of.clone(),
         is: Value::UnsignedInt(value.into()),
         cause: None,
-        cardinality: Some(if *policy == Pick::All {
-            Cardinality::Many
-        } else {
-            Cardinality::One
-        }),
-        pick: Some(policy.clone()),
+        cardinality: Some(*policy),
     }
 }
 
 /// `org/salary` of `of` read under `policy`.
-fn salary_query(of: &Entity, policy: &Pick) -> ConceptQuery {
+fn salary_query(of: &Entity, policy: &Cardinality) -> ConceptQuery {
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "salary": { "the": "org/salary", "as": "natural:", "pick": select_of(policy) }
+        "salary": { "the": "org/salary", "as": "natural:", "cardinality": policy.name() }
     }}))
     .expect("a descriptor");
     let mut terms = Parameters::new();
@@ -213,7 +185,7 @@ impl Seeded {
     }
 }
 
-/// Every read of every cell on `branch`, under every pick, against
+/// Every read of every cell on `branch`, under each cardinality, against
 /// the reference over the branch's stored claims.
 async fn check_reads(
     branch: &Branch,
@@ -272,7 +244,7 @@ async fn replay(seed: u64, steps: usize) -> Result<()> {
             for _ in 0..count {
                 let person = random.below(people.len());
                 let value = 1 + random.below(6) as u64;
-                let policy = POLICIES[random.below(POLICIES.len())].clone();
+                let policy = POLICIES[random.below(POLICIES.len())];
                 writes.push((person, value, policy));
             }
             history.push(format!(
@@ -310,7 +282,7 @@ async fn replay(seed: u64, steps: usize) -> Result<()> {
                         let mut every = Vec::new();
                         for policy in &POLICIES {
                             every.push((
-                                policy.clone(),
+                                *policy,
                                 salaries(
                                     transaction
                                         .query()
@@ -362,7 +334,7 @@ async fn replay(seed: u64, steps: usize) -> Result<()> {
     }
 
     // The replicas pull from each other until nothing changes, and then
-    // hold the same claims and read the same under every pick.
+    // hold the same claims and read the same under each cardinality.
     let mut quiesced = false;
     for _ in 0..8 {
         let mut changed = false;
@@ -426,7 +398,7 @@ async fn a_wide_sweep_agrees_with_the_reference() -> Result<()> {
     Ok(())
 }
 
-/// Generated histories of writes under every pick and pulls between
+/// Generated histories of writes under each cardinality and pulls between
 /// three replicas, each step checked against the reference election.
 #[dialog_common::test]
 async fn every_election_agrees_with_the_reference() -> Result<()> {
