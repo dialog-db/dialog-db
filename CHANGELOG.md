@@ -108,6 +108,30 @@ bytes no query could read and no two writers spelled alike. The notation
 keeps its syntax trees as maps and lists, and a composite that is read
 without decoding all of it is what lets a rule reach one node of one.
 
+### A concept read copies no inner evaluation, and a concept's descriptor clones without copying its fields
+
+[#806](https://github.com/dialog-db/dialog-db/pull/806)
+
+Every evaluation of a concept built a stream of about 12.5 KB, because it
+held the inner evaluation of both of its arms (rows sorted on the entity,
+and rows in rule order) inline, side by side, at 5.8 KB each. Its caller
+moved the stream when it was returned and again when it boxed it, so a
+concept read copied about 25 KB before it read a row. The inner
+evaluation is now boxed, and the stream is under 1 KB. A
+concept descriptor's fields are now shared, so the clones a query makes of
+it on every evaluation (into its plan, its rule lookup, its renamed
+premises) no longer copy every field name and attribute.
+
+What this changes for you:
+
+- A point read of a concept costs 16 to 26% fewer instructions: the
+  `read-point` perf scenario goes from 23.0 M to 17.1 M, `rule-point` from
+  51.6 M to 39.8 M, `rule-recursive` from 801.6 M to 636.1 M. Scans and
+  commits do not move.
+- No API, result, stored fact or wire format changes.
+
+Why: copying that stream was 28% of the instructions of a single-entity
+read of a rule-derived concept, more than the read's tree scans.
 ### A poll scopes its diff to the cover as it stands, copying none of it
 
 [#844](https://github.com/dialog-db/dialog-db/pull/844).
@@ -150,6 +174,383 @@ dropping that scope.
   a file this release writes holding a composite is read by no older
   release, as the space is not. Nothing in a file an older release wrote
   is rewritten.
+- Nothing stored or synced changes.
+
+
+### A stored rule that reads a collection entry with its key and value blank reads back
+
+[#835](https://github.com/dialog-db/dialog-db/pull/835), reported in
+[#834](https://github.com/dialog-db/dialog-db/issues/834).
+
+A concept application that reads a collection and binds neither the key
+nor the value of its entries, `entry: {the: _, is: _}`, writes the entry
+as `{}`, both halves left out as blanks are. Reading it back took `{}`
+for a constant and failed, so the rule's stored body did not decode and
+the rule could not be loaded from a branch:
+`rule hydrate: dag-cbor decode failed: an empty map names no type`. It now
+reads `{}` under a collection field as that entry.
+
+What this changes for you:
+
+- A rule holding such a read loads from the branch it was installed on,
+  under the identity it was installed with. The error above is gone for
+  it.
+
+Why: the writer and the reader of a concept application disagreed on one
+form of an entry, so a rule that compiled had a body nothing could read.
+
+#### Compatibility and migration
+
+- Nothing is rewritten and no rule's bytes or identity change: bodies an
+  earlier release stored with `{}` already hold what this one reads.
+  An earlier release cannot read such a body, as it could not before.
+
+
+### A read that names a derived value no longer fails with an unbound variable
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793)
+
+A read of a relation some rule derives tests the value its caller
+names against what the relation's cardinality keeps; the value never
+seeds the rule's body. The body was still planned as if it did, so a
+premise reading the value could be ordered ahead of the one binding
+it, and the read failed with `Unbound variable "is"`.
+
+What this changes for you:
+
+- A query, a negation (`unless`) or an inductive rule that reads a
+  derived relation with both its entity and its value given now
+  answers where the rule's body compares or computes with that value.
+  A commit that failed with `Commit-time induction failed: rule body:
+  Unbound variable "is"` goes through.
+- No answer that was returned before differs.
+
+Why: the plan and the row it runs on have to agree on what is bound.
+A rule's body is now planned for the terms that seed it.
+
+### A rule body a branch cannot read is skipped, and listed with why
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793)
+
+A stored rule body is whatever some peer wrote: one in a format an
+older release stored, one in a format this release does not know yet,
+bytes that are no rule, or a rule's body under an entity it does not
+hash to. None of them is evaluated, and no query fails over one: a
+query that met an undecodable body used to fail with `rule hydrate`,
+so one bad rule arriving by merge stopped every read of its relation.
+
+A branch now answers `dialog.rule/invalid`: one row per stored body it
+does not read, of the rule's entity, valued with the reason. The reason
+begins with its kind:
+
+- `older:` the body is in a format before this release's, which
+  `Branch::upgrade_rules` rewrites;
+- `newer:` the body is in a format after this release's, which a newer
+  release reads;
+- `undecodable:` the bytes do not decode as a rule, followed by what
+  the decoder said;
+- `forged:` the body decodes, and does not hash to the entity it is
+  stored under.
+
+The body's format is probed before it is decoded, so the first two are
+told apart from the third. Like `dialog.rule/quarantined`, the relation
+is never stored: it is answered from the rule bodies the branch's
+layers hold, and facts written under it are not read.
+
+What this changes for you:
+
+- A query over a relation some undecodable rule body would derive
+  answers from the rules that do read, where it failed.
+- An application lists the rules a branch skipped by querying
+  `dialog.rule/invalid`, as it lists the rules set aside by querying
+  `dialog.rule/quarantined`. `dialog_query::rule::statement::invalid_attr`
+  names the attribute.
+
+Why: rules are replicated facts, and a merge must never be able to stop
+a program that worked before it. Skipping a rule is only safe if the
+skip can be seen.
+
+### A concept field reads one claim with a `pick`, and its cardinality follows from the pick
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
+[`notes/aggregation.md`](./notes/aggregation.md) ("Selective
+aggregators").
+
+An aggregator is selective when its result is always one of its
+inputs, as `max` and `min` are; a computing aggregator (`count`,
+`count-distinct`, `sum`, `avg`) produces a value none of its inputs
+holds. A concept field's `pick` names a selective one, which chooses
+one of its relation's claims per entity: `last` the newest, `max` the
+greatest value, `min` the least, and `top` the value listed first in
+the attribute's `as`, which ranks its values best first as 0.4 did. The
+attribute says what a write does, the pick what a read returns, so a
+ranking field reads a cardinality-many attribute, whose cell keeps every
+claim to rank:
+
+```json
+{ "with": { "status": {
+  "the": "account/status",
+  "as": ["suspended", "active", "registered"],
+  "pick": "top"
+} } }
+```
+
+A field's cardinality is derived from its pick unless it is written:
+`last`, or no pick, is cardinality one, and `all`, `max`, `min` and
+`top` are many. Written beside a pick it has to be one the pick can
+read: `"pick": "last", "cardinality": "many"` keeps every claim and
+reads the newest, and `"cardinality": "one"` beside any other pick is
+refused. An attribute on its own takes `pick: last` or `pick: all` in
+place of its cardinality, and refuses a ranking pick.
+
+Writing `active` to an account that holds `suspended` adds a claim and
+does not displace it; un-suspending is retracting `suspended`. The
+aggregator ranks stored and derived claims alike, and among values it
+holds equal it falls back on the order a cardinality-one read elects by.
+
+What this changes for you:
+
+- `ConceptFieldDescriptor` has a pick, set with `picking` and read with
+  `pick` and `ranking`; `"pick": "top"` on the wire. `last` over a
+  cardinality-one attribute is what the field reads anyway and declares
+  nothing. A field refuses a pick its attribute cannot be read under
+  (`TypeError::SelectiveAggregate`): `max`, `min` or `top` over
+  cardinality one, `top` over an attribute that lists no values, `max`
+  or `min` over a type with no order, or any aggregator on a keyed
+  collection.
+- `#[derive(Concept)]` takes `#[dialog(pick = last | max | min)]`
+  on a field. `top` is refused at compile time, since
+  `#[derive(Attribute)]` cannot declare a listed `as`; a ranking
+  aggregator over a `#[cardinality(one)]` attribute fails when the
+  concept's descriptor is first built.
+- A concept's identity hashes each field's aggregator beside its
+  optionality and conformance, so a field reading `top` and one reading
+  without an aggregator over the same attribute are two concepts, and a
+  one-field concept with an aggregator is not the attribute's relation.
+- `dialog_query::selective::{Selective, Ranking}` are new, and
+  `ReduceEntry::selects` is `is_selective`.
+- A listed `as` is ordered: `[registered, active, suspended]` and
+  `[suspended, active, registered]` are two types, and the second ranks
+  `suspended` best.
+- `top` is no longer an aggregator a rule's `reduce` spells, and
+  `ReduceSpec` and `ReduceEntry` lose `among`: a ranked read is a field
+  with a selective aggregator.
+- A read of a field over stored claims chooses in the scan, as a
+  cardinality-one read does. A field over a relation some rule derives
+  folds the relation's claims, which is set aside like any fold if the
+  field's concept closes a cycle through the relation.
+
+Why: a rule concluding a ranked value into a relation of its own put
+that value in competition with the relation's stored claims, so a
+status set by hand outranked the fold until a newer state arrived. A
+field with a selective aggregator reads the one relation the claims are
+in, and a write through it adds to that relation. The ordering is the
+type's, so a comparison in a rule body and the aggregator agree on it.
+
+### An attribute is a relation, a type and a cardinality, and a ranked read is a concept field's pick
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793) and
+[#759](https://github.com/dialog-db/dialog-db/issues/759), detail in
+[`notes/glossary.md`](./notes/glossary.md) and
+[`notes/notation.md`](./notes/notation.md).
+
+An attribute no longer reads under a ranking pick. It is a relation, a
+value type and a cardinality, `one` (the default) or `many`, which
+`pick: last` and `pick: all` also spell. Under one a read returns the
+cell's newest claim, built in, recursion included, and a write succeeds
+that claim: what `last` did. Under many a read returns every claim and
+a write adds one: what `all` did.
+
+```json
+{ "the": "person/email", "as": "text:", "cardinality": "many" }
+```
+
+No attribute reads under `max`, `min` or `top` any more, and `the` names
+one relation: a list of relations, ranked, is gone. A read that ranks a
+cell's claims is a concept field picking `max`, `min` or `top` (see the
+previous entry). A listed `as: [a, b]` stays, as an enumerated type
+ordered best first.
+
+An attribute spelled with a ranking pick, `select`, the entity spelling
+0.3 to 0.5 wrote (`"pick": "top:"`), or a list of relations under
+`the` is refused by name, so a definition in the format those releases
+wrote is never read with another meaning. A rule
+those releases stored is inert until `Branch::upgrade_rules` rewrites
+it (see Compatibility and migration).
+
+What this changes for you:
+
+- `dialog_corpus::Pick` and `dialog_query::Pick` are gone.
+  `dialog_corpus::Cardinality`, re-exported as `dialog_query::Cardinality`,
+  takes their place on the write path: `Change::Assert(Value,
+  Cardinality)`, `Instruction::Assert(Fact, Cardinality)` and
+  `Update::associate(.., Cardinality)`. `Cardinality::One` succeeds the
+  newest claim and `Cardinality::Many` adds. `Pick::newer` is
+  `Cardinality::newer`, the one order the tree, a transaction's
+  settlement, a cardinality-one read and the selective aggregators share, and
+  `Cardinality::elect` is what `Pick::Last.elect` was. A batch spells
+  the cardinality `one` or `many`, and reads the picks 0.3 to 0.5 wrote
+  there (`last` and `max`, `min`, `top` as one, `all` as many).
+- `Cardinality::estimate` is `dialog_query::estimate_cost(cardinality,
+  ..)`.
+- `AttributeDescriptor` loses `pick`, `with_pick`, `pick_error`,
+  `with_then`, `relations`, `is_chain`, `reads_elected`,
+  `scan_cardinality`, `writes`, `adding` and `adds`. `cardinality` is
+  what both a read and a write go by, `with_cardinality` sets it, and
+  `without_pick` is `plain`. `Attribution::pick` is `cardinality`, and
+  `AttributeStatement` (`DynamicAttributeExpression`) has no `pick`
+  field: its `cardinality` says how it writes, many when it is `None`.
+  `TypeError::UnfitPick` is gone.
+- `#[derive(Attribute)]` reads `#[cardinality(one)]` (the default) or
+  `#[cardinality(many)]`, which `#[pick(last)]` and `#[pick(all)]` also
+  say. A ranking `#[pick(..)]` no longer compiles on an attribute, and
+  says to put the pick on the concept field.
+- A query over `{ "the": .., "pick": "max:" }` fails to parse. Read a
+  field `{ "the": .., "pick": "max" }`.
+- `Election` elects by cardinality alone; `Election::elect_claims`,
+  `ConceptRules::chain_scans` and `ConceptRules::ranks` are gone.
+- An attribute's identity hashes its relation, its cardinality, its type
+  and its listed values, where it hashed the list of relations it read
+  and its pick. Every attribute's identity moved, and every concept's
+  and every rule's with it. `dialog_query::migration` reproduces the
+  identities of 0.3 to 0.5 (`attribute_reference_v1`,
+  `attribute_uri_v1`, `concept_reference_v1`, `concept_identity_v1`).
+- A rule body is stored in format 4, which spells cardinalities.
+- `RulesUpgraded::unmapped` lists the rules the upgrade left inert, with
+  why (`dialog_query::migration::Unmapped`), and
+  `dialog_query::migration::rewrite_body` is the rewrite it runs.
+  `dialog_query::rule::body::format_of` reads the format a stored body
+  names.
+- A stored rule body this release does not decode, a body spelling
+  picks or one in a later format, is inert on a read as it already was
+  at commit: a query that finds it no longer fails with `rule hydrate`.
+
+Why: a pick made one attribute decide both how a relation is read and
+what a write to it retires, so the relation's contents depended on how
+each writer read it, and a ranked read forced a succeeding write. A
+cardinality says only how many claims a cell holds. How to rank them is
+the reading concept field's selective aggregator, which reads the relation as it is and
+can be changed without rewriting it.
+
+### A ranked field over a derived relation picks among its candidates, and a cycle through one is set aside
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
+[`notes/aggregation.md`](./notes/aggregation.md).
+
+A concept field with a `pick` may read a relation rules derive: it
+picks among every candidate the rules offer and every stored claim.
+The value it picks stands as the fact it was picked from, a derived
+candidate as the newest fact its derivation consumed, so `last` over a
+derived relation reads the newest derivation.
+
+A deductive rule an author writes still takes no `reduce`
+(`TypeError::ReduceInOpenRule`), as since
+[#580](https://github.com/dialog-db/dialog-db/pull/580). A computed
+value (`count`, `sum`, `avg`) is none of the claims it was computed
+from, so concluded into an attribute it would compete with the claims
+stored there; it belongs in a query that folds
+([#839](https://github.com/dialog-db/dialog-db/pull/839)), and is still
+refused in a deductive rule.
+
+What this changes for you:
+
+- A concept whose ranked field closes a cycle through the relation it
+  reads is not evaluated in the cycle: the rule of the cycle installed
+  last is quarantined, and `Quarantine::tested` carries
+  `Absence::Folded`. The queries touching such a cycle used to fail
+  (`AggregationThroughRecursion`), which remains for a cycle with no
+  rule to set aside.
+- `max` and `min` over values that compare equal pick the one from the
+  newest fact, where they picked the one of the smaller encoding;
+  values that also stand equal still fall to the encoding.
+- A subscription over a concept with a ranked field on a derived
+  relation is maintained per entity: a change picks again for the
+  entities whose candidates it touches, and no other. Inside a
+  recursion it is still recomputed.
+- A concept of one field that picks, over a relation rules derive
+  outside any cycle, is answered by gathering the relation's
+  candidates and picking among them, without a selecting rule and a
+  fold between, and a subscription over one discovers what a change
+  touches over that relation. `ConceptDescriptor::picked_relation`
+  names it.
+- `Aggregator::Last` is new and `ReduceEntry::is_selective` tells a
+  picking fold from a computing one. A sum of naturals is a natural.
+- A query that folds with `last` or `top`
+  (`Aggregator::orders_by_standing`) is evaluated afresh, under a
+  standing fold, on each poll that moved one of its rows: a row the
+  subscription keeps carries no standing, which those two choose by.
+  Every other fold is still maintained per group.
+
+Why: a status ranked among the cases several rules derive is the read
+tonk's library needed, and it has to answer the same on every replica
+whatever order the candidates arrive in.
+
+### A rule deciding on a cardinality-one value inside its own cycle is set aside
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
+[`notes/attribute-heads.md`](./notes/attribute-heads.md).
+
+Inside a recursive component a cardinality-one read sees every
+candidate the fixpoint derives, and readers elect the newest once the
+component is derived in full. That is exact for a rule that passes the
+value along: each candidate it derives stands by the one it carried, so
+the election at the exit picks what a stratified read would have. It is
+not for a rule that decides on the value. Such a rule fires for a
+candidate no reader elects, and nothing at the exit takes its
+conclusion back: with `b` reading `own` over a losing `end`, a rule
+concluding a label for `a` from `x/label(next) = "end"` concluded it,
+though every read of `b` returned `own`. The same body under another
+head, outside the cycle, concluded nothing.
+
+A cardinality-one read whose value the rule decides on is now an
+absence test, so a rule closing a cycle through one is quarantined. A
+rule decides on a value when the read is pinned to a constant, or when
+the value, or anything a formula or an equality computes from it, is
+compared, joined on by another read, negated over, or checked against a
+constant. A rule passes a value along when it reaches the head and
+nothing else, directly or through formulas.
+
+What this changes for you:
+
+- A rule that reads its own relation under cardinality one, of another
+  entity, and decides on the value read is set aside, and listed by
+  `ProgramAnalysis::quarantined` and `dialog.rule/quarantined`. A query
+  over the relation returns what the remaining rules derive. Before, it
+  returned that rule's conclusions too, the ones drawn from losing
+  candidates among them.
+- So is a rule deciding on a field of a concept of several fields,
+  where the field is of cardinality one or declares a selective
+  aggregator: the concept elects the field's claim, and the premise
+  tests that election. A rule deriving a relation from the claim a
+  field's aggregator elects of that same relation closes its cycle
+  through a fold, and is set aside as one.
+- A rule carrying a value down a chain, or computing from it (a
+  position from a successor's position, a depth from a parent's), is
+  unaffected.
+- A rule rewriting the cell it reads, `x/status(e) := "todo" :-
+  x/status(e) = "triage"`, is unaffected: it reads its own relation of
+  its own entity, and its conclusion succeeds the value it read.
+- The same rule outside a cycle is unaffected: there the read is of a
+  relation derived in full.
+- To decide on a value inside a recursion, conclude into another
+  relation, which takes the decision out of the cycle, or make the
+  decision in an inductive rule, which runs at commit over the settled
+  value.
+- A quarantine says what it was made over. `Quarantine::tested` names
+  the cycle's plainest absence test: the rule making it (`by`), the
+  relation tested (`target`) and how (`absence`). `Tested` is new, and
+  `Absence::Decided` is a cardinality-one read the rule decides on.
+  `Absence::Elected`, a ranked read, is gone with ranked reads. Code
+  building a `Quarantine` by its fields names the new one.
+- `Polarity::Electing` carries `decides`, and no longer `ranked`.
+
+Why: a rule set has to mean one thing whatever else is installed. The
+same body gave a different answer when an unrelated rule closed a cycle
+around it, with nothing reported. Setting the rule aside is reported,
+and names the rule.
+
+### Compatibility and migration
+
 - Nothing stored or synced changes.
 
 
