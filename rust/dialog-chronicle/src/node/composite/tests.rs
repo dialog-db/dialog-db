@@ -748,6 +748,67 @@ fn measure_an_archive_of_syntax_trees() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What packing a composite costs the write path, per composite: interning
+/// its value packed (splitting, interning its atoms, the check that the
+/// packed token realizes to the very value) against interning it whole,
+/// and the check alone. Run by hand:
+/// `cargo test --release -p dialog-chronicle --lib -- --ignored --nocapture
+/// measure_packing_a_composite`.
+#[dialog_common::test]
+#[ignore = "a measurement, run by hand"]
+fn measure_packing_a_composite() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    let mut random = Random(0x5ca1ab1e);
+    let mut values: Vec<(String, Vec<u8>)> = vec![("{x, y} of one text".into(), {
+        let mut value = vec![ValueDataType::Composite as u8];
+        encode_key_value(&Value::Composite(hello()), 1, &mut value);
+        value
+    })];
+    for depth in [7, 11] {
+        let Value::Composite(tree) = syntax_form(&mut random, depth) else {
+            unreachable!("a map")
+        };
+        let mut value = vec![ValueDataType::Composite as u8];
+        encode_key_value(&Value::Composite(tree), 1, &mut value);
+        values.push((format!("a syntax tree {depth} deep"), value));
+    }
+    let rounds = 20_000;
+    println!("| composite | bytes | atoms | intern whole | intern packed | the check |");
+    for (name, value) in values {
+        let started = Instant::now();
+        for _ in 0..rounds {
+            let mut draft = Draft::detached();
+            black_box(draft.intern(black_box(&value)));
+        }
+        let whole = started.elapsed().as_nanos() as f64 / rounds as f64;
+
+        let started = Instant::now();
+        for _ in 0..rounds {
+            let mut draft = Draft::detached();
+            black_box(intern_value(&mut draft, black_box(&value), false));
+        }
+        let packed = started.elapsed().as_nanos() as f64 / rounds as f64;
+
+        let mut draft = Draft::detached();
+        let id = intern_value(&mut draft, &value, false);
+        let token = draft.get(id).unwrap().to_vec();
+        let (atoms, _) = header(&token).unwrap();
+        let started = Instant::now();
+        for _ in 0..rounds {
+            let mut back = Vec::with_capacity(value.len());
+            realize(black_box(&token), &draft, &mut back).unwrap();
+            black_box(back == value);
+        }
+        let check = started.elapsed().as_nanos() as f64 / rounds as f64;
+        println!(
+            "| {name} | {} | {atoms} | {whole:.0} ns | {packed:.0} ns | {check:.0} ns |",
+            value.len()
+        );
+    }
+}
+
 /// A small deterministic generator of composites.
 struct Random(u64);
 

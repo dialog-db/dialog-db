@@ -31,7 +31,8 @@
 
 use std::fmt;
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use dialog_corpus::{
     ATTRIBUTE_KEY_TAG, COVERAGE_KEY_TAG, Composite, ENTITY_KEY_TAG, HISTORY_KEY_TAG, VALUE_KEY_TAG,
@@ -87,13 +88,15 @@ impl From<PackedError> for io::Error {
 
 /// How many composites whose key holds them whole were interned whole
 /// anyway, because they did not split or would not realize to the same
-/// bytes: none, for composites the corpus wrote.
+/// bytes: none, for composites the corpus wrote. Kept for tests, which
+/// assert it does not move.
+#[cfg(test)]
 static KEPT_WHOLE: AtomicU64 = AtomicU64::new(0);
 
 /// Whether composites are packed: a measurement turns it off to weigh a
 /// file that keeps every composite whole.
 #[cfg(test)]
-pub(crate) static PACKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+pub(crate) static PACKING: AtomicBool = AtomicBool::new(true);
 
 /// How many inline composites have been interned whole so far.
 #[cfg(test)]
@@ -181,6 +184,7 @@ pub(crate) fn intern_value(tokens: &mut Draft<'_>, value: &[u8], spilled: bool) 
     match pack(tokens, value) {
         Some(packed) => tokens.intern(&packed),
         None => {
+            #[cfg(test)]
             KEPT_WHOLE.fetch_add(1, Ordering::Relaxed);
             tokens.intern(value)
         }
