@@ -23,6 +23,8 @@
 //!
 //! [`Composite::from_bytes`]: super::Composite::from_bytes
 
+use std::str::from_utf8;
+
 use super::SCAN_LIMIT;
 use super::encode::{TOKEN_REF, scalar};
 use super::layout::{LAYOUT, LIST, MAP, Seq, TABLE, layout_of, read_varint, seq, slot_end};
@@ -220,7 +222,7 @@ fn atom_canonical(atom: &[u8]) -> bool {
         && let Some((&0, text)) = payload.split_last()
         && !text.contains(&0)
     {
-        return std::str::from_utf8(text).is_ok();
+        return from_utf8(text).is_ok();
     }
     match decode_value(ValueDataType::from(kind), payload) {
         Some((value, [])) => scalar(&value).is_ok_and(|written| written == atom),

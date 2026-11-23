@@ -1565,7 +1565,7 @@ fn it_shows_canonical_bytes_as_the_full_check_does() {
             );
         }
         let quick = Composite::from_bytes(&bytes).map(|read| read.to_bytes().into_owned());
-        if crate::model::composite::layout::layout_of(&bytes) == 0 {
+        if layout::layout_of(&bytes) == 0 {
             assert_eq!(quick, full, "{bytes:?}");
         }
     }

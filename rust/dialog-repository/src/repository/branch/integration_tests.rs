@@ -1812,6 +1812,8 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
 /// beside it read as ever.
 #[dialog_common::test]
 async fn it_replicates_a_composite_of_a_later_layout(s3: S3Address) -> Result<()> {
+    use dialog_corpus::helpers::composite_unchecked;
+
     let (operator, profile) = test_session_with_peer().await;
     let (alice_repo, alice_branch) =
         setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
@@ -1830,7 +1832,7 @@ async fn it_replicates_a_composite_of_a_later_layout(s3: S3Address) -> Result<()
         Fact {
             the: "user/profile".parse()?,
             of: "user:alice".parse()?,
-            is: Value::Composite(dialog_corpus::helpers::composite_unchecked(&later)),
+            is: Value::Composite(composite_unchecked(&later)),
             cause: None,
         },
     ];

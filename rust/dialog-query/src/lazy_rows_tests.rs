@@ -364,6 +364,8 @@ async fn an_entity_value_that_is_no_uri_fails_in_place_as_it_fails_eagerly() -> 
 /// corrupt row, since it is there and this release cannot read it.
 #[dialog_common::test]
 async fn a_composite_of_a_layout_this_release_does_not_read_fails_a_query() -> anyhow::Result<()> {
+    use dialog_corpus::helpers::composite_unchecked;
+
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
@@ -377,7 +379,7 @@ async fn a_composite_of_a_layout_this_release_does_not_read_fails_a_query() -> a
         &operator,
         vec![(
             "item/profile",
-            Value::Composite(dialog_corpus::helpers::composite_unchecked(&later)),
+            Value::Composite(composite_unchecked(&later)),
         )],
     )
     .await?;
