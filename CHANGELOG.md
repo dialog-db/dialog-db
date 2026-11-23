@@ -14,6 +14,45 @@ says how to cut a release.
 
 ## Unreleased
 
+### A block `append` acknowledged stays readable while threads of one process append to one file
+
+Since 0.5.0, when several threads of one process appended to one
+Chronicle file while sync points freed extents and claims reused them, a
+block `append` had acknowledged could be missing afterwards: `get`
+returned `None` for it, on the handle that wrote it and after reopening
+the file. A thread gathering extents to fold in, on a snapshot taken
+before one of them was retired, took that extent as abandoned. A claim in
+the writer's turn then reused the same extent from the free list and
+handed it to a writer, because it marked the extent busy without looking
+whether a thread of this process held it already, and its lock on the
+extent's byte succeeded since POSIX locks belong to the process. When the
+gathering thread let go, it unmarked the extent and unlocked its byte
+under the writer. Another thread could then fold the extent in and retire
+it while the writer still wrote to it, and the writer gave the retired
+extent back to be written again: what went into it after that was listed
+by no slot.
+
+A thread of a process now takes an extent only if no other thread of the
+process has it, idle or busy, so the thread that marked an extent and
+took its byte is the only one that lets go of either. The claim passes
+over an extent a stale gather holds and takes the next free one, or a new
+one at the file's end.
+
+What this changes for you:
+
+- Appends from many threads of one process to one file no longer lose
+  blocks. Nothing in the API changes.
+- Another process can no longer take an extent a writer of this process
+  holds, which the unlock above allowed: two processes could have written
+  one extent.
+- A claim that finds the only free extent held by a stale gather grows
+  the file by one extent instead of waiting for it.
+
+Why: an extent's owner byte cannot keep threads of one process apart, so
+the process's own record of who has each extent has to, and it has to
+refuse a second taker rather than let two share one mark that either can
+erase.
+
 ### A concept read copies no inner evaluation, and a concept's descriptor clones without copying its fields
 
 [#806](https://github.com/dialog-db/dialog-db/pull/806)

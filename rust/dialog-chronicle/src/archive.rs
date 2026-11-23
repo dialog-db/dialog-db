@@ -633,10 +633,29 @@ struct Gathered {
 
 /// The extents this process writes: those idle, free for a writer to take,
 /// and the records of those a writer has taken.
+///
+/// An extent's owner byte belongs to the whole process (see the `locks`
+/// module): a thread's lock on a byte another thread of this process
+/// holds succeeds, and either thread's unlock lets go of it for both. So
+/// this process holds an extent's byte only while exactly one of its
+/// threads has the extent, idle here or marked busy by [`mark`](Self::mark),
+/// and only that thread lets go of the byte, before it unmarks the extent.
+/// A thread marks an extent before it takes the byte, and takes nothing
+/// it cannot mark: its lock would succeed on a byte another thread holds,
+/// and its unlock would then let go of that thread's.
 #[derive(Default)]
 struct Extents {
     idle: Vec<Owned>,
     busy: HashSet<u64>,
+}
+
+impl Extents {
+    /// Marks the extent at `record` busy for the caller: `false`, marking
+    /// nothing, when a thread of this process has it already, idle or
+    /// busy.
+    fn mark(&mut self, record: u64) -> bool {
+        !self.idle.iter().any(|owned| owned.record == record) && self.busy.insert(record)
+    }
 }
 
 /// What this process knows of the blocks extents hold, its own and other
@@ -2258,11 +2277,11 @@ impl Chronicle {
             return Ok(());
         };
         let _ = locks::unlock(file, locks::left(left));
+        // Passed over if a thread of this process adopted it to write.
         let mine = snapshot.slot.extents.contains(&left)
             && extent::used(snapshot.bytes(), left) == Some(0)
-            && locks::lock(file, locks::owner(left), true, false)?;
+            && self.own(left)?;
         let record = if mine {
-            self.inner.extents.lock().busy.insert(left);
             Some(left)
         } else {
             self.orphan(&snapshot)?
@@ -2284,6 +2303,20 @@ impl Chronicle {
         Ok(())
     }
 
+    /// Takes the extent at `record` for the caller: marks it busy, then
+    /// tries its owner byte. Takes nothing when a thread of this process
+    /// has it already (see [`Extents`]) or another process holds its byte.
+    fn own(&self, record: u64) -> io::Result<bool> {
+        if !self.inner.extents.lock().mark(record) {
+            return Ok(false);
+        }
+        let taken = locks::lock(&self.inner.file, locks::owner(record), true, false);
+        if !matches!(taken, Ok(true)) {
+            self.inner.extents.lock().busy.remove(&record);
+        }
+        taken
+    }
+
     /// Claims an extent in the writer's turn: an orphan the file lists (see
     /// [`orphan`](Self::orphan)), else one freed by an integration a sync
     /// point has made durable, else a new one at the file's end.
@@ -2302,23 +2335,18 @@ impl Chronicle {
         slot.sequence += 1;
         // Owned before any slot lists it, so no process adopts it, and
         // marked busy before this process's snapshot lists it, so no thread
-        // of this one does. Only an adopter checking a stale listing can
-        // hold its byte now, and lets go at once. The byte is tried, never
-        // waited for: the turn's holder waiting on a lock could close a
-        // cycle of processes waiting on one another, which the system
-        // refuses (EDEADLK), whether real or only through a process's
-        // threads sharing its locks.
-        let take = |record: u64| -> io::Result<bool> {
-            self.inner.extents.lock().busy.insert(record);
-            let taken = locks::lock(file, locks::owner(record), true, false);
-            if !matches!(taken, Ok(true)) {
-                self.inner.extents.lock().busy.remove(&record);
-            }
-            taken
-        };
+        // of this one does. One a thread of this process has already is
+        // passed over, not taken: a gather or an adopter that read a stale
+        // listing can hold a freed extent's byte, and its lock would not
+        // keep this one out, while its unlock would let go of this one's
+        // byte and its unmarking leave the extent unmarked under the writer
+        // it is handed. The byte is tried, never waited for: the turn's
+        // holder waiting on a lock could close a cycle of processes waiting
+        // on one another, which the system refuses (EDEADLK), whether real
+        // or only through a process's threads sharing its locks.
         let mut reused = None;
         for at in (0..slot.extents_free.len()).rev() {
-            if take(slot.extents_free[at])? {
+            if self.own(slot.extents_free[at])? {
                 reused = Some(slot.extents_free.remove(at));
                 break;
             }
@@ -2328,7 +2356,7 @@ impl Chronicle {
             None => {
                 let record = slot.end;
                 let mut tries = 0;
-                while !take(record)? {
+                while !self.own(record)? {
                     tries += 1;
                     if tries > 1000 {
                         return Err(invalid("a new extent's byte held by another process"));
