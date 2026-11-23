@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 
 use crate::file::{HEADER, Kind, MAGIC, put_record, read_at, record_in, write_at};
 use crate::locks;
-use crate::node::{TreeNode, realize, rows_after, tree_node};
+use crate::node::{PackedError, TreeNode, realize, rows_after, tree_node};
 use crate::rows::{Reader, Rows, get_rows, invalid, put_rows, put_varint, rename};
 use crate::tokens::{ALIGN, Draft, TokenRead};
 
@@ -2827,8 +2827,28 @@ impl Chronicle {
         let mut new = Vec::new();
         for id in first..first + draft.pending() as u32 {
             let token = draft.get(id).expect("a drafted token");
-            let hash = draft.hash(id).expect("a drafted token's hash");
-            match self.find_token(snapshot, hash, token) {
+            let held = if crate::node::is_packed(token) {
+                // A packed composite names its atoms by drafted ids where
+                // they were new: the file can hold it only if it holds
+                // every one of them by now, and then under their ids. Its
+                // atoms were drafted before it, so they are named already.
+                let mut named = token.to_vec();
+                crate::node::remap_composite_token(&mut named, |atom| {
+                    if atom < first {
+                        return Ok(atom);
+                    }
+                    match tokens.get((atom - first) as usize) {
+                        Some(0) | None => Err(PackedError::Unresolved(atom)),
+                        Some(held) => Ok(*held),
+                    }
+                })
+                .ok()
+                .and_then(|()| self.find_token(snapshot, crate::hash::hash(&named), &named))
+            } else {
+                let hash = draft.hash(id).expect("a drafted token's hash");
+                self.find_token(snapshot, hash, token)
+            };
+            match held {
                 Some(held) => tokens.push(held),
                 None => {
                     tokens.push(0);
@@ -2842,8 +2862,9 @@ impl Chronicle {
         if !new.is_empty() {
             let body_offset = start + bytes.len() as u64 + HEADER;
             let (mut body, places) = draft.record(body_offset, &new);
-            // Composite token references use fixed-width IDs, so assigning
-            // file offsets cannot change token lengths or the places above.
+            // A packed composite names its atoms by fixed-width ids, so
+            // naming them by their places changes no token's length, and
+            // no place above.
             for (id, place) in new.iter().zip(&places) {
                 tokens[(*id - first) as usize] = token_id(*place)?;
             }
@@ -2871,8 +2892,8 @@ impl Chronicle {
                         tokens
                             .get((id - first) as usize)
                             .copied()
-                            .filter(|mapped| *mapped != 0)
-                            .ok_or_else(|| invalid("a composite token reference is unresolved"))
+                            .filter(|named| *named != 0)
+                            .ok_or(PackedError::Unresolved(id))
                     }
                 })?;
                 let hash = crate::hash::hash(token);
@@ -3598,6 +3619,32 @@ impl Chronicle {
 }
 
 #[cfg(test)]
+impl Chronicle {
+    /// Every token the file holds, by its id, in the order the file holds
+    /// them: what tests count the dictionary by.
+    pub(crate) fn held_tokens(&self) -> io::Result<Vec<(u32, Vec<u8>)>> {
+        let snapshot = self.current();
+        let bytes = snapshot.bytes();
+        let mut tokens = Vec::new();
+        let mut at = DATA as usize;
+        while at < snapshot.slot.end as usize {
+            let (kind, body_at, end) =
+                record_in(bytes, at).ok_or_else(|| invalid("a record that is not whole"))?;
+            if kind == Kind::Tokens {
+                for start in crate::tokens::read_token_record(&bytes[body_at..end], body_at as u64)?
+                {
+                    let id = token_id(start)?;
+                    let token = snapshot.get(id).ok_or_else(|| invalid("a token"))?;
+                    tokens.push((id, token.to_vec()));
+                }
+            }
+            at = end;
+        }
+        Ok(tokens)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use dialog_capability::{Did, Subject};
@@ -4193,6 +4240,66 @@ mod tests {
             assert_eq!(
                 reopened.get("index", content.blake3_hash())?.as_deref(),
                 Some(content.as_ref())
+            );
+        }
+        Ok(())
+    }
+
+    /// An append prepared before another one lands names a packed
+    /// composite's new atoms by drafted ids. When the other append wrote
+    /// those atoms and the composite first, the packed token is the one the
+    /// file holds, under the atoms' places, and is not written again.
+    #[dialog_common::test]
+    fn it_reconciles_a_packed_composite_another_append_wrote_first() -> anyhow::Result<()> {
+        use crate::node::tests::segment_block;
+        use dialog_corpus::{Composite, Entity, EntityKey, Fact, Relation, Value};
+        use std::str::FromStr;
+
+        let manifest = Manifest::default();
+        let composite = Value::Composite(Composite::map([
+            (Value::String("x".into()), Value::String("new atom".into())),
+            (Value::String("y".into()), Value::String("another".into())),
+        ])?);
+        let segment = |name: &str| -> anyhow::Result<Buffer> {
+            let fact = Fact {
+                the: Relation::from_str("test/profile")?,
+                of: Entity::from_str(&format!("test:{name}"))?,
+                is: composite.clone(),
+                cause: None,
+            };
+            let key = EntityKey::from_fact(&fact, &manifest).0;
+            Ok(Buffer::from(segment_block(vec![key], &manifest)?))
+        };
+        let first = [segment("first")?];
+        let second = [segment("second")?];
+
+        let directory = tempfile::tempdir()?;
+        let archive = Chronicle::open(directory.path().join("archive"))?;
+        let prepared = archive
+            .prepare(archive.current(), "index", &first)?
+            .expect("blocks the file lacks");
+        archive.append("index", &second)?;
+        archive.flush(prepared, "index", &first)?;
+
+        let control = Chronicle::open(directory.path().join("control"))?;
+        control.append("index", &second)?;
+        control.append("index", &first)?;
+        assert_eq!(
+            archive.stats().tokens,
+            control.stats().tokens,
+            "no token written twice"
+        );
+        let packed = archive
+            .held_tokens()?
+            .into_iter()
+            .filter(|(_, token)| crate::node::is_packed(token))
+            .count();
+        assert_eq!(packed, 1, "the composite is packed once");
+        for block in first.iter().chain(&second) {
+            assert!(archive.is_frame("index", block.blake3_hash()));
+            assert_eq!(
+                archive.get("index", block.blake3_hash())?.as_deref(),
+                Some(block.as_ref())
             );
         }
         Ok(())

@@ -6,7 +6,9 @@
 //! holds is copied out of the file or deserialized: a value is read as its
 //! archived type in place (tokens are aligned for it, and each is checked
 //! once, the first time a node that holds it is served), and a key is
-//! compared part by part.
+//! compared part by part. The one exception is a composite value the file
+//! keeps packed, as the names of its atoms: it is realized once, when the
+//! node is served, into a buffer the node holds.
 
 use std::any::TypeId;
 use std::ops::Range;
@@ -32,7 +34,8 @@ use zerocopy::FromBytes as _;
 
 use super::index::{Place, Snapshot};
 use super::{Chronicle, DATUMS_CHECKED};
-use crate::rows::{DATUM, INDEX, NONE, Row, Rows, SLOTS};
+use crate::node::{is_packed, realize_value, value_slot};
+use crate::rows::{DATUM, INDEX, NONE, Row, Rows, SLOTS, slots_of};
 use crate::tokens::{ALIGN, TokenRead as _};
 
 /// Every byte value, so a key's form byte is a slice that lives forever.
@@ -46,15 +49,21 @@ static FORMS: [u8; 256] = {
     forms
 };
 
-/// Where some bytes sit in the file.
+/// Where some bytes sit: in the file, or in the node's buffer of realized
+/// values.
 #[derive(Clone, Copy, Default)]
 struct Part {
     offset: u64,
     len: u32,
+    realized: bool,
 }
 
 /// No part: a slot a key's form does not use.
-const NO_PART: Part = Part { offset: 0, len: 0 };
+const NO_PART: Part = Part {
+    offset: 0,
+    len: 0,
+    realized: false,
+};
 
 /// An entry of a segment, or an operation an index buffers: its key's parts
 /// in key order and its value, each where the file keeps it.
@@ -88,12 +97,19 @@ pub(crate) struct FileNode {
     entries: Vec<Entry>,
     links: Vec<Link>,
     buffers: Vec<(u32, Range<usize>)>,
+    /// The packed composite values of its keys, realized.
+    realized: Vec<u8>,
 }
 
 impl FileNode {
     fn bytes(&self, part: Part) -> &[u8] {
         let start = part.offset as usize;
-        &self.map[start..start + part.len as usize]
+        let from: &[u8] = if part.realized {
+            &self.realized
+        } else {
+            &self.map
+        };
+        &from[start..start + part.len as usize]
     }
 }
 
@@ -109,15 +125,37 @@ fn part(snapshot: &Snapshot, id: u32) -> Option<Part> {
     Some(Part {
         offset: id as u64 * ALIGN,
         len: token.len() as u32,
+        realized: false,
     })
 }
 
 /// An entry or operation row as where its key parts and value are. A
 /// datum is checked as an archive once, the first time a node that holds
-/// it is served.
-fn entry(archive: &Chronicle, snapshot: &Snapshot, row: &Row) -> Option<Entry> {
+/// it is served. A packed composite value is realized into `realized`.
+fn entry(
+    archive: &Chronicle,
+    snapshot: &Snapshot,
+    row: &Row,
+    realized: &mut Vec<u8>,
+) -> Option<Entry> {
     let form = row[0] as u8;
-    let slot = |at: usize| part(snapshot, row[at]);
+    // A key's value is its row's last part, in every form that has one.
+    let value_at = value_slot(form, slots_of(form)).map(|slot| 1 + slot);
+    let mut slot = |at: usize| -> Option<Part> {
+        if Some(at) == value_at {
+            let value = snapshot.get(row[at])?;
+            if is_packed(value) {
+                let start = realized.len();
+                realize_value(value, snapshot, realized).ok()?;
+                return Some(Part {
+                    offset: start as u64,
+                    len: (realized.len() - start) as u32,
+                    realized: true,
+                });
+            }
+        }
+        part(snapshot, row[at])
+    };
     let (form, count, parts) = match form {
         ENTITY_KEY_TAG => (Some(form), 3, [slot(1)?, slot(2)?, slot(3)?, NO_PART]),
         ATTRIBUTE_KEY_TAG => (Some(form), 3, [slot(2)?, slot(1)?, slot(3)?, NO_PART]),
@@ -179,6 +217,7 @@ impl Chronicle {
             entries: Vec::new(),
             links: Vec::new(),
             buffers: Vec::new(),
+            realized: Vec::new(),
         };
         build(self, &snapshot, &rows, &mut node)?;
         super::Timings::add(&self.inner.timings.serve, started);
@@ -211,7 +250,10 @@ fn build(archive: &Chronicle, snapshot: &Snapshot, rows: &Rows, node: &mut FileN
             .sections
             .first()?
             .iter()
-            .map(|row| entry(archive, snapshot, row).filter(|entry| entry.value.is_some()))
+            .map(|row| {
+                entry(archive, snapshot, row, &mut node.realized)
+                    .filter(|entry| entry.value.is_some())
+            })
             .collect::<Option<_>>()?;
         return Some(());
     }
@@ -241,7 +283,7 @@ fn build(archive: &Chronicle, snapshot: &Snapshot, rows: &Rows, node: &mut FileN
         .collect::<Option<_>>()?;
     node.entries = ops
         .iter()
-        .map(|row| entry(archive, snapshot, row))
+        .map(|row| entry(archive, snapshot, row, &mut node.realized))
         .collect::<Option<_>>()?;
     let mut next = 0;
     for buffer in buffers {
@@ -261,7 +303,8 @@ fn build(archive: &Chronicle, snapshot: &Snapshot, rows: &Rows, node: &mut FileN
 // (every token is), and the mapping is page aligned. The file is
 // append-only: nothing indexed is ever written again (see `Tokens::map`). A
 // frame was written only once its rows rebuilt the very block its hash
-// names.
+// names. Only key parts are ever read from the node's own buffer of
+// realized composites, never a value.
 unsafe impl NodeRows for FileNode {
     fn hash(&self) -> &Blake3Hash {
         &self.hash
@@ -340,6 +383,7 @@ unsafe impl NodeRows for FileNode {
             + self.links.capacity() * size_of::<Link>()
             + self.buffers.capacity() * size_of::<(u32, Range<usize>)>()
             + self.catalog.capacity()
+            + self.realized.capacity()
     }
 
     fn block(&self) -> Result<Buffer, DialogSearchTreeError> {

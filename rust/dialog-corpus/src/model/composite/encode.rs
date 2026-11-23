@@ -7,9 +7,9 @@ use super::layout::{LIST, MAP, TABLE, head, varint};
 use super::{CompositeError, MAX_DEPTH, SCAN_LIMIT};
 use crate::{NUMBER_BAND, Value, ValueDataType, encode_key_value};
 
-/// A scalar slot in a composite body refers to its canonical token-table
-/// entry by index.
-pub(super) const TOKEN_REF: u8 = 26;
+/// A scalar slot in a composite body refers to its atom in the table by its
+/// place there.
+pub(super) const TOKEN_REF: u8 = ValueDataType::ATOM_REFERENCE;
 
 /// A composite's content, its keys and scalar values already in the bytes a
 /// slot holds them in.
@@ -163,13 +163,13 @@ fn slot(node: &Node, index: &BTreeMap<&[u8], usize>, limit: usize) -> Vec<u8> {
 
 /// `head · count · size · offsets · items`: offsets, each of the narrowest
 /// width that holds the last, when there are more than `limit` items.
-pub(super) fn write_seq(kind: u8, items: &[Vec<u8>], limit: usize, out: &mut Vec<u8>) {
+pub(super) fn write_seq<T: AsRef<[u8]>>(kind: u8, items: &[T], limit: usize, out: &mut Vec<u8>) {
     let count = items.len();
     let mut starts = Vec::with_capacity(count);
     let mut total = 0usize;
     for item in items {
         starts.push(total);
-        total += item.len();
+        total += item.as_ref().len();
     }
     let width = if count > limit && count > 1 {
         let last = starts[count - 1];
@@ -193,6 +193,6 @@ pub(super) fn write_seq(kind: u8, items: &[Vec<u8>], limit: usize, out: &mut Vec
         }
     }
     for item in items {
-        out.extend_from_slice(item);
+        out.extend_from_slice(item.as_ref());
     }
 }

@@ -829,24 +829,99 @@ fn it_refuses_keys_out_of_order() {
 fn it_refuses_a_key_no_entry_uses() {
     let used = Composite::map([(text("a"), natural(1))]).unwrap();
     let extra = Composite::map([(text("z"), natural(2))]).unwrap();
-    let mut tokens: Vec<Vec<u8>> = used
-        .atom_tokens()
-        .iter()
-        .map(|token| token.to_vec())
-        .collect();
-    tokens.push(
-        extra
-            .atom_tokens()
-            .into_iter()
-            .find(|token| token.first() == Some(&(ValueDataType::Number as u8)))
-            .unwrap()
-            .to_vec(),
+    let used_bytes = used.to_bytes();
+    let extra_bytes = extra.to_bytes();
+    let (atoms, body) = Composite::split_atoms(&used_bytes).unwrap();
+    let (more, _) = Composite::split_atoms(&extra_bytes).unwrap();
+    let mut atoms = atoms;
+    atoms.push(
+        more.into_iter()
+            .find(|atom| atom.first() == Some(&(ValueDataType::Number as u8)))
+            .unwrap(),
     );
-    tokens.sort();
-    let tokens: Vec<&[u8]> = tokens.iter().map(Vec::as_slice).collect();
+    atoms.sort();
+    let mut bytes = Vec::new();
+    Composite::join_atoms(&atoms, body, &mut bytes);
     assert!(matches!(
-        Composite::from_token_parts(&tokens, used.token_body()),
+        Composite::from_bytes(&bytes),
         Err(CompositeError::NotCanonical)
+    ));
+}
+
+/// A composite's bytes split into its atoms and its body, and join back
+/// into the very bytes, for every composite of the fixtures.
+#[dialog_common::test]
+fn it_splits_into_atoms_and_joins_back() {
+    let nested = Composite::map([(text("n"), natural(3))]).unwrap();
+    let many = Composite::list((0..40u32).map(|n| natural(n.into()))).unwrap();
+    for composite in [
+        Composite::map([]).unwrap(),
+        Composite::list([]).unwrap(),
+        Composite::map([(text("a"), Value::Composite(nested.clone()))]).unwrap(),
+        Composite::list([Value::Composite(nested), text("b")]).unwrap(),
+        many,
+    ] {
+        let bytes = composite.to_bytes();
+        let (atoms, body) = Composite::split_atoms(&bytes).expect("splits");
+        let mut joined = Vec::new();
+        Composite::join_atoms(&atoms, body, &mut joined);
+        assert_eq!(joined, bytes.as_ref(), "{composite:?}");
+    }
+    assert!(Composite::split_atoms(&[]).is_none());
+    assert!(
+        Composite::split_atoms(&[0x00, 0x00, 0x00]).is_none(),
+        "no body"
+    );
+}
+
+/// Type byte 26 is reserved for a composite's references to its atoms: no
+/// type is it, and a key whose value starts with it does not parse.
+#[dialog_common::test]
+fn it_reserves_the_atom_reference_byte() {
+    assert_eq!(ValueDataType::ATOM_REFERENCE, 26);
+    assert!(
+        ValueDataType::ALL
+            .iter()
+            .all(|kind| *kind as u8 != ValueDataType::ATOM_REFERENCE)
+    );
+    let mut key = vec![crate::ENTITY_KEY_TAG];
+    key.extend_from_slice(b"test:a\0test/v\0");
+    key.extend_from_slice(&[ValueDataType::ATOM_REFERENCE, 0]);
+    assert!(crate::split_record_components(&key).is_none());
+    let mut fine = key.clone();
+    let at = fine.len() - 2;
+    fine[at] = ValueDataType::String as u8;
+    assert!(
+        crate::split_record_components(&fine).is_some(),
+        "the same key of a type parses"
+    );
+}
+
+/// A body slot holding a scalar inline, rather than a reference to its
+/// atom, is not a composite: no reader takes it.
+#[dialog_common::test]
+fn it_refuses_a_scalar_held_in_the_body() {
+    let canonical = Composite::list([text("a")])
+        .unwrap()
+        .to_bytes()
+        .into_owned();
+    let (atoms, _) = Composite::split_atoms(&canonical).unwrap();
+    let atom = atoms[0].to_vec();
+    // The list's one item as the atom itself instead of `26 0`.
+    let mut body = Vec::new();
+    body.push(LIST);
+    body.push(1);
+    body.push(atom.len() as u8);
+    body.extend_from_slice(&atom);
+    let mut bytes = Vec::new();
+    Composite::join_atoms(&[&atom], &body, &mut bytes);
+    assert!(matches!(
+        Composite::from_bytes(&bytes),
+        Err(CompositeError::Malformed)
+    ));
+    assert!(matches!(
+        Composite::from_layout(&bytes),
+        Err(CompositeError::Malformed)
     ));
 }
 
@@ -920,14 +995,18 @@ fn it_refuses_an_offset_that_is_not_where_its_item_is() {
 
 #[dialog_common::test]
 fn it_refuses_a_number_under_a_type_other_than_the_band() {
+    // A list of one item, the atom `slot`, referred to from the body.
+    let list_of = |slot: &[u8]| {
+        let mut bytes = Vec::new();
+        Composite::join_atoms(&[slot], &[LIST, 1, 2, TOKEN_REF, 0], &mut bytes);
+        bytes
+    };
     // The natural 3 under `natural:`'s type byte and in its own encoding,
     // which a key outside the band holds: a composite holds every number in
-    // the band, so it reads no slot of `natural:`.
+    // the band, so it holds no atom of `natural:`.
     let mut slot = vec![ValueDataType::UnsignedInt as u8];
     crate::encode_key_value(&natural(3), 0, &mut slot);
-    let mut bytes = vec![TABLE, 0, 0, LIST, 1, slot.len() as u8];
-    bytes.extend(slot);
-    assert!(matches!(refused(&bytes), CompositeError::Malformed));
+    assert!(matches!(refused(&list_of(&slot)), CompositeError::Malformed));
     // A number in the band's encoding with more bytes than it needs reads
     // as the number, and is not its encoding.
     let mut slot = vec![ValueDataType::Number as u8];
@@ -936,8 +1015,7 @@ fn it_refuses_a_number_under_a_type_other_than_the_band() {
         .unwrap()
         .to_bytes()
         .into_owned();
-    let mut bytes = vec![TABLE, 0, 0, LIST, 1, slot.len() as u8];
-    bytes.extend(slot);
+    let bytes = list_of(&slot);
     if bytes != canonical {
         assert!(matches!(refused(&bytes), CompositeError::NotCanonical));
     }

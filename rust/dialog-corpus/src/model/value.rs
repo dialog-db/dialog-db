@@ -1474,7 +1474,26 @@ pub enum ValueDataType {
     CompositeList = 25,
 }
 
+/// No variant takes [`ValueDataType::ATOM_REFERENCE`]'s byte.
+const _: () = {
+    let mut at = 0;
+    while at < ValueDataType::ALL.len() {
+        assert!(ValueDataType::ALL[at] as u8 != ValueDataType::ATOM_REFERENCE);
+        at += 1;
+    }
+};
+
 impl ValueDataType {
+    /// The byte a slot in a [`Composite`]'s body starts with when it refers
+    /// to a scalar in the composite's table of atoms, by its place there.
+    ///
+    /// It is reserved beside the type bytes so that no type ever takes it: a
+    /// body slot is either this or [`Composite`](Self::Composite), and a
+    /// reader tells them apart by the byte alone. It is not a type: no value
+    /// is of it, no fact holds it, and a key whose value starts with it does
+    /// not parse.
+    pub const ATOM_REFERENCE: u8 = 26;
+
     /// Every type, in discriminant order.
     pub const ALL: [ValueDataType; 26] = [
         ValueDataType::Bytes,
