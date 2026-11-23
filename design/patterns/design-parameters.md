@@ -2,7 +2,7 @@
 
 **Problem it serves:** a parameter has no way to hold more than one variable (the topic's [problem](../patterns.md)). The plan says `Parameters` maps a name to a pattern and every premise that reads a parameter as a variable or a constant keeps working for the leaves.
 
-**Decision:** what `Parameters::get` answers for a name that holds a map, a list or a tuple, and where a premise that reads terms meets a pattern.
+**Decision:** what `Parameters::get` answers for a name that holds a map or a list, and where a premise that reads terms meets a pattern.
 
 ## Facts the matrix rests on
 
@@ -42,7 +42,7 @@
 
 B and E, with D where E cannot go.
 
-- `Parameters` maps a name to a term or, for a map, a list or a tuple, to its shape: the pattern, and the variable that stands for the whole. `get` and `iter` answer the term: the leaf, or the whole. `shape`, `pattern`, `slot`, `shapes`, `leaves` and `addressed` look inside. `insert` takes a term as before and `set` takes a pattern. A pattern with no variable is the value it builds and is held as that constant. How the two are held in one slot is in [design-leaf-cost.md](design-leaf-cost.md).
+- `Parameters` maps a name to a term or, for a map or a list, to its shape: the pattern, and the variable that stands for the whole. `get` and `iter` answer the term: the leaf, or the whole. `shape`, `pattern`, `slot`, `shapes`, `leaves` and `addressed` look inside. `insert` takes a term as before and `set` takes a pattern. A pattern with no variable is the value it builds and is held as that constant. How the two are held in one slot is in [design-leaf-cost.md](design-leaf-cost.md).
 - The whole is a variable named by how the pattern is written, so two premises holding one pattern share it: with its variables bound it is one value in both. A pattern that holds a blank is not one value, and its whole is numbered within the body.
 - `pattern::lower` rewrites a positive concept premise that holds a shape into the concept over the whole and an equality (`Equality::between`). It runs when a rule compiles and when a conjunction is planned. `Equality`'s two sides are patterns; an equality between two terms is the leaf case and runs as it did.
 - A negated concept premise is left whole, and a concept takes its own shapes apart when it is evaluated: `pattern::build` before the read, and `pattern::take_apart` on each row inside the read's own stream (`ConceptQuery::evaluate_erased`). That is D, for the two cases the lower rows are red on: a negation, and a query run by itself. It was first built as a stream around the read, which every query paid for; [design-leaf-cost.md](design-leaf-cost.md) says what it is now and why.

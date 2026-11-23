@@ -2,7 +2,7 @@
 
 **Problem it serves:** a parameter has no way to hold more than one variable (the topic's [problem](../patterns.md)). The planner orders premises by which variables each binds and which it needs, one variable a slot (`categorize`, `rust/dialog-query/src/planner/feasibility.rs`). A slot that holds a pattern holds several.
 
-**Decision:** when a slot that holds a map, a list or a tuple counts as bound, what it binds, and what it requires.
+**Decision:** when a slot that holds a map or a list counts as bound, what it binds, and what it requires.
 
 ## Facts the matrix rests on
 

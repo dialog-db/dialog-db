@@ -33,9 +33,25 @@ B, by the builder. Step 3 asks that the tests pass in either order of premises, 
 
 - A map pattern with no rest matches a map of exactly its entries. With a rest it matches a map that holds them and binds the others to the rest, as a map. A blank rest takes the others and binds nothing.
 - A list pattern with no run matches a list of exactly its items. With a run it matches a list that starts with them and binds the ones after to the run, as a list. A run stands after the items and nowhere else.
-- A tuple pattern matches a tuple of exactly its items. A list is not a tuple.
-- A constant inside a pattern matches the value it reads as, as a scan matches a constant (`Value::reads_as`).
+- A constant inside a map or a list matches a part only where it is the part: a number by the number it is, whatever type it was given under (`Value::same_number`), since that is the value the pattern builds. A constant that is the whole pattern matches as a scan's constant does (`Value::reads_as`).
 - A pattern that holds a blank cannot be built. Built from a rest that is not a map, or one that holds a key the pattern names, it is no value, and the row is dropped.
-- Matched against a record under a version this release does not read, a pattern is refused by the number (`EvaluationError::RecordVersion`), since the record may match and this release cannot tell. A record of before is a value of no shape and does not match.
+- Which keys of a map pattern are one is the map's to say: the natural `3`, the integer `3` and the float `3.0` are one key, and a pattern that names two of them is refused (`MapPatternError::DuplicateKey`, `it_refuses_two_keys_a_map_holds_as_one`).
+- Opaque record bytes (`Value::Record`) are a value of no shape and match no map or list pattern; a variable takes them whole.
 
 The cost of B is the second row. Whether a notation writes `{title: ?t}` for the open reading and lowers it to a blank rest is the notation's to decide; dialog's pattern says which it is.
+
+## The edges, at head
+
+Each of these is pinned by a test in `rust/dialog-query/src/pattern/tests.rs`, named in its paragraph.
+
+**A key that holds several values.** A map holds a key once for each value it holds under it (`Composite::map`). A map pattern names a key for one value, so naming a key that holds several never matches, whether the value is taken apart or the pattern is built, and a rest takes such a key whole, every value under it, as a blank rest passes it by (`it_matches_no_key_that_holds_several_values_and_a_rest_takes_it_whole`). This is consistent but it is a gap, not a decision: the notation's own maps refuse a key given twice, so it cannot write a pattern for such a key, and a map that holds one can only be read through a rest. Whether a map pattern should be able to match a key of several values, by a set pattern or by matching each, is on the [journal](journal.md)'s agenda.
+
+**A record.** A record is a map whose keys are attributes, held as symbols (`Value::Symbol`). A map pattern reads one through symbol keys alone: the attribute's name written as text is another key and does not match. A map pattern of symbol keys builds what `Composite::is_record` says is a record, and one of text keys a map (`it_reads_a_record_through_symbol_keys`).
+
+**A variable named twice.** A variable is one variable wherever a pattern names it: `[?a ?a ?b]` matches `[1 1 2]`, binding `?a` once, and does not match `[1 2 2]` (`it_binds_a_variable_named_twice_once`).
+
+**Empty.** `{}` matches the empty map alone and `[]` the empty list alone: neither matches the other kind, nor a composite that holds anything, and each builds its own kind (`it_matches_an_empty_composite_of_its_own_kind_alone`).
+
+**No variable.** A map pattern with no variable is a constant: it is the value it builds, it matches that value alone and binds nothing (`it_is_a_constant_when_it_holds_no_variable`).
+
+**Both ways.** A pattern used to build, its variables bound, and used to take apart, its value bound, round trips: what it builds it takes apart to the same bindings, and what it takes apart it builds again. That is a property test over generated patterns and values, with variables typed and constants of other number types (`it_builds_what_it_takes_apart_and_takes_apart_what_it_builds`, `rust/dialog-query/src/pattern/property_tests.rs`).

@@ -31,7 +31,7 @@ Done when: a rule that binds a text from inside a map and adds a number to it is
 
 ## What is not decided here
 
-- **What installing a rule that holds a pattern does.** Format 3 has no way to write one. Refuse it with that reason, and bring the question back; do not add a format.
+- **What installing a rule that holds a pattern does.** The stored rule format has no way to write one. It is refused at commit, with that reason; the format that would store it is not built here (see [rule identity](design-rule-identity.md)).
 - **The words of the wire form.** None is needed while only the new notation makes patterns, through Rust.
 
 ## What to leave alone

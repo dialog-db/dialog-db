@@ -10,4 +10,5 @@
 | a revision's record is a bare dag-cbor map | fact | `RevisionRecord::to_bytes`, `rust/dialog-corpus/src/history/revision_record.rs` | holds |
 | a parameter should hold a pattern, of which a term is the leaf | opinion | Irakli, 2026-11-11 | decides |
 | no stored format changes for patterns now | opinion | Irakli, 2026-11-11 | decides |
-| a premise can be planned by the variables inside its patterns | hypothesis | confirmed by step 3 of [the plan](plan.md) passing in either order of premises | open |
+| a premise can be planned by the variables inside its patterns | hypothesis | `it_takes_a_record_apart_in_either_order_of_premises`, `it_builds_a_record_in_either_order_of_premises` | confirmed |
+| committing a rule that holds a pattern is refused, and writes nothing | fact | `CommitError::Refused`; `it_refuses_to_commit_a_pattern_rule_on_a_volatile_branch` and `_on_a_filesystem_branch` | holds |

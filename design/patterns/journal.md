@@ -2,8 +2,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | A parameter holds a variable, constant, map pattern or list pattern. Patterns build and take apart `Value::Composite`; nested atoms use the shared canonical table and Chronicle tokens from #849. | **Implementation.** Pattern planning, typing and rule handling are implemented in #778 and are being ported to the current composite API. |
-| **Agenda** | Verify pattern query and rule behavior against the current branch stack. | Run the pattern tests, then the full test and performance gates. |
+| **Status** | A parameter holds a variable, constant, map pattern or list pattern. Patterns build and take apart `Value::Composite`; nested atoms use the shared canonical table and Chronicle tokens from #849. A rule that holds a pattern runs in a query layer and is refused at commit. | **Implementation.** Planning, typing, rule identity and the refusal are built in #778, on the composite API of #843. |
+| **Agenda** | Whether a key that holds several values should be matchable by a map pattern ([meaning](design-pattern-meaning.md)). The format that stores a pattern in a rule ([rule identity](design-rule-identity.md)). | Review and merge #778 after #843. |
 
 ## 2026-11-11, Directing: a pattern in place of a term
 
@@ -29,3 +29,14 @@
 **Decided.** The pattern design and implementation use this composite representation directly. They do not introduce a second record encoding, version byte, or per-pattern token table. The revision record remains a separate bare dag-cbor map.
 
 **Implementation note, 2026-11-21.** The pattern matcher now constructs and inspects `Composite` values directly. A pattern does not encode nested composites itself: it delegates canonical ordering, shared scalar atoms and composite identity to the corpus implementation.
+
+## 2026-11-23, Reviewing: a refusal in place of a panic, and the read's one stream
+
+**Learned.**
+
+- Committing a rule that holds a pattern panicked in `Statement::assert`, which on wasm takes the page down. `Statement::assert` returns nothing, so the refusal is now a state of the batch: `Update::refuse` records a `Refusal`, a batch that is committed stages nothing for the rule, and the commit returns `CommitError::Refused` before anything is written. A query layer still holds the rule and runs it.
+- A map pattern decided duplicate keys by `Value`'s equality, so `3` and `3.0` were two keys of a pattern and one key of the map it built. The map decides now.
+- The read of a concept had a box around it again, and a stream around that for a read that holds a pattern: f86d6983b, porting to the composite API, took 99b412efe's one stream out, and with it the branch of `canonical()` that renames a one-field read's patterns along with its terms. Both are back, and the read is the one stream [design-leaf-cost.md](design-leaf-cost.md) decided. Measured under callgrind, the box had cost little (at most 0.09% on the gate's read and rule scenarios); the numbers are in that note.
+- A subscription to a query that holds a pattern with a blank inside missed a change: two rows of one entity compared equal, since the whole is bound under a name of each run's own. A row now compares the variables inside its patterns.
+
+**Decided.** By the builder, on the review's list: the refusal's shape above, and the semantics of the edges, written in [design-pattern-meaning.md](design-pattern-meaning.md).

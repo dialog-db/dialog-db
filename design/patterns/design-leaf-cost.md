@@ -20,7 +20,7 @@
 | a read that holds a pattern | rows leave as they are found | rows leave as they are found | 🟢 rows leave as they are found; the application is cloned once for the read |
 | what the reader of the code has to know | nothing | nothing | 🟡 why the loop writes a row back into the place it came in: a second place costs every read |
 
-| Decision: how `Parameters` holds a map, a list or a tuple, for: parameters of terms alone being what they were |
+| Decision: how `Parameters` holds a map or a list, for: parameters of terms alone being what they were |
 |---|---|---|---|
 | criterion \ approach | D: each entry a term and an optional shape (43d49a5) | E: the map of terms it was, and the shapes in a list beside it | F: one map whose slot is a term or a boxed shape, the size of a term |
 | entries and nodes of the map | 🔴 each entry 8 bytes larger, so every node is | 🟢 what they were | 🟢 what they were: the slot is the size of a term |
@@ -40,7 +40,8 @@
 
 C, E and H, by the builder, under the maintainer's requirement. F was built and measured too: it allocates exactly what the base does and runs more instructions, twice as many in a rule's read, and the gate counts instructions.
 
-- `ConceptQuery::evaluate_erased` is the one stream of a concept read, for a query that holds a pattern too. The application is held in it as `Option<ConceptQuery>`, which is the size of the application. A read of terms alone takes it out and gives it to its evaluation, as the base did. A read that holds a pattern leaves it in, reads through a copy that holds the wholes (`Parameters::plain`), and takes each row apart by the terms it kept (`pattern::take_apart`). The row is written back into the place it arrived in, so the loop has the places to stop it had.
+- `ConceptQuery::evaluate_erased` is the one stream of a concept read, for a query that holds a pattern too, and `evaluate_application` returns it for both, with no box around it. The application is held in it as `Option<ConceptQuery>`, which is the size of the application. A read of terms alone takes it out and gives it to its evaluation, as the base did. A read that holds a pattern leaves it in, reads through a copy of it, whose terms hold the wholes where the patterns stand, and takes each row apart by the terms it kept (`pattern::take_apart`), a picked read's rows too. The row is written back into the place it arrived in, so the loop has the places to stop it had.
+- `ConceptQuery::canonical` renames the operands of a one-field read. Where its terms hold a pattern it renames with `Parameters::rekeyed`, which keeps the pattern under the new name; terms alone are moved one by one, as the base moves them.
 - `Parameters` is the map of terms it was, and beside it in the same allocation one place for the patterns, which is empty unless a name holds one. `get`, `iter` and `insert` read and write the map of terms as before, the whole standing where a name holds a pattern.
 - A `MapPattern`'s rest and a `ListPattern`'s run are boxed, and `Pattern` is the size of `Term<Any>`.
 - An `Equality` between two terms runs the body it ran, in line, and `Pattern`'s questions (`is_bound`, `bind`, `is_constant`, `has_blank`) answer a leaf without collecting its terms.
