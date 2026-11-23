@@ -1316,17 +1316,17 @@ impl ConceptQuery {
         }
         let key = The::key_operand(name);
         let canonical_key = The::key_operand(ConceptDescriptor::VALUE);
-        let mut terms = Parameters::new();
-        for (param, term) in self.terms.iter() {
-            let param = if param == name {
+        // Renamed with what each name holds, a pattern included, so a
+        // read that holds one takes its rows apart under the new name.
+        let terms = self.terms.rekeyed(|param| {
+            if param == name {
                 ConceptDescriptor::VALUE.to_string()
-            } else if *param == key {
+            } else if param == key {
                 canonical_key.clone()
             } else {
-                param.clone()
-            };
-            terms.insert(param, term.clone());
-        }
+                param.to_string()
+            }
+        });
         ConceptQuery {
             predicate: ConceptDescriptor::of_attribute(field),
             terms,
