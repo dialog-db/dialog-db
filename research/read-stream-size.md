@@ -1,7 +1,9 @@
 # Read stream size
 
-**Status: Evaluating.** Built and measured against main; not landed. The
-brief is [dialog-db/dialog-db#781](https://github.com/dialog-db/dialog-db/issues/781),
+**Status: Landed**, as the increment over
+[dialog-db/dialog-db#806](https://github.com/dialog-db/dialog-db/pull/806),
+in [dialog-db/dialog-db#784](https://github.com/dialog-db/dialog-db/pull/784).
+The brief is [dialog-db/dialog-db#781](https://github.com/dialog-db/dialog-db/issues/781),
 the design topic `design/read-stream-size.md` on
 [dialog-db/dialog-db#780](https://github.com/dialog-db/dialog-db/pull/780).
 The record of the runs is the [journal](read-stream-size/journal.md).
@@ -38,14 +40,22 @@ one toolchain on one machine.
 - **The middle:** a smaller count with no change in time. The maintainer
   judges whether a count the gate holds is worth the change by itself.
 
-## Where it stands
+## Report
 
-The count's bar is met: 12,432 bytes to 3,136, the point scenarios 14% to
-21% fewer instructions, nothing above its spread, no allocation added to a
-plain read. The result is in the middle all the same: the wall clock did
-not move by anything the runs could tell from noise, because most of what
-callgrind counted for the moves is `rep movsb`, which it counts one
-instruction a byte.
+#806 landed first. It boxes the inner evaluation, so a concept read's
+stream holds none of it inline: 1,696 bytes (rustc 1.97, the test
+environment) where it was 12,432. This change adds, on top of it, the
+boxes of `Continuation::rows`, `fixpoint::evaluate` and the `relation`
+stream, which take the boxed inner evaluation from 7,856 bytes to 3,232,
+and a test that holds the read to 2,048 bytes. The Perf gate's delta
+against main with #806 is in the journal's entry of 2026-11-23.
+
+Before #806, against main at `f65891b`, this change alone took the stream
+from 12,432 bytes to 3,136 and the point scenarios 14% to 21% fewer
+instructions, with nothing above its spread and no allocation added to a
+plain read. The wall clock did not move by anything the runs could tell
+from noise, because most of what callgrind counted for the moves is
+`rep movsb`, which it counts one instruction a byte.
 
 Left open:
 
@@ -56,6 +66,6 @@ Left open:
 - The commit path's 11 to 12 KB futures in `dialog-corpus/src/buffered.rs`.
   `commit-batch`, `commit-rows` and `number-commit` did not move here, and
   nothing has measured what those futures cost.
-- The stream is still 3 KB, most of it a dozen locals of about 90 bytes
-  the compiler does not overlap. Holding fewer of them across a stop would
-  take it further.
+- The boxed inner evaluation is still 3 KB, most of it a dozen locals of
+  about 90 bytes the compiler does not overlap. Holding fewer of them
+  across a stop would take it further.

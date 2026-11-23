@@ -2,14 +2,14 @@
 
 ## Where things stand
 
-**Evaluating.** The change is three edits in
-`rust/dialog-query/src/concept/query.rs` and one test. A concept read's
-stream is 3,136 bytes where it was 12,432. The point scenarios count 14% to
-21% fewer instructions and no scenario counts more past what one binary
-moves between runs. The wall clock does not move by anything these runs can
-see: what callgrind counted was mostly `rep movsb`, one instruction a
-byte, which hardware does not pay for that way. Next: the maintainer
-decides whether to land it, and whether to re-record baselines.
+**Landed**, on top of
+[dialog-db/dialog-db#806](https://github.com/dialog-db/dialog-db/pull/806),
+which landed first and boxed the inner evaluation. A concept read's stream
+is 1,696 bytes (rustc 1.97, the test environment) where it was 12,432.
+This change adds the boxes for the paths a plain read does not run, which
+take the boxed inner evaluation from 7,856 bytes to 3,232, and a test that
+holds the read's size. The wall clock did not move by anything these runs
+could see.
 
 ## Datasets
 
@@ -137,6 +137,38 @@ cannot tell from noise.
 
 **Decision.** Not decided: the maintainer's. The count's bar is met; the
 time's is not shown either way.
+
+## 2026-11-23: On top of #806
+
+**Question.** What this change still does once
+[dialog-db/dialog-db#806](https://github.com/dialog-db/dialog-db/pull/806)
+is on main.
+
+**Method.** #806 landed first. It boxes the inner evaluation, so the
+stream `evaluate_erased` returns no longer holds it inline, and it shares
+a concept descriptor's fields behind an `Arc`. This change was merged onto
+it: its single `pin!` of the unsorted stream gave way to #806's single
+`Box::pin`, and what is left is the boxes of `Continuation::rows`,
+`fixpoint::evaluate` and the `relation` stream, and the size test. Sizes
+are `size_of_val` in `it_keeps_a_read_small_enough_to_move`, release build,
+rustc 1.97, the test environment (not `QueryEnv`, and not
+`-Zprint-type-sizes`, so not comparable byte for byte with the first
+entry).
+
+**Results.**
+
+| what | without these boxes | with them |
+|---|---|---|
+| the stream `evaluate_erased` returns | 1,696 | 1,696 |
+| the boxed `evaluate_unsorted` stream | 7,856 | 3,232 |
+
+The outer stream is #806's result; the boxes here make the allocation
+#806 adds smaller, by the room for paths a plain read never runs.
+
+Perf gate against main with #806: pending CI.
+
+**Decision.** Land it as the increment over #806, with the test holding
+the read to 2,048 bytes.
 
 ## How to reproduce
 
