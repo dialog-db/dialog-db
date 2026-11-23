@@ -1006,7 +1006,10 @@ fn it_refuses_a_number_under_a_type_other_than_the_band() {
     // the band, so it holds no atom of `natural:`.
     let mut slot = vec![ValueDataType::UnsignedInt as u8];
     crate::encode_key_value(&natural(3), 0, &mut slot);
-    assert!(matches!(refused(&list_of(&slot)), CompositeError::Malformed));
+    assert!(matches!(
+        refused(&list_of(&slot)),
+        CompositeError::Malformed
+    ));
     // A number in the band's encoding with more bytes than it needs reads
     // as the number, and is not its encoding.
     let mut slot = vec![ValueDataType::Number as u8];
