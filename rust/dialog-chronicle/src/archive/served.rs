@@ -142,19 +142,24 @@ fn entry(
     // A key's value is its row's last part, in every form that has one.
     let value_at = value_slot(form, slots_of(form)).map(|slot| 1 + slot);
     let mut slot = |at: usize| -> Option<Part> {
-        if Some(at) == value_at {
-            let value = snapshot.get(row[at])?;
-            if is_packed(value) {
-                let start = realized.len();
-                realize_value(value, snapshot, realized).ok()?;
-                return Some(Part {
-                    offset: start as u64,
-                    len: (realized.len() - start) as u32,
-                    realized: true,
-                });
-            }
+        if Some(at) != value_at {
+            return part(snapshot, row[at]);
         }
-        part(snapshot, row[at])
+        let value = snapshot.get(row[at])?;
+        if !is_packed(value) {
+            return Some(Part {
+                offset: row[at] as u64 * ALIGN,
+                len: value.len() as u32,
+                realized: false,
+            });
+        }
+        let start = realized.len();
+        realize_value(value, snapshot, realized).ok()?;
+        Some(Part {
+            offset: start as u64,
+            len: (realized.len() - start) as u32,
+            realized: true,
+        })
     };
     let (form, count, parts) = match form {
         ENTITY_KEY_TAG => (Some(form), 3, [slot(1)?, slot(2)?, slot(3)?, NO_PART]),
