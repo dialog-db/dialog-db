@@ -22,12 +22,12 @@
     "span.warm_walk": 503,
     "span.write_instructions": 0
   },
-  "instructions": 104972880,
-  "instructions_outside_allocator": 86148891,
+  "instructions": 104587505,
+  "instructions_outside_allocator": 85975393,
   "allocations": {
-    "alloc.bytes": 28048738,
-    "alloc.calls": 82496,
-    "free.calls": 82088,
+    "alloc.bytes": 28009146,
+    "alloc.calls": 82463,
+    "free.calls": 82055,
     "realloc.calls": 6590,
     "realloc.from.bytes": 1213909
   }
