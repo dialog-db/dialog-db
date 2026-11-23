@@ -207,20 +207,54 @@ realizes the packed token to the escaped canonical bytes again. Its limits:
 - A composite that spilled, whose key holds only a prefix of its bytes,
   is kept whole, told by the key (`key_value_is_spilled`), not by a parse
   that fails.
-- A composite is packed only when the packed token realizes to the very
-  key bytes; otherwise it is kept whole and a counter says so (zero for
-  every composite the corpus writes, tested on random ones).
+- Every well formed composite a key holds whole is packed. A composite is
+  packed only when the packed token realizes to the very key bytes; that
+  check is a guard the tests assert is never used for a composite the
+  corpus wrote (500 random composites in every key form, and every
+  shape). It can fire only for key bytes the corpus would not write,
+  which a block from a peer can hold: a value that is not one escaped
+  byte string, bytes without a table and a body, or a layout that is not
+  the canonical one (offsets where none belong, a wider offset width).
+  Such a value is kept whole, which is what was given. The check costs
+  173 ns for a two-field map and 0.8 to 2.0 µs for a syntax tree, once a
+  value: a draft remembers the token each value was packed as, so the
+  four keys a fact puts its value in (three orderings and history) pack
+  it once. A commit of 1,000 syntax-tree facts packs 3.96 times a fact
+  without that and 0.99 with it, and appends in 48.6 µs a fact against
+  27.9 (`cargo test --release -p dialog-chronicle --lib -- --ignored
+  --nocapture measure_a_commit_of_syntax_trees`, 2026-11-23).
 - An index node's separators are whole keys, kept whole: a composite in a
   separator shares nothing.
 - A packed token's second byte, `FF`, is one no composite kept whole
   starts with: escaped canonical bytes start with the table's head, below
   `0x10`, escaped `00 FF` when zero (tested on random, empty, spilled and
   offset-tabled composites).
+- A spilled composite shares nothing with the file. Its key holds a
+  64-byte prefix (a value spills when its key encoding passes
+  `inline_n`, 4,096 bytes by default), and its whole bytes go to the
+  space's blob store through the blob effect, which Chronicle does not
+  answer: a Chronicle space keeps blobs in the filesystem provider, a
+  file each. Within one composite the atom table already keeps a repeated
+  scalar once; across values a spilled one gets nothing. Of 1,000
+  generated trees of the census's shape 11 spill; the census's largest
+  form is 7,026 bytes of dag-cbor, so at most a few of its 133 forms do.
+  Sharing their atoms needs the blob in the file: Chronicle answering the
+  blob effects (a blob store with range reads in the file, packing a blob
+  that realizes back as a composite), or the corpus writing a spilled
+  composite as an archive block, which moves where a replica keeps and
+  syncs it. Neither is in this change.
 - Every token costs a pad byte, padding to 16 and a four-byte length, so
   a small atom shared once costs more than it saves; the archive's size
   below says what that comes to.
 - Token ids are file offsets and a token is never moved or dropped once
-  written, so the ids a packed token holds stay valid. An append prepared
+  written, so the ids a packed token holds stay valid. A packed token
+  names atoms written before it (tested on every file the tests write),
+  so a file Chronicle wrote never holds one naming an atom it lacks:
+  `PackedError::MissingAtom` and `Truncated` come only from damaged
+  bytes. A token record's checksum is checked when the file is opened
+  for the records past its last sync point, not on every read, so damage
+  to an older record reaches a reader; these errors are what a packed
+  token gives then, and a read never panics on it. An append prepared
   before another one names new atoms by drafted ids; laid out, it looks a
   packed token up under its atoms' final ids, so it is not written twice
   (`it_reconciles_a_packed_composite_another_append_wrote_first`).

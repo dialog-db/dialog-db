@@ -79,8 +79,8 @@ What this changes for you:
   but the canonical ones with a `CompositeError` saying why;
   `Composite::to_bytes` gives them; `Composite::reference` gives the
   identity. Refused on construction: a composite as a key
-  (`CompositeError::CompositeKey`), NaN (`NotANumber`) and nesting past
-  `MAX_DEPTH`, 128 (`TooDeep`).
+  (`CompositeError::CompositeKey`), NaN (`NotANumber`), nesting past
+  `MAX_DEPTH`, 128 (`TooDeep`), and bytes past 4 GiB (`TooLarge`).
 - `Composite::split_atoms` splits a composite's bytes into its atoms and
   its body, and `Composite::join_atoms` writes them back, for a store
   that keeps scalars once. `ValueDataType::ATOM_REFERENCE` (26) is the
