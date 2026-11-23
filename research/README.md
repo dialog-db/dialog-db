@@ -49,6 +49,11 @@ runs, in the journal's "Where things stand"; they change together.
 - [Graph queries](graph-queries.md): **Proposed.** A concept's entity field
   names the concept it points to, so a concept describes a graph, a query
   returns it and a subscription follows changes anywhere in it.
+- [Read stream size](read-stream-size.md): **Landed**, on
+  [dialog-db/dialog-db#784](https://github.com/dialog-db/dialog-db/pull/784)
+  over [#806](https://github.com/dialog-db/dialog-db/pull/806). A concept
+  read's stream, moved on every read, shrinks from 12 KB to under 2 KB; the
+  paths a plain read does not take are boxed, and a test holds the size.
 - [Zero-copy answers](zero-copy-answers.md): **Evaluating**, on
   [dialog-db/dialog-db#825](https://github.com/dialog-db/dialog-db/pull/825)
   (the binary answer frame on
