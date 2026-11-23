@@ -85,14 +85,14 @@ impl From<PackedError> for io::Error {
     }
 }
 
-/// How many composites whose key holds them whole were interned whole
-/// anyway, because they did not split or would not realize to the same
-/// bytes: none, for composites the corpus wrote. Kept for tests, which
-/// assert it does not move.
-/// Counted a thread: tests append on their own thread, and one that
-/// counts is not disturbed by another that is kept whole on purpose.
 #[cfg(test)]
 thread_local! {
+    /// How many composites whose key holds them whole were interned whole
+    /// anyway, because they did not split or would not realize to the same
+    /// bytes: none, for composites the corpus wrote. Kept for tests, which
+    /// assert it does not move, and counted a thread: tests append on their
+    /// own thread, and one that counts is not disturbed by another that is
+    /// kept whole on purpose.
     static KEPT_WHOLE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
