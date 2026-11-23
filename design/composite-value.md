@@ -113,28 +113,36 @@ What they say:
 - A view reads three levels down in about a microsecond at any size; #812
   pays for everything it writes again, 39 to 460 times more.
 
-**What a read costs on the path a query takes.** A value bound from a key
-goes through `decode_value_view`: the payload is unescaped, then
-`Composite::from_bytes` reads every part and writes the composite again
-to check its bytes are canonical, then the field is read. For a chain of
-maps of two fields (`type` and `body`), the deepest `type` read through
-its path, release, 20,000 rounds (`cargo test --release -p dialog-corpus
---lib -- --ignored --nocapture measure_reading_a_field`):
+**What a read costs on the path a query takes.** Goal 2. A value bound
+from a key goes through `decode_value_view`: the payload is unescaped,
+`Composite::from_bytes` checks the bytes are canonical, and the field is
+read. The check used to read every part into a tree, write it again and
+compare, on every read; it was 80% of the read. It now shows the bytes
+canonical in one pass with no tree built (`model/composite/check.rs`):
+the table sorted strictly, each atom its value's encoding (text with no
+zero byte checked where it is), every atom used, each body's entries in
+the encoder's order, every sequence's offsets present exactly when the
+encoder writes them, narrowest and in place, every varint minimal. Bytes
+it cannot show canonical, which the encoder never writes but for a key
+holding two nested composites (ordered by their bytes on their own), go
+to the full check, which stays the definition of the answer and of its
+error; 40,000 random and mutated byte strings get the same answer from
+both, error for error. For a chain of maps of two fields (`type` and
+`body`), the deepest `type` read through its path, release, 20,000
+rounds (`cargo test --release -p dialog-corpus --lib -- --ignored
+--nocapture measure_reading_a_field`, 2026-11-23, load about 3):
 
-| depth | bytes | whole read | unescape | `from_bytes` | view, no check | the field |
+| depth | bytes | whole read, before | whole read | `from_bytes`, before | `from_bytes` | the field |
 |--:|--:|--:|--:|--:|--:|--:|
-| 7 | 118 | 7,974 ns | 328 ns | 6,237 ns | 27 ns | 831 ns |
-| 13 | 166 | 15,174 ns | 395 ns | 12,032 ns | 31 ns | 1,473 ns |
-| 19 | 217 | 20,023 ns | 392 ns | 16,160 ns | 28 ns | 2,051 ns |
+| 7 | 118 | 7,974 ns | 1,797 ns | 6,237 ns | 323 ns | 829 ns |
+| 13 | 166 | 15,174 ns | 2,510 ns | 12,032 ns | 403 ns | 1,372 ns |
+| 19 | 217 | 20,023 ns | 3,032 ns | 16,160 ns | 621 ns | 1,967 ns |
 
-The canonical check is about 80% of a read and the field 10%: a stored
-composite is not yet read "without decoding it all", since the check
-decodes all of it. It guards bytes nobody checked: a block from a peer or
-from storage is content addressed, which says the bytes are the ones its
-hash names, not that they are canonical, while a composite built here is
-canonical by construction. Where the check belongs (when a block is taken
-in, or on every read as now) is the maintainer's call; nothing here
-changes it.
+The field is now most of a read. Still read on every read: the check
+reads every byte once. Validating where bytes enter (a block from a peer
+or from storage) and trusting them after would take a mark on bytes that
+are trusted, which every store and the wire would have to carry; it is
+not built.
 
 **The archive.** A file of syntax trees with their atoms shared as tokens
 against each composite kept whole, in `dialog-chronicle` (`cargo test

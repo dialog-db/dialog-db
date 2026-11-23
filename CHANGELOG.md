@@ -86,6 +86,13 @@ What this changes for you:
   that keeps scalars once. `ValueDataType::ATOM_REFERENCE` (26) is the
   reserved reference byte; no type takes it. `key_value_is_spilled` says
   whether a key holds its value only as a prefix.
+- A composite says its layout in the high four bits of its first byte;
+  this release writes layout 0, so no byte of its encoding moves. A
+  composite in any other layout (one a newer release wrote) is refused by
+  name: `CompositeError::UnsupportedLayout`, and
+  `DialogCorpusError::UnsupportedLayout` from a tree read, which a scan
+  reports rather than skipping the fact as a corrupt row. `decode_composite`
+  decodes a key's composite payload and says why when it cannot.
 - `ValueView` has a `Composite` variant: a scanned row holding a composite
   binds in place, as every other value does.
 - An attribute declared `as: composite:`, `composite:map`,
