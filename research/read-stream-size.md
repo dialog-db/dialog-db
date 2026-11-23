@@ -47,8 +47,10 @@ stream holds none of it inline: 1,696 bytes (rustc 1.97, the test
 environment) where it was 12,432. This change adds, on top of it, the
 boxes of `Continuation::rows`, `fixpoint::evaluate` and the `relation`
 stream, which take the boxed inner evaluation from 7,856 bytes to 3,232,
-and a test that holds the read to 2,048 bytes. The Perf gate's delta
-against main with #806 is in the journal's entry of 2026-11-23.
+and a test that holds the read to 2,048 bytes. Against main with #806,
+the Perf gate counts `read-point` 1.05% fewer instructions and 5.77% fewer
+bytes allocated, `rule-point` 0.76% and 5.07%, `rule-recursive` 0.72% and
+2.86%, none past tolerance (the journal's entry of 2026-11-23).
 
 Before #806, against main at `f65891b`, this change alone took the stream
 from 12,432 bytes to 3,136 and the point scenarios 14% to 21% fewer

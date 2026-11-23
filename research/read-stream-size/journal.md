@@ -8,8 +8,9 @@ which landed first and boxed the inner evaluation. A concept read's stream
 is 1,696 bytes (rustc 1.97, the test environment) where it was 12,432.
 This change adds the boxes for the paths a plain read does not run, which
 take the boxed inner evaluation from 7,856 bytes to 3,232, and a test that
-holds the read's size. The wall clock did not move by anything these runs
-could see.
+holds the read's size. Against main with #806 the Perf gate counts 0.2% to
+1% fewer instructions and 1.7% to 5.8% fewer bytes allocated on the read
+scenarios. The wall clock did not move by anything these runs could see.
 
 ## Datasets
 
@@ -165,7 +166,22 @@ entry).
 The outer stream is #806's result; the boxes here make the allocation
 #806 adds smaller, by the room for paths a plain read never runs.
 
-Perf gate against main with #806: pending CI.
+The Perf gate on this change's first head after the merge (`38d8e1b`),
+against CI's sweep of main at `29bd830` (with #806): 603 rows, none past
+tolerance, 12 improved past it. Instructions outside the allocator and
+bytes allocated:
+
+| scenario | instructions | bytes allocated |
+|---|---|---|
+| `read-point` | -1.05% | -5.77% |
+| `rule-point` | -0.76% | -5.07% |
+| `rule-recursive` | -0.72% | -2.86% |
+| `rule-dispatch` | -0.16% | -1.70% |
+| `commit-derived` | -0.21% | -2.26% |
+
+Allocation calls do not move (`commit-derived` +0.26%, inside tolerance).
+So beyond #806 the boxes buy little in instructions and a few percent of
+bytes allocated, since the box #806 makes for every read is smaller.
 
 **Decision.** Land it as the increment over #806, with the test holding
 the read to 2,048 bytes.
