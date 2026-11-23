@@ -90,6 +90,11 @@ impl From<PackedError> for io::Error {
 /// bytes: none, for composites the corpus wrote.
 static KEPT_WHOLE: AtomicU64 = AtomicU64::new(0);
 
+/// Whether composites are packed: a measurement turns it off to weigh a
+/// file that keeps every composite whole.
+#[cfg(test)]
+pub(crate) static PACKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 /// How many inline composites have been interned whole so far.
 #[cfg(test)]
 pub(crate) fn kept_whole() -> u64 {
@@ -167,6 +172,10 @@ pub(crate) fn realize<T: TokenRead + ?Sized>(
 /// a `spilled` value among them, byte for byte.
 pub(crate) fn intern_value(tokens: &mut Draft<'_>, value: &[u8], spilled: bool) -> u32 {
     if spilled || value.first() != Some(&COMPOSITE) {
+        return tokens.intern(value);
+    }
+    #[cfg(test)]
+    if !PACKING.load(Ordering::Relaxed) {
         return tokens.intern(value);
     }
     match pack(tokens, value) {

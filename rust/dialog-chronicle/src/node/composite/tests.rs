@@ -1,5 +1,6 @@
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use dialog_common::Buffer;
 use dialog_corpus::{
@@ -625,6 +626,125 @@ fn it_reuses_a_predecessors_rows_of_composites() -> anyhow::Result<()> {
     }
     let archive = Chronicle::open(&path)?;
     assert_reads_back(&archive, &[before, after])?;
+    Ok(())
+}
+
+/// A form of the notation as a syntax tree, shaped as the census of the
+/// notation's documents reports them (`design/composite-value.md`): every
+/// node a map that says its `type`, two fields a map at the median, a
+/// call's parts a list, nested 7 to 19 deep, its names drawn from a small
+/// vocabulary as a program's are.
+fn syntax_form(random: &mut Random, depth: usize) -> Value {
+    const KINDS: [&str; 12] = [
+        "application",
+        "variable",
+        "symbol",
+        "keyword",
+        "text",
+        "number",
+        "tuple",
+        "struct",
+        "set",
+        "rule",
+        "concept",
+        "field",
+    ];
+    let name = |random: &mut Random| {
+        let at = random.below(150);
+        match random.below(4) {
+            0 => format!("?v{at}"),
+            1 => format!(":k{at}"),
+            _ => format!("name-{at}"),
+        }
+    };
+    let kind = KINDS[random.below(KINDS.len() as u64) as usize];
+    let mut fields = vec![(text("type"), text(kind))];
+    if depth == 0 {
+        fields.push((text("name"), text(&name(random))));
+    } else {
+        match random.below(3) {
+            0 => {
+                let items = (0..1 + random.below(3)).map(|_| syntax_form(random, depth - 1));
+                fields.push((
+                    text("terms"),
+                    Value::Composite(Composite::list(items).unwrap()),
+                ));
+            }
+            _ => {
+                fields.push((text("operand"), syntax_form(random, depth - 1)));
+                if random.below(2) == 0 {
+                    fields.push((text("name"), text(&name(random))));
+                }
+            }
+        }
+    }
+    Value::Composite(Composite::map(fields).unwrap())
+}
+
+/// The size of a file holding `forms`, one fact each, in the entity
+/// ordering, with composites packed or kept whole.
+fn archive_of(
+    forms: &[Value],
+    packing: bool,
+) -> anyhow::Result<(std::collections::HashMap<String, u64>, usize, u64)> {
+    PACKING.store(packing, Ordering::Relaxed);
+    let manifest = Manifest::default();
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("archive");
+    let archive = Chronicle::open(&path)?;
+    for (at, chunk) in forms.chunks(16).enumerate() {
+        let block = segment(Form::Entity, &format!("doc{at}"), chunk, &manifest)?;
+        archive.append("index", std::slice::from_ref(&block))?;
+    }
+    let held = archive.held_tokens()?;
+    let token_bytes = held.iter().map(|(_, token)| token.len() as u64).sum();
+    let records = archive.record_bytes()?;
+    PACKING.store(true, Ordering::Relaxed);
+    Ok((records, held.len(), token_bytes))
+}
+
+/// The file a set of syntax trees takes with their atoms shared as tokens
+/// against each composite kept whole. Generated trees of the census's
+/// shape, not the census's own trees. Run by hand:
+/// `cargo test --release -p dialog-chronicle --lib -- --ignored --nocapture
+/// measure_an_archive_of_syntax_trees`.
+#[dialog_common::test]
+#[ignore = "a measurement, run by hand"]
+fn measure_an_archive_of_syntax_trees() -> anyhow::Result<()> {
+    let mut random = Random(0x5ca1ab1e);
+    let forms: Vec<Value> = (0..133)
+        .map(|_| {
+            let depth = 7 + random.below(5) as usize;
+            syntax_form(&mut random, depth)
+        })
+        .collect();
+    let canonical: usize = forms
+        .iter()
+        .map(|form| match form {
+            Value::Composite(composite) => composite.to_bytes().len(),
+            _ => 0,
+        })
+        .sum();
+    let (shared, shared_tokens, shared_bytes) = archive_of(&forms, true)?;
+    let (whole, whole_tokens, whole_bytes) = archive_of(&forms, false)?;
+    let of = |records: &std::collections::HashMap<String, u64>, kind: &str| {
+        records.get(kind).copied().unwrap_or(0)
+    };
+    println!("{} forms, {canonical} bytes of composites", forms.len());
+    println!("| | tokens | their bytes | token records | frame records | all records |");
+    for (name, records, tokens, bytes) in [
+        ("atoms shared", &shared, shared_tokens, shared_bytes),
+        ("kept whole", &whole, whole_tokens, whole_bytes),
+    ] {
+        println!(
+            "| {name} | {tokens} | {bytes} | {} | {} | {} |",
+            of(records, "Tokens"),
+            of(records, "Frame"),
+            records.values().sum::<u64>()
+        );
+    }
+    println!("{shared:?}");
+    println!("{whole:?}");
     Ok(())
 }
 

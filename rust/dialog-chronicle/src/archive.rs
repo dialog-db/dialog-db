@@ -3642,6 +3642,22 @@ impl Chronicle {
         }
         Ok(tokens)
     }
+
+    /// The bytes of every record the file holds, by kind, headers
+    /// included: what tests weigh a file by.
+    pub(crate) fn record_bytes(&self) -> io::Result<HashMap<String, u64>> {
+        let snapshot = self.current();
+        let bytes = snapshot.bytes();
+        let mut kinds = HashMap::new();
+        let mut at = DATA as usize;
+        while at < snapshot.slot.end as usize {
+            let (kind, _, end) =
+                record_in(bytes, at).ok_or_else(|| invalid("a record that is not whole"))?;
+            *kinds.entry(format!("{kind:?}")).or_default() += (end - at) as u64;
+            at = end;
+        }
+        Ok(kinds)
+    }
 }
 
 #[cfg(test)]
