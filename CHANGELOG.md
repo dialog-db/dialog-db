@@ -35,18 +35,30 @@ composites are equal exactly when they hold the same content, whatever
 order it was given in, and the natural `3` and the float `3.0` are one value
 in a composite as anywhere.
 
-A composite has one canonical encoding: a table of every key it and the
-maps nested in it use, once, then its body; a sequence of more than
-`SCAN_LIMIT` items carries a table of offsets, and every nested body says
-its size. Bytes that are not that encoding are refused, so equal composites
-have equal bytes and a composite is keyed in the tree by them. A
-`Composite` is a view, its buffer shared and the place of its body, so a
-nested composite, a field or an item is read where it sits: the length,
-a field by key, an item by index and iteration decode only what they
-return. Its identity is its merkle reference: for a map, a map under
-`composite:` from each key's reference to its value's (or to the `set:` of
-its values'); for a list, the `list:` of its items' references. No part of
-the layout enters it.
+A composite has one canonical encoding: a table of its atoms, every
+scalar it and the composites nested in it hold, keys and values alike,
+once, sorted by their bytes; then its body, in which every scalar is a
+reference to its place in the table (a slot that starts with type byte
+26, reserved for that and for nothing else) and a nested composite is its
+own body, which says its size. A sequence of more than `SCAN_LIMIT` items
+carries a table of offsets. Bytes that are not that encoding are refused,
+so equal composites have equal bytes and a composite is keyed in the
+tree by them. A `Composite` is a view, its buffer shared and the place of
+its body, so a nested composite, a field or an item is read where it
+sits: the length, a field by key, an item by index and iteration decode
+only what they return. Its identity is its merkle reference: for a map, a
+map under `composite:` from each key's reference to its value's (or to
+the `set:` of its values'); for a list, the `list:` of its items'
+references. No part of the layout enters it.
+
+An atom is a scalar in the bytes a tree key holds it in, so the
+single-file archive (`dialog-chronicle`) keeps a composite in a key as
+the token ids of its atoms and its body, and each atom as the token a
+key holding that scalar alone names: a text a thousand composites hold
+is stored once. A composite whose key holds only a prefix of it (one
+that spilled) is kept whole, and a composite is kept as its atoms only
+when that rebuilds the very key it was given. Blocks, sync and identity
+are unchanged: the atoms are shared inside the file only.
 
 What this changes for you:
 
@@ -69,6 +81,11 @@ What this changes for you:
   identity. Refused on construction: a composite as a key
   (`CompositeError::CompositeKey`), NaN (`NotANumber`) and nesting past
   `MAX_DEPTH`, 128 (`TooDeep`).
+- `Composite::split_atoms` splits a composite's bytes into its atoms and
+  its body, and `Composite::join_atoms` writes them back, for a store
+  that keeps scalars once. `ValueDataType::ATOM_REFERENCE` (26) is the
+  reserved reference byte; no type takes it. `key_value_is_spilled` says
+  whether a key holds its value only as a prefix.
 - `ValueView` has a `Composite` variant: a scanned row holding a composite
   binds in place, as every other value does.
 - An attribute declared `as: composite:`, `composite:map`,
@@ -122,7 +139,47 @@ dropping that scope.
 
 #### Compatibility and migration
 
+- Composites: nothing an existing space holds is rewritten or read
+  differently, and opaque `record:` values keep their encoding and identity.
+  No release up to and including 0.5.0 wrote a composite (the draft #812 was
+  never released), so there is nothing to migrate. A space that stores a
+  composite cannot be read by an older release, which takes a key with type
+  byte 22 for corruption: once a replica writes one, every replica reading
+  that space needs this release. Nothing an embedder has to run.
+  A single-file archive keeps a composite's atoms as tokens of their own;
+  a file this release writes holding a composite is read by no older
+  release, as the space is not. Nothing in a file an older release wrote
+  is rewritten.
 - Nothing stored or synced changes.
+
+
+### A stored rule that reads a collection entry with its key and value blank reads back
+
+[#835](https://github.com/dialog-db/dialog-db/pull/835), reported in
+[#834](https://github.com/dialog-db/dialog-db/issues/834).
+
+A concept application that reads a collection and binds neither the key
+nor the value of its entries, `entry: {the: _, is: _}`, writes the entry
+as `{}`, both halves left out as blanks are. Reading it back took `{}`
+for a constant and failed, so the rule's stored body did not decode and
+the rule could not be loaded from a branch:
+`rule hydrate: dag-cbor decode failed: an empty map names no type`. It now
+reads `{}` under a collection field as that entry.
+
+What this changes for you:
+
+- A rule holding such a read loads from the branch it was installed on,
+  under the identity it was installed with. The error above is gone for
+  it.
+
+Why: the writer and the reader of a concept application disagreed on one
+form of an entry, so a rule that compiled had a body nothing could read.
+
+#### Compatibility and migration
+
+- Nothing is rewritten and no rule's bytes or identity change: bodies an
+  earlier release stored with `{}` already hold what this one reads.
+  An earlier release cannot read such a body, as it could not before.
 
 
 ### A read that names a derived value no longer fails with an unbound variable
@@ -470,13 +527,6 @@ and names the rule.
 
 ### Compatibility and migration
 
-- Composites: nothing an existing space holds is rewritten or read
-  differently, and opaque `record:` values keep their encoding and identity.
-  No release up to and including 0.5.0 wrote a composite (the draft #812 was
-  never released), so there is nothing to migrate. A space that stores a
-  composite cannot be read by an older release, which takes a key with type
-  byte 22 for corruption: once a replica writes one, every replica reading
-  that space needs this release. Nothing an embedder has to run.
 - A rule an older release stored spells its attributes under picks (0.3 to 0.5) or under the older `cardinality` (0.2), and sits under an
   identity that hashed them. This release reads a rule body only in its
   own format and only under the identity it gives it now,
