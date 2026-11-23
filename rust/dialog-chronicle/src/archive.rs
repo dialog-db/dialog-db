@@ -2290,12 +2290,14 @@ impl Chronicle {
         // one another, which the system refuses (EDEADLK), whether real or
         // only through a process's threads sharing its locks.
         let mut reused = None;
-        for at in (0..slot.extents_free.len()).rev() {
-            if let Some(claim) = self.inner.extents.lock().own(file, slot.extents_free[at])? {
-                slot.extents_free.remove(at);
+        for record in slot.extents_free.iter().rev() {
+            if let Some(claim) = self.inner.extents.lock().own(file, *record)? {
                 reused = Some(claim);
                 break;
             }
+        }
+        if let Some(claim) = &reused {
+            slot.extents_free.retain(|free| *free != claim.record());
         }
         let (claim, reused) = match reused {
             Some(claim) => (claim, true),
