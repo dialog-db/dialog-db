@@ -1215,6 +1215,44 @@ mod tests {
         assert_eq!(decoded.this(), a.this(), "encode/decode preserves identity");
     }
 
+    /// A premise that reads a collection and binds neither the key nor
+    /// the value of its entries writes the entry as `{}`, and the body
+    /// it is stored in reads back as the rule it was.
+    #[dialog_common::test]
+    fn it_decodes_a_body_that_reads_an_entry_with_its_key_and_value_blank() {
+        use serde_json::json;
+        let json = json!({
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "text:" } } },
+            "when": [
+                {
+                    "assert": { "with": { "name": { "the": "org/person-name", "as": "text:" } } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } }
+                    }
+                },
+                {
+                    "assert": { "with": { "entry": {
+                        "the": { "domain": "org.person", "keyed": "sequence" },
+                        "as": "entity:"
+                    } } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "entry": { "the": { "?": {} }, "is": { "?": {} } }
+                    }
+                }
+            ]
+        });
+        let descriptor: DeductiveRuleDescriptor =
+            serde_json::from_value(json).expect("descriptor parses");
+        let rule = descriptor.compile().expect("rule compiles");
+        let bytes = rule.encode();
+        assert_eq!(
+            DeductiveRule::decode(&bytes).map(|decoded| (decoded.this(), decoded.encode())),
+            Ok((rule.this(), bytes))
+        );
+    }
+
     #[dialog_common::test]
     fn it_rejects_unconstrained_fact() {
         let conclusion = ConceptDescriptor::try_from(vec![
