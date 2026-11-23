@@ -330,6 +330,7 @@ pub struct Refusal {
 
 impl Refusal {
     /// A refusal to write what `entity` names, for `reason`.
+    // bare-send-ok: type-erased reason needs real auto-trait bounds
     pub fn new(entity: Entity, reason: impl StdError + Send + Sync + 'static) -> Self {
         Self {
             entity,
