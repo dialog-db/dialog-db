@@ -23,7 +23,9 @@ and a file system's minimum block size for each.
 
 `Chronicle` keeps each distinct entity, attribute, value, datum and
 version once, as a token, and each node as a frame: rows of token ids,
-written against the node it supersedes. The tree reads a node through
+written against the node it supersedes. A composite value is kept as the
+ids of its scalars' tokens and its body, so a scalar a thousand
+composites hold is one token. The tree reads a node through
 `IndexView` and `SegmentView` over the file's mapping, with no block
 built, hashed or validated. A block is rebuilt only when sync or push asks
 for one with `Get`.
