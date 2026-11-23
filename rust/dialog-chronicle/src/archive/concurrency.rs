@@ -778,14 +778,7 @@ fn a_block_only_another_process_holds_loose_is_written_again() -> anyhow::Result
     archive.append("index", &[block("shared-0")])?;
     let held = holding(&archive);
     assert_eq!(held.len(), 2, "and this process wrote its own copy");
-    let ours = archive
-        .inner
-        .extents
-        .lock()
-        .idle
-        .iter()
-        .map(|owned| owned.record)
-        .collect::<Vec<_>>();
+    let ours = archive.inner.extents.lock().idle_records();
     assert!(
         held.iter()
             .any(|record| ours.contains(record) && !theirs.contains(record))
@@ -953,7 +946,7 @@ fn an_extent_retired_under_a_stale_snapshot_is_not_taken() -> anyhow::Result<()>
         "the retired extent is not taken"
     );
     assert!(
-        !archive.inner.extents.lock().busy.contains(&retired[0]),
+        !archive.inner.extents.lock().is_busy(retired[0]),
         "nor kept busy"
     );
     Ok(())
@@ -1035,9 +1028,7 @@ fn an_extent_is_reused_only_after_a_sync_point_and_stale_readers_stay_right() ->
         let turn = archive.turn()?;
         let claimed = archive.claim_in_turn(&turn)?;
         assert_eq!(claimed.record, extent, "the freed extent is claimed again");
-        let mut extents = archive.inner.extents.lock();
-        extents.busy.remove(&claimed.record);
-        extents.idle.push(claimed);
+        archive.inner.extents.lock().give_back(claimed);
     }
     // Longer than what the reader read of it before: a reader that took
     // the extent for the one it read would look past them.
@@ -1208,9 +1199,8 @@ fn a_writer_keeps_an_extent_a_stale_gather_let_go_of() -> anyhow::Result<()> {
         .inner
         .extents
         .lock()
-        .idle
-        .iter()
-        .map(|owned| owned.record)
+        .idle_records()
+        .into_iter()
         .filter(|record| !listed.contains(record))
         .collect();
     assert_eq!(unlisted, Vec::<u64>::new(), "every idle extent is listed");
@@ -1252,6 +1242,86 @@ fn another_process_cannot_take_an_extent_a_stale_gather_let_go_of() -> anyhow::R
     );
     archive.give_back(writer);
     Ok(())
+}
+
+/// The reverse order of [`stale_gather_lets_go_of_a_claimed_extent`]: a
+/// writer thread is handed extent E first, reused from the free list, and
+/// only then does a thread gather on a snapshot taken before E was
+/// retired. The gather passes E over (a thread of this process has it), so
+/// letting go of what it gathered leaves E marked and its owner byte held
+/// for the writer: no other process takes it, and every block the writer
+/// appends reads back.
+#[dialog_common::test]
+fn a_stale_gather_passes_over_an_extent_a_writer_holds() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = archive_in(&directory);
+    let archive = Chronicle::open_with(
+        &path,
+        Options {
+            sync_in_background: false,
+            ..small(4096)
+        },
+    )?;
+    archive.append("index", &[block("first")])?;
+    let holder = hold(&path, locks::TURN, true)?;
+    let before = names("before", 3);
+    for name in &before {
+        archive.append("index", &[block(name)])?;
+    }
+    holder.finish()?;
+    let held = holding(&archive);
+    assert_eq!(held.len(), 1, "one extent holds the blocks");
+    let extent = held[0];
+
+    // G's snapshot, then E folded in, retired and freed.
+    let stale = archive.current();
+    archive.append("index", &[block("folds")])?;
+    archive.sync()?;
+    assert!(archive.current().slot.extents_free.contains(&extent));
+    // W is handed E first.
+    let mut writer = {
+        let turn = archive.turn()?;
+        archive.claim_in_turn(&turn)?
+    };
+    assert_eq!(writer.record, extent, "the freed extent is claimed again");
+    write_into(&archive, &mut writer, "written")?;
+    // G gathers on its stale snapshot, and lets go.
+    let gathered = archive.gather_fold(&stale, false)?;
+    assert!(
+        gathered
+            .as_ref()
+            .is_none_or(|gathered| !gathered.records.contains(&extent)),
+        "the stale gather passes over the extent the writer holds"
+    );
+    if let Some(gathered) = gathered {
+        archive.release_fold(gathered, false);
+    }
+    assert!(
+        archive.inner.extents.lock().is_busy(extent),
+        "still marked for the writer"
+    );
+    let mut other = Process::spawn(&[
+        "try",
+        &path.to_string_lossy(),
+        &locks::owner(extent).to_string(),
+    ])?;
+    let taken = other.won()?;
+    other.finish()?;
+    assert!(!taken, "another process took the extent the writer holds");
+
+    archive.give_back(writer);
+    let holder = hold(&path, locks::TURN, true)?;
+    archive.append("index", &[block("after")])?;
+    holder.finish()?;
+    archive.append("index", &[block("last")])?;
+    let all: Vec<String> = before
+        .iter()
+        .cloned()
+        .chain(["first", "folds", "written", "after", "last"].map(String::from))
+        .collect();
+    all_read_back(&archive, &all)?;
+    drop(archive);
+    all_read_back(&Chronicle::open(&path)?, &all)
 }
 
 /// A frame in an extent not whole is not read; the frames before it are.

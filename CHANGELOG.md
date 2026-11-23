@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### A block `append` acknowledged stays readable while threads of one process append to one file
 
+[#851](https://github.com/dialog-db/dialog-db/pull/851)
+
 Since 0.5.0, when several threads of one process appended to one
 Chronicle file while sync points freed extents and claims reused them, a
 block `append` had acknowledged could be missing afterwards: `get`
