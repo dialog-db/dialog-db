@@ -1512,3 +1512,87 @@ fn it_bounds_a_composite_of_every_layout() {
     assert!(payload.as_slice() < bound.as_slice());
     assert_ne!(payload[1], 0xFF);
 }
+
+/// The one-pass check accepts only what the full check accepts, and
+/// accepts what the encoder writes: over every generated composite, and
+/// over random and mutated bytes, `from_bytes` answers as the full check
+/// does, error for error.
+#[dialog_common::test]
+fn it_shows_canonical_bytes_as_the_full_check_does() {
+    let mut random = Seeded(0x0ca1);
+    let mut valid = Vec::new();
+    let mut shown = 0;
+    for seed in 1..=2_000 {
+        let (_, composite) = generate(&mut Seeded(seed), 3, false);
+        let bytes = composite.to_bytes().into_owned();
+        assert!(Composite::from_bytes_fully(&bytes).is_ok());
+        // Every one, but for a key holding two nested composites, which
+        // the encoder orders by their bytes on their own.
+        assert_eq!(
+            check::canonical(&bytes),
+            !two_nested_under_a_key(&composite),
+            "seed {seed}"
+        );
+        shown += check::canonical(&bytes) as usize;
+        valid.push(bytes);
+    }
+    assert!(shown > 1_000, "{shown} of 2,000 shown in one pass");
+    for round in 0..40_000 {
+        let bytes: Vec<u8> = if round % 4 == 0 {
+            (0..random.below(64))
+                .map(|_| random.below(256) as u8)
+                .collect()
+        } else {
+            let mut bytes = valid[random.below(valid.len())].clone();
+            for _ in 0..1 + random.below(2) {
+                match random.below(3) {
+                    0 if !bytes.is_empty() => {
+                        let at = random.below(bytes.len());
+                        bytes[at] = random.below(256) as u8;
+                    }
+                    1 => bytes.truncate(random.below(bytes.len() + 1)),
+                    _ => bytes.insert(random.below(bytes.len() + 1), random.below(256) as u8),
+                }
+            }
+            bytes
+        };
+        let full = Composite::from_bytes_fully(&bytes).map(|read| read.to_bytes().into_owned());
+        if check::canonical(&bytes) {
+            assert_eq!(
+                full.as_ref().ok(),
+                Some(&bytes),
+                "shown canonical, but not: {bytes:?}"
+            );
+        }
+        let quick = Composite::from_bytes(&bytes).map(|read| read.to_bytes().into_owned());
+        if crate::model::composite::layout::layout_of(&bytes) == 0 {
+            assert_eq!(quick, full, "{bytes:?}");
+        }
+    }
+}
+
+/// Whether a map in `composite` holds two nested composites under one
+/// key: what the one-pass check leaves to the full check.
+fn two_nested_under_a_key(composite: &Composite) -> bool {
+    fn two_nested(composite: &Composite) -> bool {
+        let mut seen: Vec<(Value, usize)> = Vec::new();
+        for (key, value) in composite.entries() {
+            if let Value::Composite(nested) = &value {
+                if two_nested(nested) {
+                    return true;
+                }
+                match seen.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, n)) => *n += 1,
+                    None => seen.push((key.clone(), 1)),
+                }
+            }
+        }
+        if seen.iter().any(|(_, n)| *n >= 2) {
+            return true;
+        }
+        composite
+            .items()
+            .any(|item| matches!(&item, Value::Composite(n) if two_nested(n)))
+    }
+    two_nested(composite)
+}

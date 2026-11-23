@@ -55,6 +55,7 @@
 //! reference, so no part of the layout, the table or the offsets, enters a
 //! composite's identity.
 
+mod check;
 mod encode;
 mod layout;
 
@@ -240,6 +241,18 @@ impl Composite {
         if layout != LAYOUT {
             return Err(CompositeError::UnsupportedLayout(layout));
         }
+        // Bytes the encoder wrote are shown canonical in one pass, with no
+        // tree built; any others take the full check, whose answer and
+        // error are the definition.
+        if check::canonical(bytes) {
+            return Ok(Self::root(bytes.into()));
+        }
+        Self::from_bytes_fully(bytes)
+    }
+
+    /// [`Composite::from_bytes`] by its definition: every part read into a
+    /// tree, the tree written again, and the two compared.
+    fn from_bytes_fully(bytes: &[u8]) -> Result<Self, CompositeError> {
         let read = Self::root(bytes.into());
         let node = read.checked_node()?;
         if canonical(&node)? != bytes {
