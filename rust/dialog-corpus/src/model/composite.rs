@@ -70,6 +70,10 @@ use merkle_reference::{Reference, Type};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeSeq};
 use thiserror::Error;
 
+/// The keys-first table switch, for research only
+/// (`research/composite-table-order.md`).
+#[cfg(feature = "research-table-order")]
+pub use self::encode::research as table_order_research;
 use self::encode::{Node, TOKEN_REF, canonical, node, scalar};
 use self::layout::{LIST, MAP, Seq, TABLE, read_varint, seq, slot_end};
 use crate::identity::COMPOSITE;
@@ -403,6 +407,13 @@ impl Composite {
         let table = self.table()?;
         if table.width > 0 {
             let (mut low, mut high) = (0, table.count);
+            // Keys first, the table is sorted only over its run of keys, and
+            // every key this map holds is at or below its last entry's.
+            #[cfg(feature = "research-table-order")]
+            if self::encode::research::keys_first() {
+                let body = self.seq().filter(|body| body.kind == MAP)?;
+                high = self.entry_at(&body, body.count.checked_sub(1)?)?.0 + 1;
+            }
             while low < high {
                 let middle = (low + high) / 2;
                 match self.key_bytes(middle)?.cmp(key) {

@@ -44,6 +44,10 @@ dialog-search-tree = { workspace = true, features = ["audit"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# The keys-first composite table, measured against the table sorted by
+# bytes (`examples/composite_table_order.rs`). The feature only adds a
+# switch, off unless that example sets it.
+dialog-corpus = { workspace = true, features = ["research-table-order"] }
 # The single-file archive, measured against the `fs` archive
 # (`examples/file_archive_bench.rs`).
 dialog-chronicle = { workspace = true }

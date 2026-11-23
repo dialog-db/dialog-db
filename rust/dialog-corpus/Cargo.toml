@@ -10,6 +10,10 @@ default = ["csv"]
 debug = []
 helpers = ["dep:anyhow", "dialog-search-tree/helpers"]
 csv = ["dep:csv-async"]
+# Research only (`research/composite-table-order.md`): lets a measurement
+# switch a composite's table to keys first at run time. Off by default, and
+# with it on the table stays sorted by bytes until the switch is set.
+research-table-order = []
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests

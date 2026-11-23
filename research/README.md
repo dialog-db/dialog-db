@@ -46,6 +46,11 @@ runs, in the journal's "Where things stand"; they change together.
 
 ## Topics
 
+- [Composite table order](composite-table-order.md): **Shelved.** A
+  composite's table with the map keys first, so same-shape records share
+  their keys in a leaf: 6.7 percent smaller leaves, 10 to 15 percent slower
+  to encode; rejected against its bars.
+
 - [Graph queries](graph-queries.md): **Proposed.** A concept's entity field
   names the concept it points to, so a concept describes a graph, a query
   returns it and a subscription follows changes anywhere in it.

@@ -54,6 +54,21 @@ impl Node {
         }
     }
 
+    /// The atoms used as a map's key anywhere in it.
+    #[cfg(feature = "research-table-order")]
+    fn keys<'a>(&'a self, into: &mut BTreeSet<&'a [u8]>) {
+        match self {
+            Node::Map(entries) => {
+                for (key, value) in entries {
+                    into.insert(key);
+                    value.keys(into);
+                }
+            }
+            Node::List(items) => items.iter().for_each(|item| item.keys(into)),
+            Node::Slot(_) => {}
+        }
+    }
+
     fn tokens<'a>(&'a self, into: &mut BTreeSet<&'a [u8]>) {
         match self {
             Node::Map(entries) => {
@@ -92,16 +107,52 @@ pub(super) fn canonical(node: &Node) -> Result<Vec<u8>, CompositeError> {
 pub(super) fn encode(node: &Node, limit: usize) -> Vec<u8> {
     let mut keys = BTreeSet::new();
     node.tokens(&mut keys);
-    let index: BTreeMap<&[u8], usize> = keys
+    let ordered: Vec<&[u8]> = table_order(node, keys);
+    let index: BTreeMap<&[u8], usize> = ordered
         .iter()
         .enumerate()
         .map(|(at, key)| (*key, at))
         .collect();
-    let table: Vec<Vec<u8>> = keys.iter().map(|key| key.to_vec()).collect();
+    let table: Vec<Vec<u8>> = ordered.iter().map(|key| key.to_vec()).collect();
     let mut out = Vec::new();
     write_seq(TABLE, &table, limit, &mut out);
     body(node, &index, limit, &mut out);
     out
+}
+
+/// The atoms in the order the table holds them: sorted by bytes, or, with
+/// the research switch on, the map keys first and then the rest, each run
+/// sorted by bytes (`research/composite-table-order.md`).
+fn table_order<'a>(node: &'a Node, atoms: BTreeSet<&'a [u8]>) -> Vec<&'a [u8]> {
+    #[cfg(feature = "research-table-order")]
+    if research::keys_first() {
+        let mut keys = BTreeSet::new();
+        node.keys(&mut keys);
+        let mut ordered: Vec<&[u8]> = keys.iter().copied().collect();
+        ordered.extend(atoms.into_iter().filter(|atom| !keys.contains(atom)));
+        return ordered;
+    }
+    let _ = node;
+    atoms.into_iter().collect()
+}
+
+/// The run-time switch a measurement of the keys-first table sets. Never
+/// set outside research code.
+#[cfg(feature = "research-table-order")]
+pub mod research {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static KEYS_FIRST: AtomicBool = AtomicBool::new(false);
+
+    /// Whether tables are written, and keys looked up, keys first.
+    pub fn keys_first() -> bool {
+        KEYS_FIRST.load(Ordering::Relaxed)
+    }
+
+    /// Writes tables keys first from now on, or sorted by bytes again.
+    pub fn set_keys_first(on: bool) {
+        KEYS_FIRST.store(on, Ordering::Relaxed);
+    }
 }
 
 /// A map's or a list's sequence, naming keys by their place in `index`.
