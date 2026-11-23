@@ -19,8 +19,8 @@
     "span.settle": 0,
     "span.write_instructions": 0
   },
-  "instructions": 5579662,
-  "instructions_outside_allocator": 4276485,
+  "instructions": 5545468,
+  "instructions_outside_allocator": 4277115,
   "allocations": {
     "alloc.bytes": 1441726,
     "alloc.calls": 6210,

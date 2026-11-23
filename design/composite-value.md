@@ -194,9 +194,10 @@ The maintainer's, unless marked:
 
 ## The layout
 
-Not final: the table is sorted by canonical bytes, pending one
-measurement of a keys-first order (the atoms a map uses as keys first,
-then the rest), which may move the bytes but no merkle reference.
+The table is sorted by canonical bytes, decided. A keys-first order (the
+atoms a map uses as keys first, then the rest) was measured on branch
+`research/composite-table-order` and rejected: leaves 6.7% smaller
+against a 10% bar, encoding 10 to 15% slower against 5%.
 
 ```
  composite := table · body                     a buffer of one composite
