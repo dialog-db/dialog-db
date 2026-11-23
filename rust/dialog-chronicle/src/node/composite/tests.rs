@@ -935,6 +935,42 @@ fn it_appends_a_key_holding_a_broken_composite() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A composite in a layout this release does not read (one a newer
+/// release wrote) is never packed: it is kept whole, as the one token its
+/// key holds, and read back byte for byte, whole and as served in place.
+#[dialog_common::test]
+fn it_keeps_a_composite_of_a_later_layout_whole() -> anyhow::Result<()> {
+    let manifest = Manifest::default();
+    let mut later = hello().to_bytes().into_owned();
+    later[0] |= 1 << 4;
+    let mut key = vec![dialog_corpus::ENTITY_KEY_TAG];
+    key.extend_from_slice(b"test:later\0test/v\0");
+    key.push(ValueDataType::Composite as u8);
+    dialog_corpus::encode_bytes(&later, &mut key);
+    let mut draft = Draft::detached();
+    let row = entry_row(&mut draft, &key, None)?;
+    assert!(!is_packed(value_token(&draft, &key, &row)), "kept whole");
+    assert_eq!(entry_of(&row, &draft)?.0, key);
+
+    let block = Buffer::from(segment_block(vec![Key::from(key)], &manifest)?);
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("archive");
+    {
+        let archive = Chronicle::open(&path)?;
+        archive.append("index", std::slice::from_ref(&block))?;
+    }
+    let archive = Chronicle::open(&path)?;
+    assert_reads_back(&archive, std::slice::from_ref(&block))?;
+    assert!(
+        archive
+            .held_tokens()?
+            .iter()
+            .all(|(_, token)| !is_packed(token)),
+        "nothing is packed"
+    );
+    Ok(())
+}
+
 /// A small deterministic generator of composites.
 struct Random(u64);
 

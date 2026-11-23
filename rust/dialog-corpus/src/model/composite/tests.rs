@@ -1448,3 +1448,67 @@ fn it_refuses_a_boolean_atom_cut_short() {
     assert!(Composite::split_atoms(&with_body).is_none());
     assert!(Composite::from_bytes(&with_body).is_err());
 }
+
+/// A composite says its layout in the high four bits of its first byte.
+/// This release writes layout 0, which costs no byte, and refuses every
+/// other by name: not as malformed bytes, never by a panic, never read as
+/// something else. Splitting one into atoms refuses it too, so a store
+/// keeps it as it is.
+#[dialog_common::test]
+fn it_refuses_a_layout_it_does_not_read_by_name() {
+    let composites = [
+        Composite::map([(text("x"), text("y"))]).unwrap(),
+        Composite::list((0..20u32).map(|n| natural(n.into()))).unwrap(),
+        Composite::list([]).unwrap(),
+    ];
+    for composite in composites {
+        let bytes = composite.to_bytes().into_owned();
+        assert_eq!(bytes[0] >> 4, 0, "this release writes layout 0");
+        for layout in 1..16u8 {
+            let mut later = bytes.clone();
+            later[0] |= layout << 4;
+            assert_eq!(
+                Composite::from_bytes(&later).err(),
+                Some(CompositeError::UnsupportedLayout(layout))
+            );
+            assert!(Composite::split_atoms(&later).is_none());
+            let mut payload = Vec::new();
+            crate::encode_bytes(&later, &mut payload);
+            assert!(matches!(
+                crate::decode_composite(&payload),
+                Err(CompositeError::UnsupportedLayout(found)) if found == layout
+            ));
+            assert!(matches!(
+                crate::decode_value_view(ValueDataType::Composite, &payload),
+                Err(crate::DialogCorpusError::UnsupportedLayout(found)) if found == layout
+            ));
+            assert!(matches!(
+                Value::try_from((ValueDataType::Composite, later.clone())),
+                Err(crate::DialogCorpusError::UnsupportedLayout(found)) if found == layout
+            ));
+            assert_eq!(
+                crate::decode_value(ValueDataType::Composite, &payload),
+                None
+            );
+        }
+    }
+}
+
+/// A composite of any layout sorts below the bound a scan with no value
+/// takes, as layout 0 does: its first byte, the table's head, is at most
+/// `0xFC` (layout 15, a table with four-byte offsets), below the bound's
+/// `0xFE`, and is never `0xFF`, the byte a Chronicle packed token starts
+/// its magic with.
+#[dialog_common::test]
+fn it_bounds_a_composite_of_every_layout() {
+    let widest = Composite::list((0..70_000u32).map(|n| natural(n.into()))).unwrap();
+    let mut bytes = widest.to_bytes().into_owned();
+    assert_eq!(bytes[0], 0x0C, "a table with four-byte offsets");
+    bytes[0] |= 0xF0;
+    assert_eq!(bytes[0], 0xFC);
+    let mut payload = vec![ValueDataType::Composite as u8];
+    crate::encode_bytes(&bytes, &mut payload);
+    let bound = [ValueDataType::Composite as u8, 0xFE, 0x00];
+    assert!(payload.as_slice() < bound.as_slice());
+    assert_ne!(payload[1], 0xFF);
+}

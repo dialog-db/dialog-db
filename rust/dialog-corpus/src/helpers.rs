@@ -84,3 +84,9 @@ pub fn generate_data(entity_count: usize) -> Result<Vec<Fact>> {
 pub fn composite_decodes() -> usize {
     decoded()
 }
+
+/// A composite over `bytes`, nothing checked: what a test stores to stand
+/// for a newer writer's composite, in a layout this release does not read.
+pub fn composite_unchecked(bytes: &[u8]) -> crate::Composite {
+    crate::Composite::unchecked(bytes)
+}

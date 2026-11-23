@@ -95,6 +95,20 @@ fn corrupt(reason: String) -> DialogCorpusError {
     DialogCorpusError::CorruptEntry(reason)
 }
 
+/// A composite from a key's inline payload: the whole payload, and the
+/// canonical bytes of a layout this release reads. A layout it does not
+/// read is said by name; any other failure is a corrupt entry.
+pub(crate) fn inline_composite(bytes: &[u8]) -> Result<Composite, DialogCorpusError> {
+    match crate::decode_composite(bytes) {
+        Ok((composite, [])) => Ok(composite),
+        Ok(_) => Err(corrupt("inline value payload had trailing bytes".into())),
+        Err(crate::CompositeError::UnsupportedLayout(layout)) => {
+            Err(DialogCorpusError::UnsupportedLayout(layout))
+        }
+        Err(error) => Err(corrupt(format!("{error}"))),
+    }
+}
+
 /// Borrows a key component as UTF-8, owning it only when it was escaped.
 pub(crate) fn cow_str(bytes: Cow<'_, [u8]>) -> Result<Cow<'_, str>, DialogCorpusError> {
     match bytes {
@@ -133,6 +147,9 @@ pub fn decode_value_view(
         ValueDataType::String => ValueView::String(inline_text(bytes)?),
         ValueDataType::Bytes => ValueView::Bytes(inline_raw(bytes)?),
         ValueDataType::Record => ValueView::Record(inline_raw(bytes)?),
+        ValueDataType::Composite | ValueDataType::Map | ValueDataType::List => {
+            ValueView::Composite(inline_composite(bytes)?)
+        }
         ValueDataType::Entity => {
             let uri = inline_text(bytes)?;
             Uri::check_stored(&uri).map_err(|error| corrupt(format!("{error}")))?;

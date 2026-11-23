@@ -2516,6 +2516,84 @@ mod corrupt_row_tests {
         Ok((tree, store))
     }
 
+    /// A fact whose composite is in a layout this release does not read is
+    /// no corrupt row: a scan returns the error, by name, rather than
+    /// skipping the fact as if it were not there. The tree itself does not
+    /// read values, so it holds the fact as any other.
+    #[dialog_common::test]
+    async fn it_refuses_a_composite_of_an_unknown_layout_in_a_scan() -> anyhow::Result<()> {
+        let store = Blocks::new();
+        let mut delta = ArchiveDelta::zero();
+        let mut tree = Corpus::empty_in(test_catalog());
+        let canonical =
+            crate::Composite::map([(Value::String("x".into()), Value::String("y".into()))])?
+                .to_bytes()
+                .into_owned();
+        let mut later = canonical.clone();
+        later[0] |= 1 << 4;
+        let mut payload = Vec::new();
+        crate::encode_bytes(&later, &mut payload);
+        let mut entries = Vec::new();
+        for tag in [ENTITY_KEY_TAG, ATTRIBUTE_KEY_TAG, VALUE_KEY_TAG] {
+            let parts = KeyParts {
+                tag,
+                entity: b"user:later".to_vec(),
+                attribute: b"user/profile".to_vec(),
+                value_type: ValueDataType::Composite,
+                value: ValuePayload::Inline(payload.clone()),
+                version: None,
+            };
+            entries.push((
+                Key::from(build_key(&parts)),
+                State::Added(Datum {
+                    cause: None,
+                    blob: None,
+                    version: None,
+                    collapsed: vec![],
+                    supersedes: vec![],
+                    retraction: false,
+                }),
+            ));
+        }
+        tree.record(&store, &mut delta, entries.into()).await?;
+        delta.flush_into(&store);
+
+        let selector = Selector::new().the("user/profile".parse()?);
+        let owned: Result<Vec<Fact>, _> = tree
+            .clone()
+            .scan_owned(store.clone(), spill_cache(), selector.clone())
+            .try_collect()
+            .await;
+        assert!(
+            matches!(owned, Err(crate::DialogCorpusError::UnsupportedLayout(1))),
+            "{owned:?}"
+        );
+        let views: Vec<_> = tree
+            .clone()
+            .scan(store.clone(), spill_cache(), selector.clone())
+            .try_collect()
+            .await?;
+        assert_eq!(views.len(), 1, "the tree holds the fact");
+        assert!(matches!(
+            views[0].check(),
+            Err(crate::DialogCorpusError::UnsupportedLayout(1))
+        ));
+        assert!(matches!(
+            views[0].value_view(),
+            Err(crate::DialogCorpusError::UnsupportedLayout(1))
+        ));
+        let materialized: Result<Vec<Fact>, _> = tree
+            .scan(store, spill_cache(), selector)
+            .owned()
+            .try_collect()
+            .await;
+        assert!(matches!(
+            materialized,
+            Err(crate::DialogCorpusError::UnsupportedLayout(1))
+        ));
+        Ok(())
+    }
+
     /// The owned scan silently skips manufactured corrupt rows: every valid
     /// fact comes back, no row errors, and the corrupt entries are absent.
     #[dialog_common::test]

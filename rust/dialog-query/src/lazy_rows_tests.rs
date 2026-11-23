@@ -358,6 +358,43 @@ async fn an_entity_value_that_is_no_uri_fails_in_place_as_it_fails_eagerly() -> 
     Ok(())
 }
 
+/// A stored composite in a layout this release does not read (one a newer
+/// release wrote) fails a query, eagerly and in place alike, with the
+/// store's error saying the layout: the fact is not passed over as a
+/// corrupt row, since it is there and this release cannot read it.
+#[dialog_common::test]
+async fn a_composite_of_a_layout_this_release_does_not_read_fails_a_query() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let mut later =
+        dialog_corpus::Composite::map([(Value::String("x".into()), Value::String("y".into()))])?
+            .to_bytes()
+            .into_owned();
+    later[0] |= 1 << 4;
+    store(
+        &branch,
+        &operator,
+        vec![(
+            "item/profile",
+            Value::Composite(dialog_corpus::helpers::composite_unchecked(&later)),
+        )],
+    )
+    .await?;
+    let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+    for (how, seed) in [("eagerly", Match::eager()), ("in place", Match::new())] {
+        let read = values(&source, "item/profile", seed).await;
+        assert!(
+            matches!(
+                &read,
+                Err(EvaluationError::Store(error)) if error.contains("layout 1")
+            ),
+            "a query reading {how} fails with the layout, got {read:?}"
+        );
+    }
+    Ok(())
+}
+
 /// One scan to run both ways, from a seed built by `bind` on an empty
 /// lazy or eager row.
 struct Scenario {

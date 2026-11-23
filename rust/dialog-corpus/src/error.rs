@@ -83,6 +83,12 @@ pub enum DialogCorpusError {
     #[error("Corrupt stored entry: {0}")]
     CorruptEntry(String),
 
+    /// A stored composite is in a layout this release does not read: one a
+    /// newer release wrote. Not a corrupt entry, so a scan does not skip it:
+    /// the value is there, and this release cannot read it.
+    #[error("A composite in layout {0}, which this release does not read")]
+    UnsupportedLayout(u8),
+
     /// An attempt to export the database failed
     #[error("Could not export data: {0}")]
     Export(String),

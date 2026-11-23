@@ -124,11 +124,8 @@ pub fn decode_value(value_type: ValueDataType, bytes: &[u8]) -> Option<(Value, &
         | ValueDataType::Map
         | ValueDataType::CompositeRecord
         | ValueDataType::List => {
-            let (raw, rest) = decode_bytes(bytes)?;
-            (
-                Value::Composite(crate::Composite::from_bytes(&raw).ok()?),
-                rest,
-            )
+            let (composite, rest) = decode_composite(bytes).ok()?;
+            (Value::Composite(composite), rest)
         }
         ValueDataType::Entity => {
             let (raw, rest) = decode_bytes(bytes)?;
@@ -141,6 +138,15 @@ pub fn decode_value(value_type: ValueDataType, bytes: &[u8]) -> Option<(Value, &
             (Value::Symbol(attribute), rest)
         }
     })
+}
+
+/// Decodes a composite's key payload, its canonical bytes escaped and
+/// terminated, from the front of `bytes`: the composite and the bytes after
+/// it. Says why when it does not decode, a layout this release does not
+/// read among the reasons.
+pub fn decode_composite(bytes: &[u8]) -> Result<(crate::Composite, &[u8]), crate::CompositeError> {
+    let (raw, rest) = decode_bytes(bytes).ok_or(crate::CompositeError::Malformed)?;
+    Ok((crate::Composite::from_bytes(&raw)?, rest))
 }
 
 /// Decodes a number in the [`Number`](ValueDataType::Number) band. The band
