@@ -26,7 +26,6 @@
 //! A pattern that holds a blank cannot be built, since a blank is never
 //! bound. It can only take a value apart.
 
-use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -101,16 +100,16 @@ pub enum MapPatternError {
 impl MapPattern {
     /// The pattern of a map that holds exactly `entries`. Refuses a key
     /// given twice, as a map does.
+    ///
+    /// Which keys are one is the map's to say, not [`Value`]'s equality:
+    /// the natural `3`, the integer `3` and the float `3.0` are one key in
+    /// a map. The entries are put through one, each key to the place it
+    /// was given at, and a key that then holds two places was given
+    /// twice.
     pub fn new(
         entries: impl IntoIterator<Item = (Value, Pattern)>,
     ) -> Result<Self, MapPatternError> {
         let entries: Vec<(Value, Pattern)> = entries.into_iter().collect();
-        let mut keys = HashSet::with_capacity(entries.len());
-        for (key, _) in &entries {
-            if !keys.insert(key.clone()) {
-                return Err(MapPatternError::DuplicateKey(key.clone()));
-            }
-        }
         // A map decides which keys are one and in what order they are
         // written, so the entries are put through one.
         let order = Composite::map(
@@ -123,18 +122,28 @@ impl MapPattern {
             .into_iter()
             .map(|(_, pattern)| Some(pattern))
             .collect();
-        let entries = order
-            .entries()
-            .filter_map(|(key, index)| {
-                let Value::UnsignedInt(index) = index else {
-                    return None;
-                };
-                let index = usize::try_from(index).ok()?;
-                Some((key.clone(), slots.get_mut(index)?.take()?))
-            })
-            .collect();
+        let mut named: Vec<(Value, Pattern)> = Vec::with_capacity(slots.len());
+        for (key, index) in order.entries() {
+            // A map holds a key's values beside each other: a key that
+            // lands where the one before it is was given twice.
+            if named.last().is_some_and(|(previous, _)| *previous == key) {
+                return Err(MapPatternError::DuplicateKey(key));
+            }
+            let pattern = match index {
+                Value::UnsignedInt(index) => usize::try_from(index)
+                    .ok()
+                    .and_then(|index| slots.get_mut(index)?.take()),
+                _ => None,
+            };
+            // Every place was written as a natural, once: one that reads
+            // back as anything else is a bug in the map, not the caller's.
+            let Some(pattern) = pattern else {
+                return Err(MapPatternError::DuplicateKey(key));
+            };
+            named.push((key, pattern));
+        }
         Ok(Self {
-            entries,
+            entries: named,
             rest: None,
         })
     }
@@ -413,8 +422,9 @@ impl Pattern {
     /// bound to something else. `row` may then hold some of the
     /// bindings, so match into a copy.
     ///
-    /// A record under a version this release does not read is refused,
-    /// by its number: it may well match, and this release cannot tell.
+    /// Matching refuses nothing today: every composite this release
+    /// reads it can take apart, and the `Err` is kept for a part that a
+    /// later one cannot.
     pub fn unify(&self, value: &Value, row: &mut Match) -> Result<bool, EvaluationError> {
         match self {
             Pattern::Term(term) => Ok(unify_leaf(term, value, row)),
@@ -449,8 +459,14 @@ impl Pattern {
                 _ => return Ok(false),
             },
         };
+        // The composite is read in place: its length from its head, so a
+        // value of another size costs nothing, and a part only where the
+        // pattern names it or a variable takes it.
         match (self, composite.kind()) {
             (Pattern::Map(pattern), CompositeKind::Map) => {
+                if pattern.rest.is_none() && composite.len() != pattern.entries.len() {
+                    return Ok(false);
+                }
                 for (key, part) in &pattern.entries {
                     let values = composite.get(key);
                     let [value] = values.as_slice() else {
@@ -461,12 +477,14 @@ impl Pattern {
                     }
                 }
                 match pattern.rest.as_deref() {
-                    None => Ok(composite.len() == pattern.entries.len()),
-                    Some(Term::Variable { name: None, .. }) => Ok(true),
+                    None | Some(Term::Variable { name: None, .. }) => Ok(true),
                     Some(rest) => {
                         let others = composite.entries().filter(|(key, _)| {
                             !pattern.entries.iter().any(|(named, _)| named == key)
                         });
+                        // Entries read out of a map make a map: what is
+                        // refused here is a map past the encoder's
+                        // limits, which the one read already is not.
                         let Ok(others) = Composite::map(others) else {
                             return Ok(false);
                         };
@@ -475,26 +493,31 @@ impl Pattern {
                 }
             }
             (Pattern::List(pattern), CompositeKind::List) => {
-                let items: Vec<_> = composite.items().collect();
                 let named = pattern.items.len();
-                if items.len() < named || (pattern.run.is_none() && items.len() != named) {
+                let held = composite.len();
+                if held < named || (pattern.run.is_none() && held != named) {
                     return Ok(false);
                 }
-                for (part, item) in pattern.items.iter().zip(items.iter()) {
-                    if !part.take_apart(item, row)? {
+                // Items are decoded as they are reached, so only the ones
+                // the pattern names, and the run only when it is bound.
+                let mut items = composite.items();
+                for part in &pattern.items {
+                    let Some(item) = items.next() else {
+                        return Ok(false);
+                    };
+                    if !part.take_apart(&item, row)? {
                         return Ok(false);
                     }
                 }
                 match pattern.run.as_deref() {
                     None | Some(Term::Variable { name: None, .. }) => Ok(true),
-                    Some(run) => Ok(unify_leaf(
-                        run,
-                        &Value::Composite(
-                            Composite::list(items[named..].iter().cloned())
-                                .expect("a slice of composite values is valid"),
-                        ),
-                        row,
-                    )),
+                    Some(run) => {
+                        // Items read out of a list make a list, as above.
+                        let Ok(others) = Composite::list(items) else {
+                            return Ok(false);
+                        };
+                        Ok(unify_leaf(run, &Value::Composite(others), row))
+                    }
                 }
             }
             _ => Ok(false),

@@ -444,6 +444,43 @@ fn it_is_written_one_way() {
     ));
 }
 
+/// Which keys are one is the map's to say: two keys that are one number
+/// are one key, and a pattern that names both is refused, where a set
+/// of `Value`s would take them for two and the pattern would build a
+/// map it does not match.
+#[dialog_common::test]
+fn it_refuses_two_keys_a_map_holds_as_one() {
+    let pairs = [
+        (Value::UnsignedInt(3), Value::Float(3.0)),
+        (Value::SignedInt(3), Value::Float(3.0)),
+        (Value::UnsignedInt(3), Value::SignedInt(3)),
+        (Value::SignedInt(-2), Value::Float(-2.0)),
+    ];
+    for (one, other) in pairs {
+        assert_ne!(one, other, "two values");
+        let refused = MapPattern::new([(one.clone(), var("a")), (other.clone(), var("b"))]);
+        assert!(
+            matches!(refused, Err(MapPatternError::DuplicateKey(_))),
+            "{one:?} and {other:?}: {refused:?}"
+        );
+        // A map of the two holds one key.
+        let held = Composite::map([(one, Value::UnsignedInt(1)), (other, Value::UnsignedInt(2))])
+            .expect("a map");
+        let keys: Vec<Value> = held.entries().map(|(key, _)| key).collect();
+        assert_eq!(keys.len(), 2, "two values");
+        assert_eq!(keys[0], keys[1], "under one key");
+    }
+
+    // Keys a map holds apart stay apart.
+    let apart = MapPattern::new([
+        (Value::UnsignedInt(3), var("a")),
+        (Value::Float(3.5), var("b")),
+        (Value::String("3".into()), var("c")),
+    ])
+    .expect("three keys");
+    assert_eq!(apart.entries().len(), 3);
+}
+
 /// A leaf is written to the wire as a term is. A map or a list has no
 /// wire form and is refused.
 #[dialog_common::test]
@@ -1360,32 +1397,28 @@ fn it_refuses_to_store_a_rule_that_holds_a_pattern() {
     assert!(plain.try_encode().is_some());
 }
 
-/// Installing a rule that holds a pattern into durable changes is refused:
-/// asserting it stages nothing and panics, since an assertion has no error
-/// to return.
-///
-/// Native only: the test catches the panic, and a wasm test cannot
-/// unwind. What a wasm build does is the same refusal, which
-/// [`it_refuses_to_store_a_rule_that_holds_a_pattern`] pins on both
-/// targets through `storable`, the check the assertion makes.
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
+/// Asserting a rule that holds a pattern into a batch that is committed
+/// records the refusal, typed, and stages nothing: an assertion has no
+/// error to return, and a commit of the batch returns this one (see the
+/// branch's `pattern_rule_tests`). Retracting it stages nothing either.
+#[dialog_common::test]
 fn it_refuses_to_install_a_rule_that_holds_a_pattern() {
     use crate::statement::Changes;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     let rule = card_rule([0, 1, 2]).expect("compiles");
     let mut changes = Changes::new();
-    let refused = catch_unwind(AssertUnwindSafe(|| {
-        changes.assert(&rule);
-    }))
-    .expect_err("the assertion is refused");
-    let reason = refused
-        .downcast_ref::<String>()
-        .cloned()
-        .unwrap_or_default();
-    assert!(reason.contains("no way to write a pattern"), "{reason}");
-    assert_eq!(changes, Changes::new(), "nothing was staged");
+    changes.assert(&rule);
+    let refusal = changes.refused().expect("the assertion is refused");
+    assert_eq!(refusal.entity(), &rule.this());
+    assert!(matches!(
+        refusal.reason::<TypeError>(),
+        Some(TypeError::UnstorablePattern { .. })
+    ));
+    assert!(changes.is_empty(), "nothing was staged");
+    assert!(
+        serde_json::to_string(&changes).is_err(),
+        "a refused batch does not serialize"
+    );
 }
 
 /// Parameters hold a pattern under a name. A premise reads a term
