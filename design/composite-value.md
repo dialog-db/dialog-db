@@ -310,8 +310,8 @@ have to canonicalize first.
 They will call `Composite::map`, `Composite::record`, `Composite::list`,
 `kind`, `is_map`, `is_list`, `is_record`, `len`, `first`, `get`, `item`,
 `entries`, `items`, `first_view`, `item_view`, `reference` and
-`to_bytes`, `Value::Composite` and `ValueDataType::{CompositeMap,
-CompositeRecord, CompositeList}`. To do there:
+`to_bytes`, `Value::Composite` and `ValueDataType::{Map,
+CompositeRecord, List}`. To do there:
 
 - replace `data.rs`'s `Composite::{Map, List}` in `Value::Record` with
   `Value::Composite`, and `entries`/`items` with `first` and `item`;

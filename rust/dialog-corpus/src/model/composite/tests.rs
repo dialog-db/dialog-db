@@ -409,28 +409,25 @@ fn it_tells_a_record_by_its_keys() {
     let of = |composite: &Composite| Value::Composite(composite.clone());
     assert!(ValueDataType::CompositeRecord.holds(&of(&record)));
     assert!(!ValueDataType::CompositeRecord.holds(&of(&map)));
-    assert!(ValueDataType::CompositeMap.holds(&of(&record)));
-    assert!(ValueDataType::CompositeMap.holds(&of(&map)));
-    assert!(!ValueDataType::CompositeMap.holds(&of(&list)));
-    assert!(ValueDataType::CompositeList.holds(&of(&list)));
+    assert!(ValueDataType::Map.holds(&of(&record)));
+    assert!(ValueDataType::Map.holds(&of(&map)));
+    assert!(!ValueDataType::Map.holds(&of(&list)));
+    assert!(ValueDataType::List.holds(&of(&list)));
     assert!(ValueDataType::Composite.holds(&of(&list)));
     assert!(ValueDataType::Composite.holds(&of(&map)));
     assert!(!ValueDataType::Composite.holds(&text("x")));
-    assert_eq!(of(&record).data_type(), ValueDataType::CompositeMap);
-    assert_eq!(of(&list).data_type(), ValueDataType::CompositeList);
+    assert_eq!(of(&record).data_type(), ValueDataType::Map);
+    assert_eq!(of(&list).data_type(), ValueDataType::List);
     for kind in [
-        ValueDataType::CompositeMap,
+        ValueDataType::Map,
         ValueDataType::CompositeRecord,
-        ValueDataType::CompositeList,
+        ValueDataType::List,
     ] {
         assert_eq!(kind.band(NUMBER_BAND), ValueDataType::Composite);
         assert_eq!(kind.band(0), ValueDataType::Composite);
         assert!(!kind.is_view() && !kind.is_number());
     }
-    assert_eq!(
-        ValueDataType::CompositeRecord.storage(),
-        ValueDataType::CompositeMap
-    );
+    assert_eq!(ValueDataType::CompositeRecord.storage(), ValueDataType::Map);
 }
 
 /// Names are kept once for a composite and everything nested in it,
@@ -1232,7 +1229,7 @@ fn it_reads_back_from_every_form_a_value_is_written_in() {
     // A record read where a list is declared is refused.
     assert!(
         Value::try_from((
-            ValueDataType::CompositeList,
+            ValueDataType::List,
             location(1.0, 2.0).to_bytes().into_owned()
         ))
         .is_err()
@@ -1334,5 +1331,102 @@ fn it_orders_as_a_tree_key_without_prefixes_colliding() {
         let (read, rest) = crate::decode_value(ValueDataType::Composite, &tail).unwrap();
         assert_eq!(read, Value::Composite(composite.clone()));
         assert_eq!(rest, b"\x05rest");
+    }
+}
+
+/// A syntax tree's shape: every node a map of two fields, its `type` and
+/// its `body`, `depth` deep, the deepest body a text.
+fn chain(depth: usize) -> Composite {
+    let mut body = text("leaf");
+    for level in 0..depth {
+        body = Value::Composite(
+            Composite::map([
+                (text("type"), text(&format!("kind-{}", level % 5))),
+                (text("body"), body),
+            ])
+            .unwrap(),
+        );
+    }
+    match body {
+        Value::Composite(composite) => composite,
+        _ => unreachable!("depth is at least one"),
+    }
+}
+
+/// What reading one field of a stored composite costs on the path a query
+/// takes from a key's value payload (`decode_value_view`): unescaping the
+/// payload, [`Composite::from_bytes`] (reading every part and writing the
+/// composite again to check its bytes are canonical), and reading the
+/// field, the `type` of the deepest map, through its path. Run by hand:
+/// `cargo test --release -p dialog-corpus --lib -- --ignored --nocapture
+/// measure_reading_a_field`.
+#[dialog_common::test]
+#[ignore = "a measurement, run by hand"]
+fn measure_reading_a_field_of_a_stored_syntax_tree() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    let rounds = 20_000;
+    let nanos = |started: Instant| started.elapsed().as_nanos() as f64 / rounds as f64;
+    println!(
+        "depth | bytes | whole read | unescape | from_bytes | view, no check | field | field share"
+    );
+    for depth in [7, 13, 19] {
+        let tree = chain(depth);
+        let payload = crate::encode_value_owned(&Value::Composite(tree.clone()));
+        let canonical = tree.to_bytes().into_owned();
+        let read = |composite: &Composite| {
+            let mut at = composite.clone();
+            for _ in 1..depth {
+                match at.first(&text("body")) {
+                    Some(Value::Composite(next)) => at = next,
+                    _ => panic!("a body"),
+                }
+            }
+            at.first_view(&text("type"))
+                .and_then(|view| view.to_value().ok())
+        };
+        assert_eq!(read(&tree), Some(text("kind-0")), "the deepest map");
+
+        let started = Instant::now();
+        for _ in 0..rounds {
+            let view =
+                crate::decode_value_view(ValueDataType::Composite, black_box(&payload)).unwrap();
+            let crate::ValueView::Composite(composite) = view else {
+                unreachable!()
+            };
+            black_box(read(&composite));
+        }
+        let whole = nanos(started);
+
+        let started = Instant::now();
+        for _ in 0..rounds {
+            black_box(crate::decode_bytes(black_box(&payload)).unwrap());
+        }
+        let unescape = nanos(started);
+
+        let started = Instant::now();
+        for _ in 0..rounds {
+            black_box(Composite::from_bytes(black_box(&canonical)).unwrap());
+        }
+        let checked = nanos(started);
+
+        let started = Instant::now();
+        for _ in 0..rounds {
+            black_box(Composite::root(black_box(canonical.as_slice()).into()));
+        }
+        let unchecked = nanos(started);
+
+        let view = Composite::root(canonical.as_slice().into());
+        let started = Instant::now();
+        for _ in 0..rounds {
+            black_box(read(black_box(&view)));
+        }
+        let field = nanos(started);
+        println!(
+            "{depth} | {} | {whole:.0} ns | {unescape:.0} ns | {checked:.0} ns | {unchecked:.0} ns | {field:.0} ns | {:.0}%",
+            canonical.len(),
+            100.0 * field / whole
+        );
     }
 }

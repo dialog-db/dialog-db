@@ -121,9 +121,9 @@ pub fn decode_value(value_type: ValueDataType, bytes: &[u8]) -> Option<(Value, &
             (Value::Record(raw), rest)
         }
         ValueDataType::Composite
-        | ValueDataType::CompositeMap
+        | ValueDataType::Map
         | ValueDataType::CompositeRecord
-        | ValueDataType::CompositeList => {
+        | ValueDataType::List => {
             let (raw, rest) = decode_bytes(bytes)?;
             (
                 Value::Composite(crate::Composite::from_bytes(&raw).ok()?),

@@ -402,9 +402,9 @@ impl<'de> de::Visitor<'de> for ValueVisitor {
                 ValueDataType::Record => Value::Record(map.next_value()?),
                 ValueDataType::Symbol => Value::Symbol(map.next_value()?),
                 ValueDataType::Composite
-                | ValueDataType::CompositeMap
+                | ValueDataType::Map
                 | ValueDataType::CompositeRecord
-                | ValueDataType::CompositeList => {
+                | ValueDataType::List => {
                     let composite: Composite = map.next_value()?;
                     let value = Value::Composite(composite);
                     if !kind.holds(&value) {
@@ -507,8 +507,8 @@ impl Value {
             Value::Record(_) => ValueDataType::Record,
             Value::Symbol(_) => ValueDataType::Symbol,
             Value::Composite(composite) => match composite.kind() {
-                CompositeKind::Map => ValueDataType::CompositeMap,
-                CompositeKind::List => ValueDataType::CompositeList,
+                CompositeKind::Map => ValueDataType::Map,
+                CompositeKind::List => ValueDataType::List,
             },
         }
     }
@@ -783,9 +783,9 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
             // A composite's bytes are its canonical encoding, checked as they
             // are read: the spilled-value read-back path among others.
             ValueDataType::Composite
-            | ValueDataType::CompositeMap
+            | ValueDataType::Map
             | ValueDataType::CompositeRecord
-            | ValueDataType::CompositeList => {
+            | ValueDataType::List => {
                 let value = Value::Composite(Composite::from_bytes(&value)?);
                 if !value_data_type.holds(&value) {
                     return Err(DialogCorpusError::InvalidValue(format!(
@@ -1466,12 +1466,12 @@ pub enum ValueDataType {
     Composite = 22,
     /// A map, a record or any other: `composite:map`. Types a slot, never
     /// a key.
-    CompositeMap = 23,
+    Map = 23,
     /// A record, the sub-band of the map whose every key is an attribute:
     /// `composite:record`. Types a slot, never a key.
     CompositeRecord = 24,
     /// A list: `composite:list`. Types a slot, never a key.
-    CompositeList = 25,
+    List = 25,
 }
 
 /// No variant takes [`ValueDataType::ATOM_REFERENCE`]'s byte.
@@ -1519,9 +1519,9 @@ impl ValueDataType {
         ValueDataType::F32,
         ValueDataType::F64,
         ValueDataType::Composite,
-        ValueDataType::CompositeMap,
+        ValueDataType::Map,
         ValueDataType::CompositeRecord,
-        ValueDataType::CompositeList,
+        ValueDataType::List,
     ];
 
     /// The entity that names this type, such as `text:`.
@@ -1550,9 +1550,9 @@ impl ValueDataType {
             ValueDataType::F32 => "float:32",
             ValueDataType::F64 => "float:64",
             ValueDataType::Composite => "composite:",
-            ValueDataType::CompositeMap => "composite:map",
+            ValueDataType::Map => "composite:map",
             ValueDataType::CompositeRecord => "composite:record",
-            ValueDataType::CompositeList => "composite:list",
+            ValueDataType::List => "composite:list",
         }
     }
 
@@ -1583,9 +1583,9 @@ impl ValueDataType {
             ValueDataType::F32 => "float:32",
             ValueDataType::F64 => "float:64",
             ValueDataType::Composite => "composite:",
-            ValueDataType::CompositeMap => "composite:map",
+            ValueDataType::Map => "composite:map",
             ValueDataType::CompositeRecord => "composite:record",
-            ValueDataType::CompositeList => "composite:list",
+            ValueDataType::List => "composite:list",
         }
     }
 
@@ -1638,7 +1638,7 @@ impl ValueDataType {
             | ValueDataType::I128 => ValueDataType::SignedInt,
             ValueDataType::F32 | ValueDataType::F64 => ValueDataType::Float,
             // A record is held as the map it is.
-            ValueDataType::CompositeRecord => ValueDataType::CompositeMap,
+            ValueDataType::CompositeRecord => ValueDataType::Map,
             other => other,
         }
     }
@@ -1699,9 +1699,9 @@ impl ValueDataType {
         matches!(
             self,
             ValueDataType::Composite
-                | ValueDataType::CompositeMap
+                | ValueDataType::Map
                 | ValueDataType::CompositeRecord
-                | ValueDataType::CompositeList
+                | ValueDataType::List
         )
     }
 
@@ -1743,9 +1743,9 @@ impl ValueDataType {
             return false;
         };
         match self {
-            ValueDataType::CompositeMap => composite.is_map(),
+            ValueDataType::Map => composite.is_map(),
             ValueDataType::CompositeRecord => composite.is_record(),
-            ValueDataType::CompositeList => composite.is_list(),
+            ValueDataType::List => composite.is_list(),
             _ => true,
         }
     }
@@ -1774,7 +1774,7 @@ impl ValueDataType {
             }
             // Every composite is keyed in the composite's band (a record's
             // storage is the map's).
-            ValueDataType::CompositeMap | ValueDataType::CompositeList => ValueDataType::Composite,
+            ValueDataType::Map | ValueDataType::List => ValueDataType::Composite,
             other => other,
         }
     }
@@ -1823,9 +1823,9 @@ impl Display for ValueDataType {
             ValueDataType::Symbol => write!(f, "Symbol"),
             ValueDataType::Number => write!(f, "Number"),
             ValueDataType::Composite => write!(f, "Composite"),
-            ValueDataType::CompositeMap => write!(f, "CompositeMap"),
+            ValueDataType::Map => write!(f, "Map"),
             ValueDataType::CompositeRecord => write!(f, "CompositeRecord"),
-            ValueDataType::CompositeList => write!(f, "CompositeList"),
+            ValueDataType::List => write!(f, "List"),
             view => write!(f, "{}", view.uri()),
         }
     }
@@ -1851,9 +1851,9 @@ impl From<&u8> for ValueDataType {
             8 => ValueDataType::Symbol,
             9 => ValueDataType::Number,
             22 => ValueDataType::Composite,
-            23 => ValueDataType::CompositeMap,
+            23 => ValueDataType::Map,
             24 => ValueDataType::CompositeRecord,
-            25 => ValueDataType::CompositeList,
+            25 => ValueDataType::List,
             // A lossy fallback for infallible callers; the key-parse path
             // rejects unknown discriminants before reaching this (see
             // `varkey::value_payload_len`), so no persisted-byte path relies

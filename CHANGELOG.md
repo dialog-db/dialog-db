@@ -53,10 +53,10 @@ What this changes for you:
 - `Value` has a new variant, `Composite`, keyed with type byte 22.
   `ValueDataType` (the query layer's `Type`) has `Composite`
   (`composite:`, any composite, the band every composite is keyed under),
-  and in its band `CompositeMap` (`composite:map`), `CompositeRecord`
-  (`composite:record`) and `CompositeList` (`composite:list`), which type
+  and in its band `Map` (`composite:map`), `CompositeRecord`
+  (`composite:record`) and `List` (`composite:list`), which type
   slots and never keys, as the sized number types do. A composite value's
-  `data_type()` is `CompositeMap` or `CompositeList`. A `match` over either
+  `data_type()` is `Map` or `List`. A `match` over either
   enum needs arms. `Value::Record` and `record:` are unchanged, identities
   included.
 - Build with `Composite::map`, `Composite::record` (`Composite::new` is the
