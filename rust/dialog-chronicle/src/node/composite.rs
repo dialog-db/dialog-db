@@ -93,6 +93,16 @@ impl From<PackedError> for io::Error {
 #[cfg(test)]
 static KEPT_WHOLE: AtomicU64 = AtomicU64::new(0);
 
+/// How many times a composite has been split and packed: what a test
+/// counts the work of interning by.
+#[cfg(test)]
+pub(crate) static PACKS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a draft remembers the composites it packed: a measurement turns
+/// it off to weigh what remembering saves.
+#[cfg(test)]
+pub(crate) static MEMO: AtomicBool = AtomicBool::new(true);
+
 /// Whether composites are packed: a measurement turns it off to weigh a
 /// file that keeps every composite whole.
 #[cfg(test)]
@@ -181,8 +191,19 @@ pub(crate) fn intern_value(tokens: &mut Draft<'_>, value: &[u8], spilled: bool) 
     if !PACKING.load(Ordering::Relaxed) {
         return tokens.intern(value);
     }
+    #[cfg(test)]
+    let remembered = MEMO.load(Ordering::Relaxed);
+    #[cfg(not(test))]
+    let remembered = true;
+    if remembered && let Some(id) = tokens.packed(value) {
+        return id;
+    }
     match pack(tokens, value) {
-        Some(packed) => tokens.intern(&packed),
+        Some(packed) => {
+            let id = tokens.intern(&packed);
+            tokens.remember_packed(value, id);
+            id
+        }
         None => {
             #[cfg(test)]
             KEPT_WHOLE.fetch_add(1, Ordering::Relaxed);
@@ -195,6 +216,8 @@ pub(crate) fn intern_value(tokens: &mut Draft<'_>, value: &[u8], spilled: bool) 
 /// `None`, with nothing interned, when its bytes do not split or the
 /// packed token would not realize to `value` again.
 fn pack(tokens: &mut Draft<'_>, value: &[u8]) -> Option<Vec<u8>> {
+    #[cfg(test)]
+    PACKS.fetch_add(1, Ordering::Relaxed);
     let (bytes, rest) = decode_bytes_cow(&value[1..])?;
     if !rest.is_empty() {
         return None;

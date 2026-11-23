@@ -248,6 +248,29 @@ fn it_interns_whole_a_composite_that_would_not_come_back() -> anyhow::Result<()>
     Ok(())
 }
 
+/// A draft packs a composite once however many keys hold it, and forgets
+/// it when it rolls back past it: a value interned again after the roll
+/// back is packed again, its atoms with it, and never named by a token the
+/// draft dropped.
+#[dialog_common::test]
+fn it_packs_a_composite_once_and_forgets_it_on_roll_back() {
+    let mut value = vec![ValueDataType::Composite as u8];
+    encode_key_value(&Value::Composite(hello()), 1, &mut value);
+    let mut draft = Draft::detached();
+    let before = PACKS.load(Ordering::Relaxed);
+    let first = intern_value(&mut draft, &value, false);
+    assert_eq!(intern_value(&mut draft, &value, false), first);
+    assert!(PACKS.load(Ordering::Relaxed) - before >= 1);
+    assert_eq!(draft.pending(), 4, "three atoms and the packed token");
+    draft.roll_back(0);
+    assert_eq!(draft.packed(&value), None, "the dropped token is forgotten");
+    let again = intern_value(&mut draft, &value, false);
+    assert_eq!(draft.pending(), 4, "packed again, atoms and all");
+    let mut back = Vec::new();
+    realize(draft.get(again).unwrap(), &draft, &mut back).unwrap();
+    assert_eq!(back, value);
+}
+
 /// A packed token that does not read is an error of a named kind, never
 /// a panic: a count past its ids, an id the file lacks, bytes cut short.
 #[dialog_common::test]
@@ -807,6 +830,58 @@ fn measure_packing_a_composite() {
             value.len()
         );
     }
+}
+
+/// What a commit of 1,000 facts, each holding its own syntax tree, costs
+/// to append: every fact keyed in the entity, attribute and value
+/// orderings and in history, in segments of 16, one append. Reports the
+/// time a fact and how many times a composite was packed. Run by hand:
+/// `cargo test --release -p dialog-chronicle --lib -- --ignored --nocapture
+/// measure_a_commit_of_syntax_trees`.
+#[dialog_common::test]
+#[ignore = "a measurement, run by hand"]
+fn measure_a_commit_of_syntax_trees() -> anyhow::Result<()> {
+    let manifest = Manifest::default();
+    let mut random = Random(0xc0ffee);
+    let forms: Vec<Value> = (0..1_000)
+        .map(|_| {
+            let depth = 7 + random.below(5) as usize;
+            syntax_form(&mut random, depth)
+        })
+        .collect();
+    let mut blocks = Vec::new();
+    for form in [Form::Entity, Form::Attribute, Form::Value, Form::History] {
+        for (at, chunk) in forms.chunks(16).enumerate() {
+            blocks.push(segment(form, &format!("doc{at}"), chunk, &manifest)?);
+        }
+    }
+    for memo in [false, true] {
+        MEMO.store(memo, Ordering::Relaxed);
+        let mut times = Vec::new();
+        let mut packs = 0;
+        for _ in 0..7 {
+            let directory = tempfile::tempdir()?;
+            let archive = Chronicle::open(directory.path().join("archive"))?;
+            let before = PACKS.load(Ordering::Relaxed);
+            let started = std::time::Instant::now();
+            archive.append("index", &blocks)?;
+            times.push(started.elapsed().as_nanos() as f64 / forms.len() as f64);
+            packs = PACKS.load(Ordering::Relaxed) - before;
+            assert_eq!(archive.stats().unverified, 0);
+        }
+        times.sort_by(f64::total_cmp);
+        println!(
+            "remembered: {memo}; {} facts, {} blocks: {:.0} ns a fact (median of 7, {:.0} to {:.0}), {packs} packs, {:.2} a fact",
+            forms.len(),
+            blocks.len(),
+            times[3],
+            times[0],
+            times[6],
+            packs as f64 / forms.len() as f64
+        );
+    }
+    MEMO.store(true, Ordering::Relaxed);
+    Ok(())
 }
 
 /// A small deterministic generator of composites.
