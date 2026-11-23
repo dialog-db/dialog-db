@@ -175,6 +175,7 @@ async fn it_round_trips_composites_through_a_durable_tree() -> Result<()> {
     {
         use dialog_effects::storage::Directory;
         use dialog_storage::provider::storage::NativeSpace;
+        use std::fs::read_dir;
 
         let root = tempfile::tempdir()?;
         durable_round_trip!(
@@ -182,7 +183,7 @@ async fn it_round_trips_composites_through_a_durable_tree() -> Result<()> {
             Directory::At(root.path().to_string_lossy().into_owned())
         )?;
         // Something was written under the directory, not elsewhere.
-        assert!(std::fs::read_dir(root.path())?.next().is_some());
+        assert!(read_dir(root.path())?.next().is_some());
         Ok(())
     }
     #[cfg(target_arch = "wasm32")]
