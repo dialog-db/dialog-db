@@ -9,15 +9,16 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use anyhow::Result;
 use dialog_corpus::selector::Constrained;
-use dialog_corpus::{Changes, Composite, Entity, Fact, Selector, Value};
+use dialog_corpus::{Changes, Composite, DialogCorpusError, Entity, Fact, Selector, Value};
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_peer::{Peer, PeerSpace, Session};
 use dialog_query::concept::query::ConceptQuery;
 use dialog_query::error::TypeError;
+use dialog_query::query::Output as _;
 use dialog_query::types::Any;
 use dialog_query::{
-    ConceptDescriptor, DeductiveRule, InductiveRule, MapPattern, Parameters, Pattern, Premise,
-    Proposition, Term, the,
+    ConceptConclusion, ConceptDescriptor, DeductiveRule, InductiveRule, MapPattern, Parameters,
+    Pattern, Premise, Proposition, Term, the,
 };
 use futures_util::TryStreamExt as _;
 
@@ -248,4 +249,259 @@ async fn it_refuses_to_commit_a_pattern_rule_on_a_filesystem_branch() -> Result<
 
     let (session, peer) = filesystem_session_with_peer(root.path()).await?;
     scenario(&session, &peer).await
+}
+
+/// The branch's session overlay is a line of facts, exported and read
+/// back as facts, so it has no place for a rule's body: a pattern rule
+/// asserted there, or a query layer's changes applied there, is refused
+/// with [`DialogCorpusError::Refused`] and nothing lands. A reader that
+/// does not hold the body, another query of the same branch, sees no
+/// trace of the rule, while the layer that holds it derives through it.
+#[dialog_common::test]
+async fn it_refuses_a_pattern_rule_into_the_session_overlay() -> Result<()> {
+    let (session, peer) = test_session_with_peer().await;
+    let repo = test_repo(&session, &peer).await;
+    let branch = repo.branch("main").open().perform(&session).await?;
+    seed(&branch, &session).await?;
+    let rule = deductive()?;
+    let refused = |error: &DialogCorpusError| {
+        matches!(
+            error,
+            DialogCorpusError::Refused(refusal)
+                if refusal.entity() == &rule.this()
+                    && matches!(
+                        refusal.reason::<TypeError>(),
+                        Some(TypeError::UnstorablePattern { .. })
+                    )
+        )
+    };
+
+    let before = branch.overlay().revision();
+    let Err(error) = branch.overlay().assert(&rule) else {
+        panic!("the overlay refuses the rule");
+    };
+    assert!(refused(&error), "{error:?}");
+    let layer = branch.with(&rule);
+    let error = branch
+        .overlay()
+        .apply(layer.changes().clone())
+        .expect_err("the overlay refuses a layer's changes");
+    assert!(refused(&error), "{error:?}");
+    assert_eq!(branch.overlay().revision(), before, "nothing landed");
+    assert!(
+        branch
+            .overlay()
+            .scan(&Selector::new().of(rule.this()))
+            .is_empty()
+    );
+
+    // The layer holding the body derives the heading; a query of the
+    // branch that does not hold it derives nothing.
+    let held = layer.select(headings()).perform(&session).try_vec().await?;
+    assert_eq!(held.len(), 1);
+    let other = branch
+        .query()
+        .select(headings())
+        .perform(&session)
+        .try_vec()
+        .await?;
+    assert!(other.is_empty(), "no other reader holds the rule");
+    Ok(())
+}
+
+/// `note/heading` of `?this` is `?heading`.
+fn headings() -> ConceptQuery {
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::var("this"));
+    terms.insert("heading".into(), Term::var("heading"));
+    ConceptQuery {
+        predicate: concept("heading", "note/heading", "text:"),
+        terms,
+    }
+}
+
+/// `note/payload` of `?this` matches `{"title" ?heading ..}`: a query that
+/// holds a pattern, run by itself.
+fn titled() -> Result<ConceptQuery> {
+    let Premise::Assert(Proposition::Concept(query)) = titled_premise()? else {
+        anyhow::bail!("a concept premise");
+    };
+    Ok(query)
+}
+
+/// The headings a batch of concept rows binds, by entity.
+fn titles<'a>(rows: impl IntoIterator<Item = &'a ConceptConclusion>) -> Vec<(Entity, Value)> {
+    let mut titles: Vec<(Entity, Value)> = rows
+        .into_iter()
+        .filter_map(|row| {
+            Some((
+                row.entity().clone(),
+                row.source().value_of("heading")?.clone(),
+            ))
+        })
+        .collect();
+    titles.sort_by(|a, b| a.0.cmp(&b.0));
+    titles
+}
+
+/// A subscription to a query that holds a pattern is kept current: a
+/// commit that adds a value the pattern matches is asserted, one that
+/// changes the part the pattern binds is retracted and asserted, and one
+/// that changes the value to no longer match is retracted.
+///
+/// The rule is not what is subscribed: a subscription reads a branch or
+/// a stack, and neither can hold a rule with a pattern, so the pattern
+/// is in the query.
+#[dialog_common::test]
+async fn it_keeps_a_subscription_to_a_pattern_current() -> Result<()> {
+    let (session, peer) = test_session_with_peer().await;
+    let repo = test_repo(&session, &peer).await;
+    let branch = repo.branch("main").open().perform(&session).await?;
+    seed(&branch, &session).await?;
+    let milk: Entity = "id:milk".parse()?;
+    let call: Entity = "id:call".parse()?;
+    let payload =
+        |title: &str| -> Result<Composite> { Ok(Composite::map([(text("title"), text(title))])?) };
+    let write = |of: Entity, is: Composite| {
+        branch
+            .transaction()
+            .assert(the!("note/payload").of(of).is(is))
+            .commit()
+            .publish()
+    };
+
+    let mut subscription = branch.subscribe(titled()?);
+    let first = subscription.poll(&session).await?.expect("initial");
+    assert_eq!(
+        titles(&first.asserted),
+        vec![(milk.clone(), text("Buy milk"))]
+    );
+
+    #[allow(deprecated)]
+    write(call.clone(), payload("Call mum")?)
+        .perform(&session)
+        .await?;
+    let added = subscription.poll(&session).await?.expect("a match added");
+    assert_eq!(
+        titles(&added.asserted),
+        vec![(call.clone(), text("Call mum"))]
+    );
+    assert!(added.retracted.is_empty());
+
+    // A payload with an entry the pattern does not name still matches:
+    // the blank rest takes it.
+    let with_done = Composite::map([
+        (text("title"), text("Call dad")),
+        (text("done"), Value::Boolean(true)),
+    ])?;
+    let replaced = branch
+        .transaction()
+        .retract(
+            the!("note/payload")
+                .of(call.clone())
+                .is(payload("Call mum")?),
+        )
+        .assert(the!("note/payload").of(call.clone()).is(with_done.clone()));
+    #[allow(deprecated)]
+    replaced.commit().publish().perform(&session).await?;
+    let moved = subscription.poll(&session).await?.expect("the title moved");
+    assert_eq!(
+        titles(&moved.retracted),
+        vec![(call.clone(), text("Call mum"))]
+    );
+    assert_eq!(
+        titles(&moved.asserted),
+        vec![(call.clone(), text("Call dad"))]
+    );
+
+    // A payload with no title is a value the pattern does not match.
+    let untitled = branch
+        .transaction()
+        .retract(the!("note/payload").of(call.clone()).is(with_done))
+        .assert(
+            the!("note/payload")
+                .of(call.clone())
+                .is(Composite::map([(text("note"), text("later"))])?),
+        );
+    #[allow(deprecated)]
+    untitled.commit().publish().perform(&session).await?;
+    let gone = subscription.poll(&session).await?.expect("the match left");
+    assert_eq!(titles(&gone.retracted), vec![(call, text("Call dad"))]);
+    assert!(gone.asserted.is_empty());
+    Ok(())
+}
+
+/// A standing fold whose inputs hold a pattern counts, per entity with a
+/// title, the payloads that match it, and a commit that adds a match
+/// reports the count that started to hold and the one that stopped.
+#[dialog_common::test]
+async fn it_keeps_a_fold_over_a_pattern_current() -> Result<()> {
+    use dialog_query::reduce::{Aggregator, Reduce, ReduceEntry};
+    use dialog_query::{AttributeQuery, Conclusion as _, Fold};
+
+    let (session, peer) = test_session_with_peer().await;
+    let repo = test_repo(&session, &peer).await;
+    let branch = repo.branch("main").open().perform(&session).await?;
+    let milk: Entity = "id:milk".parse()?;
+    #[allow(deprecated)]
+    branch
+        .transaction()
+        .assert(the!("note/title").of(milk.clone()).is("Milk".to_string()))
+        .commit()
+        .publish()
+        .perform(&session)
+        .await?;
+
+    let mut inputs = titled()?;
+    inputs.terms.insert("this".into(), Term::var("t"));
+    let fold = Fold::new(
+        AttributeQuery::new(
+            Term::from(the!("note/title")),
+            Term::<Entity>::var("t"),
+            Term::<Any>::var("name"),
+            Term::var("cause"),
+            None,
+        ),
+        inputs,
+        Reduce::new(
+            vec!["t".into()],
+            vec![ReduceEntry::new(
+                "titled",
+                Aggregator::Count,
+                Term::var("heading"),
+            )],
+        ),
+    );
+    let count = |rows: &[dialog_query::FoldConclusion]| -> Vec<(Entity, Value)> {
+        rows.iter()
+            .filter_map(|row| Some((row.this().clone(), row.get("titled")?.clone())))
+            .collect()
+    };
+
+    let mut subscription = branch.subscribe_fold(fold);
+    let first = subscription.poll(&session).await?.expect("initial");
+    assert_eq!(
+        count(&first.asserted),
+        vec![(milk.clone(), Value::UnsignedInt(0))]
+    );
+
+    #[allow(deprecated)]
+    branch
+        .transaction()
+        .assert(
+            the!("note/payload")
+                .of(milk.clone())
+                .is(Composite::map([(text("title"), text("Buy milk"))])?),
+        )
+        .commit()
+        .publish()
+        .perform(&session)
+        .await?;
+    let delta = subscription.poll(&session).await?.expect("a match added");
+    assert_eq!(
+        count(&delta.asserted),
+        vec![(milk.clone(), Value::UnsignedInt(1))]
+    );
+    assert_eq!(count(&delta.retracted), vec![(milk, Value::UnsignedInt(0))]);
+    Ok(())
 }

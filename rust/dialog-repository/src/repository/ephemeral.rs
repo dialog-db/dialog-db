@@ -812,12 +812,18 @@ impl Ephemeral {
     /// changes one is refused with
     /// [`AssetsUnsupported`](DialogCorpusError::AssetsUnsupported) and
     /// nothing in it lands, rather than landing its facts and dropping its
-    /// assets.
+    /// assets. A batch that holds a statement it could not write, a rule
+    /// that holds a pattern, is refused with
+    /// [`Refused`](DialogCorpusError::Refused) the same way: a line is
+    /// exported and read back as facts, and has no place for the rule.
     pub fn apply(&self, changes: Changes) -> Result<Option<Instant>, DialogCorpusError> {
         if changes.has_assets() {
             return Err(DialogCorpusError::AssetsUnsupported(
                 "an ephemeral line".into(),
             ));
+        }
+        if let Some(refusal) = changes.refused() {
+            return Err(DialogCorpusError::Refused(refusal.clone()));
         }
         if changes.is_empty() {
             return Ok(None);
@@ -841,6 +847,9 @@ impl Ephemeral {
             return Err(DialogCorpusError::AssetsUnsupported(
                 "an ephemeral line".into(),
             ));
+        }
+        if let Some(refusal) = changes.refused() {
+            return Err(DialogCorpusError::Refused(refusal.clone()));
         }
         if changes.is_empty() {
             return Ok(None);
