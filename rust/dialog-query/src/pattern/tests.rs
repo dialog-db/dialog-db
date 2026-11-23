@@ -8,7 +8,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use super::*;
 use crate::attribute::{AttributeStatement, Relation};
-use crate::corpus::{Composite, Entity};
+use crate::corpus::{Composite, CorpusRelation, Entity};
 use crate::error::TypeError;
 use crate::formula::Formula;
 use crate::formula::math::Sum;
@@ -1478,4 +1478,135 @@ fn it_shares_a_whole_only_where_a_pattern_is_one_value() {
         shape(&[("title", var("title"))]).with_rest(Term::blank()),
     ));
     assert_ne!(Shape::of(open.clone()).whole, Shape::of(open).whole);
+}
+
+/// A map can hold a key more than once, a value under it each time. A
+/// map pattern names a key for one value: naming a key that holds
+/// several never matches, built or taken apart. A rest takes such a key
+/// whole, every value under it, and a blank rest passes it by.
+#[dialog_common::test]
+fn it_matches_no_key_that_holds_several_values_and_a_rest_takes_it_whole() {
+    let tagged = Value::Composite(
+        Composite::map([
+            (text("title"), text("Buy milk")),
+            (text("tag"), text("errand")),
+            (text("tag"), text("home")),
+        ])
+        .expect("a map"),
+    );
+
+    let naming = Pattern::Map(shape(&[("tag", var("tag"))]).with_rest(Term::blank()));
+    assert!(unify(&naming, &tagged).is_none(), "a key of two values");
+
+    let rest = Pattern::Map(shape(&[("title", var("title"))]).with_rest(Term::var("rest")));
+    let row = unify(&rest, &tagged).expect("the rest takes the key whole");
+    let Some(Value::Composite(others)) = row.value_of("rest") else {
+        panic!("the rest is a map");
+    };
+    assert_eq!(others.get(&text("tag")), vec![text("errand"), text("home")]);
+    // Built again from what it bound, it is the value it took apart.
+    assert_eq!(rest.build(&row), Some(tagged.clone()));
+
+    let blank = Pattern::Map(shape(&[("title", var("title"))]).with_rest(Term::blank()));
+    assert!(unify(&blank, &tagged).is_some());
+
+    let exact = Pattern::Map(shape(&[("title", var("title"))]));
+    assert!(unify(&exact, &tagged).is_none(), "the others are left over");
+}
+
+/// A record is a map whose keys are attributes, held as symbols. A map
+/// pattern reads it through symbol keys alone: the attribute's name as
+/// text is another key. A pattern of symbol keys builds what
+/// `is_record` says is a record, and opaque record bytes match no map.
+#[dialog_common::test]
+fn it_reads_a_record_through_symbol_keys() {
+    let lat: CorpusRelation = "geo/lat".parse().expect("an attribute");
+    let record = Value::Composite(
+        Composite::record([(lat.clone(), Value::Float(37.77))]).expect("a record"),
+    );
+
+    let by_symbol = Pattern::map([(Value::Symbol(lat.clone()), var("lat"))]).expect("a pattern");
+    let row = unify(&by_symbol, &record).expect("a record matches by symbol");
+    assert_eq!(row.value_of("lat"), Some(&Value::Float(37.77)));
+    let Some(Value::Composite(built)) = by_symbol.build(&row) else {
+        panic!("a composite is built");
+    };
+    assert!(built.is_record(), "symbol keys build a record");
+    assert_eq!(Value::Composite(built), record);
+
+    let by_text = Pattern::map([(text("geo/lat"), var("lat"))]).expect("a pattern");
+    assert!(unify(&by_text, &record).is_none(), "text is another key");
+    let Some(Value::Composite(built)) = by_text.build(&row) else {
+        panic!("a composite is built");
+    };
+    assert!(!built.is_record(), "text keys build a map");
+}
+
+/// A variable named twice in one pattern is one variable: `[?a ?a ?b]`
+/// matches `[1 1 2]` and binds `?a` once, and refuses `[1 2 2]`.
+#[dialog_common::test]
+fn it_binds_a_variable_named_twice_once() {
+    let pattern = Pattern::list([var("a"), var("a"), var("b")]);
+    let list = |items: [u128; 3]| {
+        Value::Composite(Composite::list(items.map(Value::UnsignedInt)).expect("a list"))
+    };
+
+    let row = unify(&pattern, &list([1, 1, 2])).expect("a repeats");
+    assert_eq!(row.value_of("a"), Some(&Value::UnsignedInt(1)));
+    assert_eq!(row.value_of("b"), Some(&Value::UnsignedInt(2)));
+    assert_eq!(pattern.build(&row), Some(list([1, 1, 2])));
+
+    assert!(unify(&pattern, &list([1, 2, 2])).is_none());
+}
+
+/// An empty map pattern matches the empty map alone, and an empty list
+/// pattern the empty list alone: neither matches the other kind, nor a
+/// composite that holds anything.
+#[dialog_common::test]
+fn it_matches_an_empty_composite_of_its_own_kind_alone() {
+    let empty_map = Value::Composite(Composite::map([]).expect("a map"));
+    let empty_list = Value::Composite(Composite::list([]).expect("a list"));
+    let no_entries = Pattern::map(Vec::<(Value, Pattern)>::new()).expect("a pattern");
+    let no_items = Pattern::list(Vec::<Pattern>::new());
+
+    assert!(unify(&no_entries, &empty_map).is_some());
+    assert!(unify(&no_entries, &empty_list).is_none());
+    assert!(unify(&no_entries, &map(&[("a", text("x"))])).is_none());
+    assert!(unify(&no_items, &empty_list).is_some());
+    assert!(unify(&no_items, &empty_map).is_none());
+    assert!(
+        unify(
+            &no_items,
+            &Value::Composite(Composite::list([text("x")]).expect("a list"))
+        )
+        .is_none()
+    );
+    assert_eq!(no_entries.as_value(), Some(empty_map));
+    assert_eq!(no_items.as_value(), Some(empty_list));
+}
+
+/// A map pattern with no variable is a constant: it is the value it
+/// builds, matches that value alone and binds nothing.
+#[dialog_common::test]
+fn it_is_a_constant_when_it_holds_no_variable() {
+    let pattern = Pattern::map([
+        ("title".to_string(), Pattern::from(text("Buy milk"))),
+        ("done".to_string(), Pattern::from(Value::Boolean(false))),
+    ])
+    .expect("a pattern");
+    assert!(pattern.is_constant());
+    assert!(pattern.variables().is_empty());
+    let value = map(&[("title", text("Buy milk")), ("done", Value::Boolean(false))]);
+    assert_eq!(pattern.as_value(), Some(value.clone()));
+    assert_eq!(pattern.build(&Match::new()), Some(value.clone()));
+
+    let row = unify(&pattern, &value).expect("it matches what it is");
+    assert_eq!(row, Match::new(), "and binds nothing");
+    assert!(
+        unify(
+            &pattern,
+            &map(&[("title", text("Buy milk")), ("done", Value::Boolean(true))])
+        )
+        .is_none()
+    );
 }

@@ -24,8 +24,7 @@
 use std::collections::BTreeSet;
 use std::{error, fmt};
 
-use dialog_corpus::Value;
-use dialog_corpus::identity::{BOOLEAN, ENTITY, NUMBER, SYMBOL, TEXT};
+use dialog_corpus::identity::{BOOLEAN, ENTITY, NUMBER, RECORD, SYMBOL, TEXT};
 use merkle_reference::{Reference, Type};
 use serde::Serialize;
 use serde::ser::{self, SerializeMap as _};
@@ -322,9 +321,7 @@ fn constant(tag: &str, payload: &Node) -> Option<Reference> {
         ("boolean:", Node::Bool(value)) => BOOLEAN.reference_of(&[u8::from(*value)]),
         ("natural:" | "integer:" | "float:", Node::Number(content)) => NUMBER.reference_of(content),
         ("bytes:", payload) => Reference::hash(&bytes_of(payload)?),
-        // A record that holds a composite is named by its parts, and
-        // any other by its bytes, as `Value::reference` names one.
-        ("record:", payload) => Value::Record(bytes_of(payload)?).reference(),
+        ("record:", payload) => RECORD.reference_of(&bytes_of(payload)?),
         _ => return None,
     })
 }
