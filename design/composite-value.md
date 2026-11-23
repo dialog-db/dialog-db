@@ -19,7 +19,8 @@ a syntax tree.
 
 The syntax trees of every `.clj` the notation has (its sketches, examples
 and prelude, `wip/engine-fold` at `7b7484a8c`), counted by
-[census.py](composite-value/census.py). It reads each document with the
+`design/composite-value/census.py` on the `research/composite-value`
+branch, which holds the measurement harness. It reads each document with the
 reader's rules (`form.rs`) and builds the value `Syntax::value` builds
 (`syntax.rs`: every node a map that says its `type`, a call's parts a list
 and its labels a map, a struct's entries a list of `[key, value]` pairs).
@@ -39,7 +40,8 @@ of offsets is the rare one, and is kept as small as it can be.
 
 ## Measurements
 
-`record_spike access` (`rust/dialog-repository/examples/record_spike/access.rs`),
+`record_spike access` (`rust/dialog-repository/examples/record_spike/access.rs`
+on the `research/composite-value` branch),
 over the trees `CENSUS_DUMP` writes (sha256 `362444d5754e6c43…`), release build, 9 rounds, ns a read, the median over every field or item in
 turn; two runs agree within 15%. A 4-core Xeon at 2.1 GHz, shared with two
 other builds (load 3 to 4), so differences under about 20 ns are noise.
