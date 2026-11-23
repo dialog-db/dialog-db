@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use dialog_corpus::helpers::composite_decodes;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{Cardinality, Composite, Entity, Fact, Instruction, Selector, Value};
-use dialog_peer::helpers::{test_session_with_peer, unique_name};
+use dialog_peer::helpers::test_session_with_peer;
 use dialog_peer::{Peer, PeerSpace, Session};
 use futures_util::{TryStreamExt as _, stream};
 
@@ -139,34 +139,12 @@ async fn it_round_trips_composites_through_a_volatile_tree() -> Result<()> {
 #[cfg(not(target_arch = "wasm32"))]
 #[dialog_common::test]
 async fn it_round_trips_composites_through_a_filesystem_tree() -> Result<()> {
-    use dialog_capability::Subject;
-    use dialog_effects::storage::{Directory, Location};
-    use dialog_peer::helpers::{onboard, test_grant, test_state, test_system};
-    use dialog_storage::provider::storage::{CredentialStore, NativeSpace, Storage};
-    use dialog_varsig::Principal as _;
     use std::fs::read_dir;
 
     let root = tempfile::tempdir()?;
-    let base = Directory::At(root.path().to_string_lossy().into_owned());
-    let name = unique_name("composite");
-    let storage = Storage::<NativeSpace>::default().owned_by(test_system().await.did());
-    let credential = dialog_peer::OpenCredential::open(name.clone())
-        .at(base.clone())
-        .perform(&CredentialStore::<NativeSpace>::default())
-        .await?;
-    let peer = Peer::new(credential.clone())
-        .at(Location::new(base.clone(), name))
-        .with(storage)
-        .space(test_state(&credential.did()))
-        .grant(test_grant().await)
-        .base(base)
-        .await?;
-    onboard(&peer).await?;
-    let session = peer
-        .session(b"test")
-        .space(peer.state())
-        .allow(Subject::any())
-        .await?;
+    use crate::helpers::filesystem_session_with_peer;
+
+    let (session, peer) = filesystem_session_with_peer(root.path()).await?;
     round_trip(&session, &peer).await?;
     // Something was written under the directory, not elsewhere.
     assert!(read_dir(root.path())?.next().is_some());

@@ -26,7 +26,7 @@ use crate::attribute::The;
 use crate::corpus::{Entity, Value};
 use crate::rule::{DeductiveRule, InductiveRule, Rule};
 use crate::{Proposition, Statement, Update, the};
-use dialog_corpus::{NameShape, Relation as CorpusRelation, Symbol};
+use dialog_corpus::{NameShape, Refusal, Relation as CorpusRelation, Symbol};
 
 /// The `dialog.rule/source` body attribute, validated at compile time.
 /// Shared by both rule kinds — hydration dispatches on the decoded
@@ -258,6 +258,14 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
 /// trigger footprint over derivation. Retracting the same rule erases
 /// those facts, uninstalling it.
 ///
+/// A rule that holds a pattern has no stored body yet
+/// ([`DeductiveRule::storable`]): asserting it records a [`Refusal`]
+/// carrying [`TypeError::UnstorablePattern`](crate::TypeError::UnstorablePattern)
+/// on the target and stages nothing, so a transaction holding it fails
+/// to commit. A target that can hold the rule itself, the changes laid
+/// over a line for a query, keeps it and stages its index facts, the
+/// refusal beside them.
+///
 /// ```no_run
 /// # use dialog_query::DeductiveRule;
 /// # use dialog_query::Changes;
@@ -268,17 +276,20 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
 /// ```
 impl Statement for &DeductiveRule {
     fn assert(self, update: &mut impl Update) {
-        // Persist a body when the stored notation can encode it. A query
-        // overlay can instead keep the rule itself for this evaluation.
-        let (rule_entity, body) = match self.storable() {
-            Ok(()) => (self.this(), Some(self.encode())),
+        let rule_entity = self.this();
+        // A rule the stored rule format cannot write is refused: the
+        // batch records why, and stages nothing for it unless it can
+        // hold the rule itself, as the changes laid over a line for a
+        // query can. Its index facts are staged only beside a held
+        // body, so a durable batch never names a rule with no source.
+        let body = match self.storable() {
+            Ok(()) => Some(self.encode()),
             Err(refusal) => {
-                let rule_entity = self.this();
-                update
-                    .hold(&rule_entity, Box::new(self.clone()))
-                    .map_err(|_| refusal.to_string())
-                    .expect("a stored rule format cannot encode a pattern");
-                (rule_entity, None)
+                update.refuse(Refusal::new(rule_entity.clone(), refusal));
+                if update.hold(&rule_entity, Box::new(self.clone())).is_err() {
+                    return;
+                }
+                None
             }
         };
         update.associate(
@@ -313,6 +324,8 @@ impl Statement for &DeductiveRule {
         }
     }
 
+    /// Retracting a rule the stored format cannot write retracts its
+    /// index facts alone: it never had a stored body.
     fn retract(self, update: &mut impl Update) {
         let rule_entity = self.this();
         update.dissociate(
@@ -320,11 +333,13 @@ impl Statement for &DeductiveRule {
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
         );
-        update.dissociate(
-            source_attr(),
-            rule_entity.clone(),
-            Value::Bytes(self.encode()),
-        );
+        if self.storable().is_ok() {
+            update.dissociate(
+                source_attr(),
+                rule_entity.clone(),
+                Value::Bytes(self.encode()),
+            );
+        }
         for reads in reads_entities(self) {
             update.dissociate(reads_attr(), rule_entity.clone(), Value::Entity(reads));
         }
@@ -348,10 +363,18 @@ impl Statement for DeductiveRule {
 /// the `source` body (shared attribute with deductive rules — hydration
 /// dispatches on the head field), the `induces` head index, and the
 /// `on` trigger index dispatch probes by touched attribute. Retracting
-/// the same rule erases those facts, uninstalling it.
+/// the same rule erases those facts, uninstalling it. A rule that holds
+/// a pattern is refused as a deductive one is, and no target holds it.
 impl Statement for &InductiveRule {
+    /// An inductive rule fires at commit, from its stored body, so one
+    /// the stored rule format cannot write is refused wherever it is
+    /// asserted, and stages nothing.
     fn assert(self, update: &mut impl Update) {
         let rule_entity = self.this();
+        if let Err(refusal) = self.storable() {
+            update.refuse(Refusal::new(rule_entity, refusal));
+            return;
+        }
         update.associate(
             source_attr(),
             rule_entity.clone(),
@@ -374,7 +397,12 @@ impl Statement for &InductiveRule {
         }
     }
 
+    /// A rule the stored format cannot write was never stored: retracting
+    /// it retracts nothing.
     fn retract(self, update: &mut impl Update) {
+        if self.storable().is_err() {
+            return;
+        }
         let rule_entity = self.this();
         update.dissociate(
             source_attr(),

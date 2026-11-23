@@ -14,8 +14,8 @@ use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::{
     Asset, Changes, DialogCorpusError, Entity, Estimate, Fact, FactStream, FactView, LayerIndex,
-    Layered, Likelihood, Preload, PreloadRequest, Select, SelectIn, Selector, SortKey, Speculation,
-    Statement, Update, sort_key,
+    Layered, Likelihood, Preload, PreloadRequest, Refusal, Select, SelectIn, Selector, SortKey,
+    Speculation, Statement, Update, sort_key,
 };
 use dialog_corpus::{Cardinality, Relation as CorpusRelation, Standing, Value};
 use dialog_effects::archive::{ArchiveError, Get, Put};
@@ -156,6 +156,13 @@ impl Update for Laying<'_> {
     }
     fn discard(&mut self, asset: Asset) {
         self.changes.discard(asset);
+    }
+
+    /// The refusal stays on the overlay's changes beside the rule this
+    /// layer holds, so a copy of them taken anywhere durable is refused
+    /// there.
+    fn refuse(&mut self, refusal: Refusal) {
+        self.changes.refuse(refusal);
     }
 
     fn hold(&mut self, entity: &Entity, body: Box<dyn Any>) -> Result<(), Box<dyn Any>> {
