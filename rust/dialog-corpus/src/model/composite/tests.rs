@@ -1071,6 +1071,10 @@ fn it_never_panics_on_any_bytes() {
             bytes
         };
         let _ = Composite::from_bytes(&bytes);
+        if let Some((atoms, body)) = Composite::split_atoms(&bytes) {
+            let mut joined = Vec::new();
+            Composite::join_atoms(&atoms, body, &mut joined);
+        }
         // A view over bytes nothing checked answers too, if wrongly.
         let unchecked = Composite::root(bytes.clone().into());
         let _ = (unchecked.len(), unchecked.kind(), unchecked.is_record());
@@ -1429,4 +1433,18 @@ fn measure_reading_a_field_of_a_stored_syntax_tree() {
             100.0 * field / whole
         );
     }
+}
+
+/// A table whose one atom is a boolean's type byte with no value after it
+/// is not a composite: splitting it and reading it refuse it, and nothing
+/// reads past the end.
+#[dialog_common::test]
+fn it_refuses_a_boolean_atom_cut_short() {
+    let bytes = [TABLE, 1, 1, ValueDataType::Boolean as u8];
+    assert!(Composite::split_atoms(&bytes).is_none());
+    assert!(Composite::from_bytes(&bytes).is_err());
+    let mut with_body = bytes.to_vec();
+    with_body.extend_from_slice(&[LIST, 0, 0]);
+    assert!(Composite::split_atoms(&with_body).is_none());
+    assert!(Composite::from_bytes(&with_body).is_err());
 }

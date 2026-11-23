@@ -28,7 +28,7 @@ mod composite;
 
 use composite::intern_value;
 pub(crate) use composite::{
-    PackedError, is_packed, realize as realize_value, remap as remap_composite_token, value_slot,
+    is_packed, realize as realize_value, remap as remap_composite_token, renamed, value_slot,
 };
 
 /// A node of the artifact tree.
@@ -484,6 +484,12 @@ fn segment_of<T: TokenRead + ?Sized>(
         let mut spans = Vec::new();
         if layout != BLOB_KEY_TAG {
             for row in rows {
+                // A row of another layout is not split here; the caller
+                // builds the segment from whole entries.
+                if row[0] as u8 != layout {
+                    spans.push(None);
+                    continue;
+                }
                 let value = token(row[3])?;
                 if is_packed(value) {
                     let start = realized.len();

@@ -54,8 +54,8 @@ pub(crate) enum PackedError {
     Truncated,
     /// It names an atom the file does not hold.
     MissingAtom(u32),
-    /// It names an atom by a drafted id no token of the append took.
-    Unresolved(u32),
+    /// It realizes to more than 4 GiB: more than any key holds.
+    TooLarge,
 }
 
 impl fmt::Display for PackedError {
@@ -70,10 +70,9 @@ impl fmt::Display for PackedError {
                     "a packed composite token names atom {id}, which the file lacks"
                 )
             }
-            PackedError::Unresolved(id) => write!(
-                f,
-                "a packed composite token names drafted atom {id}, which no token took"
-            ),
+            PackedError::TooLarge => {
+                write!(f, "a packed composite token realizes past 4 GiB")
+            }
         }
     }
 }
@@ -90,8 +89,12 @@ impl From<PackedError> for io::Error {
 /// anyway, because they did not split or would not realize to the same
 /// bytes: none, for composites the corpus wrote. Kept for tests, which
 /// assert it does not move.
+/// Counted a thread: tests append on their own thread, and one that
+/// counts is not disturbed by another that is kept whole on purpose.
 #[cfg(test)]
-static KEPT_WHOLE: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static KEPT_WHOLE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// How many times a composite has been split and packed: what a test
 /// counts the work of interning by.
@@ -111,7 +114,7 @@ pub(crate) static PACKING: AtomicBool = AtomicBool::new(true);
 /// How many inline composites have been interned whole so far.
 #[cfg(test)]
 pub(crate) fn kept_whole() -> u64 {
-    KEPT_WHOLE.load(Ordering::Relaxed)
+    KEPT_WHOLE.with(std::cell::Cell::get)
 }
 
 /// Where the value is among a split key's tokens, as [`key_tokens`]
@@ -169,9 +172,17 @@ pub(crate) fn realize<T: TokenRead + ?Sized>(
     }
     let (count, start) = header(value)?;
     let mut atoms = Vec::with_capacity(count);
+    let mut len = value.len() - start;
     for at in (start..start + 4 * count).step_by(4) {
         let id = id_at(value, at);
-        atoms.push(dictionary.get(id).ok_or(PackedError::MissingAtom(id))?);
+        let atom = dictionary.get(id).ok_or(PackedError::MissingAtom(id))?;
+        // Atoms named again and again could realize to more than any key
+        // holds, which only damaged bytes could ask for.
+        len = len
+            .checked_add(atom.len())
+            .filter(|len| u32::try_from(*len).is_ok())
+            .ok_or(PackedError::TooLarge)?;
+        atoms.push(atom);
     }
     let mut bytes = Vec::new();
     Composite::join_atoms(&atoms, &value[start + 4 * count..], &mut bytes);
@@ -206,7 +217,7 @@ pub(crate) fn intern_value(tokens: &mut Draft<'_>, value: &[u8], spilled: bool) 
         }
         None => {
             #[cfg(test)]
-            KEPT_WHOLE.fetch_add(1, Ordering::Relaxed);
+            KEPT_WHOLE.with(|count| count.set(count.get() + 1));
             tokens.intern(value)
         }
     }
@@ -243,20 +254,31 @@ fn pack(tokens: &mut Draft<'_>, value: &[u8]) -> Option<Vec<u8>> {
 
 /// Renames the atoms a packed token names through `rename`, in place: a
 /// drafted id to the id the token took in the file. Any other token is
-/// left as it is.
-pub(crate) fn remap(
-    value: &mut [u8],
-    mut rename: impl FnMut(u32) -> Result<u32, PackedError>,
-) -> io::Result<()> {
+/// left as it is. Fails only for bytes that are not a packed token's,
+/// which a draft never holds.
+pub(crate) fn remap(value: &mut [u8], mut rename: impl FnMut(u32) -> u32) -> io::Result<()> {
     if !is_packed(value) {
         return Ok(());
     }
     let (count, start) = header(value)?;
     for at in (start..start + 4 * count).step_by(4) {
-        let id = rename(id_at(value, at))?;
+        let id = rename(id_at(value, at));
         value[at..at + 4].copy_from_slice(&id.to_le_bytes());
     }
     Ok(())
+}
+
+/// The packed token `value` with every atom it names renamed through
+/// `rename`, or `None` when `rename` has no name for one: the token as the
+/// file would hold it, if the file holds every atom it names.
+pub(crate) fn renamed(value: &[u8], mut rename: impl FnMut(u32) -> Option<u32>) -> Option<Vec<u8>> {
+    let mut renamed = value.to_vec();
+    let (count, start) = header(value).ok()?;
+    for at in (start..start + 4 * count).step_by(4) {
+        let id = rename(id_at(value, at))?;
+        renamed[at..at + 4].copy_from_slice(&id.to_le_bytes());
+    }
+    Some(renamed)
 }
 
 #[cfg(test)]

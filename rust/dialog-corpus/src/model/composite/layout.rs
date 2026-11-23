@@ -170,7 +170,10 @@ pub(super) fn slot_end(bytes: &[u8], at: usize, end: usize) -> Option<usize> {
     } else {
         return None;
     };
-    Some(at + 1 + len)
+    // A slot ends within the bytes: a boolean's type byte with nothing
+    // after it does not.
+    let slot_end = at.checked_add(1)?.checked_add(len)?;
+    (slot_end <= bytes.len()).then_some(slot_end)
 }
 
 /// Whether a slot of type `kind` holds a terminated string.

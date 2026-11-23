@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 
 use crate::file::{HEADER, Kind, MAGIC, put_record, read_at, record_in, write_at};
 use crate::locks;
-use crate::node::{PackedError, TreeNode, realize, rows_after, tree_node};
+use crate::node::{TreeNode, realize, rows_after, tree_node};
 use crate::rows::{Reader, Rows, get_rows, invalid, put_rows, put_varint, rename};
 use crate::tokens::{ALIGN, Draft, TokenRead};
 
@@ -2832,18 +2832,16 @@ impl Chronicle {
                 // they were new: the file can hold it only if it holds
                 // every one of them by now, and then under their ids. Its
                 // atoms were drafted before it, so they are named already.
-                let mut named = token.to_vec();
-                crate::node::remap_composite_token(&mut named, |atom| {
+                crate::node::renamed(token, |atom| {
                     if atom < first {
-                        return Ok(atom);
+                        return Some(atom);
                     }
-                    match tokens.get((atom - first) as usize) {
-                        Some(0) | None => Err(PackedError::Unresolved(atom)),
-                        Some(held) => Ok(*held),
-                    }
+                    tokens
+                        .get((atom - first) as usize)
+                        .copied()
+                        .filter(|held| *held != 0)
                 })
-                .ok()
-                .and_then(|()| self.find_token(snapshot, crate::hash::hash(&named), &named))
+                .and_then(|named| self.find_token(snapshot, crate::hash::hash(&named), &named))
             } else {
                 let hash = draft.hash(id).expect("a drafted token's hash");
                 self.find_token(snapshot, hash, token)
@@ -2885,15 +2883,15 @@ impl Chronicle {
                     .filter(|end| *end <= body.len())
                     .ok_or_else(|| invalid("a token ends early"))?;
                 let token = &mut body[at..end];
+                // Every drafted id has its name by now: the loop above gave
+                // each new one its place, and the one before named each held
+                // one. A packed token names only ids its own draft returned
+                // before it, so below `first + pending`: the index is in range.
                 crate::node::remap_composite_token(token, |id| {
                     if id < first {
-                        Ok(id)
+                        id
                     } else {
-                        tokens
-                            .get((id - first) as usize)
-                            .copied()
-                            .filter(|named| *named != 0)
-                            .ok_or(PackedError::Unresolved(id))
+                        tokens[(id - first) as usize]
                     }
                 })?;
                 let hash = crate::hash::hash(token);

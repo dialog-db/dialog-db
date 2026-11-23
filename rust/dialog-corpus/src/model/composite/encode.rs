@@ -76,7 +76,13 @@ pub(super) fn canonical(node: &Node) -> Result<Vec<u8>, CompositeError> {
     if node.depth() > MAX_DEPTH {
         return Err(CompositeError::TooDeep);
     }
-    Ok(encode(node, SCAN_LIMIT))
+    let bytes = encode(node, SCAN_LIMIT);
+    // Every count, size and offset is at most the length, so a length that
+    // fits in a `u32` is one every reader reads back.
+    if u32::try_from(bytes.len()).is_err() {
+        return Err(CompositeError::TooLarge);
+    }
+    Ok(bytes)
 }
 
 /// `node` written with offsets in every sequence of more than `limit`

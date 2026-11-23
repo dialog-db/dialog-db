@@ -271,6 +271,13 @@ fn it_packs_a_composite_once_and_forgets_it_on_roll_back() {
     assert_eq!(back, value);
 }
 
+/// The kind of error realizing `token` over `draft` gives, if any.
+fn kind_of(draft: &Draft<'_>, token: &[u8]) -> Option<PackedError> {
+    let error = realize(token, draft, &mut Vec::new()).err()?;
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    error.get_ref()?.downcast_ref::<PackedError>().copied()
+}
+
 /// A packed token that does not read is an error of a named kind, never
 /// a panic: a count past its ids, an id the file lacks, bytes cut short.
 #[dialog_common::test]
@@ -282,11 +289,7 @@ fn it_refuses_a_corrupted_packed_token() -> anyhow::Result<()> {
     let packed = draft.get(id).unwrap().to_vec();
     let count_at = 1 + MAGIC.len();
     assert_eq!(packed[count_at], 3, "three atoms");
-    let kind = |token: &[u8]| -> Option<PackedError> {
-        let error = realize(token, &draft, &mut Vec::new()).err()?;
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        error.get_ref()?.downcast_ref::<PackedError>().copied()
-    };
+    let kind = |token: &[u8]| kind_of(&draft, token);
 
     let mut counted = packed.clone();
     counted[count_at] = 100;
@@ -327,14 +330,19 @@ fn it_refuses_a_corrupted_packed_token() -> anyhow::Result<()> {
         Some(PackedError::MissingAtom(9_999))
     ));
 
-    // Naming drafted atoms no token took.
-    let mut unresolved = packed.clone();
-    let error = remap(&mut unresolved, |id| Err(PackedError::Unresolved(id))).unwrap_err();
+    // Atoms named over and over, past what any key holds.
+    let atom = draft.intern(&vec![3u8; 1 << 20]);
+    let count = 5_000u64;
+    let mut repeated = vec![ValueDataType::Composite as u8];
+    repeated.extend_from_slice(MAGIC);
+    crate::rows::put_varint(&mut repeated, count);
+    for _ in 0..count {
+        repeated.extend_from_slice(&atom.to_le_bytes());
+    }
+    repeated.extend_from_slice(&[2, 0, 0]);
     assert!(matches!(
-        error
-            .get_ref()
-            .and_then(|e| e.downcast_ref::<PackedError>()),
-        Some(PackedError::Unresolved(_))
+        kind_of(&draft, &repeated),
+        Some(PackedError::TooLarge)
     ));
     Ok(())
 }
@@ -597,6 +605,21 @@ fn it_reads_back_composites_after_reopening() -> anyhow::Result<()> {
     let all: Vec<Buffer> = first.into_iter().chain(second).collect();
     assert_reads_back(&archive, &all)?;
     assert_eq!(kept_whole(), before, "only the spilled composite is whole");
+    // Every packed token the file holds names atoms the file holds, each
+    // written before it: no damage-free sequence of appends can leave one
+    // naming an atom that is missing.
+    let held = archive.held_tokens()?;
+    let ids: std::collections::HashSet<u32> = held.iter().map(|(id, _)| *id).collect();
+    for (id, token) in held.iter().filter(|(_, token)| is_packed(token)) {
+        let (count, start) = header(token)?;
+        for n in 0..count {
+            let atom = id_at(token, start + 4 * n);
+            assert!(
+                ids.contains(&atom) && atom < *id,
+                "packed token {id} names {atom}"
+            );
+        }
+    }
     let held = archive.held_tokens()?;
     assert!(
         held.iter().any(
@@ -881,6 +904,34 @@ fn measure_a_commit_of_syntax_trees() -> anyhow::Result<()> {
         );
     }
     MEMO.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+/// A block from anywhere whose key holds a composite that is no composite
+/// (its table's one atom a boolean's type byte with nothing after it) is
+/// appended without a panic, kept whole, and read back as it was given.
+#[dialog_common::test]
+fn it_appends_a_key_holding_a_broken_composite() -> anyhow::Result<()> {
+    let manifest = Manifest::default();
+    let mut key = vec![dialog_corpus::ENTITY_KEY_TAG];
+    key.extend_from_slice(b"test:broken\0test/v\0");
+    key.push(ValueDataType::Composite as u8);
+    dialog_corpus::encode_bytes(&[0x00, 0x01, 0x01, ValueDataType::Boolean as u8], &mut key);
+    let block = Buffer::from(segment_block(vec![Key::from(key.clone())], &manifest)?);
+    let directory = tempfile::tempdir()?;
+    let archive = Chronicle::open(directory.path().join("archive"))?;
+    archive.append("index", std::slice::from_ref(&block))?;
+    assert_eq!(
+        archive.get("index", block.blake3_hash())?.as_deref(),
+        Some(block.as_ref())
+    );
+    assert!(
+        archive
+            .held_tokens()?
+            .iter()
+            .all(|(_, token)| !is_packed(token)),
+        "nothing is packed"
+    );
     Ok(())
 }
 

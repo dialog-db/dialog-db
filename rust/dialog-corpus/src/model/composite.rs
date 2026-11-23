@@ -107,6 +107,10 @@ pub enum CompositeError {
     /// Composites nested deeper than [`MAX_DEPTH`].
     #[error("composites nest at most {MAX_DEPTH} deep")]
     TooDeep,
+    /// A composite whose bytes would run past `u32::MAX`, the most a size
+    /// or an offset in them can say.
+    #[error("a composite's bytes are at most 4 GiB")]
+    TooLarge,
 }
 
 impl From<CompositeError> for DialogCorpusError {
@@ -237,7 +241,8 @@ impl Composite {
     /// structure.
     pub fn split_atoms(bytes: &[u8]) -> Option<(Vec<&[u8]>, &[u8])> {
         let table = seq(bytes, 0).filter(|table| table.kind == TABLE)?;
-        let mut atoms = Vec::with_capacity(table.count.min(bytes.len()));
+        // Sized by what was read, never by a count the bytes claim.
+        let mut atoms = Vec::new();
         let mut at = table.items;
         for index in 0..table.count {
             if table.width > 0 && table.offset(bytes, index) != Some(at) {
@@ -247,7 +252,7 @@ impl Composite {
                 return None;
             }
             let end = slot_end(bytes, at, table.end)?;
-            atoms.push(&bytes[at..end]);
+            atoms.push(bytes.get(at..end)?);
             at = end;
         }
         if at != table.end {
@@ -639,6 +644,9 @@ impl Composite {
     /// Its content, keys and scalars as their slot bytes, read without
     /// checks: what writing it again reads.
     fn node(&self) -> Node {
+        // Its buffer was checked by `from_bytes` or written by `canonical`,
+        // which refuses one past `u32::MAX` bytes, the most a varint here
+        // reads: every part of it reads back.
         self.read_node(self.body)
             .expect("a composite reads back as the content it was written from")
     }
@@ -694,7 +702,10 @@ impl Composite {
         let body = seq(&self.buffer, at).ok_or(CompositeError::Malformed)?;
         let table = self.table().ok_or(CompositeError::Malformed)?;
         let mut cursor = body.items;
-        let mut parts = Vec::with_capacity(body.count.min(self.buffer.len()));
+        // Sized by what was read, never by a count the bytes claim: a count
+        // a level claims is not the items it holds, and 128 levels of such
+        // claims would reserve more memory than there is.
+        let mut parts = Vec::new();
         for index in 0..body.count {
             // Where offsets are written, each is where the item is.
             if body.width > 0 && body.offset(&self.buffer, index) != Some(cursor) {
