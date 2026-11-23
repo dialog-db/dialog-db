@@ -194,6 +194,10 @@ The maintainer's, unless marked:
 
 ## The layout
 
+Not final: the table is sorted by canonical bytes, pending one
+measurement of a keys-first order (the atoms a map uses as keys first,
+then the rest), which may move the bytes but no merkle reference.
+
 ```
  composite := table · body                     a buffer of one composite
  table     := seq(0) of atom*                  every key and scalar value the
@@ -204,7 +208,8 @@ The maintainer's, unless marked:
  slot      := 26 · index                        a scalar's place in the table
             | 22 · body                        a nested composite
  seq(kind) := head · count · size · offsets · items
- head      := kind | width << 2                width: none, or 1, 2 or 4 bytes
+ head      := kind | width << 2 | layout << 4    width: none, or 1, 2 or 4 bytes;
+                                               layout 0 (see Layouts)
 
  The table holds complete scalar key/value encodings. Every scalar slot in
  every nested body is a type-26 reference to that table; repeated strings
@@ -261,20 +266,9 @@ realizes the packed token to the escaped canonical bytes again. Its limits:
   starts with: escaped canonical bytes start with the table's head, below
   `0x10`, escaped `00 FF` when zero (tested on random, empty, spilled and
   offset-tabled composites).
-- A spilled composite shares nothing with the file. Its key holds a
-  64-byte prefix (a value spills when its key encoding passes
-  `inline_n`, 4,096 bytes by default), and its whole bytes go to the
-  space's blob store through the blob effect, which Chronicle does not
-  answer: a Chronicle space keeps blobs in the filesystem provider, a
-  file each. Within one composite the atom table already keeps a repeated
-  scalar once; across values a spilled one gets nothing. Of 1,000
-  generated trees of the census's shape 11 spill; the census's largest
-  form is 7,026 bytes of dag-cbor, so at most a few of its 133 forms do.
-  Sharing their atoms needs the blob in the file: Chronicle answering the
-  blob effects (a blob store with range reads in the file, packing a blob
-  that realizes back as a composite), or the corpus writing a spilled
-  composite as an archive block, which moves where a replica keeps and
-  syncs it. Neither is in this change.
+- A spilled composite (its key encoding past `inline_n`, 4,096 bytes) is
+  treated as any large value: its key keeps a prefix, its bytes go to the
+  blob store, and it shares nothing across values.
 - Every token costs a pad byte, padding to 16 and a four-byte length, so
   a small atom shared once costs more than it saves; the archive's size
   below says what that comes to.
@@ -373,53 +367,18 @@ is reached five composites down with one decode, the name returned; built
 with every map's fields and the labels in the other order, it is one value
 with one reference.
 
-## Layouts, and what a reader of each age does
+## Layouts
 
 Goal 3. A composite says its layout in the high four bits of its first
 byte, its table's head (`kind | width << 2` uses the low four). This
-release writes layout 0, so the bit costs no byte and today's bytes are
-unchanged. The layout covers the encoding only: the table, the bodies,
-slots, offsets and varints. It does not cover the kinds (map, list), the
-scalar types an atom holds, or identity, which never depended on the
-layout.
-
-- **A release reads every layout it knows** and refuses any other by name:
-  `CompositeError::UnsupportedLayout(n)` from `Composite::from_bytes`,
-  `DialogCorpusError::UnsupportedLayout(n)` from a tree read, never
-  `Malformed`, never a panic, never a read as another type. A scan does
-  not skip such a fact as a corrupt row (it is there; this release cannot
-  read it): it fails, and a query fails with `EvaluationError::Store`
-  whose message names the layout (the query layer keeps store errors as
-  text).
-- **An older release** meets a newer layout and refuses it so.
-- **The tree does not read values**, so a tree holding a later layout
-  replicates and its blocks verify by their hashes; Chronicle keeps such a
-  composite whole, never packed, and returns its bytes as given.
-- **Where the bit sits is safe.** A table's head is at most `0xFC` in any
-  layout (kind 0, width code 3, layout 15), so it stays below the `0xFE`
-  bound a scan with no value takes, and is never `0xFF`, the byte that
-  starts a Chronicle packed token's magic.
-
-Not built, for two layouts to coexist in one tree (code, not stored
-shape, so they can land with the first second layout; not goals while
-identity across layouts is not one): retract probes the entity ordering
-by exact key bytes and erases three keys built from the instruction's
-bytes, so it would miss the same value stored in another layout; assert
-under cardinality many sees a duplicate only as an identical key; a read
-with entity, attribute and value all bound, and `is_novel`, probe by
-exact bytes. Assert under cardinality one compares with `reads_as` and is
-already layout-proof. What the value ordering holds for a composite is
-unchanged.
-
-**Other type bytes.** `ValueDataType::from(u8)` reads an unknown byte as
-`Bytes`. Keys never reach it with one: the key parser refuses an unknown
-type byte first. A composite's readers reach it only on checked bytes,
-and `inspect` only displays. The one path from stored or received bytes
-is a history claim's `(type byte, bytes)` (`history/claim.rs`), where an
-unknown byte, and the sized number views 10 to 21, read as `Bytes`. No
-release writes such a byte there (a value's type is never a view), so
-making it an error breaks no stored data; it is left as it is here and
-reported.
+release writes layout 0, so the marker costs no byte. `Composite::from_bytes`
+refuses any other layout by name, `CompositeError::UnsupportedLayout(n)`,
+never as malformed bytes and never by a panic, and Chronicle keeps such a
+composite whole, never packed. The layout covers the encoding only, not
+the kinds, the scalar types or identity. A table's head is at most `0xFC`
+in any layout, below the `0xFE` bound a scan with no value takes and never
+`0xFF`, the byte that starts a Chronicle packed token's magic. A tree read
+that meets one reports what it reports for any value that does not decode.
 
 ## How a composite sits in keys
 

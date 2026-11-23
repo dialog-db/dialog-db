@@ -120,12 +120,7 @@ pub enum CompositeError {
 
 impl From<CompositeError> for DialogCorpusError {
     fn from(error: CompositeError) -> Self {
-        match error {
-            CompositeError::UnsupportedLayout(layout) => {
-                DialogCorpusError::UnsupportedLayout(layout)
-            }
-            error => DialogCorpusError::InvalidValue(error.to_string()),
-        }
+        DialogCorpusError::InvalidValue(error.to_string())
     }
 }
 
@@ -225,14 +220,6 @@ impl Composite {
         Self { buffer, body }
     }
 
-    /// A composite over `bytes` with nothing checked: for tests that store
-    /// what a newer or a hostile writer would, a layout this release does
-    /// not read among them.
-    #[cfg(any(test, feature = "helpers"))]
-    pub(crate) fn unchecked(bytes: &[u8]) -> Self {
-        Self::root(bytes.into())
-    }
-
     /// The composite whose canonical bytes are `bytes`, refusing bytes that
     /// do not read as a composite or are not the canonical encoding of the
     /// one they read as.
@@ -330,9 +317,7 @@ impl Composite {
     /// Whether this is the composite at the root of its buffer, rather than
     /// one nested in another.
     pub fn is_root(&self) -> bool {
-        // Where the root's body is, as `root` found it: a nested body is
-        // never there, since it starts past its slot's type byte.
-        seq(&self.buffer, 0).map_or(0, |table| table.end) == self.body
+        seq(&self.buffer, 0).is_some_and(|table| table.end == self.body)
     }
 
     /// Its canonical bytes on its own: the buffer it is the root of, or, for

@@ -916,9 +916,6 @@ fn entity_attribute<K: KeyView>(key: K) -> Result<(Entity, Relation), DialogCorp
 fn as_corrupt_entry(error: DialogCorpusError) -> DialogCorpusError {
     match error {
         already @ DialogCorpusError::CorruptEntry(_) => already,
-        // A layout this release does not read is no corruption: the value is
-        // there, so the row is not skipped as one.
-        unread @ DialogCorpusError::UnsupportedLayout(_) => unread,
         other => DialogCorpusError::CorruptEntry(format!("{other}")),
     }
 }
@@ -977,10 +974,6 @@ pub(crate) fn decode_value_parts(
                 )
             })?;
             Value::try_from((parts.value_type, bytes))?
-        }
-        // A composite says why it does not decode.
-        ValueRef::Inline(inline_payload) if parts.value_type == ValueDataType::Composite => {
-            Value::Composite(super::view::inline_composite(inline_payload)?)
         }
         // Decode the inline order-preserving value from the key.
         ValueRef::Inline(inline_payload) => {
