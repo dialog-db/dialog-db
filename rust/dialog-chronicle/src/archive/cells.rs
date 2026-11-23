@@ -218,24 +218,20 @@ impl Chronicle {
     /// This process's extents that hold blocks, as `snapshot` maps them: what
     /// a cell's record it appends now needs whole.
     fn loose_needed(&self, snapshot: &Snapshot) -> Vec<Needed> {
-        let extents = self.inner.extents.lock();
-        let ours = extents
-            .idle
-            .iter()
-            .map(|owned| owned.record)
-            .chain(extents.busy.iter().copied());
-        ours.filter_map(|record| {
-            let used = super::extent::used(snapshot.bytes(), record)?;
-            let epoch = super::extent::epoch(snapshot.bytes(), record)?;
-            let checksum = super::extent::checksum(snapshot.bytes(), record, used)?;
-            (used > 0).then_some(Needed {
-                record,
-                epoch,
-                used,
-                checksum,
+        let ours: Vec<u64> = self.inner.extents.lock().records().collect();
+        ours.into_iter()
+            .filter_map(|record| {
+                let used = super::extent::used(snapshot.bytes(), record)?;
+                let epoch = super::extent::epoch(snapshot.bytes(), record)?;
+                let checksum = super::extent::checksum(snapshot.bytes(), record, used)?;
+                (used > 0).then_some(Needed {
+                    record,
+                    epoch,
+                    used,
+                    checksum,
+                })
             })
-        })
-        .collect()
+            .collect()
     }
 
     /// Where `snapshot` files the cell named `name`.

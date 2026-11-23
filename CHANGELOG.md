@@ -14,6 +14,90 @@ says how to cut a release.
 
 ## Unreleased
 
+### A block `append` acknowledged stays readable while threads of one process append to one file
+
+[#851](https://github.com/dialog-db/dialog-db/pull/851)
+
+Since 0.5.0, when several threads of one process appended to one
+Chronicle file while sync points freed extents and claims reused them, a
+block `append` had acknowledged could be missing afterwards: `get`
+returned `None` for it, on the handle that wrote it and after reopening
+the file. A thread gathering extents to fold in, on a snapshot taken
+before one of them was retired, took that extent as abandoned. A claim in
+the writer's turn then reused the same extent from the free list and
+handed it to a writer, because it marked the extent busy without looking
+whether a thread of this process held it already, and its lock on the
+extent's byte succeeded since POSIX locks belong to the process. When the
+gathering thread let go, it unmarked the extent and unlocked its byte
+under the writer. Another thread could then fold the extent in and retire
+it while the writer still wrote to it, and the writer gave the retired
+extent back to be written again: what went into it after that was listed
+by no slot.
+
+A thread of a process now takes an extent only if no other thread of the
+process has it, idle or busy, so the thread that marked an extent and
+took its byte is the only one that lets go of either. The claim passes
+over an extent a stale gather holds and takes the next free one, or a new
+one at the file's end.
+
+What this changes for you:
+
+- Appends from many threads of one process to one file no longer lose
+  blocks. Nothing in the API changes.
+- Another process can no longer take an extent a writer of this process
+  holds, which the unlock above allowed: two processes could have written
+  one extent.
+- A claim that finds the only free extent held by a stale gather grows
+  the file by one extent instead of waiting for it.
+
+Why: an extent's owner byte cannot keep threads of one process apart, so
+the process's own record of who has each extent has to, and it has to
+refuse a second taker rather than let two share one mark that either can
+erase.
+
+### A rule over an attribute a deductive rule derives from what a commit writes fires for what is derived
+
+[#791](https://github.com/dialog-db/dialog-db/pull/791), following
+[#802](https://github.com/dialog-db/dialog-db/pull/802).
+
+Since 0.5.0 an inductive rule is evaluated seeded, with each row of a
+commit bound into the premises that read it, unless what it reads
+changed derivedly. An attribute counted as derived only when no row of
+the commit wrote it. So when a commit wrote an attribute that a
+deductive rule also derives from something the commit touched, the rule
+over it was seeded with the rows written and missed what was derived
+from them: the kind of an event mirroring the one written, a value
+derived beside the one written at the same entity, or a value derived
+from another attribute written in the same commit, at another entity.
+Such an attribute now counts as derived, written or not, and a rule
+premised on it is evaluated in full.
+
+What this changes for you:
+
+- A rule premised on an attribute that a deductive rule derives from
+  what a commit touched fires for every match the commit made, derived
+  ones included. The firings 0.5.0 missed now happen.
+- Evaluated in full, such a rule also fires for matches the commit did
+  not make: a command is issued again for every entity it matches, and
+  a durable head is written again where it differs from what the
+  entity holds, over a later write by hand. This is what a rule over an
+  attribute that changed only derivedly already did.
+- A commit writing such an attribute costs what a full evaluation of
+  the rule costs. One row written under a rule over 1,000 events whose
+  kind a deductive rule restates from itself: 283M instructions in
+  0.5.0, 379M now; over 10,000 events, 2.79G and 3.76G. Without the
+  deductive rule the same commit costs 4.3M and 5.6M: reading a derived
+  attribute already evaluated the deductive rule over the relation.
+- Rules over attributes no deductive rule derives from what a commit
+  touched are seeded as before.
+
+Why: a seed finds the matches a row is part of, at its value and its
+entity, and a fact derived from the row is another fact. Narrowing the
+full evaluation to deductive rules that can derive for another entity
+than the one they read is not sound: a value derived at the entity
+read, or derived from another attribute written beside it, is missed
+as well.
+
 ### A concept read copies no inner evaluation, and a concept's descriptor clones without copying its fields
 
 [#806](https://github.com/dialog-db/dialog-db/pull/806)
@@ -446,6 +530,12 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A rule over an attribute a deductive rule derives from what a commit
+  writes (#791): nothing stored changes shape and nothing is rewritten on
+  upgrade, and an older release reads everything this one writes. What
+  induction writes can differ: the firings 0.5.0 missed happen from
+  the first commit after the upgrade, and are not replayed for commits
+  made before it. An embedder runs nothing.
 - A rule an older release stored spells its attributes under picks (0.3 to 0.5) or under the older `cardinality` (0.2), and sits under an
   identity that hashed them. This release reads a rule body only in its
   own format and only under the identity it gives it now,
