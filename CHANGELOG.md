@@ -14,6 +14,49 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule over an attribute a deductive rule derives from what a commit writes fires for what is derived
+
+[#791](https://github.com/dialog-db/dialog-db/pull/791), following
+[#802](https://github.com/dialog-db/dialog-db/pull/802).
+
+Since 0.5.0 an inductive rule is evaluated seeded, with each row of a
+commit bound into the premises that read it, unless what it reads
+changed derivedly. An attribute counted as derived only when no row of
+the commit wrote it. So when a commit wrote an attribute that a
+deductive rule also derives from something the commit touched, the rule
+over it was seeded with the rows written and missed what was derived
+from them: the kind of an event mirroring the one written, a value
+derived beside the one written at the same entity, or a value derived
+from another attribute written in the same commit, at another entity.
+Such an attribute now counts as derived, written or not, and a rule
+premised on it is evaluated in full.
+
+What this changes for you:
+
+- A rule premised on an attribute that a deductive rule derives from
+  what a commit touched fires for every match the commit made, derived
+  ones included. The firings 0.5.0 missed now happen.
+- Evaluated in full, such a rule also fires for matches the commit did
+  not make: a command is issued again for every entity it matches, and
+  a durable head is written again where it differs from what the
+  entity holds, over a later write by hand. This is what a rule over an
+  attribute that changed only derivedly already did.
+- A commit writing such an attribute costs what a full evaluation of
+  the rule costs. One row written under a rule over 1,000 events whose
+  kind a deductive rule restates from itself: 283M instructions in
+  0.5.0, 379M now; over 10,000 events, 2.79G and 3.76G. Without the
+  deductive rule the same commit costs 4.3M and 5.6M: reading a derived
+  attribute already evaluated the deductive rule over the relation.
+- Rules over attributes no deductive rule derives from what a commit
+  touched are seeded as before.
+
+Why: a seed finds the matches a row is part of, at its value and its
+entity, and a fact derived from the row is another fact. Narrowing the
+full evaluation to deductive rules that can derive for another entity
+than the one they read is not sound: a value derived at the entity
+read, or derived from another attribute written beside it, is missed
+as well.
+
 ### A poll scopes its diff to the cover as it stands, copying none of it
 
 [#844](https://github.com/dialog-db/dialog-db/pull/844).
@@ -422,6 +465,12 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A rule over an attribute a deductive rule derives from what a commit
+  writes (#791): nothing stored changes shape and nothing is rewritten on
+  upgrade, and an older release reads everything this one writes. What
+  induction writes can differ: the firings 0.5.0 missed happen from
+  the first commit after the upgrade, and are not replayed for commits
+  made before it. An embedder runs nothing.
 - A rule an older release stored spells its attributes under picks (0.3 to 0.5) or under the older `cardinality` (0.2), and sits under an
   identity that hashed them. This release reads a rule body only in its
   own format and only under the identity it gives it now,
