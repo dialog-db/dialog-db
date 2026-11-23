@@ -104,6 +104,28 @@ Main is `dcb72a5`; head before is `876288c`, the branch with main merged; head a
 
 Neither head moves a scenario past what one binary moves between two runs of itself (the fifth fact above): the box f86d6983b added cost at most 0.09% here, and the head after is within -0.49% to +0.12% of main, with the calls to the allocator the same within eight. So the restoration is for the decision C records, not a saving the gate sees. The full gate at `a459c30` (`dialog-perf compare perf/baseline`, all 31 scenarios) reports no regression, every counter unchanged.
 
+Main moved while this was measured: #806 and #784 boxed the inner evaluation of a concept read and the paths a plain read does not run, and cut `read-point` by about 30%. Merged with them (`af4f0ef`), against main at `9b43ebc`, with the same command:
+
+| scenario | main | this branch | change | allocation calls, main / branch |
+|---|---:|---:|---:|---|
+| `concept-optional` | 133,413,646 | 133,423,254 | +0.01% | 82,465 / 82,465 |
+| `first-query` | 1,331,776 | 1,333,248 | +0.11% | 960 / 960 |
+| `query-join` | 49,544,289 | 49,569,510 | +0.05% | 49,263 / 49,263 |
+| `query-member` | 85,979,810 | 85,854,844 | -0.15% | 82,463 / 82,464 |
+| `read-point` | 11,865,501 | 11,854,075 | -0.10% | 21,508 / 21,508 |
+| `read-scan` | 19,965,622 | 19,998,443 | +0.16% | 18,763 / 18,763 |
+| `read-sibling` | 17,300,433 | 17,297,342 | -0.02% | 29,676 / 29,676 |
+| `rule-dispatch` | 443,953,961 | 442,382,009 | -0.35% | 437,053 / 437,054 |
+| `rule-install` | 118,327,741 | 118,343,907 | +0.01% | 158,083 / 158,082 |
+| `rule-overlay` | 171,124,743 | 170,852,359 | -0.16% | 317,498 / 317,499 |
+| `rule-point` | 28,338,732 | 28,316,695 | -0.08% | 50,402 / 50,404 |
+| `rule-ranked` | 37,014,867 | 36,827,381 | -0.51% | 45,522 / 45,530 |
+| `rule-recursive` | 434,326,647 | 431,188,641 | -0.72% | 814,998 / 814,996 |
+| `rule-scan` | 57,861,072 | 57,949,689 | +0.15% | 61,345 / 61,346 |
+| `rule-session` | 38,821,340 | 38,789,185 | -0.08% | 67,893 / 67,893 |
+
+Within what one binary moves between two runs, as above. The full gate at `af4f0ef` against `perf/baseline` reports no regression, every counter unchanged, and main's `it_keeps_a_read_small_enough_to_move` holds the read's stream under its 2,048 bytes with the patterns' option in it.
+
 ## Backtracked
 
 [design-parameters.md](design-parameters.md) decided that a concept takes its own shapes apart around `evaluate_application`, and that `Parameters` holds a term and, for a shape, the pattern beside it. Both were built as the first thing that worked, a stream around the stream and a second field in every entry, and both were what the gate measured. What they decided stands: a reader gets a term, and a concept run by itself takes its own patterns apart. How it is held changed.
