@@ -1318,15 +1318,33 @@ impl ConceptQuery {
         let canonical_key = The::key_operand(ConceptDescriptor::VALUE);
         // Renamed with what each name holds, a pattern included, so a
         // read that holds one takes its rows apart under the new name.
-        let terms = self.terms.rekeyed(|param| {
-            if param == name {
-                ConceptDescriptor::VALUE.to_string()
-            } else if param == key {
-                canonical_key.clone()
-            } else {
-                param.to_string()
+        let terms = if self.terms.has_shapes() {
+            self.terms.rekeyed(|param| {
+                if param == name {
+                    ConceptDescriptor::VALUE.to_string()
+                } else if param == key {
+                    canonical_key.clone()
+                } else {
+                    param.to_string()
+                }
+            })
+        } else {
+            // Terms alone are moved under their names one by one, as
+            // they were before a parameter could hold a pattern: every
+            // concept read comes through here.
+            let mut terms = Parameters::new();
+            for (param, term) in self.terms.iter() {
+                let param = if param == name {
+                    ConceptDescriptor::VALUE.to_string()
+                } else if *param == key {
+                    canonical_key.clone()
+                } else {
+                    param.clone()
+                };
+                terms.insert(param, term.clone());
             }
-        });
+            terms
+        };
         ConceptQuery {
             predicate: ConceptDescriptor::of_attribute(field),
             terms,
