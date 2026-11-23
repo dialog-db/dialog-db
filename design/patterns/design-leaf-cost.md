@@ -70,6 +70,40 @@ And one allocation in a thousand is 8 bytes larger.
 
 The total of a scenario moves more than this between two runs of one binary, because of the allocator: the medians of five runs of the fix are within 1% of the base's on every scenario, above on some and below on others. So the gate does not see what is left. It is named here so that nobody has to find it again, and so the maintainer can say whether a test of "does this hold a pattern" in these places is a cost.
 
+## Measured again, 2026-11-23
+
+f86d6983b, porting the branch to the composite API, put a box around every concept read and a second stream around a read that holds a pattern, approach A above, and dropped the branch of `ConceptQuery::canonical` that renames a one-field read's patterns. The one stream of C is restored, and `canonical` renames with `Parameters::rekeyed` only where the terms hold a pattern.
+
+The comment on `evaluate_application` about the recursive type still applies: it is why the caller's stream is erased (`Box::pin(selection)`) before the read, which main does too. It is not why the read itself was boxed; that box only gave the two ways one type, which `evaluate_erased` now gives by taking `apart`.
+
+The Perf gate's read and rule scenarios, under callgrind, the toolchain the flake pins (1.99.0), each side built from its own worktree:
+
+```
+cargo +1.99.0 run -p dialog-perf --release -- sweep --out-dir <dir> --only read-point,read-scan,read-sibling,rule-dispatch,rule-install,rule-overlay,rule-point,rule-ranked,rule-recursive,rule-scan,rule-session,concept-optional,query-join,query-member,first-query
+```
+
+Main is `dcb72a5`; head before is `876288c`, the branch with main merged; head after is `a459c30`. Instructions outside the allocator, and the change against main:
+
+| scenario | main | head before | head after | before | after | allocation calls, main / before / after |
+|---|---:|---:|---:|---:|---:|---|
+| `concept-optional` | 133,459,513 | 133,545,168 | 133,617,868 | +0.06% | +0.12% | 82,633 / 82,632 / 82,633 |
+| `first-query` | 1,360,987 | 1,361,375 | 1,362,353 | +0.03% | +0.10% | 978 / 978 / 978 |
+| `query-join` | 49,508,215 | 49,554,648 | 49,547,905 | +0.09% | +0.08% | 49,292 / 49,291 / 49,291 |
+| `query-member` | 86,152,857 | 86,148,421 | 85,947,537 | -0.01% | -0.24% | 82,495 / 82,495 / 82,495 |
+| `read-point` | 17,066,679 | 17,075,532 | 17,084,119 | +0.05% | +0.10% | 22,919 / 22,919 / 22,919 |
+| `read-scan` | 20,066,479 | 20,053,157 | 20,005,882 | -0.07% | -0.30% | 18,781 / 18,781 / 18,781 |
+| `read-sibling` | 22,505,136 | 22,501,563 | 22,511,643 | -0.02% | +0.03% | 30,689 / 30,689 / 30,689 |
+| `rule-dispatch` | 483,464,020 | 483,592,529 | 482,399,898 | +0.03% | -0.22% | 449,130 / 449,131 / 449,133 |
+| `rule-install` | 119,245,132 | 119,270,240 | 119,292,819 | +0.02% | +0.04% | 160,768 / 160,766 / 160,766 |
+| `rule-overlay` | 183,342,997 | 183,366,261 | 183,063,860 | +0.01% | -0.15% | 326,607 / 326,608 / 326,608 |
+| `rule-point` | 38,963,081 | 38,962,269 | 38,987,315 | -0.00% | +0.06% | 53,892 / 53,893 / 53,894 |
+| `rule-ranked` | 37,234,622 | 37,249,076 | 37,051,826 | +0.04% | -0.49% | 45,775 / 45,775 / 45,783 |
+| `rule-recursive` | 588,007,220 | 588,096,556 | 585,419,599 | +0.02% | -0.44% | 845,161 / 845,161 / 845,159 |
+| `rule-scan` | 58,108,868 | 58,117,942 | 58,151,492 | +0.02% | +0.07% | 61,652 / 61,652 / 61,651 |
+| `rule-session` | 49,441,158 | 49,440,057 | 49,427,062 | -0.00% | -0.03% | 71,184 / 71,184 / 71,183 |
+
+Neither head moves a scenario past what one binary moves between two runs of itself (the fifth fact above): the box f86d6983b added cost at most 0.09% here, and the head after is within -0.49% to +0.12% of main, with the calls to the allocator the same within eight. So the restoration is for the decision C records, not a saving the gate sees. The full gate at `a459c30` (`dialog-perf compare perf/baseline`, all 31 scenarios) reports no regression, every counter unchanged.
+
 ## Backtracked
 
 [design-parameters.md](design-parameters.md) decided that a concept takes its own shapes apart around `evaluate_application`, and that `Parameters` holds a term and, for a shape, the pattern beside it. Both were built as the first thing that worked, a stream around the stream and a second field in every entry, and both were what the gate measured. What they decided stands: a reader gets a term, and a concept run by itself takes its own patterns apart. How it is held changed.
