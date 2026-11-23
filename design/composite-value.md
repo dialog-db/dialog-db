@@ -7,13 +7,37 @@ replaces the draft #812, which reached a field by a scan of every name and
 wrote a nested composite again to read it, and the dag-cbor composite on
 the notation's line, which is decoded whole.
 
-The maintainer's goals, which this is measured against: "a builtin
-representation of composite value that offer random access and can be
-stored more compactly and could be read without decoding it all";
-"Records should be referenced canonically by merkle-references", "giving
-canonical identities even if on wire / on disk bytes may be different";
-"all records are just views over the same memory buffer"; and it must hold
-a syntax tree.
+## Goals, in order
+
+The maintainer's, stated 2026-11-23; every section below answers to them.
+
+1. **Compression by sharing.** The only reason this is not CBOR: many
+   tokens repeat across many composite values (and within a syntax tree),
+   so stored in the Chronicle format they are shared and compress very
+   well. In his words: "if it is tokenized, it can be interned. If it's
+   not, then impossible." So a composite's bytes are tokenized, its atoms
+   addressable in a table, which makes interning possible wherever a store
+   supports it. Today that is a Chronicle file (`dialog-chronicle`, native
+   only): a composite in a key there is its atoms' token ids and its body.
+   Tree blocks in every other store, in the browser among them, and blocks
+   sent to a peer carry each composite whole, its own table shared with
+   nothing; "it's okay if we don't do the sharing in non-chronicle setups.
+   In fact, that's kind of the expectation at the moment."
+2. **Reading without decoding.** A property or a path inside a composite
+   is read without decoding the whole value, and what is read is a view
+   into the buffer.
+3. **The format can change without changing the database's.** A newer
+   dialog reads every older layout and may write the new one; nobody is
+   forced to upgrade a database for it.
+4. **Not goals.** Identity preserved across layouts (nice to have only),
+   and one value across two layouts. Joining on whole composites is not
+   something the system cares about: composites are taken apart, and a
+   field that needs an index gets an index of its own.
+
+Earlier statements of the same aims: "a builtin representation of
+composite value that offer random access and can be stored more
+compactly and could be read without decoding it all"; "all records are
+just views over the same memory buffer"; and it must hold a syntax tree.
 
 ## What the encoding has to serve
 
