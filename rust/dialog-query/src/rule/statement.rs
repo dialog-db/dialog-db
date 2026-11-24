@@ -258,9 +258,12 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
 /// trigger footprint over derivation. Retracting the same rule erases
 /// those facts, uninstalling it.
 ///
-/// A rule that holds a pattern has no stored body yet
-/// ([`DeductiveRule::storable`]): asserting it records a [`Refusal`]
-/// carrying [`TypeError::UnstorablePattern`](crate::TypeError::UnstorablePattern)
+/// A rule that holds a pattern is stored as any other, its body in
+/// format 5 (see [`body`](crate::rule::body)). One whose pattern a body
+/// cannot hold, a constant map or list inside it
+/// ([`DeductiveRule::storable`]), has no body: asserting it records a
+/// [`Refusal`] carrying
+/// [`TypeError::UnstorablePattern`](crate::TypeError::UnstorablePattern)
 /// on the target and stages nothing, so a transaction holding it fails
 /// to commit. A target that can hold the rule itself, the changes laid
 /// over a line for a query, keeps it and stages its index facts, the
@@ -277,8 +280,8 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
 impl Statement for &DeductiveRule {
     fn assert(self, update: &mut impl Update) {
         let rule_entity = self.this();
-        // A rule the stored rule format cannot write is refused: the
-        // batch records why, and stages nothing for it unless it can
+        // A rule whose pattern a stored body cannot write is refused:
+        // the batch records why, and stages nothing for it unless it can
         // hold the rule itself, as the changes laid over a line for a
         // query can. Its index facts are staged only beside a held
         // body, so a durable batch never names a rule with no source.
@@ -324,8 +327,8 @@ impl Statement for &DeductiveRule {
         }
     }
 
-    /// Retracting a rule the stored format cannot write retracts its
-    /// index facts alone: it never had a stored body.
+    /// Retracting a rule a stored body cannot write retracts its index
+    /// facts alone: it never had a stored body.
     fn retract(self, update: &mut impl Update) {
         let rule_entity = self.this();
         update.dissociate(
@@ -364,11 +367,12 @@ impl Statement for DeductiveRule {
 /// dispatches on the head field), the `induces` head index, and the
 /// `on` trigger index dispatch probes by touched attribute. Retracting
 /// the same rule erases those facts, uninstalling it. A rule that holds
-/// a pattern is refused as a deductive one is, and no target holds it.
+/// a pattern is stored in format 5; one whose pattern has no written
+/// form is refused as a deductive one is, and no target holds it.
 impl Statement for &InductiveRule {
     /// An inductive rule fires at commit, from its stored body, so one
-    /// the stored rule format cannot write is refused wherever it is
-    /// asserted, and stages nothing.
+    /// whose pattern a stored body cannot write is refused wherever it
+    /// is asserted, and stages nothing.
     fn assert(self, update: &mut impl Update) {
         let rule_entity = self.this();
         if let Err(refusal) = self.storable() {
@@ -397,8 +401,8 @@ impl Statement for &InductiveRule {
         }
     }
 
-    /// A rule the stored format cannot write was never stored: retracting
-    /// it retracts nothing.
+    /// A rule a stored body cannot write was never stored: retracting it
+    /// retracts nothing.
     fn retract(self, update: &mut impl Update) {
         if self.storable().is_err() {
             return;

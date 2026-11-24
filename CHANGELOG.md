@@ -14,6 +14,74 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule that holds a pattern is stored, in rule body format 5
+
+Stacked on [#778](https://github.com/dialog-db/dialog-db/pull/778); the
+design is in [design/patterns/design-rule-identity.md](design/patterns/design-rule-identity.md).
+
+A rule that holds a map or a list of terms ran only where it was built,
+in a query layer: the stored rule body had no way to write a pattern, so
+asserting one into a transaction or the session overlay was refused. Rule
+body format 5 writes one. Where a parameter holds a map or a list, the
+body writes it under the one key `match` as a composite value is written
+for a human reader: a map as its entries, each a pair of a key and a
+pattern, and a list as its items, with what takes the rest beside them
+under `...`. Inside a pattern a map or a list is `{"map": ..}` or
+`{"list": ..}` again, a key is any value a map holds as a key (text, a
+symbol, a number), and a constant is written under the name of its type.
+Every pattern has one encoding, its entries in the order the map holds
+them:
+
+```json
+{ "match": { "map": [[{ "text:": "title" }, { "?": { "name": "heading" } }]], "...": { "?": {} } } }
+{ "match": { "list": [{ "?": { "name": "first" } }], "...": { "?": { "name": "more" } } } }
+```
+
+A body is written in the lowest format that can say it: format 5 for a
+rule that holds a pattern, and format 4, byte for byte as before, for
+every other rule. This departs from the stamping note of the earlier
+draft (#799), which wrote every body in the newest format: a rule of
+terms means what it did, so it keeps its bytes, an embedder's stored
+rules are not migrated a second time for patterns, and a rule already
+stored is still found and retracted by encoding it. A pattern rule is now installed like any rule: it
+commits, is read back from the branch, fires, replicates, and is held in
+the session overlay, so a subscription or a fold over the concept it
+concludes stays current. Rule identity does not move: a rule of terms
+keeps its entity and its body, and a pattern rule keeps the name it had.
+
+What this changes for you:
+
+- Asserting a rule that holds a pattern into a transaction, a batch, the
+  session overlay or a query layer stages its `source` body with its
+  index facts. Committing it succeeds where it returned
+  `CommitError::Refused`, and `Ephemeral::apply` lands it where it
+  returned `DialogCorpusError::Refused`.
+- Still refused, with `TypeError::UnstorablePattern`, which now carries a
+  `reason`: a rule holding a constant map or list inside a pattern. A
+  composite is written in dag-cbor as its bytes, which a rule body's terms
+  are not read back from, so the rule would be stored and inert. A map
+  pattern keyed by any value is stored.
+- `Parameters` and `Pattern` serialize a map or a list of terms under
+  `match`, and read it back, in JSON and dag-cbor. A `Changes` that holds
+  a refusal still does not serialize. A `ConceptQuery` writes a name that holds a pattern as that
+  pattern in its `where`, where it wrote the variable standing for the
+  whole value, and reads it back: a negated premise keeps its pattern in
+  the concept application, so a rule negating one was written without it.
+- `dialog_query::rule::body::FORMAT` is 5, the latest format this release
+  reads and the one a pattern rule is written in.
+  `rule::body::TERMS_FORMAT` is 4, the format of a rule that holds no
+  pattern, and `rule::body::format_for` picks between them.
+- A body stamped with a format below 5 that holds a pattern is refused when
+  it is decoded: no release wrote one.
+- A constant inside a pattern is held to what a stored body carries, as a
+  constant elsewhere in a rule is: an integer past 64 bits or a float that
+  is not finite fails the rule with `TypeError::UnencodableConstant`.
+
+Why: the notation compiles a query of more than one column into a rule
+whose conclusion builds the row as one record with a map pattern. Such a
+rule could not be committed, held in the session overlay or subscribed to,
+so the notation's cards, tables and measurements had nothing to stand on.
+
 ### A parameter can hold a pattern: a map or a list of terms, taken apart or built
 
 [#778](https://github.com/dialog-db/dialog-db/pull/778), on the composite
@@ -30,8 +98,8 @@ matches a map of exactly its entries, and a list pattern with no run a list
 of exactly its items. The planner counts a pattern bound when every variable
 inside it is, and inference types a slot that holds one as a composite and
 each leaf as its term is typed. A rule that holds a pattern has an identity
-and runs where it was built, in a query layer, but the stored rule format
-cannot write it, so it cannot be installed.
+and runs where it was built, in a query layer; rule body format 5 (the
+entry above) stores it.
 
 What this changes for you:
 
@@ -309,6 +377,18 @@ dropping that scope.
 
 #### Compatibility and migration
 
+- Rule body format 5: what a replica holds is unchanged. A rule that
+  holds no pattern is written in format 4 as before, under the entity it
+  had, so nothing is rewritten on upgrade, and `Branch::upgrade_rules`
+  leaves a format 4 or format 5 body as it is (it still rewrites a body
+  below format 4, into format 4). A rule that holds a pattern is written in
+  format 5. A release that reads up to format 4, which is every build of
+  `main` before this one, does not read a format 5 body: it lists the rule
+  in `dialog.rule/invalid` as newer, the rule is inert there (it derives
+  nothing and fires at no commit), and no read fails over it; the rule's
+  facts replicate untouched, and the rule fires once that replica
+  upgrades. 0.5.0 reads up to format 3, so it treats format 4 and format 5
+  bodies alike. Nothing an embedder has to run.
 - Patterns: nothing stored changes. No rule format, up to format 4 that
   this release writes, holds a pattern, and a rule that holds one is
   refused at commit, so no replica stores one and an older release reads
