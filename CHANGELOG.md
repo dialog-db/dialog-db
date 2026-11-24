@@ -126,6 +126,12 @@ What this changes for you:
   namespaced name written with `/` is compared as `xlink:href`. It is no
   sanitizer: a back end still escapes every text and attribute value it
   serialises.
+- A derived attribute, `(rule (list/count-open ?l ?n) …)`, concludes the
+  relation `dialog.notation.c.<hash>/is`, the hash 128 bits of the
+  reference of the concept's name and the attribute's as written: one
+  length whatever the names, and two names that spelled one relation
+  before are two. A refusal names it as written, and
+  `Analyzer::spelled` writes an answer's hash as the written name.
 - A set, `{: "errand" : "home"}`, is a value: an answer that holds one
   reads back from its text and `Syntax::value` keeps it in the order of
   its members, refusing a member twice. A set whose members are not all

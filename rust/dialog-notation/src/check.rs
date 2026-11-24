@@ -163,6 +163,7 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
     }
     for diagnostic in &mut checked.diagnostics {
         diagnostic.span = diagnostic.place(&checked.written);
+        spell(diagnostic, &trial);
     }
     if checked.refusals().next().is_none() {
         checked.analyzed = analyzed;
@@ -239,8 +240,19 @@ pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
     }
     for diagnostic in &mut checked.diagnostics {
         diagnostic.span = diagnostic.place(&checked.written);
+        spell(diagnostic, analyzer);
     }
     checked
+}
+
+/// `diagnostic` as a person reads it: a derived attribute it names is
+/// written as the name it is written by, never the hash of it.
+fn spell(diagnostic: &mut Diagnostic, analyzer: &Analyzer) {
+    diagnostic.message = analyzer.spelled(&diagnostic.message);
+    diagnostic.refusal = diagnostic
+        .refusal
+        .take()
+        .map(|error| error.said(&|text| analyzer.spelled(text)));
 }
 
 /// Each form of `steps` whose report relation is named as one of an
@@ -1185,9 +1197,13 @@ mod tests {
             checked.diagnostics
         );
         let said = format!("{:?}", checked.steps);
-        assert!(
-            said.contains("dialog.notation.concept.my.list.count/is"),
-            "{said}"
+        let named = crate::syntax::derived("my", "list.count")?;
+        assert!(said.contains(&format!("{named}/is")), "{said}");
+        // What the dotted form spelled alike is two names now.
+        assert_ne!(named, crate::syntax::derived("my.list", "count")?);
+        assert_ne!(
+            crate::syntax::derived("a", "b.c")?,
+            crate::syntax::derived("a.b", "c")?
         );
         let checked = check(
             &mut Analyzer::new()?,
@@ -1230,7 +1246,7 @@ mod tests {
             .match_indices("dialog.notation.c.")
             .map(|(at, _)| {
                 said[at..]
-                    .split(|c: char| c == '/' || c == '"')
+                    .split(['/', '"'])
                     .next()
                     .unwrap_or_default()
                     .to_string()

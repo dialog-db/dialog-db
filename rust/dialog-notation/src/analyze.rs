@@ -49,6 +49,14 @@ pub struct Analyzer {
 }
 
 impl Analyzer {
+    /// `text` with each derived attribute's relation this analyzer made
+    /// written as the name it is written by, `list/count-open`, in place
+    /// of the hash that names it: what a person is shown, in a refusal or
+    /// in an answer.
+    pub fn spelled(&self, text: &str) -> String {
+        self.expander.spelled(text)
+    }
+
     /// An analyzer that knows the core forms.
     pub fn new() -> Result<Self, Error> {
         Ok(Analyzer {

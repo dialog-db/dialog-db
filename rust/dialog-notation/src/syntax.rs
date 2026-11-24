@@ -60,11 +60,50 @@ use crate::written::{Note, Path, Segment, Slot, Written};
 /// a document's writes under it; this part is the notation's.
 pub const NAMESPACE: &str = "dialog.notation";
 
-/// The domain every derived attribute's relation is under:
-/// `dialog.notation.concept.list.count-open` is what
-/// `(list/count-open ?l ?n)` derives and reads. A concept's domain is
-/// concluded only.
-pub const DERIVED: &str = "dialog.notation.concept";
+/// The prefix of every derived attribute's domain: `(list/count-open ?l
+/// ?n)` derives and reads `dialog.notation.c.<hash>/is`, the hash
+/// [`derived`] makes of `list` and `count-open`. It is under `dialog.`,
+/// where the engine refuses every write but a rule's, and `c` is no other
+/// family of the notation's names. A concept's domain is concluded only.
+pub const DERIVED: &str = "dialog.notation.c";
+
+/// The bytes of a reference a derived attribute's domain takes: 128 bits.
+const DERIVED_BYTES: usize = 16;
+
+/// How many bytes a derived attribute's domain has: the prefix, a dot,
+/// and 128 bits in base 32, 26 characters.
+pub const DERIVED_LENGTH: usize = DERIVED.len() + 1 + (DERIVED_BYTES * 8).div_ceil(5);
+
+/// The domain of the attribute `name` derived under the concept
+/// `concept`, as each is written: the prefix and 128 bits of the
+/// reference of the list of the two, in lowercase base 32. A list of two
+/// texts is one value for one pair, so no other concept and attribute
+/// make it, whatever either holds, dots included; and it is one length,
+/// 44 bytes, so a label has 19 of the 64 the engine allows a relation.
+pub fn derived(concept: &str, name: &str) -> Result<String, Error> {
+    let framed = data::list([data::text(concept), data::text(name)])?;
+    let reference = framed.reference();
+    let bytes = reference.as_bytes();
+    let mut hash = String::with_capacity(DERIVED_LENGTH);
+    hash.push_str(DERIVED);
+    hash.push('.');
+    // Base 32, lowercase, unpadded: five bits a character.
+    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+    let mut held: u32 = 0;
+    let mut bits = 0;
+    for byte in bytes.iter().take(DERIVED_BYTES) {
+        held = (held << 8) | u32::from(*byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            hash.push(char::from(ALPHABET[((held >> bits) & 31) as usize]));
+        }
+    }
+    if bits > 0 {
+        hash.push(char::from(ALPHABET[((held << (5 - bits)) & 31) as usize]));
+    }
+    Ok(hash)
+}
 
 /// Whether a variable is one the notation made: a template's own, at a
 /// site, `x[3]`, a column, a fold's, a view's. Its name holds a `[`,
@@ -82,7 +121,7 @@ pub const DERIVED: &str = "dialog.notation.concept";
 /// | `[view-of]`, `[query-row]`, `[groups]`, `[inputs]` | nothing | constants, each spelled apart from the others and from the prefixes above |
 /// | `dialog.notation.report.q12` | a site's number | digits only |
 /// | `c0`, `c1`, `row`, fields of a report | a column's number | the fields of the notation's own relations, never a document's |
-/// | `dialog.notation.concept.<concept>.<name>` | a concept's name and an attribute's | a concept named as a domain is refused when it is declared (`it_refuses_a_concept_named_as_a_domain`), so a concept's name holds no dot and ends at the first dot after the prefix |
+/// | `dialog.notation.c.<hash>` | a concept's name and an attribute's, as written | 128 bits of the reference of the list of the two: one value for one pair, so a collision is a hash's, not a spelling's |
 /// | `<label>/key`, an entry's key in a rule's head | a field's label | a head with a field named so beside the entry is refused |
 pub fn unwritten(name: &str) -> bool {
     name.contains('[')

@@ -41,7 +41,7 @@ use crate::kernel::QUOTE;
 use crate::kernel::{AMONG, CONTROL, ELECTORS, Head, Keyed, RETIRED, Rule, TYPES};
 use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, REST, fill, matches};
-use crate::syntax::{self, DERIVED, Parameters, Signature, Syntax};
+use crate::syntax::{self, Parameters, Signature, Syntax};
 use crate::written::{Path, Segment};
 
 mod query;
@@ -529,25 +529,26 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
 
 /// The read a derived attribute is: one named under a declared concept,
 /// `list/count-open`, in that concept's own domain. It is a relation of
-/// its own, named by the concept's name and the attribute's, since the
-/// build has no hash of a concept to name it by. It is one name for one
-/// concept and attribute because a concept's name holds no dot: one
-/// named as a domain, `my.list`, is refused when it is declared
-/// (`it_refuses_a_concept_named_as_a_domain`), so the concept ends at the
-/// first dot after the prefix, and `my/list.count` is the one relation
-/// `dialog.notation.concept.my.list.count`.
+/// its own, whose domain is a hash of the concept's name and the
+/// attribute's as written ([`syntax::derived`]), so it is one length and
+/// one name for one concept and attribute whatever they spell. The build
+/// has no identity of a concept to hash at this point: a concept is a
+/// rule about syntax until its descriptor is compiled, and a hash of
+/// that would rename every derived relation whenever a line of the
+/// concept changed.
 ///
 /// ```clj
 /// (list/count-open ?l (count ?t))
-/// (dialog.notation.concept.list.count-open ?l is: (count ?t))
+/// (dialog.notation.c.<hash of list, count-open> ?l is: (count ?t))
 ///
 /// (list/count ?l status: ?s count: (count ?t))
-/// (dialog.notation.concept.list.count ?l count: (count ?t) status: ?s)
+/// (dialog.notation.c.<hash of list, count> ?l count: (count ?t) status: ?s)
 /// ```
 ///
 /// Its two terms unlabeled are the entity and the value, under `is:`.
-/// With labels, it is the fields they name.
-fn derived(tree: &Syntax, concept: &str, name: &str) -> Result<Syntax, Error> {
+/// With labels, it is the fields they name. A label has what the 64 bytes
+/// of a relation leave beside the domain.
+fn derived(tree: &Syntax, concept: &str, name: &str, domain: &str) -> Result<Syntax, Error> {
     let operand = tree.operand().cloned().unwrap_or_default();
     let (entity, terms) = match (operand.items.as_slice(), operand.terms.is_empty()) {
         ([entity, value], true) => (
@@ -563,34 +564,16 @@ fn derived(tree: &Syntax, concept: &str, name: &str) -> Result<Syntax, Error> {
             )));
         }
     };
-    // The relation is a domain the engine reads as lowercase letters,
-    // digits, hyphens and dots: a concept or a name with anything else
-    // cannot be one.
-    if let Some(odd) = concept
-        .chars()
-        .chain(name.chars())
-        .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.')))
-    {
+    let room = 64 - syntax::DERIVED_LENGTH - 1;
+    if let Some(label) = terms.keys().find(|label| label.len() > room) {
         return Err(Error::Refused(format!(
-            "{tree} derives `{concept}/{name}`, which holds `{odd}`: a derived attribute's \
-             relation is made of the concept's name and the attribute's, and holds only \
-             lowercase letters, digits, hyphens and dots"
-        )));
-    }
-    // The engine allows a relation 64 bytes, its attribute's part, the
-    // longest label, counted.
-    let label = terms.keys().map(String::len).max().unwrap_or(0);
-    let total = DERIVED.len() + 1 + concept.len() + 1 + name.len() + 1 + label;
-    if total > 64 {
-        return Err(Error::Refused(format!(
-            "{tree} derives `{concept}/{name}`, whose relation would be {total} bytes, past the \
-             64 the engine allows: the concept's name, the attribute's and its longest label \
-             together may have {} bytes",
-            64 - (DERIVED.len() + 1 + 1 + 1)
+            "{tree} derives `{concept}/{name}` with the label `{label}:`, of {} bytes: a derived \
+             attribute's label has {room}",
+            label.len()
         )));
     }
     Ok(Syntax::Application(
-        Box::new(Syntax::Reference(format!("{DERIVED}.{concept}.{name}"))),
+        Box::new(Syntax::Reference(domain.to_string())),
         Parameters {
             items: vec![entity],
             terms,
@@ -1058,6 +1041,10 @@ pub struct Expander {
     /// the tree: one the document declares as a concept after that tree
     /// was expanded was read as another relation than the one meant.
     misread: Vec<(usize, String)>,
+    /// The domain of each derived attribute read or written, a hash, with
+    /// the name it is written by, `list/count-open`: what a person is
+    /// shown in its place.
+    spelled: BTreeMap<String, String>,
     /// The sites of the tree being expanded, each by its reference,
     /// numbered in the order they are met: what a site's own variables
     /// are named apart by. Begun again for each tree, so the numbers
@@ -1089,6 +1076,42 @@ pub struct Expander {
 }
 
 impl Expander {
+    /// `text` with each derived attribute's domain this expander made
+    /// written as the name it was made of: `list/count-open` for its
+    /// `/is`, `list/count status:` for a label, `list/count` alone.
+    pub(crate) fn spelled(&self, text: &str) -> String {
+        let mut text = text.to_string();
+        for (domain, written) in &self.spelled {
+            let mut out = String::with_capacity(text.len());
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find(domain.as_str()) {
+                out.push_str(&rest[..at]);
+                rest = &rest[at + domain.len()..];
+                match rest.strip_prefix('/') {
+                    Some(after) => {
+                        let end = after
+                            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                            .unwrap_or(after.len());
+                        match &after[..end] {
+                            "is" => out.push_str(written),
+                            label => {
+                                out.push_str(written);
+                                out.push(' ');
+                                out.push_str(label);
+                                out.push(':');
+                            }
+                        }
+                        rest = &after[end..];
+                    }
+                    None => out.push_str(written),
+                }
+            }
+            out.push_str(rest);
+            text = out;
+        }
+        text
+    }
+
     /// The concepts declared under `name` that a use written with
     /// `labels` fits: each has every label written. Two concepts of one
     /// name and other labels are told apart by what a use writes, never
@@ -2087,7 +2110,10 @@ impl Expander {
                 })
                 && self.concepts.contains(concept)
             {
-                return self.about(&tree, |_| derived(&tree, concept, name));
+                let domain = syntax::derived(concept, name)?;
+                self.spelled
+                    .insert(domain.clone(), format!("{concept}/{name}"));
+                return self.about(&tree, |_| derived(&tree, concept, name, &domain));
             }
             if !declared && let Some(read) = self.about(&tree, |_| line(&tree))? {
                 return Ok(read);
@@ -3530,6 +3556,8 @@ mod tests {
                      (concept (todo ?t list: ?l state: ?s)
                        (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
                        (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one))";
+        let open = syntax::derived("list", "count-open").unwrap();
+        let count = syntax::derived("list", "count").unwrap();
         let concluded = expanded(
             lists,
             "(rule (list/count-open ?l (count ?t))
@@ -3539,16 +3567,16 @@ mod tests {
         .unwrap();
         assert_eq!(concluded.len(), 1);
         assert!(
-            concluded[0].starts_with(
-                "(rule (dialog.notation.concept.list.count-open ?l is: (count ?t)) (xyz.list ?l name: "
-            ),
+            concluded[0].starts_with(&format!(
+                "(rule ({open} ?l is: (count ?t)) (xyz.list ?l name: "
+            )),
             "{concluded:?}"
         );
         assert_eq!(
             expanded(lists, "(select (list/count-open list:home ?n))").unwrap(),
-            vec![
-                "(rule (report (dialog.notation.concept.list.count-open list:home is: ?n)) (dialog.notation.concept.list.count-open list:home is: ?n))"
-            ]
+            vec![format!(
+                "(rule (report ({open} list:home is: ?n)) ({open} list:home is: ?n))"
+            )]
         );
         let labelled = expanded(
             lists,
@@ -3557,9 +3585,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            labelled[0].starts_with(
-                "(rule (dialog.notation.concept.list.count ?l count: (count ?t) status: ?s) "
-            ),
+            labelled[0].starts_with(&format!("(rule ({count} ?l count: (count ?t) status: ?s) ")),
             "{labelled:?}"
         );
         // Under no declared concept, the same spelling is an attribute.

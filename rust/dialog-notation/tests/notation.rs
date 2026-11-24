@@ -1205,11 +1205,11 @@ async fn it_derives_an_attribute_in_a_concepts_domain() -> Result<()> {
         .await?;
     assert_eq!(
         report(&mut notebook, "(select (todo/home ?t ?n))").await?,
-        vec![r#"(dialog.notation.concept.todo.home todo:1 is: "Home")"#]
+        vec![r#"(todo/home todo:1 is: "Home")"#]
     );
     assert_eq!(
         report(&mut notebook, "(select (todo/home todo:1 is: ?n))").await?,
-        vec![r#"(dialog.notation.concept.todo.home todo:1 is: "Home")"#]
+        vec![r#"(todo/home todo:1 is: "Home")"#]
     );
 
     // A concept's domain is concluded only, and nothing of a document
@@ -1232,7 +1232,7 @@ async fn it_derives_an_attribute_in_a_concepts_domain() -> Result<()> {
     );
     assert_eq!(
         report(&mut notebook, "(select (todo/home ?t ?n))").await?,
-        vec![r#"(dialog.notation.concept.todo.home todo:1 is: "Home")"#]
+        vec![r#"(todo/home todo:1 is: "Home")"#]
     );
     Ok(())
 }
