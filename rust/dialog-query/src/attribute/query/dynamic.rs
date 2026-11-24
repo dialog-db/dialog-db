@@ -8,6 +8,7 @@ use crate::proposition::Proposition;
 use crate::query::Output;
 use crate::query::{Application, Restriction};
 use crate::selection::{Match, Selection};
+use crate::selective::Ranking;
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Premise, Schema, Term, Value};
@@ -58,6 +59,23 @@ impl DynamicAttributeQuery {
             }
             _ => DynamicAttributeQuery::All(AttributeQueryAll::new(the, of, is, cause)),
         }
+    }
+
+    /// This query choosing one claim of each cell by `ranking`: the
+    /// read a concept field declaring a selective aggregator makes of its stored
+    /// claims.
+    pub(crate) fn ranked(self, ranking: Ranking) -> Self {
+        let query = match self {
+            DynamicAttributeQuery::Only(query) => query,
+            DynamicAttributeQuery::All(query) => AttributeQueryOnly::new(
+                query.the().clone(),
+                query.of().clone(),
+                query.is().clone(),
+                query.cause().clone(),
+            )
+            .with_layer(query.layer().clone()),
+        };
+        DynamicAttributeQuery::Only(query.ranked(ranking))
     }
 
     /// Get the 'the' (attribute) term.
@@ -244,6 +262,13 @@ impl Application for DynamicAttributeQuery {
         match self {
             DynamicAttributeQuery::All(q) => q.realize(input),
             DynamicAttributeQuery::Only(q) => q.realize(input),
+        }
+    }
+
+    fn bindings(&self, claim: &Claim) -> Option<Match> {
+        match self {
+            DynamicAttributeQuery::All(q) => Application::bindings(q, claim),
+            DynamicAttributeQuery::Only(q) => Application::bindings(q, claim),
         }
     }
 

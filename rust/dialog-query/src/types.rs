@@ -26,7 +26,7 @@ use std::marker::PhantomData;
 
 use crate::attribute::Relation;
 use crate::corpus::CorpusTypeError;
-pub use crate::corpus::{Cause, CorpusRelation, Entity, Type, Value};
+pub use crate::corpus::{Cause, Composite, CorpusRelation, Entity, Type, Value};
 
 /// Trait implemented by type descriptors: named ZSTs that
 /// represent a runtime type at the Rust type level.
@@ -95,32 +95,38 @@ macro_rules! define_descriptor {
 
 define_descriptor!(
     /// Descriptor for string/text values.
-    Text, Type::String
+    Text,
+    Type::String
 );
 
 define_descriptor!(
     /// Descriptor for boolean values.
-    Boolean, Type::Boolean
+    Boolean,
+    Type::Boolean
 );
 
 define_descriptor!(
     /// Descriptor for unsigned integer values (`u8`-`u128`, `usize`).
-    UnsignedInteger, Type::UnsignedInt
+    UnsignedInteger,
+    Type::UnsignedInt
 );
 
 define_descriptor!(
     /// Descriptor for signed integer values (`i8`-`i128`).
-    SignedInteger, Type::SignedInt
+    SignedInteger,
+    Type::SignedInt
 );
 
 define_descriptor!(
     /// Descriptor for floating-point values (`f32`, `f64`).
-    Float, Type::Float
+    Float,
+    Type::Float
 );
 
 define_descriptor!(
     /// Descriptor for binary data (`Vec<u8>`).
-    Bytes, Type::Bytes
+    Bytes,
+    Type::Bytes
 );
 
 /// Descriptors whose terms can carry a *narrowed* kind at plan
@@ -165,17 +171,45 @@ macro_rules! define_refinable_descriptor {
 
 define_refinable_descriptor!(
     /// Descriptor for entity references.
-    EntityType, Type::Entity
+    EntityType,
+    Type::Entity
 );
 
 define_refinable_descriptor!(
     /// Descriptor for attribute symbols.
-    Symbol, Type::Symbol
+    Symbol,
+    Type::Symbol
 );
 
 define_descriptor!(
     /// Descriptor for opaque record values.
-    Record, Type::Record
+    Record,
+    Type::Record
+);
+
+define_descriptor!(
+    /// Descriptor for composite values: any map or list.
+    CompositeType,
+    Type::Composite
+);
+
+define_descriptor!(
+    /// Descriptor for composite maps, records among them.
+    CompositeMapType,
+    Type::CompositeMap
+);
+
+define_descriptor!(
+    /// Descriptor for records: composite maps whose every key is an
+    /// attribute.
+    CompositeRecordType,
+    Type::CompositeRecord
+);
+
+define_descriptor!(
+    /// Descriptor for composite lists.
+    CompositeListType,
+    Type::CompositeList
 );
 
 /// Descriptor for dynamically-typed values: carries an optional
@@ -258,6 +292,7 @@ impl_typed!(CorpusRelation, Symbol);
 impl_typed!(Relation, Symbol);
 impl_typed!(Cause, Bytes);
 impl_typed!(Value, Any);
+impl_typed!(Composite, CompositeType);
 
 /// `Option<U>: Typed` for any [`Scalar`] `U`. Maps to
 /// [`OptionalOf<U::Descriptor>`].
@@ -299,7 +334,8 @@ impl_scalar!(
     Vec<u8>,
     Cause,
     Relation,
-    RecordBytes
+    RecordBytes,
+    Composite
 );
 
 /// The opaque payload of a [`Value::Record`] fact, as a typed term

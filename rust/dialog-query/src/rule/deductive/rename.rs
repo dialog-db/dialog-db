@@ -116,9 +116,9 @@ fn rename_proposition(proposition: &Proposition, map: &Rename) -> Result<Proposi
         Proposition::Formula(formula) => Proposition::Formula(
             formula.with_parameters(rename_parameters(&formula.parameters(), map))?,
         ),
-        Proposition::Resolver(resolver) => Proposition::Resolver(
+        Proposition::Resolver(resolver) => Proposition::Resolver(Box::new(
             resolver.with_parameters(&rename_parameters(&resolver.parameters(), map)),
-        ),
+        )),
         Proposition::Constraint(constraint) => Proposition::Constraint(
             constraint.with_parameters(&rename_parameters(&constraint.parameters(), map)),
         ),

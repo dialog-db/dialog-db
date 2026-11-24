@@ -26,8 +26,8 @@ pub use asset::*;
 
 mod update;
 pub use update::{
-    AssetChange, Change, ChangeStream, Changes, Contender, Pick, SortKey, Standing, Statement,
-    Update, sort_key,
+    AssetChange, Cardinality, Change, ChangeStream, Changes, Contender, Refusal, SortKey, Standing,
+    Statement, Update, sort_key,
 };
 
 mod relation;
@@ -41,7 +41,9 @@ pub use value::*;
 
 mod composite;
 pub use composite::*;
-pub(crate) use composite::{NAMED_DEPTH, type_and_bytes};
+
+mod view;
+pub use view::*;
 
 mod ordkey;
 pub use ordkey::*;

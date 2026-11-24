@@ -6,12 +6,13 @@ use std::error;
 use std::fmt;
 
 use crate::attribute::Keyed;
-use crate::corpus::{COMPOSITE_VERSION, CorpusTypeError, DialogCorpusError, Type, Value};
+use crate::corpus::{CorpusTypeError, DialogCorpusError, Type, Value};
 pub use crate::environment::Environment;
 pub use crate::proposition::Proposition;
 use crate::reduce::Aggregator;
 pub use crate::rule::Rule;
 pub use crate::rule::deductive::DeductiveRule;
+use crate::selective::Selective;
 use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
@@ -139,6 +140,29 @@ pub enum TypeError {
         /// The offending attribute selector.
         the: String,
     },
+    /// A deductive rule carries a `reduce` block. A computed value is
+    /// none of the claims it was computed from, so concluded into an
+    /// attribute it would compete with the claims stored there; where
+    /// it belongs is not settled, and until it is a deductive rule
+    /// admits no fold. A concept field's `pick` chooses among a
+    /// relation's claims instead.
+    #[error("Rule {rule} is deductive and folds: a deductive rule admits no `reduce`")]
+    ReduceInOpenRule {
+        /// The offending rule.
+        rule: Box<Rule>,
+    },
+
+    /// A concept field declares a selective aggregator its attribute
+    /// cannot be read under.
+    #[error("{the} cannot be read with `pick: {aggregate}`: {reason}")]
+    SelectiveAggregate {
+        /// The field's attribute selector.
+        the: String,
+        /// The selective aggregator it declares.
+        aggregate: Selective,
+        /// Why the attribute cannot be read under it.
+        reason: String,
+    },
     /// A keyed collection field is marked optional. A collection's
     /// key is projected by a formula over the matched attribute, and
     /// a formula filters an `Absent` input, so an optional collection
@@ -256,30 +280,6 @@ pub enum TypeError {
         concept: String,
     },
 
-    /// A deductive rule carries a `reduce` block. A deductive rule is
-    /// open: installed as facts, read by any rule installed later,
-    /// resolved against whatever program exists when a query runs. A
-    /// fold withdraws its previous result when a fact arrives, and
-    /// inside a cycle has no deterministic reading at all, so it
-    /// belongs to the closed places: a query, a subscription, an
-    /// inductive rule. An attribute's `pick` chooses among
-    /// the candidates every rule adds to instead.
-    #[error("Rule {rule} is deductive and folds: a deductive rule admits no `reduce`")]
-    ReduceInOpenRule {
-        /// The offending rule.
-        rule: Box<Rule>,
-    },
-
-    /// A concept field declares a `pick` its attribute cannot read
-    /// under.
-    #[error("Attribute {the} cannot be read as declared: {reason}")]
-    UnfitPick {
-        /// The attribute's selector.
-        the: String,
-        /// Why the pick does not fit.
-        reason: String,
-    },
-
     /// Type inference over a rule's premises produced a
     /// contradiction (a variable appears in slots with conflicting
     /// kinds). The planner cannot proceed because the rule has no
@@ -300,6 +300,19 @@ pub enum TypeError {
         value: String,
         /// Why no body can carry it.
         reason: String,
+    },
+
+    /// A rule holds a pattern of a map or a list, and the
+    /// stored rule format has no way to write one. The rule runs where
+    /// it was built, and cannot be installed.
+    #[error(
+        "The rule holds the pattern {pattern} and cannot be stored: format {format} of a rule body writes a variable or a constant where a parameter stands, and has no way to write a pattern"
+    )]
+    UnstorablePattern {
+        /// The pattern, as it is written.
+        pattern: String,
+        /// The rule body format this release writes.
+        format: u64,
     },
 
     /// A rule application omits a required parameter.
@@ -676,17 +689,6 @@ pub enum EvaluationError {
         constraint: String,
     },
 
-    /// A pattern was matched against a record under a version this
-    /// release does not read. The record may well match, and this
-    /// release cannot tell, so the row is refused and not dropped.
-    #[error(
-        "A record in version {version} cannot be taken apart: this release reads version {COMPOSITE_VERSION}"
-    )]
-    RecordVersion {
-        /// The version the record names.
-        version: u8,
-    },
-
     /// A required parameter was not provided.
     #[error("Missing required parameter \"{parameter}\"")]
     MissingParameter {
@@ -743,8 +745,9 @@ pub enum EvaluationError {
     /// growing. Rules are installed unconditionally
     /// (replicas must converge on the merged rule set), so this
     /// surfaces at query time, on exactly the queries whose closure
-    /// folds in a cycle. A deductive rule refuses `reduce` at compile
-    /// time, so no authored rule reaches it.
+    /// folds in a cycle. The program analysis quarantines a rule of
+    /// such a cycle, so this is left for a cycle with no rule to set
+    /// aside.
     #[error(
         "Aggregation through recursion: rules for {concept} fold over \
          {aggregated} inside the same dependency cycle; no stratified \

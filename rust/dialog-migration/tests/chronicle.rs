@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 use dialog_capability::Subject;
 use dialog_chronicle::{Chronicle, FILE_NAME};
-use dialog_corpus::{Changes, Entity, Fact, Instruction, Pick, Relation, Selector, Value};
+use dialog_corpus::{Cardinality, Changes, Entity, Fact, Instruction, Relation, Selector, Value};
 use dialog_effects::storage::{Directory as At, Location};
 use dialog_migration::chronicle::{BlockSource, Directory, transcode_spaces};
 use dialog_peer::helpers::{Seed, open_peer_as, test_owned};
@@ -102,7 +102,7 @@ async fn it_transcodes_a_replica_the_fs_provider_wrote() -> anyhow::Result<()> {
                             is: Value::String(format!("name {commit}.{row}")),
                             cause: None,
                         },
-                        Pick::Last,
+                        Cardinality::One,
                     ))
                 })
                 .collect::<anyhow::Result<_>>()?;
@@ -190,7 +190,7 @@ async fn it_migrates_a_replica_as_an_application_would() -> anyhow::Result<()> {
                             is: Value::String(format!("name {commit}.{row}")),
                             cause: None,
                         },
-                        Pick::Last,
+                        Cardinality::One,
                     ))
                 })
                 .collect::<anyhow::Result<_>>()?;

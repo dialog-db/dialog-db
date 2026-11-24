@@ -15,7 +15,7 @@ use anyhow::Result;
 use dialog_corpus::history::HistorySelector;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
-    DialogCorpusError, Entity, Fact, Instruction, NUMBER_BAND, Pick, Relation, Selector, Value,
+    DialogCorpusError, Entity, Fact, Instruction, NUMBER_BAND, Relation, Selector, Value,
     encode_key_value_owned,
 };
 use dialog_peer::helpers::test_session_with_peer;
@@ -148,18 +148,18 @@ async fn commit(
     Ok(revision)
 }
 
-/// Asserts `facts` under `pick` as one batch.
+/// Asserts `facts` under `cardinality` as one batch.
 async fn assert_all(
     branch: &Branch,
     facts: impl IntoIterator<Item = Fact>,
-    pick: Pick,
+    cardinality: Cardinality,
     operator: &Operator,
 ) -> Result<Revision, CommitError> {
     commit(
         branch,
         facts
             .into_iter()
-            .map(|fact| Instruction::Assert(fact, pick.clone()))
+            .map(|fact| Instruction::Assert(fact, cardinality))
             .collect(),
         operator,
     )
@@ -186,7 +186,7 @@ async fn write_sizes(branch: &Branch, sizes: &[Value], operator: &Operator) -> R
         .iter()
         .map(|size| fact("item/size", &Entity::new()?, size.clone()))
         .collect::<Result<Vec<_>>>()?;
-    assert_all(branch, facts, Pick::All, operator).await?;
+    assert_all(branch, facts, Cardinality::Many, operator).await?;
     Ok(())
 }
 
@@ -398,7 +398,7 @@ async fn it_holds_one_fact_for_a_number_however_it_is_spelled() -> Result<()> {
             fact("item/size", &zero, Value::UnsignedInt(0))?,
             fact("item/size", &minus, Value::SignedInt(-1))?,
         ],
-        Pick::All,
+        Cardinality::Many,
         &operator,
     )
     .await?;
@@ -415,7 +415,7 @@ async fn it_holds_one_fact_for_a_number_however_it_is_spelled() -> Result<()> {
             fact("item/size", &zero, Value::SignedInt(0))?,
             fact("item/size", &minus, Value::Float(-1.0))?,
         ],
-        Pick::All,
+        Cardinality::Many,
         &operator,
     )
     .await?;
@@ -449,7 +449,7 @@ async fn it_retracts_a_fact_by_another_spelling_of_its_number() -> Result<()> {
             fact("item/size", &three, Value::UnsignedInt(3))?,
             fact("item/size", &seven, Value::SignedInt(7))?,
         ],
-        Pick::All,
+        Cardinality::Many,
         &operator,
     )
     .await?;
@@ -498,7 +498,7 @@ async fn it_does_not_supersede_a_cardinality_one_value_rewritten_in_another_type
             fact("item/count", &item, Value::UnsignedInt(3))?,
             fact("item/count", &minus, Value::SignedInt(-1))?,
         ],
-        Pick::Last,
+        Cardinality::One,
         &operator,
     )
     .await?;
@@ -513,7 +513,7 @@ async fn it_does_not_supersede_a_cardinality_one_value_rewritten_in_another_type
             fact("item/count", &item, Value::SignedInt(3))?,
             fact("item/count", &minus, Value::Float(-1.0))?,
         ],
-        Pick::Last,
+        Cardinality::One,
         &operator,
     )
     .await?;
@@ -535,7 +535,7 @@ async fn it_does_not_supersede_a_cardinality_one_value_rewritten_in_another_type
     assert_all(
         &branch,
         [fact("item/count", &item, Value::Float(4.0))?],
-        Pick::Last,
+        Cardinality::One,
         &operator,
     )
     .await?;
@@ -616,7 +616,7 @@ async fn it_matches_a_constant_through_the_lens_of_its_type() -> Result<()> {
             fact("item/size", &Entity::new()?, Value::Float(-4.5))?,
             fact("item/size", &Entity::new()?, Value::UnsignedInt(5))?,
         ],
-        Pick::All,
+        Cardinality::Many,
         &operator,
     )
     .await?;
@@ -818,7 +818,7 @@ macro_rules! assert_lens {
             }
         }
         let stored = written.len();
-        assert_all($branch, written, Pick::All, $operator).await?;
+        assert_all($branch, written, Cardinality::Many, $operator).await?;
         assert_eq!(
             facts($branch, $the, $operator).await?.len(),
             stored,
@@ -1060,7 +1060,7 @@ async fn it_reads_derived_fixed_width_fields_through_their_lens() -> Result<()> 
 /// type and read under `last`.
 fn typed_concept(the: &str, declared: &str) -> ConceptDescriptor {
     serde_json::from_value(serde_json::json!({
-        "with": { "value": { "the": the, "as": declared, "pick": "last" } }
+        "with": { "value": { "the": the, "as": declared } }
     }))
     .expect("a one-field concept is well formed")
 }
@@ -1261,7 +1261,7 @@ async fn it_treats_a_typed_write_the_field_already_observes_as_a_no_op() -> Resu
     assert_all(
         &branch,
         [fact("item/size", &item, Value::UnsignedInt(4))?],
-        Pick::Last,
+        Cardinality::One,
         &operator,
     )
     .await?;
@@ -1315,7 +1315,7 @@ async fn write_edges(branch: &Branch, operator: &Operator) -> Result<Vec<(Entity
             fact("item/size", &one, Value::SignedInt(1))?,
             fact("item/size", &one, Value::UnsignedInt(1))?,
         ],
-        Pick::All,
+        Cardinality::Many,
         operator,
     )
     .await?;
@@ -1460,7 +1460,7 @@ async fn it_migrates_a_branch_holding_every_edge_number_losslessly() -> Result<(
     let refused = assert_all(
         &branch,
         [fact("item/size", &Entity::new()?, Value::UnsignedInt(7))?],
-        Pick::All,
+        Cardinality::Many,
         &operator,
     )
     .await;
@@ -1493,7 +1493,7 @@ async fn it_migrates_a_branch_holding_every_edge_number_losslessly() -> Result<(
     assert_all(
         &branch,
         [fact("item/size", &Entity::new()?, Value::UnsignedInt(7))?],
-        Pick::All,
+        Cardinality::Many,
         &operator,
     )
     .await?;
@@ -1519,7 +1519,7 @@ async fn it_pulls_mixed_numbers_as_the_narrowest_types() -> Result<()> {
             fact("item/size", &item, Value::Float(3.0))?,
             fact("item/size", &item, Value::UnsignedInt(3))?,
         ],
-        Pick::All,
+        Cardinality::Many,
         &operator,
     )
     .await?;
@@ -1639,7 +1639,7 @@ async fn it_pulls_a_numeric_heavy_upstream_an_earlier_release_wrote() -> Result<
     assert_all(
         &main,
         [fact("item/size", &late, Value::SignedInt(-99))?],
-        Pick::All,
+        Cardinality::Many,
         &operator,
     )
     .await?;
@@ -1652,7 +1652,7 @@ async fn it_pulls_a_numeric_heavy_upstream_an_earlier_release_wrote() -> Result<
     assert_all(
         &feature,
         [fact("item/size", &own, Value::Float(0.5))?],
-        Pick::All,
+        Cardinality::Many,
         &operator,
     )
     .await?;

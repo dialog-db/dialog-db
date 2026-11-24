@@ -291,6 +291,25 @@ impl<'a> ColumnReader<'a> {
         }
         Ok(())
     }
+
+    /// The length of the component the next [`append_next`](Self::append_next)
+    /// appends, read without moving.
+    fn next_len(&self) -> Result<usize, DialogSearchTreeError> {
+        match self {
+            ColumnReader::Arena { cursor } => cursor.next_len(),
+            ColumnReader::Dictionary {
+                values,
+                indices,
+                position,
+            } => {
+                let (index, _) = read_varint(indices, *position)?;
+                values
+                    .get(index as usize)
+                    .map(|value| value.len())
+                    .ok_or_else(|| malformed("Dictionary index out of range"))
+            }
+        }
+    }
 }
 
 /// A streaming decoder over a columnar leaf that reconstructs each entry's full
@@ -322,11 +341,12 @@ impl<'a> StreamingLeaf<'a> {
         if columns.len() != components.len() {
             return Err(malformed("Column count does not match the key schema"));
         }
-        let readers = components
-            .iter()
-            .zip(columns)
-            .map(|(component, slices)| ColumnReader::new(component, slices))
-            .collect::<Result<_, _>>()?;
+        // Sized up front: collected through a `Result` the vector would
+        // grow one reader at a time, and a leaf is opened on every read.
+        let mut readers = Vec::with_capacity(components.len());
+        for (component, slices) in components.iter().zip(columns) {
+            readers.push(ColumnReader::new(component, slices)?);
+        }
         Ok(Self {
             readers,
             key_buf: Vec::new(),
@@ -344,6 +364,16 @@ impl<'a> StreamingLeaf<'a> {
         }
         let at = self.index;
         self.key_buf.clear();
+        if self.key_buf.capacity() == 0 {
+            // The leaf's first key: sized before it is filled, so the
+            // buffer is allocated once at its length rather than grown a
+            // component at a time. Every later key reuses it.
+            let mut length = 0;
+            for reader in &self.readers {
+                length += reader.next_len()?;
+            }
+            self.key_buf.reserve_exact(length);
+        }
         for reader in &mut self.readers {
             reader.append_next(&mut self.key_buf)?;
         }
@@ -441,6 +471,34 @@ mod tests {
             panic!()
         };
         assert_eq!(t1, t2, "dictionary table must be order-independent");
+        Ok(())
+    }
+
+    /// A leaf whose key stream claims a key longer than the block is
+    /// refused as malformed when its first key is read, before anything is
+    /// sized from the claim: the lengths are the block's word, and a block
+    /// can come from a remote.
+    #[dialog_common::test]
+    async fn it_refuses_a_key_longer_than_its_block() -> Result<()> {
+        const PARTS: &[Component] = &[Component::arena_var(), Component::dictionary_var()];
+        let schema = Schema::new(PARTS);
+        let rows: Vec<Vec<&[u8]>> = vec![vec![b"AA", b"age"]];
+        let mut columns = encode_columns(&schema, &rows)?;
+        // A suffix of u32::MAX bytes, then a shared length of u32::MAX.
+        for lengths in [[0, u32::MAX], [u32::MAX, 0]] {
+            let ColumnData::Arena { stream, .. } = &mut columns[0] else {
+                panic!("the first component is an arena column");
+            };
+            stream.clear();
+            for length in lengths {
+                crate::node::codec::write_varint(stream, length);
+            }
+            let refused = keys_of(&schema, &columns, 1);
+            assert!(
+                matches!(refused, Err(DialogSearchTreeError::Encoding(_))),
+                "{lengths:?}: {refused:?}"
+            );
+        }
         Ok(())
     }
 

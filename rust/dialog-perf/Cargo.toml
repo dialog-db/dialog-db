@@ -8,6 +8,7 @@ license.workspace = true
 publish = false
 
 [features]
+trace-hydration = ["dialog-query/trace-hydration"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests

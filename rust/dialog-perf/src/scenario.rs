@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_corpus::Pick;
+use dialog_corpus::Cardinality;
 use dialog_query::ConceptDescriptor;
 
 use crate::env::{Env, assert_all, concept, entity, fact, text};
@@ -158,6 +158,14 @@ pub fn catalog() -> Vec<Spec> {
             // over the same names retired 390 K to 474 K instructions.
             layout_pct: 1.0,
             prepare: |size| Box::pin(read::join(size)),
+        },
+        Spec {
+            name: "concept-optional",
+            size: 1000,
+            about: "one read of every field of tonk's issue concept, three fields required and ten optional, every entity: the optional fields left-merged beside the required scans",
+            cross_cpu_pct: 0.0,
+            layout_pct: 0.0,
+            prepare: |size| Box::pin(read::optional(size)),
         },
         Spec {
             name: "query-member",
@@ -360,7 +368,7 @@ fn stuff_name() -> ConceptDescriptor {
 }
 
 /// Commit `count` stuff entities, their two facts under `policy`.
-async fn seed_stuff(env: &Env, count: usize, policy: Pick) -> Result<()> {
+async fn seed_stuff(env: &Env, count: usize, policy: Cardinality) -> Result<()> {
     let facts = (0..count).flat_map(|index| {
         let this = entity("stuff", index);
         [

@@ -20,6 +20,7 @@ use crate::identity;
 use crate::memo::Memo;
 use crate::negation::Negation;
 use crate::optional::OptionalAttributeQuery;
+use crate::pattern;
 pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
@@ -27,7 +28,9 @@ use crate::reduce::{Reduce, ReduceEntry, ReduceSpec};
 use crate::rule::analyzer::AnalyzedRule;
 use crate::rule::body;
 use crate::rule::reference;
-use crate::rule::{Compile, RuleKind, compile_internal, compile_rule, fmt_rule_schema};
+use crate::rule::{
+    Compile, RuleKind, compile_internal, compile_rule, compile_selective, fmt_rule_schema,
+};
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
@@ -221,7 +224,15 @@ impl DeductiveRule {
         if !rewritten {
             return Ok(None);
         }
-        compile_internal::<Self>(self.conclusion().clone(), premises).map(Some)
+        // A selecting rule folds its ranked fields; the rewritten body
+        // binds the same variables, so the folds carry over as they are.
+        let reduce: Vec<(String, ReduceSpec)> = self
+            .analysis
+            .reduce
+            .iter()
+            .map(|entry| (entry.field.clone(), ReduceSpec::from(entry)))
+            .collect();
+        compile_selective::<Self>(self.conclusion().clone(), premises, reduce).map(Some)
     }
 
     /// The checked `reduce` clause entries, in head-field order.
@@ -404,7 +415,11 @@ impl DeductiveRule {
                 (field, spec)
             })
             .collect();
-        Ok(Some(Self::with_reduce(target.clone(), premises, reduce)?))
+        Ok(Some(compile_selective::<Self>(
+            target.clone(),
+            premises,
+            reduce.into_iter().collect(),
+        )?))
     }
 
     fn describe(&self, premises: &[Premise], reduce: &[ReduceEntry]) -> DeductiveRuleDescriptor {
@@ -444,6 +459,22 @@ impl DeductiveRule {
     /// have a body.
     pub fn try_encode(&self) -> Option<Vec<u8>> {
         body::encode(&self.canonical_descriptor())
+    }
+
+    /// Whether this rule can be stored, and so installed. A rule that
+    /// holds a map or a list of terms cannot: the stored rule
+    /// format writes a variable or a constant where a parameter stands
+    /// and has no way to write a pattern. Such a rule has an identity
+    /// and runs where it was built, and
+    /// [`try_encode`](Self::try_encode) gives it no body.
+    pub fn storable(&self) -> Result<(), TypeError> {
+        match pattern::held(self.analysis.premises()) {
+            Some(pattern) => Err(TypeError::UnstorablePattern {
+                pattern,
+                format: body::FORMAT,
+            }),
+            None => Ok(()),
+        }
     }
 
     /// This rule's content-addressed identity, if it has an encodable
@@ -638,11 +669,19 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
                 ),
                 (kind, _) => kind,
             };
+            // A field that declares a selective aggregator reads every
+            // claim of the relation into a variable of its own, which the
+            // selecting rule folds into the field with the aggregator
+            // (see `selective_reduce`).
+            let bound = match field.pick() {
+                Some(_) => claim_variable(name),
+                None => name.to_string(),
+            };
             let value = match (kind, field.is_optional()) {
-                (Some(kind), true) => Term::<Any>::typed_var(name, kind.optional()),
-                (Some(kind), false) => Term::<Any>::typed_var(name, kind),
-                (None, true) => Term::<Any>::typed_var(name, Kind::from(Primitive::ANY)),
-                (None, false) => Term::var(name),
+                (Some(kind), true) => Term::<Any>::typed_var(&bound, kind.optional()),
+                (Some(kind), false) => Term::<Any>::typed_var(&bound, kind),
+                (None, true) => Term::<Any>::typed_var(&bound, Kind::from(Primitive::ANY)),
+                (None, false) => Term::var(&bound),
             };
             let mut terms = Parameters::new();
             terms.insert("this".to_string(), Term::<Any>::var("this"));
@@ -695,34 +734,41 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
             None => Term::var(name),
         };
 
-        // The scan reads under the pick's scan arity: one claim for
-        // `last`, every claim for a pick that elects among them.
-        let scanned = Some(field.descriptor().scan_cardinality());
+        // The scan reads under the field's cardinality: the newest
+        // claim under one, every claim under many; a field that
+        // declares an aggregate, the one claim of each cell it elects.
+        let scanned = Some(field.descriptor().cardinality());
         let layer = field
             .descriptor()
             .layer()
             .cloned()
             .unwrap_or_else(Term::blank);
         let premise: Premise = if field.is_optional() {
-            OptionalAttributeQuery::new(
+            let query = OptionalAttributeQuery::new(
                 field.the().term(name),
                 this.clone(),
                 value.clone(),
                 Term::blank(),
                 scanned,
             )
-            .with_layer(layer)
-            .into()
+            .with_layer(layer.clone());
+            match field.ranking() {
+                Some(ranking) => query.ranked(ranking).into(),
+                None => query.into(),
+            }
         } else {
-            AttributeQuery::new(
+            let query = AttributeQuery::new(
                 field.the().term(name),
                 this.clone(),
                 value.clone(),
                 Term::blank(),
                 scanned,
             )
-            .with_layer(layer)
-            .into()
+            .with_layer(layer);
+            match field.ranking() {
+                Some(ranking) => query.ranked(ranking).into(),
+                None => query.into(),
+            }
         };
         premises.push(premise);
 
@@ -768,6 +814,39 @@ impl From<&ConceptDescriptor> for DeductiveRule {
     }
 }
 
+/// The variable a field that declares a selective aggregator reads its relation's
+/// claims into when rules derive the relation: the selecting rule folds
+/// it into the field.
+fn claim_variable(field: &str) -> String {
+    format!("{field}/claim")
+}
+
+/// The folds by which a selecting rule reads the fields that read a
+/// derived relation and declare a selective aggregator: each field is
+/// the claim its aggregator chooses among the relation's stored and
+/// derived claims.
+fn selective_reduce(
+    concept: &ConceptDescriptor,
+    derived: &dyn Fn(&ConceptFieldDescriptor) -> bool,
+) -> Vec<(String, ReduceSpec)> {
+    concept
+        .with()
+        .iter()
+        .filter(|(_, field)| derived(field))
+        .filter_map(|(name, field)| {
+            let ranking = field.ranking()?;
+            Some((
+                name.to_string(),
+                ReduceSpec::selective(
+                    ranking.aggregate,
+                    Term::var(claim_variable(name)),
+                    ranking.listed,
+                ),
+            ))
+        })
+        .collect()
+}
+
 impl DeductiveRule {
     /// The rule by which `concept` selects its rows: every required
     /// field whose attribute `derived` says some rule derives is read
@@ -778,14 +857,23 @@ impl DeductiveRule {
         concept: &ConceptDescriptor,
         derived: &dyn Fn(&ConceptFieldDescriptor) -> bool,
     ) -> Result<Self, TypeError> {
-        compile_internal::<Self>(concept.clone(), selecting_premises(concept, derived))
+        let reduce = selective_reduce(concept, derived);
+        if reduce.is_empty() {
+            compile_internal::<Self>(concept.clone(), selecting_premises(concept, derived))
+        } else {
+            compile_selective::<Self>(
+                concept.clone(),
+                selecting_premises(concept, derived),
+                reduce,
+            )
+        }
     }
 
     /// Whether the body binds at most one row per `this`. Every premise
     /// it asserts reads a concept of an entity already determined (`this`,
-    /// or a value an earlier such read bound) under a choosing pick for
+    /// or a value an earlier such read bound) under cardinality one for
     /// every field, so each read yields one row; a negation adds none.
-    /// Anything else (a formula, an `all` read, a read keyed by another
+    /// Anything else (a formula, a many read, a read keyed by another
     /// variable) may yield several, and the body is not single-valued.
     pub fn single_valued(&self) -> bool {
         let mut determined: BTreeSet<&str> = BTreeSet::from(["this"]);
@@ -811,8 +899,7 @@ impl DeductiveRule {
                 }
                 let single = query.predicate.with().iter().all(|(_, field)| {
                     !field.is_optional()
-                        && field.descriptor().pick().elects()
-                        && !field.descriptor().is_chain()
+                        && field.descriptor().cardinality() == Cardinality::One
                         && !matches!(field.the(), The::Collection { .. })
                 });
                 if !single || query.widens() {
@@ -1143,6 +1230,44 @@ mod tests {
         // Round-trips through encode/decode.
         let decoded = DeductiveRule::decode(&a.encode()).expect("decodes");
         assert_eq!(decoded.this(), a.this(), "encode/decode preserves identity");
+    }
+
+    /// A premise that reads a collection and binds neither the key nor
+    /// the value of its entries writes the entry as `{}`, and the body
+    /// it is stored in reads back as the rule it was.
+    #[dialog_common::test]
+    fn it_decodes_a_body_that_reads_an_entry_with_its_key_and_value_blank() {
+        use serde_json::json;
+        let json = json!({
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "text:" } } },
+            "when": [
+                {
+                    "assert": { "with": { "name": { "the": "org/person-name", "as": "text:" } } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } }
+                    }
+                },
+                {
+                    "assert": { "with": { "entry": {
+                        "the": { "domain": "org.person", "keyed": "sequence" },
+                        "as": "entity:"
+                    } } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "entry": { "the": { "?": {} }, "is": { "?": {} } }
+                    }
+                }
+            ]
+        });
+        let descriptor: DeductiveRuleDescriptor =
+            serde_json::from_value(json).expect("descriptor parses");
+        let rule = descriptor.compile().expect("rule compiles");
+        let bytes = rule.encode();
+        assert_eq!(
+            DeductiveRule::decode(&bytes).map(|decoded| (decoded.this(), decoded.encode())),
+            Ok((rule.this(), bytes))
+        );
     }
 
     #[dialog_common::test]
@@ -1646,22 +1771,16 @@ mod tests {
         );
     }
 
-    /// A `reduce` block is refused in a deductive rule: a fold
-    /// withdraws its previous result when a fact arrives and has no
-    /// reading inside a dependency cycle. The attribute's `pick`
-    /// chooses among the candidates instead.
+    /// A `reduce` block is refused in a deductive rule an author
+    /// writes: a computed value concluded into an attribute would
+    /// compete with the claims stored there.
     #[dialog_common::test]
     fn it_refuses_reduce_in_a_deductive_rule() {
         use crate::reduce::{Aggregator, ReduceSpec};
 
         let conclusion = ConceptDescriptor::try_from(vec![(
             "total",
-            AttributeDescriptor::new(
-                the!("org/total"),
-                "",
-                Cardinality::One,
-                Some(Type::UnsignedInt),
-            ),
+            AttributeDescriptor::new(the!("org/total"), "", Cardinality::One, None),
         )])
         .unwrap();
         let premises = vec![
@@ -1676,10 +1795,7 @@ mod tests {
         ];
         let reduce = BTreeMap::from([(
             "total".to_string(),
-            ReduceSpec {
-                apply: Aggregator::Sum,
-                of: Term::var("salary"),
-            },
+            ReduceSpec::new(Aggregator::Sum, Term::var("salary")),
         )]);
         let result = DeductiveRule::with_reduce(conclusion, premises, reduce);
         assert!(
@@ -2159,13 +2275,13 @@ mod tests {
         assert!(!rule.single_valued());
     }
 
-    /// A read under `all` binds a row per value.
+    /// A read under cardinality many binds a row per value.
     #[dialog_common::test]
-    fn a_body_reading_under_all_is_not_single_valued() {
+    fn a_body_reading_under_many_is_not_single_valued() {
         let rule = compiled(serde_json::json!({
             "deduce": { "with": { "tag": { "the": "item/label", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "tag": { "the": "item/tag", "as": "text:", "pick": "all:" } } },
+                "assert": { "with": { "tag": { "the": "item/tag", "as": "text:", "cardinality": "many" } } },
                 "where": { "this": { "?": { "name": "this" } }, "tag": { "?": { "name": "tag" } } }
             }]
         }));

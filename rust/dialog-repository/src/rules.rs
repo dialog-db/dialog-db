@@ -63,7 +63,7 @@ use dialog_corpus::{Entity, Fact, Key, Relation, Selector, Statement, Update, Va
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
 use dialog_query::error::EvaluationError;
-use dialog_query::formula::revision::{RevisionParentQuery, RevisionQuery};
+use dialog_query::formula::revision::{RevisionParentQuery, RevisionQuery, RevisionSlotQuery};
 use dialog_query::rule::statement::{Reach, derives_entities};
 use dialog_query::session::Quarantine;
 use dialog_query::type_system::Type as Kind;
@@ -83,8 +83,8 @@ use dialog_common::Blake3Hash;
 // rule types themselves; this module re-uses them for its selectors,
 // caches, and dispatch probing.
 pub(crate) use dialog_query::rule::statement::{
-    conclusion_attr, derives_attr, head_entities, on_attr, quarantined_attr, reads_attr,
-    source_attr,
+    conclusion_attr, derives_attr, head_entities, invalid_attr, on_attr, quarantined_attr,
+    reads_attr, source_attr,
 };
 
 /// Whether facts of `the` are rule facts: every `dialog.rule/*` attribute
@@ -126,7 +126,7 @@ impl Statement for Transient {
             transient_attr(),
             self.0,
             Value::Boolean(true),
-            dialog_corpus::Pick::All,
+            dialog_corpus::Cardinality::Many,
         );
     }
 
@@ -424,26 +424,37 @@ fn ancestor_rules(conclusion: ConceptDescriptor, parent: ConceptDescriptor) -> V
     vec![base, step]
 }
 
-/// Assemble a record-projection rule: scan the revision entity's
-/// `dialog.db/revision` fact into `?record`, then apply `formula` to
-/// project its fields. The formula derives `?this` from the record's
-/// own contents, so sharing the variable with the scan's entity makes
-/// the join reject a record replayed at another revision entity.
+/// Assemble a record-projection rule: scan a `dialog.db/revision` fact
+/// into `?record`, then apply `formula` to project its fields.
+///
+/// The formula derives `?this` from the record's own contents, and
+/// `dialog/revision-slot` gives the entities that revision's record may
+/// be stored at (`revision:…`, and the `did:key:…` an older release
+/// wrote it under). The scan reads at one of those, so a record replayed
+/// at another entity joins nothing, and a record an older release wrote
+/// projects under the revision's current name. Asked of one revision,
+/// the rule is the two lookups; asked of none, it is one scan of the
+/// attribute.
 fn projection_rule(conclusion: ConceptDescriptor, formula: FormulaQuery) -> DeductiveRule {
+    let slot: FormulaQuery = RevisionSlotQuery {
+        of: Term::var("this"),
+        is: Term::var("at"),
+    }
+    .into();
     let scan: Premise = AttributeQuery::new(
         Term::Constant(Value::Symbol(
             REVISION_ATTRIBUTE
                 .parse()
                 .expect("the revision attribute is valid"),
         )),
-        Term::var("this"),
+        Term::var("at"),
         Term::<Any>::typed_var("record", Kind::from(dialog_query::Type::Record)),
         Term::blank(),
         Some(Cardinality::One),
     )
     .into();
 
-    DeductiveRule::new(conclusion, vec![scan, formula.into()])
+    DeductiveRule::new(conclusion, vec![slot.into(), scan, formula.into()])
         .expect("the revision projection rule compiles")
 }
 
@@ -958,7 +969,7 @@ pub(crate) fn assemble(
 
 /// The head of `rule` deriving the relation indexed by `on`, if it has
 /// one: the head concluding that relation's attribute concept, whatever
-/// type or pick the reader declares over it.
+/// type or cardinality the reader declares over it.
 pub(crate) fn head_onto(
     rule: &DeductiveRule,
     on: &Entity,

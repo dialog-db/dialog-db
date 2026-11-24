@@ -291,7 +291,7 @@ impl<'a> Generator<'a> {
                 let the = descriptor[*field]["the"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("the space has no {concept}.{field}"))?;
-                let op = if descriptor[*field]["pick"].as_str() == Some("all:") {
+                let op = if descriptor[*field]["cardinality"].as_str() == Some("many") {
                     Op::Add
                 } else {
                     Op::Replace

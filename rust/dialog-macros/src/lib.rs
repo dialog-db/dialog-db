@@ -298,8 +298,8 @@ pub fn derive_formula(input: TokenStream) -> TokenStream {
 ///
 /// # Attributes
 ///
-/// - `#[pick(all)]` - The pick the attribute is read under: `last` (the default),
-///   `all`, `max` or `min`
+/// - `#[cardinality(many)]` - The attribute's cardinality: `one` (the default)
+///   or `many`
 /// - `#[domain(custom)]` or `#[domain("io.gozala")]` - Override the default domain
 ///   (`#[namespace(...)]` is accepted as a legacy alias)
 ///
@@ -319,7 +319,7 @@ pub fn derive_formula(input: TokenStream) -> TokenStream {
 ///     /// Tags associated with an employee
 ///     #[derive(Clone, PartialEq)]
 ///     // #[derive(Attribute, Clone, PartialEq)]
-///     // #[pick(all)]
+///     // #[cardinality(many)]
 ///     pub struct Tag(pub String);
 /// }
 /// ```

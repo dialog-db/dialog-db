@@ -70,7 +70,7 @@ use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_search_tree::nodes;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
@@ -96,7 +96,7 @@ use dialog_query::concept::query::fixpoint::{Continuation, InMemoryAnswerTable};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output as _, Restriction};
 use dialog_query::source::SelectRules;
-use dialog_search_tree::Change;
+use dialog_search_tree::{Change, KeyRanges};
 use dialog_storage::Blake3Hash;
 use futures_util::stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
@@ -105,6 +105,9 @@ use super::session::{Composite, QueryEnv, QueryLayer};
 use crate::repository::archive::erased;
 use crate::repository::source::Source;
 use crate::{Branch, Ephemeral, Index, RemoteSite, Revision, Stack};
+
+mod kept;
+use kept::Kept;
 
 /// How many touched entities a maintained poll re-derives at once.
 /// Measured on the catch-up soak's hundred-entity poll (#646): a
@@ -118,13 +121,20 @@ const MAINTAIN_WINDOW: usize = 16;
 /// while the evaluation streams.
 #[derive(Clone, Debug, Default)]
 pub struct Demand {
-    /// Ranges read by fact scans: the query's data demand.
-    facts: Arc<Mutex<Ranges>>,
-    /// Ranges read by rule-discovery scans (`dialog.rule/*`). Kept
-    /// apart because a change here can install a rule, which can
+    /// Every range read: by fact scans (the query's data demand) and by
+    /// rule-discovery scans alike. Kept sorted and disjoint as ranges are
+    /// recorded, behind a shared handle a poll borrows
+    /// ([`Demand::snapshot`]): the scope of a poll's diff is the cover as
+    /// it stands, with nothing copied, merged or dropped, and each test
+    /// against it is one search.
+    all: Arc<Mutex<Arc<Ranges>>>,
+    /// Ranges read by rule-discovery scans (`dialog.rule/*`), again on
+    /// their own because a change here can install a rule, which can
     /// affect any row — it invalidates the whole result, not one
-    /// entity's slice.
-    rules: Arc<Mutex<Ranges>>,
+    /// entity's slice. A change is checked against these first; one
+    /// that misses them and lands in [`all`](Self::all) is a fact
+    /// change.
+    rules: Arc<Mutex<Arc<Ranges>>>,
     /// The format the recorded ranges are keyed under: the manifest of
     /// the tree the evaluation read. `None` until something is recorded.
     /// Keys checked against the cover are built under it.
@@ -183,50 +193,28 @@ fn selects_head(selector: &Selector<Constrained>, metadata: &BTreeSet<Entity>) -
     }
 }
 
-/// Insert a range into a cover, merging overlaps: the cover stays a
-/// sorted list of disjoint intervals, so it cannot grow beyond the
-/// number of genuinely distinct demanded regions no matter how many
-/// (nested, repeated) selectors record into it.
-/// Disjoint, sorted ranges, keyed by start: the predecessor of a key
-/// is the one range that can contain it, so recording and checking a
-/// range cost a lookup each, however many an evaluation records.
-type Ranges = BTreeMap<Key, Key>;
+/// Disjoint, sorted ranges, merged as they are recorded, so a cover
+/// cannot grow beyond the number of genuinely distinct demanded regions
+/// no matter how many (nested, repeated) selectors record into it.
+/// Recording and checking a range cost a search each, however many an
+/// evaluation records, and a range the cover holds already changes
+/// nothing.
+type Ranges = KeyRanges<Key>;
 
-fn record_range(ranges: &Mutex<Ranges>, range: RangeInclusive<Key>) {
-    merge_range(&mut ranges.lock().expect("demand lock"), range);
+/// Record `range` into a cover. A poll's snapshot of the cover is
+/// dropped before anything records again, so the shared set is written
+/// in place; were one still held, the set would be copied first and the
+/// snapshot left as it was taken.
+fn record_range(ranges: &Mutex<Arc<Ranges>>, range: RangeInclusive<Key>) {
+    let mut ranges = ranges.lock().expect("demand lock");
+    if ranges.contains_range(&range) {
+        return;
+    }
+    Arc::make_mut(&mut ranges).insert(range);
 }
 
-/// Add `range` to `ranges`, merged with every range it overlaps.
-fn merge_range(ranges: &mut Ranges, range: RangeInclusive<Key>) {
-    let (mut start, mut end) = range.into_inner();
-    // The range starting at or before the new one may reach into it.
-    if let Some((existing_start, existing_end)) = ranges.range(..=start.clone()).next_back()
-        && *existing_end >= start
-    {
-        start = existing_start.clone();
-        end = end.max(existing_end.clone());
-        ranges.remove(&start);
-    }
-    // Every range starting inside the new one is absorbed.
-    let absorbed: Vec<Key> = ranges
-        .range(start.clone()..=end.clone())
-        .map(|(existing_start, _)| existing_start.clone())
-        .collect();
-    for existing_start in absorbed {
-        if let Some(existing_end) = ranges.remove(&existing_start) {
-            end = end.max(existing_end);
-        }
-    }
-    ranges.insert(start, end);
-}
-
-fn covers_key(ranges: &Mutex<Ranges>, key: &Key) -> bool {
-    ranges
-        .lock()
-        .expect("demand lock")
-        .range(..=key.clone())
-        .next_back()
-        .is_some_and(|(_, end)| end >= key)
+fn covers_key(ranges: &Mutex<Arc<Ranges>>, key: &Key) -> bool {
+    ranges.lock().expect("demand lock").contains(key.as_ref())
 }
 
 impl Demand {
@@ -251,7 +239,7 @@ impl Demand {
         manifest: &dialog_search_tree::Manifest,
     ) {
         self.keyed_under(manifest);
-        record_range(&self.facts, selector_range(selector, manifest));
+        record_range(&self.all, selector_range(selector, manifest));
         let metadata = self.metadata.lock().expect("demand metadata lock");
         if selects_head(selector, &metadata) {
             self.head.store(true, Ordering::Relaxed);
@@ -278,7 +266,9 @@ impl Demand {
         manifest: &dialog_search_tree::Manifest,
     ) {
         self.keyed_under(manifest);
-        record_range(&self.rules, selector_range(selector, manifest));
+        let range = selector_range(selector, manifest);
+        record_range(&self.all, range.clone());
+        record_range(&self.rules, range);
     }
 
     /// Record rule-discovery ranges already built under `manifest`: what
@@ -289,9 +279,9 @@ impl Demand {
         ranges: &[RangeInclusive<Key>],
     ) {
         self.keyed_under(manifest);
-        let mut rules = self.rules.lock().expect("demand lock");
         for range in ranges {
-            merge_range(&mut rules, range.clone());
+            record_range(&self.all, range.clone());
+            record_range(&self.rules, range.clone());
         }
     }
 
@@ -318,41 +308,38 @@ impl Demand {
 
     /// Whether the key falls inside any recorded range.
     pub fn covers(&self, key: &Key) -> bool {
-        self.covers_facts(key) || self.covers_rules(key)
-    }
-
-    fn covers_facts(&self, key: &Key) -> bool {
-        covers_key(&self.facts, key)
+        covers_key(&self.all, key)
     }
 
     fn covers_rules(&self, key: &Key) -> bool {
         covers_key(&self.rules, key)
     }
 
-    /// A snapshot of every recorded range (facts and rules): the
-    /// scope a cover-gated tree diff walks.
+    /// The cover as it stands, and its rule-discovery ranges, each sorted
+    /// and disjoint: the first is the scope a cover-gated tree diff walks.
+    /// Taking them shares the sets, copying no range, so a poll whose
+    /// evaluations recorded nothing new does no work in the size of its
+    /// cover to build its scope, or to drop it.
+    pub(crate) fn snapshot(&self) -> (Arc<Ranges>, Arc<Ranges>) {
+        (
+            self.all.lock().expect("demand lock").clone(),
+            self.rules.lock().expect("demand lock").clone(),
+        )
+    }
+
+    /// Every recorded range (facts and rules), sorted and disjoint.
+    #[cfg(test)]
     pub(crate) fn ranges(&self) -> Vec<RangeInclusive<Key>> {
-        let mut ranges: Vec<RangeInclusive<Key>> = self
-            .facts
-            .lock()
-            .expect("demand lock")
+        self.snapshot()
+            .0
             .iter()
             .map(|(start, end)| start.clone()..=end.clone())
-            .collect();
-        ranges.extend(
-            self.rules
-                .lock()
-                .expect("demand lock")
-                .iter()
-                .map(|(start, end)| start.clone()..=end.clone()),
-        );
-        ranges
+            .collect()
     }
 
     /// Number of distinct recorded ranges.
     pub fn len(&self) -> usize {
-        self.facts.lock().expect("demand lock").len()
-            + self.rules.lock().expect("demand lock").len()
+        self.all.lock().expect("demand lock").len()
     }
 
     /// Whether nothing was demanded.
@@ -414,8 +401,8 @@ pub struct Subscription<Q: Application> {
     /// The demand cover recorded during the last evaluation.
     demand: Demand,
     /// The last evaluation's full result, retained to compute the
-    /// next delta.
-    results: Vec<Q::Conclusion>,
+    /// next delta, indexed by the entity each row is about.
+    results: Kept<Q::Conclusion>,
     /// The retained fixpoint answer table when the subscribed
     /// concept is recursive: additions extend it semi-naively;
     /// recomputes rebuild into it.
@@ -480,7 +467,7 @@ impl<Q: Application> Subscription<Q> {
             memory_sequences: vec![0; layers],
             durable_heads: Vec::new(),
             demand: Demand::new(),
-            results: Vec::new(),
+            results: Kept::default(),
             fixpoint: Arc::new(Mutex::new(None)),
             initialized: false,
             recomputes: 0,
@@ -521,7 +508,9 @@ fn touched_by(demand: &Demand, instants: Vec<crate::Instant>) -> Touched {
                 if keys.iter().any(|key| demand.covers_rules(key)) {
                     return Touched::Rules;
                 }
-                if !keys.iter().any(|key| demand.covers_facts(key)) {
+                // A key outside the rule ranges is a fact change if it is
+                // in the cover at all.
+                if !keys.iter().any(|key| demand.covers(key)) {
                     continue;
                 }
                 if !seen.insert((
@@ -557,7 +546,7 @@ fn touched_by(demand: &Demand, instants: Vec<crate::Instant>) -> Touched {
 /// single-valued, every claim the cell holds now, read through `env`,
 /// is asserted, and every claim it held before, the same less the
 /// raw assertions plus the raw retractions, is retracted. A claim the
-/// move left in place lands on both sides, since which claim the pick
+/// move left in place lands on both sides, since which claim the read
 /// elects may have changed either way; re-derivation settles it. A
 /// cell of an attribute read as many-valued is left as the moves
 /// report it: every claim is read, so the moves are the change.
@@ -696,6 +685,16 @@ type EvaluationFuture<'a, T> =
 #[cfg(target_arch = "wasm32")]
 type EvaluationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, EvaluationError>> + 'a>>;
 
+/// Where everything a subscription reads stands at one moment
+/// ([`Subscription::stamp`]).
+#[derive(Clone, Debug, PartialEq)]
+struct Stamp {
+    revision: Option<Revision>,
+    overlay: u64,
+    memories: Vec<u64>,
+    durables: Vec<Option<Revision>>,
+}
+
 /// The index root a revision pins — `None` for an unborn branch,
 /// which has no tree at all.
 fn tree_hash(revision: &Option<Revision>) -> Option<Blake3Hash> {
@@ -709,7 +708,7 @@ where
 {
     /// The retained result of the last evaluation.
     pub fn results(&self) -> &[Q::Conclusion] {
-        &self.results
+        self.results.rows()
     }
 
     /// The demand cover recorded by the last evaluation.
@@ -729,6 +728,13 @@ where
     /// whole query.
     pub fn maintenances(&self) -> usize {
         self.maintenances
+    }
+
+    /// How many kept rows the comparisons of re-derived entities and
+    /// recomputes have read so far.
+    #[cfg(test)]
+    fn kept_reads(&self) -> usize {
+        self.results.reads.load(Ordering::Relaxed)
     }
 
     /// Re-derive at most `window` touched entities at once; 1 is the
@@ -848,21 +854,7 @@ where
         let results = self.evaluate(env, &demand, &self.query).await?;
         self.recomputes += 1;
 
-        let delta = Delta {
-            asserted: results
-                .iter()
-                .filter(|row| !self.results.contains(row))
-                .cloned()
-                .collect(),
-            retracted: self
-                .results
-                .iter()
-                .filter(|row| !results.contains(row))
-                .cloned()
-                .collect(),
-        };
-
-        self.results = results;
+        let delta = self.results.replace(results);
         self.demand = demand;
         self.revision = current;
         self.overlay_sequence = sequence;
@@ -870,6 +862,21 @@ where
         self.durable_heads = durables;
         self.initialized = true;
         Ok(Some(delta))
+    }
+
+    /// Where everything this subscription reads stands now: the
+    /// branch's head, its session overlay's sequence, and through a
+    /// stack each memory layer's sequence and each durable layer's head.
+    /// A poll pins what it reads at what it finds at its start, so two
+    /// polls that begin at one stamp, with the stamp unmoved after both,
+    /// read one state.
+    fn stamp(&self) -> Stamp {
+        Stamp {
+            revision: self.branch.revision(),
+            overlay: self.branch.overlay().revision().sequence,
+            memories: self.memory_sequences_now(),
+            durables: self.durable_heads_now(),
+        }
     }
 
     /// The memory layers the subscription reads through its stack, by
@@ -1019,10 +1026,14 @@ where
         if pinned == target {
             return Ok(Touched::Nothing);
         }
-        let scope = self.demand.ranges();
-        if scope.is_empty() {
+        // The cover as it stands, shared: the diff borrows its sets, so
+        // a poll builds, walks with and drops a scope of any size at the
+        // cost of a search per test against it.
+        let (all, rules) = self.demand.snapshot();
+        if all.is_empty() {
             return Ok(Touched::Nothing);
         }
+        let cover = [&*all];
 
         // Read exactly as a select does: a pull replicates tree nodes
         // along changed paths but never spilled value blocks, so the first
@@ -1045,7 +1056,7 @@ where
         let previous = index_at(pinned);
         let next = index_at(target);
 
-        let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
+        let changes = previous.differentiate_covered(&next, &cover, &storage, &storage);
         let mut changes = Box::pin(changes);
         let mut subjects = BTreeSet::new();
         let mut asserted = Vec::new();
@@ -1062,7 +1073,7 @@ where
                 Change::Add(entry) => entry,
                 Change::Remove(entry) => entry,
             };
-            if self.demand.covers_rules(&entry.key) {
+            if rules.contains(entry.key.as_ref()) {
                 return Ok(Touched::Rules);
             }
             // An entry arriving with a datum became readable; an
@@ -1189,10 +1200,30 @@ where
                 let query_env: QueryEnv<'a> =
                     QueryEnv::over(self.composite(), overlay.clone(), env)
                         .with_demand(self.demand.clone());
-                let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
+                // A concept of one field that picks moves for an entity
+                // exactly when the relation it picks from does, so what
+                // a change touches is discovered over that relation, one
+                // rule nearer the facts, and the concept's own rules are
+                // not resolved. A relation its own cycle derives is left
+                // to the concept's selecting rule.
+                let picked = match concept.picked_relation() {
+                    Some(relation) => {
+                        let rules =
+                            Provider::<SelectRules>::execute(&query_env, relation.clone()).await?;
+                        rules.recursion().is_none().then_some((relation, rules))
+                    }
+                    None => None,
+                };
+                let (concept, rules) = match picked {
+                    Some(picked) => picked,
+                    None => (
+                        concept,
+                        Provider::<SelectRules>::execute(&query_env, concept.clone()).await?,
+                    ),
+                };
                 // The poll reports the rows that moved. What a rule
                 // reads of a single-valued attribute is the one claim
-                // its pick elects from the cell, so a row moving can
+                // the read elects from the cell, so a row moving can
                 // change what is read of the cell's other claims: a
                 // session value outvoting a committed one, a retracted
                 // winner uncovering the claim beneath it. For every
@@ -1217,21 +1248,7 @@ where
                             Arc::new(retracted.to_vec()),
                         )
                         .await?;
-                    let delta = Delta {
-                        asserted: results
-                            .iter()
-                            .filter(|row| !self.results.contains(row))
-                            .cloned()
-                            .collect(),
-                        retracted: self
-                            .results
-                            .iter()
-                            .filter(|row| !results.contains(row))
-                            .cloned()
-                            .collect(),
-                    };
-                    self.results = results;
-                    return Ok(Some(delta));
+                    return Ok(Some(self.results.replace(results)));
                 }
                 // The state the changes were applied to: the pinned
                 // revision under the session overlay as it stood at
@@ -1305,28 +1322,13 @@ where
 
             // Over-delete every retained row of each entity, then put
             // back what it re-derived, in entity order, exactly as a
-            // recompute would read.
+            // recompute would read. Each entity is compared with the rows
+            // kept for it alone.
             let mut asserted = Vec::new();
             let mut retracted = Vec::new();
             for (entity, after) in rederived {
-                let before: Vec<Q::Conclusion> = self
-                    .results
-                    .iter()
-                    .filter(|row| row.this() == entity)
-                    .cloned()
-                    .collect();
-                for row in &after {
-                    if !before.contains(row) {
-                        asserted.push(row.clone());
-                    }
-                }
-                for row in &before {
-                    if !after.contains(row) {
-                        retracted.push(row.clone());
-                    }
-                }
-                self.results.retain(|row| row.this() != entity);
-                self.results.extend(after);
+                self.results
+                    .rederive(entity, after, &mut asserted, &mut retracted);
             }
             Ok(Some(Delta {
                 asserted,
@@ -2945,6 +2947,206 @@ mod tests {
         Ok(())
     }
 
+    /// The scope a cover-gated diff walks is the facts' and the rules'
+    /// ranges merged into one sorted, disjoint list, as recording every
+    /// range into one cover would leave it, whether the two interleave,
+    /// overlap, nest, touch or keep to themselves.
+    #[dialog_common::test]
+    fn it_merges_the_fact_and_rule_ranges_into_one_cover() {
+        use dialog_corpus::Key;
+        let key = |at: u8| Key::from(vec![at]);
+        type Cover = &'static [(u8, u8)];
+        let cases: [(Cover, Cover); 6] = [
+            (&[], &[]),
+            (&[(1, 2), (5, 6)], &[]),
+            (&[], &[(3, 4)]),
+            (&[(1, 2), (7, 9)], &[(3, 4), (10, 11)]),
+            (&[(1, 5), (8, 9)], &[(2, 3), (4, 8), (12, 12)]),
+            (&[(2, 4)], &[(1, 2), (4, 6)]),
+        ];
+        for (facts, rules) in cases {
+            let demand = super::Demand::new();
+            let mut expected = super::Ranges::new();
+            for (start, end) in facts {
+                super::record_range(&demand.all, key(*start)..=key(*end));
+                expected.insert(key(*start)..=key(*end));
+            }
+            for (start, end) in rules {
+                demand.record_rule_ranges(
+                    &dialog_search_tree::Manifest::default(),
+                    &[key(*start)..=key(*end)],
+                );
+                expected.insert(key(*start)..=key(*end));
+            }
+            let expected: Vec<_> = expected
+                .iter()
+                .map(|(start, end)| start.clone()..=end.clone())
+                .collect();
+            assert_eq!(
+                demand.ranges(),
+                expected,
+                "facts {facts:?}, rules {rules:?}"
+            );
+        }
+    }
+
+    /// A maintained poll compares each entity it re-derived with the rows
+    /// kept for that entity, and reads no other kept row: renaming one
+    /// person among many reads that person's row, and renaming a tenth of
+    /// them reads their rows, not a tenth of the people times every row.
+    /// The maintained answer still reads as a fresh evaluation does.
+    #[dialog_common::test]
+    async fn it_compares_a_rederived_entity_with_its_own_rows() -> anyhow::Result<()> {
+        const PEOPLE: usize = 400;
+        const TOUCHED: usize = 40;
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let people = (0..PEOPLE)
+            .map(|index| format!("id:person-{index:04}").parse())
+            .collect::<Result<Vec<Entity>, _>>()?;
+        let mut seed = branch.transaction();
+        for (index, person) in people.iter().enumerate() {
+            seed = seed.assert(
+                the!("person/name")
+                    .of(person.clone())
+                    .is(format!("name-{index}")),
+            );
+        }
+        seed.commit().publish().perform(&operator).await?;
+
+        let mut subscription = branch.subscribe(people_query());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(initial.asserted.len(), PEOPLE);
+
+        // Each round renames the first `touched` people from the name they
+        // hold to one no round gave them before, so every touched person's
+        // row changes: one row retracted and one asserted per person.
+        let mut names: Vec<String> = (0..PEOPLE).map(|index| format!("name-{index}")).collect();
+        let mut renamed = 0;
+        for touched in [1, TOUCHED] {
+            let mut changes = branch.transaction();
+            for (index, person) in people.iter().enumerate().take(touched) {
+                let name = format!("renamed-{renamed}-{index}");
+                changes = changes
+                    .retract(
+                        the!("person/name")
+                            .of(person.clone())
+                            .is(names[index].clone()),
+                    )
+                    .assert(the!("person/name").of(person.clone()).is(name.clone()));
+                names[index] = name;
+            }
+            changes.commit().publish().perform(&operator).await?;
+
+            let reads = subscription.kept_reads();
+            let delta = subscription.poll(&operator).await?.expect("renamed");
+            let reads = subscription.kept_reads() - reads;
+            renamed += 1;
+            assert_eq!(subscription.maintenances(), renamed, "maintained");
+            assert_eq!(subscription.recomputes(), 1, "never recomputed");
+            assert_eq!(delta.asserted.len(), touched);
+            assert_eq!(delta.retracted.len(), touched);
+            assert!(
+                reads <= 2 * touched,
+                "comparing {touched} re-derived entities must read their rows, \
+                 not every kept row: {reads} kept rows read among {PEOPLE}"
+            );
+
+            let fresh = branch
+                .query()
+                .select(people_query())
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(bindings(subscription.results()), bindings(&fresh));
+        }
+        Ok(())
+    }
+
+    /// A poll walks its diff with the cover as it stands: it builds no
+    /// scope from it, so the ranges a poll compares against or builds from
+    /// do not grow with the cover. One rename under a cover of a hundred,
+    /// a thousand and ten thousand ranges (the people's own, and point
+    /// ranges for entities that hold nothing, as a rule keyed by entity
+    /// records them) costs within a small constant of the same work.
+    /// Before, every poll merged the cover into a list and the diff
+    /// checked the list's order twice: 1,550, 4,160 and 23,360 ranges
+    /// compared against or built from at the three sizes. A poll now
+    /// builds from none and compares against 1,413, 2,220 and 3,440, the
+    /// steps of its binary searches.
+    #[dialog_common::test]
+    async fn it_polls_a_large_cover_as_it_polls_a_small_one() -> anyhow::Result<()> {
+        use dialog_corpus::tree::selector_range;
+        use dialog_search_tree::helpers::{scope_builds, scope_probes};
+        const PEOPLE: usize = 8;
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let people = (0..PEOPLE)
+            .map(|index| format!("id:person-{index:04}").parse())
+            .collect::<Result<Vec<Entity>, _>>()?;
+        let mut seed = branch.transaction();
+        for (index, person) in people.iter().enumerate() {
+            seed = seed.assert(
+                the!("person/name")
+                    .of(person.clone())
+                    .is(format!("name-{index}")),
+            );
+        }
+        seed.commit().publish().perform(&operator).await?;
+
+        let padding = CorpusRelation::try_from("person/padding".to_string())?;
+        let mut work = Vec::new();
+        for cover in [100usize, 1_000, 10_000] {
+            let mut subscription = branch.subscribe(people_query());
+            subscription.poll(&operator).await?.expect("initial");
+            let manifest = subscription.demand().manifest().expect("recorded");
+            let mut index = 0;
+            while subscription.demand().len() < cover {
+                let entity: Entity = format!("id:pad-{index:06}").parse()?;
+                let selector = Selector::new().the(padding.clone()).of(entity);
+                super::record_range(
+                    &subscription.demand().all,
+                    selector_range(&selector, &manifest),
+                );
+                index += 1;
+            }
+
+            let person = &people[0];
+            branch
+                .transaction()
+                .assert(
+                    the!("person/name")
+                        .of(person.clone())
+                        .is(format!("renamed-{cover}")),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            let (probes, builds) = (scope_probes(), scope_builds());
+            let delta = subscription.poll(&operator).await?.expect("renamed");
+            let built = scope_builds() - builds;
+            work.push(scope_probes() - probes + built);
+            assert_eq!(built, 0, "a poll builds no scope from its cover of {cover}");
+            assert_eq!(delta.asserted.len(), 1);
+            assert_eq!(subscription.maintenances(), 1, "maintained");
+            assert!(subscription.demand().len() >= cover);
+        }
+        let [small, _, large] = work[..] else {
+            unreachable!("three covers")
+        };
+        assert!(
+            large <= 3 * small.max(1),
+            "a poll under a cover of 10,000 ranges must cost what one under 100 \
+             does: ranges compared against or built from per poll {work:?} \
+             at 100 / 1,000 / 10,000"
+        );
+        Ok(())
+    }
+
     mod concepts {
         //! Derived concepts + attributes shared by the incremental
         //! maintenance tests below.
@@ -3091,11 +3293,11 @@ mod tests {
 
         /// An ancestor edge (`family/ancestor`) — the recursive
         /// conclusion. Every ancestor is one, so the relation is read
-        /// as a set: under the default `last` a reader outside the
-        /// recursion elects one ancestor.
+        /// as a set: under the default cardinality, one, a reader
+        /// outside the recursion elects one ancestor.
         #[derive(Attribute, Clone, PartialEq)]
         #[domain("family")]
-        #[pick(all)]
+        #[cardinality(many)]
         pub struct Ancestor(pub Entity);
 
         /// Direct parenthood.
@@ -3691,11 +3893,11 @@ mod tests {
         Ok(())
     }
 
-    /// A field listing several relations reads them as a ranked
-    /// choice over however many candidates: twenty contacts have a
-    /// phone, seven of them an email as well, and the handle is the
-    /// email where there is one and the phone otherwise. No rule says
-    /// so; the field does, and nothing is negated.
+    /// A choice between relations over however many candidates: twenty
+    /// contacts have a phone, seven of them an email as well, and the
+    /// handle is the email where there is one and the phone otherwise.
+    /// Two rules say so, the second reading the phone `unless` an email
+    /// is there.
     #[dialog_common::test]
     async fn it_ranks_many_candidates_by_relation() -> anyhow::Result<()> {
         use concepts::{Email, Phone};
@@ -3705,6 +3907,9 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let mut transaction = branch.transaction();
+        for rule in handle_rules() {
+            transaction = with_rule(transaction, &rule);
+        }
         let mut expected: Vec<(Entity, String)> = Vec::new();
         for index in 0..20 {
             let contact: Entity = format!("id:contact-{index}").parse()?;
@@ -3735,12 +3940,47 @@ mod tests {
         Ok(())
     }
 
-    /// `contact/handle` as the notation would declare it: the email,
-    /// else the phone.
+    /// `contact/handle(c) := e :- comm/email(c) = e` and
+    /// `contact/handle(c) := p :- comm/phone(c) = p, unless
+    /// comm/email(c)`: the email, else the phone.
+    fn handle_rules() -> Vec<dialog_query::DeductiveRule> {
+        use dialog_query::rule::DeductiveRuleDescriptor;
+        let handle = serde_json::json!({ "with": {
+            "handle": { "the": "contact/handle", "as": "text:" }
+        }});
+        let read = |the: &str, binds: Option<&str>| {
+            let mut field = serde_json::json!({ "this": { "?": { "name": "this" } } });
+            if let Some(name) = binds {
+                field["value"] = serde_json::json!({ "?": { "name": name } });
+            }
+            serde_json::json!({
+                "assert": { "with": { "value": { "the": the, "as": "text:" } } },
+                "where": field
+            })
+        };
+        let rule = |json: serde_json::Value| -> dialog_query::DeductiveRule {
+            let descriptor: DeductiveRuleDescriptor =
+                serde_json::from_value(json).expect("descriptor parses");
+            descriptor.compile().expect("rule compiles")
+        };
+        vec![
+            rule(serde_json::json!({
+                "deduce": handle,
+                "when": [read("comm/email", Some("handle"))]
+            })),
+            rule(serde_json::json!({
+                "deduce": handle,
+                "when": [read("comm/phone", Some("handle"))],
+                "unless": [read("comm/email", None)]
+            })),
+        ]
+    }
+
+    /// `contact/handle`: the email, else the phone.
     fn handle_query() -> ConceptQuery {
         concept_query(
             serde_json::json!({ "with": {
-                "handle": { "the": ["comm/email", "comm/phone"], "as": "text:" }
+                "handle": { "the": "contact/handle", "as": "text:" }
             }}),
             &["handle"],
         )
@@ -3758,13 +3998,13 @@ mod tests {
             .collect()
     }
 
-    /// A ranked choice flips as its better relation fills in: Bob's
-    /// handle is his phone until his email arrives, and then it is
-    /// the email, the phone row retracted and the email row asserted
+    /// A choice between relations flips as its better relation fills
+    /// in: Bob's handle is his phone until his email arrives, and then
+    /// it is the email, the phone row retracted and the email row asserted
     /// in one delta. The flip is maintained for the touched entity,
     /// not recomputed.
     #[dialog_common::test]
-    async fn it_maintains_a_ranked_choice_flip() -> anyhow::Result<()> {
+    async fn it_maintains_a_choice_flip() -> anyhow::Result<()> {
         use concepts::{Email, Phone};
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3772,8 +4012,11 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let bob = Entity::new()?;
-        branch
-            .transaction()
+        let mut transaction = branch.transaction();
+        for rule in handle_rules() {
+            transaction = with_rule(transaction, &rule);
+        }
+        transaction
             .assert(Phone::of(bob.clone()).is("555-0100"))
             .commit()
             .publish()
@@ -4080,16 +4323,17 @@ mod tests {
     /// The relation `dept_salary_rule` derives into, read as the set.
     fn dept_salary() -> ConceptDescriptor {
         serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "payroll/salary", "as": "natural:", "pick": "all:" }
+            "salary": { "the": "payroll/salary", "as": "natural:", "cardinality": "many" }
         }}))
         .expect("descriptor parses")
     }
 
-    /// `payroll/salary` read under `max`: a department's highest salary.
+    /// `payroll/salary` read under cardinality one: a department's
+    /// newest salary.
     fn dept_top() -> ConceptQuery {
         concept_query(
             serde_json::json!({ "with": {
-                "top": { "the": "payroll/salary", "as": "natural:", "pick": "max:" }
+                "top": { "the": "payroll/salary", "as": "natural:" }
             }}),
             &["top"],
         )
@@ -4127,9 +4371,10 @@ mod tests {
     /// wins retracts the group's old elected row and asserts the new
     /// one; a fact for a fresh group asserts a new row. The election is
     /// the subscription's read, not a rule's: the rule derives one
-    /// candidate per member, and `max` chooses among them. It is per
-    /// group, the row's entity, so the group is maintained like any
-    /// other head: its candidates re-derived and the pick taken again.
+    /// candidate per member, and the cardinality-one read takes the
+    /// newest. It is per group, the row's entity, so the group is
+    /// maintained like any other head: its candidates re-derived and the
+    /// election taken again.
     #[dialog_common::test]
     async fn it_updates_an_electing_subscription_on_asserts() -> anyhow::Result<()> {
         use concepts::{Dept, Salary, Staffed};
@@ -4161,7 +4406,7 @@ mod tests {
         assert!(initial.retracted.is_empty());
         assert_eq!(subscription.recomputes(), 1);
 
-        // A second, higher candidate: the old elected row is retracted
+        // A second, newer candidate: the old elected row is retracted
         // and the new one asserted in the same delta.
         branch
             .transaction()
@@ -4243,8 +4488,15 @@ mod tests {
                 dept: Dept(dept_a.clone()),
                 salary: Salary(100),
             })
-            .assert(bob_row.clone())
             .assert(carol_row.clone())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        // Bob joins later, so his is the newest candidate of dept-a.
+        branch
+            .transaction()
+            .assert(bob_row.clone())
             .commit()
             .publish()
             .perform(&operator)
@@ -4365,13 +4617,14 @@ mod tests {
         Ok(())
     }
 
-    /// Optional elections across polls: a department's `top` bonus is
+    /// Optional elections across polls: a department's newest bonus is
     /// absent while no member has a bonus, present once the first
     /// arrives, and absent again when it is retracted. The member
     /// read, over a relation every member contributes to, keeps the
     /// department's row throughout.
     #[dialog_common::test]
-    async fn it_transitions_optional_max_between_present_and_absent() -> anyhow::Result<()> {
+    async fn it_transitions_an_optional_election_between_present_and_absent() -> anyhow::Result<()>
+    {
         use concepts::{Bonus, Dept};
 
         let (operator, profile) = test_session_with_peer().await;
@@ -4391,10 +4644,10 @@ mod tests {
             "bonus": { "the": "staff/bonus", "as": "natural:" }
         }}))?;
         let members: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "member": { "the": "payroll/member", "as": "entity:", "pick": "all:" }
+            "member": { "the": "payroll/member", "as": "entity:", "cardinality": "many" }
         }}))?;
         let bonuses: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "bonus": { "the": "payroll/bonus", "as": "natural:", "pick": "all:" }
+            "bonus": { "the": "payroll/bonus", "as": "natural:", "cardinality": "many" }
         }}))?;
         let member_rule = concept_rule(
             &members,
@@ -4420,9 +4673,9 @@ mod tests {
 
         let stats = concept_query(
             serde_json::json!({ "with": {
-                "member": { "the": "payroll/member", "as": "entity:", "pick": "all:" },
+                "member": { "the": "payroll/member", "as": "entity:", "cardinality": "many" },
                 "top": {
-                    "the": "payroll/bonus", "as": "natural:", "pick": "max:",
+                    "the": "payroll/bonus", "as": "natural:",
                     "optional": true
                 }
             }}),
@@ -4488,8 +4741,8 @@ mod tests {
     }
 
     /// Composition depth 2 under subscriptions: a deductive rule reads
-    /// a `max` attribute over a derived relation, so a consumer concept
-    /// projects the department's top salary, and a standing query over
+    /// a cardinality-one attribute over a derived relation, so a consumer
+    /// concept projects the department's newest salary, and a standing query over
     /// the consumer updates when the base facts change, through both
     /// the election and the projection.
     #[dialog_common::test]
@@ -4571,7 +4824,8 @@ mod tests {
     /// through change in both directions. A child department inherits
     /// its parent's salaries through a step rule reading the relation
     /// it derives into, so the component yields each department's
-    /// candidate set and the subscription's `max` chooses at the exit:
+    /// candidate set and the subscription's cardinality-one read chooses
+    /// the newest at the exit:
     /// a new winner replaces both departments' elected rows, and
     /// retracting it hands both back to the runner-up.
     #[dialog_common::test]
@@ -4828,7 +5082,7 @@ mod tests {
                 "person/name".parse().expect("attribute"),
                 here.clone(),
                 Value::String(value.into()),
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             );
             changes
         };
@@ -5086,7 +5340,7 @@ mod tests {
                 "sync/status".parse()?,
                 here.clone(),
                 Value::String(status.into()),
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             );
             branch.overlay().assert(changes)?;
             let site = Entity::new()?;
@@ -5166,7 +5420,7 @@ mod tests {
                 "person/name".parse().expect("attribute"),
                 of.clone(),
                 Value::String(is.into()),
-                dialog_corpus::Pick::Last,
+                dialog_corpus::Cardinality::One,
             );
             changes
         };
@@ -5699,3 +5953,6 @@ mod tests {
 
 #[cfg(test)]
 mod invariants;
+
+mod fold;
+pub use fold::FoldSubscription;

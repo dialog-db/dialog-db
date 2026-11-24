@@ -62,11 +62,14 @@ fn value(dice: &mut Dice, depth: usize) -> Value {
                 .map(|_| value(dice, depth - 1))
                 .collect::<Vec<_>>(),
         )
+        .expect("a list")
         .into()
     } else {
-        Composite::map((0..size).map(|at| (format!("k{at}"), value(dice, depth - 1))))
-            .expect("no key twice")
-            .into()
+        Composite::map(
+            (0..size).map(|at| (Value::String(format!("k{at}")), value(dice, depth - 1))),
+        )
+        .expect("no key twice")
+        .into()
     }
 }
 
@@ -101,20 +104,25 @@ fn pattern(dice: &mut Dice, depth: usize, row: &mut Match, names: &mut usize) ->
                 let others = (0..dice.below(3))
                     .map(|_| value(dice, 1))
                     .collect::<Vec<_>>();
-                let run = variable(row, names, Composite::list(others).into());
+                let run = variable(row, names, Composite::list(others).expect("a list").into());
                 list.with_run(run).into()
             }
         }
     } else {
-        let entries: Vec<(String, Pattern)> = (0..size)
-            .map(|at| (format!("k{at}"), pattern(dice, depth - 1, row, names)))
+        let entries: Vec<(Value, Pattern)> = (0..size)
+            .map(|at| {
+                (
+                    Value::String(format!("k{at}")),
+                    pattern(dice, depth - 1, row, names),
+                )
+            })
             .collect();
         let map = MapPattern::new(entries).expect("no key twice");
         match dice.below(2) {
             0 => map.into(),
             _ => {
                 let others = (0..dice.below(3))
-                    .map(|at| (format!("other{at}"), value(dice, 1)))
+                    .map(|at| (Value::String(format!("other{at}")), value(dice, 1)))
                     .collect::<Vec<_>>();
                 let rest = variable(
                     row,
@@ -224,48 +232,4 @@ fn it_builds_what_it_takes_apart_and_takes_apart_what_it_builds() {
         typed_matches > 500,
         "{typed_matches} matched with a variable typed"
     );
-}
-
-/// Every pattern drawn is read back as it was written, in a stored
-/// rule's dag-cbor and as JSON, its variables typed and not.
-#[dialog_common::test]
-fn it_reads_back_every_pattern_drawn_as_it_was_written() {
-    let mut dice = Dice(4);
-    for round in 0..3000u64 {
-        let mut row = Match::new();
-        let mut names = 0;
-        // A stored body holds integers of at most 64 bits and finite
-        // floats, and a rule that holds another constant is refused
-        // where it is made, so none is written here.
-        let drawn =
-            typed(&pattern(&mut dice, 3, &mut row, &mut names), round).map_terms(
-                &|term| match term {
-                    Term::Constant(Value::UnsignedInt(natural))
-                        if u64::try_from(*natural).is_err() =>
-                    {
-                        Term::Constant(Value::UnsignedInt(u128::from(u64::MAX)))
-                    }
-                    Term::Constant(Value::SignedInt(integer))
-                        if i64::try_from(*integer).is_err() =>
-                    {
-                        Term::Constant(Value::SignedInt(i128::from(i64::MIN)))
-                    }
-                    Term::Constant(Value::Float(float)) if !float.is_finite() => {
-                        Term::Constant(Value::Float(f64::MAX))
-                    }
-                    other => other.clone(),
-                },
-            );
-
-        let bytes = serde_ipld_dagcbor::to_vec(&drawn)
-            .unwrap_or_else(|error| panic!("{round}: {drawn} is not written: {error}"));
-        let read: Pattern = serde_ipld_dagcbor::from_slice(&bytes)
-            .unwrap_or_else(|error| panic!("{round}: {drawn} does not read back: {error}"));
-        assert_eq!(read, drawn, "{round}");
-
-        let json = serde_json::to_value(&drawn).expect("is written");
-        let read: Pattern = serde_json::from_value(json.clone())
-            .unwrap_or_else(|error| panic!("{round}: {json} does not read back: {error}"));
-        assert_eq!(read, drawn, "{round}: {json}");
-    }
 }

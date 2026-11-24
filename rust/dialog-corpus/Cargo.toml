@@ -52,7 +52,6 @@ url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 dialog-common = { workspace = true, features = ["helpers"] }
-ipld-core = { workspace = true }
 dialog-search-tree = { workspace = true, features = ["helpers"] }
 anyhow = { workspace = true }
 # The integration tests and examples stand a commit in with `ArchiveDelta::flush_into`.

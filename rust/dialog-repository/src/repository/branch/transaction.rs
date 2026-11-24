@@ -7,6 +7,8 @@ mod migration;
 #[cfg(test)]
 mod oracle;
 #[cfg(test)]
+mod pick_migration;
+#[cfg(test)]
 mod quarantine;
 pub(crate) use induce::induction_ignores;
 mod query;
@@ -237,7 +239,7 @@ impl<L: Line> Transaction<L> {
     ///
     /// Each instruction is replayed as if it had been asserted or
     /// retracted on the transaction directly — `Assert` becomes an
-    /// entry under its pick, `Retract` a retraction entry —
+    /// entry under its cardinality, `Retract` a retraction entry —
     /// and the batch's asset changes are staged on the transaction.
     /// Useful for callers that build a [`Changes`] independently
     /// (e.g. a reactor accumulating effect outputs across rounds) and
@@ -377,6 +379,16 @@ pub struct TransactionCommit<L: Line> {
 }
 
 impl<L: Line> TransactionCommit<L> {
+    /// Refuse the commit when the transaction holds a statement that
+    /// cannot be written (see [`CommitError::Refused`]): checked before
+    /// anything is settled, induced or written.
+    pub(super) fn check_refused(&self) -> Result<(), CommitError> {
+        match self.changes.refused().or(self.transients.refused()) {
+            Some(refusal) => Err(CommitError::Refused(refusal.clone())),
+            None => Ok(()),
+        }
+    }
+
     /// Mint a revision even when the settled change batch leaves the
     /// indexes untouched. See [`Commit::allow_empty`](crate::Commit::allow_empty).
     pub fn allow_empty(mut self) -> Self {
@@ -424,6 +436,7 @@ impl TransactionCommit<&Snapshot> {
             + ConditionalSync
             + 'static,
     {
+        self.check_refused()?;
         let snapshot = self.line;
         // The revision the transaction opened at: what it read, and
         // what the commit builds on. A commit through the same handle

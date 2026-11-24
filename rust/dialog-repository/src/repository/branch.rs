@@ -37,6 +37,8 @@ mod claims;
 pub use claims::*;
 
 mod commit;
+#[cfg(test)]
+pub(crate) use commit::legacy;
 pub use commit::*;
 
 pub(crate) mod context;
@@ -122,10 +124,9 @@ pub use upstream::*;
 mod integration_tests;
 
 #[cfg(test)]
-mod composite_tests;
-
-#[cfg(test)]
 mod isolation_tests;
+#[cfg(test)]
+mod pattern_rule_tests;
 #[cfg(all(
     test,
     any(feature = "integration-tests", feature = "web-integration-tests")

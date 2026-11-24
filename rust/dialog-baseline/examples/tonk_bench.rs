@@ -60,7 +60,7 @@ mod native {
 
     use anyhow::Context as _;
     use dialog_capability::Subject;
-    use dialog_corpus::{Changes, Entity, Pick, Relation, Statement, Update, Value};
+    use dialog_corpus::{Cardinality, Changes, Entity, Relation, Statement, Update, Value};
     use dialog_credentials::{Credential, SignerCredential};
     use dialog_effects::credential::prelude::*;
     use dialog_effects::storage::{Directory, Location};
@@ -222,7 +222,7 @@ mod native {
     impl Statement for Command {
         fn assert(self, update: &mut impl Update) {
             for (the, of, is) in self.0 {
-                update.associate(the, of, is, Pick::Last);
+                update.associate(the, of, is, Cardinality::One);
             }
         }
 
@@ -260,8 +260,8 @@ mod native {
                 let of = self.entity(&change.of)?;
                 let is = self.value(&change.is)?;
                 match change.op {
-                    Op::Add => into.associate(the, of, is, Pick::All),
-                    Op::Replace => into.associate(the, of, is, Pick::Last),
+                    Op::Add => into.associate(the, of, is, Cardinality::Many),
+                    Op::Replace => into.associate(the, of, is, Cardinality::One),
                     Op::Retract => into.dissociate(the, of, is),
                 }
             }
@@ -641,6 +641,21 @@ mod native {
                     started.elapsed(),
                 );
                 report.count("rows/issue-detail", rows.len() as u64);
+            }
+            // `DIALOG_FRESH_DETAIL=1`: the same read, cold, by a member that
+            // has queried nothing, so no earlier query's leftovers serve it.
+            if std::env::var("DIALOG_FRESH_DETAIL").is_ok_and(|v| v == "1") {
+                let fresh = &members[2];
+                fresh.profile.caches().release(&server.did());
+                let started = Instant::now();
+                let rows = fresh
+                    .branch
+                    .select(query(activity, &[("issue", issue.clone())]))
+                    .perform(&fresh.operator)
+                    .try_vec()
+                    .await?;
+                report.time("query/issue-detail-fresh/cold", started.elapsed());
+                report.count("rows/issue-detail-fresh", rows.len() as u64);
             }
         }
 

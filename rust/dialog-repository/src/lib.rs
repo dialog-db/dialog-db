@@ -57,6 +57,7 @@ pub use stack::effect::{
     Command, Effect, EffectReport, Failure, Provider, answered_attr, failed_attr, invoked_attr,
     progress_attr, provided_attr, unhandled_attr,
 };
+pub use stack::holdings;
 pub use stack::invoke::{Attempt, Invocation, InvocationReport, MAX_RERUNS};
 pub use stack::{
     Arrivals, Backup, Durable, Layer, LayerBackup, OpenStack, OpenStackEnv, QueryHash, Stack,

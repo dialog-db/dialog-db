@@ -11,7 +11,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::query::Application as _;
 use crate::query::Output as _;
 use crate::rule::DeductiveRuleDescriptor;
-use crate::session::RuleRegistry;
+use crate::session::{Absence, RuleRegistry};
 use crate::source::test::TestEnv;
 use crate::the;
 use crate::types::Any;
@@ -26,16 +26,16 @@ fn compile(json: serde_json::Value) -> anyhow::Result<DeductiveRule> {
 }
 
 /// The `(group, role)` pairs a concept over `member/group` and
-/// `member/role` yields for `of`, with both fields read under `select`,
-/// sorted.
+/// `member/role` yields for `of`, with both fields read under the
+/// cardinality `select` names, sorted.
 async fn member_rows(
     source: &TestEnv<'_>,
     of: &Entity,
     select: &str,
 ) -> anyhow::Result<Vec<(Value, Value)>> {
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "group": { "the": "member/group", "as": "entity:", "pick": select },
-        "role": { "the": "member/role", "as": "text:", "pick": select }
+        "group": { "the": "member/group", "as": "entity:", "cardinality": select },
+        "role": { "the": "member/role", "as": "text:", "cardinality": select }
     }}))?;
     let mut terms = Parameters::new();
     terms.insert("this".into(), Term::<Any>::constant(of.clone()));
@@ -148,7 +148,7 @@ async fn a_concept_read_under_all_joins_the_attributes_a_rule_derives() -> anyho
         }
     }
     expected.sort_by_key(|pair| format!("{pair:?}"));
-    assert_eq!(member_rows(&source, &alice, "all").await?, expected);
+    assert_eq!(member_rows(&source, &alice, "many").await?, expected);
     Ok(())
 }
 
@@ -171,7 +171,7 @@ async fn a_concept_read_under_last_elects_one_value_per_attribute() -> anyhow::R
     registry.register(member_rule()?)?;
     let source = TestEnv::new(&branch, &operator, registry);
     assert_eq!(
-        member_rows(&source, &alice, "last").await?,
+        member_rows(&source, &alice, "one").await?,
         vec![(Value::Entity(g1), Value::String("viewer".into()))],
         "one row: each attribute's newest value"
     );
@@ -184,7 +184,7 @@ async fn a_concept_read_under_last_elects_one_value_per_attribute() -> anyhow::R
 /// attributes, and the per-attribute election "the moment a fact lands
 /// under one of those attributes". Storing a `member/role` of *bob*
 /// says nothing about alice, so alice's rows must not change. Under
-/// the default pick, `last`, they do: the covering rule yields the
+/// the default cardinality, one, they do: the covering rule yields the
 /// body's two rows (no election runs on that path for a multi-field
 /// concept), and the election yields one row, the right one under
 /// attribute heads (see `a_concept_read_under_last_elects_one_value_per_attribute`).
@@ -202,7 +202,7 @@ async fn a_fact_about_another_entity_does_not_change_a_derived_concepts_rows_und
 
     let before = {
         let source = TestEnv::new(&branch, &operator, registry.clone());
-        member_rows(&source, &alice, "last").await?
+        member_rows(&source, &alice, "one").await?
     };
     branch
         .transaction()
@@ -213,7 +213,7 @@ async fn a_fact_about_another_entity_does_not_change_a_derived_concepts_rows_und
         .await?;
     let after = {
         let source = TestEnv::new(&branch, &operator, registry);
-        member_rows(&source, &alice, "last").await?
+        member_rows(&source, &alice, "one").await?
     };
     assert_eq!(
         after, before,
@@ -293,14 +293,15 @@ async fn a_negation_inside_a_cycle_still_sees_stored_facts() -> anyhow::Result<(
 }
 
 /// The rows an attribute concept over `the` yields for every entity,
-/// read under `select`: `(this, value)` pairs, sorted.
+/// read under the cardinality `select` names: `(this, value)` pairs,
+/// sorted.
 async fn relation_under(
     source: &TestEnv<'_>,
     the: &str,
     select: &str,
 ) -> anyhow::Result<Vec<(Value, Value)>> {
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "value": { "the": the, "as": "text:", "pick": select }
+        "value": { "the": the, "as": "text:", "cardinality": select }
     }}))?;
     let mut terms = Parameters::new();
     terms.insert("this".into(), Term::var("who"));
@@ -371,7 +372,7 @@ async fn a_stratified_negation_keeps_its_meaning_when_another_rule_closes_a_cycl
     registry.register(p)?;
     let before = {
         let source = TestEnv::new(&branch, &operator, registry.clone());
-        relation_under(&source, "x/p", "all").await?
+        relation_under(&source, "x/p", "many").await?
     };
     assert_eq!(
         before,
@@ -383,105 +384,16 @@ async fn a_stratified_negation_keeps_its_meaning_when_another_rule_closes_a_cycl
     registry.register(derive("x/r", "x/s")?)?;
     let source = TestEnv::new(&branch, &operator, registry);
     assert_eq!(
-        relation_under(&source, "x/p", "all").await?,
+        relation_under(&source, "x/p", "many").await?,
         before,
         "two rules that read neither q nor r's stored facts do not change what p means"
     );
     Ok(())
 }
 
-/// An absence test spelled as a ranked choice: `x/default(e)` is the
-/// sentinel `"none"` for every item, and `status` reads `top` over
-/// `[x/real, x/default]`, so it is `"none"` exactly when no `x/real`
-/// exists. `x/flag(e) := s :- status(e) = s, s == "none"` is then
-/// `x/flag(e) :- unless x/real(e)`: an election is "this candidate,
-/// and nothing better", and the "nothing better" is a negation. With
-/// `b`'s stored `x/real`, only `a` is flagged. A rule that reads
-/// `x/flag` into `x/real` closes a cycle through the choice, and
-/// derives nothing (no entity has an `x/mirror`). The analysis treats
-/// the election as the absence test it is and quarantines that rule,
-/// the one deriving what the choice reads. (Before, the choice read its
-/// candidate set inside the cycle, `{"set", "none"}` for `b`, and
-/// flagged `b` too: the cycle policy reached through a pick.)
-#[dialog_common::test]
-async fn a_ranked_default_inside_a_cycle_still_elects() -> anyhow::Result<()> {
-    let (operator, profile) = test_session_with_peer().await;
-    let repo = test_repo(&operator, &profile).await;
-    let branch = repo.branch("main").open().perform(&operator).await?;
-    let a: Entity = "id:a".parse()?;
-    let b: Entity = "id:b".parse()?;
-    branch
-        .transaction()
-        .assert(the!("x/item").of(a.clone()).is("none".to_string()))
-        .assert(the!("x/item").of(b.clone()).is("none".to_string()))
-        .assert(the!("x/real").of(b.clone()).is("set".to_string()))
-        .commit()
-        .publish()
-        .perform(&operator)
-        .await?;
-
-    let default = compile(serde_json::json!({
-        "deduce": { "with": { "default": { "the": "x/default", "as": "text:" } } },
-        "when": [{
-            "assert": { "with": { "item": { "the": "x/item", "as": "text:" } } },
-            "where": { "this": { "?": { "name": "this" } }, "item": { "?": { "name": "default" } } }
-        }]
-    }))?;
-    let flag = compile(serde_json::json!({
-        "deduce": { "with": { "flag": { "the": "x/flag", "as": "text:" } } },
-        "when": [
-            {
-                "assert": { "with": {
-                    "status": { "the": ["x/real", "x/default"], "as": "text:" }
-                }},
-                "where": { "this": { "?": { "name": "this" } }, "status": { "?": { "name": "flag" } } }
-            },
-            {
-                "assert": "==",
-                "where": { "this": { "?": { "name": "flag" } }, "is": "none" }
-            }
-        ]
-    }))?;
-    let close = compile(serde_json::json!({
-        "deduce": { "with": { "real": { "the": "x/real", "as": "text:" } } },
-        "when": [{
-            "assert": { "with": {
-                "flag": { "the": "x/flag", "as": "text:" },
-                "mirror": { "the": "x/mirror", "as": "text:" }
-            }},
-            "where": {
-                "this": { "?": { "name": "this" } },
-                "flag": { "?": { "name": "real" } },
-                "mirror": { "?": { "name": "real" } }
-            }
-        }]
-    }))?;
-    let expected = vec![(Value::Entity(a), Value::String("none".into()))];
-
-    let mut registry = RuleRegistry::new();
-    registry.register(default)?;
-    registry.register(flag)?;
-    {
-        let source = TestEnv::new(&branch, &operator, registry.clone());
-        assert_eq!(
-            relation_under(&source, "x/flag", "all").await?,
-            expected,
-            "outside a cycle: b's x/real outranks the sentinel, so only a is flagged"
-        );
-    }
-    registry.register(close)?;
-    let source = TestEnv::new(&branch, &operator, registry);
-    assert_eq!(
-        relation_under(&source, "x/flag", "all").await?,
-        expected,
-        "a rule that derives nothing does not change the election the sentinel reads"
-    );
-    Ok(())
-}
-
 /// `ancestor(this, a) :- parent(this, a)` and `ancestor(this, a) :-
 /// parent(this, p), ancestor(p, a)`, read through a field under the
-/// default pick, `last`. The design says election "runs once, over
+/// default cardinality, one. The design says election "runs once, over
 /// the finished fixpoint, where the component's rows leave it" and "a
 /// reader outside the component sees one value". Under `last` the
 /// exit skips the election and every candidate leaves: a reader of a
@@ -528,7 +440,7 @@ async fn a_recursive_relation_read_under_last_yields_one_value_per_entity() -> a
     let source = TestEnv::new(&branch, &operator, registry);
 
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "ancestor": { "the": "family/ancestor", "as": "entity:", "pick": "last:" }
+        "ancestor": { "the": "family/ancestor", "as": "entity:" }
     }}))?;
     let mut terms = Parameters::new();
     terms.insert("this".into(), Term::<Any>::constant(c.clone()));
@@ -589,7 +501,7 @@ async fn a_derived_value_stands_by_the_fact_that_bound_it_through_a_fixpoint() -
     {
         let source = TestEnv::new(&branch, &operator, registry.clone());
         assert_eq!(
-            relation_under(&source, "x/a", "last").await?,
+            relation_under(&source, "x/a", "one").await?,
             expected,
             "the derived value is newer than the stored claim"
         );
@@ -597,7 +509,7 @@ async fn a_derived_value_stands_by_the_fact_that_bound_it_through_a_fixpoint() -
     registry.register(derive("x/a")?)?;
     let source = TestEnv::new(&branch, &operator, registry);
     assert_eq!(
-        relation_under(&source, "x/a", "last").await?,
+        relation_under(&source, "x/a", "one").await?,
         expected,
         "a rule reading the relation back changes nothing about which value is newest"
     );
@@ -647,7 +559,7 @@ async fn a_derived_value_succeeds_the_claim_its_body_read_under_last() -> anyhow
         registry.register(rewrite(stored, derived)?)?;
         let source = TestEnv::new(&branch, &operator, registry);
         assert_eq!(
-            relation_under(&source, "x/status", "last").await?,
+            relation_under(&source, "x/status", "one").await?,
             vec![(Value::Entity(e.clone()), Value::String(derived.into()))],
             "the derived value succeeds the stored claim the rule read"
         );
@@ -657,7 +569,7 @@ async fn a_derived_value_succeeds_the_claim_its_body_read_under_last() -> anyhow
         ];
         both.sort_by_key(|pair| format!("{pair:?}"));
         assert_eq!(
-            relation_under(&source, "x/status", "all").await?,
+            relation_under(&source, "x/status", "many").await?,
             both,
             "under `all` the claim and its successor are both candidates"
         );
@@ -687,7 +599,7 @@ async fn a_rewrite_of_a_derived_value_succeeds_it_in_turn() -> anyhow::Result<()
     registry.register(rewrite("todo", "done")?)?;
     let source = TestEnv::new(&branch, &operator, registry);
     assert_eq!(
-        relation_under(&source, "x/status", "last").await?,
+        relation_under(&source, "x/status", "one").await?,
         vec![(Value::Entity(e), Value::String("done".into()))],
         "the second rewrite succeeds the first"
     );
@@ -752,7 +664,7 @@ async fn rules_succeeding_one_claim_elect_by_the_newer_reading() -> anyhow::Resu
     {
         let source = TestEnv::new(&branch, &operator, registry.clone());
         assert_eq!(
-            relation_under(&source, "x/status", "last").await?,
+            relation_under(&source, "x/status", "one").await?,
             vec![(Value::Entity(e.clone()), Value::String("blocked".into()))],
             "the rule that read the newer fact wins, not the greater value"
         );
@@ -760,7 +672,7 @@ async fn rules_succeeding_one_claim_elect_by_the_newer_reading() -> anyhow::Resu
     registry.register(flagged(false, "waiting")?)?;
     let source = TestEnv::new(&branch, &operator, registry);
     assert_eq!(
-        relation_under(&source, "x/status", "last").await?,
+        relation_under(&source, "x/status", "one").await?,
         vec![(Value::Entity(e), Value::String("blocked".into()))],
         "at one version, the conclusion that rewrote the cell outranks one that did not read it"
     );
@@ -803,12 +715,12 @@ async fn a_cycle_of_rewrites_elects_as_concurrent_candidates() -> anyhow::Result
         registry.register(rewrite("todo", "triage")?)?;
         let source = TestEnv::new(&branch, &operator, registry);
         assert_eq!(
-            relation_under(&source, "x/status", "last").await?,
+            relation_under(&source, "x/status", "one").await?,
             vec![(Value::Entity(e.clone()), Value::String("triage".into()))],
             "the cycle's members tie on rank and the value decides"
         );
         assert_eq!(
-            relation_under(&source, "x/status", "all").await?,
+            relation_under(&source, "x/status", "many").await?,
             triage_and_todo(&e),
             "under `all` both members of the cycle are candidates"
         );
@@ -830,7 +742,7 @@ async fn a_cycle_of_rewrites_elects_as_concurrent_candidates() -> anyhow::Result
         registry.register(rewrite("todo", "triage")?)?;
         let source = TestEnv::new(&branch, &operator, registry);
         assert_eq!(
-            relation_under(&source, "x/status", "last").await?,
+            relation_under(&source, "x/status", "one").await?,
             vec![(Value::Entity(e.clone()), Value::String("triage".into()))],
             "the cycle ranks past the value it displaced, and settles by value"
         );
@@ -864,11 +776,11 @@ async fn a_rule_recursing_through_a_last_read_derives_down_the_chain() -> anyhow
         "deduce": { "with": { "label": { "the": "x/label", "as": "text:" } } },
         "when": [
             {
-                "assert": { "with": { "next": { "the": "x/next", "as": "entity:", "pick": "last:" } } },
+                "assert": { "with": { "next": { "the": "x/next", "as": "entity:" } } },
                 "where": { "this": { "?": { "name": "this" } }, "next": { "?": { "name": "next" } } }
             },
             {
-                "assert": { "with": { "label": { "the": "x/label", "as": "text:", "pick": "last:" } } },
+                "assert": { "with": { "label": { "the": "x/label", "as": "text:" } } },
                 "where": { "this": { "?": { "name": "next" } }, "label": { "?": { "name": "label" } } }
             }
         ]
@@ -884,7 +796,7 @@ async fn a_rule_recursing_through_a_last_read_derives_down_the_chain() -> anyhow
     let mut expected = expected;
     expected.sort_by_key(|pair| format!("{pair:?}"));
     assert_eq!(
-        relation_under(&source, "x/label", "last").await?,
+        relation_under(&source, "x/label", "one").await?,
         expected,
         "every block of the chain takes the tail's label"
     );
@@ -942,7 +854,7 @@ async fn a_bulk_negation_keys_on_the_variables_each_candidate_binds() -> anyhow:
     let mut registry = RuleRegistry::new();
     registry.register(ok)?;
     let source = TestEnv::new(&branch, &operator, registry);
-    let rows = relation_under(&source, "club/ok", "all").await?;
+    let rows = relation_under(&source, "club/ok", "many").await?;
     assert_eq!(
         rows.len(),
         people - 1,
@@ -957,7 +869,7 @@ async fn a_bulk_negation_keys_on_the_variables_each_candidate_binds() -> anyhow:
 /// value. A cardinality-one attribute premise reads the same cell
 /// through its own election, which breaks the tie by the hash of each
 /// fact instead, so for some value pairs the two reads of one cell
-/// under one pick disagree.
+/// under one cardinality disagree.
 #[dialog_common::test]
 async fn every_last_read_of_a_cell_elects_the_same_claim() -> anyhow::Result<()> {
     use crate::attribute::query::AttributeQuery;
@@ -1006,7 +918,7 @@ async fn every_last_read_of_a_cell_elects_the_same_claim() -> anyhow::Result<()>
             .collect::<Result<_, crate::EvaluationError>>()?;
 
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": "last:" }
+            "salary": { "the": "org/salary", "as": "natural:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::<Any>::constant(of.clone()));
@@ -1027,5 +939,529 @@ async fn every_last_read_of_a_cell_elects_the_same_claim() -> anyhow::Result<()>
         disagree.is_empty(),
         "a cardinality-one attribute read and a `last` concept read elect different claims of one cell: {disagree:?}"
     );
+    Ok(())
+}
+
+/// A chain `a -> b -> tail` where the tail holds the label `end` and
+/// `b` a label of its own written later, with the rule carrying a
+/// label down the chain: `b` reads `own`, its newest candidate, and
+/// holds `end` as a losing one.
+async fn chain_with_a_losing_label(
+    operator: &dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
+    branch: &dialog_repository::Branch,
+) -> anyhow::Result<()> {
+    let a: Entity = "id:a".parse()?;
+    let b: Entity = "id:b".parse()?;
+    let tail: Entity = "id:tail".parse()?;
+    branch
+        .transaction()
+        .assert(the!("x/label").of(tail.clone()).is("end".to_string()))
+        .commit()
+        .publish()
+        .perform(operator)
+        .await?;
+    branch
+        .transaction()
+        .assert(the!("x/label").of(b.clone()).is("own".to_string()))
+        .commit()
+        .publish()
+        .perform(operator)
+        .await?;
+    branch
+        .transaction()
+        .assert(the!("x/next").of(a.clone()).is(b.clone()))
+        .assert(the!("x/next").of(b).is(tail))
+        .assert(the!("x/mark").of(a).is("yes".to_string()))
+        .commit()
+        .publish()
+        .perform(operator)
+        .await?;
+    Ok(())
+}
+
+fn next_premise() -> serde_json::Value {
+    serde_json::json!({
+        "assert": { "with": { "next": { "the": "x/next", "as": "entity:" } } },
+        "where": { "this": { "?": { "name": "this" } }, "next": { "?": { "name": "next" } } }
+    })
+}
+
+/// `x/label(e) := l :- x/next(e) = n, x/label(n) = l`.
+fn carry_label() -> anyhow::Result<DeductiveRule> {
+    compile(serde_json::json!({
+        "deduce": { "with": { "label": { "the": "x/label", "as": "text:" } } },
+        "when": [ next_premise(), {
+            "assert": { "with": { "label": { "the": "x/label", "as": "text:" } } },
+            "where": { "this": { "?": { "name": "next" } }, "label": { "?": { "name": "label" } } }
+        }]
+    }))
+}
+
+/// `<head>(e) := "saw-end" :- x/mark(e) = "yes", x/next(e) = n,
+/// x/label(n) = "end"`: a rule deciding on the label its successor
+/// reads.
+fn saw_end(head: &str) -> anyhow::Result<DeductiveRule> {
+    compile(serde_json::json!({
+        "deduce": { "with": { "out": { "the": head, "as": "text:" } } },
+        "when": [ next_premise(), {
+            "assert": { "with": { "mark": { "the": "x/mark", "as": "text:" } } },
+            "where": { "this": { "?": { "name": "this" } }, "mark": "yes" }
+        }, {
+            "assert": { "with": { "label": { "the": "x/label", "as": "text:" } } },
+            "where": { "this": { "?": { "name": "next" } }, "label": "end" }
+        }, {
+            "assert": "==",
+            "where": { "this": "saw-end", "is": { "?": { "name": "out" } } }
+        }]
+    }))
+}
+
+/// "A rule deciding on a `last` value inside its own cycle is set
+/// aside." `b` reads `own`, so a rule firing on `x/label(next) = "end"`
+/// concludes nothing for `a` where its head is another relation. With
+/// `x/label` as its head the rule sits in the cycle the carrying rule
+/// makes, where a read sees every candidate, `end` among them: left in,
+/// it concludes `saw-end` for `a` from a label no reader of `b` sees.
+/// The analysis sets it aside, and `a` reads what the chain carries.
+#[dialog_common::test]
+async fn a_rule_deciding_on_a_last_value_inside_its_cycle_is_set_aside() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    chain_with_a_losing_label(&operator, &branch).await?;
+    let a = Value::Entity("id:a".parse()?);
+
+    let mut outside = RuleRegistry::new();
+    outside.register(carry_label()?)?;
+    outside.register(saw_end("x/flag")?)?;
+    assert!(
+        outside.analysis()?.quarantined().is_empty(),
+        "outside the cycle the read is of a relation derived in full"
+    );
+    let source = TestEnv::new(&branch, &operator, outside);
+    assert_eq!(
+        relation_under(&source, "x/flag", "one").await?,
+        vec![],
+        "b reads `own`, so nothing saw `end`"
+    );
+
+    let decides = saw_end("x/label")?;
+    let mut inside = RuleRegistry::new();
+    inside.register(carry_label()?)?;
+    inside.register(decides.clone())?;
+    let analysis = inside.analysis()?;
+    let [set_aside] = analysis.quarantined() else {
+        anyhow::bail!("one rule is set aside: {:?}", analysis.quarantined());
+    };
+    assert_eq!(set_aside.rule, decides.this());
+    assert_eq!(
+        set_aside
+            .tested
+            .as_ref()
+            .map(|tested| (&tested.by, tested.absence)),
+        Some((&Some(decides.this()), Absence::Decided)),
+        "the record says which rule decided, and that it did"
+    );
+    let source = TestEnv::new(&branch, &operator, inside);
+    let labels = relation_under(&source, "x/label", "one").await?;
+    assert!(
+        labels.contains(&(a.clone(), Value::String("own".into()))),
+        "a reads the label the chain carries from b: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&(a, Value::String("saw-end".into()))),
+        "nothing is concluded from a label no reader of b sees: {labels:?}"
+    );
+    Ok(())
+}
+
+/// "A rule passing a `last` value through a formula inside its cycle
+/// is not set aside." `x/depth(e) := d + 1 :- x/next(e) = n,
+/// x/depth(n) = d` computes from the value it reads and decides
+/// nothing on it.
+#[dialog_common::test]
+async fn a_rule_computing_from_a_last_value_inside_its_cycle_stays() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let a: Entity = "id:a".parse()?;
+    let b: Entity = "id:b".parse()?;
+    let tail: Entity = "id:tail".parse()?;
+    branch
+        .transaction()
+        .assert(the!("x/next").of(a.clone()).is(b.clone()))
+        .assert(the!("x/next").of(b.clone()).is(tail.clone()))
+        .assert(the!("x/depth").of(tail.clone()).is(0u32))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let deeper = compile(serde_json::json!({
+        "deduce": { "with": { "depth": { "the": "x/depth", "as": "natural:" } } },
+        "when": [ next_premise(), {
+            "assert": { "with": { "depth": { "the": "x/depth", "as": "natural:" } } },
+            "where": { "this": { "?": { "name": "next" } }, "depth": { "?": { "name": "below" } } }
+        }, {
+            "assert": "math/sum",
+            "where": { "of": { "?": { "name": "below" } }, "with": 1, "is": { "?": { "name": "depth" } } }
+        }]
+    }))?;
+    let mut registry = RuleRegistry::new();
+    registry.register(deeper)?;
+    assert!(registry.analysis()?.quarantined().is_empty());
+    let source = TestEnv::new(&branch, &operator, registry);
+    let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "value": { "the": "x/depth", "as": "natural:" }
+    }}))?;
+    let mut terms = Parameters::new();
+    terms.insert("this".into(), Term::var("who"));
+    terms.insert("value".into(), Term::var("value"));
+    let rows = ConceptQuery { terms, predicate }
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+    let mut depths: Vec<(Value, Value)> = rows
+        .iter()
+        .map(|row| {
+            Ok((
+                row.lookup(&Term::<Any>::var("who"))?.content()?,
+                row.lookup(&Term::<Any>::var("value"))?.content()?,
+            ))
+        })
+        .collect::<anyhow::Result<_>>()?;
+    depths.sort_by_key(|pair| format!("{pair:?}"));
+    assert_eq!(
+        depths,
+        vec![
+            (Value::Entity(a), Value::UnsignedInt(2)),
+            (Value::Entity(b), Value::UnsignedInt(1)),
+            (Value::Entity(tail), Value::UnsignedInt(0)),
+        ]
+    );
+    Ok(())
+}
+
+/// Three employees in two departments: alice (100) and bob (50) in
+/// `dept-a`, carol (7) in `dept-b`.
+async fn staff(
+    operator: &dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
+    branch: &dialog_repository::Branch,
+) -> anyhow::Result<()> {
+    let mut transaction = branch.transaction();
+    for (who, dept, salary) in [
+        ("id:alice", "id:dept-a", 100u32),
+        ("id:bob", "id:dept-a", 50),
+        ("id:carol", "id:dept-b", 7),
+    ] {
+        let who: Entity = who.parse()?;
+        let dept: Entity = dept.parse()?;
+        transaction = transaction
+            .assert(the!("org.employee/dept").of(who.clone()).is(dept))
+            .assert(the!("org.employee/salary").of(who).is(salary));
+    }
+    transaction.commit().publish().perform(operator).await?;
+    Ok(())
+}
+
+/// Write `value` to `the` of `of`, added beside the cell's claims or
+/// succeeding the newest, in a commit of its own.
+async fn write(
+    operator: &dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
+    branch: &dialog_repository::Branch,
+    the: &str,
+    of: &Entity,
+    value: &str,
+    cardinality: crate::Cardinality,
+) -> anyhow::Result<()> {
+    use dialog_corpus::{Changes, Fact, Instruction};
+    let fact = Fact {
+        the: the.parse()?,
+        of: of.clone(),
+        is: Value::String(value.into()),
+        cause: None,
+    };
+    let changes: Changes = [Instruction::Assert(fact, cardinality)]
+        .into_iter()
+        .collect();
+    branch
+        .transaction()
+        .integrate(changes)
+        .commit()
+        .publish()
+        .perform(operator)
+        .await?;
+    Ok(())
+}
+
+/// "Every state is kept, and the concept elects the status by rank."
+/// An account's status is its states read under `top`, which ranks the
+/// states its attribute lists from least to greatest: `active` stands
+/// alone, `suspended` outranks it, and an `active` written after
+/// `suspended` adds a claim but does not displace it. Un-suspending is
+/// retracting `suspended`.
+#[dialog_common::test]
+async fn a_concept_elects_a_status_by_rank_over_the_states_kept() -> anyhow::Result<()> {
+    use crate::Cardinality;
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let account: Entity = "id:account".parse()?;
+    let concept: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "status": {
+            "the": "account/state",
+            "as": ["suspended", "active"],
+            "pick": "top"
+        }
+    }}))?;
+    let read = || async {
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let mut terms = Parameters::new();
+        terms.insert(
+            "this".into(),
+            Term::Constant(Value::Entity(account.clone())),
+        );
+        terms.insert("status".into(), Term::<Any>::var("status"));
+        let rows = ConceptQuery {
+            terms,
+            predicate: concept.clone(),
+        }
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+        rows.iter()
+            .map(|row| Ok(row.lookup(&Term::<Any>::var("status"))?.content()?))
+            .collect::<anyhow::Result<Vec<Value>>>()
+    };
+    let status = |value: &str| vec![Value::String(value.to_string())];
+
+    write(
+        &operator,
+        &branch,
+        "account/state",
+        &account,
+        "active",
+        Cardinality::Many,
+    )
+    .await?;
+    assert_eq!(read().await?, status("active"), "the one state");
+    write(
+        &operator,
+        &branch,
+        "account/state",
+        &account,
+        "suspended",
+        Cardinality::Many,
+    )
+    .await?;
+    assert_eq!(
+        read().await?,
+        status("suspended"),
+        "the better ranked state"
+    );
+    write(
+        &operator,
+        &branch,
+        "account/state",
+        &account,
+        "active",
+        Cardinality::Many,
+    )
+    .await?;
+    assert_eq!(
+        read().await?,
+        status("suspended"),
+        "a later, lesser state does not displace it"
+    );
+    Ok(())
+}
+
+/// "A rule deciding on a field of a concept inside its own cycle is set
+/// aside." The same decision as
+/// [`a_rule_deciding_on_a_last_value_inside_its_cycle_is_set_aside`],
+/// read through a concept of two fields: `x/label(e) := "saw-end" :-
+/// x/mark(e) = "yes", x/next(e) = n, Block(n, label: "end", next: _)`.
+/// The concept elects each field's claim, so a premise pinning its
+/// label tests that election as a read of the label alone does.
+#[dialog_common::test]
+async fn a_rule_deciding_on_a_concepts_field_inside_its_cycle_is_set_aside() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    chain_with_a_losing_label(&operator, &branch).await?;
+    let a = Value::Entity("id:a".parse()?);
+    let decides = compile(serde_json::json!({
+        "deduce": { "with": { "out": { "the": "x/label", "as": "text:" } } },
+        "when": [ next_premise(), {
+            "assert": { "with": { "mark": { "the": "x/mark", "as": "text:" } } },
+            "where": { "this": { "?": { "name": "this" } }, "mark": "yes" }
+        }, {
+            "assert": { "with": {
+                "label": { "the": "x/label", "as": "text:" },
+                "next": { "the": "x/next", "as": "entity:" }
+            }},
+            "where": {
+                "this": { "?": { "name": "next" } },
+                "label": "end",
+                "next": { "?": { "name": "after" } }
+            }
+        }, {
+            "assert": "==",
+            "where": { "this": "saw-end", "is": { "?": { "name": "out" } } }
+        }]
+    }))?;
+    let mut registry = RuleRegistry::new();
+    registry.register(carry_label()?)?;
+    registry.register(decides.clone())?;
+    let analysis = registry.analysis()?;
+    let [set_aside] = analysis.quarantined() else {
+        anyhow::bail!("one rule is set aside: {:?}", analysis.quarantined());
+    };
+    assert_eq!(set_aside.rule, decides.this());
+    assert_eq!(
+        set_aside.tested.as_ref().map(|tested| tested.absence),
+        Some(Absence::Decided)
+    );
+    let source = TestEnv::new(&branch, &operator, registry);
+    let labels = relation_under(&source, "x/label", "one").await?;
+    assert!(
+        labels.contains(&(a.clone(), Value::String("own".into()))),
+        "a reads the label the chain carries from b: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&(a, Value::String("saw-end".into()))),
+        "nothing is concluded from a label no reader of b sees: {labels:?}"
+    );
+    Ok(())
+}
+
+/// "A read that names a derived value is answered as one that does not,
+/// filtered." `org.employee/outearned-by(e) := more :- salary(e) = mine,
+/// dept(e) = d, dept(peer) = d, salary(peer) = more, mine < more` is
+/// read for bob and the value `100`. The value a caller names is tested
+/// against what the relation's cardinality keeps and never seeds the
+/// body, so the body is planned with the value free: a comparison
+/// against it waits for the premise that binds it.
+#[dialog_common::test]
+async fn a_read_naming_a_derived_value_plans_its_rule_with_the_value_free() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    staff(&operator, &branch).await?;
+    let var = |name: &str| serde_json::json!({ "?": { "name": name } });
+    let outearned = compile(serde_json::json!({
+        "deduce": { "with": { "more": {
+            "the": "org.employee/outearned-by", "as": "natural:", "cardinality": "many"
+        } } },
+        "when": [{
+            "assert": { "with": { "salary": { "the": "org.employee/salary", "as": "natural:" } } },
+            "where": { "this": var("this"), "salary": var("mine") }
+        }, {
+            "assert": { "with": { "dept": { "the": "org.employee/dept", "as": "entity:" } } },
+            "where": { "this": var("this"), "dept": var("dept") }
+        }, {
+            "assert": { "with": { "dept": { "the": "org.employee/dept", "as": "entity:" } } },
+            "where": { "this": var("peer"), "dept": var("dept") }
+        }, {
+            "assert": { "with": { "salary": { "the": "org.employee/salary", "as": "natural:" } } },
+            "where": { "this": var("peer"), "salary": var("more") }
+        }, {
+            "assert": "<",
+            "where": { "of": var("mine"), "with": var("more") }
+        }]
+    }))?;
+    let mut registry = RuleRegistry::new();
+    registry.register(outearned)?;
+    assert!(registry.analysis()?.quarantined().is_empty());
+    let source = TestEnv::new(&branch, &operator, registry);
+    let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "more": { "the": "org.employee/outearned-by", "as": "natural:", "cardinality": "many" }
+    }}))?;
+    let read = |who: &str, more: u32| {
+        let mut terms = Parameters::new();
+        terms.insert(
+            "this".into(),
+            Term::<Any>::constant(who.parse::<Entity>().expect("an entity parses")),
+        );
+        terms.insert("more".into(), Term::<Any>::constant(more));
+        ConceptQuery {
+            terms,
+            predicate: predicate.clone(),
+        }
+    };
+    let bob = read("id:bob", 100)
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+    assert_eq!(bob.len(), 1, "alice's 100 is more than bob's 50");
+    let alice = read("id:alice", 50)
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+    assert!(alice.is_empty(), "nobody in the department outearns alice");
+    Ok(())
+}
+
+/// "A concluded value is as recent as the newest fact it was concluded
+/// from." `report/reports(m) := who :- report/manager(who) = m` derives
+/// every report of a manager, and a field picking `last` over it reads
+/// the report whose manager was written most recently, whichever
+/// entity sorts first.
+#[dialog_common::test]
+async fn a_field_picking_last_over_a_derived_relation_reads_the_newest_derivation()
+-> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let entity = |name: &str| name.parse::<Entity>().expect("an entity parses");
+    let var = |name: &str| serde_json::json!({ "?": { "name": name } });
+    let reports = compile(serde_json::json!({
+        "deduce": { "with": { "reports": {
+            "the": "report/reports", "as": "entity:", "cardinality": "many"
+        } } },
+        "when": [{
+            "assert": { "with": { "manager": { "the": "report/manager", "as": "entity:" } } },
+            "where": { "this": var("reports"), "manager": var("this") }
+        }]
+    }))?;
+    let headed: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "reports": { "the": "report/reports", "as": "entity:", "cardinality": "many", "pick": "last" }
+    }}))?;
+    // The later write names the entity that sorts first and the one
+    // that sorts last in turn, so no order of entities passes for the
+    // order of writes.
+    for (first, second) in [("id:p0", "id:p1"), ("id:p1", "id:p0")] {
+        let manager = entity(&format!("id:boss-of-{}", &second[3..]));
+        for who in [first, second] {
+            branch
+                .transaction()
+                .assert(the!("report/manager").of(entity(who)).is(manager.clone()))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        let mut registry = RuleRegistry::new();
+        registry.register(reports.clone())?;
+        let source = TestEnv::new(&branch, &operator, registry);
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::<Any>::constant(manager));
+        terms.insert("reports".into(), Term::var("reports"));
+        let rows = ConceptQuery {
+            terms,
+            predicate: headed.clone(),
+        }
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+        let read: Vec<Value> = rows
+            .iter()
+            .map(|row| row.lookup(&Term::<Any>::var("reports"))?.content())
+            .collect::<Result<_, crate::EvaluationError>>()?;
+        assert_eq!(
+            read,
+            vec![Value::Entity(entity(second))],
+            "written {first} then {second}"
+        );
+    }
     Ok(())
 }

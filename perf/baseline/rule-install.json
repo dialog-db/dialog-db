@@ -9,8 +9,8 @@
   "counters": {
     "archive.get": 0,
     "archive.get.bytes": 0,
-    "archive.put": 13,
-    "archive.put.bytes": 433076,
+    "archive.put": 11,
+    "archive.put.bytes": 450332,
     "span.apply_batch_reusing": 1,
     "span.buffer_records": 2,
     "span.commit": 1,
@@ -21,13 +21,13 @@
     "span.settle": 1,
     "span.write_instructions": 1
   },
-  "instructions": 163540787,
-  "instructions_outside_allocator": 122287374,
+  "instructions": 158676758,
+  "instructions_outside_allocator": 119229928,
   "allocations": {
-    "alloc.bytes": 54015922,
-    "alloc.calls": 161797,
-    "free.calls": 154109,
-    "realloc.calls": 22199,
-    "realloc.from.bytes": 3909432
+    "alloc.bytes": 50900042,
+    "alloc.calls": 160766,
+    "free.calls": 153071,
+    "realloc.calls": 21702,
+    "realloc.from.bytes": 3630144
   }
 }

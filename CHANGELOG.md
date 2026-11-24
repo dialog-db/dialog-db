@@ -106,199 +106,1010 @@ Its two cells are a stand-in, and this entry is not to be released as it
 reads: the formula is to take one record once a rule can build one, and
 the entities it names will change with it.
 
-### A stored rule holds a pattern: rule bodies are written in format 4
+### A parameter can hold a pattern: a map or a list of terms, taken apart or built
 
-[#799](https://github.com/dialog-db/dialog-db/pull/799),
-[design/rule-format.md](./design/rule-format.md),
-[design/rule-format/design-pattern-form.md](./design/rule-format/design-pattern-form.md)
+[#778](https://github.com/dialog-db/dialog-db/pull/778), on the composite
+value of [#843](https://github.com/dialog-db/dialog-db/pull/843). The design
+is in [design/patterns.md](design/patterns.md).
 
-A rule that held a map or a list of terms ran where it was
-built and could not be kept: format 3 of a rule body wrote a variable or
-a constant where a parameter stands and nothing else. Format 4 writes a
-pattern there too, as what it is under the one key `match`, so such a
-rule is installed, synced and read back like any other. Every rule body
-this release writes is format 4.
-
-```
-{ "match": { "author": { "?": { "name": "who" } }, "...": { "?": { "name": "others" } } } }
-{ "match": [ { "?": { "name": "first" } }, { "...": { "?": { "name": "more" } } } ] }
-```
-
-Under `match` a map is a map pattern and an array is a list pattern, at
-any depth. `...` is a key whose value takes the rest: among a map's
-entries, and as the one entry of a list's last item.
+A premise's parameter held one variable or one constant. It can now hold a
+`Pattern`: a term, or a map or a list of patterns, with an optional rest (the
+entries a map pattern does not name, bound as a map) or run (the items after
+a list pattern's, bound as a list). Where the value is bound, the pattern
+takes it apart and binds the variables inside it; where every variable
+inside it is bound, the pattern builds the value. A map pattern with no rest
+matches a map of exactly its entries, and a list pattern with no run a list
+of exactly its items. The planner counts a pattern bound when every variable
+inside it is, and inference types a slot that holds one as a composite and
+each leaf as its term is typed. A rule that holds a pattern has an identity
+and runs where it was built, in a query layer, but the stored rule format
+cannot write it, so it cannot be installed.
 
 What this changes for you:
 
-- A rule that holds a pattern is asserted into a transaction and
-  committed. It was refused before, by a panic.
-- `DeductiveRule::storable`, `InductiveRule::storable` and
-  `TypeError::UnstorablePattern` are gone: there is nothing they refuse.
-  `try_encode` gives such a rule a body.
-- `Pattern` and `Parameters` are written and read by serde wherever a
-  rule or a query is, JSON included. Serializing one that held a map or
-  a list was an error.
-- A map pattern cannot name the keys `?`, `...` or one ending in `:`,
-  which are how a variable, the rest and a constant are written under
-  `match`. `MapPattern::new` and `Pattern::map` return `PatternError`,
-  with `ReservedKey` for these and `Composite` for what they returned
-  before. A map that holds such a key is still matched: a rest takes it.
-- `Branch::with(&rule)` lays a rule that holds a pattern over a branch
-  with its body among the facts it lays, as it does any rule. It kept
-  the rule in memory beside them before.
-- `rule::body::FORMAT` is 4.
+- `Equality.this` and `Equality.is` are a `Pattern` where they were a
+  `Term<Any>`. `Equality::new` takes terms as before, and a `Pattern`
+  compares with a `Term<Any>` and answers `name` and `is_constant`.
+- New: `Pattern`, `MapPattern` (`MapPattern::new` refuses a key given
+  twice, as a map holds it, with `MapPatternError::DuplicateKey`),
+  `ListPattern`, and on `Parameters` `set` (a pattern under a name),
+  `shape`, `pattern`, `shapes`, `has_shapes`, `leaves`, `lowered`, `plain`
+  and `map_terms`. `get` and `iter` still answer terms: under a name that
+  holds a pattern, a variable that stands for the whole value.
+- New: `Update::hold`, a target keeping a thing it cannot write as facts,
+  and `Update::refuse`, a target recording a statement it cannot write, a
+  required method for every `Update` implementor. `Changes::refused` gives
+  the first refusal, and `Refusal` carries the entity and the typed reason.
+- New: `TypeError::UnstorablePattern`, from `DeductiveRule::storable` and
+  `InductiveRule::storable`.
+- `Parameters` and a pattern above a leaf have no wire form: serializing
+  `Parameters` that hold a pattern fails, and so does serializing a
+  `Changes` that holds a refusal.
+- Asserting a rule that holds a pattern stages nothing for it in a batch
+  that is committed: the batch records a `Refusal` carrying
+  `TypeError::UnstorablePattern`, and committing a transaction that holds
+  it fails with `CommitError::Refused` before anything is written.
+  `Ephemeral::apply`, and so the branch's session overlay, refuses such a
+  batch with `DialogCorpusError::Refused`. A `QueryLayer`
+  (`Branch::with`) keeps the rule and its index facts and runs it; a copy
+  of the layer's `changes()` carries the refusal and is refused wherever
+  it is committed or applied.
+- An inductive rule that holds a pattern is refused the same way
+  everywhere, a query layer included.
 
-Why: structs, tuples and lists in the rules of the notation
-([#773](https://github.com/dialog-db/dialog-db/pull/773)) have to be
-kept on a branch, and a rule that derives an entity from a record is a
-rule that holds a pattern. One format written always, with the earlier
-ones read for one release cycle, is the maintainer's choice over writing
-each rule in the lowest format that can say it
-([stamping](./design/rule-format/stamping.md)).
+Why: a rule could not say a value by its shape, so a command could not be
+given a record, an entity could not be derived from one, and a syntax tree
+could not be taken apart in a rule. The pattern is the notation's struct
+with variables in it, one thing both ways. Committing a rule that holds a
+pattern used to panic, which aborts the page on wasm; it is now an error the
+commit returns.
 
-### A parameter holds a pattern: a term, or a map or a list of terms
+### A value can be a composite: a map, a record or a list, held as one value and read in place
 
-[#778](https://github.com/dialog-db/dialog-db/pull/778),
-[design/patterns.md](./design/patterns.md),
-[design/patterns/design-parameters.md](./design/patterns/design-parameters.md),
-[design/patterns/design-pattern-meaning.md](./design/patterns/design-pattern-meaning.md),
-[design/patterns/design-feasibility.md](./design/patterns/design-feasibility.md),
-[design/patterns/design-typing.md](./design/patterns/design-typing.md),
-[design/patterns/design-rule-identity.md](./design/patterns/design-rule-identity.md),
-[design/patterns/design-leaf-cost.md](./design/patterns/design-leaf-cost.md)
+[#843](https://github.com/dialog-db/dialog-db/pull/843).
 
-A premise was applied to parameters that each held one variable or one
-constant, so a rule could not say a value by its shape. A parameter now
-holds a `Pattern`: a term, or a map or a list of patterns.
-Where the value is bound the pattern takes it apart and binds the
-variables inside it, and a value that does not match drops the row.
-Where every variable inside it is bound the pattern is the value, a
-composite kept as a record. A rule's body runs it whichever way the
-plan puts first.
+From the record values research ([#748](https://github.com/dialog-db/dialog-db/pull/748)),
+replacing the draft [#812](https://github.com/dialog-db/dialog-db/pull/812);
+the layout and its measurements are in
+[design/composite-value.md](design/composite-value.md).
+
+A value that is compound but atomic (a location's latitude and longitude, a
+table a view resolved, a syntax tree) had nowhere to go but an opaque
+`record:`, each writer inventing its own encoding and its own tag. A
+composite is a value type of its own, written and replaced whole like any
+value. It is a map, whose keys are any values but composites (text the
+usual one) and whose key may hold several values, or a list, whose items
+keep their order and repeats. A record is the map whose every key is an
+attribute: the same kind, told by its keys, as a natural is a number. Two
+composites are equal exactly when they hold the same content, whatever
+order it was given in, and the natural `3` and the float `3.0` are one value
+in a composite as anywhere.
+
+A composite has one canonical encoding: a table of every key it and the
+maps nested in it use, once, then its body; a sequence of more than
+`SCAN_LIMIT` items carries a table of offsets, and every nested body says
+its size. Bytes that are not that encoding are refused, so equal composites
+have equal bytes and a composite is keyed in the tree by them. A
+`Composite` is a view, its buffer shared and the place of its body, so a
+nested composite, a field or an item is read where it sits: the length,
+a field by key, an item by index and iteration decode only what they
+return. Its identity is its merkle reference: for a map, a map under
+`composite:` from each key's reference to its value's (or to the `set:` of
+its values'); for a list, the `list:` of its items' references. No part of
+the layout enters it.
 
 What this changes for you:
 
-- `Pattern`, `MapPattern` and `ListPattern` build one. A map pattern
-  with no rest is the map of exactly its entries; `with_rest` binds the
-  entries it did not name, as a map, and a blank rest takes them and
-  binds nothing. A list pattern with no run is the list of exactly its
-  items; `with_run` binds the ones after them, as a list.
-- Inside a map or a list a number matches by the number it is. A scan
-  reads a value through a type, so the natural 4, and a variable typed
-  a natural, read a stored 4.3 as 4. In a pattern `{n: 4}` does not
-  match a record that holds 4.3, and a variable typed a natural does
-  not bind there: a pattern matches only a value it builds, whichever
-  of a rule's premises runs first.
-- `Parameters::set` binds a name to a pattern, and `shape`, `pattern`,
-  `slot`, `shapes`, `leaves` and `map_terms` look inside. `insert`, `get` and
-  `iter` take and give terms as before: for a name that holds a map or
-  a list, `get` gives the variable that stands for the whole
-  value. Code that collects the variables a premise mentions from
-  `iter` should collect them from `leaves`.
-- `Equality`'s `this` and `is` are `Pattern`s, were `Term<Any>`.
-  `Equality::new` still takes two terms, `Equality::between` takes two
-  patterns, and `Pattern::is` writes one as a premise. A `Pattern`
-  compares with a `Term<Any>` and answers `name` and `is_constant`, so
-  reading the sides of an equality between terms compiles as before;
-  matching on them as `Term::Variable` does not.
-- A concept premise that holds a pattern is planned as the concept over
-  a variable and an equality between that variable and the pattern, so
-  `DeductiveRule::analysis().premises()` lists one premise more than
-  was written.
-- A pattern is written where a parameter stands, and a rule that holds
-  one is stored and installed like any other: see the entry above. A
-  pattern with no variable is the constant it builds and is written as
-  one.
-- A rule that holds a pattern is laid over a branch for one query and
-  run with `Branch::with(rule)` and `QueryLayer::with(rule)`. `Update`
-  has a method `hold`, which a target that is never stored answers by
-  keeping what it is given; nothing reaches it now that every rule has
-  a body.
-- A premise is feasible by the variables inside its patterns: a
-  parameter that holds a map or a list is bound when every
-  variable inside it is, and a premise that binds it binds each of them.
-  A rule whose pattern can never be bound fails to compile with
-  `TypeError::RequiredBindings`, which names the variables inside the
-  pattern that nothing binds. A negated premise may hold a pattern, and
-  a blank inside it stands for any value.
-- A pattern's type follows from its shape and its leaves. A variable
-  inside one keeps the type it was written with, so a rule that binds a
-  text inside a map and adds a number to it fails to compile with
-  `TypeError::TypeInference`, as one that adds a number to a text field
-  does. A map or a list under a field that reads only text, and
-  a rest or a run another premise needs to be a number, fail the same
-  way. A variable written with no type inside a pattern is any present
+- `Value` has a new variant, `Composite`, keyed with type byte 22.
+  `ValueDataType` (the query layer's `Type`) has `Composite`
+  (`composite:`, any composite, the band every composite is keyed under),
+  and in its band `CompositeMap` (`composite:map`), `CompositeRecord`
+  (`composite:record`) and `CompositeList` (`composite:list`), which type
+  slots and never keys, as the sized number types do. A composite value's
+  `data_type()` is `CompositeMap` or `CompositeList`. A `match` over either
+  enum needs arms. `Value::Record` and `record:` are unchanged, identities
+  included.
+- Build with `Composite::map`, `Composite::record` (`Composite::new` is the
+  same) and `Composite::list`; read with `len`, `kind`, `is_record`, `get`
+  and `first` by key, `field` by attribute, `item` by index, `entries`,
+  `items` and `fields`, and `first_view` and `item_view` for a value whose
+  text borrows from the buffer. `Composite::from_bytes` refuses any bytes
+  but the canonical ones with a `CompositeError` saying why;
+  `Composite::to_bytes` gives them; `Composite::reference` gives the
+  identity. Refused on construction: a composite as a key
+  (`CompositeError::CompositeKey`), NaN (`NotANumber`) and nesting past
+  `MAX_DEPTH`, 128 (`TooDeep`).
+- `ValueView` has a `Composite` variant: a scanned row holding a composite
+  binds in place, as every other value does.
+- An attribute declared `as: composite:`, `composite:map`,
+  `composite:record` or `composite:list` holds what its type says; a write
+  of a list where a record is declared is refused. The query layer's
+  `Primitive` gives maps and lists a bit each (a record is on the map's),
+  `Primitive::ALL` includes both, and the wire names them `map` and `list`.
+  A query cannot yet read a field out of a composite it bound; that comes
+  with destructuring.
+- In JSON a composite is `{"composite:map": {"map": [[key, value], ...]}}`
+  or `{"composite:list": {"list": [...]}}`, its entries in canonical order;
+  in a binary format, its canonical bytes; in a CSV export, `composite` with
+  its bytes in base58.
+- `ValueDataType::max()`, the largest type a key carries, is now
+  `Composite`, so a scan bound from it covers composites.
+
+Why: a value that has to change as a whole was either split into claims,
+which concurrent writers can leave half updated, or packed into opaque
+bytes no query could read and no two writers spelled alike. The notation
+keeps its syntax trees as maps and lists, and a composite that is read
+without decoding all of it is what lets a rule reach one node of one.
+
+### A concept read copies no inner evaluation, and a concept's descriptor clones without copying its fields
+
+[#806](https://github.com/dialog-db/dialog-db/pull/806)
+
+Every evaluation of a concept built a stream of about 12.5 KB, because it
+held the inner evaluation of both of its arms (rows sorted on the entity,
+and rows in rule order) inline, side by side, at 5.8 KB each. Its caller
+moved the stream when it was returned and again when it boxed it, so a
+concept read copied about 25 KB before it read a row. The inner
+evaluation is now boxed, and the stream is under 1 KB. A
+concept descriptor's fields are now shared, so the clones a query makes of
+it on every evaluation (into its plan, its rule lookup, its renamed
+premises) no longer copy every field name and attribute.
+
+What this changes for you:
+
+- A point read of a concept costs 16 to 26% fewer instructions: the
+  `read-point` perf scenario goes from 23.0 M to 17.1 M, `rule-point` from
+  51.6 M to 39.8 M, `rule-recursive` from 801.6 M to 636.1 M. Scans and
+  commits do not move.
+- No API, result, stored fact or wire format changes.
+
+Why: copying that stream was 28% of the instructions of a single-entity
+read of a rule-derived concept, more than the read's tree scans.
+
+### A poll scopes its diff to the cover as it stands, copying none of it
+
+[#844](https://github.com/dialog-db/dialog-db/pull/844).
+
+A subscription's cover was kept sorted and disjoint, but every poll
+merged its fact and rule ranges into a new list to scope the diff, the
+diff checked that list's order twice, and the poll then dropped it: a
+cover of ten thousand ranges cost tens of thousands of range copies,
+comparisons and frees per poll, whatever changed. The cover is now kept
+as one shared sorted list (`dialog_search_tree::KeyRanges`), and the
+poll's diff borrows it as it stands
+(`PersistentTree::differentiate_covered`). A range a re-derivation
+records again, which the cover already holds, changes nothing.
+
+What this changes for you:
+
+- Nothing in the API of a subscription. A poll's delta, its order and
+  `results()` read as they did.
+- A poll does work in the log of its cover, not its size: one changed
+  fact under a cover of ten thousand ranges costs what it does under a
+  hundred.
+- `dialog_search_tree` adds `KeyRanges`, a set of key ranges kept sorted
+  and disjoint as ranges are added, and `PersistentTree::differentiate_covered`,
+  a scoped difference over a union of them.
+
+Why: after #838 the diff searched its scope, so what a poll over a large
+answer still paid in the size of its cover was building, copying and
+dropping that scope.
+
+#### Compatibility and migration
+
+- Patterns: nothing stored changes. No rule format, up to format 4 that
+  this release writes, holds a pattern, and a rule that holds one is
+  refused at commit, so no replica stores one and an older release reads
+  everything this one writes. The format that stores a pattern in a rule
+  body will be format 5 and is not built yet. Nothing an embedder has to
+  run.
+- Nothing stored or synced changes.
+
+
+### A stored rule that reads a collection entry with its key and value blank reads back
+
+[#835](https://github.com/dialog-db/dialog-db/pull/835), reported in
+[#834](https://github.com/dialog-db/dialog-db/issues/834).
+
+A concept application that reads a collection and binds neither the key
+nor the value of its entries, `entry: {the: _, is: _}`, writes the entry
+as `{}`, both halves left out as blanks are. Reading it back took `{}`
+for a constant and failed, so the rule's stored body did not decode and
+the rule could not be loaded from a branch:
+`rule hydrate: dag-cbor decode failed: an empty map names no type`. It now
+reads `{}` under a collection field as that entry.
+
+What this changes for you:
+
+- A rule holding such a read loads from the branch it was installed on,
+  under the identity it was installed with. The error above is gone for
+  it.
+
+Why: the writer and the reader of a concept application disagreed on one
+form of an entry, so a rule that compiled had a body nothing could read.
+
+#### Compatibility and migration
+
+- Nothing is rewritten and no rule's bytes or identity change: bodies an
+  earlier release stored with `{}` already hold what this one reads.
+  An earlier release cannot read such a body, as it could not before.
+
+
+### A read that names a derived value no longer fails with an unbound variable
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793)
+
+A read of a relation some rule derives tests the value its caller
+names against what the relation's cardinality keeps; the value never
+seeds the rule's body. The body was still planned as if it did, so a
+premise reading the value could be ordered ahead of the one binding
+it, and the read failed with `Unbound variable "is"`.
+
+What this changes for you:
+
+- A query, a negation (`unless`) or an inductive rule that reads a
+  derived relation with both its entity and its value given now
+  answers where the rule's body compares or computes with that value.
+  A commit that failed with `Commit-time induction failed: rule body:
+  Unbound variable "is"` goes through.
+- No answer that was returned before differs.
+
+Why: the plan and the row it runs on have to agree on what is bound.
+A rule's body is now planned for the terms that seed it.
+
+### A rule body a branch cannot read is skipped, and listed with why
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793)
+
+A stored rule body is whatever some peer wrote: one in a format an
+older release stored, one in a format this release does not know yet,
+bytes that are no rule, or a rule's body under an entity it does not
+hash to. None of them is evaluated, and no query fails over one: a
+query that met an undecodable body used to fail with `rule hydrate`,
+so one bad rule arriving by merge stopped every read of its relation.
+
+A branch now answers `dialog.rule/invalid`: one row per stored body it
+does not read, of the rule's entity, valued with the reason. The reason
+begins with its kind:
+
+- `older:` the body is in a format before this release's, which
+  `Branch::upgrade_rules` rewrites;
+- `newer:` the body is in a format after this release's, which a newer
+  release reads;
+- `undecodable:` the bytes do not decode as a rule, followed by what
+  the decoder said;
+- `forged:` the body decodes, and does not hash to the entity it is
+  stored under.
+
+The body's format is probed before it is decoded, so the first two are
+told apart from the third. Like `dialog.rule/quarantined`, the relation
+is never stored: it is answered from the rule bodies the branch's
+layers hold, and facts written under it are not read.
+
+What this changes for you:
+
+- A query over a relation some undecodable rule body would derive
+  answers from the rules that do read, where it failed.
+- An application lists the rules a branch skipped by querying
+  `dialog.rule/invalid`, as it lists the rules set aside by querying
+  `dialog.rule/quarantined`. `dialog_query::rule::statement::invalid_attr`
+  names the attribute.
+
+Why: rules are replicated facts, and a merge must never be able to stop
+a program that worked before it. Skipping a rule is only safe if the
+skip can be seen.
+
+### A concept field reads one claim with a `pick`, and its cardinality follows from the pick
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
+[`notes/aggregation.md`](./notes/aggregation.md) ("Selective
+aggregators").
+
+An aggregator is selective when its result is always one of its
+inputs, as `max` and `min` are; a computing aggregator (`count`,
+`count-distinct`, `sum`, `avg`) produces a value none of its inputs
+holds. A concept field's `pick` names a selective one, which chooses
+one of its relation's claims per entity: `last` the newest, `max` the
+greatest value, `min` the least, and `top` the value listed first in
+the attribute's `as`, which ranks its values best first as 0.4 did. The
+attribute says what a write does, the pick what a read returns, so a
+ranking field reads a cardinality-many attribute, whose cell keeps every
+claim to rank:
+
+```json
+{ "with": { "status": {
+  "the": "account/status",
+  "as": ["suspended", "active", "registered"],
+  "pick": "top"
+} } }
+```
+
+A field's cardinality is derived from its pick unless it is written:
+`last`, or no pick, is cardinality one, and `all`, `max`, `min` and
+`top` are many. Written beside a pick it has to be one the pick can
+read: `"pick": "last", "cardinality": "many"` keeps every claim and
+reads the newest, and `"cardinality": "one"` beside any other pick is
+refused. An attribute on its own takes `pick: last` or `pick: all` in
+place of its cardinality, and refuses a ranking pick.
+
+Writing `active` to an account that holds `suspended` adds a claim and
+does not displace it; un-suspending is retracting `suspended`. The
+aggregator ranks stored and derived claims alike, and among values it
+holds equal it falls back on the order a cardinality-one read elects by.
+
+What this changes for you:
+
+- `ConceptFieldDescriptor` has a pick, set with `picking` and read with
+  `pick` and `ranking`; `"pick": "top"` on the wire. `last` over a
+  cardinality-one attribute is what the field reads anyway and declares
+  nothing. A field refuses a pick its attribute cannot be read under
+  (`TypeError::SelectiveAggregate`): `max`, `min` or `top` over
+  cardinality one, `top` over an attribute that lists no values, `max`
+  or `min` over a type with no order, or any aggregator on a keyed
+  collection.
+- `#[derive(Concept)]` takes `#[dialog(pick = last | max | min)]`
+  on a field. `top` is refused at compile time, since
+  `#[derive(Attribute)]` cannot declare a listed `as`; a ranking
+  aggregator over a `#[cardinality(one)]` attribute fails when the
+  concept's descriptor is first built.
+- A concept's identity hashes each field's aggregator beside its
+  optionality and conformance, so a field reading `top` and one reading
+  without an aggregator over the same attribute are two concepts, and a
+  one-field concept with an aggregator is not the attribute's relation.
+- `dialog_query::selective::{Selective, Ranking}` are new, and
+  `ReduceEntry::selects` is `is_selective`.
+- A listed `as` is ordered: `[registered, active, suspended]` and
+  `[suspended, active, registered]` are two types, and the second ranks
+  `suspended` best.
+- `top` is no longer an aggregator a rule's `reduce` spells, and
+  `ReduceSpec` and `ReduceEntry` lose `among`: a ranked read is a field
+  with a selective aggregator.
+- A read of a field over stored claims chooses in the scan, as a
+  cardinality-one read does. A field over a relation some rule derives
+  folds the relation's claims, which is set aside like any fold if the
+  field's concept closes a cycle through the relation.
+
+Why: a rule concluding a ranked value into a relation of its own put
+that value in competition with the relation's stored claims, so a
+status set by hand outranked the fold until a newer state arrived. A
+field with a selective aggregator reads the one relation the claims are
+in, and a write through it adds to that relation. The ordering is the
+type's, so a comparison in a rule body and the aggregator agree on it.
+
+### An attribute is a relation, a type and a cardinality, and a ranked read is a concept field's pick
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793) and
+[#759](https://github.com/dialog-db/dialog-db/issues/759), detail in
+[`notes/glossary.md`](./notes/glossary.md) and
+[`notes/notation.md`](./notes/notation.md).
+
+An attribute no longer reads under a ranking pick. It is a relation, a
+value type and a cardinality, `one` (the default) or `many`, which
+`pick: last` and `pick: all` also spell. Under one a read returns the
+cell's newest claim, built in, recursion included, and a write succeeds
+that claim: what `last` did. Under many a read returns every claim and
+a write adds one: what `all` did.
+
+```json
+{ "the": "person/email", "as": "text:", "cardinality": "many" }
+```
+
+No attribute reads under `max`, `min` or `top` any more, and `the` names
+one relation: a list of relations, ranked, is gone. A read that ranks a
+cell's claims is a concept field picking `max`, `min` or `top` (see the
+previous entry). A listed `as: [a, b]` stays, as an enumerated type
+ordered best first.
+
+An attribute spelled with a ranking pick, `select`, the entity spelling
+0.3 to 0.5 wrote (`"pick": "top:"`), or a list of relations under
+`the` is refused by name, so a definition in the format those releases
+wrote is never read with another meaning. A rule
+those releases stored is inert until `Branch::upgrade_rules` rewrites
+it (see Compatibility and migration).
+
+What this changes for you:
+
+- `dialog_corpus::Pick` and `dialog_query::Pick` are gone.
+  `dialog_corpus::Cardinality`, re-exported as `dialog_query::Cardinality`,
+  takes their place on the write path: `Change::Assert(Value,
+  Cardinality)`, `Instruction::Assert(Fact, Cardinality)` and
+  `Update::associate(.., Cardinality)`. `Cardinality::One` succeeds the
+  newest claim and `Cardinality::Many` adds. `Pick::newer` is
+  `Cardinality::newer`, the one order the tree, a transaction's
+  settlement, a cardinality-one read and the selective aggregators share, and
+  `Cardinality::elect` is what `Pick::Last.elect` was. A batch spells
+  the cardinality `one` or `many`, and reads the picks 0.3 to 0.5 wrote
+  there (`last` and `max`, `min`, `top` as one, `all` as many).
+- `Cardinality::estimate` is `dialog_query::estimate_cost(cardinality,
+  ..)`.
+- `AttributeDescriptor` loses `pick`, `with_pick`, `pick_error`,
+  `with_then`, `relations`, `is_chain`, `reads_elected`,
+  `scan_cardinality`, `writes`, `adding` and `adds`. `cardinality` is
+  what both a read and a write go by, `with_cardinality` sets it, and
+  `without_pick` is `plain`. `Attribution::pick` is `cardinality`, and
+  `AttributeStatement` (`DynamicAttributeExpression`) has no `pick`
+  field: its `cardinality` says how it writes, many when it is `None`.
+  `TypeError::UnfitPick` is gone.
+- `#[derive(Attribute)]` reads `#[cardinality(one)]` (the default) or
+  `#[cardinality(many)]`, which `#[pick(last)]` and `#[pick(all)]` also
+  say. A ranking `#[pick(..)]` no longer compiles on an attribute, and
+  says to put the pick on the concept field.
+- A query over `{ "the": .., "pick": "max:" }` fails to parse. Read a
+  field `{ "the": .., "pick": "max" }`.
+- `Election` elects by cardinality alone; `Election::elect_claims`,
+  `ConceptRules::chain_scans` and `ConceptRules::ranks` are gone.
+- An attribute's identity hashes its relation, its cardinality, its type
+  and its listed values, where it hashed the list of relations it read
+  and its pick. Every attribute's identity moved, and every concept's
+  and every rule's with it. `dialog_query::migration` reproduces the
+  identities of 0.3 to 0.5 (`attribute_reference_v1`,
+  `attribute_uri_v1`, `concept_reference_v1`, `concept_identity_v1`).
+- A rule body is stored in format 4, which spells cardinalities.
+- `RulesUpgraded::unmapped` lists the rules the upgrade left inert, with
+  why (`dialog_query::migration::Unmapped`), and
+  `dialog_query::migration::rewrite_body` is the rewrite it runs.
+  `dialog_query::rule::body::format_of` reads the format a stored body
+  names.
+- A stored rule body this release does not decode, a body spelling
+  picks or one in a later format, is inert on a read as it already was
+  at commit: a query that finds it no longer fails with `rule hydrate`.
+
+Why: a pick made one attribute decide both how a relation is read and
+what a write to it retires, so the relation's contents depended on how
+each writer read it, and a ranked read forced a succeeding write. A
+cardinality says only how many claims a cell holds. How to rank them is
+the reading concept field's selective aggregator, which reads the relation as it is and
+can be changed without rewriting it.
+
+### A ranked field over a derived relation picks among its candidates, and a cycle through one is set aside
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
+[`notes/aggregation.md`](./notes/aggregation.md).
+
+A concept field with a `pick` may read a relation rules derive: it
+picks among every candidate the rules offer and every stored claim.
+The value it picks stands as the fact it was picked from, a derived
+candidate as the newest fact its derivation consumed, so `last` over a
+derived relation reads the newest derivation.
+
+A deductive rule an author writes still takes no `reduce`
+(`TypeError::ReduceInOpenRule`), as since
+[#580](https://github.com/dialog-db/dialog-db/pull/580). A computed
+value (`count`, `sum`, `avg`) is none of the claims it was computed
+from, so concluded into an attribute it would compete with the claims
+stored there; it belongs in a query that folds
+([#839](https://github.com/dialog-db/dialog-db/pull/839)), and is still
+refused in a deductive rule.
+
+What this changes for you:
+
+- A concept whose ranked field closes a cycle through the relation it
+  reads is not evaluated in the cycle: the rule of the cycle installed
+  last is quarantined, and `Quarantine::tested` carries
+  `Absence::Folded`. The queries touching such a cycle used to fail
+  (`AggregationThroughRecursion`), which remains for a cycle with no
+  rule to set aside.
+- `max` and `min` over values that compare equal pick the one from the
+  newest fact, where they picked the one of the smaller encoding;
+  values that also stand equal still fall to the encoding.
+- A subscription over a concept with a ranked field on a derived
+  relation is maintained per entity: a change picks again for the
+  entities whose candidates it touches, and no other. Inside a
+  recursion it is still recomputed.
+- A concept of one field that picks, over a relation rules derive
+  outside any cycle, is answered by gathering the relation's
+  candidates and picking among them, without a selecting rule and a
+  fold between, and a subscription over one discovers what a change
+  touches over that relation. `ConceptDescriptor::picked_relation`
+  names it.
+- `Aggregator::Last` is new and `ReduceEntry::is_selective` tells a
+  picking fold from a computing one. A sum of naturals is a natural.
+- A query that folds with `last` or `top`
+  (`Aggregator::orders_by_standing`) is evaluated afresh, under a
+  standing fold, on each poll that moved one of its rows: a row the
+  subscription keeps carries no standing, which those two choose by.
+  Every other fold is still maintained per group.
+
+Why: a status ranked among the cases several rules derive is the read
+tonk's library needed, and it has to answer the same on every replica
+whatever order the candidates arrive in.
+
+### A rule deciding on a cardinality-one value inside its own cycle is set aside
+
+Refs [#793](https://github.com/dialog-db/dialog-db/issues/793), detail in
+[`notes/attribute-heads.md`](./notes/attribute-heads.md).
+
+Inside a recursive component a cardinality-one read sees every
+candidate the fixpoint derives, and readers elect the newest once the
+component is derived in full. That is exact for a rule that passes the
+value along: each candidate it derives stands by the one it carried, so
+the election at the exit picks what a stratified read would have. It is
+not for a rule that decides on the value. Such a rule fires for a
+candidate no reader elects, and nothing at the exit takes its
+conclusion back: with `b` reading `own` over a losing `end`, a rule
+concluding a label for `a` from `x/label(next) = "end"` concluded it,
+though every read of `b` returned `own`. The same body under another
+head, outside the cycle, concluded nothing.
+
+A cardinality-one read whose value the rule decides on is now an
+absence test, so a rule closing a cycle through one is quarantined. A
+rule decides on a value when the read is pinned to a constant, or when
+the value, or anything a formula or an equality computes from it, is
+compared, joined on by another read, negated over, or checked against a
+constant. A rule passes a value along when it reaches the head and
+nothing else, directly or through formulas.
+
+What this changes for you:
+
+- A rule that reads its own relation under cardinality one, of another
+  entity, and decides on the value read is set aside, and listed by
+  `ProgramAnalysis::quarantined` and `dialog.rule/quarantined`. A query
+  over the relation returns what the remaining rules derive. Before, it
+  returned that rule's conclusions too, the ones drawn from losing
+  candidates among them.
+- So is a rule deciding on a field of a concept of several fields,
+  where the field is of cardinality one or declares a selective
+  aggregator: the concept elects the field's claim, and the premise
+  tests that election. A rule deriving a relation from the claim a
+  field's aggregator elects of that same relation closes its cycle
+  through a fold, and is set aside as one.
+- A rule carrying a value down a chain, or computing from it (a
+  position from a successor's position, a depth from a parent's), is
+  unaffected.
+- A rule rewriting the cell it reads, `x/status(e) := "todo" :-
+  x/status(e) = "triage"`, is unaffected: it reads its own relation of
+  its own entity, and its conclusion succeeds the value it read.
+- The same rule outside a cycle is unaffected: there the read is of a
+  relation derived in full.
+- To decide on a value inside a recursion, conclude into another
+  relation, which takes the decision out of the cycle, or make the
+  decision in an inductive rule, which runs at commit over the settled
   value.
-- Matching a pattern against a record under a version this release
-  does not read is `EvaluationError::RecordVersion`, not a dropped row.
-- A rule's identity names a record constant that holds a composite by
-  its parts, as `Value::reference` does.
+- A quarantine says what it was made over. `Quarantine::tested` names
+  the cycle's plainest absence test: the rule making it (`by`), the
+  relation tested (`target`) and how (`absence`). `Tested` is new, and
+  `Absence::Decided` is a cardinality-one read the rule decides on.
+  `Absence::Elected`, a ranked read, is gone with ranked reads. Code
+  building a `Quarantine` by its fields names the new one.
+- `Polarity::Electing` carries `decides`, and no longer `ranked`.
 
-A premise whose parameters are all terms costs what it did: a concept
-read is the stream it was, field for field, and parameters of terms
-are the map of terms they were, with one place beside it for the
-patterns.
+Why: a rule set has to mean one thing whatever else is installed. The
+same body gave a different answer when an unrelated rule closed a cycle
+around it, with nothing reported. Setting the rule aside is reported,
+and names the rule.
 
-Why: a rule that issues a command, derives an entity from a row or
-takes a form apart needs a value made of values where a term stands.
-One pattern that both builds and takes apart lets the planner order the
-premises, as it does for every other premise.
+### Compatibility and migration
 
-### A record can hold a map or a list of values
+- Composites: nothing an existing space holds is rewritten or read
+  differently, and opaque `record:` values keep their encoding and identity.
+  No release up to and including 0.5.0 wrote a composite (the draft #812 was
+  never released), so there is nothing to migrate. A space that stores a
+  composite cannot be read by an older release, which takes a key with type
+  byte 22 for corruption: once a replica writes one, every replica reading
+  that space needs this release. Nothing an embedder has to run.
+- A rule an older release stored spells its attributes under picks (0.3 to 0.5) or under the older `cardinality` (0.2), and sits under an
+  identity that hashed them. This release reads a rule body only in its
+  own format and only under the identity it gives it now,
+  so every such rule is inert: it derives nothing, fires at no commit,
+  and no read fails over it. Nothing is rewritten on upgrade.
+  `Branch::upgrade_rules` (or `Branch::migrate`) is what an embedder
+  runs: it rewrites each rule whose attributes read under `last` or
+  `all` (spelled, or implied by a plain attribute) into cardinality one
+  or many, asserts it in format 4 under its identity now, and retracts
+  every rule fact the older release wrote for it. An attribute read
+  under `max`, `min` or `top` (including a listed `as` without a pick,
+  which read as `top`) is rewritten into a field with that pick over a
+  cardinality-many attribute, a `top`'s list kept in its order, best
+  first. A rule
+  over a chain of relations has no rewriting with the same meaning: it
+  is left as it is, inert, and listed in `RulesUpgraded::unmapped` with
+  why. Its author replaces it with a rule deriving one relation from
+  each, read by a field with a selective aggregator. When to run the upgrade,
+  once after a full replication or on every pull, is the embedder's
+  decision, as before.
+- The upgrade also moves a `dialog.concept/transient` marker keyed by a
+  concept's 0.3 to 0.5 identity, as it moves one keyed by its 0.2
+  identity. An application that keyed its own facts by an attribute or
+  concept identity moves them with `dialog_query::migration`.
+- An older release cannot read what this one writes: a rule body in
+  format 4 is refused by name, and a rule stored under its new identity
+  is inert there, as an older release's rules are here. A batch this
+  release encodes spells `one` and `many`, which an older release does
+  not read; this release reads the batches an older one encoded.
+- What the tree stores is unchanged: a cell's claims, and how a
+  cardinality-one write elects the claim it succeeds, are as `last`
+  left them. A write a 0.3 to 0.5 replica made under `max`, `min` or
+  `top` succeeded the claim that pick elected; those claims stay as
+  written. A field the upgrade rewrote to read with that pick's aggregator
+  reads the same claim; any other read under cardinality one returns the
+  cell's newest.
+- A rule the analysis sets aside for deciding on a cardinality-one value
+  in its own cycle stays installed and is evaluated again once the cycle
+  it closed is gone. Replicas on releases either side of this one can
+  answer a query over such a cycle differently.
 
-[#778](https://github.com/dialog-db/dialog-db/pull/778),
-[design/patterns.md](./design/patterns.md),
-[design/patterns/design-composite-bytes.md](./design/patterns/design-composite-bytes.md)
 
-A value was a scalar or a `Record`, bytes dialog did not look into. A
-`Composite` is a value made of values: a map from a text to a value
-that holds no key twice, or a list, nested as deep as it is written,
-as the IPLD data model has them. There is no tuple: a notation that has
-one writes it as a list. It is kept whole as a `Value::Record`: one
-version byte, `0x01`, then plain dag-cbor. A value dag-cbor has a kind
-for is written as that kind, a nested composite as the map or the list
-it is, and a value it has no kind for (an entity, a symbol, a whole
-number past 64 bits) as a link that holds the value: a CID hashed by
-the identity, under a codec that says the value's type. So anything
-that reads dag-cbor reads what follows the version byte, and a
-composite is a claim's value like any other: it is stored, keyed,
-compared, spilled and synced as the bytes it is. Its name is not a hash
-of those bytes. A composite is named by the merkle reference of its
-parts, a map under `map:` and a list under `list:`, each part by its
-own reference and a key as the text it is, so a later layout of the
-bytes moves no name.
+## 0.5.0 (2026-11-19)
+
+### A subscription's poll costs the entities it touched, not its whole answer
+
+[#838](https://github.com/dialog-db/dialog-db/pull/838).
+
+A subscription keeps a range of its cover per entity it read, and a
+poll gates the tree difference by that cover. Every node, buffered
+operation and changed entry the difference walked was tested against
+every range, so one changed fact under a cover of ten thousand ranges
+cost tens of thousands of comparisons per node. The scope is now sorted
+and merged once and each test is a binary search. A maintained poll
+then compared each re-derived entity with the kept answer by scanning
+every kept row; the kept answer is now indexed by entity, so the
+comparison reads that entity's rows only.
 
 What this changes for you:
 
-- `dialog_corpus::Composite`, `CompositeMap` and `CompositeItems` build
-  one, and `Value::from` keeps it as a record. `Value::composite` reads
-  one back: `Ok(None)` for a scalar and for a record that starts with
-  no version byte, the composite for a record this release wrote, and
-  `Err(CompositeError::UnknownVersion { version })` for a record under a
-  version this release does not read.
-- One value has one byte string. A map's entries are written in one
-  order whatever order they were given in (dag-cbor's: the shorter key
-  first), a key given twice is refused (`CompositeError::DuplicateKey`),
-  bytes that hold a composite any other way are refused
-  (`CompositeError::NotCanonical`), and a number is kept under the
-  narrowest type that holds it, as a tree under the number band reads
-  one back: the natural `3`, the integer `3` and the float `3.0` are
-  one part, and read back as the natural `3`.
-- A link holds a value of any length. A reader built on the `cid`
-  crate's `Cid` reads one of 64 bytes at most, so it reads every symbol
-  and refuses an entity longer than that.
-- `Value::reference` of a record that holds a composite is the
-  reference of its parts. Of any other record it is what it was,
-  `RECORD.reference_of(bytes)`.
-- Equality, ordering, `Value::to_bytes`, `Value::to_reference` (the
-  address a spilled value is stored under) and the key encoding treat a
-  record as its bytes, as before.
+- Nothing in the API. A poll's delta, its order and `results()` read as
+  they did.
+- A poll over a large cover, and a poll that re-derives many entities of
+  a large answer, does work in the touched entities and the log of the
+  cover, where it did work in their product.
 
-Why: a rule could not hold a value made of other values, and everything
-that needed one waited on the layout of a record's bytes. A name that is
-a function of the parts does not depend on that layout, and the version
-byte leaves the layout free to change.
+Why: a subscription's answer grows with the data it watches, and the
+cost of a poll that changed one fact grew with the square of it.
 
+#### Compatibility and migration
+
+- Nothing stored or synced changes.
+
+### An ephemeral line can be read as it stood, at no cost to take: `Ephemeral::frozen`
+
+[#841](https://github.com/dialog-db/dialog-db/pull/841).
+
+`Ephemeral::frozen` returns a `Frozen`: the line's facts, tombstones and
+revision as they stood when it was taken, answering the reads the line
+answers (`scan`, `select`, `export`, `len`, `is_empty`, `revision`) and
+never changing after. The line now holds its facts in chunks shared by
+reference count, so taking one copies nothing, and a write to the line
+while one is held copies the chunk it changes rather than every fact.
+
+What this changes for you:
+
+- New: `Ephemeral::frozen() -> Frozen`, and the `Frozen` type.
+- Nothing a read of a live line answers changes.
+
+Why: a subscription's poll is to read one fixed state of every layer,
+so that subscriptions of one view agree and a channel's facts, which
+last one tick, are read by a retry as they stood. Until now the state of
+a session overlay or a memory layer at an earlier point was had only by
+copying the whole line and undoing its instants.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes, and nothing is rewritten.
+
+### A query can fold, and a fold can be kept current
+
+[#839](https://github.com/dialog-db/dialog-db/pull/839).
+
+Decided in [dialog-db/dialog-db#830](https://github.com/dialog-db/dialog-db/pull/830)
+(a fold is a query type, not a rule) and
+[dialog-db/dialog-db#837](https://github.com/dialog-db/dialog-db/pull/837)
+(how it is kept current).
+
+`Fold::new(groups, inputs, reduce)` is a query in `dialog-query` that
+folds the rows of `inputs` with a `Reduce`, one row for each row of
+`groups`, joined on the grouping fields of the `Reduce`. A group no input
+joins is folded over inputs all absent, so `count` gives 0 for it. A fold
+is asked and subscribed to as any query is; it has no name and installs
+no rule, so an authored deductive rule still cannot fold.
+
+What this changes for you:
+
+- New: `Fold` and `FoldConclusion`, a folded row with the value of each
+  grouping field and each fold.
+- New: `Branch::subscribe_fold(fold)` and `Stack::fold_subscription(fold)`
+  give a `FoldSubscription`, polled as a `Subscription` is and giving
+  `Delta<FoldConclusion>`. It keeps a subscription of each of the fold's
+  two queries and the rows they report, and folds again in memory only the
+  groups a change moved a row of: a group whose row changed reports the
+  old row retracted and the new one asserted, and what it reports adds up
+  to what asking the fold whole gives. Both inner subscriptions are polled
+  at one state of the branch.
+- `Branch::subscribe(fold)` works too, and asks the whole fold again on
+  each poll that touches what it read; `Branch::subscribe_fold` is the
+  one that keeps it current.
+- New: `Application::bindings`, with a default of `None`: the bindings a
+  conclusion was realized from. Attribute queries, concept queries and
+  folds give them, and a `FoldSubscription` needs them of both its
+  queries; one over a query that gives none fails to poll.
+- New: `Fold::groups`, `Fold::inputs`, `Fold::key`, `Fold::fold_groups`
+  (the fold of a set of groups, which asking a fold and a
+  `FoldSubscription` both fold with) and `Reduce::fold_rows`.
+
+Why: a rule cannot fold, and a fold asked again whole on every change
+folds every group for a change to one. A query that folds needs no name
+and no stored value beside its own, and kept current it costs the two
+inner polls and the groups a change moved.
+
+#### Compatibility and migration
+
+- Nothing stored or synced changes: a fold is a query asked in memory and
+  nothing of it is written. Nothing is rewritten on upgrade, and an older
+  release reads what this one writes.
+
+### A concept read binds stored values in place, and reads optional fields in one pass
+
+[#825](https://github.com/dialog-db/dialog-db/pull/825). Research: [zero-copy answers](research/zero-copy-answers.md)
+
+A concept read used to turn every row it scanned into owned values (an
+entity with a hash of its URI, an attribute, a value, a claim) and copy
+them again into each joined row. It now binds the scanned row in place
+and makes a value only when something reads it as one; a join compares
+the stored bytes. A concept with optional fields used to be read by
+probing every optional field once per entity; its optional fields are
+now read once each, in entity order, beside the required ones, and an
+entity a field lacks binds `Absent` as before.
+
+What this changes for you:
+
+- **List reads and subscriptions are faster.** On tonk-team at 10×, the
+  issue list reads in 82 ms where it took 288, the activity list in 106
+  where it took 486, and their subscription polls in 23 and 46 ms where
+  they took 939 and 1,398. Results are the same, row for row.
+- **New reads that do not hydrate:** `Match::view` and
+  `ConceptConclusion::view` return a `ValueView` borrowed from the stored
+  row; `Match::absent` answers without making the value;
+  `Conclusion::this_uri` (with a default) and
+  `ConceptConclusion::this_uri` give the entity's URI as stored.
+  `dialog_corpus` gains `ValueView`, `FactView::checked` and `CheckedRow`.
+- Nothing stored or synced changes.
+
+Why: copying values was most of a concept read's cost after the scan,
+and a concept with an optional field, which most of tonk's are, was
+never merged, so its list read probed every field of every entity.
+
+### A coverage entry spills nothing
+
+[#833](https://github.com/dialog-db/dialog-db/pull/833).
+
+A coverage key carries a hash of the covered value in the spilled form,
+whatever the value's size, so claims can be matched by it; no value is
+stored under that hash. `tree/entry` read it as a spilled value, so an
+inspector offered to read a value that could never be read, and waited
+on it.
+
+What this changes for you:
+
+- `tree/entry` yields no `spill` for an entry at a coverage key, and
+  `inspect::entries` no `spill` in its `EntrySummary`.
+- `dialog/key-part` reads a coverage key as its index, origin, edition,
+  entity and attribute and a part of kind `reference`, `value:<hash>`,
+  where it read a value type of `Bytes` and a `spill` part.
+
+Why: a spill names bytes a reader can fetch; a coverage key's hash names
+none.
+
+#### Compatibility and migration
+
+- Nothing stored changes.
+
+### An index node's buffered operations are its entries, and a separator reads as the key it is
+
+[#832](https://github.com/dialog-db/dialog-db/pull/832).
+
+An index node buffers writes headed for its children (`novelty`), and
+`tree/entry` gave no rows for an index, so a query could count them but
+not read them. A separator was split into its tag and one `prefix` part
+of lossy text, which for a history separator was the origin's raw bytes,
+and a forced seam's separator, the last key before the seam padded with
+zero bytes past the separator bound, read as a key whose value was the
+padding.
+
+What this changes for you:
+
+- `tree/entry` of an index node yields one row per operation it
+  buffers, with a new slot `span` naming the span the operation rides,
+  as `tree/span` names it. `span` is absent on a segment's entry. `at`
+  counts the node's buffered operations; `rank` is absent on them.
+- `dialog_corpus::inspect::entries` returns an index node's buffered
+  operations, and `EntrySummary` has a new field `span: Option<u64>`.
+- `dialog/separator-part` reads a separator field by field as far as it
+  reaches, as `dialog/key-part` reads a key: `entity`, `attribute`,
+  `vtype` and `value` parts in the ordering's order, the value-type byte
+  on its own, and a Bytes or Record value as hex. A history or coverage
+  separator yields its `origin` (hex) and `edition`. The `prefix` part is
+  gone.
+- A separator that is a whole key reads as that key. A forced seam's
+  separator reads as the key before the seam and a part of kind
+  `padding`.
+
+Why: an inspector shows what a node holds, and the operations an index
+buffers and where its boundaries fall are part of that.
+
+#### Compatibility and migration
+
+- Nothing stored changes: both read blocks as they are.
+
+### A revision is named by `revision:`, not by a `did:key:`
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829).
+
+A revision's entity was `did:key:z6Mk<base58(hash)>`: the shape of a key
+DID around a blake3 hash of the revision's version. It read as a
+principal and was none, and nothing could tell a revision from a branch,
+a replica or an operator by its name.
+
+It is now `revision:<base58(hash)>`, over the same hash
+(`Version::entity`, `Revision::entity`). A commit writes the revision's
+signed record under that entity, `dialog.branch/revision` carries it, and
+the built-in `Revision`, `RevisionParent` and `RevisionAncestor` concepts
+yield it for `this`, `parent` and `ancestor`.
+
+What this changes for you:
+
+- A revision entity you read from a query starts with `revision:`. Code
+  that told revisions apart by parsing `did:key:z6Mk` has to change; an
+  entity compared whole needs nothing.
+- `Version::entity_did` is `Version::entity_uri`. `Version::legacy_entity`
+  and `Version::legacy_entity_uri` give the name a revision had before,
+  and `Version::legacy_of` turns the current name into it.
+- A new formula, `dialog/revision-slot`, takes a revision entity as `of`
+  and yields as `is` each entity its record may be stored under: the
+  entity itself, then its older name.
+- A fact your space wrote about a revision under its older name (a
+  comment on a commit, say) still names the older entity, and no longer
+  joins the `this` of `Revision`. Join through `dialog/revision-slot`,
+  or rewrite those facts.
+
+Why: an entity's scheme is what a reader, a rule and a view have to tell
+kinds of thing apart, and a node (`node:`) and an asset (`asset:`)
+already say what they are. A name shaped like a key invites treating it
+as one.
+
+#### Compatibility and migration
+
+- A replica written by an older release holds each revision's record
+  under `did:key:z6Mk…`. Nothing is rewritten on upgrade: this release
+  reads a record under either name (the history reader, the built-in
+  revision concepts and a stack's durable layers all do) and writes new
+  ones under `revision:`, so one tree can hold both. An embedder runs
+  nothing.
+- A durable layer's pointer, the `dialog.branch/revision` of
+  `memory:<name>` stored in the primary's tree, names its revision by
+  the name the release that wrote it used. This release follows a
+  pointer an older release wrote, by either name, and opens the layer;
+  the layer's next move points the primary at the new revision by its
+  `revision:` name and retires the older claim, as any move does.
+- An older release cannot find a record written under `revision:`, so
+  it cannot read the history of what this release committed, nor follow
+  a durable layer's pointer this release wrote. Upgrade every replica of
+  a space before any of them commits with this release.
+
+### A tree node is a handle, and five resolvers read it
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829), argued in [design/tree-exploration.md](./design/tree-exploration.md).
+
+The seven `tree/*` resolvers each loaded a node's block and decoded one
+part of it, so a query asking three things of one node decoded it three
+times. A segment's entries were split across three of them (`tree/key`,
+`tree/entry`, `tree/blob`) and paired by position. A node was named by
+the base58 string of its hash, which is not an entity, so a rule could
+not derive a concept whose rows were nodes.
+
+A node is now opaque to a query, which holds its handle: the entity
+`node:<base58(hash)>` (`Entity::from_node`, `Entity::node_hash`).
+`dialog.branch/tree` carries the root's handle and `tree/span` yields
+each child's. A resolver takes the handle as `of`, asks the environment
+for the decoded node (`nodes::Read`, as the tree's own reads do), and
+yields one part of it. The environment decodes a node once and keeps it.
+
+```text
+tree/node   what the node is, and the format it was written under
+tree/span   an index node's children, with what the node holds about each
+tree/entry  a segment node's entries, each whole
+tree/block  the node's block as stored
+tree/value  a spilled value's bytes, by its asset: entity
+```
+
+What this changes for you:
+
+- `dialog/key-part` and `dialog/separator-part` yield `part`, each
+  component's own entity (`part:<base58(blake3(key))>/<at>`), so a rule
+  can derive one row per component. A query asking either formula
+  names `part` among its terms too.
+- `tree/key`, `tree/blob` and `tree/manifest` are gone, with
+  `TreeKeyQuery`, `TreeBlobQuery` and `TreeManifestQuery`. A key and its
+  rank, and a blob record's fields, are slots of `tree/entry`; the
+  manifest's fields are slots of `tree/node`. `tree/block` is new.
+- `of` is an entity: a `node:` for every resolver but `tree/value`,
+  which takes an `asset:`. A base58 string or raw bytes, which `of`
+  used to take, match nothing.
+- `dialog.branch/tree` is an entity (`branch::Tree(Entity)`), not text.
+  A concept that reads it declares the field as an entity; the hash is
+  `tree.0.node_hash()`.
+- `tree/span` yields `node` as a `node:` entity, and a new slot `span`:
+  the span's own entity, `span:<base58(node)>/<position>`. `tree/entry`
+  yields `entry`, `entry:<base58(node)>/<position>`. A rule deriving a
+  concept of spans or of entries has an entity for each row.
+- `tree/entry` yields `spill` and `blob` as `asset:` entities. A slot
+  that does not apply to a row is absent: `spill` when the value is
+  inline (it was an empty string), `origin` and `edition` when the
+  write was unversioned (they were empty and 0), the blob slots on any
+  entry that is no blob record, and the claim slots on one that is.
+- Slot names are kebab-case: `max-separator`, `inline-n`,
+  `spill-prefix`, `max-segment`, `frame-ceiling-factor`,
+  `anchor-selector`. `fanout_n` is `fanout-exponent`. `tree/node` also
+  yields `entry-overhead`, `key-overhead` and `link-overhead`, which no
+  resolver did.
+- `RESOLVER_COST` is 50,000, from 200. Where a rule's body has a fact
+  that decides whether a node is read, the planner now asks the fact
+  first, whether or not the caller gave the node.
+- `dialog_corpus::inspect` has a reading of each part that takes a
+  decoded node (`summary`, `spans`, `keys`, `entries`, `blob_records`,
+  `manifest`) beside the `inspect_*` functions that take bytes.
+- A resolver still requires its handle. A rule whose body is a resolver
+  alone is refused at install as before; a rule that names its nodes by
+  a fact installs, and reads those nodes and no others.
+
+Why: a query should be able to read everything a node holds without the
+embedder decoding blocks for it, and the reading and decoding of a node
+belong to the environment, which already does both for the tree. A
+handle that is an entity is what a rule needs to make a node, a span or
+an entry the subject of a concept.
+
+#### Compatibility and migration
+
+- Nothing stored changes. A branch's `dialog.branch/tree` is derived
+  when a query runs and never written; it now reads as a `node:`
+  entity. A durable layer's pointer does write `dialog.branch/tree`, of
+  `memory:<name>` in the primary's tree, and still writes it as the
+  tree's base58 text, so the same attribute reads as an entity of a
+  branch and as text of a layer: a rule reading a layer's pointer reads
+  text. Resolver rows are read off blocks. An older release reads
+  everything this one writes. A rule stored on a branch that uses `tree/key`,
+  `tree/blob` or `tree/manifest`, a snake_case manifest slot, or a
+  base58 string as `of`, or that reads `dialog.branch/tree` as text, no
+  longer compiles or no longer matches, and has to be re-authored.
+
+### A stack learns what its replica holds of a tree by command
+
+[#829](https://github.com/dialog-db/dialog-db/pull/829), argued in [design/tree-exploration.md](./design/tree-exploration.md).
+Built on the stack's providers
+([#816](https://github.com/dialog-db/dialog-db/pull/816)).
+
+A tree resolver fetches a node the replica lacks, so that what a query
+answers does not depend on what happened to be local. That left a
+consumer no way to know, before it asked, whether asking for a node
+would fetch it.
+
+`dialog_repository::holdings` has two commands for that and the
+providers that answer them (`holdings::provide(&stack, env)`):
+
+- `dialog.node.probe/node`, the node to ask about, is answered with
+  `dialog.node.probed/node` and `dialog.node.probed/local`: whether the
+  replica holds the node, with nothing fetched.
+- `dialog.node.fetch/node`, the node to bring local, is answered with
+  `dialog.node.fetched/node` and `dialog.node.fetched/local`: whether
+  the replica holds it, having tried.
+
+What this changes for you:
+
+- `holdings::{provide, providers, probe, fetch}` and the attribute names
+  beside them are new. A stack they are not registered with reports
+  these commands as unhandled, like any command no provider claims.
+- An answer is written into `control:`, so it is a command for one tick
+  and nothing keeps it. A space keeps it with a rule, and where the
+  rule's attribute is placed is where it is kept: on a layer of the
+  session it is read and subscribed to through the stack, never
+  committed or synced, and gone with the session. A space with no such
+  rule gets nothing.
+- A command whose value is not a `node:` entity, and a read that fails,
+  fail the command: it gets a `dialog.command/failed` row with the
+  reason.
+
+Why: whether a block is held changes with no commit, so a query step
+that reported it would answer the same query differently from one
+moment to the next. As a command's answer captured by a rule, it enters
+a query as a fact of a layer the query has pinned.
 ### A provider claims the commands whose rows satisfy its concept, and a command sees the rows of its tick
 
 [#823](https://github.com/dialog-db/dialog-db/pull/823). Refs
@@ -1773,49 +2584,6 @@ most of what a replica weighs. Replaying 4096 Stack Exchange commits, the
 
 ### Compatibility and migration
 
-- A set the notation writes into a record, `{: 1 : 2}`, is stored as a
-  list, which every release reads; it reads back as that list. Nothing
-  is rewritten, and a query is stored nowhere. Nothing for an embedder to
-  run.
-- Nothing stored or synced changes shape for `entity/derive`, and nothing
-  is rewritten on upgrade. A rule that applies it is stored as any rule
-  is, and a release without the formula cannot read that rule's body, as
-  it cannot read any formula it does not know. Nothing for an embedder to
-  run.
-- **Rule bodies are format 4.** An older replica holds rule bodies in
-  format 3 or earlier. This release reads them all as before, and
-  `Branch::upgrade_rules` rewrites each in format 4. No rule changes
-  its entity: a rule that holds no pattern is the same body but for the
-  number, and a rule that holds a pattern is named by its parts, as it
-  has been since it could be built. Until an embedder runs
-  `upgrade_rules`, a rule this release writes again has both bodies
-  under its entity, which read as one rule. **An older release cannot
-  read what this one writes**: it refuses a body of a later format by
-  its number and skips the rule, a rule of plain terms too, so on a
-  space shared with a peer that has not upgraded, that peer derives
-  nothing from rules written here until it does. The release after this
-  one reads format 4 only, so run `upgrade_rules` on this one.
-- One rule changes identity between releases: a rule whose body holds a
-  record constant that is a composite is named by the composite's parts
-  here and by its bytes in an older release, so each release finds the
-  body the other stored under an entity it does not derive and leaves
-  it inert. No release before this one could write such a constant.
-- A composite is a new kind of bytes under the existing `record:` value
-  type, so nothing is rewritten on upgrade and no tree, key or wire
-  format changes. What an older replica holds under `record:` is a
-  revision's record, a bare dag-cbor map whose first byte is `0xa7`, and
-  whatever bytes an embedder stored. This release reads a record as a
-  composite only when its first byte is `0x01` and the rest is exactly
-  the bytes a composite is written in; every other record reads,
-  compares, verifies and is named as before. An older release makes of a
-  versioned record what it makes of any record: bytes it stores, syncs
-  and compares, and names by a hash of the bytes, which is not the name
-  this release gives it. It cannot look inside. A record under a later
-  version than `0x01` is carried the same way by this release and refused
-  by its number when something looks into it. An embedder runs nothing.
-  One that stored records of its own starting with a byte from `0x01` to
-  `0x17` should say so before upgrading
-  ([design/patterns/design-version-byte.md](./design/patterns/design-version-byte.md)).
 - Nothing an existing space holds changes or is read differently for the
   single-file archive: it is a new provider a space opts into. A space
   opened with `Chronicle` does not read an `fs` archive's directory of

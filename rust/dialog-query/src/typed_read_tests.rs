@@ -60,7 +60,6 @@ async fn store_mixed(branch: &Branch, operator: &Operator) -> anyhow::Result<Vec
             is: value,
             cause: None,
             cardinality: None,
-            pick: None,
         });
     }
     transaction.commit().publish().perform(operator).await?;
@@ -68,12 +67,12 @@ async fn store_mixed(branch: &Branch, operator: &Operator) -> anyhow::Result<Vec
 }
 
 /// The concept of `mixed/value` alone, its field declaring no type,
-/// read under `pick` (none for the default).
-fn untyped(pick: Option<&str>) -> ConceptDescriptor {
+/// read under `cardinality` (none for the default).
+fn untyped(cardinality: Option<&str>) -> ConceptDescriptor {
     let mut field = serde_json::Map::new();
     field.insert("the".into(), "mixed/value".into());
-    if let Some(pick) = pick {
-        field.insert("pick".into(), pick.into());
+    if let Some(cardinality) = cardinality {
+        field.insert("cardinality".into(), cardinality.into());
     }
     serde_json::from_value(serde_json::json!({ "with": { "is": field } }))
         .expect("a one-field concept is well formed")
@@ -82,7 +81,7 @@ fn untyped(pick: Option<&str>) -> ConceptDescriptor {
 /// A registry whose one rule derives `mixed/value` from itself, which
 /// makes the relation recursive.
 fn recursive() -> anyhow::Result<RuleRegistry> {
-    let field = serde_json::json!({ "the": "mixed/value", "pick": "all:" });
+    let field = serde_json::json!({ "the": "mixed/value", "cardinality": "many" });
     let rule: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
         "deduce": { "with": { "is": field } },
         "when": [{
@@ -125,7 +124,7 @@ async fn read(source: &TestEnv<'_>, kind: Kind) -> anyhow::Result<Vec<Value>> {
     terms.insert("is".into(), Term::var("value").with_kind(kind));
     let rows = ConceptQuery {
         terms,
-        predicate: untyped(Some("all:")),
+        predicate: untyped(Some("many")),
     }
     .evaluate(Match::new().seed(), source)
     .try_vec()
@@ -229,9 +228,8 @@ async fn it_reads_the_values_of_its_type_through_a_recursive_untyped_field() -> 
 
 /// A variable that reads a text or nothing is absent for an entity
 /// whose only value is a number, as it is for one with no value: to
-/// the variable neither has a text. Under the stored rows as they are
-/// (`all:` and the default), under a pick that elects on the way out
-/// (`max:`), and through the fixpoint.
+/// the variable neither has a text. Under the stored rows as they are,
+/// under each cardinality, and through the fixpoint.
 #[dialog_common::test]
 async fn it_reads_a_value_of_another_type_as_absent_when_it_may_be() -> anyhow::Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -244,24 +242,24 @@ async fn it_reads_a_value_of_another_type_as_absent_when_it_may_be() -> anyhow::
     let recursive = TestEnv::new(&branch, &operator, recursive()?);
 
     let reads = [
-        (&plain, Some("all:"), "all:"),
-        (&plain, None, "the default pick"),
-        (&plain, Some("max:"), "max:"),
-        (&recursive, Some("all:"), "the fixpoint"),
+        (&plain, Some("many"), "many"),
+        (&plain, None, "the default cardinality"),
+        (&plain, Some("one"), "one"),
+        (&recursive, Some("many"), "the fixpoint"),
     ];
-    for (source, pick, how) in reads {
+    for (source, cardinality, how) in reads {
         assert_eq!(
-            read_optional(source, untyped(pick), hello).await?,
+            read_optional(source, untyped(cardinality), hello).await?,
             vec![Some(text("hello"))],
             "the text under {how}"
         );
         assert_eq!(
-            read_optional(source, untyped(pick), &nobody).await?,
+            read_optional(source, untyped(cardinality), &nobody).await?,
             vec![None],
             "no value under {how}"
         );
         assert_eq!(
-            read_optional(source, untyped(pick), seven).await?,
+            read_optional(source, untyped(cardinality), seven).await?,
             vec![None],
             "the number under {how}"
         );
@@ -271,8 +269,8 @@ async fn it_reads_a_value_of_another_type_as_absent_when_it_may_be() -> anyhow::
 
 /// The same through a concept a rule derives, where an entity's values
 /// are elected among: `derived/value` is whatever `source/a` and
-/// `source/b` hold. A variable reads the greatest of the values of its
-/// type, not the greatest of all when that is of another, and one that
+/// `source/b` hold. A variable reads the newest of the values of its
+/// type, not the newest of all when that is of another, and one that
 /// may be absent is absent for an entity with none of its type.
 #[dialog_common::test]
 async fn it_elects_among_the_values_of_its_type_in_a_derived_field() -> anyhow::Result<()> {
@@ -292,18 +290,17 @@ async fn it_elects_among_the_values_of_its_type_in_a_derived_field() -> anyhow::
             is,
             cause: None,
             cardinality: None,
-            pick: None,
         });
     }
     transaction.commit().publish().perform(&operator).await?;
 
-    let derived = serde_json::json!({ "the": "derived/value", "pick": "max:" });
+    let derived = serde_json::json!({ "the": "derived/value" });
     let mut registry = RuleRegistry::new();
     for from in ["source/a", "source/b"] {
         let rule: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
             "deduce": { "with": { "is": derived } },
             "when": [{
-                "assert": { "with": { "is": { "the": from, "pick": "all:" } } },
+                "assert": { "with": { "is": { "the": from, "cardinality": "many" } } },
                 "where": {
                     "this": { "?": { "name": "this" } },
                     "is": { "?": { "name": "is" } }
@@ -371,7 +368,6 @@ async fn it_passes_over_a_row_one_variable_cannot_hold_twice() -> anyhow::Result
             is: Value::Entity(own.clone()),
             cause: None,
             cardinality: None,
-            pick: None,
         })
         .commit()
         .publish()
@@ -384,7 +380,7 @@ async fn it_passes_over_a_row_one_variable_cannot_hold_twice() -> anyhow::Result
     terms.insert("is".into(), Term::var("x"));
     let rows = ConceptQuery {
         terms,
-        predicate: untyped(Some("all:")),
+        predicate: untyped(Some("many")),
     }
     .evaluate(Match::new().seed(), &source)
     .try_vec()

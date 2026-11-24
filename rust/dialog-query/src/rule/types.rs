@@ -146,7 +146,7 @@ impl TypeEnv {
         // once every premise has contributed, so an operand a later
         // premise types still decides the output.
         let mut signed: Vec<SignedImage> = Vec::new();
-        // The variables a pattern makes hold a record: what an equality
+        // The variables a pattern makes hold composites: what an equality
         // sets equal to a map or a list, a rest and a run.
         // Checked once every premise has contributed (see
         // [`Self::check_records`]).
@@ -373,22 +373,27 @@ impl TypeEnv {
     /// of kind `slot`. The pattern's type follows from its shape and
     /// its leaves:
     ///
-    /// - a value of the shape is kept as a record, so the slot has to
-    ///   read records, and one that reads only text is a conflict;
+    /// - a value of the shape is a composite map or list, so the slot has
+    ///   to read that shape, and one that reads only text is a conflict;
     /// - a leaf keeps the descriptor a term has: a variable written as
     ///   text is text wherever else the rule mentions it, and one
     ///   written with no type is any present value;
-    /// - a rest is a map and a run is a list, so each holds a record
-    ///   and is added to `records`.
+    /// - a rest is a map and a run is a list, so each is checked against
+    ///   its corresponding composite shape.
     fn infer_shape(
         ctx: &mut Context,
         pattern: &Pattern,
         slot: Option<&Kind>,
         records: &mut Vec<String>,
     ) -> Result<(), InferenceError> {
-        let record = Inferred::Static(Kind::from(ValueType::Record));
+        let shape_kind = match pattern {
+            Pattern::Map(_) => ValueType::CompositeMap,
+            Pattern::List(_) => ValueType::CompositeList,
+            Pattern::Term(_) => ValueType::Composite,
+        };
+        let shape = Inferred::Static(Kind::from(shape_kind));
         if let Some(slot) = slot
-            && let Err(reason) = ctx.unify(&lift(&slot.clone().required()), &record)
+            && let Err(reason) = ctx.unify(&lift(&slot.clone().required()), &shape)
         {
             return Err(InferenceError::Conflict {
                 variable: pattern.to_string(),
@@ -433,8 +438,7 @@ impl TypeEnv {
         }
     }
 
-    /// A rest or a run: a present value, like any leaf, that holds a
-    /// record.
+    /// A rest or run variable holds a composite of the same shape.
     fn infer_remainder(
         ctx: &mut Context,
         remainder: Option<&Term<Any>>,
@@ -448,8 +452,8 @@ impl TypeEnv {
         leaf(ctx, term)
     }
 
-    /// Refuse a rule in which a variable a pattern makes hold a record
-    /// cannot hold one, because another premise types it as something
+    /// Refuse a rule in which a variable a pattern makes hold a
+    /// composite cannot hold one, because another premise types it as something
     /// else: a rest that a sum adds to, or a field of text read into a
     /// map.
     ///
@@ -459,15 +463,16 @@ impl TypeEnv {
     /// on the first value of another kind it yields, where a pattern is
     /// to drop that row.
     fn check_records(ctx: &mut Context, records: &[String]) -> Result<(), InferenceError> {
-        let record = Primitive::singleton(ValueType::Record);
+        let composite = Primitive::singleton(ValueType::CompositeMap)
+            .union(Primitive::singleton(ValueType::CompositeList));
         for name in records {
             let var = ctx.var_for_name(name);
             let kind = Self::resolve(ctx, var);
-            if kind.primitive_part().intersect(record).is_none() {
+            if kind.primitive_part().intersect(composite).is_none() {
                 return Err(InferenceError::Conflict {
                     variable: name.clone(),
                     reason: format!(
-                        "a pattern makes it hold a record, and the rule's other premises make it \
+                        "a pattern makes it hold a composite, and the rule's other premises make it \
                          {kind}"
                     ),
                 });

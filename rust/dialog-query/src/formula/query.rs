@@ -136,6 +136,7 @@ define_formulas! {
 
     "dialog/revision"         => Revision(super::revision::Revision, super::revision::RevisionQuery),
     "dialog/revision-parent"  => RevisionParent(super::revision::RevisionParent, super::revision::RevisionParentQuery),
+    "dialog/revision-slot"    => RevisionSlot(super::revision::RevisionSlot, super::revision::RevisionSlotQuery),
 
     "dialog/key-part"         => KeyPart(super::key::KeyPart, super::key::KeyPartQuery),
     "dialog/separator-part"   => SeparatorPart(super::key::SeparatorPart, super::key::SeparatorPartQuery),

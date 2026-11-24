@@ -1,19 +1,19 @@
 # A parameter holds one variable or one constant
 
-**Phase: Building.** The direction is the maintainer's, decided 2026-11-11. The implementation decisions are for whoever builds it, each in its own file beside [the plan](patterns/plan.md); the [journal](patterns/journal.md) says how far the build is.
+**Phase: Implementation.** Patterns use the canonical composite value from [#843](https://github.com/dialog-db/dialog-db/pull/843), with Chronicle sharing its scalar atoms through tokens in [#849](https://github.com/dialog-db/dialog-db/pull/849). The implementation work is in [the plan](patterns/plan.md).
 
 ## Description
 
-A premise is applied to parameters, a map from a name to a `Term`, and a `Term` is a variable or a constant (`rust/dialog-query/src/parameters.rs`, `term.rs`). A constant is a `Value`, and a `Value` is a scalar or `Record`, bytes dialog does not look into (`rust/dialog-corpus/src/model/value.rs`). The one record dialog writes is a revision's, dag-cbor that formulas of fixed cells take apart (`history/revision_record.rs`, `rust/dialog-query/src/formula/revision.rs`).
+A premise is applied to parameters, a map from a name to a `Term`, and a `Term` is a variable or a constant (`rust/dialog-query/src/parameters.rs`, `term.rs`). A constant is a `Value`: a scalar or a `Composite`, a map or list that can be read by shape (`rust/dialog-corpus/src/model/composite.rs`). Its canonical header table holds each scalar atom used by it and its nested composites once. Chronicle interns those atoms in the same token dictionary it uses for standalone values; see [the composite design](../composite-value.md).
 
-So a rule cannot hold a value made of other values, cannot take one apart by its shape, and cannot make one from what it has bound.
+Patterns let a rule hold a value made of other values, take one apart by its shape, and make one from what it has bound.
 
 Where it shows:
 
 - The notation being designed in [macros](macros.md) writes a struct where a value stands, `{text: ?x}`, and its proof of concept (#773) refuses it.
 - A rule that issues a command, or creates something, names an entity from what it bound. `entity/derive` there takes two values and is chained a link a value, because it cannot be given one record.
 - A rule about syntax takes a form apart and builds another. The proof of concept does that in memory, outside dialog, since a form is not a value dialog can hold.
-- The record values research (#748) has what a record is and how its bytes might be laid out, and nothing built.
+- The earlier record values research (#748) has been superseded by the composite value implementation and layout in #843 and #849.
 
 ## Problem
 
@@ -30,8 +30,9 @@ A rule cannot say a value by its shape: dialog has no value made of values, and 
 ```
 
 - **A parameter holds a pattern.** Where the value is bound, the pattern takes it apart and binds what is inside it. Where everything inside it is bound, the pattern is the value. One thing, both ways.
-- **A composite value first.** A map or a list of values, as the IPLD data model has them and no tuple (Irakli, 2026-11-14: a notation may have a tuple, and that does not give it a place in the data model; it writes one as a list). Kept whole as a `Value::Record`: dag-cbor under a version byte, so a later layout is a later version. Named by a merkle reference of its parts, so no layout moves a name. A revision's record is a bare dag-cbor map and never starts with the version byte, so the two tell apart and nothing stored is rewritten.
+- **Use the composite value.** A map or a list of values, as the IPLD data model has them and no tuple. Patterns build and take apart `Value::Composite` maps and lists. The scalar atoms in a composite and all its nested composites share one sorted table; Chronicle maps those atoms to the same tokens used by standalone values. Composite identity comes from its parts, independent of its canonical bytes and token IDs. A revision record remains its own bare dag-cbor map.
 - **The planner and inference look inside.** A pattern is feasible by the variables in it, not as one variable. Its type follows from its shape.
-- **No stored format and no wire form changes for it now.** Rules of tonk's notation never hold a pattern. What installing a rule that holds one does is to be said, not left to happen.
+- **Use the canonical composite value.** Patterns build and match `Value::Composite`; they add no separate record encoding or token table. Composite canonical bytes and token sharing are defined by #843 and #849.
+- **No stored format and no wire form changes for patterns.** A rule that holds a pattern has an identity and runs in a query layer, but has no stored body: committing one is refused with `CommitError::Refused` ([rule identity](patterns/design-rule-identity.md)).
 
-Out of scope: the layout of a record's bytes beyond the first version (#748's), and rules of several heads ([rule-heads](rule-heads.md), #776).
+Out of scope: designing another composite encoding or token table, and rules of several heads ([rule-heads](rule-heads.md), #776).
