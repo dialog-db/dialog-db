@@ -931,6 +931,16 @@ pub struct Expander {
     asked: Vec<(Syntax, Position, usize)>,
     /// The trees of the document being expanded, as given.
     document: Vec<Syntax>,
+    /// What the document being expanded defines, each with the tree
+    /// that defines it: a concept by its signature and by its name, a
+    /// query by its name.
+    defining: BTreeMap<String, usize>,
+    /// The pairs of the document's trees that define one name, the one
+    /// met first and the other: what the document means would depend on
+    /// the order they are written in.
+    pub(crate) twice: Vec<(usize, usize, Error)>,
+    /// Trees of the document left out, each refused as it says.
+    pub(crate) skipping: BTreeMap<usize, Error>,
     /// The sites of the tree being expanded, each by its reference,
     /// numbered in the order they are met: what a site's own variables
     /// are named apart by. Begun again for each tree, so the numbers
@@ -998,6 +1008,8 @@ impl Expander {
     pub fn check(&mut self, trees: Vec<Syntax>) -> (Vec<Syntax>, Vec<Diagnostic>) {
         self.asked.clear();
         self.origin.clear();
+        self.defining.clear();
+        self.twice.clear();
         self.document = trees.clone();
         // The order of a document's forms does not matter. What declares
         // a name, a concept or a rule about syntax, is expanded before
@@ -1010,12 +1022,21 @@ impl Expander {
                 .is_some_and(|word| matches!(word, "syntax" | "warning")),
             _ => false,
         };
+        let skipping = std::mem::take(&mut self.skipping);
         let mut pending: Vec<usize> = (0..trees.len())
             .filter(|at| declares(&trees[*at]))
             .chain((0..trees.len()).filter(|at| !declares(&trees[*at])))
+            .filter(|at| !skipping.contains_key(at))
             .collect();
         let mut done: BTreeMap<usize, Vec<Syntax>> = BTreeMap::new();
-        let mut refused: BTreeMap<usize, Diagnostic> = BTreeMap::new();
+        let mut refused: BTreeMap<usize, Diagnostic> = skipping
+            .into_iter()
+            .map(|(at, error)| {
+                let refusal =
+                    Diagnostic::refused(trees.get(at).cloned(), vec![Segment::Item(at)], error);
+                (at, refusal)
+            })
+            .collect();
         // A form a macro expands to may declare a name too. Whatever
         // failed before it is expanded again once it has, until nothing
         // more is declared. A name two such expansions need of each
@@ -1074,6 +1095,29 @@ impl Expander {
         let mut diagnostics: Vec<Diagnostic> = refused.into_values().collect();
         diagnostics.extend(self.diagnose());
         (kernel, diagnostics)
+    }
+
+    /// Say the tree being expanded defines `key`: refused, naming both,
+    /// where another tree of the document defines it already.
+    pub(crate) fn defines(&mut self, key: String, name: &str) -> Result<(), Error> {
+        match self.defining.get(&key) {
+            Some(&at) if at != self.tree => {
+                let form = |at: usize| {
+                    self.document
+                        .get(at)
+                        .map(ToString::to_string)
+                        .unwrap_or_default()
+                };
+                let error = Error::Twice(name.to_string(), form(at), form(self.tree));
+                self.twice.push((at, self.tree, error.clone()));
+                Err(error)
+            }
+            Some(_) => Ok(()),
+            None => {
+                self.defining.insert(key, self.tree);
+                Ok(())
+            }
+        }
     }
 
     /// Refuse a tree of a document that names what the notation names
@@ -1231,6 +1275,22 @@ impl Expander {
             _ => None,
         };
         if let Some(declared) = &signature {
+            // One document says one thing of a name, in any order: a
+            // concept a form defines and another form defines again, or
+            // names as a query, is refused naming both.
+            self.defines(
+                format!("concept {} {:?}", declared.name, declared.parameters),
+                &declared.name,
+            )?;
+            if self
+                .defining
+                .contains_key(&format!("query {}", declared.name))
+            {
+                self.defines(format!("query {}", declared.name), &declared.name)?;
+            }
+            self.defining
+                .entry(format!("concept {}", declared.name))
+                .or_insert(self.tree);
             // The field that is one entry of a collection, `block: {?k ?b}`.
             let entry = pattern.operand().and_then(|operand| {
                 operand.terms.iter().find_map(|(label, term)| match term {

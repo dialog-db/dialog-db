@@ -10,6 +10,8 @@
 //! replica, which is why this phase and not the others is the one that
 //! reads a database.
 
+use std::collections::BTreeMap;
+
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::expand::Expander;
 use crate::{Error, Syntax};
@@ -86,12 +88,29 @@ impl Analyzer {
     /// says the way to the form it is about. What the forms define is
     /// kept, so the analyzer is not left as it was when a form is
     /// refused, as it is by [`analyze`](Self::analyze).
+    ///
+    /// Two forms that define one name are both refused, whichever comes
+    /// first, and what neither defines is analyzed without them: which
+    /// of them would stand would depend on their order.
     pub fn analyze_forms(&mut self, trees: &[Syntax]) -> Analysis {
-        let (analyzed, diagnostics) = self.expander.check(trees.to_vec());
-        Analysis {
-            analyzed,
-            origin: self.expander.origin().to_vec(),
-            diagnostics,
+        let before = self.expander.clone();
+        let mut skipping: BTreeMap<usize, Error> = BTreeMap::new();
+        loop {
+            let (analyzed, diagnostics) = self.expander.check(trees.to_vec());
+            let twice = std::mem::take(&mut self.expander.twice);
+            if twice.is_empty() {
+                return Analysis {
+                    analyzed,
+                    origin: self.expander.origin().to_vec(),
+                    diagnostics,
+                };
+            }
+            for (first, second, error) in twice {
+                skipping.entry(first).or_insert_with(|| error.clone());
+                skipping.entry(second).or_insert(error);
+            }
+            self.expander = before.clone();
+            self.expander.skipping = skipping.clone();
         }
     }
 }

@@ -270,6 +270,12 @@ impl Expander {
             return Err(asks(tree));
         }
         let name = name.to_string();
+        // A concept another form of the document defines under this name
+        // is refused naming both, whichever comes first.
+        if self.defining.contains_key(&format!("concept {name}")) {
+            self.defines(format!("concept {name}"), &name)?;
+        }
+        self.defines(format!("query {name}"), &name)?;
         if self.concepts.contains(&name) {
             return Err(Error::Refused(format!(
                 "{head}: {name} is a concept, and a query is named apart from what it reads"
