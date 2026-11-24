@@ -462,3 +462,37 @@ async fn it_answers_after_a_poll_failed_putting_the_answers_together() -> Result
     );
     Ok(())
 }
+
+/// `Plan::row` of a layer the plan has no such index for is a typed
+/// error, not a panic, and a match is read as a row of every column.
+#[dialog_common::test]
+async fn it_refuses_a_row_of_a_layer_the_plan_has_not() -> Result<()> {
+    use dialog_query::query::Output as _;
+    let notebook = tasks().await?;
+    let plan = flat()?;
+    let layer = (0..plan.layers.len())
+        .find(|layer| !plan.layers[*layer].conditions.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("a layer with conditions"))?;
+    let query = plan.query(layer, None)?;
+    let mut asked = notebook.branch.query();
+    if let Some(rule) = &query.rule {
+        asked = asked.with(rule.clone());
+    }
+    let found = asked
+        .select(query.select.clone())
+        .perform(&notebook.operator)
+        .try_vec()
+        .await?;
+    let conclusion = found.first().ok_or_else(|| anyhow::anyhow!("a match"))?;
+    let row = plan.row(layer, &query, conclusion, None)?;
+    assert_eq!(row.len(), plan.layers[layer].row.len(), "{row:?}");
+    let beyond = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        plan.row(plan.layers.len() + 3, &query, conclusion, None)
+    }));
+    assert!(
+        matches!(beyond, Ok(Err(dialog_notation::Error::Refused(_)))),
+        "{:?}",
+        beyond.map(|row| row.err())
+    );
+    Ok(())
+}
