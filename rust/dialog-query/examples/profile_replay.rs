@@ -1,7 +1,9 @@
 //! Standalone profiling driver for the transaction-log replay.
 //!
-//! Replays a Stack Exchange transaction log (see `scripts/se-transform.py`)
-//! one commit per source edit, so a sampling profiler sees the commit path
+//! Replays a Stack Exchange transaction log (a CSV of
+//! `txn,at,the,of,as,is`, rows sharing a `txn` one commit, made from a
+//! site dump by [`se-transform.py`] on the `research-data` branch) one
+//! commit per source edit, so a sampling profiler sees the commit path
 //! without a test harness in the frame. Per-commit cost grows with history
 //! depth on this workload, and the query path does not (cardinality-one
 //! supersession keeps the queried state one value per entity), so what a
@@ -23,6 +25,8 @@
 //! ```
 //!
 //! Args: `<log.csv> [limit]` (limit defaults to 2048; 0 replays all).
+//!
+//! [`se-transform.py`]: https://github.com/dialog-db/dialog-db/blob/research-data/research/benchmark-dataset/se-transform.py
 
 // The replay drives the on-disk BenchEnv and a tokio runtime, neither of
 // which exists on wasm; the example is native-only, with a stub main so the
