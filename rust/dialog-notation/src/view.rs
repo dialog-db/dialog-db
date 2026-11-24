@@ -40,7 +40,9 @@
 //! character or a space is refused. This is a refusal of known dangerous shapes and no
 //! sanitizer: the back end stays the boundary. It escapes every text and
 //! attribute value it writes and sets them as text and attributes, never
-//! as markup.
+//! as markup. An attribute's name such as `innerHTML` passes the checks
+//! here: it is safe only where the renderer sets attributes, never
+//! properties of the element by the attribute's name.
 
 use dialog_corpus::Value;
 
