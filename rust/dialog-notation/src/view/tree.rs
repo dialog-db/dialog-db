@@ -245,6 +245,10 @@ pub struct Maintainer {
     given: BTreeSet<usize>,
     /// The counts given, by the counted place and its host's chain.
     tallies: BTreeMap<(usize, Chain), u64>,
+    /// How many times an instance was asked whether it is in the tree:
+    /// what a test bounds the work of a change by.
+    #[cfg(test)]
+    asked: std::cell::Cell<u64>,
 }
 
 impl Maintainer {
@@ -307,6 +311,8 @@ impl Maintainer {
             counted: BTreeMap::new(),
             given: BTreeSet::new(),
             tallies: BTreeMap::new(),
+            #[cfg(test)]
+            asked: std::cell::Cell::new(0),
         }
     }
 
@@ -372,6 +378,8 @@ impl Maintainer {
     /// Whether an instance is in the tree: it has a row, and so does
     /// every instance above it, the root being of the entity rendered.
     fn mounted(&self, element: usize, chain: &Chain) -> bool {
+        #[cfg(test)]
+        self.asked.set(self.asked.get() + 1);
         // The entity rendered is the key of the element told apart by it.
         let rendered = |depth: usize, at: usize| match &self.entity {
             Some(entity)
@@ -1131,5 +1139,67 @@ mod tests {
             .hiccup(),
             r#"[:article [:h2 "Home"] [:ul [:li "Buy milk"]]]"#
         );
+    }
+
+    /// A root inserted among many is placed by where it stands among the
+    /// roots kept in order, not by going over them: 8,000 lists, added
+    /// one at a time in no order, each asks whether a few instances are
+    /// in the tree, and lands at its place among the roots in key order.
+    #[test]
+    fn it_places_a_root_among_many_without_going_over_them() {
+        let plan = card();
+        let mut maintainer = Maintainer::new(plan.clone(), None);
+        let count: u64 = 8_000;
+        // Every key once, in an order that is not the keys' own.
+        let keys: Vec<u64> = (0..count).map(|at| (at * 7_919) % count).collect();
+        let mut placed: Vec<u64> = Vec::new();
+        for key in &keys {
+            let list = row(
+                &plan,
+                0,
+                &[
+                    entity(&format!("list:{key:05}")),
+                    Value::String(format!("L{key}")),
+                ],
+            );
+            let patches = maintainer.apply(&[Change {
+                layer: 0,
+                arrived: vec![list],
+                left: Vec::new(),
+            }]);
+            let [Patch::Insert { index, .. }] = patches.as_slice() else {
+                panic!("{patches:?}");
+            };
+            let at = placed.partition_point(|other| other < key);
+            assert_eq!(*index, at, "list {key}");
+            placed.insert(at, *key);
+        }
+        assert_eq!(maintainer.tree().roots.len(), count as usize);
+        let asked = maintainer.asked.get();
+        assert!(asked < 16 * count, "{asked} asked for {count} roots");
+        // Rendered for one list, the others are not in the tree, and the
+        // one is at the top.
+        let mut one = Maintainer::new(plan.clone(), Some(entity("list:04000")));
+        for key in &keys {
+            let list = row(
+                &plan,
+                0,
+                &[
+                    entity(&format!("list:{key:05}")),
+                    Value::String(format!("L{key}")),
+                ],
+            );
+            let patches = one.apply(&[Change {
+                layer: 0,
+                arrived: vec![list],
+                left: Vec::new(),
+            }]);
+            match patches.as_slice() {
+                [] => assert_ne!(*key, 4_000),
+                [Patch::Insert { index, .. }] => assert_eq!((*key, *index), (4_000, 0)),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(one.asked.get() < 16 * count, "{}", one.asked.get());
     }
 }
