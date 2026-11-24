@@ -2196,14 +2196,14 @@ static INVALID: LazyLock<CorpusRelation> = LazyLock::new(invalid_attr);
 /// body's format is probed before it is decoded, so a body an older or
 /// a newer release wrote is told apart from one that is no rule at all.
 fn invalid_reason(entity: &Entity, bytes: &[u8]) -> Option<String> {
-    use dialog_query::rule::body::{FORMAT, format_of};
+    use dialog_query::rule::body::{FORMAT, TERMS_FORMAT, format_of};
     match format_of(bytes) {
         Some(format) if format > FORMAT => {
             return Some(format!(
                 "newer: the body is in format {format}, and this release reads up to {FORMAT}"
             ));
         }
-        Some(format) if format < FORMAT => {
+        Some(format) if format < TERMS_FORMAT => {
             // A body an earlier format spelled the same way still reads.
             if hydrate(bytes).is_ok_and(|rule| rule.stored_as(entity))
                 || hydrate_inductive(bytes).is_ok()
@@ -2211,7 +2211,7 @@ fn invalid_reason(entity: &Entity, bytes: &[u8]) -> Option<String> {
                 return None;
             }
             return Some(format!(
-                "older: the body is in format {format}, which `upgrade_rules` rewrites to {FORMAT}"
+                "older: the body is in format {format}, which `upgrade_rules` rewrites to {TERMS_FORMAT}"
             ));
         }
         _ => {}
@@ -6022,13 +6022,16 @@ mod transient_pattern_tests {
         .expect("a concept")
     }
 
+    /// A rule whose map pattern is keyed by the symbol `note/title`,
+    /// which a stored body cannot write: a query layer holds it as it is.
     fn heading_rule() -> Result<DeductiveRule> {
+        let title: dialog_corpus::Relation = "note/title".parse()?;
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
         terms.set(
             "payload".into(),
             Pattern::Map(
-                MapPattern::new([(text("title"), Pattern::Term(Term::var("heading")))])?
+                MapPattern::new([(Value::Symbol(title), Pattern::Term(Term::var("heading")))])?
                     .with_rest(Term::<Any>::blank()),
             ),
         );
@@ -6047,9 +6050,15 @@ mod transient_pattern_tests {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
-        let titled = Composite::map([
-            (text("title"), text("Buy milk")),
-            (text("done"), Value::Boolean(false)),
+        let titled = Composite::record([
+            (
+                "note/title".parse::<dialog_corpus::Relation>()?,
+                text("Buy milk"),
+            ),
+            (
+                "note/done".parse::<dialog_corpus::Relation>()?,
+                Value::Boolean(false),
+            ),
         ])?;
         let milk: Entity = "id:milk".parse()?;
         branch

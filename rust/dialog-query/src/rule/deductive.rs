@@ -458,20 +458,27 @@ impl DeductiveRule {
     /// (what `rule!:` notation and stored `dialog.rule/*` rules produce)
     /// have a body.
     pub fn try_encode(&self) -> Option<Vec<u8>> {
-        body::encode(&self.canonical_descriptor())
+        let holds_pattern = pattern::held(self.analysis.premises()).is_some();
+        body::encode(holds_pattern, &self.canonical_descriptor())
     }
 
     /// Whether this rule can be stored, and so installed. A rule that
-    /// holds a map or a list of terms cannot: the stored rule
-    /// format writes a variable or a constant where a parameter stands
-    /// and has no way to write a pattern. Such a rule has an identity
-    /// and runs where it was built, and
+    /// holds a map or a list of terms is stored in format 5 of a rule
+    /// body, which writes a pattern under `match`. A map pattern is
+    /// written with text keys, so a rule that holds one with another key,
+    /// or with a key that reads as something else where a pattern is
+    /// written (`?`, `...`, one ending in `:`), cannot be stored (see
+    /// [`Pattern::unwritable`](crate::Pattern::unwritable)), nor one that
+    /// holds a constant map or list inside a pattern, which a body holds
+    /// as bytes it does not read back. Such a rule
+    /// has an identity and runs where it was built, and
     /// [`try_encode`](Self::try_encode) gives it no body.
     pub fn storable(&self) -> Result<(), TypeError> {
-        match pattern::held(self.analysis.premises()) {
-            Some(pattern) => Err(TypeError::UnstorablePattern {
+        match pattern::unstorable(self.analysis.premises()) {
+            Some((pattern, reason)) => Err(TypeError::UnstorablePattern {
                 pattern,
                 format: body::FORMAT,
+                reason,
             }),
             None => Ok(()),
         }
@@ -590,7 +597,9 @@ impl DeductiveRule {
     /// body did not decode, or its descriptor did not compile.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let descriptor: DeductiveRuleDescriptor = body::decode(bytes)?;
-        descriptor.compile().map_err(|e| e.to_string())
+        let rule = descriptor.compile().map_err(|e| e.to_string())?;
+        body::check_pattern(bytes, pattern::held(rule.analysis.premises()))?;
+        Ok(rule)
     }
 }
 

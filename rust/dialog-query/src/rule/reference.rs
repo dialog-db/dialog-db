@@ -643,7 +643,8 @@ mod tests {
     use crate::Value;
     use crate::attribute::Relation;
     use crate::corpus::Entity;
-    use crate::rule::{DeductiveRule, DeductiveRuleDescriptor};
+    use crate::rule::body::format_of;
+    use crate::rule::{DeductiveRule, DeductiveRuleDescriptor, InductiveRuleDescriptor};
 
     /// A constant inside a premise's wire form references as the value it
     /// is, so a constant has one identity wherever it appears.
@@ -810,4 +811,66 @@ mod tests {
             );
         }
     }
+    /// Three rules that hold no pattern, as the release before format 5
+    /// named and stored them: their entities and the blake3 of their
+    /// bodies, captured from the build before format 5 was added (the head of #778). A rule
+    /// of terms keeps its name and its bytes, so a rule already stored is
+    /// found, retracted and left alone by `upgrade_rules` as it was.
+    #[dialog_common::test]
+    fn it_keeps_the_name_and_the_bytes_of_a_rule_that_holds_no_pattern() {
+        let inductive: InductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "assert!": { "with": {
+                "tag": { "the": "org/tag", "as": "text:", "cardinality": "many" }
+            } },
+            "when": [{
+                "assert": { "with": {
+                    "label": { "the": "org/label", "as": "text:" }
+                } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "label": { "?": { "name": "tag" } }
+                }
+            }]
+        }))
+        .expect("descriptor parses");
+        let inductive = inductive.compile().expect("rule compiles");
+        let rules = [
+            (
+                compile(employee("", serde_json::json!({ "integer:": 5 }))).this(),
+                compile(employee("", serde_json::json!({ "integer:": 5 }))).encode(),
+            ),
+            (
+                compile(employee("", serde_json::json!({ "text:": "senior" }))).this(),
+                compile(employee("", serde_json::json!({ "text:": "senior" }))).encode(),
+            ),
+            (inductive.this(), inductive.encode()),
+        ];
+        let named: Vec<(String, String)> = rules
+            .iter()
+            .map(|(entity, body)| (entity.to_string(), blake3::hash(body).to_hex().to_string()))
+            .collect();
+        assert_eq!(
+            named,
+            PINNED.map(|(a, b)| (a.to_string(), b.to_string())).to_vec()
+        );
+        for (_, body) in &rules {
+            assert_eq!(format_of(body), Some(4));
+        }
+    }
+
+    /// Captured at e0c35af, the head the format was added on.
+    const PINNED: [(&str, &str); 3] = [
+        (
+            "rule:7PA3y6a4vvM4D3R2Q2ki2cZjxzQ4WakbyAQAxBDy8tdL",
+            "5c586fd0a4a56194a3f6e483038ef8a1d22fe0f19b0b5a10df5039f911f0cf4c",
+        ),
+        (
+            "rule:fGodzcuj6H3zSw1WNU8WdKe6Adthu7UsJXYheZPix4b",
+            "b5da1a2fd4d96e01e0e99f3dcbcb668eeee068716a6ab926dc65629557983ea7",
+        ),
+        (
+            "rule:4saY3Sudyy5pLcqCBJ1DAgp7pYJeB5QrkMGVeGQW3JsC",
+            "899e10576e55cf3ef615d961d580e0c8c7682bd2c9c496e4e0bd62149c786be2",
+        ),
+    ];
 }

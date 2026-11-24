@@ -19,7 +19,7 @@ use std::fmt;
 use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::corpus::{CorpusRelation, Type, Value};
-use crate::pattern;
+use crate::pattern::{self, Pattern};
 use crate::planner::{Disjunction, Plan};
 use crate::rule::deductive::DeductiveRule;
 use crate::schema::CONCEPT_OVERHEAD;
@@ -172,12 +172,20 @@ pub struct ConceptQuery {
 #[serde(untagged)]
 enum Bound {
     Entry {
-        #[serde(default = "Term::blank", skip_serializing_if = "Term::is_blank")]
-        the: Term<Any>,
-        #[serde(default = "Term::blank", skip_serializing_if = "Term::is_blank")]
-        is: Term<Any>,
+        #[serde(default = "blank", skip_serializing_if = "is_blank")]
+        the: Pattern,
+        #[serde(default = "blank", skip_serializing_if = "is_blank")]
+        is: Pattern,
     },
-    Term(Term<Any>),
+    Term(Pattern),
+}
+
+fn blank() -> Pattern {
+    Pattern::Term(Term::blank())
+}
+
+fn is_blank(pattern: &Pattern) -> bool {
+    matches!(pattern, Pattern::Term(term) if term.is_blank())
 }
 
 #[derive(Serialize)]
@@ -201,24 +209,25 @@ impl Serialize for ConceptQuery {
         for (name, _) in self.predicate.collections() {
             keys.insert(The::key_operand(name), name);
         }
-        for (name, term) in self.terms.iter() {
+        // What a name holds as it is written: the pattern where it holds
+        // a map or a list of terms, and its term otherwise. A premise
+        // reads the whole value's variable there, which is never written.
+        let held = |name: &str| -> Option<Pattern> { self.terms.pattern(name) };
+        for (name, _) in self.terms.iter() {
+            let Some(written) = held(name) else {
+                continue;
+            };
             if let Some(field) = keys.get(name) {
                 // The key half of an entry: folded under its field.
-                let is = self.terms.get(field).cloned().unwrap_or_else(Term::blank);
-                terms.insert(
-                    field,
-                    Bound::Entry {
-                        the: term.clone(),
-                        is,
-                    },
-                );
+                let is = held(field).unwrap_or_else(blank);
+                terms.insert(field, Bound::Entry { the: written, is });
             } else if self.predicate.collections().any(|(field, _)| field == name) {
                 terms.entry(name).or_insert_with(|| Bound::Entry {
-                    the: Term::blank(),
-                    is: term.clone(),
+                    the: blank(),
+                    is: written,
                 });
             } else {
-                terms.insert(name, Bound::Term(term.clone()));
+                terms.insert(name, Bound::Term(written));
             }
         }
         ConceptQueryOut {
@@ -253,11 +262,11 @@ impl<'de> Deserialize<'de> for ConceptQuery {
             };
             match bound {
                 Bound::Entry { the, is } => {
-                    terms.insert(The::key_operand(&name), the);
-                    terms.insert(name, is);
+                    terms.set(The::key_operand(&name), the);
+                    terms.set(name, is);
                 }
-                Bound::Term(term) => {
-                    terms.insert(name, term);
+                Bound::Term(pattern) => {
+                    terms.set(name, pattern);
                 }
             }
         }

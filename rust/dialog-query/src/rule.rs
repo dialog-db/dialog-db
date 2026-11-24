@@ -458,6 +458,15 @@ fn encodable_constants(
                 refuse(value)?;
             }
         }
+        // A constant inside a map or a list of terms is stored as one
+        // is anywhere else.
+        for (_, pattern) in premise.parameters().shapes() {
+            for term in pattern.terms() {
+                if let Term::Constant(value) = term {
+                    refuse(value)?;
+                }
+            }
+        }
         if let Premise::Assert(Proposition::Concept(query))
         | Premise::Unless(Negation(Proposition::Concept(query))) = premise
         {
