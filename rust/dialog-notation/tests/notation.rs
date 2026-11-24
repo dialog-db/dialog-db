@@ -919,6 +919,65 @@ async fn it_refuses_a_top_level_write_whose_entity_nothing_binds() -> Result<()>
     Ok(())
 }
 
+/// A to-do replaced through its concept in one round: a rule retracts
+/// the record, every field named, and another asserts it changed. What
+/// both write holds afterwards (#863): finishing leaves the title, the
+/// list and `state: :done`, and a rename to the title it had leaves the
+/// to-do as it was.
+#[dialog_common::test]
+async fn it_replaces_a_record_by_retracting_it_and_asserting_it_changed() -> Result<()> {
+    let replace = r#"(concept (todo/finish subject: ?t)
+          (xyz.todo.finish/subject of: ?c is: ?t as: :entity in: :control cardinality: :many))
+        (concept (todo/rename subject: ?t title: ?x)
+          (xyz.todo.rename/subject of: ?c is: ?t as: :entity in: :control cardinality: :many)
+          (xyz.todo.rename/title of: ?c is: ?x as: :text in: :control cardinality: :many))
+        (rule (retract (todo ?t title: ?title state: ?s list: ?l))
+          (todo/finish subject: ?t)
+          (todo ?t title: ?title state: ?s list: ?l))
+        (rule (assert (todo ?t title: ?title state: :done list: ?l))
+          (todo/finish subject: ?t)
+          (todo ?t title: ?title state: ?s list: ?l))
+        (rule (retract (todo ?t title: ?title state: ?s list: ?l))
+          (todo/rename subject: ?t title: ?new)
+          (todo ?t title: ?title state: ?s list: ?l))
+        (rule (assert (todo ?t title: ?new state: ?s list: ?l))
+          (todo/rename subject: ?t title: ?new)
+          (todo ?t title: ?title state: ?s list: ?l))"#;
+    let mut notebook = Notebook::open().await?;
+    notebook.submit(&format!("{DROPPABLE} {replace}")).await?;
+    notebook
+        .submit("(assert (todo/finish subject: todo:1))")
+        .await?;
+    let finished = vec![
+        r#"(xyz.todo todo:1 title: "A")"#,
+        r#"(xyz.todo todo:2 title: "B")"#,
+        "(xyz.todo todo:1 state: :done)",
+        "(xyz.todo todo:2 state: :done)",
+        "(xyz.todo todo:1 list: list:1)",
+        "(xyz.todo todo:2 list: list:1)",
+    ];
+    assert_eq!(droppable(&mut notebook).await?, finished);
+    notebook
+        .submit(r#"(assert (todo/rename subject: todo:1 title: "A"))"#)
+        .await?;
+    assert_eq!(droppable(&mut notebook).await?, finished);
+    notebook
+        .submit(r#"(assert (todo/rename subject: todo:1 title: "C"))"#)
+        .await?;
+    assert_eq!(
+        droppable(&mut notebook).await?,
+        vec![
+            r#"(xyz.todo todo:1 title: "C")"#,
+            r#"(xyz.todo todo:2 title: "B")"#,
+            "(xyz.todo todo:1 state: :done)",
+            "(xyz.todo todo:2 state: :done)",
+            "(xyz.todo todo:1 list: list:1)",
+            "(xyz.todo todo:2 list: list:1)",
+        ]
+    );
+    Ok(())
+}
+
 /// One field is retracted through its attribute's relation, at the top
 /// level or in a rule's conclusion, and the concept's other fields stay:
 /// a retract through the concept that names some fields is refused.
