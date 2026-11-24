@@ -666,8 +666,8 @@ mod tests {
                  (xyz.todo ?t text: (:one (:text ?x))
                               state: (:many (:among (:entity ?s) cases: [:open :done]))
                               list: (:last (:entity ?l))))
-               (concept (account ?a status: (min ?s))
-                 (xyz.account/status of: ?a is: ?s as: [:suspended :active] cardinality: :many))"#,
+               (concept (account ?a status: (max ?s))
+                 (xyz.account/status of: ?a is: ?s as: [:active :suspended] cardinality: :many))"#,
         );
         assert!(
             checked.refusals().next().is_none(),

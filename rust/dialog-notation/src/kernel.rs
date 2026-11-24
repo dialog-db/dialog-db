@@ -26,11 +26,11 @@ pub const TYPES: [&str; 8] = [
 pub const PICKS: [&str; 4] = ["last", "all", "max", "min"];
 
 /// The electors a concept's head may choose a field's claim by:
-/// `(min ?s)`.
+/// `(max ?s)`.
 pub const ELECTORS: [&str; 3] = ["last", "max", "min"];
 
-/// The elector the notation no longer takes: `top` over a list is `min`
-/// over the same list. A document that writes it is refused.
+/// The elector the notation no longer takes: `top` over a list is `max`
+/// over the list reversed, or `min` over the same list. A document that writes it is refused.
 pub const RETIRED: &str = "top";
 
 /// The cardinalities a term may be read under: `(:one ?x)`, `(:many ?x)`.

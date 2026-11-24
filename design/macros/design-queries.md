@@ -55,7 +55,7 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 | many values | `(todo/tag ?t tag: ?g)` | `(todo/tag ?t tag: (collect ?tags))`, a set: a map with no names |
 | a keyed collection | `(notebook/blocks ?n block: {?k ?b})` | `(notebook/blocks ?n block: (collect ?blocks))`, a map |
 
-- `collect` stands where an elector does. `(min ?s)` chooses one of a field's claims; `(collect ?s)` takes every one.
+- `collect` stands where an elector does. `(max ?s)` chooses one of a field's claims; `(collect ?s)` takes every one.
 - Key and value are paired because they were never apart: an entry is one term.
 - What comes out is a map either way. A keyed collection's has its keys. Many plain values have none, and a map with no names is a set: `{: "errand" : "home"}`, stored in a record as a list. No list as such: many values have no order, and a sequence's order is in its keys.
 - A pattern takes one value apart; `collect` puts many rows together. `{…}` and `[…]` in a condition are always the first.

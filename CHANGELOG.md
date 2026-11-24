@@ -19,17 +19,23 @@ says how to cut a release.
 [#773](https://github.com/dialog-db/dialog-db/pull/773).
 
 A concept field's elector is `min` or `max`, written in the concept's
-head, `status: (min ?s)`, or on a line's value, `is: (min ?s)`. Over a
+head, `status: (max ?s)`, or on a line's value, `is: (max ?s)`. Over a
 listed `as:` they rank by the listing, written least first: `min` elects
 the case listed first and `max` the case listed last.
+
+```clj
+(concept (account ?a status: (max ?s))
+  (xyz.account/status of: ?a is: ?s
+    as: [:registered :active :suspended] cardinality: :many))
+```
 
 What this changes for you:
 
 - A document that writes `top`, `(top ?s)` or `(:top ?s)`, is refused
   with `Error::Refused`, naming the replacement: `top` over a list is
-  `min` over the same list.
-- A concept that elected by `top` is rewritten with `min` over the
-  same list; its identity changes, as any concept's does when its
+  `max` over the list reversed, or `min` over the same list.
+- A concept that elected by `top` is rewritten with `max` over its list
+  reversed; its identity changes, as any concept's does when its
   descriptor does.
 
 Why: #858 ranks `max` and `min` over a listed type by the listing and
@@ -760,7 +766,7 @@ dropping that scope.
 - A concept the notation declared with `top` before this release keeps
   its stored `pick: top`, which the engine reads as before until it
   removes `top`. The notation no longer writes `top`; declaring the
-  concept again with `min` over the same list stores a new concept, with
+  concept again with `max` over its list reversed stores a new concept, with
   a new identity. Nothing is rewritten automatically.
 - The notation stores nothing of its own: what it writes are concepts'
   facts and rules in the formats this release writes. A rule that uses

@@ -1008,7 +1008,8 @@ async fn it_elects_a_claim_by_the_elector_in_a_concepts_head() -> Result<()> {
 
 /// `top` is no elector: a document that writes it, in a concept's head,
 /// on a line's value or as a pick, is refused with a message naming
-/// what replaces it, `min` over the same list, and nothing is declared
+/// what replaces it, `max` over the list reversed or `min` over the
+/// same list, and nothing is declared
 /// by it.
 #[dialog_common::test]
 async fn it_refuses_top_naming_min_over_the_same_list() -> Result<()> {
@@ -1026,7 +1027,7 @@ async fn it_refuses_top_naming_min_over_the_same_list() -> Result<()> {
             .await
             .map_err(|error| error.downcast::<Error>());
         assert!(
-            matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("`top`") && why.contains("`min`")),
+            matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("`top`") && why.contains("`max`") && why.contains("reversed") && why.contains("`min`")),
             "{text}: {refused:?}"
         );
     }
