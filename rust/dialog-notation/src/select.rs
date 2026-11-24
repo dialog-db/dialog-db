@@ -613,7 +613,7 @@ impl Evaluation<'_> {
                         .map(|value| (name.clone(), written(value)))
                     })
                     .collect();
-                if seen.insert(format!("{row:?}")) {
+                if seen.insert(format!("{:?}", canonical_row(&row))) {
                     all.push(row);
                 }
             }
@@ -665,7 +665,7 @@ impl Evaluation<'_> {
         let mut kept: Vec<Row> = Vec::new();
         let mut seen = HashSet::new();
         for row in rows {
-            if seen.insert(format!("{row:?}")) {
+            if seen.insert(format!("{:?}", canonical_row(&row))) {
                 kept.push(row);
             }
         }
@@ -875,6 +875,40 @@ fn gathered(mut entries: Vec<(Syntax, Syntax)>) -> Vec<(Syntax, Syntax)> {
     entries
 }
 
+/// `row` with every map in it in the order of its keys: what two rows
+/// that say the same are told apart by, whatever order their maps were
+/// built in.
+fn canonical_row(row: &Row) -> Row {
+    fn canonical(tree: &Syntax) -> Syntax {
+        match tree {
+            Syntax::Map(entries) => {
+                let mut entries: Vec<(Syntax, Syntax)> = entries
+                    .iter()
+                    .map(|(key, value)| (canonical(key), canonical(value)))
+                    .collect();
+                entries.sort_by(|(a, x), (b, y)| order(a, b).then_with(|| order(x, y)));
+                Syntax::Map(entries)
+            }
+            Syntax::Tuple(items) => Syntax::Tuple(items.iter().map(canonical).collect()),
+            Syntax::Application(operator, operand) => Syntax::Application(
+                Box::new(canonical(operator)),
+                crate::syntax::Parameters {
+                    items: operand.items.iter().map(canonical).collect(),
+                    terms: operand
+                        .terms
+                        .iter()
+                        .map(|(label, term)| (label.clone(), canonical(term)))
+                        .collect(),
+                },
+            ),
+            other => other.clone(),
+        }
+    }
+    row.iter()
+        .map(|(name, value)| (name.clone(), canonical(value)))
+        .collect()
+}
+
 /// Whether `pattern` holds of `value`, binding in `row` the variables
 /// it holds that are not bound yet.
 fn unify(pattern: &Syntax, value: &Syntax, row: &mut Row) -> bool {
@@ -894,12 +928,20 @@ fn unify(pattern: &Syntax, value: &Syntax, row: &mut Row) -> bool {
             if patterns.len() != entries.len() {
                 return false;
             }
-            patterns
-                .iter()
-                .zip(entries)
-                .all(|((key, wanted), (given, value))| {
-                    unify(key, given, row) && unify(wanted, value, row)
-                })
+            // A record says the same in any order: an entry is found by
+            // its key. An entry whose key is a variable, `{?k ?v}`, is the
+            // map's one entry.
+            if let ([(key @ Syntax::Variable(_), wanted)], [(given, value)]) =
+                (patterns.as_slice(), entries.as_slice())
+            {
+                return unify(key, given, row) && unify(wanted, value, row);
+            }
+            patterns.iter().all(|(key, wanted)| {
+                entries
+                    .iter()
+                    .find(|(given, _)| given == key)
+                    .is_some_and(|(_, value)| unify(wanted, value, row))
+            })
         }
         Syntax::Tuple(patterns) => match value {
             Syntax::Tuple(items) if items.len() == patterns.len() => patterns
