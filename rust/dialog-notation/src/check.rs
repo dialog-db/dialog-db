@@ -1127,4 +1127,68 @@ mod tests {
         assert!(matches!(checked.steps.as_slice(), [Step::Assert(_)]));
         Ok(())
     }
+
+    /// The names the notation makes from what a document writes are one
+    /// name for one input. A derived attribute's relation is its
+    /// concept's name and its own: one under a concept whose name holds
+    /// a `.` could be spelled by another concept and attribute, so it is
+    /// refused. A head's key of an entry, `entry/key`, is refused where a
+    /// field of the same head is named so.
+    #[test]
+    fn it_refuses_two_inputs_that_would_make_one_name() -> Result<(), Error> {
+        let concepts = "(concept (my ?l name: ?n) (xyz.my/name of: ?l is: ?n as: :text cardinality: :one))
+            (concept (my.list ?l name: ?n) (xyz.mylist/name of: ?l is: ?n as: :text cardinality: :one))";
+        let checked = check(
+            &mut Analyzer::new()?,
+            &format!("{concepts} (rule (my.list/count ?l ?n) (my.list ?l name: ?n))"),
+        );
+        assert!(
+            checked.refusals().any(|refused| matches!(&refused.refusal,
+                Some(Error::Refused(why)) if why.contains("my.list/count") && why.contains("`.`"))),
+            "{:?}",
+            checked.diagnostics
+        );
+        // Under a concept whose name has no `.`, an attribute with one is
+        // what it is.
+        let checked = check(
+            &mut Analyzer::new()?,
+            &format!("{concepts} (rule (my/list.count ?l ?n) (my ?l name: ?n))"),
+        );
+        assert!(
+            checked.refusals().next().is_none(),
+            "{:?}",
+            checked.diagnostics
+        );
+        let checked = check(
+            &mut Analyzer::new()?,
+            "(concept (bag ?s item: {?i ?b} odd: ?x)
+               (xyz.bag/?i of: ?s is: ?b as: :entity cardinality: :many by: :position)
+               (xyz.bag/entry/key of: ?s is: ?x as: :text cardinality: :one))
+             (rule (bag ?s item: {?i ?b} odd: ?x) (xyz.src ?s i: ?i b: ?b x: ?x))",
+        );
+        assert!(
+            checked.refusals().any(|refused| matches!(&refused.refusal,
+                Some(Error::Refused(why)) if why.contains("entry/key"))),
+            "{:?}",
+            checked.diagnostics
+        );
+        // The reader never reads a `[` in a variable, so no document
+        // writes a variable the notation makes.
+        for text in [
+            "(select (xyz.a ?x[1] v: 1))",
+            "(select (xyz.a ?[q1]x v: 1))",
+        ] {
+            assert!(
+                crate::parse(text)
+                    .map(|trees| trees.iter().all(|tree| {
+                        let mut names = Vec::new();
+                        tree.variables(&mut names);
+                        names.iter().all(|name| !crate::syntax::unwritten(name))
+                    }))
+                    .unwrap_or(true),
+                "{text}"
+            );
+        }
+        Ok(())
+    }
 }
