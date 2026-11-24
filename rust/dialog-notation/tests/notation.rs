@@ -947,22 +947,26 @@ async fn it_runs_a_concept_written_as_lines() -> Result<()> {
     Ok(())
 }
 
-/// An elector in a concept's head chooses one of a field's claims:
-/// `(top ?s)` the one listed first in the line's `as:`. Under `:many` a
-/// write adds a claim and displaces none, so the read gives the best of
-/// what is held. The same elector written on the line's value elects
-/// alike. A listed `as:` with no elector chooses nothing: the read gives
-/// every claim.
+/// An elector in a concept's head chooses one of a field's claims. Over
+/// a listed `as:`, `min` and `max` rank by the listing, written least
+/// first: `min` is the one listed first, `max` the one listed last.
+/// Under `:many` a write adds a claim and displaces none, so the read
+/// gives the least or the greatest of what is held. The same elector
+/// written on the line's value elects alike. A listed `as:` with no
+/// elector chooses nothing: the read gives every claim.
 #[dialog_common::test]
 async fn it_elects_a_claim_by_the_elector_in_a_concepts_head() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     let (_, diagnostics) = notebook
         .submit(
-            r#"(concept (account ?a status: (top ?s))
+            r#"(concept (account ?a status: (min ?s))
                  (xyz.account/status of: ?a is: ?s
                    as: [:suspended :active :registered] cardinality: :many))
                (concept (standing ?a status: ?s)
-                 (xyz.account/status of: ?a is: (top ?s)
+                 (xyz.account/status of: ?a is: (min ?s)
+                   as: [:suspended :active :registered] cardinality: :many))
+               (concept (latest ?a status: (max ?s))
+                 (xyz.account/status of: ?a is: ?s
                    as: [:suspended :active :registered] cardinality: :many))
                (concept (statuses ?a status: ?s)
                  (xyz.account/status of: ?a is: ?s
@@ -970,15 +974,13 @@ async fn it_elects_a_claim_by_the_elector_in_a_concepts_head() -> Result<()> {
         )
         .await?;
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    notebook
-        .submit("(assert (account acct:1 status: :registered))")
-        .await?;
-    notebook
-        .submit("(assert (account acct:1 status: :suspended))")
-        .await?;
-    notebook
-        .submit("(assert (account acct:1 status: :active))")
-        .await?;
+    // Written in neither the listing's order nor its reverse, so that
+    // neither the first nor the last write is what is elected.
+    for status in [":active", ":suspended", ":registered"] {
+        notebook
+            .submit(&format!("(assert (account acct:1 status: {status}))"))
+            .await?;
+    }
     for read in [
         "(select (account ?a status: ?s))",
         "(select (standing ?a status: ?s))",
@@ -990,6 +992,10 @@ async fn it_elects_a_claim_by_the_elector_in_a_concepts_head() -> Result<()> {
         );
     }
     assert_eq!(
+        report(&mut notebook, "(select (latest ?a status: ?s))").await?,
+        vec!["(xyz.account acct:1 status: :registered)"]
+    );
+    assert_eq!(
         report(&mut notebook, "(select (statuses ?a status: ?s))").await?,
         vec![
             "(xyz.account acct:1 status: :active)",
@@ -997,6 +1003,39 @@ async fn it_elects_a_claim_by_the_elector_in_a_concepts_head() -> Result<()> {
             "(xyz.account acct:1 status: :suspended)",
         ]
     );
+    Ok(())
+}
+
+/// `top` is no elector: a document that writes it, in a concept's head,
+/// on a line's value or as a pick, is refused with a message naming
+/// what replaces it, `min` over the same list, and nothing is declared
+/// by it.
+#[dialog_common::test]
+async fn it_refuses_top_naming_min_over_the_same_list() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    for text in [
+        r#"(concept (account ?a status: (top ?s))
+             (xyz.account/status of: ?a is: ?s as: [:suspended :active] cardinality: :many))"#,
+        r#"(concept (account ?a status: ?s)
+             (xyz.account/status of: ?a is: (top ?s) as: [:suspended :active] cardinality: :many))"#,
+        r#"(concept (account ?a status: ?s)
+             (xyz.account ?a status: (:top (:among (:entity ?s) cases: [:suspended :active]))))"#,
+    ] {
+        let refused = notebook
+            .submit(text)
+            .await
+            .map_err(|error| error.downcast::<Error>());
+        assert!(
+            matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("`top`") && why.contains("`min`")),
+            "{text}: {refused:?}"
+        );
+    }
+    // Nothing was declared: `account` is no concept.
+    let after = notebook
+        .submit("(select (account ?a status: ?s))")
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(after.is_err(), "{after:?}");
     Ok(())
 }
 
