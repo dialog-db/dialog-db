@@ -358,3 +358,33 @@ async fn it_takes_off_the_overlay_what_it_laid_when_the_last_holder_goes() -> Re
     );
     Ok(())
 }
+
+/// Two `Live`s made apart on one branch, each watching one view, share
+/// the rules it lays: the first dropped, the second is still kept
+/// current; the second dropped, the overlay is as it was before either.
+#[dialog_common::test]
+async fn it_keeps_a_rule_two_lives_hold_until_both_let_go() -> Result<()> {
+    let mut notebook = tasks().await?;
+    let overlay = notebook.branch.overlay().clone();
+    let before = overlay.len();
+    let first = Live::new(notebook.branch.clone());
+    let second = Live::new(notebook.branch.clone());
+    let one = first.watch(flat()?, None)?;
+    let mut other = second.watch(flat()?, None)?;
+    other.poll(&notebook.operator).await?;
+    drop(one);
+    drop(first);
+    notebook.submit(CHANGE).await?;
+    other.poll(&notebook.operator).await?;
+    let rendered = second
+        .render(other.plan(), None, &notebook.operator)
+        .await?;
+    assert_eq!(
+        other.tree().hiccup(),
+        rendered.hiccup(),
+        "the second still has the rule the first laid"
+    );
+    drop(other);
+    assert_eq!(overlay.len(), before, "both gone, nothing is left laid");
+    Ok(())
+}
