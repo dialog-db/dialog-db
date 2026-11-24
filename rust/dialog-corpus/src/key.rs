@@ -55,6 +55,14 @@ pub use part::*;
 pub(crate) mod varkey;
 pub use varkey::split_record_components;
 
+/// Whether the key `key` carries its value spilled: the value slot holds
+/// only an order-preserving prefix of the value's encoding, and the
+/// whole value's hash trails the key. `false` for a key that does not
+/// parse.
+pub fn key_value_is_spilled(key: &[u8]) -> bool {
+    varkey::value_is_spilled(key, key.first().copied().unwrap_or(u8::MIN))
+}
+
 /// Tag byte of the history index (the fourth index ordering): the region of
 /// the corpus holding per-instruction claim-lineage records (see
 /// [`history`]). Allocated below the blob index's tag `4`.
@@ -159,6 +167,7 @@ fn encoded_len_lower_bound(value: &Value) -> usize {
     match value {
         Value::Bytes(bytes) => bytes.len(),
         Value::Record(bytes) => bytes.len(),
+        Value::Composite(composite) => composite.to_bytes().len(),
         Value::String(string) => string.len(),
         Value::Entity(entity) => entity.as_str().len(),
         // A number in the one band takes at least its class byte; the
@@ -689,10 +698,19 @@ mod tests {
             Value::Float(1783112056217.0),
             Value::Record(vec![1, 2, 3]),
             Value::Symbol(Relation::from_str("open/status")?),
+            Value::Composite(crate::Composite::new([
+                (Relation::from_str("geo/lat")?, Value::Float(37.77)),
+                (Relation::from_str("geo/lon")?, Value::Float(-122.42)),
+            ])?),
+            Value::Composite(crate::Composite::new([])?),
         ];
         for length in [0, 1, 15, 16, 17, 63, 64, 65, 300] {
             values.push(Value::String("x".repeat(length)));
             values.push(Value::Bytes(vec![0; length]));
+            values.push(Value::Composite(crate::Composite::new([(
+                Relation::from_str("doc/body")?,
+                Value::String("x".repeat(length)),
+            )])?));
         }
         for manifest in [Manifest::default(), narrow] {
             for value in &values {
@@ -710,6 +728,57 @@ mod tests {
                 assert_eq!(eav.as_ref(), entity.bytes());
                 assert_eq!(aev.as_ref(), attribute.bytes());
                 assert_eq!(vae.as_ref(), value_key.bytes());
+            }
+        }
+        Ok(())
+    }
+
+    /// The upper bound of a scan whose value is unset sorts at or above
+    /// every fact's key in all three orderings, composites included: the
+    /// bound's value is the composite type and one filler byte, above every
+    /// composite's escaped table head, inline or spilled.
+    #[dialog_common::test]
+    async fn it_bounds_every_value_from_above_when_the_value_is_unset() -> anyhow::Result<()> {
+        use super::{
+            AttributeKeyPart, EntityKeyPart, Key, KeyType, KeyViewConstruct, KeyViewMut,
+            fact_index_keys,
+        };
+
+        let narrow = Manifest {
+            inline_n: 16,
+            spill_prefix: 4,
+            ..Manifest::default()
+        };
+        let mut values = vec![
+            Value::Bytes(vec![0xFE; 4]),
+            Value::String("\u{10FFFF}".into()),
+            Value::Float(f64::INFINITY),
+            Value::UnsignedInt(u128::MAX),
+            Value::Composite(crate::Composite::new([])?),
+            Value::Composite(crate::Composite::list([Value::Bytes(vec![0xFF; 4])])?),
+        ];
+        for length in [0, 17, 300] {
+            values.push(Value::Composite(crate::Composite::new([(
+                Relation::from_str("doc/body")?,
+                Value::Bytes(vec![0xFF; length]),
+            )])?));
+        }
+        for manifest in [Manifest::default(), narrow] {
+            for value in &values {
+                let fact = fact(value.clone());
+                let entity = <EntityKey<Key> as KeyViewConstruct>::max()
+                    .set_entity(EntityKeyPart::from(&fact.of))
+                    .set_attribute(AttributeKeyPart::from(&fact.the));
+                let attribute = <AttributeKey<Key> as KeyViewConstruct>::max()
+                    .set_attribute(AttributeKeyPart::from(&fact.the))
+                    .set_entity(EntityKeyPart::from(&fact.of));
+                let (eav, aev, vae) = fact_index_keys(&fact, &manifest);
+                assert!(eav.as_ref() <= entity.bytes(), "{value:?}");
+                assert!(aev.as_ref() <= attribute.bytes(), "{value:?}");
+                assert!(
+                    vae.as_ref() <= <ValueKey<Key> as KeyViewConstruct>::max().bytes(),
+                    "{value:?}"
+                );
             }
         }
         Ok(())
@@ -742,6 +811,11 @@ mod tests {
             Value::Float(1783112056217.0),
             Value::Record(vec![1, 2, 3]),
             Value::Symbol(Relation::from_str("open/status")?),
+            Value::Composite(crate::Composite::new([
+                (Relation::from_str("geo/lat")?, Value::Float(37.77)),
+                (Relation::from_str("geo/lon")?, Value::Float(-122.42)),
+            ])?),
+            Value::Composite(crate::Composite::new([])?),
         ];
         for value in values {
             let fact = fact(value.clone());

@@ -13,7 +13,8 @@ use std::sync::Arc;
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_corpus::{
     ATTRIBUTE_KEY_TAG, ArchivedState, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum, ENTITY_KEY_TAG,
-    HISTORY_KEY_TAG, Key, State, VALUE_KEY_TAG, split_record_components,
+    HISTORY_KEY_TAG, Key, State, VALUE_KEY_TAG, ValueDataType, key_value_is_spilled,
+    split_record_components,
 };
 use dialog_search_tree::{
     Entry, Key as TreeKey, Link, MIXED_LAYOUT, Manifest, NodeBody, NoveltyBuffer, NoveltyEntry,
@@ -22,6 +23,13 @@ use dialog_search_tree::{
 
 use crate::rows::{DATUM, INDEX, NONE, Row, Rows, SEGMENT, SLOTS, invalid, slots_of};
 use crate::tokens::{Draft, TokenRead};
+
+mod composite;
+
+use composite::intern_value;
+pub(crate) use composite::{
+    is_packed, realize as realize_value, remap as remap_composite_token, renamed, value_slot,
+};
 
 /// A node of the artifact tree.
 pub(crate) type TreeNode = PersistentNode<Key, State<Datum>>;
@@ -77,17 +85,41 @@ fn key_tokens(key: &[u8]) -> (u8, [&[u8]; SLOTS], usize) {
 }
 
 /// Rebuilds a key from its form and tokens: the inverse of [`key_tokens`].
-fn key_from_tokens(form: u8, tokens: &[&[u8]]) -> io::Result<Vec<u8>> {
+fn key_from_tokens<T: TokenRead + ?Sized>(
+    form: u8,
+    parts: &[&[u8]],
+    tokens: &T,
+) -> io::Result<Vec<u8>> {
     let mut key = Vec::new();
-    key_into(form, tokens, &mut key)?;
+    key_into(form, parts, &mut key, tokens)?;
     Ok(key)
 }
 
 /// [`key_from_tokens`], into `key` (cleared first), so a caller rebuilding
-/// many keys reuses one buffer.
-fn key_into(form: u8, tokens: &[&[u8]], key: &mut Vec<u8>) -> io::Result<()> {
+/// many keys reuses one buffer. A packed composite value is realized
+/// through `dictionary`.
+fn key_into<T: TokenRead + ?Sized>(
+    form: u8,
+    tokens: &[&[u8]],
+    key: &mut Vec<u8>,
+    dictionary: &T,
+) -> io::Result<()> {
     key.clear();
-    let parts: &[&[u8]] = match (form, tokens) {
+    if tokens.len() > SLOTS {
+        return Err(invalid("a key's form and its tokens disagree"));
+    }
+    // The value, realized when it is packed, in place of its token.
+    let mut realized = Vec::new();
+    let mut held: [&[u8]; SLOTS] = [&[]; SLOTS];
+    held[..tokens.len()].copy_from_slice(tokens);
+    let tokens = &mut held[..tokens.len()];
+    if let Some(at) = value_slot(form, tokens.len())
+        && is_packed(tokens[at])
+    {
+        realize_value(tokens[at], dictionary, &mut realized)?;
+        tokens[at] = &realized;
+    }
+    let parts: &[&[u8]] = match (form, &*tokens) {
         (ENTITY_KEY_TAG, [entity, attribute, value]) => &[entity, attribute, value],
         (ATTRIBUTE_KEY_TAG, [entity, attribute, value]) => &[attribute, entity, value],
         (VALUE_KEY_TAG, [entity, attribute, value]) => &[value, attribute, entity],
@@ -112,8 +144,17 @@ fn key_into(form: u8, tokens: &[&[u8]], key: &mut Vec<u8>) -> io::Result<()> {
 fn entry_row(tokens: &mut Draft<'_>, key: &[u8], datum: Option<&State<Datum>>) -> io::Result<Row> {
     let (form, parts, count) = key_tokens(key);
     let mut row = [form as u32, 0, 0, 0, 0, NONE];
+    let value = value_slot(form, count);
     for (slot, token) in parts[..count].iter().enumerate() {
-        row[1 + slot] = tokens.intern(token);
+        row[1 + slot] = if Some(slot) == value {
+            // Whether the value spilled is read off the key only for a
+            // composite, the one value a packed token stands for.
+            let spilled = token.first() == Some(&(ValueDataType::Composite as u8))
+                && key_value_is_spilled(key);
+            intern_value(tokens, token, spilled)
+        } else {
+            tokens.intern(token)
+        };
     }
     if let Some(datum) = datum {
         row[DATUM] = SCRATCH.with_borrow_mut(|scratch| -> io::Result<u32> {
@@ -169,7 +210,7 @@ fn entry_of<T: TokenRead + ?Sized>(
         NONE => None,
         id => Some(datum_of(token(id)?)?),
     };
-    Ok((key_from_tokens(form, &parts)?, datum))
+    Ok((key_from_tokens(form, &parts, tokens)?, datum))
 }
 
 /// The rows of the node a node supersedes, walked beside the node's own
@@ -216,7 +257,7 @@ impl Predecessor {
             for slot in 0..count {
                 parts[slot] = tokens.get(row[1 + slot])?;
             }
-            key_into(form, &parts[..count], &mut self.key).ok()?;
+            key_into(form, &parts[..count], &mut self.key, tokens).ok()?;
             match self.key.as_slice().cmp(key) {
                 std::cmp::Ordering::Less => self.next += 1,
                 std::cmp::Ordering::Greater => return None,
@@ -437,10 +478,32 @@ fn segment_of<T: TokenRead + ?Sized>(
         ENTITY_KEY_TAG | ATTRIBUTE_KEY_TAG | VALUE_KEY_TAG | BLOB_KEY_TAG
     );
     if split {
+        // A packed composite value is realized, into one buffer for the
+        // node; every other part is the token itself.
+        let mut realized = Vec::new();
+        let mut spans = Vec::new();
+        if layout != BLOB_KEY_TAG {
+            for row in rows {
+                // A row of another layout is not split here; the caller
+                // builds the segment from whole entries.
+                if row[0] as u8 != layout {
+                    spans.push(None);
+                    continue;
+                }
+                let value = token(row[3])?;
+                if is_packed(value) {
+                    let start = realized.len();
+                    realize_value(value, tokens, &mut realized)?;
+                    spans.push(Some(start..realized.len()));
+                } else {
+                    spans.push(None);
+                }
+            }
+        }
         let width = if layout == BLOB_KEY_TAG { 2 } else { 5 };
         let mut columns: Vec<Vec<&[u8]>> =
             (0..width).map(|_| Vec::with_capacity(rows.len())).collect();
-        for row in rows {
+        for (at, row) in rows.iter().enumerate() {
             if row[0] as u8 != layout {
                 return Ok(None);
             }
@@ -449,7 +512,10 @@ fn segment_of<T: TokenRead + ?Sized>(
                 [tag, token(row[1])?, &[], &[], &[]]
             } else {
                 let (entity, attribute) = (token(row[1])?, token(row[2])?);
-                let value = token(row[3])?;
+                let value = match &spans[at] {
+                    Some(span) => &realized[span.clone()],
+                    None => token(row[3])?,
+                };
                 if value.is_empty() {
                     return Ok(None);
                 }
@@ -473,9 +539,10 @@ fn segment_of<T: TokenRead + ?Sized>(
     }
 
     // The schema keeps whole keys: an opaque row's one token is its key,
-    // and a split row's key is its tokens joined, in one buffer for the
-    // segment.
+    // and a split row's key is its tokens joined (a packed value realized),
+    // in one buffer for the segment.
     let mut joined = Vec::new();
+    let mut key = Vec::new();
     let mut spans = Vec::with_capacity(rows.len());
     for row in rows {
         let form = row[0] as u8;
@@ -486,26 +553,9 @@ fn segment_of<T: TokenRead + ?Sized>(
         let parts = (0..slots_of(form))
             .map(|slot| token(row[1 + slot]))
             .collect::<io::Result<Vec<_>>>()?;
+        key_into(form, &parts, &mut key, tokens)?;
         let start = joined.len();
-        joined.push(form);
-        match (form, parts.as_slice()) {
-            (ENTITY_KEY_TAG, [entity, attribute, value]) => {
-                joined.extend_from_slice(entity);
-                joined.extend_from_slice(attribute);
-                joined.extend_from_slice(value);
-            }
-            (ATTRIBUTE_KEY_TAG, [entity, attribute, value]) => {
-                joined.extend_from_slice(attribute);
-                joined.extend_from_slice(entity);
-                joined.extend_from_slice(value);
-            }
-            (VALUE_KEY_TAG, [entity, attribute, value]) => {
-                joined.extend_from_slice(value);
-                joined.extend_from_slice(attribute);
-                joined.extend_from_slice(entity);
-            }
-            (_, parts) => parts.iter().for_each(|part| joined.extend_from_slice(part)),
-        }
+        joined.extend_from_slice(&key);
         spans.push(Ok(start..joined.len()));
     }
     let keys = spans
@@ -775,7 +825,7 @@ pub(crate) mod tests {
     }
 
     /// A manifest under which the long values spill out of their keys.
-    fn spilling() -> Manifest {
+    pub(crate) fn spilling() -> Manifest {
         Manifest {
             inline_n: 64,
             spill_prefix: 32,
@@ -783,12 +833,12 @@ pub(crate) mod tests {
         }
     }
 
-    fn version(edition: u64) -> Version {
+    pub(crate) fn version(edition: u64) -> Version {
         Version::new(Origin::from([7; 32]), Edition::new(edition))
     }
 
     /// The block of a segment holding `keys`, each with a datum.
-    fn segment_block(keys: Vec<Key>, manifest: &Manifest) -> anyhow::Result<Vec<u8>> {
+    pub(crate) fn segment_block(keys: Vec<Key>, manifest: &Manifest) -> anyhow::Result<Vec<u8>> {
         let body = PersistentNodeBody::from_segment(
             PersistentSegment::from_entries::<Key>(segment_entries(keys))?,
             manifest.clone(),

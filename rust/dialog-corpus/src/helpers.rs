@@ -1,5 +1,6 @@
 //! Test helpers for generating deterministic test data.
 
+use crate::model::decoded;
 use std::str::FromStr;
 
 mod counting;
@@ -75,4 +76,11 @@ pub fn generate_data(entity_count: usize) -> Result<Vec<Fact>> {
     }
 
     Ok(data)
+}
+
+/// How many scalars this thread has decoded out of composites so far: a
+/// test reads it before and after a read to say the read decoded only what
+/// it returned.
+pub fn composite_decodes() -> usize {
+    decoded()
 }

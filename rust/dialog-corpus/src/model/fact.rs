@@ -660,6 +660,7 @@ enum Stored {
     SignedInt(i128),
     Float(f64),
     Boolean(bool),
+    Composite(super::Composite),
 }
 
 /// A row validated once, so everything that reads it afterwards reads its
@@ -794,6 +795,7 @@ impl Stored {
             super::ValueView::SignedInt(n) => Stored::SignedInt(n),
             super::ValueView::Float(n) => Stored::Float(n),
             super::ValueView::Boolean(b) => Stored::Boolean(b),
+            super::ValueView::Composite(composite) => Stored::Composite(composite),
         }
     }
 }
@@ -826,6 +828,7 @@ impl CheckedRow {
             Stored::SignedInt(n) => super::ValueView::SignedInt(*n),
             Stored::Float(n) => super::ValueView::Float(*n),
             Stored::Boolean(b) => super::ValueView::Boolean(*b),
+            Stored::Composite(composite) => super::ValueView::Composite(composite.clone()),
         }
     }
 
