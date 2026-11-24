@@ -144,6 +144,10 @@ pub const RESERVED_NAMESPACES: [&str; 2] = [crate::compile::REPORTED, "concept."
 /// reads it and never writes it.
 pub const READ_ONLY: &str = crate::compile::DESCRIBED;
 
+/// The label no field may have: what every query and rule calls the
+/// entity.
+pub const THIS: &str = "this";
+
 /// Whether a document may not write `name`, a relation or an attribute
 /// of one.
 fn reserved_name(name: &str) -> bool {
@@ -173,6 +177,13 @@ fn reserved(tree: &Syntax) -> Option<(&Syntax, String)> {
                 return Some((part, format!("?{name}")));
             }
             Syntax::Application(..) if part.applies() == Some(QUOTE) => {}
+            // `this` is what every query and rule calls the entity, so a
+            // field of that name would be the entity. (A concept pinned
+            // to an entity, which the design writes `this:`, is not
+            // built.)
+            Syntax::Application(_, operand) if operand.terms.contains_key(THIS) => {
+                return Some((part, format!("{THIS}:")));
+            }
             Syntax::Application(operator, operand) => {
                 open.extend(operand.terms.values().rev());
                 open.extend(operand.items.iter().rev());
