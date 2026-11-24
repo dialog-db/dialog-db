@@ -702,8 +702,13 @@ impl Syntax {
                     _ => Form::Symbol(entity.as_str().to_string()),
                 },
                 Value::Symbol(_) => Form::Symbol(data::spelled(value).unwrap_or_default()),
-                // The notation writes none of these as a constant.
-                Value::Bytes(_) | Value::Record(_) | Value::Composite(_) => Form::Blank,
+                // A map or a list is written as the tree it is answered
+                // as, which reads back as that tree.
+                Value::Composite(_) => crate::compile::written(value).form(),
+                // Bytes have no written form: they are shown as `…`, which
+                // reads as a name and so as no value, and `printed`
+                // refuses them.
+                Value::Bytes(_) | Value::Record(_) => Form::Symbol(UNWRITTEN.into()),
             },
             Syntax::Reference(name) => Form::Symbol(name.clone()),
             Syntax::Map(entries) => Form::Map(
@@ -714,6 +719,50 @@ impl Syntax {
             ),
             Syntax::Tuple(items) => Form::Vector(items.iter().map(Syntax::form).collect()),
         }
+    }
+}
+
+/// What bytes are shown as where a tree that holds them is shown: a
+/// name, so that it reads back as no value.
+const UNWRITTEN: &str = "…";
+
+/// Whether `value` has no written form: bytes, or a map or a list that
+/// holds them.
+fn unwritable(value: &Value) -> bool {
+    match value {
+        Value::Bytes(_) | Value::Record(_) => true,
+        Value::Composite(composite) if composite.is_map() => composite
+            .entries()
+            .any(|(key, value)| unwritable(&key) || unwritable(&value)),
+        Value::Composite(composite) => composite.items().any(|item| unwritable(&item)),
+        _ => false,
+    }
+}
+
+impl Syntax {
+    /// The text that says this and reads back as it, or `Unsupported`
+    /// where it holds a value the notation has no written form for,
+    /// bytes. A map or a list reads back as the tree it is answered as.
+    pub fn printed(&self) -> Result<String, Error> {
+        fn check(tree: &Syntax) -> Result<(), Error> {
+            match tree {
+                Syntax::Constant(value) if unwritable(value) => Err(Error::Unsupported(
+                    "bytes have no written form, so a tree that holds them is not printed".into(),
+                )),
+                Syntax::Application(operator, operand) => {
+                    check(operator)?;
+                    operand.items.iter().try_for_each(check)?;
+                    operand.terms.values().try_for_each(check)
+                }
+                Syntax::Map(entries) => entries
+                    .iter()
+                    .try_for_each(|(key, value)| check(key).and_then(|()| check(value))),
+                Syntax::Tuple(items) => items.iter().try_for_each(check),
+                _ => Ok(()),
+            }
+        }
+        check(self)?;
+        Ok(self.to_string())
     }
 }
 
@@ -1380,14 +1429,25 @@ mod tests {
             map.clone(),
             data::list([map, data::list([])?, Value::UnsignedInt(1u64.into())])?,
         ] {
-            let printed = Syntax::Constant(value.clone()).to_string();
+            let printed = Syntax::Constant(value.clone()).printed()?;
             assert_eq!(
                 crate::parse(&printed)?,
                 vec![crate::compile::written(&value)],
                 "{printed}"
             );
         }
-        for bytes in [Value::Bytes(vec![1, 2]), Value::Record(vec![3])] {
+        for bytes in [
+            Value::Bytes(vec![1, 2]),
+            Value::Record(vec![3]),
+            data::list([Value::Bytes(vec![4])])?,
+        ] {
+            assert!(
+                matches!(
+                    Syntax::Constant(bytes.clone()).printed(),
+                    Err(Error::Unsupported(_))
+                ),
+                "{bytes:?}"
+            );
             let printed = Syntax::Constant(bytes).to_string();
             assert!(
                 !crate::parse(&printed).is_ok_and(|trees| trees == vec![Syntax::Blank]),
