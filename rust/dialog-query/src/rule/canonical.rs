@@ -125,6 +125,13 @@ pub(crate) fn canonicalize(
     premises: &[Premise],
     reduce: &[(String, ReduceSpec)],
 ) -> Result<Option<Canonical>, TypeError> {
+    // The entity is `this` in every rule and is never renamed, so a
+    // field of that name would be the entity.
+    if let Some(field) = conclusion.with().keys().find(|name| *name == "this") {
+        return Err(TypeError::ReservedField {
+            field: field.to_string(),
+        });
+    }
     let fields: Vec<(String, Option<String>)> = conclusion
         .with()
         .iter()
@@ -298,7 +305,7 @@ fn search(
     match classes.iter().find(|members| members.len() > 1) {
         None => {
             *leaves += 1;
-            let names = names(&classes, rule);
+            let names = names(&classes, rule)?;
             let (encoded, _) = spell(rule, &names)?;
             if best.as_ref().is_none_or(|(known, _)| encoded < *known) {
                 *best = Some((encoded, names));
@@ -409,7 +416,7 @@ fn classes(colours: &BTreeMap<String, Vec<u8>>, locals: &[String]) -> Vec<Vec<St
 /// `this` is renamed, so nothing is left for them to collide with. A
 /// key operand takes its field's name with the key suffix, since the
 /// head's encoding derives it from the field.
-fn names(classes: &[Vec<String>], rule: &Rule<'_>) -> Rename {
+fn names(classes: &[Vec<String>], rule: &Rule<'_>) -> Result<Rename, TypeError> {
     let mut names: Rename = classes
         .iter()
         .flatten()
@@ -418,11 +425,19 @@ fn names(classes: &[Vec<String>], rule: &Rule<'_>) -> Rename {
         .collect();
     for (field, key) in &rule.fields {
         if let Some(key) = key {
-            let canonical = The::key_operand(&names[field]);
+            let canonical = The::key_operand(canonical_name(&names, field)?);
             names.insert(key.clone(), canonical);
         }
     }
-    names
+    Ok(names)
+}
+
+/// The canonical name of `name`, which every variable of a rule but
+/// `this` has.
+fn canonical_name<'a>(names: &'a Rename, name: &str) -> Result<&'a String, TypeError> {
+    names.get(name).ok_or_else(|| TypeError::TypeInference {
+        reason: format!("?{name} has no canonical name"),
+    })
 }
 
 /// The rule under `names`: head re-keyed, premises renamed and sorted
@@ -433,8 +448,8 @@ fn spell(rule: &Rule<'_>, names: &Rename) -> Result<(Vec<u8>, Identity), TypeErr
         .conclusion
         .with()
         .iter()
-        .map(|(name, field)| (names[name].clone(), field.clone()))
-        .collect();
+        .map(|(name, field)| Ok((canonical_name(names, name)?.clone(), field.clone())))
+        .collect::<Result<_, TypeError>>()?;
     let conclusion = ConceptDescriptor::try_from(fields)?;
     let renamed = rename_premises(rule.premises, names)?;
     // Sized up front: collected through a `Result` the vector would grow
@@ -451,16 +466,16 @@ fn spell(rule: &Rule<'_>, names: &Rename) -> Result<(Vec<u8>, Identity), TypeErr
         .reduce
         .iter()
         .map(|(field, spec)| {
-            (
-                names[field].clone(),
+            Ok((
+                canonical_name(names, field)?.clone(),
                 ReduceSpec {
                     apply: spec.apply,
                     of: rename_term(&spec.of, names),
                     listed: spec.listed.clone(),
                 },
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<_, TypeError>>()?;
     reduce.sort_by(|a, b| a.0.cmp(&b.0));
     let mut encoded = encode(&conclusion)?;
     let reduced = encode(&reduce)?;
