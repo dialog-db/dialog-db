@@ -2488,6 +2488,70 @@ impl Followed {
         ))
     }
 
+    /// Whether, in the head the author published last, `entity`'s name
+    /// and that head's own revision record are kept in one leaf: a fact
+    /// of the fixture's layout, read on the author's side, which holds
+    /// every block.
+    async fn named_beside_the_head_record(&self, entity: &str) -> Result<bool> {
+        use dialog_corpus::{
+            AttributeKey, AttributeKeyPart, EntityKey, EntityKeyPart, KeyViewConstruct,
+            KeyViewMut as _, Relation, history::REVISION_ATTRIBUTE,
+        };
+        use dialog_search_tree::{Accessor, SearchOptions, TreeWalker};
+        use futures_util::StreamExt as _;
+
+        let head = self
+            .alice
+            .revision()
+            .context("the author published a head")?;
+        let catalog = self.alice.archive().index();
+        let root = NodeHash::from(*head.tree.hash());
+        let tree = crate::Index::at(catalog.clone(), root.clone());
+
+        let revision: Relation = REVISION_ATTRIBUTE.parse()?;
+        let record = head.version().entity();
+        let name: Relation = "user/name".parse()?;
+        let named: Entity = entity.parse()?;
+        let ranges = [
+            <AttributeKey<Key> as KeyViewConstruct>::min()
+                .set_attribute(AttributeKeyPart::from(&revision))
+                .set_entity(EntityKeyPart::from(&record))
+                .into_key()
+                ..=<AttributeKey<Key> as KeyViewConstruct>::max()
+                    .set_attribute(AttributeKeyPart::from(&revision))
+                    .set_entity(EntityKeyPart::from(&record))
+                    .into_key(),
+            <EntityKey<Key> as KeyViewConstruct>::min()
+                .set_entity(EntityKeyPart::from(&named))
+                .set_attribute(AttributeKeyPart::from(&name))
+                .into_key()
+                ..=<EntityKey<Key> as KeyViewConstruct>::max()
+                    .set_entity(EntityKeyPart::from(&named))
+                    .set_attribute(AttributeKeyPart::from(&name))
+                    .into_key(),
+        ];
+        let mut leaves = Vec::new();
+        for range in ranges {
+            let stream = tree.stream_range(range, &self.operator);
+            futures_util::pin_mut!(stream);
+            let key = stream
+                .next()
+                .await
+                .context("the head keeps the record and the name")??
+                .key;
+            let found = TreeWalker::<Key, State<Datum>>::new(Some(root.clone()))
+                .search(
+                    &key,
+                    Accessor::new(&self.operator, &catalog),
+                    SearchOptions::default(),
+                )
+                .await?
+                .context("the head's tree is not empty")?;
+            leaves.push(found.leaf.hash().clone());
+        }
+        Ok(leaves[0] == leaves[1])
+    }
+
     /// The follower names `entity`, and how many blocks it fetched from
     /// the remote to write that.
     async fn name(&self, entity: &str, name: &str) -> Result<u64> {
@@ -2547,11 +2611,78 @@ impl Followed {
 /// A pull asked for `Download::QueriedRanges`
 /// reads what changed along the paths this replica holds a leaf of before
 /// the head moves, and leaves what the replica never read by reference.
+///
+/// The pull also brings the leaf that keeps the adopted head's revision
+/// record, which lands where a hash of the head's version puts it. In a
+/// tree this small one leaf runs from the residents into the first
+/// records, so under random keys that leaf kept `user:9-9` in about one
+/// run in seven and the follower read it without a fetch. The keys here
+/// derive from a seed under which it does not, and the test says so
+/// before it relies on it;
+/// [`it_reads_what_the_head_record_kept_after_adopting_a_head_another_device_moved`]
+/// pins the other layout.
 #[dialog_common::test]
 async fn it_reads_what_it_held_after_adopting_a_head_another_device_moved(
     s3: S3Address,
 ) -> Result<()> {
-    let devices = followed(&s3, "follow-read").await?;
+    let seed = Seed::new(0);
+    let _entropy = seed.entropy();
+    let devices = read_and_adopt(&seed, &s3).await?;
+
+    assert!(
+        !devices.named_beside_the_head_record("user:9-9").await?,
+        "the fixture's layout moved: under seed {} the leaf that keeps the \
+         adopted head's record now keeps `user:9-9`, so choose the seed \
+         again",
+        seed.value()
+    );
+    let (names, fetched) = devices.names_of("user:9-9").await?;
+    assert_eq!(names, vec![Value::String("resident-9-9".into())]);
+    assert!(
+        fetched > 0,
+        "what the follower never read was left by reference, and is \
+         fetched on demand"
+    );
+
+    Ok(())
+}
+
+/// What the leaf that keeps the adopted head's revision record keeps
+/// beside it, the replica reads from its own blocks after the pull.
+///
+/// The counterpart of
+/// [`it_reads_what_it_held_after_adopting_a_head_another_device_moved`],
+/// under a seed whose layout puts `user:9-9` in that leaf.
+#[dialog_common::test]
+async fn it_reads_what_the_head_record_kept_after_adopting_a_head_another_device_moved(
+    s3: S3Address,
+) -> Result<()> {
+    let seed = Seed::new(4);
+    let _entropy = seed.entropy();
+    let devices = read_and_adopt(&seed, &s3).await?;
+
+    assert!(
+        devices.named_beside_the_head_record("user:9-9").await?,
+        "the fixture's layout moved: under seed {} the leaf that keeps the \
+         adopted head's record no longer keeps `user:9-9`, so choose the \
+         seed again",
+        seed.value()
+    );
+    let (names, fetched) = devices.names_of("user:9-9").await?;
+    assert_eq!(names, vec![Value::String("resident-9-9".into())]);
+    assert_eq!(
+        fetched, 0,
+        "the pull brought the leaf of the head's record, and what it keeps"
+    );
+
+    Ok(())
+}
+
+/// [`followed_from`] `seed`, with a follower that read `user:0-0`, then
+/// adopted the author's next head, and still reads it from its own
+/// blocks.
+async fn read_and_adopt(seed: &Seed, s3: &S3Address) -> Result<Followed> {
+    let devices = followed_from(seed, s3).await?;
 
     let (names, fetched) = devices.names_of("user:0-0").await?;
     assert_eq!(names, vec![Value::String("resident-0-0".into())]);
@@ -2575,16 +2706,7 @@ async fn it_reads_what_it_held_after_adopting_a_head_another_device_moved(
         "what the follower read from its own blocks before the pull, it \
          reads from them after"
     );
-
-    let (names, fetched) = devices.names_of("user:9-9").await?;
-    assert_eq!(names, vec![Value::String("resident-9-9".into())]);
-    assert!(
-        fetched > 0,
-        "what the follower never read was left by reference, and is \
-         fetched on demand"
-    );
-
-    Ok(())
+    Ok(devices)
 }
 
 /// A replica writes where it wrote before, once it adopted a head another
