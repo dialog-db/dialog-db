@@ -949,9 +949,29 @@ impl Plan {
             if part.entry || part.shared.iter().collect::<BTreeSet<_>>() != key {
                 continue;
             }
+            // A count needs the count alone: the whole beside it would be
+            // built again over the group on every change and not read.
+            let whole = &selection.folds[part.fold];
+            let reduce = whole.fold.reduce();
+            let counting = dialog_query::reduce::Reduce::new(
+                reduce.groups.clone(),
+                reduce
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.field == part.count)
+                    .cloned()
+                    .collect(),
+            );
             folds.push(FoldedCount {
                 count,
-                folded: selection.folds[part.fold].clone(),
+                folded: Folded {
+                    rules: whole.rules.clone(),
+                    fold: dialog_query::Fold::new(
+                        whole.fold.groups().clone(),
+                        whole.fold.inputs().clone(),
+                        counting,
+                    ),
+                },
                 shared: part.shared.clone(),
                 field: part.count.clone(),
             });
