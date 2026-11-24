@@ -1222,29 +1222,67 @@ mod tests {
         Ok(())
     }
 
-    /// A relation the engine would refuse is refused by the notation, with
-    /// a message that says why: a derived attribute whose relation, its
-    /// attribute's part counted, is past 64 bytes; one under a concept or
-    /// of a name with a character a relation cannot hold; and an attribute
-    /// a line names with one.
+    /// The derived relations a check made, by the debug form of its steps:
+    /// each a domain under the notation's prefix for derived attributes.
+    fn derived_in(checked: &Checked) -> Vec<String> {
+        let said = format!("{:?}", checked.steps);
+        let mut found: Vec<String> = said
+            .match_indices("dialog.notation.c.")
+            .map(|(at, _)| {
+                said[at..]
+                    .split(|c: char| c == '/' || c == '"')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        found.sort();
+        found.dedup();
+        found
+    }
+
+    /// A derived attribute's relation is named by a hash of its concept's
+    /// written name and its own, of one length whatever they are: the
+    /// same concept and attribute in two documents make one relation;
+    /// long names, and names a relation could not spell, compile; a
+    /// label past what the relation leaves room for is refused saying
+    /// so; and no refusal an author sees names the hash.
     #[test]
-    fn it_refuses_a_relation_the_engine_would_with_why() -> Result<(), Error> {
+    fn it_names_a_derived_attribute_by_a_hash_of_what_it_is() -> Result<(), Error> {
+        let list = "(concept (list ?l name: ?n) (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))";
+        let rule = "(rule (list/count-open ?l ?n) (list ?l name: ?n))";
+        let once = derived_in(&check(&mut Analyzer::new()?, &format!("{list} {rule}")));
+        let again = derived_in(&check(
+            &mut Analyzer::new()?,
+            &format!("{list}\n(select (list ?l name: ?n))\n{rule}"),
+        ));
+        assert_eq!(once.len(), 1, "{once:?}");
+        assert_eq!(once, again);
+        assert_eq!(once[0].len(), "dialog.notation.c.".len() + 26, "{once:?}");
         let long = "abcdefghijabcdefghijabcdefghijabcd";
         let cafe = "caf\u{e9}";
+        for text in [
+            format!(
+                "(concept ({long} ?l name: ?n) (xyz.l/name of: ?l is: ?n as: :text cardinality: :one))
+                 (rule ({long}/abcdefghijabcdefghijabcdefghij ?l ?n) ({long} ?l name: ?n))"
+            ),
+            format!(
+                "(concept ({cafe} ?l name: ?n) (xyz.l/name of: ?l is: ?n as: :text cardinality: :one))
+                 (rule ({cafe}/count ?l ?n) ({cafe} ?l name: ?n))"
+            ),
+        ] {
+            let checked = check(&mut Analyzer::new()?, &text);
+            assert!(checked.refusals().next().is_none(), "{text}: {:?}", checked.diagnostics);
+            assert_eq!(derived_in(&checked).len(), 1, "{text}");
+        }
+        // A label past the room the relation leaves, and an attribute a
+        // line names with a character a relation cannot hold.
         for (text, said) in [
             (
                 format!(
-                    "(concept ({long} ?l name: ?n) (xyz.l/name of: ?l is: ?n as: :text cardinality: :one))
-                     (rule ({long}/abcdefghijabcdefghijabcdefghij ?l ?n) ({long} ?l name: ?n))"
+                    "{list} (rule (list/count ?l abcdefghijabcdefghij: ?n) (list ?l name: ?n))"
                 ),
-                "64",
-            ),
-            (
-                format!(
-                    "(concept ({cafe} ?l name: ?n) (xyz.l/name of: ?l is: ?n as: :text cardinality: :one))
-                     (rule ({cafe}/count ?l ?n) ({cafe} ?l name: ?n))"
-                ),
-                "\u{e9}",
+                "abcdefghijabcdefghij",
             ),
             (
                 format!(
@@ -1261,6 +1299,25 @@ mod tests {
                 checked.diagnostics
             );
         }
+        // A refusal about a derived attribute names it as it is written.
+        let checked = check(
+            &mut Analyzer::new()?,
+            &format!("{list} (rule (list/count-open ?l (count ?n)) (list ?l name: ?n))"),
+        );
+        let messages: Vec<&str> = checked
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("list/count-open"))
+                && messages
+                    .iter()
+                    .all(|message| !message.contains("dialog.notation")),
+            "{messages:?}"
+        );
         Ok(())
     }
 }
