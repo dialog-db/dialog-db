@@ -17,6 +17,66 @@ use dialog_query::query::Output as _;
 use dialog_repository::{Branch, Transient};
 use dialog_storage::provider::storage::VolatileSpace;
 
+/// Panics where `message`, said of the document `text`, names what the
+/// notation made and the author did not write: a variable the compiler
+/// made, `?[2]` or `?v[1]`, or a name in the notation's own namespace,
+/// `dialog.n`. What the document itself says is the author's.
+pub fn spoken(text: &str, message: &str) {
+    let leaks = leaks(message);
+    let unwritten: Vec<&String> = leaks
+        .iter()
+        .filter(|leak| !text.contains(leak.as_str()))
+        .collect();
+    assert!(
+        unwritten.is_empty(),
+        "{message:?} names {unwritten:?}, which the author did not write"
+    );
+}
+
+/// The names in `message` the notation makes: each variable with a
+/// bracketed tag, and each name under `dialog.n`.
+pub fn leaks(message: &str) -> Vec<String> {
+    let chars: Vec<char> = message.chars().collect();
+    let mut found = Vec::new();
+    let named = |c: char| c.is_alphanumeric() || "-_./*+!<>=".contains(c);
+    let mut at = 0;
+    while at < chars.len() {
+        if chars[at] == '?' {
+            let mut end = at + 1;
+            while end < chars.len() && named(chars[end]) {
+                end += 1;
+            }
+            if end < chars.len() && chars[end] == '[' {
+                let close = chars[end..]
+                    .iter()
+                    .position(|c| *c == ']')
+                    .map(|at| end + at);
+                let stop = close.map_or(chars.len(), |close| close + 1);
+                found.push(chars[at..stop].iter().collect());
+                at = stop;
+                continue;
+            }
+            at = end;
+            continue;
+        }
+        at += 1;
+    }
+    let mut rest = message;
+    while let Some(at) = rest.find("dialog.n") {
+        let tail = &rest[at..];
+        let end = tail
+            .find(|c: char| !(c.is_alphanumeric() || ".-_/".contains(c)))
+            .unwrap_or(tail.len());
+        let name = &tail[..end];
+        // `dialog.node.*` is the engine's, not the notation's.
+        if name == "dialog.n" || name.starts_with("dialog.n.") || name.starts_with("dialog.n/") {
+            found.push(name.to_string());
+        }
+        rest = &tail[end.max(1)..];
+    }
+    found
+}
+
 /// A branch and the syntax submitted to it so far.
 pub struct Notebook {
     pub operator: Peer<VolatileSpace, Session>,
@@ -38,8 +98,21 @@ impl Notebook {
 
     /// Submit a document: one transaction for what it writes, installs
     /// and issues, then its queries against the result. The report is
-    /// every row, as written, sorted.
+    /// every row, as written, sorted. Whatever refuses it is in the
+    /// author's terms.
     pub async fn submit(&mut self, text: &str) -> Result<(Vec<String>, Vec<Diagnostic>)> {
+        let submitted = self.submitted(text).await;
+        match &submitted {
+            Ok((_, diagnostics)) => diagnostics
+                .iter()
+                .for_each(|diagnostic| spoken(text, &diagnostic.message)),
+            Err(error) => spoken(text, &format!("{error:#}")),
+        }
+        submitted
+    }
+
+    /// [`submit`](Self::submit), with no check of what it is told.
+    pub async fn submitted(&mut self, text: &str) -> Result<(Vec<String>, Vec<Diagnostic>)> {
         // The three phases: text to trees, trees to analyzed trees, an
         // analyzed tree to what Dialog-DB runs. A document with a
         // refusal in it is refused whole. The first one is the error,

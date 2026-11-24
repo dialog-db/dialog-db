@@ -1417,6 +1417,37 @@ async fn it_reads_a_concept_over_another_concept_under_a_name_with_a_slash() -> 
     Ok(())
 }
 
+/// A refusal names what the author wrote: their form and their
+/// variables, never one the compiler made or a name in the notation's
+/// own namespace. A head whose field Dialog-DB finds unbound, and a
+/// select that names no field, are each said so.
+#[dialog_common::test]
+async fn it_says_a_refusal_in_the_authors_terms() -> Result<()> {
+    let alt = r#"(concept (alt ?d v: ?v)
+           (xyz.alt/v of: ?d is: ?v as: :text cardinality: :one))
+         (concept (doc ?d title: ?t)
+           (xyz.doc.meta/title of: ?d is: ?t as: :text cardinality: :one))
+         (concept (doc/plain ?d part: ?v) (alt ?d v: ?v))"#;
+    for (text, says) in [
+        (
+            r#"(rule (doc/parts ?d part: {"a" ?v}) (alt ?d v: ?v))"#,
+            "part:",
+        ),
+        ("(select (doc/plain ?d ...))", "(select (doc/plain ?d ...))"),
+    ] {
+        let mut notebook = Notebook::open().await?;
+        notebook.submit(alt).await?;
+        let refused = notebook.submitted(text).await;
+        let said = match &refused {
+            Err(error) => format!("{error:#}"),
+            Ok(done) => panic!("{text} was not refused: {done:?}"),
+        };
+        assert!(said.contains(says), "{text}: {said}");
+        assert!(session::leaks(&said).is_empty(), "{text}: {said}");
+    }
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a

@@ -1543,6 +1543,9 @@ fn it_measures_how_far_the_notebook_and_the_table_get() -> Result<()> {
     let measure = |documents: &[&str]| -> Result<(usize, usize, usize)> {
         let text = documents.join("\n");
         let checked = dialog_notation::check_forms(&mut Analyzer::new()?, &text);
+        for refused in checked.refusals() {
+            session::spoken(&text, &refused.message);
+        }
         let forms = parse(&text)?.len();
         let compiled: std::collections::BTreeSet<usize> =
             checked.step_forms.iter().copied().collect();
