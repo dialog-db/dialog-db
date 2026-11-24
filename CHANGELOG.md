@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A claim one round of induction both retracts and asserts holds afterwards
 
-Pull request: to be linked when it opens.
+[#863](https://github.com/dialog-db/dialog-db/pull/863)
 
 Induction runs in rounds, and every rule a round triggers reads the
 state before the round. A rule that retracts the old value of a field
