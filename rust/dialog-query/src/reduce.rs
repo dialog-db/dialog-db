@@ -107,6 +107,9 @@ use crate::types::Any;
 use dialog_corpus::Contender;
 use std::sync::Arc;
 
+mod running;
+pub use running::Running;
+
 /// The fold applied to a reduced field's inputs, one group at a time.
 ///
 /// The phase-1 set from `notes/aggregation.md`. `median`, `variance`,
