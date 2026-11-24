@@ -250,7 +250,7 @@ pub fn fill(template: &Syntax, bindings: &Bindings, fresh: &str) -> Result<Synta
         Syntax::Variable(name) => match bindings.get(name) {
             Some(Binding::One(tree)) => tree.clone(),
             Some(Binding::Many(trees)) => Syntax::Tuple(trees.clone()),
-            Some(Binding::Row(_)) | None => Syntax::Variable(format!("{name}.{fresh}")),
+            Some(Binding::Row(_)) | None => Syntax::Variable(crate::syntax::tagged(name, fresh)),
         },
         Syntax::Tuple(items) => Syntax::Tuple(fill_run(items, bindings, fresh)?),
         Syntax::Map(entries) => Syntax::Map(
@@ -387,7 +387,7 @@ mod tests {
     fn it_renames_a_variable_the_pattern_did_not_bind() {
         assert_eq!(
             rewrite("(todo ?t)", "(todo ?t text: ?x)", "(xyz.todo ?t text: ?x)").as_deref(),
-            Some("(xyz.todo ?t text: ?x.s)")
+            Some("(xyz.todo ?t text: ?x[s])")
         );
     }
 
@@ -400,7 +400,7 @@ mod tests {
                 "(?command.domain _ ... ?fields)"
             )
             .as_deref(),
-            Some("(?command.domain.s _ list: list:home text: \"x\")")
+            Some("(?command.domain[s] _ list: list:home text: \"x\")")
         );
         assert_eq!(
             rewrite("(todo ?t colour: ?c)", "(todo ?t text: ?x)", "x"),
@@ -462,7 +462,7 @@ mod tests {
         let took = matches(&became, &template, Bindings::new()).unwrap();
         assert_eq!(
             fill(&pattern, &took, "s").unwrap().to_string(),
-            "(task ?mine title: ?x.s)"
+            "(task ?mine title: ?x[s])"
         );
     }
 

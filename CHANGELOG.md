@@ -81,6 +81,11 @@ What this changes for you:
   `Patch`es of a view, the markup types in `view`, and `live`. Its
   modules are private. The `inspect` feature also exposes the maintainer
   of a view's tree and what a driver evaluated, for tests.
+- Every name the notation makes for itself is under `dialog.notation`,
+  and a document that names anything under it is refused with
+  `Error::Reserved`. Its own variables are spelled with a `[`, which no
+  document can write in a variable. A field may not be labelled `this:`.
+  `syntax.meta` is read and never written.
 - `check(analyzer, text)` gives, form by form, what a document compiles
   to, its diagnostics, and its declarations as data
   (`Declaration::Concept`, `Declaration::Query`).

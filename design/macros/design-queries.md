@@ -304,7 +304,7 @@ flowchart TD
 ```
 
 - **A view is a query whose answer is markup.** `(view ?x template)` in the body. `(select …)` of one compiles to a `Plan`; asked by the session, it is rendered once and printed as Hiccup.
-- **What is collected is put in place.** A query collected into markup has its template put where its variable stands, its variables named apart (`q1.`, `q2.` …), and its required conditions a layer under the element it stands in. Calls are not mounted; the whole page is one plan, one subscription a layer.
+- **What is collected is put in place.** A query collected into markup has its template put where its variable stands, its variables named apart (`[q1]`, `[q2]` …, names no document can spell), and its required conditions a layer under the element it stands in. Calls are not mounted; the whole page is one plan, one subscription a layer.
 - **What tells instances apart.** The root by the query's entity, or once for a query of no entity. A query collected by the terms of its head the call leaves free, an entry's key first, so the order stands by position and a set by its values.
 - **A count** is a layer whose instances are counted and never shown, under the element that shows it: `0 open`, and `1 open` when a to-do arrives, one text set.
 - **A layer that does not bind a key above it takes that layer's conditions too**, so `(table/sheet-row _ is: (collect ?sheets))` gives every sheet under each table. Its rows are re-read when the table's conditions change.

@@ -7,7 +7,8 @@
 ; A variable the pattern binds is replaced in the template. Any other
 ; variable in a template is the template's own, fresh at each site it is
 ; expanded at: two sites of one rule never share it, and one form written
-; twice in the same place of a rule is one site.
+; twice in the same place of a rule is one site. It is named `x[3]`, a
+; name no document can write, so it never meets an author's variable.
 
 ; Asking is a rule whose head lands in the report. With no premise it
 ; reads what it reports. A query, which collects, is defined with

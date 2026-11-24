@@ -185,7 +185,7 @@ pub struct FoldedCount {
 pub const SOURCE_TAG: &str = "view-source";
 
 /// The relation a layer's rows are reported in.
-const LAYER: &str = "view.layer";
+const LAYER: &str = "dialog.notation.view.layer";
 
 /// The field a layer's row is reported under, as one record.
 const ROW_FIELD: &str = "row";
@@ -386,7 +386,7 @@ impl Defined {
     }
 }
 
-/// Whether an analyzed `(select.query …)` asks a query whose answer is
+/// Whether an analyzed `(dialog.notation.select …)` asks a query whose answer is
 /// markup.
 pub fn is_markup(tree: &Syntax) -> bool {
     let [call, defined @ ..] = items(tree) else {
@@ -693,7 +693,7 @@ impl Builder<'_> {
             }
         }
         self.fresh += 1;
-        let prefix = format!("q{}.", self.fresh);
+        let prefix = format!("[q{}]", self.fresh);
         self.instantiate(&name, &prefix, &given, path, bound, false)
     }
 
@@ -717,7 +717,7 @@ impl Builder<'_> {
             return Err(Error::Unknown(name.to_string()));
         };
         self.fresh += 1;
-        let prefix = format!("q{}.", self.fresh);
+        let prefix = format!("[q{}]", self.fresh);
         // Only the source's own variables are named apart: those of the
         // query it stands in are bound above.
         let own: BTreeSet<String> = premises
@@ -727,7 +727,7 @@ impl Builder<'_> {
                 premise.variables(&mut names);
                 names
             })
-            .filter(|variable| variable.starts_with("source-") || variable == crate::view::CALLED)
+            .filter(|variable| variable.starts_with("[source-") || variable == crate::view::CALLED)
             .collect();
         let given: BTreeMap<String, Syntax> = premises
             .iter()
@@ -801,7 +801,7 @@ fn places(node: &Node, path: Vec<usize>, parent: Option<usize>, into: &mut Vec<P
 }
 
 impl Plan {
-    /// The plan of an analyzed `(select.query CALL QUERY…)` whose query
+    /// The plan of an analyzed `(dialog.notation.select CALL QUERY…)` whose query
     /// answers with markup.
     pub fn of(tree: &Syntax) -> Result<Plan, Error> {
         let [call, queries @ ..] = items(tree) else {

@@ -11,7 +11,7 @@
 //!   keeps a row from being an answer.
 //!
 //! Nothing of a query is compiled where it is defined. `(select CALL)`
-//! of one is analyzed into a `(select.query …)` tree that holds the
+//! of one is analyzed into a `(dialog.notation.select …)` tree that holds the
 //! query and every query it reaches, each condition expanded to kernel
 //! rules (see [`crate::select`]).
 //!
@@ -61,7 +61,7 @@ struct Body {
 
 /// The variable a query's conditions are reported under, as the entity
 /// of their row.
-const ROW_ENTITY: &str = "query-row";
+const ROW_ENTITY: &str = "[query-row]";
 
 /// Every `(collect …)` in a tree, wherever it stands.
 fn collects_in(tree: &Syntax) -> Vec<&Syntax> {
@@ -676,11 +676,11 @@ impl Expander {
             };
             let item = if keyed {
                 Syntax::Map(vec![(
-                    Syntax::Variable(format!("collect-{index}-key")),
-                    Syntax::Variable(format!("collect-{index}-value")),
+                    Syntax::Variable(format!("[collect-{index}-key]")),
+                    Syntax::Variable(format!("[collect-{index}-value]")),
                 )])
             } else {
-                Syntax::Variable(format!("collect-{index}"))
+                Syntax::Variable(format!("[collect-{index}]"))
             };
             let condition = replaced(&collect.condition, &collect.place, item.clone());
             let source = if collect.call {
@@ -752,9 +752,9 @@ impl Expander {
             let term = match operand.terms.get(label) {
                 Some(term) if label != "is" => term.clone(),
                 _ => {
-                    let value = Syntax::Variable(format!("source-{label}"));
+                    let value = Syntax::Variable(format!("[source-{label}]"));
                     if self.entries.get(&concept) == Some(label) {
-                        Syntax::Map(vec![(Syntax::Variable("source-key".into()), value)])
+                        Syntax::Map(vec![(Syntax::Variable("[source-key]".into()), value)])
                     } else {
                         value
                     }

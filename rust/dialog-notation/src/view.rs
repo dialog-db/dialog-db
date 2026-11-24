@@ -40,7 +40,7 @@ pub use tree::{Change, Counts, Given, Maintainer, Row, render};
 
 /// The variable a view not found, shown as its source, names the entity
 /// it reads by where the call names none.
-pub const CALLED: &str = "view-of";
+pub const CALLED: &str = "[view-of]";
 
 /// A part of a template.
 #[derive(Clone, Debug, PartialEq)]

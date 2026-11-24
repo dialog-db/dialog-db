@@ -1264,8 +1264,8 @@ mod tests {
 
     /// A list's card with a count of its open to-dos and its to-dos, each
     /// with its tags: nested two levels deep. Its layers: the lists
-    /// `(l name)`, the to-dos `(l q1.t q1.s q1.title)`, the tags
-    /// `(l q1.t q2.g)` and the open to-dos counted `(l collect-0)`.
+    /// `(l name)`, the to-dos `(l [q1]t [q1]s [q1]title)`, the tags
+    /// `(l [q1]t [q2]g)` and the open to-dos counted `(l [collect-0])`.
     fn nested() -> Plan {
         let document = r#"
             (concept (list ?l name: ?name)
@@ -1309,9 +1309,9 @@ mod tests {
             rows,
             [
                 vec!["l", "name"],
-                vec!["l", "q1.t", "q1.s", "q1.title"],
-                vec!["l", "q1.t", "q2.g"],
-                vec!["l", "collect-0"],
+                vec!["l", "[q1]t", "[q1]s", "[q1]title"],
+                vec!["l", "[q1]t", "[q2]g"],
+                vec!["l", "[collect-0]"],
             ]
         );
         (**plan).clone()

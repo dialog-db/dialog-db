@@ -5,9 +5,9 @@
 //! analyzed trees. It gives what the document compiles to, and every
 //! diagnostic of every phase with where in the text it is.
 
-use crate::Syntax;
 use crate::analyze::Analyzer;
-use std::collections::BTreeSet;
+use crate::{Error, Syntax};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::compile::{Step, compile};
 use crate::declare::{self, Declaration};
@@ -134,6 +134,13 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
             )),
         }
     }
+    for (origin, error) in clashes(steps.iter().zip(forms.iter().copied()), &trees) {
+        checked.diagnostics.push(Diagnostic::refused(
+            trees.get(origin).cloned(),
+            vec![Segment::Item(origin)],
+            error,
+        ));
+    }
     for diagnostic in &mut checked.diagnostics {
         diagnostic.span = diagnostic.place(&checked.written);
     }
@@ -187,6 +194,18 @@ pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
             }
         }
     }
+    let kept = compiled
+        .iter()
+        .filter(|(origin, _, _)| !refused.contains(origin))
+        .flat_map(|(origin, _, steps)| steps.iter().map(|step| (step, *origin)));
+    for (origin, error) in clashes(kept, &trees) {
+        refused.insert(origin);
+        checked.diagnostics.push(Diagnostic::refused(
+            trees.get(origin).cloned(),
+            vec![Segment::Item(origin)],
+            error,
+        ));
+    }
     for (origin, tree, steps) in compiled {
         if refused.contains(&origin) {
             continue;
@@ -201,6 +220,32 @@ pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
         diagnostic.span = diagnostic.place(&checked.written);
     }
     checked
+}
+
+/// Each form of `steps` whose report relation is named as one of an
+/// earlier form's is, after another site: the two would derive into one
+/// relation, and the later is refused, naming both.
+fn clashes<'s>(
+    steps: impl IntoIterator<Item = (&'s Step, usize)>,
+    trees: &[Syntax],
+) -> Vec<(usize, Error)> {
+    let form = |at: usize| trees.get(at).map(ToString::to_string).unwrap_or_default();
+    let mut named: BTreeMap<String, (String, usize)> = BTreeMap::new();
+    let mut clashes = Vec::new();
+    for (step, origin) in steps {
+        for (relation, site) in step.derives() {
+            match named.get(&relation) {
+                Some((other, at)) if *other != site => {
+                    clashes.push((origin, Error::Clash(relation, form(*at), form(origin))));
+                }
+                Some(_) => {}
+                None => {
+                    named.insert(relation, (site, origin));
+                }
+            }
+        }
+    }
+    clashes
 }
 
 /// `analyzed` with what the comments about the tree it came of say as

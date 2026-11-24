@@ -125,21 +125,6 @@ pub(crate) const DEEPEST: usize = 2 * crate::form::DEPTH;
 const GROWTH: usize = 16;
 const SPARE: usize = 1024;
 
-/// The relations the notation writes and reads itself, and a document
-/// never names: a query's rows, a select, a write that runs once, a
-/// view's layer.
-pub const RESERVED: [&str; 4] = [
-    crate::select::ROW,
-    crate::select::SELECTED,
-    "once.write",
-    "view.layer",
-];
-
-/// The namespaces whose relations the notation names itself: a report's
-/// relation, `report.q…`, and an attribute derived under a concept,
-/// `concept.list.count-open`, which a document writes `list/count-open`.
-pub const RESERVED_NAMESPACES: [&str; 2] = [crate::compile::REPORTED, "concept."];
-
 /// The relation the notation writes a rule's description in: a document
 /// reads it and never writes it.
 pub const READ_ONLY: &str = crate::compile::DESCRIBED;
@@ -148,21 +133,13 @@ pub const READ_ONLY: &str = crate::compile::DESCRIBED;
 /// entity.
 pub const THIS: &str = "this";
 
-/// Whether a document may not write `name`, a relation or an attribute
-/// of one.
+/// Whether a document may not name `name`, a relation or an attribute
+/// of one: it is under the notation's own namespace.
 fn reserved_name(name: &str) -> bool {
     let relation = name.split_once('/').map_or(name, |(relation, _)| relation);
-    RESERVED.contains(&relation)
-        || RESERVED_NAMESPACES
-            .iter()
-            .any(|namespace| relation.starts_with(namespace))
-}
-
-/// Whether a document may not name a variable `name`: the notation names
-/// a template's own variables `name.site`, a fold's `fold.groups.…`, and
-/// a view's `view-of` and `source-…`.
-fn reserved_variable(name: &str) -> bool {
-    name.contains('.') || name == crate::view::CALLED || name.starts_with("source-")
+    relation
+        .strip_prefix(syntax::NAMESPACE)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
 }
 
 /// The first part of `tree` as written that names what the notation
@@ -173,9 +150,6 @@ fn reserved(tree: &Syntax) -> Option<(&Syntax, String)> {
     while let Some(part) = open.pop() {
         match part {
             Syntax::Reference(name) if reserved_name(name) => return Some((part, name.clone())),
-            Syntax::Variable(name) if reserved_variable(name) => {
-                return Some((part, format!("?{name}")));
-            }
             Syntax::Application(..) if part.applies() == Some(QUOTE) => {}
             // `this` is what every query and rule calls the entity, so a
             // field of that name would be the entity. (A concept pinned
@@ -516,10 +490,10 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
 ///
 /// ```clj
 /// (list/count-open ?l (count ?t))
-/// (concept.list.count-open ?l is: (count ?t))
+/// (dialog.notation.concept.list.count-open ?l is: (count ?t))
 ///
 /// (list/count ?l status: ?s count: (count ?t))
-/// (concept.list.count ?l count: (count ?t) status: ?s)
+/// (dialog.notation.concept.list.count ?l count: (count ?t) status: ?s)
 /// ```
 ///
 /// Its two terms unlabeled are the entity and the value, under `is:`.
@@ -623,7 +597,9 @@ fn blanked(rule: Syntax) -> Syntax {
     rule.variables(&mut all);
     let once: BTreeSet<String> = all
         .iter()
-        .filter(|name| name.contains('.') && all.iter().filter(|other| other == name).count() == 1)
+        .filter(|name| {
+            syntax::unwritten(name) && all.iter().filter(|other| other == name).count() == 1
+        })
         .cloned()
         .collect();
     if once.is_empty() {
@@ -875,7 +851,7 @@ fn unnamed(tree: &Syntax, site: &str) -> Syntax {
             other => other.clone(),
         }
     }
-    walk(tree, &format!(".{site}"), &mut Vec::new())
+    walk(tree, &format!("[{site}]"), &mut Vec::new())
 }
 
 /// Several reads of one entity as one read, so that their absence is
@@ -2107,6 +2083,15 @@ mod tests {
           (todo/add todo: ?t list: ?l text: ?x))
     "#;
 
+    /// The kernel trees `text` expands to after `setup`: a tree the
+    /// notation names its own variables in is not printed and read back,
+    /// since no document can spell those names.
+    fn kernel(setup: &str, text: &str) -> Result<Vec<Syntax>, Error> {
+        let mut expander = Expander::new()?;
+        expander.submit(setup)?;
+        Ok(expander.submit(text)?.0)
+    }
+
     fn expanded(setup: &str, text: &str) -> Result<Vec<String>, Error> {
         let mut expander = Expander::new()?;
         expander.submit(setup)?;
@@ -2222,19 +2207,18 @@ mod tests {
     /// two premises once named theirs alike and joined on them.
     #[test]
     fn it_names_the_own_variables_of_two_sites_apart() -> Result<(), Error> {
-        let rules = expanded(
+        let rules = kernel(
             "(concept (task ?t title: ?x) (xyz.todo ?t text: ?x) (xyz.todo ?t alt: ?x))",
             "(rule (xyz.out ?a97 other: ?a940) (task ?a97) (task ?a940))",
         )?;
         let [rule] = rules.as_slice() else {
             return Err(Error::Refused(format!("one rule: {rules:?}")));
         };
-        let tree = crate::parse(rule)?;
         let mut names = Vec::new();
-        tree[0].variables(&mut names);
+        rule.variables(&mut names);
         let own: BTreeSet<String> = names
             .into_iter()
-            .filter(|name| name.contains('.'))
+            .filter(|name| syntax::unwritten(name))
             .collect();
         assert_eq!(own.len(), 2, "{rule}");
         Ok(())
@@ -2244,19 +2228,18 @@ mod tests {
     /// and its own variables are one; the prelude says so.
     #[test]
     fn it_names_the_own_variables_of_one_form_written_twice_alike() -> Result<(), Error> {
-        let rules = expanded(
+        let rules = kernel(
             "(concept (task ?t title: ?x) (xyz.todo ?t text: ?x) (xyz.todo ?t alt: ?x))",
             "(rule (xyz.out ?a other: ?b) (task ?a) (task ?b) (task ?a))",
         )?;
         let [rule] = rules.as_slice() else {
             return Err(Error::Refused(format!("one rule: {rules:?}")));
         };
-        let tree = crate::parse(rule)?;
         let mut names = Vec::new();
-        tree[0].variables(&mut names);
+        rule.variables(&mut names);
         let own: BTreeSet<String> = names
             .into_iter()
-            .filter(|name| name.contains('.'))
+            .filter(|name| syntax::unwritten(name))
             .collect();
         assert_eq!(own.len(), 2, "{rule}");
         assert!(PRELUDE.contains("two sites of one rule never share it"));
@@ -2277,17 +2260,16 @@ mod tests {
             // a blank.
             let setup =
                 "(concept (task ?t title: ?x) (xyz.todo ?t text: ?x) (xyz.todo ?t alt: ?x))";
-            let rules = expanded(setup, &text)?;
-            assert_eq!(rules, expanded(setup, &text)?, "the same each time");
+            let rules = kernel(setup, &text)?;
+            assert_eq!(rules, kernel(setup, &text)?, "the same each time");
             let [rule] = rules.as_slice() else {
                 return Err(Error::Refused(format!("one rule: {rules:?}")));
             };
-            let tree = crate::parse(rule)?;
             let mut names = Vec::new();
-            tree[0].variables(&mut names);
+            rule.variables(&mut names);
             let own: BTreeSet<String> = names
                 .into_iter()
-                .filter(|name| name.contains('.'))
+                .filter(|name| syntax::unwritten(name))
                 .collect();
             assert_eq!(own.len(), count, "{count} sites");
         }
@@ -2700,8 +2682,8 @@ mod tests {
     /// another where it stands as the premise.
     #[test]
     fn it_expands_a_query_to_a_rule_that_reports() {
-        let kernel = expanded(TODO, "(select (todo ?t text: ?x ...))").unwrap();
-        let rule = Clauses::of(&parse(&kernel[0]).unwrap()[0]);
+        let kernel = kernel(TODO, "(select (todo ?t text: ?x ...))").unwrap();
+        let rule = Clauses::of(&kernel[0]);
         let at = |tree: &Syntax, label: &str| {
             tree.operand()
                 .and_then(|operand| operand.terms.get(label))
@@ -2715,8 +2697,8 @@ mod tests {
         assert_eq!(reported.applies(), Some("report"));
         let head = &items(reported)[0];
         assert_eq!(at(head, "text"), at(&rule.when[0], "text"));
-        assert!(own(head).starts_with("(:one (:entity ?l."));
-        assert!(own(&rule.when[0]).starts_with("(:one (:entity ?l."));
+        assert!(own(head).starts_with("(:one (:entity ?l["));
+        assert!(own(&rule.when[0]).starts_with("(:one (:entity ?l["));
         assert_ne!(own(head), own(&rule.when[0]));
     }
 
@@ -2736,7 +2718,7 @@ mod tests {
         assert!(
             kernel[0]
                 .to_string()
-                .starts_with("(rule (assert (xyz.todo.add ?c."),
+                .starts_with("(rule (assert (xyz.todo.add ?c["),
             "{kernel:?}"
         );
         assert!(diagnostics.is_empty());
@@ -2803,10 +2785,15 @@ mod tests {
         )
         .unwrap();
         assert!(
-            deduced[0].starts_with("(rule (xyz.todo.add ?c."),
+            deduced[0].starts_with("(rule (xyz.todo.add ?c["),
             "{deduced:?}"
         );
-        let kernel = Rule::parse(&parse(&deduced[0]).unwrap().remove(0)).unwrap();
+        let deduced = kernel(
+            TODO,
+            r#"(rule (todo/add todo: ?t list: list:home text: ?x) (xyz.draft ?t text: ?x))"#,
+        )
+        .unwrap();
+        let kernel = Rule::parse(&deduced[0]).unwrap();
         assert!(matches!(&kernel.head, Head::Derive(read)
             if matches!(&read.entity, crate::kernel::Term::Formula(id) if id.name == "id")));
     }
@@ -3208,14 +3195,14 @@ mod tests {
         assert_eq!(concluded.len(), 1);
         assert!(
             concluded[0].starts_with(
-                "(rule (concept.list.count-open ?l is: (count ?t)) (xyz.list ?l name: "
+                "(rule (dialog.notation.concept.list.count-open ?l is: (count ?t)) (xyz.list ?l name: "
             ),
             "{concluded:?}"
         );
         assert_eq!(
             expanded(lists, "(select (list/count-open list:home ?n))").unwrap(),
             vec![
-                "(rule (report (concept.list.count-open list:home is: ?n)) (concept.list.count-open list:home is: ?n))"
+                "(rule (report (dialog.notation.concept.list.count-open list:home is: ?n)) (dialog.notation.concept.list.count-open list:home is: ?n))"
             ]
         );
         let labelled = expanded(
@@ -3225,7 +3212,9 @@ mod tests {
         )
         .unwrap();
         assert!(
-            labelled[0].starts_with("(rule (concept.list.count ?l count: (count ?t) status: ?s) "),
+            labelled[0].starts_with(
+                "(rule (dialog.notation.concept.list.count ?l count: (count ?t) status: ?s) "
+            ),
             "{labelled:?}"
         );
         // Under no declared concept, the same spelling is an attribute.
@@ -3331,7 +3320,7 @@ mod tests {
             "(select (io.person ?p name: ?n) (io.person ?p name: ?n) (unless (author ?p ...)))",
         )
         .unwrap();
-        assert!(kernel[0].contains("(unless (io.person ?p io.contact/email: ?e."));
-        assert!(kernel[0].contains(" name: ?n."));
+        assert!(kernel[0].contains("(unless (io.person ?p io.contact/email: ?e["));
+        assert!(kernel[0].contains(" name: ?n["));
     }
 }

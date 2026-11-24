@@ -54,10 +54,30 @@ use crate::data;
 use crate::form::{Form, Kind, Mark, Part};
 use crate::written::{Note, Path, Segment, Slot, Written};
 
+/// Everything the notation names for itself is under this namespace,
+/// which a document cannot name: the relations it derives, reports and
+/// lays out views in. The engine keeps `dialog.` for its own and refuses
+/// a document's writes under it; this part is the notation's.
+pub const NAMESPACE: &str = "dialog.notation";
+
 /// The domain every derived attribute's relation is under:
-/// `concept.list.count-open` is what `(list/count-open ?l ?n)` derives
-/// and reads. A concept's domain is concluded only.
-pub const DERIVED: &str = "concept";
+/// `dialog.notation.concept.list.count-open` is what
+/// `(list/count-open ?l ?n)` derives and reads. A concept's domain is
+/// concluded only.
+pub const DERIVED: &str = "dialog.notation.concept";
+
+/// Whether a variable is one the notation made: a template's own, at a
+/// site, `x[3]`, a column, a fold's, a view's. Its name holds a `[`,
+/// which the reader never reads in a variable, so no document can name
+/// it.
+pub fn unwritten(name: &str) -> bool {
+    name.contains('[')
+}
+
+/// The variable the notation names `name` with `tag`: `x[3]`.
+pub fn tagged(name: &str, tag: &str) -> String {
+    format!("{name}[{tag}]")
+}
 
 /// Whether a domain is a concept's own, which rules conclude and nothing
 /// writes.

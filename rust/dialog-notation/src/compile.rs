@@ -16,8 +16,8 @@
 //! | `(report A)` with one read as its premise | a [`ConceptQuery`] |
 //! | `(report A)` with any other premises | a [`DeductiveRule`] deriving the report, and a [`ConceptQuery`] of it |
 //! | `description: "…"` on a rule Dialog-DB keeps | a [`ConceptStatement`] asserting `syntax.meta/description` of the rule's entity |
-//! | `(select.query …)` of a query whose answer is markup | a [`Plan`](crate::Plan): its layers, each a query of its own, that a back end maintains it by; nothing written |
-//! | `(select.query …)`, a query asked | a [`Selection`](crate::select::Selection): the [`ConceptQuery`]s its rows come from, put together in memory; nothing written |
+//! | `(dialog.notation.select …)` of a query whose answer is markup | a [`Plan`](crate::Plan): its layers, each a query of its own, that a back end maintains it by; nothing written |
+//! | `(dialog.notation.select …)`, a query asked | a [`Selection`](crate::select::Selection): the [`ConceptQuery`]s its rows come from, put together in memory; nothing written |
 //!
 //! A kernel rule has one head, as a Dialog-DB rule has. What Dialog-DB
 //! has no counterpart for comes back as [`Error::Unsupported`], never as
@@ -198,7 +198,7 @@ fn once(rule: &Rule, form: &Syntax) -> Result<Step, Error> {
         .filter(|name| entity != Term::Variable((*name).clone()))
         .map(|name| Field {
             label: name.clone(),
-            attribute: format!("once.write/{name}"),
+            attribute: format!("{ONCE_WRITE}/{name}"),
             term: Term::Variable(name.clone()),
             kind: None,
             pick: None,
@@ -209,7 +209,7 @@ fn once(rule: &Rule, form: &Syntax) -> Result<Step, Error> {
         })
         .collect();
     let row = Read {
-        domain: "once.write".into(),
+        domain: ONCE_WRITE.into(),
         entity,
         fields,
     };
@@ -272,6 +272,33 @@ pub struct Query {
     /// Each field's label, what its key is where it is an entry of a
     /// collection, and its value.
     fields: Vec<(String, Option<Slot>, Slot)>,
+    /// The relation the rule derives and the whole of the site it is
+    /// named after, where it derives one: two sites of one name would
+    /// derive into one relation.
+    pub(crate) derives: Option<(String, String)>,
+}
+
+impl Step {
+    /// The relations the step's rules derive, each with the whole of the
+    /// site it is named after.
+    pub(crate) fn derives(&self) -> Vec<(String, String)> {
+        let queries: Vec<&Query> = match self {
+            Step::Query(query) => vec![query],
+            Step::Write(write) => vec![&write.query],
+            Step::Select(selection) => selection.queries.iter().collect(),
+            _ => Vec::new(),
+        };
+        let mut derives: Vec<(String, String)> = queries
+            .into_iter()
+            .filter_map(|query| query.derives.clone())
+            .collect();
+        if let Step::View(plan) = self {
+            derives.extend(
+                (0..plan.layers.len()).filter_map(|layer| plan.query(layer, None).ok()?.derives),
+            );
+        }
+        derives
+    }
 }
 
 impl Query {
@@ -468,7 +495,10 @@ std::thread_local! {
 
 /// The namespace of the relations a report derives, each named by the
 /// reference of its site.
-pub const REPORTED: &str = "report.q";
+pub const REPORTED: &str = "dialog.notation.report.q";
+
+/// The relation a write that runs once reads what it writes from.
+pub const ONCE_WRITE: &str = "dialog.notation.once.write";
 
 /// Compile an analyzed tree: the third phase, from a rule of the
 /// kernel to what Dialog-DB runs.
@@ -1027,7 +1057,7 @@ fn ground(head: &Head) -> Result<Step, Error> {
 /// what was written.
 fn whole(read: &Read, bound: &BTreeSet<String>) -> Result<(), Error> {
     let named = read.named(bound);
-    let unnamed = |term: &Term| matches!(term, Term::Variable(name) if name.contains('.') && !bound.contains(name));
+    let unnamed = |term: &Term| matches!(term, Term::Variable(name) if crate::syntax::unwritten(name) && !bound.contains(name));
     let left_out: Vec<&str> = read
         .fields
         .iter()
@@ -1090,7 +1120,7 @@ impl Scope {
 
     fn fresh(&mut self) -> String {
         self.fresh += 1;
-        format!("?.{}", self.fresh)
+        format!("?[{}]", self.fresh)
     }
 
     fn body(&mut self, rule: &Rule) -> Result<(), Error> {
@@ -1150,7 +1180,9 @@ impl Scope {
             // What must not hold binds nothing: Dialog-DB wants every
             // variable in it bound by what must hold, or blank.
             Term::Variable(name)
-                if self.negated && !self.bound.contains(name) && !name.contains('.') =>
+                if self.negated
+                    && !self.bound.contains(name)
+                    && !crate::syntax::unwritten(name) =>
             {
                 Err(Error::Refused(format!(
                     "?{name} is in `unless` and no premise binds it: write `_` for \
@@ -1420,7 +1452,7 @@ impl Scope {
                 }
                 // A record the head concludes is built of what the
                 // premises bind: the field is that record.
-                Term::Struct(form) if read.domain.starts_with("report.") => {
+                Term::Struct(form) if read.domain.starts_with(REPORTED) => {
                     let pattern = shape(form, false, &mut |name| match name {
                         Some(name) => Variable::var(self.name(name)),
                         None => Variable::blank(),
@@ -1532,7 +1564,7 @@ fn retracted(mut rule: Rule, form: &Syntax) -> Result<Rule, Error> {
     };
     let bound = rule.bound();
     let unnamed = |term: &Term| match term {
-        Term::Variable(name) => name.contains('.') && !bound.contains(name),
+        Term::Variable(name) => crate::syntax::unwritten(name) && !bound.contains(name),
         Term::Blank => true,
         _ => false,
     };
@@ -1644,7 +1676,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
     // says the entity the premise of the same relation read.
     let mut read = read.clone();
     if let Term::Variable(name) = &read.entity
-        && name.contains('.')
+        && crate::syntax::unwritten(name)
         && !bound.contains(name)
         && let Some(entity) = rule.when.iter().find_map(|premise| match premise {
             Premise::Read(premise) if premise.domain == read.domain => Some(premise.entity.clone()),
@@ -1753,6 +1785,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                     domain: read.domain.clone(),
                     entity,
                     fields,
+                    derives: None,
                 })));
             }
         }
@@ -1760,7 +1793,12 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
 
     // Twelve characters of the site's reference: a name is short, and
     // 58 to the twelfth sites leave two of them alike only by chance.
-    let relation = format!("{REPORTED}{}", site.chars().take(12).collect::<String>());
+    let length = SITE_LENGTH.with(std::cell::Cell::get);
+    let relation = format!(
+        "{REPORTED}{}",
+        site.chars().take(length).collect::<String>()
+    );
+    let derives = Some((relation.clone(), site.to_string()));
     let mut scope = Scope::default();
     let entity = match (&read.entity, shown(&read.entity)?) {
         (Term::Variable(name), _) => {
@@ -1860,10 +1898,12 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
     // is one value, and read back from it. A query's row is one already.
     let recorded = columns.len() > 1 && read.domain != crate::select::ROW;
     if recorded {
+        // Each column's variable, under a name no author can write.
         for column in &columns {
-            scope
-                .names
-                .insert(column.label.clone(), column.label.clone());
+            scope.names.insert(
+                crate::syntax::tagged("", &column.label),
+                column.label.clone(),
+            );
         }
         let record = Syntax::Map(
             columns
@@ -1871,7 +1911,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                 .map(|column| {
                     (
                         Syntax::Reference(column.label.clone()),
-                        Syntax::Variable(column.label.clone()),
+                        Syntax::Variable(crate::syntax::tagged("", &column.label)),
                     )
                 })
                 .collect(),
@@ -1918,6 +1958,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
         domain: read.domain.clone(),
         entity,
         fields: slots,
+        derives,
     })))
 }
 
@@ -1926,8 +1967,41 @@ mod tests {
     use super::*;
     use crate::parse;
 
+    /// What `text` compiles to, a kernel rule written as text: a
+    /// variable written `?x.1` is one an expansion made, `x[1]`, which no
+    /// text can spell.
     fn steps(text: &str) -> Result<Vec<Step>, Error> {
-        compile(&parse(text)?.remove(0))
+        compile(&made_up(&parse(text)?.remove(0)))
+    }
+
+    /// `tree` with each variable written with a `.` named as one an
+    /// expansion made.
+    fn made_up(tree: &Syntax) -> Syntax {
+        match tree {
+            Syntax::Variable(name) => match name.split_once('.') {
+                Some((name, site)) => Syntax::Variable(crate::syntax::tagged(name, site)),
+                None => tree.clone(),
+            },
+            Syntax::Application(operator, operand) => Syntax::Application(
+                Box::new(made_up(operator)),
+                Parameters {
+                    items: operand.items.iter().map(made_up).collect(),
+                    terms: operand
+                        .terms
+                        .iter()
+                        .map(|(label, term)| (label.clone(), made_up(term)))
+                        .collect(),
+                },
+            ),
+            Syntax::Map(entries) => Syntax::Map(
+                entries
+                    .iter()
+                    .map(|(key, value)| (made_up(key), made_up(value)))
+                    .collect(),
+            ),
+            Syntax::Tuple(items) => Syntax::Tuple(items.iter().map(made_up).collect()),
+            other => other.clone(),
+        }
     }
 
     #[test]
@@ -2040,10 +2114,10 @@ mod tests {
     fn it_says_a_fold_in_a_head_that_derives_is_not_supported() {
         assert!(matches!(
             steps(
-                "(rule (concept.list.count-open ?l is: (count ?t))
+                "(rule (dialog.notation.concept.list.count-open ?l is: (count ?t))
                    (xyz.todo ?t list: ?l))"
             ),
-            Err(Error::Unsupported(said)) if said.contains("concept.list.count-open/is is a fold")
+            Err(Error::Unsupported(said)) if said.contains("dialog.notation.concept.list.count-open/is is a fold")
         ));
         for written in [
             "(rule (assert (xyz.list ?l open: (count ?t))) (xyz.todo ?t list: ?l))",

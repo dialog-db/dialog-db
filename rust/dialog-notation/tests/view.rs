@@ -1244,14 +1244,14 @@ async fn it_lays_out_every_view_of_the_sketches() -> Result<()> {
     assert_eq!(
         said,
         [
-            "notebook/ui: notebook-save by [n], span by [q1.k], div by [q2.b]",
-            "notebook/directory: div by [], a by [q1.n]",
-            "notebook/index-page: tonk-notebook-index by [site], a by [q2.n]",
-            "notebook/page: div by [site], notebook-save by [], span by [q2.k], div by [q3.b]",
-            "table/ui: tonk-table by [t], div by [q1.s], div by [q2.c], div by [q3.k], div by \
-             [q4.r]",
-            "table/directory: div by [], tonk-table by [q1.t], div by [q2.s], div by [q3.c], div \
-             by [q4.k], div by [q5.r]",
+            "notebook/ui: notebook-save by [n], span by [[q1]k], div by [[q2]b]",
+            "notebook/directory: div by [], a by [[q1]n]",
+            "notebook/index-page: tonk-notebook-index by [site], a by [[q2]n]",
+            "notebook/page: div by [site], notebook-save by [], span by [[q2]k], div by [[q3]b]",
+            "table/ui: tonk-table by [t], div by [[q1]s], div by [[q2]c], div by [[q3]k], div by \
+             [[q4]r]",
+            "table/directory: div by [], tonk-table by [[q1]t], div by [[q2]s], div by [[q3]c], div \
+             by [[q4]k], div by [[q5]r]",
         ]
     );
     Ok(())
