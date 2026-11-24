@@ -24,7 +24,16 @@ The branch was moved onto the engine as it will land: `feat/patterns` (#778) mer
 ## In the way
 
 1. Format 5 is merged in from `feat/rule-format-5`, not yet on main. A query whose row has more than one column beside its entity concludes it by a map pattern, so it is kept current only with format 5: 14 of 31 layers of the views in the sketches and tests, and every layer nested two levels deep.
-2. The cost ([journal](journal.md), 2026-11-24, two entries): `Maintainer::apply` is flat since it keeps each parent's instances in order, and a view's count is folded alone. At ten thousand a rename and a to-do added still cost 33 and 28 ms, most of it the fold's subscription folding the list's one group again over its ten thousand rows: the engine's.
+2. The cost ([journal](journal.md), 2026-11-24, two entries): `Maintainer::apply` is flat since it keeps each parent's instances in order, and a view's count is folded alone. On the branch with format 5 in ([output](rounds/cost-2026-11-24-branch.txt)):
+
+| one change, `Live::watch` | N=1000 | N=10000 | times plain at 1000 | at 10000 | before the fixes, 1000 / 10000 |
+|---|---|---|---|---|---|
+| rename | 2.4 ms | 35 ms | 7.4 | 45 | 3.3 / 56 |
+| tag added | 1.2 | 4.5 | 9.4 | 6.6 | 1.3 / 5.1 |
+| to-do added | 2.4 | 25 | 6.8 | 32 | 3.7 / 62 |
+| `select` one card | 2.1 | 2.5 | | | 2.1 / 2.8 |
+
+   At ten thousand most of a rename or a to-do added is the fold's subscription folding the list's one group again over its ten thousand rows, 28 to 34 ms: the engine's, and a running value per group is being built for it (`perf/fold-running-value`). Views keep counting on the fold.
 3. Still evaluated in memory: a collected call to another query, a call every answer needs, a read whose conditions or rows are more than one query, a read grouped by more than one field beside a recorded row, a shape `(is ?x …)`, the joins between queries; and a view's count of a collected call, of a count in a collected query's template, of entries, or grouped by other than the root.
 4. Not built: `distinct` and the spread, definitions on the branch, names and namespaces, composites for syntax trees beyond what is kept now, variant cases, layers but `:control`, a limit, a query that calls itself.
 5. Not decided: `cardinality: :one` beside `top` (refused, as #827 does); rows of one head; what two entries of one key leave in a map.

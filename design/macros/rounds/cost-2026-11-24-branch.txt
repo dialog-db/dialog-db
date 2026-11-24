@@ -1,0 +1,89 @@
+Produced on 2026-11-24 by `cargo run --release -p dialog-notation --example cost -- 5 10 1000 10000` on feat/notation-poc at 99dad4f, format 5 merged in (feat/rule-format-5 1b62eb7). Release build, 5 runs, interleaved.
+
+the card's layers: 0 the list, 1 the rows, 2 the chips, 3 the open to-dos counted
+in a `layers recomputed` line, `patches` is how many layers were evaluated whole again
+rows each layer of the card delivers at its first render, by N:
+  N=10: [1, 10, 20, 1]
+  N=1000: [1, 1000, 2000, 1]
+  N=10000: [1, 10000, 20000, 1]
+measurement                    N  median us      least       most    nodes   blobs    rows  patches
+1 first render                10       1805       1721       2101      315       0      32        1
+1 first render              1000      52418      47922      61416     8124       0    3002        1
+1 first render             10000     678433     629051     775241   100446       0   30002        1
+                           ratio 10000/10: time 375.9, nodes 318.9
+2 rename                      10       1651       1512       1782       46       0       2        1
+2 rename                    1000       2373       2008       3316       62       0       2        1
+2 rename                   10000      34633      25147      37517       86       0       2        1
+                           ratio 10000/10: time 21.0, nodes 1.9
+2 rename, layers recomputed    10          0          0          0        0       0       0        0
+2 rename, layers recomputed  1000          0          0          0        0       0       0        0
+2 rename, layers recomputed 10000          0          0          0        0       0       0        0
+                           ratio 10000/10: time NaN, nodes NaN
+3 tag added                   10       1814       1715       1908       46       0       1        1
+3 tag added                 1000       1210       1057       1625       56       0       1        1
+3 tag added                10000       4500       3471       5451       82       0       1        1
+                           ratio 10000/10: time 2.5, nodes 1.8
+3 tag added, layers recomputed    10          0          0          0        0       0       0        0
+3 tag added, layers recomputed  1000          0          0          0        0       0       0        0
+3 tag added, layers recomputed 10000          0          0          0        0       0       0        0
+                           ratio 10000/10: time NaN, nodes NaN
+4 to-do added                 10       1611       1506       1668       46       0       3        2
+4 to-do added               1000       2438       1965       3071       74       0       3        2
+4 to-do added              10000      25038      19528      34006      100       0       3        2
+                           ratio 10000/10: time 15.5, nodes 2.2
+4 to-do added, layers recomputed    10          0          0          0        0       0       0        0
+4 to-do added, layers recomputed  1000          0          0          0        0       0       0        0
+4 to-do added, layers recomputed 10000          0          0          0        0       0       0        0
+                           ratio 10000/10: time NaN, nodes NaN
+5 select all cards            10        679        665        754      208       0       0       11
+5 select all cards          1000      31463      26617      38852       78       0       0     1001
+5 select all cards         10000     460116     357973     560806      314       0       0    10001
+                           ratio 10000/10: time 677.6, nodes 1.5
+5 select one card             10       1879       1649       1999       66       0       0        1
+5 select one card           1000       2103       1726       2627       66       0       0        1
+5 select one card          10000       2503       2096       3258       82       0       0        1
+                           ratio 10000/10: time 1.3, nodes 1.2
+B1 first poll                 10        423        382        470      106       0      10        0
+B1 first poll               1000       7301       6045       7818       46       0    1000        0
+B1 first poll              10000      74108      71517      86861      136       0   10000        0
+                           ratio 10000/10: time 175.2, nodes 1.3
+B2 rename                     10        497        437        573       17       0       2        0
+B2 rename                   1000        321        307        556       19       0       2        0
+B2 rename                  10000        778        719       1037       24       0       2        0
+                           ratio 10000/10: time 1.6, nodes 1.4
+B3 tag added                  10        306        255        339        4       0       0        0
+B3 tag added                1000        129        118        219        6       0       0        0
+B3 tag added               10000        678        517        808       10       0       0        0
+                           ratio 10000/10: time 2.2, nodes 2.5
+B4 to-do added                10        427        388        519       17       0       1        0
+B4 to-do added              1000        359        260        433       25       0       1        0
+B4 to-do added             10000        774        705       1111       32       0       1        0
+                           ratio 10000/10: time 1.8, nodes 1.9
+B5 query one title            10        117        102        132       13       0       1        0
+B5 query one title          1000        117        109        182       13       0       1        0
+B5 query one title         10000        144        142        194       16       0       1        0
+                           ratio 10000/10: time 1.2, nodes 1.2
+B6 rows as a rule by to-do, rename    10        471        438        506       17       0       2        0
+B6 rows as a rule by to-do, rename  1000        378        335        525       23       0       2        0
+B6 rows as a rule by to-do, rename 10000       1302       1142       1481       30       0       2        0
+                           ratio 10000/10: time 2.8, nodes 1.8
+B7 tags as a rule by to-do, tag added    10        917        798        989       82       0       1        0
+B7 tags as a rule by to-do, tag added  1000        789        708       1082       86       0       1        0
+B7 tags as a rule by to-do, tag added 10000       2265       1986       2612      109       0       1        0
+                           ratio 10000/10: time 2.5, nodes 1.3
+B8 tags folded, tag added     10        808        760        872       18       0       2        0
+B8 tags folded, tag added   1000        492        455        650       18       0       2        0
+B8 tags folded, tag added  10000       1083        972       1165       24       0       2        0
+                           ratio 10000/10: time 1.3, nodes 1.3
+B8b tags folded, inner subscriptions alone    10        623        567        689       13       0       1        0
+B8b tags folded, inner subscriptions alone  1000        242        235        264       13       0       1        0
+B8b tags folded, inner subscriptions alone 10000        665        634        828       18       0       1        0
+                           ratio 10000/10: time 1.1, nodes 1.4
+B9 list name by to-do, home list renamed    10       1276       1196       1290      397       0      22        0
+B9 list name by to-do, home list renamed  1000      70003      66614      71818    29138       0    2002        0
+B9 list name by to-do, home list renamed 10000     985769     926568    1030383   360525       0   20002        0
+                           ratio 10000/10: time 772.5, nodes 908.1
+B9 list name by to-do, other list renamed    10        783        733        884      143       0       2        0
+B9 list name by to-do, other list renamed  1000       1155       1102       1477      147       0       2        0
+B9 list name by to-do, other list renamed 10000       2132       1805       2331      186       0       2        0
+                           ratio 10000/10: time 2.7, nodes 1.3
