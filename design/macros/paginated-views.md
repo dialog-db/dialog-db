@@ -36,17 +36,29 @@ A segment is a query with two parameters, and the window is the rows of
 the query that collects it:
 
 ```clj
+(query (message/item ?m is: ?item)
+  (message ?m body: ?body author: ?who)
+  (person/chip ?who is: (collect ?chip))
+  (view ?item [:li ?chip ?body]))
+
 (query (log/segment ?channel from: ?lower to: ?upper is: ?rows)
-  (message ?m channel: ?channel at: ?key body: ?body)
+  (message ?m channel: ?channel at: ?key)
   (>= ?key ?lower)
   (< ?key ?upper)
-  (view ?rows [:li ?body]))
+  (message/item ?m is: (collect ?items by: ?key))
+  (view ?rows [:ol ?items]))
 
 (query (log/window ?channel is: ?list)
   (window/segment ?s of: ?channel from: ?lower to: ?upper)
-  (log/segment ?channel from: ?lower to: ?upper is: (collect ?segments))
-  (view ?list [:ol ?segments]))
+  (log/segment ?channel from: ?lower to: ?upper is: (collect ?segments by: ?lower))
+  (view ?list [:div ?segments]))
 ```
+
+A message has a view of its own, `message/item`, which knows nothing of
+channels, order or pages. The segment says which messages and in what
+order. `by:` is not a form the notation has today: it stands for "these
+children stand in the order of this variable of mine", which row 6 below
+asks for.
 
 `window/segment` is state of the session: the front end moves the window
 with a command that asserts and retracts those facts. That is the
@@ -63,6 +75,7 @@ wanted, the front end holds everything measured in pixels.
 | 3 | A view's rows carry their order key and stand in its order, and nothing a paginated view needs goes through a fold. | Fact for standing in key order: a layer's key is the head's free variables, an entry's key first (`view/plan.rs`). A fold loses order, so a segment is rows, not a folded list. |
 | 4 | There is a read that is not a subscription, with a direction and a limit: the N greatest keys below a key. | Missing on main (no reverse walk). On `sapling`: `06b8fff33`, `ae310aeaf`, `49a854327`. It is an API of the engine, not a form of the notation, and nothing in views stands in its way. |
 | 5 | Many small live queries are cheap: opening one reads its range and no more, and a change outside every open range costs none of them anything. | Hypothesis. Follows from 2 and from the cover a poll scopes its diff to. To be measured when ported. |
+| 6 | The query that collects children says their order and their range, by variables it binds itself. The child's view need not name the order key in its head, nor take the bounds. | Open. Today a collected query's instances stand in the order of its own head's free terms, an entry's key first (`view/plan.rs`), so a child listed by time has to carry the time in its head. Whether a collector can order and narrow by its own variables is not checked. |
 
 Not required, and not to be promised by views: a row number, a total
 count that is exact, an order by more than one field.
