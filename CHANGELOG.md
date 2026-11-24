@@ -424,6 +424,11 @@ dropping that scope.
 
 #### Compatibility and migration
 
+- The notation stores nothing of its own: what it writes are concepts'
+  facts and rules in the formats this release writes. A rule that uses
+  the formula `entity/derive` is read by no older release, which does
+  not know the formula; nothing an older release wrote is rewritten.
+  `Aggregator::Distinct` is never stored. Nothing an embedder has to run.
 - Patterns: nothing stored changes. No rule format, up to format 4 that
   this release writes, holds a pattern, and a rule that holds one is
   refused at commit, so no replica stores one and an older release reads
@@ -807,11 +812,6 @@ and names the rule.
 
 ### Compatibility and migration
 
-- The notation stores nothing of its own: what it writes are concepts'
-  facts and rules in the formats this release writes. A rule that uses
-  the formula `entity/derive` is read by no older release, which does
-  not know the formula; nothing an older release wrote is rewritten.
-  `Aggregator::Distinct` is never stored. Nothing an embedder has to run.
 - Composites: nothing an existing space holds is rewritten or read
   differently, and opaque `record:` values keep their encoding and identity.
   No release up to and including 0.5.0 wrote a composite (the draft #812 was
