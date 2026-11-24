@@ -37,6 +37,10 @@ What this changes for you:
   whose fields include its own, as every fitting one was read before.
 - A write is not a read and is unchanged: an assert says every field,
   and a retract every field or the entity alone.
+- A concept whose body reads another concept, `(concept (doc/plain ?d
+  part: ?v) (alt ?d v: ?v))`, is declared as a concept whatever its name.
+  Under a name whose first part was a declared concept it was read as a
+  derived attribute that nothing concludes, and answered nothing.
 
 Why: a read that leaves fields out by mistake read nothing about them
 and said nothing; `...` says it is meant.

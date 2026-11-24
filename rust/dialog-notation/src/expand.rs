@@ -1503,7 +1503,14 @@ impl Expander {
                 if position.is_none()
                     && when.is_empty()
                     && clauses.unless.is_empty()
-                    && members(template.clone()).iter().all(Syntax::is_read) =>
+                    && members(template.clone()).iter().all(|member| {
+                        // A read of a relation, or of a declared concept,
+                        // which stands for reads of relations.
+                        member.is_read()
+                            || member
+                                .applies()
+                                .is_some_and(|name| self.concepts.contains(name))
+                    }) =>
             {
                 Signature::of(&pattern, "concept")
             }
