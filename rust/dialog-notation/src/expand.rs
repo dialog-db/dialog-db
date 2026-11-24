@@ -1885,6 +1885,60 @@ mod tests {
         Ok(kernel.iter().map(Syntax::to_string).collect())
     }
 
+    /// The variables a template names for itself at two sites of one
+    /// rule are two variables, whatever the sites are: the reviewer's
+    /// two premises once named theirs alike and joined on them.
+    #[test]
+    fn it_names_the_own_variables_of_two_sites_apart() -> Result<(), Error> {
+        let rules = expanded(
+            "(concept (task ?t title: ?x) (xyz.todo ?t text: ?x) (xyz.todo ?t alt: ?x))",
+            "(rule (xyz.out ?a97 other: ?a940) (task ?a97) (task ?a940))",
+        )?;
+        let [rule] = rules.as_slice() else {
+            return Err(Error::Refused(format!("one rule: {rules:?}")));
+        };
+        let tree = crate::parse(rule)?;
+        let mut names = Vec::new();
+        tree[0].variables(&mut names);
+        let own: BTreeSet<String> = names
+            .into_iter()
+            .filter(|name| name.contains('.'))
+            .collect();
+        assert_eq!(own.len(), 2, "{rule}");
+        Ok(())
+    }
+
+    /// However many sites a rule has, each names its own variables
+    /// apart from every other's: a site's own variables are as many as
+    /// its sites, and the names come out the same each time the rule is
+    /// expanded.
+    #[test]
+    fn it_names_the_own_variables_of_every_site_apart() -> Result<(), Error> {
+        for count in [2, 10, 100, 1000] {
+            let premises: String = (0..count).map(|at| format!(" (task ?e{at})")).collect();
+            let fields: String = (0..count).map(|at| format!(" f{at}: ?e{at}")).collect();
+            let text = format!("(rule (xyz.out ?e0{fields}){premises})");
+            // Two lines, so a site's own variable joins them and is not
+            // a blank.
+            let setup =
+                "(concept (task ?t title: ?x) (xyz.todo ?t text: ?x) (xyz.todo ?t alt: ?x))";
+            let rules = expanded(setup, &text)?;
+            assert_eq!(rules, expanded(setup, &text)?, "the same each time");
+            let [rule] = rules.as_slice() else {
+                return Err(Error::Refused(format!("one rule: {rules:?}")));
+            };
+            let tree = crate::parse(rule)?;
+            let mut names = Vec::new();
+            tree[0].variables(&mut names);
+            let own: BTreeSet<String> = names
+                .into_iter()
+                .filter(|name| name.contains('.'))
+                .collect();
+            assert_eq!(own.len(), count, "{count} sites");
+        }
+        Ok(())
+    }
+
     /// A line over a collection leaves the key a variable in the
     /// attribute's name and says what a key is. It is the read of every
     /// entry, its key a field of the concept's head. A concept holds one
