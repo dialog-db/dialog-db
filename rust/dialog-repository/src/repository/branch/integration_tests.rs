@@ -2494,7 +2494,7 @@ impl Followed {
     /// every block.
     async fn named_beside_the_head_record(&self, entity: &str) -> Result<bool> {
         use dialog_corpus::{
-            AttributeKey, AttributeKeyPart, EntityKey, EntityKeyPart, KeyViewConstruct,
+            AttributeKey, AttributeKeyPart, Entity, EntityKey, EntityKeyPart, KeyViewConstruct,
             KeyViewMut as _, Relation, history::REVISION_ATTRIBUTE,
         };
         use dialog_search_tree::{Accessor, SearchOptions, TreeWalker};
