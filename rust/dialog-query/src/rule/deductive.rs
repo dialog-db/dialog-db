@@ -484,22 +484,6 @@ impl DeductiveRule {
         }
     }
 
-    /// Whether this rule can be stored, and so installed. A rule that
-    /// holds a map or a list of terms cannot: the stored rule
-    /// format writes a variable or a constant where a parameter stands
-    /// and has no way to write a pattern. Such a rule has an identity
-    /// and runs where it was built, and
-    /// [`try_encode`](Self::try_encode) gives it no body.
-    pub fn storable(&self) -> Result<(), TypeError> {
-        match pattern::held(self.analysis.premises()) {
-            Some(pattern) => Err(TypeError::UnstorablePattern {
-                pattern,
-                format: body::FORMAT,
-            }),
-            None => Ok(()),
-        }
-    }
-
     /// This rule's content-addressed identity, if it has an encodable
     /// body: `rule:` and the base58 of the merkle reference of its
     /// canonical spelling (see [`reference`](crate::rule::reference)).

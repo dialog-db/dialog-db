@@ -167,20 +167,6 @@ impl InductiveRule {
         }
     }
 
-    /// Whether this rule can be stored, and so installed. A rule that
-    /// holds a map or a list of terms cannot: the stored rule
-    /// format has no way to write a pattern (see
-    /// [`DeductiveRule::storable`](crate::DeductiveRule::storable)).
-    pub fn storable(&self) -> Result<(), TypeError> {
-        match pattern::held(self.analysis.premises()) {
-            Some(pattern) => Err(TypeError::UnstorablePattern {
-                pattern,
-                format: body::FORMAT,
-            }),
-            None => Ok(()),
-        }
-    }
-
     /// This rule's content-addressed identity, if it has an encodable
     /// body: `rule:` and the base58 of the merkle reference of its
     /// canonical spelling (see [`reference`](crate::rule::reference)),
