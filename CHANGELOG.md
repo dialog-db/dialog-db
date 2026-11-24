@@ -110,7 +110,7 @@ What this changes for you:
   `Patch`es of a view, the markup types in `view`, and `live`. Its
   modules are private. The `inspect` feature also exposes the maintainer
   of a view's tree and what a driver evaluated, for tests.
-- Every name the notation makes for itself is under `dialog.notation`,
+- Every name the notation makes for itself is under `dialog.n`,
   and a document that names anything under it is refused with
   `Error::Reserved`. Its own variables are spelled with a `[`, which no
   document can write in a variable. A field may not be labelled `this:`.
@@ -127,7 +127,7 @@ What this changes for you:
   sanitizer: a back end still escapes every text and attribute value it
   serialises.
 - A derived attribute, `(rule (list/count-open ?l ?n) …)`, concludes the
-  relation `dialog.notation.c.<hash>/is`, the hash 128 bits of the
+  relation `dialog.n.c.<hash>/is`, the hash 128 bits of the
   reference of the concept's name and the attribute's as written: one
   length whatever the names, and two names that spelled one relation
   before are two. A refusal and an answer name it as written,

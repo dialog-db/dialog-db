@@ -185,7 +185,7 @@ pub struct FoldedCount {
 pub const SOURCE_TAG: &str = "view-source";
 
 /// The relation a layer's rows are reported in.
-const LAYER: &str = "dialog.notation.view.layer";
+const LAYER: &str = crate::syntax::namespaced!("view.layer");
 
 /// The field a layer's row is reported under, as one record.
 const ROW_FIELD: &str = "row";
@@ -386,7 +386,7 @@ impl Defined {
     }
 }
 
-/// Whether an analyzed `(dialog.notation.select …)` asks a query whose answer is
+/// Whether an analyzed `(dialog.n.select …)` asks a query whose answer is
 /// markup.
 pub fn is_markup(tree: &Syntax) -> bool {
     let [call, defined @ ..] = items(tree) else {
@@ -801,7 +801,7 @@ fn places(node: &Node, path: Vec<usize>, parent: Option<usize>, into: &mut Vec<P
 }
 
 impl Plan {
-    /// The plan of an analyzed `(dialog.notation.select CALL QUERY…)` whose query
+    /// The plan of an analyzed `(dialog.n.select CALL QUERY…)` whose query
     /// answers with markup.
     pub fn of(tree: &Syntax) -> Result<Plan, Error> {
         let [call, queries @ ..] = items(tree) else {

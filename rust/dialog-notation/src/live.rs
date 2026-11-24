@@ -142,15 +142,15 @@ pub struct Live {
 
 /// The relation a selection or a view holding a rule on the overlay is
 /// written in: the rule's entity, and the holder's own name.
-const HOLDER: &str = "dialog.notation.live/holder";
+const HOLDER: &str = crate::syntax::namespaced!("live/holder");
 
 /// The relation that says the notation laid a rule on the overlay, and
 /// may take it off: the rule's entity, and `true`.
-const LAID: &str = "dialog.notation.live/laid";
+const LAID: &str = crate::syntax::namespaced!("live/laid");
 
 /// The relation that says which site a rule the notation laid derives a
 /// report relation for: the rule's entity, and the relation and the site.
-const DERIVES: &str = "dialog.notation.live/derives";
+const DERIVES: &str = crate::syntax::namespaced!("live/derives");
 
 /// The names of the holders in this process, each once. A session
 /// overlay lives in one process and is never synced or shared with

@@ -539,10 +539,10 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
 ///
 /// ```clj
 /// (list/count-open ?l (count ?t))
-/// (dialog.notation.c.<hash of list, count-open> ?l is: (count ?t))
+/// (dialog.n.c.<hash of list, count-open> ?l is: (count ?t))
 ///
 /// (list/count ?l status: ?s count: (count ?t))
-/// (dialog.notation.c.<hash of list, count> ?l count: (count ?t) status: ?s)
+/// (dialog.n.c.<hash of list, count> ?l count: (count ?t) status: ?s)
 /// ```
 ///
 /// Its two terms unlabeled are the entity and the value, under `is:`.

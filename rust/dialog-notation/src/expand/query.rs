@@ -11,7 +11,7 @@
 //!   keeps a row from being an answer.
 //!
 //! Nothing of a query is compiled where it is defined. `(select CALL)`
-//! of one is analyzed into a `(dialog.notation.select …)` tree that holds the
+//! of one is analyzed into a `(dialog.n.select …)` tree that holds the
 //! query and every query it reaches, each condition expanded to kernel
 //! rules (see [`crate::select`]).
 //!

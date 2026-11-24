@@ -16,8 +16,8 @@
 //! | `(report A)` with one read as its premise | a [`ConceptQuery`] |
 //! | `(report A)` with any other premises | a [`DeductiveRule`] deriving the report, and a [`ConceptQuery`] of it |
 //! | `description: "…"` on a rule Dialog-DB keeps | a [`ConceptStatement`] asserting `syntax.meta/description` of the rule's entity |
-//! | `(dialog.notation.select …)` of a query whose answer is markup | a [`Plan`](crate::Plan): its layers, each a query of its own, that a back end maintains it by; nothing written |
-//! | `(dialog.notation.select …)`, a query asked | a [`Selection`](crate::select::Selection): the [`ConceptQuery`]s its rows come from, put together in memory; nothing written |
+//! | `(dialog.n.select …)` of a query whose answer is markup | a [`Plan`](crate::Plan): its layers, each a query of its own, that a back end maintains it by; nothing written |
+//! | `(dialog.n.select …)`, a query asked | a [`Selection`](crate::select::Selection): the [`ConceptQuery`]s its rows come from, put together in memory; nothing written |
 //!
 //! A kernel rule has one head, as a Dialog-DB rule has. What Dialog-DB
 //! has no counterpart for comes back as [`Error::Unsupported`], never as
@@ -510,10 +510,10 @@ fn site_length() -> usize {
 
 /// The namespace of the relations a report derives, each named by the
 /// reference of its site.
-pub const REPORTED: &str = "dialog.notation.report.q";
+pub const REPORTED: &str = crate::syntax::namespaced!("report.q");
 
 /// The relation a write that runs once reads what it writes from.
-pub const ONCE_WRITE: &str = "dialog.notation.once.write";
+pub const ONCE_WRITE: &str = crate::syntax::namespaced!("once.write");
 
 /// Compile an analyzed tree: the third phase, from a rule of the
 /// kernel to what Dialog-DB runs.

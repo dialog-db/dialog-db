@@ -25,7 +25,7 @@
 //! The analyzed tree a selection is compiled from says all of it:
 //!
 //! ```clj
-//! (dialog.notation.select CALL
+//! (dialog.n.select CALL
 //!   (query HEAD
 //!     (required [?t ?title] RULE…)       ; every answer needs these
 //!     (call CALL)                         ; and a row of this query
@@ -51,11 +51,11 @@ use crate::data;
 use crate::syntax::{Parameters, Syntax};
 
 /// What a query's analyzed tree is applied as.
-pub const SELECTED: &str = "dialog.notation.select";
+pub const SELECTED: &str = crate::syntax::namespaced!("select");
 
 /// The relation a query's conditions are reported in, a column a
 /// variable.
-pub const ROW: &str = "dialog.notation.query.row";
+pub const ROW: &str = crate::syntax::namespaced!("query.row");
 
 /// The field a row of a query's conditions is reported under as one
 /// record, where more than one of its columns is not its entity.
@@ -258,7 +258,7 @@ fn names(tree: &Syntax) -> Result<Vec<String>, Error> {
 }
 
 impl Selection {
-    /// The selection an analyzed `(dialog.notation.select …)` tree says.
+    /// The selection an analyzed `(dialog.n.select …)` tree says.
     pub fn compile(tree: &Syntax) -> Result<Selection, Error> {
         let [call, defined @ ..] = items(tree) else {
             return Err(malformed(tree));

@@ -55,18 +55,34 @@ use crate::data;
 use crate::form::{Form, Kind, Mark, Part};
 use crate::written::{Note, Path, Segment, Slot, Written};
 
+/// A name under the notation's namespace, `namespaced!("report.q")`,
+/// or the namespace itself, `namespaced!()`: every family is spelled
+/// from the one namespace here.
+macro_rules! namespaced {
+    () => {
+        "dialog.n"
+    };
+    ($rest:literal) => {
+        concat!("dialog.n", ".", $rest)
+    };
+}
+pub(crate) use namespaced;
+
 /// Everything the notation names for itself is under this namespace,
 /// which a document cannot name: the relations it derives, reports and
 /// lays out views in. The engine keeps `dialog.` for its own and refuses
-/// a document's writes under it; this part is the notation's.
-pub const NAMESPACE: &str = "dialog.notation";
+/// a document's writes under it; this part is the notation's. Names are
+/// compared with it by whole segment, never by a plain string prefix:
+/// the engine has `dialog.node.*`, which shares the letters and no
+/// segment.
+pub const NAMESPACE: &str = namespaced!();
 
 /// The prefix of every derived attribute's domain: `(list/count-open ?l
-/// ?n)` derives and reads `dialog.notation.c.<hash>/is`, the hash
-/// [`derived`] makes of `list` and `count-open`. It is under `dialog.`,
-/// where the engine refuses every write but a rule's, and `c` is no other
-/// family of the notation's names. A concept's domain is concluded only.
-pub const DERIVED: &str = "dialog.notation.c";
+/// ?n)` derives and reads `dialog.n.c.<hash>/is`, the hash [`derived`]
+/// makes of `list` and `count-open`. It is under `dialog.`, where the
+/// engine refuses every write but a rule's, and `c` is no other family
+/// of the notation's names. A concept's domain is concluded only.
+pub const DERIVED: &str = namespaced!("c");
 
 /// The bytes of a reference a derived attribute's domain takes: 128 bits.
 const DERIVED_BYTES: usize = 16;
@@ -80,7 +96,7 @@ pub const DERIVED_LENGTH: usize = DERIVED.len() + 1 + (DERIVED_BYTES * 8).div_ce
 /// reference of the list of the two, in lowercase base 32. A list of two
 /// texts is one value for one pair, so no other concept and attribute
 /// make it, whatever either holds, dots included; and it is one length,
-/// 44 bytes, so a label has 19 of the 64 the engine allows a relation.
+/// 37 bytes, so a label has 26 of the 64 the engine allows a relation.
 pub fn derived(concept: &str, name: &str) -> Result<String, Error> {
     let hash = hashed(concept, name)?;
     WRITTEN
@@ -146,9 +162,9 @@ fn hashed(concept: &str, name: &str) -> Result<String, Error> {
 /// | `[collect-0]`, `[collect-0-key]`, `[collect-0-value]` | a number | no label or name of a document is in them |
 /// | `[source]label`, `[source-key]` | a label, or nothing | a field's has `]` after `[source` and the key's has `-`, and `[source]` before a label is a fixed prefix |
 /// | `[view-of]`, `[query-row]`, `[groups]`, `[inputs]` | nothing | constants, each spelled apart from the others and from the prefixes above |
-/// | `dialog.notation.report.q12` | a site's number | digits only |
+/// | `dialog.n.report.q12` | a site's number | digits only |
 /// | `c0`, `c1`, `row`, fields of a report | a column's number | the fields of the notation's own relations, never a document's |
-/// | `dialog.notation.c.<hash>` | a concept's name and an attribute's, as written | 128 bits of the reference of the list of the two: one value for one pair, so a collision is a hash's, not a spelling's |
+/// | `dialog.n.c.<hash>` | a concept's name and an attribute's, as written | 128 bits of the reference of the list of the two: one value for one pair, so a collision is a hash's, not a spelling's |
 /// | `<label>/key`, an entry's key in a rule's head | a field's label | a head with a field named so beside the entry is refused |
 pub fn unwritten(name: &str) -> bool {
     name.contains('[')

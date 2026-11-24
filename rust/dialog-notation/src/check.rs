@@ -1309,9 +1309,9 @@ mod tests {
         for (text, said) in [
             (
                 format!(
-                    "{list} (rule (list/count ?l abcdefghijabcdefghij: ?n) (list ?l name: ?n))"
+                    "{list} (rule (list/count ?l abcdefghijabcdefghijabcdefg: ?n) (list ?l name: ?n))"
                 ),
-                "abcdefghijabcdefghij",
+                "abcdefghijabcdefghijabcdefg",
             ),
             (
                 format!(
