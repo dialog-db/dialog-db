@@ -488,9 +488,20 @@ const RECORD: &str = "row";
 /// How many characters of a site's reference name its report relation.
 pub(crate) const SITE: usize = 12;
 
+#[cfg(any(test, feature = "inspect"))]
 std::thread_local! {
-    /// [`SITE`], which a test shortens to make two sites meet.
+    /// [`SITE`], which a test shortens to make two sites meet. It is not
+    /// in a build without the `inspect` feature, where names take
+    /// [`SITE`] characters always.
     pub(crate) static SITE_LENGTH: std::cell::Cell<usize> = const { std::cell::Cell::new(SITE) };
+}
+
+/// How many characters of a site's reference name its report relation.
+fn site_length() -> usize {
+    #[cfg(any(test, feature = "inspect"))]
+    return SITE_LENGTH.with(std::cell::Cell::get);
+    #[cfg(not(any(test, feature = "inspect")))]
+    SITE
 }
 
 /// The namespace of the relations a report derives, each named by the
@@ -1797,7 +1808,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
 
     // Twelve characters of the site's reference: a name is short, and
     // 58 to the twelfth sites leave two of them alike only by chance.
-    let length = SITE_LENGTH.with(std::cell::Cell::get);
+    let length = site_length();
     let relation = format!(
         "{REPORTED}{}",
         site.chars().take(length).collect::<String>()

@@ -141,12 +141,18 @@ const LAID: &str = "dialog.notation.live/laid";
 /// report relation for: the rule's entity, and the relation and the site.
 const DERIVES: &str = "dialog.notation.live/derives";
 
-/// The names of the holders in this process, each once. The overlay is
-/// never synced, so a holder is named in this process alone.
+/// The names of the holders in this process, each once. A session
+/// overlay lives in one process and is never synced or shared with
+/// another, so a name unique in the process is unique on the overlay.
 static HOLDERS: AtomicU64 = AtomicU64::new(0);
 
-/// What laying a rule and letting it go read and then write, kept one at
-/// a time in this process.
+/// What laying a rule and letting it go read and then write, one at a
+/// time in this process: a read of the holders and a write that depends
+/// on it. Both are synchronous calls on the in-memory overlay, so the
+/// guard is held for microseconds and never across an `.await`. It is
+/// process-wide and not per overlay because the overlay offers no lock of
+/// its own and no read-then-write in one call; two branches' leases wait
+/// on each other only for that long.
 static LAYING: Mutex<()> = Mutex::new(());
 
 /// A fact of the notation's own on the overlay.
