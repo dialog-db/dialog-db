@@ -946,10 +946,10 @@ enum Role {
 /// whose read is the newest claim and whose write succeeds it, or
 /// `many`, every claim. A field written under neither is many: it holds
 /// every value, as a relation does. Read as a concept field it carries
-/// the elector it was written under, `max`, `min` or `top`, which
-/// chooses one of the claims a cardinality-many attribute holds; an
-/// attribute on its own carries none. A variant's cases are listed, best
-/// first, so `top` can rank by them. A field that is every entry of a
+/// the elector it was written under, `max` or `min`, which chooses one
+/// of the claims a cardinality-many attribute holds; an attribute on its
+/// own carries none. A variant's cases are listed least first, so `min`
+/// and `max` rank by them. A field that is every entry of a
 /// collection reads the collection.
 fn attribute(field: &Field, role: Role) -> Result<Json, Error> {
     let mut attribute = Map::new();

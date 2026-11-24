@@ -38,7 +38,7 @@ use crate::Error;
 use crate::diagnostic::Diagnostic;
 use crate::form::Kind;
 use crate::kernel::QUOTE;
-use crate::kernel::{AMONG, CONTROL, ELECTORS, Head, Keyed, Rule, TYPES};
+use crate::kernel::{AMONG, CONTROL, ELECTORS, Head, Keyed, RETIRED, Rule, TYPES};
 use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, REST, fill, matches};
 use crate::syntax::{self, DERIVED, Parameters, Signature, Syntax};
@@ -236,9 +236,9 @@ fn wrap(word: &str, inner: Syntax) -> Result<Syntax, Error> {
 }
 
 /// A rule about syntax whose pattern chooses a field by an elector,
-/// `(account ?a status: (top ?s))`, as the rule that applies the field as
+/// `(account ?a status: (min ?s))`, as the rule that applies the field as
 /// written and reads its line under the elector: the pattern takes
-/// `status: ?s`, and the line whose value is `?s` reads `is: (top ?s)`.
+/// `status: ?s`, and the line whose value is `?s` reads `is: (min ?s)`.
 /// Any other rule is as it was.
 fn electing(rule: Syntax) -> Syntax {
     let Syntax::Application(operator, mut operand) = rule else {
@@ -302,8 +302,46 @@ fn elect(template: &mut Syntax, chosen: &BTreeMap<String, String>) {
     }
 }
 
+/// Refuse `top`, which is no elector: over a listed type it chose the
+/// case listed first, which `min` over the same list chooses, a listing
+/// being written least first. It is looked for where an elector stands,
+/// a term's value, `status: (top ?s)`, and as a pick, `(:top ?s)`, so a
+/// name `top` applied elsewhere is what it is.
+fn retired(tree: &Syntax) -> Result<(), Error> {
+    let refuse = |node: &Syntax| {
+        Err(Error::Refused(format!(
+            "{node} is under `top`, which is no elector: `top` over a list is `min` over the \
+             same list, which is written least first; `max` chooses the one listed last"
+        )))
+    };
+    match tree {
+        Syntax::Application(operator, operand) => {
+            if operator.keyword() == Some(RETIRED) {
+                return refuse(tree);
+            }
+            for term in operand.terms.values() {
+                if term.applies() == Some(RETIRED)
+                    && term
+                        .operand()
+                        .is_some_and(|inner| inner.items.len() == 1 && inner.terms.is_empty())
+                {
+                    return refuse(term);
+                }
+            }
+            retired(operator)?;
+            operand.items.iter().try_for_each(retired)?;
+            operand.terms.values().try_for_each(retired)
+        }
+        Syntax::Map(entries) => entries
+            .iter()
+            .try_for_each(|(key, value)| retired(key).and_then(|()| retired(value))),
+        Syntax::Tuple(items) => items.iter().try_for_each(retired),
+        _ => Ok(()),
+    }
+}
+
 /// The elector a term is written under and the term it chooses from:
-/// `(top ?s)` is `top` over `?s`.
+/// `(min ?s)` is `min` over `?s`.
 pub(crate) fn elected(term: &Syntax) -> Option<(&str, &Syntax)> {
     match (term.applies(), term.operand()) {
         (Some(word), Some(operand)) if ELECTORS.contains(&word) && operand.terms.is_empty() => {
@@ -328,7 +366,7 @@ pub(crate) fn elected(term: &Syntax) -> Option<(&str, &Syntax)> {
 /// is read under. `cardinality:` says how many claims the attribute
 /// holds for one entity: `:one` reads the newest, `:many` every one.
 /// Either may be left out; with no cardinality the read takes every
-/// claim. An elector on the value, `is: (top ?s)`, chooses one claim of
+/// claim. An elector on the value, `is: (min ?s)`, chooses one claim of
 /// many, as one in the concept's head does. `in:`
 /// is the layer, and the one taken is a command's, `:control`.
 ///
@@ -398,7 +436,7 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
             )));
         }
     };
-    // An elector written on the value, `is: (top ?s)`, chooses one of
+    // An elector written on the value, `is: (min ?s)`, chooses one of
     // the line's claims, as one in the concept's head does.
     let mut elector = None;
     if let Some((word, inner)) = elected(&value) {
@@ -409,7 +447,7 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
     if let Some(kind) = terms.remove("as") {
         let word = match &kind {
             // A variant, `[:open :done]`: each of its cases is an entity,
-            // listed best first.
+            // listed least first.
             Syntax::Tuple(listed)
                 if !listed.is_empty() && listed.iter().all(|case| case.keyword().is_some()) =>
             {
@@ -1999,6 +2037,7 @@ impl Expander {
     /// the premises again.
     fn top(&mut self, mut tree: Syntax) -> Result<Vec<Syntax>, Error> {
         self.path.clear();
+        retired(&tree)?;
         let written = tree.clone();
         while tree.applies() != Some("rule") {
             // A call stands in a rule, a query or a write. Alone at the

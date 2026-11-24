@@ -19,19 +19,24 @@ pub const TYPES: [&str; 8] = [
 ];
 
 /// The picks a term may be read under: `(:last ?x)`. `last` and `all`
-/// say what a cardinality does, one and many; `max`, `min` and `top`
-/// are a concept field's electors, which choose one of the claims a
-/// field of cardinality many holds.
-pub const PICKS: [&str; 5] = ["last", "all", "max", "min", "top"];
+/// say what a cardinality does, one and many; `max` and `min` are a
+/// concept field's electors, which choose one of the claims a field of
+/// cardinality many holds. Over a listed type they rank by the listing,
+/// written least first.
+pub const PICKS: [&str; 4] = ["last", "all", "max", "min"];
 
 /// The electors a concept's head may choose a field's claim by:
-/// `(top ?s)`.
-pub const ELECTORS: [&str; 4] = ["last", "max", "min", "top"];
+/// `(min ?s)`.
+pub const ELECTORS: [&str; 3] = ["last", "max", "min"];
+
+/// The elector the notation no longer takes: `top` over a list is `min`
+/// over the same list. A document that writes it is refused.
+pub const RETIRED: &str = "top";
 
 /// The cardinalities a term may be read under: `(:one ?x)`, `(:many ?x)`.
 pub const CARDINALITIES: [&str; 2] = ["one", "many"];
 
-/// The wrapper that lists the cases of a variant, best first:
+/// The wrapper that lists the cases of a variant, least first:
 /// `(:among ?x cases: [:open :done])`.
 pub const AMONG: &str = "among";
 
@@ -117,7 +122,7 @@ pub struct Field {
     /// The cardinality, `one` or `many`, when the term was written
     /// under one.
     pub cardinality: Option<String>,
-    /// The cases of a variant the value is one of, best first, each the
+    /// The cases of a variant the value is one of, least first, each the
     /// name of the entity it is: empty unless the term was written under
     /// `(:among …)`.
     pub listed: Vec<String>,
