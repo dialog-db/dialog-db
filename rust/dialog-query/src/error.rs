@@ -291,6 +291,14 @@ pub enum TypeError {
         reason: String,
     },
 
+    /// A concept's field is named `this`, the name its entity has in
+    /// every query and rule: the field and the entity would be one.
+    #[error("A concept field cannot be named \"{field}\": that is the name of the entity")]
+    ReservedField {
+        /// The field.
+        field: String,
+    },
+
     /// A rule names a constant its stored body cannot carry: dag-cbor
     /// holds integers of at most 64 bits and finite floats, and NaN is
     /// not a value.

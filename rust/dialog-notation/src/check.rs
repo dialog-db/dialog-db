@@ -336,6 +336,35 @@ mod tests {
         Ok(())
     }
 
+    /// A field labelled `this:`, the name every query and rule gives the
+    /// entity, is refused where it is written: it panicked the engine,
+    /// naming the field and the entity one variable.
+    #[test]
+    fn it_refuses_a_field_labelled_this() -> Result<(), Error> {
+        for text in [
+            "(rule (xyz.a ?e this: ?v) (xyz.b ?e w: ?v))",
+            "(rule (assert (xyz.a ?e this: ?v)) (xyz.b ?e w: ?v))",
+            "(select (xyz.b ?e this: ?v))",
+        ] {
+            let checked = std::panic::catch_unwind(|| {
+                let mut analyzer = Analyzer::new()?;
+                Ok::<_, Error>(check(&mut analyzer, text))
+            });
+            let Ok(checked) = checked else {
+                panic!("{text} panicked");
+            };
+            let checked = checked?;
+            let refusals: Vec<&Diagnostic> = checked.refusals().collect();
+            assert!(
+                matches!(refusals.as_slice(), [refused]
+                    if matches!(&refused.refusal, Some(Error::Reserved(name)) if name == "this:")),
+                "{text}: {refusals:?}"
+            );
+            assert!(checked.steps.is_empty(), "{text}");
+        }
+        Ok(())
+    }
+
     /// What a comment right above a rule says is the rule's
     /// description: the analyzed tree holds it, and the compiler is
     /// given it. A comment with a blank line under it is not about the

@@ -646,6 +646,26 @@ mod tests {
         rule_headed("friend", when)
     }
 
+    /// A head field named `this`, the entity's own name, is refused
+    /// with a typed error where it panicked looking up its canonical
+    /// name, which only the entity does not get.
+    #[dialog_common::test]
+    fn it_refuses_a_head_field_named_this() {
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(json!({
+            "deduce": head("this", "social/friend"),
+            "when": [knows("this", "x")],
+        }))
+        .expect("descriptor parses");
+        let compiled = std::panic::catch_unwind(|| descriptor.compile());
+        assert!(
+            matches!(
+                &compiled,
+                Ok(Err(crate::error::TypeError::ReservedField { field })) if field == "this"
+            ),
+            "{compiled:?}"
+        );
+    }
+
     /// Calling a local `x` or `a` does not make another rule.
     #[dialog_common::test]
     fn it_identifies_a_rule_by_its_body_not_its_variable_names() {
