@@ -1428,8 +1428,12 @@ where
                         "Path did not reach a segment".into(),
                     ));
                 };
+                #[cfg(test)]
+                let moved = leaf.separator.as_slice() != separator.as_slice();
                 apply_to_segment(leaf, self);
                 leaf.separator = separator.into();
+                #[cfg(test)]
+                seam_moves::record::<Key, Value>(&mut root, &path, moved)?;
                 reroute_moved_seam::<Key, Value>(&mut root, &path)?;
                 return Ok(Some(root));
             }
@@ -2045,6 +2049,68 @@ where
     let old_rank = D::seam_rank(old_separator, manifest);
     let new_rank = D::seam_rank(new_separator, manifest);
     new_rank > BOTTOM_RANK + 1 && new_rank > old_rank
+}
+
+/// How often this thread's surgical min-moves ran, moved a seam, and moved
+/// one while a node below the ancestor [`reroute_moved_seam`] re-homes
+/// held buffered ops: the corner whose buffers that re-homing does not
+/// visit. For tests that must show they reached it.
+#[cfg(test)]
+pub(crate) mod seam_moves {
+    use std::cell::Cell;
+
+    use super::{TransientNode, follow};
+    use crate::{DialogSearchTreeError, Key, Value};
+
+    thread_local! {
+        static FIRED: Cell<usize> = const { Cell::new(0) };
+        static MOVED: Cell<usize> = const { Cell::new(0) };
+        static MOVED_AT_A_BOUNDARY: Cell<usize> = const { Cell::new(0) };
+        static MOVED_OVER_BUFFERS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// The min-moves so far on this thread: how many ran, how many moved
+    /// the seam, and how many moved it over a buffer below the re-homed
+    /// ancestor.
+    pub(crate) fn counts() -> (usize, usize, usize, usize) {
+        (
+            FIRED.with(Cell::get),
+            MOVED.with(Cell::get),
+            MOVED_AT_A_BOUNDARY.with(Cell::get),
+            MOVED_OVER_BUFFERS.with(Cell::get),
+        )
+    }
+
+    /// Counts a min-move of the leaf at `path`, which `moved` its seam or
+    /// not, against the buffers below the ancestor the seam re-homes at.
+    pub(crate) fn record<K: Key, V: Value>(
+        root: &mut TransientNode<K, V>,
+        path: &[usize],
+        moved: bool,
+    ) -> Result<(), DialogSearchTreeError> {
+        FIRED.with(|count| count.set(count.get() + 1));
+        if !moved {
+            return Ok(());
+        }
+        MOVED.with(|count| count.set(count.get() + 1));
+        let mut depth = path.len();
+        while depth > 0 && path[depth - 1] == 0 {
+            depth -= 1;
+        }
+        if depth == 0 {
+            return Ok(());
+        }
+        MOVED_AT_A_BOUNDARY.with(|count| count.set(count.get() + 1));
+        for below in depth..path.len() {
+            if let TransientNode::Index(index) = follow(root, &path[..below])?
+                && !index.novelty.is_empty()
+            {
+                MOVED_OVER_BUFFERS.with(|count| count.set(count.get() + 1));
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Re-homes buffered ops after a fast-path min-move edit changed the
@@ -7442,6 +7508,214 @@ mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    /// Every buffered op stays where every read of its key looks, through
+    /// buffered writes, persists and canonical edits mixed at random on a
+    /// tree whose forced seams let the surgical min-move fire.
+    ///
+    /// The readers of a buffered tree, [`PersistentTree::get`] through
+    /// `pending_for_key` and [`PersistentTree::first_buffered`], consult
+    /// only the link each node routes a key to, and take the shallowest op
+    /// they meet as the newest. That is sound only while every buffered op
+    /// sits in the link that routes its key at every node on its way down.
+    /// Every regroup re-routes the ops of the nodes it reshapes; the
+    /// surgical min-move alone changes a piece's separator without one,
+    /// re-homing ops at the single ancestor where that separator is a link
+    /// boundary ([`reroute_moved_seam`](super::reroute_moved_seam)), so an
+    /// op below that ancestor on the moved edge is where one could be
+    /// stranded.
+    ///
+    /// It never is, because the min-move never moves a seam that is a link
+    /// boundary. Its separator is re-derived from the new minimum at the
+    /// stored length, and a key routed into the piece sorts at or above
+    /// the stored separator and below the piece's minimum, so its prefix at
+    /// that length is the stored separator again; a padded separator is
+    /// derived from the previous piece alone. Only a piece on the tree's
+    /// leftmost edge can take a key below its separator, and that seam is a
+    /// boundary at no ancestor. This pins both halves: the min-move fires
+    /// (68 times across these seeds), no seam it fires on moves at a
+    /// boundary, and after every step both readers agree, for every key,
+    /// with the canonical tree the buffers flush into and with a model of
+    /// what was written.
+    ///
+    /// Seeded, with a fixed set of seeds; a failure names its seed, step
+    /// and key.
+    #[dialog_common::test]
+    async fn it_keeps_buffered_ops_where_reads_find_them_through_seam_moves() -> Result<()> {
+        const SEEDS: [u64; 6] = [1, 2, 3, 5, 8, 13];
+        let (fired, _, boundary, over) = super::seam_moves::counts();
+        for seed in SEEDS {
+            seam_property(seed).await?;
+        }
+        let after = super::seam_moves::counts();
+        let (fired, boundary, over) = (after.0 - fired, after.2 - boundary, after.3 - over);
+        assert!(
+            fired > 0,
+            "the generator never took the surgical min-move, so it pins nothing"
+        );
+        assert_eq!(
+            (boundary, over),
+            (0, 0),
+            "of {fired} surgical min-moves, some moved a seam that is a link \
+             boundary (and some of those over buffered ops below the ancestor \
+             re-homed): the re-homing at one ancestor no longer covers the move"
+        );
+        Ok(())
+    }
+
+    /// Each leaf whose separator is forced (longer than the manifest's
+    /// separator bound), with that separator and its first key.
+    async fn forced_pieces(
+        root: &Blake3Hash,
+        storage: &Blocks,
+        manifest: &Manifest,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let bound = manifest.max_separator as usize;
+        let reading = crate::Reading::new(crate::helpers::test_subject());
+        let mut pieces = Vec::new();
+        let mut frontier: Vec<(Blake3Hash, Vec<u8>)> = vec![(root.clone(), Vec::new())];
+        while let Some((hash, separator)) = frontier.pop() {
+            let node: PersistentNode<VarKey, Vec<u8>> = reading.node(storage, &hash).await?;
+            if let Ok(index) = node.as_index() {
+                for at in 0..index.len() {
+                    frontier.push((index.hash_at(at)?.clone(), index.separator(at)?));
+                }
+            } else if separator.len() > bound {
+                pieces.push((separator, node.as_segment()?.first_key::<VarKey>()?));
+            }
+        }
+        Ok(pieces)
+    }
+
+    /// One seeded run of
+    /// [`it_keeps_buffered_ops_where_reads_find_them_through_seam_moves`].
+    async fn seam_property(seed: u64) -> Result<()> {
+        use crate::{FlushPolicy, HitchhikerTree, NoveltyOp};
+        use std::collections::BTreeMap;
+
+        // A tiny deterministic xorshift, as the hitchhiker tests use.
+        let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let manifest = ceiling_manifest(2, 0);
+        let mut storage = Blocks::new();
+        // An all-tails run, forced to split at marked anchors, built from
+        // every other key so the rest land inside its pieces later.
+        // Keys past the separator bound, so forced seams take the
+        // right-prefix form the min-move re-derives.
+        let domain: Vec<VarKey> = tails_keys("abcdefghijklmnopqrstu-", 160, &manifest);
+        let built: Vec<VarKey> = domain.iter().step_by(2).cloned().collect();
+        let mut tree = build_incremental(&built, manifest.clone(), &mut storage).await?;
+        let mut model: BTreeMap<Vec<u8>, Vec<u8>> = built
+            .iter()
+            .map(|key| (key.0.clone(), key.0.clone()))
+            .collect();
+
+        for step in 0..60u32 {
+            // Half the steps insert below the first key of a forced piece,
+            // at or above its separator: the min-insert the surgical path
+            // takes. The rest write a random key.
+            let mut key = domain[(next() % domain.len() as u64) as usize].clone();
+            let mut insert = next() % 3 != 0;
+            if next() % 2 == 0 {
+                let pieces = forced_pieces(tree.root(), &storage, &manifest).await?;
+                let below: Vec<&VarKey> = pieces
+                    .iter()
+                    .flat_map(|(separator, head)| {
+                        domain.iter().filter(move |key| {
+                            key.0.as_slice() >= separator.as_slice() && key.0 < *head
+                        })
+                    })
+                    .filter(|key| !model.contains_key(&key.0))
+                    .collect();
+                if !below.is_empty() {
+                    key = below[(next() % below.len() as u64) as usize].clone();
+                    insert = true;
+                }
+            }
+            let value = format!("{seed}-{step}").into_bytes();
+            let mut delta = Delta::zero();
+            tree = if next() % 2 == 0 {
+                let buffered = HitchhikerTree::open(&tree)
+                    .with_op_buf_size(4)
+                    .with_flush_policy(FlushPolicy::Amortized);
+                let buffered = if insert {
+                    buffered
+                        .insert(key.clone(), value.clone(), &storage)
+                        .await?
+                } else {
+                    buffered.delete(key.clone(), &storage).await?
+                };
+                let root = buffered.persist(&mut delta)?;
+                VarTree::at(crate::helpers::test_subject(), root)
+            } else {
+                let edit = tree.edit();
+                let edit = if insert {
+                    edit.insert(key.clone(), value.clone(), &storage).await?
+                } else {
+                    edit.delete(&key, &storage).await?
+                };
+                edit.persist(&mut delta)?
+            };
+            storage.flush(&mut delta);
+            if insert {
+                model.insert(key.0.clone(), value);
+            } else {
+                model.remove(&key.0);
+            }
+
+            let mut delta = Delta::zero();
+            let canonical = HitchhikerTree::open(&tree)
+                .canonicalize(&storage, &mut delta)
+                .await?;
+            storage.flush(&mut delta);
+            for key in &domain {
+                let expected = canonical.get(key, &storage).await?;
+                let at = || {
+                    format!(
+                        "seed {seed}, step {step}, key {:?}",
+                        String::from_utf8_lossy(&key.0)
+                    )
+                };
+                assert_eq!(
+                    expected.as_ref(),
+                    model.get(&key.0),
+                    "the canonical tree lost a write: {}",
+                    at()
+                );
+                assert_eq!(
+                    tree.get(key, &storage).await?,
+                    expected,
+                    "the buffered read disagrees with the canonical tree: {}",
+                    at()
+                );
+                let newest = tree
+                    .first_buffered(key, key, &storage, |_, op| Some(op))
+                    .await?;
+                match newest {
+                    Some(NoveltyOp::Assert(value)) => assert_eq!(
+                        Some(value),
+                        expected,
+                        "the newest buffered op is not the key's value: {}",
+                        at()
+                    ),
+                    Some(NoveltyOp::Retract) => assert_eq!(
+                        expected,
+                        None,
+                        "the newest buffered op retracts a key that holds a value: {}",
+                        at()
+                    ),
+                    None => {}
+                }
+            }
+        }
         Ok(())
     }
 
