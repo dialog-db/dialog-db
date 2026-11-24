@@ -425,6 +425,10 @@ pub(crate) fn written(value: &Value) -> Syntax {
 /// `dialog.meta/description` cannot be written from here.
 pub const DESCRIBED: &str = "syntax.meta";
 
+/// The namespace of the relations a report derives, each named by the
+/// reference of its site.
+pub const REPORTED: &str = "report.q";
+
 /// Compile an analyzed tree: the third phase, from a rule of the
 /// kernel to what Dialog-DB runs.
 pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
@@ -1707,7 +1711,9 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
         }
     }
 
-    let relation = format!("report.q{}", &site[..12]);
+    // Twelve characters of the site's reference: a name is short, and
+    // 58 to the twelfth sites leave two of them alike only by chance.
+    let relation = format!("{REPORTED}{}", site.chars().take(12).collect::<String>());
     let mut scope = Scope::default();
     let entity = match (&read.entity, shown(&read.entity)) {
         (Term::Variable(name), _) => {

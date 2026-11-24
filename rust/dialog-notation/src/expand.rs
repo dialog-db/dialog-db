@@ -125,6 +125,88 @@ pub(crate) const DEEPEST: usize = 2 * crate::form::DEPTH;
 const GROWTH: usize = 16;
 const SPARE: usize = 1024;
 
+/// The relations the notation writes and reads itself, and a document
+/// never names: a query's rows, a select, a write that runs once, a
+/// view's layer.
+pub const RESERVED: [&str; 4] = [
+    crate::select::ROW,
+    crate::select::SELECTED,
+    "once.write",
+    "view.layer",
+];
+
+/// The namespaces whose relations the notation names itself: a report's
+/// relation, `report.q…`, and an attribute derived under a concept,
+/// `concept.list.count-open`, which a document writes `list/count-open`.
+pub const RESERVED_NAMESPACES: [&str; 2] = [crate::compile::REPORTED, "concept."];
+
+/// The relation the notation writes a rule's description in: a document
+/// reads it and never writes it.
+pub const READ_ONLY: &str = crate::compile::DESCRIBED;
+
+/// Whether a document may not write `name`, a relation or an attribute
+/// of one.
+fn reserved_name(name: &str) -> bool {
+    let relation = name.split_once('/').map_or(name, |(relation, _)| relation);
+    RESERVED.contains(&relation)
+        || RESERVED_NAMESPACES
+            .iter()
+            .any(|namespace| relation.starts_with(namespace))
+}
+
+/// Whether a document may not name a variable `name`: the notation names
+/// a template's own variables `name.site`, a fold's `fold.groups.…`, and
+/// a view's `view-of` and `source-…`.
+fn reserved_variable(name: &str) -> bool {
+    name.contains('.') || name == crate::view::CALLED || name.starts_with("source-")
+}
+
+/// The first part of `tree` as written that names what the notation
+/// names itself, with the name, outermost first. What is quoted is not
+/// a form and names nothing.
+fn reserved(tree: &Syntax) -> Option<(&Syntax, String)> {
+    let mut open = vec![tree];
+    while let Some(part) = open.pop() {
+        match part {
+            Syntax::Reference(name) if reserved_name(name) => return Some((part, name.clone())),
+            Syntax::Variable(name) if reserved_variable(name) => {
+                return Some((part, format!("?{name}")));
+            }
+            Syntax::Application(..) if part.applies() == Some(QUOTE) => {}
+            Syntax::Application(operator, operand) => {
+                open.extend(operand.terms.values().rev());
+                open.extend(operand.items.iter().rev());
+                open.push(operator);
+            }
+            Syntax::Map(entries) => {
+                for (key, value) in entries.iter().rev() {
+                    open.push(value);
+                    open.push(key);
+                }
+            }
+            Syntax::Tuple(items) => open.extend(items.iter().rev()),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether a kernel rule writes or derives into [`READ_ONLY`]: its head
+/// is no report and what it concludes is of that relation.
+fn writes_read_only(rule: &Syntax) -> bool {
+    let Some(head) = items(rule).first() else {
+        return false;
+    };
+    let concluded = match head.applies() {
+        Some("report") => return false,
+        Some(word) if HEAD_WORDS.contains(&word) => items(head).first(),
+        _ => Some(head),
+    };
+    concluded.and_then(Syntax::applies).is_some_and(|word| {
+        word.split_once('/').map_or(word, |(relation, _)| relation) == READ_ONLY
+    })
+}
+
 /// What the two writes were called while a mark told what is kept from
 /// what holds one round. Unrefused, either would be read as a name that
 /// nothing gives a meaning, and said to be unknown.
@@ -960,7 +1042,14 @@ impl Expander {
                 self.blame.clear();
                 self.sites.clear();
                 let mut rules = Vec::new();
-                match self.each(tree, &mut rules) {
+                let expanded = self
+                    .written(tree)
+                    .and_then(|()| self.each(tree, &mut rules))
+                    .and_then(|()| match rules.iter().any(writes_read_only) {
+                        true => self.about(tree, |_| Err(Error::Reserved(READ_ONLY.into()))),
+                        false => Ok(()),
+                    });
+                match expanded {
                     Ok(()) => {
                         refused.remove(&at);
                         done.insert(at, rules);
@@ -998,6 +1087,16 @@ impl Expander {
         let mut diagnostics: Vec<Diagnostic> = refused.into_values().collect();
         diagnostics.extend(self.diagnose());
         (kernel, diagnostics)
+    }
+
+    /// Refuse a tree of a document that names what the notation names
+    /// itself, about the part that does.
+    fn written(&mut self, tree: &Syntax) -> Result<(), Error> {
+        if let Some((part, name)) = reserved(tree) {
+            let part = part.clone();
+            return self.about(&part, |_| Err(Error::Reserved(name)));
+        }
+        Ok(())
     }
 
     /// The kernel rules one tree of a document expands to, added to
