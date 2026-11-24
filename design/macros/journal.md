@@ -1950,6 +1950,6 @@ Node reads stay between 46 and 100 for every change, and no layer is evaluated w
 
 **Where.** Driving the card's four layers by hand on the same seed, at ten thousand: the four polls take 3 to 5 ms together, each maintained, and the two whose cover grows with the page (10011 and 20010 ranges) take 1.2 to 1.6 ms each. `Maintainer::apply` takes 16 to 24 ms, against 0.4 to 0.6 ms at a thousand: it is the notation's own tree that does not scale. For a tag added, the chips' poll is the cost, 9 to 11 ms.
 
-**Learned.** The engine's fold meets the bar the maintainer was offered, flat and within 2 times of a plain subscription. The notation does not, and at ten thousand the cost is its own.
+**Learned.** The engine's fold does not grow with the page and costs 1.5 to 1.7 times its own inner subscriptions. No change through the notation meets the bar the maintainer was offered (not growing, within 2 times plain), and at ten thousand the cost is the notation's own.
 
 **Decided.** Not decided. Nothing is made faster.
