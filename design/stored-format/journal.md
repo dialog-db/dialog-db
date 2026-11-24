@@ -219,7 +219,7 @@ said; B is reproduced by nothing, and no tonk space was written by it.
 v0.3.0 to v0.5.0 being one generation means every O device computes the
 same identities, which the mixed-fleet note now says.
 
-**Decided.** By the maintainer for step 1, relayed: generation numbers
+**Decided.** For step 1, as the coordinator relayed it (the message does not say by whom): generation numbers
 follow the existing names (0 = A, 1 = C, 2 = main), B documented and not
 exported, no rule function for C, `_v2` wrappers for the current one.
 Inventory corrected; nothing else in the plan changes.

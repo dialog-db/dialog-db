@@ -37,7 +37,7 @@ relayed 2026-11-24; the tag identities and the presence of the merkle
 | C | v0.3.0, v0.3.1-rc.1, v0.4.0, v0.5.0 (identical code) | merkle `ATTRIBUTE` map `{the: [symbols], pick, as, among}` | merkle `CONCEPT` map | merkle `RULE` map | `attribute_uri_v1`, `concept_identity_v1`; no rule function |
 | D | main, unreleased | merkle `ATTRIBUTE` map `{the, cardinality, as, among}` | merkle `CONCEPT` map | merkle `RULE` map | `to_uri`, `this()` |
 
-Decided for plan step 1: generation numbers follow the existing names
+Decided for plan step 1, as relayed by the coordinator: generation numbers follow the existing names
 (0 = A, 1 = C, 2 = main), B is documented and not exported, there is no
 rule function for C, and `_v2` wrappers pin the current generation.
 Tonk stores no rule identity; `upgrade_rules` finds an old rule by the
