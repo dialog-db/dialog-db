@@ -483,4 +483,44 @@ mod tests {
             Err(Error::Refused(_))
         ));
     }
+
+    /// A labelled part of a pattern that is not a variable has to be
+    /// there and be what it says: `(f ?x state: :done)` does not match
+    /// `(f a)`. A variable under a label may be left out.
+    #[test]
+    fn it_matches_a_labelled_literal_only_where_it_is_written() {
+        let pattern = one("(f ?x state: :done)");
+        assert!(matches(&one("(f a)"), &pattern, Bindings::new()).is_none());
+        assert!(matches(&one("(f a state: :open)"), &pattern, Bindings::new()).is_none());
+        assert!(matches(&one("(f a state: :done)"), &pattern, Bindings::new()).is_some());
+        assert!(matches(&one("(f a)"), &one("(f ?x state: ?s)"), Bindings::new()).is_some());
+        assert!(matches(&one("(f a)"), &one("(f ?x state: _)"), Bindings::new()).is_some());
+    }
+
+    /// A repeat fills its template once for each of what its repeating
+    /// variables took, and they took as many each: two of other lengths
+    /// are refused, and so is a repeat with nothing repeating in it.
+    #[test]
+    fn it_refuses_a_repeat_whose_parts_disagree_or_that_repeats_nothing() {
+        let bindings = matches(
+            &one("(f (a 1 2 3) (b 4 5))"),
+            &one("(f (a ... ?xs) (b ... ?ys))"),
+            Bindings::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            fill(&one("(g ... (pair ?xs ?ys))"), &bindings, "s"),
+            Err(Error::Refused(why)) if why.contains("as many")
+        ));
+        assert!(matches!(
+            fill(&one("(g ... (one ?z))"), &bindings, "s"),
+            Err(Error::Refused(why)) if why.contains("nothing")
+        ));
+        assert_eq!(
+            fill(&one("(g ... (pair ?xs ?xs))"), &bindings, "s")
+                .unwrap()
+                .to_string(),
+            "(g (pair 1 1) (pair 2 2) (pair 3 3))"
+        );
+    }
 }
