@@ -436,6 +436,8 @@ impl Live {
             feeds,
             folds,
             moved: true,
+            #[cfg(feature = "inspect")]
+            failing: false,
             _lease: lease,
         })
     }
@@ -539,6 +541,10 @@ pub struct Standing {
     /// Whether rows moved since the answers were last given: kept across
     /// a poll that failed, so the next one gives them.
     moved: bool,
+    /// Whether the next poll's answers fail to be put together, for a
+    /// test that a failure there loses nothing.
+    #[cfg(feature = "inspect")]
+    failing: bool,
     /// The rules it holds on the overlay.
     _lease: Lease,
 }
@@ -547,6 +553,13 @@ impl Standing {
     /// The selection kept.
     pub fn selection(&self) -> &Selection {
         &self.selection
+    }
+
+    /// Make the next poll fail where its answers are put together, after
+    /// the rows moved: what a test needs to show that nothing is lost.
+    #[cfg(feature = "inspect")]
+    pub fn fail_next_answer(&mut self) {
+        self.failing = true;
     }
 
     /// The subscription of each query the answers read, by its index in
@@ -622,6 +635,12 @@ impl Standing {
             .zip(&self.folded)
             .map(|(fold, rows)| rows.iter().map(|row| fold.values(row)).collect())
             .collect::<Vec<Vec<BTreeMap<String, Value>>>>();
+        #[cfg(feature = "inspect")]
+        if std::mem::take(&mut self.failing) {
+            return Err(LiveError::Notation(Error::Refused(
+                "the answers were made to fail".into(),
+            )));
+        }
         let answers = self.selection.answer(&results, &folded)?;
         self.moved = false;
         Ok(Some(answers))

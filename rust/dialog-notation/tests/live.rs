@@ -433,3 +433,32 @@ async fn it_refuses_a_report_two_sites_would_derive_alike() -> Result<()> {
     drop(kept);
     Ok(())
 }
+
+/// A poll of a standing selection that fails where its answers are put
+/// together, after its rows moved, gives nothing; the next poll gives
+/// the answers as the branch stands, though no row moved since.
+#[dialog_common::test]
+async fn it_answers_after_a_poll_failed_putting_the_answers_together() -> Result<()> {
+    let mut notebook = tasks().await?;
+    let live = Live::new(notebook.branch.clone());
+    let selection = selection()?;
+    let mut standing = live.standing(selection.clone())?;
+    let answers = |answers: Vec<dialog_notation::Syntax>| -> Vec<String> {
+        let mut said: Vec<String> = answers.iter().map(ToString::to_string).collect();
+        said.sort();
+        said
+    };
+    standing.poll(&notebook.operator).await?;
+    notebook.submit(CHANGE).await?;
+    standing.fail_next_answer();
+    assert!(standing.poll(&notebook.operator).await.is_err());
+    let now = standing
+        .poll(&notebook.operator)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the move was lost"))?;
+    assert_eq!(
+        answers(now),
+        answers(live.select(&selection, &notebook.operator).await?)
+    );
+    Ok(())
+}
