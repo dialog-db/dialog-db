@@ -405,7 +405,7 @@
 | a collecting read binds nothing outside it, as `unless` does not, so one safety rule covers both; and a list of things built from a join is collected from a named query of the item | hypothesis | the agent's reading of the maintainer's form, in [design-queries.md](design-queries.md). Refuted by a real view that needs the item's query at every level and reads worse than tonk's YAML | open; nothing built |
 | `query` with a head and a body collides with the design's `(query condition)` for asking | fact | design.md, Questions; `(query (a ?x) (b ?x))` reads both ways | holds; settled 2026-11-18 by `select` for asking |
 | `(select (q ?e is: ?x))` of a query answers a row for each way its conditions hold: two for "Buy milk", none for "Call mum" | fact | `it_answers_a_row_for_each_way_its_conditions_hold`, tests/query.rs | holds |
-| `(collect ?x)` on a term binds the whole of the field, one row with a set, `{}` for none, and never gates: `{:title "Call mum" :tags {}}` | fact | `it_collects_the_whole_of_a_field_as_a_set` | holds |
+| `(collect ?x)` on a term binds the whole of the field, one row with a set, `{:}` for none, and never gates: `{:title "Call mum" :tags {:}}` | fact | `it_collects_the_whole_of_a_field_as_a_set` | holds |
 | `(count ?tags)` of what was collected is 2 and 0 | fact | `it_counts_what_was_collected` | holds; any other function is refused |
 | the whole of a keyed collection is a map of key to value, `{}` for a notebook with no block | fact | `it_collects_a_keyed_collection_as_a_map` | holds |
 | a query whose answer is an entry, `is: {?k ?s}`, collected by another, gives a map, and a block with no source is absent from it | fact | `it_collects_a_query_whose_answer_is_an_entry_as_a_map` | holds |

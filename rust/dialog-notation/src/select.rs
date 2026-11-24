@@ -87,6 +87,40 @@ pub fn is_set(tree: &Syntax) -> bool {
     }
 }
 
+/// The empty set, `{:}`: a set whose one member is blank. No set of
+/// values has a blank member, so the tree says no member.
+pub fn empty_set() -> Syntax {
+    Syntax::Map(vec![(Syntax::Reference(String::new()), Syntax::Blank)])
+}
+
+/// Whether a tree is the empty set, `{:}`.
+pub fn is_empty_set(tree: &Syntax) -> bool {
+    matches!(tree, Syntax::Map(entries) if matches!(
+        entries.as_slice(),
+        [(Syntax::Reference(name), Syntax::Blank)] if name.is_empty()
+    ))
+}
+
+/// The entries of what was collected, a map or a set: none for the
+/// empty set.
+pub fn entries_of(tree: &Syntax) -> Option<&[(Syntax, Syntax)]> {
+    match tree {
+        _ if is_empty_set(tree) => Some(&[]),
+        Syntax::Map(entries) => Some(entries),
+        _ => None,
+    }
+}
+
+/// What a collection of `entries` is: a map when `set` is not, and a
+/// set otherwise, `{:}` when it has none.
+fn collection(entries: Vec<(Syntax, Syntax)>, set: bool) -> Syntax {
+    if set && entries.is_empty() {
+        empty_set()
+    } else {
+        Syntax::Map(gathered(entries))
+    }
+}
+
 /// The order of two values: by value where both are constants that
 /// compare, and by how they are written otherwise.
 pub fn order(a: &Syntax, b: &Syntax) -> Ordering {
@@ -809,7 +843,10 @@ impl Evaluation<'_> {
                 None => Ok((Syntax::Reference(String::new()), written(member))),
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        Ok((Syntax::Map(gathered(entries)), Syntax::Constant(count)))
+        Ok((
+            collection(entries, lowered.entry.is_none()),
+            Syntax::Constant(count),
+        ))
     }
 
     /// The whole of what a collecting read gives for `row`: a map of
@@ -859,7 +896,8 @@ impl Evaluation<'_> {
             };
             entries.push(entry);
         }
-        Ok(Syntax::Map(gathered(entries)))
+        let set = !matches!(collect.item, Syntax::Map(_));
+        Ok(collection(entries, set))
     }
 }
 
@@ -1006,9 +1044,9 @@ fn build(shape: &Syntax, row: &Row) -> Result<Syntax, Error> {
                 row[&counted(whole)].clone()
             }
             [whole] => match build(whole, row)? {
-                Syntax::Map(entries) => {
-                    Syntax::Constant(Value::UnsignedInt((entries.len() as u64).into()))
-                }
+                built if entries_of(&built).is_some() => Syntax::Constant(Value::UnsignedInt(
+                    (entries_of(&built).map_or(0, <[_]>::len) as u64).into(),
+                )),
                 other => {
                     return Err(Error::Refused(format!(
                         "{shape}: {other} is not the whole of a field, and count counts one"

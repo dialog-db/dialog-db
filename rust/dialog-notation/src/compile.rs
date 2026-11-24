@@ -782,7 +782,12 @@ fn shape(
             // would be matched against one order of what is stored and
             // miss every other.
             Syntax::Map(entries) if crate::select::is_set(node) => {
-                let mut members: Vec<&Syntax> = entries.iter().map(|(_, member)| member).collect();
+                // The empty set, `{:}`, has no member.
+                let mut members: Vec<&Syntax> = if crate::select::is_empty_set(node) {
+                    Vec::new()
+                } else {
+                    entries.iter().map(|(_, member)| member).collect()
+                };
                 if let Some(member) = members
                     .iter()
                     .find(|member| !matches!(member, Syntax::Constant(_)))

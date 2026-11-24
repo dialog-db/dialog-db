@@ -625,6 +625,21 @@ fn form(tokens: &[Token], at: &mut usize, depth: usize) -> Result<(Form, Mark), 
                 // A key the struct ends on has `_` for its value:
                 // `{:author ?who ...}` is `{:author ?who ... _}`.
                 let closes = tokens.get(*at).ok_or_else(ended)?;
+                // The empty set is `{:}`, a set whose one member is
+                // blank. A blank is no member of a set otherwise.
+                let blank_member = || {
+                    Error::Read(
+                        "a blank member of a set: a set's members are values, and the empty set \
+                         is written `{:}`"
+                            .into(),
+                    )
+                };
+                if unnamed && closes.text == "}" && !entries.is_empty() {
+                    return Err((blank_member(), closes.span));
+                }
+                if unnamed && closes.text == "_" {
+                    return Err((blank_member(), closes.span));
+                }
                 if closes.text == "}" {
                     mark.parts.push(Mark {
                         span: Span {
@@ -725,6 +740,10 @@ impl Display for Form {
                     write!(f, "{item}")?;
                 }
                 write!(f, "]")
+            }
+            Form::Map(entries) if matches!(entries.as_slice(), [(key, Form::Blank)] if key.label() == Some("")) =>
+            {
+                write!(f, "{{:}}")
             }
             Form::Map(entries) => {
                 write!(f, "{{")?;

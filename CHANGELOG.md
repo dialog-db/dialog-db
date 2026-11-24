@@ -138,7 +138,11 @@ What this changes for you:
   its members, refusing a member twice. A set whose members are not all
   constants, `{: ?a : 5}`, is refused with `Error::Unsupported` where it
   would be matched or written, since a stored set is a list matched in
-  order.
+  order. The empty set is written `{:}` and the empty map `{}`: a
+  collected set with no member answers `{:}`, the two read back as two
+  trees and make two values, and `{:}` is stored as the empty list and
+  found by a pattern `{:}`. A blank member of a set, `{: _}` written
+  out or `{: 1 :}`, is refused by the reader.
 - `check(analyzer, text)` gives, form by form, what a document compiles
   to, its diagnostics, and its declarations as data
   (`Declaration::Concept`, `Declaration::Query`).

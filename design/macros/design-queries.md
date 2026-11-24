@@ -86,7 +86,7 @@ A field that holds many says so on its line. In a head it is one of them, and fo
 | `?t` | `?card` |
 |---|---|
 | Buy milk | `{:title "Buy milk" :tags {: "errand" : "home"}}` |
-| Call mum | `{:title "Call mum" :tags {}}` |
+| Call mum | `{:title "Call mum" :tags {:}}` |
 
 **Folded:** `tags: (count ?tags)` is 2 and 0. A fold is a function of what was collected.
 
@@ -241,7 +241,7 @@ Of the four, `?..x`. Against `(collect ?x)` it is shorter and adds no form; the 
 | the design's fold over an entity, and tonk's marker, taken this morning | a read that collects, and nothing else repeats |
 | a fold in a rule's head (`list/count-open`), and the zero written by a second rule | `(count ?open)` of a set, where counting nothing gives 0. Nothing in the engine quarantines a fold (#830) |
 | a getter | a query of an entity and a value |
-| #712: a collection that is empty | one at a time, the row is rightly missing; the whole is `{}`, which is what #712 expected of it |
+| #712: a collection that is empty | one at a time, the row is rightly missing; the whole is `{:}`, or `{}` for a collection of entries, which is what #712 expected of it |
 | `maybe:`, which the notation has no spelling for (it occurs 25 times in tonk's library) | the whole of a field, none or one |
 
 ## What would refute it
