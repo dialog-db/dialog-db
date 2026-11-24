@@ -51,8 +51,9 @@ pub struct Analyzer {
 impl Analyzer {
     /// `text` with each derived attribute's relation this analyzer made
     /// written as the name it is written by, `list/count-open`, in place
-    /// of the hash that names it: what a person is shown, in a refusal or
-    /// in an answer.
+    /// of the hash that names it: for what is shown of the trees compiled
+    /// for Dialog-DB, [`crate::Checked::analyzed`]. Refusals from `check`
+    /// and answers are written so already.
     pub fn spelled(&self, text: &str) -> String {
         self.expander.spelled(text)
     }

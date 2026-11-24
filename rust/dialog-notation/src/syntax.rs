@@ -44,6 +44,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
+use std::sync::{Mutex, PoisonError};
 
 use base58::ToBase58;
 use dialog_corpus::{Composite, Entity, Value};
@@ -81,6 +82,32 @@ pub const DERIVED_LENGTH: usize = DERIVED.len() + 1 + (DERIVED_BYTES * 8).div_ce
 /// make it, whatever either holds, dots included; and it is one length,
 /// 44 bytes, so a label has 19 of the 64 the engine allows a relation.
 pub fn derived(concept: &str, name: &str) -> Result<String, Error> {
+    let hash = hashed(concept, name)?;
+    WRITTEN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(hash.clone(), format!("{concept}/{name}"));
+    Ok(hash)
+}
+
+/// The name each derived attribute's domain made in this process was
+/// made of, `list/count-open`: what a person is shown in its place. A
+/// hash is made only by [`derived`], so every one this process answers
+/// with is here; each is a few dozen bytes, once.
+static WRITTEN: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+/// The name a derived attribute's domain was made of, `list/count-open`,
+/// where this process made it.
+pub fn written_derived(domain: &str) -> Option<String> {
+    WRITTEN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(domain)
+        .cloned()
+}
+
+/// The hash [`derived`] names the domain by.
+fn hashed(concept: &str, name: &str) -> Result<String, Error> {
     let framed = data::list([data::text(concept), data::text(name)])?;
     let reference = framed.reference();
     let bytes = reference.as_bytes();

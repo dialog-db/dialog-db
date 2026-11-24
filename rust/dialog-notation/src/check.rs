@@ -21,7 +21,10 @@ use dialog_corpus::Value;
 pub struct Checked {
     /// The analyzed trees the document came to, each with what the
     /// comments about the form it came of say as its `description:`.
-    /// Nothing when any part of the document is refused.
+    /// Nothing when any part of the document is refused. They are what
+    /// is compiled for Dialog-DB, so a derived attribute in them is its
+    /// relation, the hash: [`Analyzer::spelled`] writes one as a person
+    /// reads it.
     pub analyzed: Vec<Syntax>,
     /// What the analyzed trees compile to, in the order written.
     /// Nothing when any part of the document is refused.

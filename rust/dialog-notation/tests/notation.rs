@@ -1223,9 +1223,14 @@ async fn it_shows_no_hash_of_a_derived_attribute() -> Result<()> {
         .await?;
     let asked = report(&mut notebook, "(select (list/label ?l ?n))").await?;
     assert_eq!(asked, vec![r#"(list/label list:home is: "Home")"#]);
+    // Kept standing, through a query that reads it.
     let checked = dialog_notation::check(
         &mut dialog_notation::Analyzer::new()?,
-        &format!("{concepts} (select (list/label ?l ?n))"),
+        &format!(
+            "{concepts}
+             (query (list/card ?l is: ?card) (list/label ?l ?n) (is ?card {{:label ?n}}))
+             (select (list/card ?l is: ?card))"
+        ),
     );
     let selection = checked
         .steps
@@ -1239,7 +1244,7 @@ async fn it_shows_no_hash_of_a_derived_attribute() -> Result<()> {
     let mut standing = live.standing(selection)?;
     let kept = standing.poll(&notebook.operator).await?.unwrap_or_default();
     let kept: Vec<String> = kept.iter().map(ToString::to_string).collect();
-    assert_eq!(kept, asked);
+    assert_eq!(kept, vec![r#"(list/card list:home is: {:label "Home"})"#]);
     let mut said = Vec::new();
     for fixture in [
         include_str!("fixtures/todo.clj"),

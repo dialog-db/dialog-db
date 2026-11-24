@@ -422,8 +422,12 @@ impl Query {
             };
             operand.terms.insert(label, fill(slot)?);
         }
+        // A derived attribute is answered by the name it is written by,
+        // `list/count-open`, never the hash its relation is named by.
+        let shown =
+            crate::syntax::written_derived(&self.domain).unwrap_or_else(|| self.domain.clone());
         Ok(Syntax::Application(
-            Box::new(Syntax::Reference(self.domain.clone())),
+            Box::new(Syntax::Reference(shown)),
             operand,
         ))
     }
