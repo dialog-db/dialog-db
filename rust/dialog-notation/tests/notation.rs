@@ -1507,6 +1507,70 @@ async fn it_says_a_refusal_in_the_authors_terms() -> Result<()> {
     Ok(())
 }
 
+/// A label is a name like any other: one under the notation's namespace
+/// is `Reserved`, in a rule's head, a premise and a select, so no
+/// document concludes or reads a derived attribute by its hash. A label
+/// is a field of the read's own domain: one that names an attribute of
+/// another domain, `io.contact/email:`, is refused, saying to read that
+/// domain by itself. Nothing is written by a refusal.
+#[dialog_common::test]
+async fn it_refuses_a_label_the_notation_names_or_one_of_another_domain() -> Result<()> {
+    let list = r#"(concept (list ?l name: ?n)
+          (xyz.list/name of: ?l is: ?n as: :text cardinality: :one))
+        (rule (list/label ?l ?n) (list ?l name: ?n))
+        (assert (list list:1 name: "real"))"#;
+    let mut notebook = Notebook::open().await?;
+    notebook.submit(list).await?;
+    let hashed = report(&mut notebook, "(select (list/label ?l ?n))").await?;
+    assert_eq!(hashed, vec![r#"(list/label list:1 is: "real")"#]);
+    for (text, name) in [
+        (
+            r#"(rule (xyz.f ?l dialog.n.c.abcdefghijklmnopqrstuvwxyz/is: "forged") (xyz.list ?l name: ?n))"#,
+            "dialog.n.c.abcdefghijklmnopqrstuvwxyz/is:",
+        ),
+        (
+            r#"(rule (xyz.f ?l dialog.n/x: "forged") (xyz.list ?l name: ?n))"#,
+            "dialog.n/x:",
+        ),
+        (
+            "(select (xyz.foo ?e dialog.n.c.abcdefghijklmnopqrstuvwxyz/is: ?v))",
+            "dialog.n.c.abcdefghijklmnopqrstuvwxyz/is:",
+        ),
+        (
+            r#"(assert (xyz.foo foo:1 dialog.n.report.q/x: "forged"))"#,
+            "dialog.n.report.q/x:",
+        ),
+    ] {
+        let refused = notebook
+            .submit(text)
+            .await
+            .map_err(|error| error.downcast::<Error>());
+        assert!(
+            matches!(&refused, Err(Ok(Error::Reserved(said))) if said == name),
+            "{text}: {refused:?}"
+        );
+    }
+    assert_eq!(
+        report(&mut notebook, "(select (list/label ?l ?n))").await?,
+        hashed
+    );
+    for text in [
+        "(select (io.person ?p io.contact/email: ?e))",
+        "(rule (xyz.out ?p a.b/c: ?e) (xyz.in ?p e: ?e))",
+        "(select (list ?l list/label: ?x ...))",
+    ] {
+        let refused = notebook
+            .submit(text)
+            .await
+            .map_err(|error| error.downcast::<Error>());
+        assert!(
+            matches!(&refused, Err(Ok(Error::Refused(why))) if why.contains("a label is a field of")),
+            "{text}: {refused:?}"
+        );
+    }
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a
