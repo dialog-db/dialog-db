@@ -30,4 +30,4 @@ Nobody writes the held head. It is what the prelude answers for `(add (todo …)
 
 Rests on one opinion, the maintainer's on #728: no form carries `!`. He decided the opposite here on 2026-11-11 ("without `!` the new count does not persist"), when a plain `assert` head was not kept. It is kept now, so what he wanted then holds; the mark is what went.
 
-Pinned by `it_issues_what_a_head_with_no_word_says_of_a_command` (kernel) and `it_refuses_a_write_under_the_name_it_had` (expander). The second was checked against the build without the refusal: `(hold! (todo todo:1 text: "x"))` expands to `(rule (command.hold!.todo …))` with the warning "no rule reads this command", and nothing is written.
+Pinned by `it_refuses_a_write_under_the_name_it_had` (expander). The kernel's test, once `it_issues_what_a_head_with_no_word_says_of_a_command`, is gone, and the kernel side is not pinned on this branch: last known, a head with no word issued the command it named. The second was checked against the build without the refusal: `(hold! (todo todo:1 text: "x"))` expands to `(rule (command.hold!.todo …))` with the warning "no rule reads this command", and nothing is written.

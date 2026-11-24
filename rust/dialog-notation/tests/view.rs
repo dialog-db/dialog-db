@@ -1352,6 +1352,27 @@ async fn it_renders_the_tables_page_and_directory() -> Result<()> {
     Ok(())
 }
 
+/// An attribute written as a list is its parts joined, as text children
+/// are: fixed text and a value of the row, one after the other.
+#[dialog_common::test]
+async fn it_joins_the_parts_of_an_attribute_written_as_a_list() -> Result<()> {
+    let link = r##"
+        (query (list/link ?l is: ?link)
+          (list ?l name: ?name)
+          (view ?link [:a {:href ["/lists/" ?name "#top"] :class "list"} ?name]))"##;
+    let mut notebook = Notebook::open().await?;
+    write(&mut notebook, CONCEPTS).await?;
+    write(&mut notebook, r#"(assert (list list:home name: "home"))"#).await?;
+    let plan = plan_of(&[CONCEPTS, link], "(select (list/link ?l is: ?link))")?;
+    let mut shown = Driven::new(&notebook, plan, entity("list:home"), How::Subscribed).await?;
+    shown.step(&notebook).await?;
+    assert_eq!(
+        shown.tree.hiccup(),
+        r##"[:a {:href "/lists/home#top" :class "list"} "home"]"##
+    );
+    Ok(())
+}
+
 /// The source of a query not found names each field of the concept
 /// apart from an entry's key, whatever the fields are labelled: a field
 /// labelled `key` beside an entry is shown with its own value.
