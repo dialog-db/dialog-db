@@ -1210,4 +1210,101 @@ mod tests {
         );
         Ok(())
     }
+
+    /// A form made up from `next`, `depth` levels at most: every atom
+    /// the reader takes, at its limits, and forms nested and empty.
+    fn made(next: &mut impl FnMut() -> u64, depth: usize) -> String {
+        const ATOMS: [&str; 26] = [
+            "0",
+            "-0",
+            "18446744073709551615",
+            "-9223372036854775808",
+            "9223372036854775807",
+            "0.0",
+            "-0.0",
+            "1.5",
+            "100000000000000000000.0",
+            "0.0000001",
+            "1e20",
+            "2.5E-3",
+            "179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000.0",
+            r#""""#,
+            r#""a \"quoted\" \\ text""#,
+            "\"two\nlines\tand é\"",
+            ":done",
+            ":xyz.todo/state",
+            "todo:1",
+            "xyz.todo/title",
+            "?x",
+            "?a.b",
+            "_",
+            "true",
+            "false",
+            "'quoted",
+        ];
+        let pick = next() % 10;
+        if depth == 0 || pick < 5 {
+            return ATOMS[(next() % ATOMS.len() as u64) as usize].to_string();
+        }
+        let count = (next() % 4) as usize;
+        let parts: Vec<String> = (0..count).map(|_| made(next, depth - 1)).collect();
+        match pick {
+            5 | 6 => format!("[{}]", parts.join(" ")),
+            7 => format!("(f {})", parts.join(" ")),
+            8 => {
+                let entries: Vec<String> = parts
+                    .iter()
+                    .enumerate()
+                    .map(|(at, part)| format!(":k{at} {part}"))
+                    .collect();
+                format!("{{{}}}", entries.join(" "))
+            }
+            _ => {
+                let terms: Vec<String> = parts
+                    .iter()
+                    .enumerate()
+                    .map(|(at, part)| format!("l{at}: {part}"))
+                    .collect();
+                format!("(g ?e {})", terms.join(" "))
+            }
+        }
+    }
+
+    /// Read, print and read again is the trees first read, whichever
+    /// printer prints them, for every form the reader takes: numbers at
+    /// their limits and written with an exponent, `-0`, texts with what
+    /// a text escapes, keywords, names, and forms nested and empty. A
+    /// whole number too large for 64 bits is refused, not read as a
+    /// float.
+    #[test]
+    fn it_reads_back_what_it_prints() -> Result<(), Error> {
+        for seed in 1..=400u64 {
+            let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+            let mut next = move || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            let text = made(&mut next, 4);
+            let (trees, written) = crate::parse_written(&text)
+                .map_err(|error| Error::Read(format!("{text}: {error}")))?;
+            let shown: Vec<String> = trees.iter().map(ToString::to_string).collect();
+            assert_eq!(
+                crate::parse(&shown.join(" "))?,
+                trees,
+                "{text} printed as {shown:?}"
+            );
+            let printed = crate::print(&trees, &written);
+            assert_eq!(
+                crate::parse(&printed)?,
+                trees,
+                "{text} printed as {printed}"
+            );
+        }
+        for text in ["18446744073709551616", "-9223372036854775809", "1e400"] {
+            assert!(crate::parse(text).is_err(), "{text}");
+        }
+        Ok(())
+    }
 }
