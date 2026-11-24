@@ -229,6 +229,11 @@ pub struct Maintainer {
     /// For each place, each instance by its chain of keys from the root,
     /// and the rows behind it, each counted.
     live: Vec<BTreeMap<Chain, BTreeMap<Kept, usize>>>,
+    /// For each place, its instances under each instance of its parent,
+    /// by the parent's chain, in the order of their keys: kept as
+    /// instances come and go, so how many there are and where one stands
+    /// among them are read, not counted again.
+    kids: Vec<BTreeMap<Chain, Vec<Chain>>>,
     /// For each place, the places from the root down to it.
     lineage: Vec<Vec<usize>>,
     /// For each place, the variables it and every place below it show.
@@ -271,6 +276,7 @@ impl Maintainer {
             }
         }
         let mut live: Vec<BTreeMap<Chain, BTreeMap<Kept, usize>>> = vec![BTreeMap::new(); count];
+        let mut kids: Vec<BTreeMap<Chain, Vec<Chain>>> = vec![BTreeMap::new(); count];
         // What a layer with no condition holds stands once, with no row:
         // a view's frame, what is outside its repeating element.
         for (index, layer) in plan.layers.iter().enumerate() {
@@ -280,15 +286,20 @@ impl Maintainer {
             for at in plan.region(index) {
                 let line: &Vec<usize> = &lineage[at];
                 if line.iter().all(|up| plan.elements[*up].key.is_empty()) {
-                    live[at].insert(
-                        vec![Vec::new(); line.len()],
-                        BTreeMap::from([(Vec::new(), 1)]),
-                    );
+                    let chain: Chain = vec![Vec::new(); line.len()];
+                    let parent = chain[..chain.len() - 1].to_vec();
+                    if live[at]
+                        .insert(chain.clone(), BTreeMap::from([(Vec::new(), 1)]))
+                        .is_none()
+                    {
+                        kids[at].entry(parent).or_default().push(chain);
+                    }
                 }
             }
         }
         Maintainer {
             live,
+            kids,
             entity: entity.map(Datum),
             plan,
             lineage,
@@ -327,7 +338,7 @@ impl Maintainer {
                 .copied()
                 .unwrap_or(0);
         }
-        self.under(place, host).len() as u64
+        self.kids[place].get(host).map_or(0, Vec::len) as u64
     }
 
     /// The plan it maintains.
@@ -561,12 +572,7 @@ impl Maintainer {
     /// The instances of `element` under the instance `parent` of its
     /// parent, in the order of their keys.
     fn under(&self, element: usize, parent: &Chain) -> Vec<Chain> {
-        self.live[element]
-            .range(parent.clone()..)
-            .take_while(|(chain, _)| chain.starts_with(parent))
-            .filter(|(chain, _)| chain.len() == parent.len() + 1)
-            .map(|(chain, _)| chain.clone())
-            .collect()
+        self.kids[element].get(parent).cloned().unwrap_or_default()
     }
 
     /// An instance and every instance under it, as the tree has them.
@@ -723,7 +729,15 @@ impl Maintainer {
             };
         }
         for (element, chain, kept, arrived) in moves {
+            let parent = chain[..chain.len() - 1].to_vec();
+            let fresh = !self.live[element].contains_key(&chain);
             let rows = self.live[element].entry(chain.clone()).or_default();
+            if fresh {
+                let siblings = self.kids[element].entry(parent.clone()).or_default();
+                if let Err(at) = siblings.binary_search(&chain) {
+                    siblings.insert(at, chain.clone());
+                }
+            }
             if arrived {
                 *rows.entry(kept).or_insert(0) += 1;
             } else if let Some(count) = rows.get_mut(&kept) {
@@ -734,6 +748,14 @@ impl Maintainer {
             }
             if rows.is_empty() {
                 self.live[element].remove(&chain);
+                if let Some(siblings) = self.kids[element].get_mut(&parent) {
+                    if let Ok(at) = siblings.binary_search(&chain) {
+                        siblings.remove(at);
+                    }
+                    if siblings.is_empty() {
+                        self.kids[element].remove(&parent);
+                    }
+                }
             }
         }
         let mut patches = Vec::new();
@@ -754,11 +776,11 @@ impl Maintainer {
                 (false, true) => {
                     let parent = chain[..chain.len() - 1].to_vec();
                     let index = match self.plan.elements[*element].parent {
-                        Some(_) => self
-                            .under(*element, &parent)
-                            .iter()
-                            .position(|sibling| sibling == chain)
-                            .unwrap_or(0),
+                        Some(_) => self.kids[*element].get(&parent).map_or(0, |siblings| {
+                            match siblings.binary_search(chain) {
+                                Ok(at) | Err(at) => at,
+                            }
+                        }),
                         None => self.live[0]
                             .keys()
                             .filter(|root| self.mounted(0, root))
