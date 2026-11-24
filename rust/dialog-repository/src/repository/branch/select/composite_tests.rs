@@ -1,11 +1,11 @@
-//! Composites through a real tree, on the volatile and the filesystem
-//! providers, and a syntax tree kept as one.
+//! Composites through a real tree, on the volatile provider and the
+//! platform's durable one, and a syntax tree kept as one.
 
 use anyhow::{Context, Result};
 use dialog_corpus::helpers::composite_decodes;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{Cardinality, Composite, Entity, Fact, Instruction, Selector, Value};
-use dialog_peer::helpers::test_session_with_peer;
+use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use dialog_peer::{Peer, PeerSpace, Session};
 use futures_util::{TryStreamExt as _, stream};
 
@@ -129,26 +129,70 @@ async fn it_round_trips_composites_through_a_volatile_tree() -> Result<()> {
     round_trip(&session, &peer).await
 }
 
-/// Composites go into a tree on the filesystem provider and come back.
-///
-/// Native only: the filesystem provider is the native one. In the browser
-/// a tree is kept in IndexedDB and OPFS, which the web test run of
-/// `it_round_trips_composites_through_a_volatile_tree` does not reach
-/// either; the composite's bytes are the same on every provider, so what
-/// this adds is the provider's own handling of the keys and blocks.
-#[cfg(not(target_arch = "wasm32"))]
+/// Opens a peer whose storage and credentials are the durable provider
+/// `$space`, under the directory `$base`, and round trips the composites
+/// through it: the one body of
+/// `it_round_trips_composites_through_a_durable_tree` on every platform.
+macro_rules! durable_round_trip {
+    ($space:ty, $base:expr) => {{
+        use dialog_capability::Subject;
+        use dialog_peer::helpers::{onboard, test_grant, test_state, test_system};
+        use dialog_storage::provider::storage::{CredentialStore, Storage};
+        use dialog_varsig::Principal as _;
+
+        let base = $base;
+        let name = unique_name("composite");
+        let storage = Storage::<$space>::default().owned_by(test_system().await.did());
+        let credential = dialog_peer::OpenCredential::open(name.clone())
+            .at(base.clone())
+            .perform(&CredentialStore::<$space>::default())
+            .await?;
+        let peer = Peer::new(credential.clone())
+            .at(dialog_effects::storage::Location::new(base.clone(), name))
+            .with(storage)
+            .space(test_state(&credential.did()))
+            .grant(test_grant().await)
+            .base(base)
+            .await?;
+        onboard(&peer).await?;
+        let session = peer
+            .session(b"test")
+            .space(peer.state())
+            .allow(Subject::any())
+            .await?;
+        round_trip(&session, &peer).await
+    }};
+}
+
+/// Composites go into a tree on the platform's durable provider and come
+/// back: the filesystem natively, and in the browser IndexedDB for blocks
+/// and cells with OPFS for blobs (the spilled composite's block among
+/// them). The volatile run is
+/// `it_round_trips_composites_through_a_volatile_tree`.
 #[dialog_common::test]
-async fn it_round_trips_composites_through_a_filesystem_tree() -> Result<()> {
-    use std::fs::read_dir;
+async fn it_round_trips_composites_through_a_durable_tree() -> Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use dialog_effects::storage::Directory;
+        use dialog_storage::provider::storage::NativeSpace;
+        use std::fs::read_dir;
 
-    let root = tempfile::tempdir()?;
-    use crate::helpers::filesystem_session_with_peer;
+        let root = tempfile::tempdir()?;
+        durable_round_trip!(
+            NativeSpace,
+            Directory::At(root.path().to_string_lossy().into_owned())
+        )?;
+        // Something was written under the directory, not elsewhere.
+        assert!(read_dir(root.path())?.next().is_some());
+        Ok(())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use dialog_effects::storage::Directory;
+        use dialog_storage::provider::storage::WebSpace;
 
-    let (session, peer) = filesystem_session_with_peer(root.path()).await?;
-    round_trip(&session, &peer).await?;
-    // Something was written under the directory, not elsewhere.
-    assert!(read_dir(root.path())?.next().is_some());
-    Ok(())
+        durable_round_trip!(WebSpace, Directory::Temp)
+    }
 }
 
 /// A node of the syntax tree as `syntax.rs` keeps it: a map that says its

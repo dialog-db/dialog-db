@@ -7,19 +7,44 @@ replaces the draft #812, which reached a field by a scan of every name and
 wrote a nested composite again to read it, and the dag-cbor composite on
 the notation's line, which is decoded whole.
 
-The maintainer's goals, which this is measured against: "a builtin
-representation of composite value that offer random access and can be
-stored more compactly and could be read without decoding it all";
-"Records should be referenced canonically by merkle-references", "giving
-canonical identities even if on wire / on disk bytes may be different";
-"all records are just views over the same memory buffer"; and it must hold
-a syntax tree.
+## Goals, in order
+
+The maintainer's, stated 2026-11-23; every section below answers to them.
+
+1. **Compression by sharing.** The only reason this is not CBOR: many
+   tokens repeat across many composite values (and within a syntax tree),
+   so stored in the Chronicle format they are shared and compress very
+   well. In his words: "if it is tokenized, it can be interned. If it's
+   not, then impossible." So a composite's bytes are tokenized, its atoms
+   addressable in a table, which makes interning possible wherever a store
+   supports it. Today that is a Chronicle file (`dialog-chronicle`, native
+   only): a composite in a key there is its atoms' token ids and its body.
+   Tree blocks in every other store, in the browser among them, and blocks
+   sent to a peer carry each composite whole, its own table shared with
+   nothing; "it's okay if we don't do the sharing in non-chronicle setups.
+   In fact, that's kind of the expectation at the moment."
+2. **Reading without decoding.** A property or a path inside a composite
+   is read without decoding the whole value, and what is read is a view
+   into the buffer.
+3. **The format can change without changing the database's.** A newer
+   dialog reads every older layout and may write the new one; nobody is
+   forced to upgrade a database for it.
+4. **Not goals.** Identity preserved across layouts (nice to have only),
+   and one value across two layouts. Joining on whole composites is not
+   something the system cares about: composites are taken apart, and a
+   field that needs an index gets an index of its own.
+
+Earlier statements of the same aims: "a builtin representation of
+composite value that offer random access and can be stored more
+compactly and could be read without decoding it all"; "all records are
+just views over the same memory buffer"; and it must hold a syntax tree.
 
 ## What the encoding has to serve
 
 The syntax trees of every `.clj` the notation has (its sketches, examples
 and prelude, `wip/engine-fold` at `7b7484a8c`), counted by
-[census.py](composite-value/census.py). It reads each document with the
+`design/composite-value/census.py` on the `research/composite-value`
+branch, which holds the measurement harness. It reads each document with the
 reader's rules (`form.rs`) and builds the value `Syntax::value` builds
 (`syntax.rs`: every node a map that says its `type`, a call's parts a list
 and its labels a map, a struct's entries a list of `[key, value]` pairs).
@@ -39,47 +64,112 @@ of offsets is the rare one, and is kept as small as it can be.
 
 ## Measurements
 
-`record_spike access` (`rust/dialog-repository/examples/record_spike/access.rs`),
-over the trees `CENSUS_DUMP` writes (sha256 `362444d5754e6c43…`), release build, 9 rounds, ns a read, the median over every field or item in
-turn; two runs agree within 15%. A 4-core Xeon at 2.1 GHz, shared with two
-other builds (load 3 to 4), so differences under about 20 ns are noise.
-"#812" is its codec kept as `pairs812.rs`; "scan" is this layout with no
-offsets; "offsets" is it with offsets in every sequence of two or more.
+Every number here is of the layout at `11dc23c` (atoms in the table,
+scalars referred to), measured 2026-11-23 on a 4-core Xeon shared with a
+callgrind sweep (load about 3), so differences under about 30 ns are
+noise. The harness is `record_spike` on the `research/composite-value`
+branch (`rust/dialog-repository/examples/record_spike/access.rs`), built
+against this layout in a local checkout with `Composite::layout` and
+`Composite::from_layout` made public again (they are test-only here):
+`cargo run --release -p dialog-repository --features helpers --example
+record_spike -- access 9`. ns a read, the median over every field or item
+in turn. "#812" is its codec, kept as `pairs812.rs` there; "scan" is this
+layout with no offsets anywhere, the table included; "offsets" is it with
+offsets in every sequence of two or more. The canonical layout is "scan"
+up to 8 items and "offsets" past them.
 
-| one field of a map of n | #812 | scan | offsets | | one item of a list of n | scan | offsets |
+| one field of a map of n, values text | #812 | scan | offsets | | one item of a list of n, items text | scan | offsets |
 |--:|--:|--:|--:|---|--:|--:|--:|
-| 2 | 105 | 118 | 151 | | 2 | 48 | 46 |
-| 4 | 120 | 138 | 155 | | 4 | 50 | 46 |
-| 8 | 169 | 174 | 200 | | 8 | 62 | 45 |
-| 12 | 225 | 206 | 217 | | 12 | 82 | 47 |
-| 16 | 281 | 240 | 223 | | 16 | 89 | 44 |
-| 64 | 905 | 627 | 287 | | 64 | 257 | 43 |
-| 256 | 3,343 | 2,108 | 355 | | 256 | 1,053 | 46 |
+| 2 | 156 | 227 | 253 | | 2 | 66 | 65 |
+| 4 | 189 | 232 | 202 | | 4 | 76 | 61 |
+| 8 | 200 | 306 | 245 | | 8 | 90 | 56 |
+| 12 | 256 | 391 | 264 | | 12 | 101 | 54 |
+| 16 | 310 | 465 | 259 | | 16 | 142 | 67 |
+| 64 | 1,097 | 1,387 | 335 | | 64 | 394 | 61 |
+| 256 | 3,643 | 4,959 | 419 | | 256 | 1,593 | 65 |
 
-Values are text. Where each value is a three-field node, #812 takes 1,192
-to 6,803 ns at every size, because it writes the node it returns again;
-the scan takes 85 at 2 and 1,848 at 256, and offsets 123 and 323.
+Where each value is a three-field node, #812 takes 1,452 to 9,276 ns,
+because it writes the node it returns again; the scan takes 122 at 2 and
+4,938 at 256, and offsets 159 and 375.
 
 | a field three composites down, s siblings a level | #812, written again at each level | view |
 |--:|--:|--:|
-| 1 (185 bytes) | 13,661 | 362 |
-| 3 (369 bytes) | 32,301 | 382 |
-| 32 (3,343 bytes) | 365,799 | 760 |
-
-| the syntax trees | dag-cbor | composite | offsets everywhere |
-|---|--:|--:|--:|
-| 133 forms | 142,609 | 95,127 (0.67) | 101,141 (0.71) |
+| 1 (178 bytes) | 21,492 | 548 |
+| 3 (310 bytes) | 42,770 | 793 |
+| 32 (2,514 bytes) | 498,209 | 1,075 |
 
 What they say:
 
-- In a map, a scan wins up to about 12 entries and offsets win from 16; in
-  a list, offsets win from 4, by less than 20 ns below 8. `SCAN_LIMIT` is
-  8: either way the loss below it is tens of nanoseconds, and the
-  syntax trees reach it three times in 4,267 composites. Offsets
-  everywhere would cost 6% more bytes for nothing they read.
-- A view reads three levels down in under a microsecond at any size; #812
-  pays for everything it writes again, 38 to 480 times more.
-- Every tree is two thirds of its dag-cbor, keys being kept once for a tree.
+- A scalar is now read through the table: the field's key is found in
+  it, then the value's atom by its place. At the syntax trees' common
+  size, a map of two text fields, that is 227 ns against 118 when values
+  sat in their slots (the layout before atom references, measured the
+  same way, under a similar load): the price of keeping each scalar once.
+  Past 8 entries the table and the body have offsets and a read stays
+  flat (419 ns at 256).
+- `SCAN_LIMIT` stays 8: below it, offsets win or lose by tens of
+  nanoseconds, and the syntax trees reach it three times in 4,267
+  composites.
+- A view reads three levels down in about a microsecond at any size; #812
+  pays for everything it writes again, 39 to 460 times more.
+
+**What a read costs on the path a query takes.** Goal 2. A value bound
+from a key goes through `decode_value_view`: the payload is unescaped,
+`Composite::from_bytes` checks the bytes are canonical, and the field is
+read. The check used to read every part into a tree, write it again and
+compare, on every read; it was 80% of the read. It now shows the bytes
+canonical in one pass with no tree built (`model/composite/check.rs`):
+the table sorted strictly, each atom its value's encoding (text with no
+zero byte checked where it is), every atom used, each body's entries in
+the encoder's order, every sequence's offsets present exactly when the
+encoder writes them, narrowest and in place, every varint minimal. Bytes
+it cannot show canonical, which the encoder never writes but for a key
+holding two nested composites (ordered by their bytes on their own), go
+to the full check, which stays the definition of the answer and of its
+error; 40,000 random and mutated byte strings get the same answer from
+both, error for error. For a chain of maps of two fields (`type` and
+`body`), the deepest `type` read through its path, release, 20,000
+rounds (`cargo test --release -p dialog-corpus --lib -- --ignored
+--nocapture measure_reading_a_field`, 2026-11-23, load about 3):
+
+| depth | bytes | whole read, before | whole read | `from_bytes`, before | `from_bytes` | the field |
+|--:|--:|--:|--:|--:|--:|--:|
+| 7 | 118 | 7,974 ns | 1,797 ns | 6,237 ns | 323 ns | 829 ns |
+| 13 | 166 | 15,174 ns | 2,510 ns | 12,032 ns | 403 ns | 1,372 ns |
+| 19 | 217 | 20,023 ns | 3,032 ns | 16,160 ns | 621 ns | 1,967 ns |
+
+The field is now most of a read. Still read on every read: the check
+reads every byte once. Validating where bytes enter (a block from a peer
+or from storage) and trusting them after would take a mark on bytes that
+are trusted, which every store and the wire would have to carry; it is
+not built.
+
+**The archive.** A file of syntax trees with their atoms shared as tokens
+against each composite kept whole, in `dialog-chronicle` (`cargo test
+--release -p dialog-chronicle --lib -- --ignored --nocapture
+measure_an_archive_of_syntax_trees`). The census's own trees could not be
+read here (the notation's documents are not in this checkout), so these
+are 133 generated trees of the census's shape (a map per node that says
+its `type`, two fields at the median, 7 to 11 deep, names from a
+vocabulary of 150), 141,182 bytes of composites, one fact each:
+
+| | tokens | their bytes | token records | frame records | index pages |
+|---|--:|--:|--:|--:|--:|
+| atoms shared | 765 | 107,523 | 116,246 | 1,450 | 8,434 |
+| kept whole | 299 | 141,661 | 146,415 | 1,444 | 0 |
+
+Shared, the tokens' records are 0.79 of whole and all records but the
+preallocated extent 0.85 (126,130 against 147,859 bytes): every token
+costs a pad byte, padding and a length, and two and a half times the
+tokens grow the token index out of its first page. Atoms shared across
+many versions of a tree, or many trees, save more; this file holds each
+tree once.
+
+**Not measured at head.** The census's dag-cbor comparison: the trees
+were 0.67 of their dag-cbor size on the layout before atom references;
+measuring the layout at head needs the trees `CENSUS_DUMP` writes from the
+notation's documents (sha256 `362444d5754e6c43…`), which this checkout
+does not have.
 
 ## Decided
 
@@ -104,6 +194,11 @@ The maintainer's, unless marked:
 
 ## The layout
 
+The table is sorted by canonical bytes, decided. A keys-first order (the
+atoms a map uses as keys first, then the rest) was measured on branch
+`research/composite-table-order` and rejected: leaves 6.7% smaller
+against a 10% bar, encoding 10 to 15% slower against 5%.
+
 ```
  composite := table · body                     a buffer of one composite
  table     := seq(0) of atom*                  every key and scalar value the
@@ -114,7 +209,8 @@ The maintainer's, unless marked:
  slot      := 26 · index                        a scalar's place in the table
             | 22 · body                        a nested composite
  seq(kind) := head · count · size · offsets · items
- head      := kind | width << 2                width: none, or 1, 2 or 4 bytes
+ head      := kind | width << 2 | layout << 4    width: none, or 1, 2 or 4 bytes;
+                                               layout 0 (see Layouts)
 
  The table holds complete scalar key/value encodings. Every scalar slot in
  every nested body is a type-26 reference to that table; repeated strings
@@ -136,13 +232,59 @@ The maintainer's, unless marked:
   it, for keys and values alike: a syntax tree writes `type` once, and the
   same string used in several fields appears once.
 
-**Chronicle.** When Chronicle stores a composite, it interns each table
-atom through the same token dictionary it uses for ordinary key values.
-Its local composite token holds those shared token IDs followed by the body
-of references; the canonical table and body are rebuilt when a key or block
-is realized. Thus equal atoms share tokens across composites and with
-standalone values. A spilled composite whose key carries only a prefix stays
-opaque until its full value is available.
+**Chronicle.** An atom is a scalar in the bytes a tree key holds it in,
+so the single-file archive (`dialog-chronicle`) keeps a composite in a
+key as a packed token: `22 · FF 'C' 'T' 01 · count · id… · body`, each
+`id` the four-byte token id of an atom, in the table's order, and the body
+as the canonical bytes hold it. Each atom is the token a key holding that
+scalar alone names, so a text that a thousand composites and a plain fact
+hold is one token (`it_shares_a_composite_atom_with_every_value_that_holds_it`).
+Reading a key, a segment rebuilt from its rows, or a node served in place
+realizes the packed token to the escaped canonical bytes again. Its limits:
+
+- A composite that spilled, whose key holds only a prefix of its bytes,
+  is kept whole, told by the key (`key_value_is_spilled`), not by a parse
+  that fails.
+- Every well formed composite a key holds whole is packed. A composite is
+  packed only when the packed token realizes to the very key bytes; that
+  check is a guard the tests assert is never used for a composite the
+  corpus wrote (500 random composites in every key form, and every
+  shape). It can fire only for key bytes the corpus would not write,
+  which a block from a peer can hold: a value that is not one escaped
+  byte string, bytes without a table and a body, or a layout that is not
+  the canonical one (offsets where none belong, a wider offset width).
+  Such a value is kept whole, which is what was given. The check costs
+  173 ns for a two-field map and 0.8 to 2.0 µs for a syntax tree, once a
+  value: a draft remembers the token each value was packed as, so the
+  four keys a fact puts its value in (three orderings and history) pack
+  it once. A commit of 1,000 syntax-tree facts packs 3.96 times a fact
+  without that and 0.99 with it, and appends in 48.6 µs a fact against
+  27.9 (`cargo test --release -p dialog-chronicle --lib -- --ignored
+  --nocapture measure_a_commit_of_syntax_trees`, 2026-11-23).
+- An index node's separators are whole keys, kept whole: a composite in a
+  separator shares nothing.
+- A packed token's second byte, `FF`, is one no composite kept whole
+  starts with: escaped canonical bytes start with the table's head, below
+  `0x10`, escaped `00 FF` when zero (tested on random, empty, spilled and
+  offset-tabled composites).
+- A spilled composite (its key encoding past `inline_n`, 4,096 bytes) is
+  treated as any large value: its key keeps a prefix, its bytes go to the
+  blob store, and it shares nothing across values.
+- Every token costs a pad byte, padding to 16 and a four-byte length, so
+  a small atom shared once costs more than it saves; the archive's size
+  below says what that comes to.
+- Token ids are file offsets and a token is never moved or dropped once
+  written, so the ids a packed token holds stay valid. A packed token
+  names atoms written before it (tested on every file the tests write),
+  so a file Chronicle wrote never holds one naming an atom it lacks:
+  `PackedError::MissingAtom` and `Truncated` come only from damaged
+  bytes. A token record's checksum is checked when the file is opened
+  for the records past its last sync point, not on every read, so damage
+  to an older record reaches a reader; these errors are what a packed
+  token gives then, and a read never panics on it. An append prepared
+  before another one names new atoms by drafted ids; laid out, it looks a
+  packed token up under its atoms' final ids, so it is not written twice
+  (`it_reconciles_a_packed_composite_another_append_wrote_first`).
 
 **Record as a sub-band.** One kind, told by its keys and never by a flag:
 the table sorts by type byte first, so the attributes are one run of it,
@@ -179,8 +321,8 @@ nesting past 128 (`TooDeep`). Random and mutated bytes never panic.
 
 ## Tests
 
-In `dialog-corpus` (`model/composite/tests.rs`, 38, and `tree.rs`, 1):
-against a plain model of maps and lists over 3,000 generated composites
+In `dialog-corpus` (`model/composite/tests.rs` and `tree.rs`): against a
+plain model of maps and lists over 3,000 generated composites
 (construction in any order and with repeats, every key and item, length,
 identity); every layout read alike and only the canonical one accepted;
 order total, equal to the canonical bytes and to the key's bytes in the
@@ -188,15 +330,35 @@ tree, no key a prefix of another; a nested view equal to, hashing and
 ordering as its copy, sharing the buffer; a read decoding only what it
 returns (a counter); the record told by its keys and typed by the band;
 a map of attributes and a record one value; the bytes the drawing shows;
-every refusal by its variant; a varint past `u32::MAX` refused; the bytes
-and the merkle reference of six fixed composites (a record, a map with
-text keys, a list with two-byte offsets, one nested three levels deep, an
-empty map and an empty list) pinned as constants, which the wasm32 build
-run in a browser matches as the 64-bit one does; 20,000 random and mutated byte strings
-without a panic; every serde form; a tree storing records, maps and lists,
-one spilled. In `dialog-repository` (`branch/select/composite_tests.rs`,
-3): a round trip through a branch loaded afresh, by entity, attribute and
-value, on the volatile provider and on the filesystem provider; and the
+every refusal by its variant, a scalar held in a body instead of
+referred to among them; byte 26 reserved, a key starting its value with
+it refused; a composite split into atoms and body and joined back to the
+same bytes; a varint past `u32::MAX` refused; the bytes and the merkle
+reference of six fixed composites (a record, a map with text keys, a list
+with two-byte offsets, one nested three levels deep, an empty map and an
+empty list) pinned as constants, which the wasm32 build run in a browser
+matches as the 64-bit one does (the bytes moved with the atom table; the
+six references did not); 20,000 random and mutated byte strings without a
+panic; every serde form; a tree storing records, maps and lists, one
+spilled.
+
+In `dialog-chronicle` (`node/composite/tests.rs`, and one in
+`archive.rs`): a composite in a key split into atom tokens; the value
+found as the last token in all five key forms; a spilled composite kept
+whole on purpose; a composite that would not come back the same kept
+whole, its atoms dropped; a corrupted packed token (a count past its ids,
+an id the file lacks, cut short, a drafted id unresolved) an error of a
+named kind; 500 random composites in every form back byte for byte; a
+segment of every shape and form realized from its tokens; the atom shared
+once across two composites and a plain value; every form and shape read
+back after reopening, from atoms new in the commit and held from an
+earlier one, whole and as served in place; a rewritten node reusing its
+predecessor's rows of composites; and the append prepared before another.
+
+In `dialog-repository` (`branch/select/composite_tests.rs`): a round trip
+through a branch loaded afresh, by entity, attribute and value, on the
+volatile provider and on the platform's durable one, one body for both:
+the filesystem natively, IndexedDB and OPFS in the browser; and the
 syntax tree below.
 
 **The syntax tree.** `(todo ?t [1 2] state: :open tags: {"errand" _ "home" _}
@@ -205,6 +367,49 @@ writes, is stored in a branch and read back; `operand.terms.where.entries[0][1].
 is reached five composites down with one decode, the name returned; built
 with every map's fields and the labels in the other order, it is one value
 with one reference.
+
+## Layouts
+
+Goal 3. A composite says its layout in the high four bits of its first
+byte, its table's head (`kind | width << 2` uses the low four). This
+release writes layout 0, so the marker costs no byte. `Composite::from_bytes`
+refuses any other layout by name, `CompositeError::UnsupportedLayout(n)`,
+never as malformed bytes and never by a panic, and Chronicle keeps such a
+composite whole, never packed. The layout covers the encoding only, not
+the kinds, the scalar types or identity. A table's head is at most `0xFC`
+in any layout, below the `0xFE` bound a scan with no value takes and never
+`0xFF`, the byte that starts a Chronicle packed token's magic. A tree read
+that meets one reports what it reports for any value that does not decode.
+
+## How a composite sits in keys
+
+Recorded 2026-11-23 so it is not redone; nothing is built from it. A
+composite up to `inline_n` (4,096 bytes) is inline, escaped, in the
+entity, attribute, value and history keys: four copies a fact, and the
+datum holds no value bytes. Keeping it inline only in the entity
+ordering, with a 32-byte hash in the others, assumes the common read is a
+point lookup, and a survey of this branch found that it is not: a concept
+read with the entity unbound is an N-way merge of one attribute-ordered
+scan per attribute (`dialog-query/src/planner/conjunction.rs`) and takes
+every field's value from the attribute-ordered row; a single
+`(?e attr ?v)` premise reads only the attribute ordering; a
+subscription's covered diff rebuilds a changed fact from whichever key
+lies in its cover, often an attribute range; and a history record
+rebuilds its claim from its own key, so its value may be nowhere else.
+The attribute and history orderings need the bytes. Only the value
+ordering could hold a hash without an extra lookup on a common read
+(nothing orders or range-scans composites, and joining on a whole one is
+not a goal), saving one copy in four where a store does not intern; in a
+Chronicle file the copies already share one token. Whoever does it meets
+one `EncodedValue` payload feeding all three orderings
+(`dialog-corpus/src/key.rs`), `FromKey` copying the payload across them
+(the same file, pinned by `it_carries_one_payload_across_orderings`),
+`selector_range` building every ordering's bound from one payload
+(`dialog-corpus/src/tree.rs`), and scanned rows and overlay facts building
+their `SortKey` tails differently (`sort_key` in
+`dialog-corpus/src/model/update.rs`). Decided: composites stay inline in
+every ordering here; hashing the value ordering is a possible later
+optimisation, to be decided by measured bytes.
 
 ## What a composite costs a value that is not one
 
@@ -266,8 +471,8 @@ is 32,933 instructions (`query-join`, +0.07%, under the gate's 50,000) and
 
 Identity is already apart from the bytes. To accept other layouts (offsets
 everywhere, keys inline, a buffer's shared table): `from_bytes` would check
-structure and not compare with the canonical encoding (`from_layout` does
-this now, for measurement); equality and hashing already walk content, so
+structure and not compare with the canonical encoding (the test-only
+`from_layout` does this now); equality and hashing already walk content, so
 they hold; the tree would key a composite by its canonical bytes written
 again on the way in, or by its reference, which loses range order and a
 spilled prefix; a block's hash would then cover bytes two writers can
@@ -308,8 +513,8 @@ have to canonicalize first.
 They will call `Composite::map`, `Composite::record`, `Composite::list`,
 `kind`, `is_map`, `is_list`, `is_record`, `len`, `first`, `get`, `item`,
 `entries`, `items`, `first_view`, `item_view`, `reference` and
-`to_bytes`, `Value::Composite` and `ValueDataType::{CompositeMap,
-CompositeRecord, CompositeList}`. To do there:
+`to_bytes`, `Value::Composite` and `ValueDataType::{Map,
+CompositeRecord, List}`. To do there:
 
 - replace `data.rs`'s `Composite::{Map, List}` in `Value::Record` with
   `Value::Composite`, and `entries`/`items` with `first` and `item`;
@@ -321,9 +526,3 @@ CompositeRecord, CompositeList}`. To do there:
   new reference;
 - keep a struct's entries as a list of `[key, value]` pairs (a key is a
   node, and a composite's key is a scalar), as `syntax.rs` does now.
-
-This PR extends #843's canonical in-memory and wire layout with atom
-references, then splits those atoms into Chronicle's archive-wide token
-dictionary, following #748's proposed buffer-table design (sections 0, 2,
-and 4). Chronicle's row still names the composite as one value; only its
-local storage token is a list of shared atom-token IDs plus the body.

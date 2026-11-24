@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use hashbrown::HashTable;
+use hashbrown::{HashMap, HashTable};
 
 use crate::rows::put_varint;
 
@@ -62,6 +62,10 @@ pub(crate) struct Draft<'a> {
     /// hash: a node's rows name the same entities and attributes over and
     /// over, and each is looked up in the file once.
     found: HashTable<(u64, u32)>,
+    /// Each composite value interned packed, by its bytes as the key holds
+    /// it, and the token it was interned as: a fact's value is in several
+    /// keys, and is split, interned and checked once.
+    packed: HashMap<Box<[u8]>, u32>,
 }
 
 impl<'a> Draft<'a> {
@@ -77,6 +81,7 @@ impl<'a> Draft<'a> {
             hashes: Vec::new(),
             ids: HashTable::new(),
             found: HashTable::new(),
+            packed: HashMap::new(),
         }
     }
 
@@ -98,6 +103,7 @@ impl<'a> Draft<'a> {
             hashes: Vec::new(),
             ids: HashTable::new(),
             found: HashTable::new(),
+            packed: HashMap::new(),
         }
     }
 
@@ -129,6 +135,17 @@ impl<'a> Draft<'a> {
         id
     }
 
+    /// The token the composite value `value` was interned as before, if
+    /// it was.
+    pub fn packed(&self, value: &[u8]) -> Option<u32> {
+        self.packed.get(value).copied()
+    }
+
+    /// Remembers that the composite value `value` was interned as `id`.
+    pub fn remember_packed(&mut self, value: &[u8], id: u32) {
+        self.packed.insert(value.into(), id);
+    }
+
     /// How many new tokens there are.
     pub fn pending(&self) -> usize {
         self.ends.len()
@@ -144,6 +161,8 @@ impl<'a> Draft<'a> {
     /// Drops the new tokens past the first `keep`: those interned for a
     /// node that is kept whole after all.
     pub fn roll_back(&mut self, keep: usize) {
+        let kept = self.first + keep as u32;
+        self.packed.retain(|_, id| *id < kept);
         while self.ends.len() > keep {
             let id = self.first + self.ends.len() as u32 - 1;
             let hash = self.hashes.pop().expect("a hash per token");

@@ -333,6 +333,8 @@ Every token starts on a multiple of 16 bytes, with its length in the four bytes 
 
 A value's token is the value's type byte and payload, here `03` for a string, so a value is one token in every ordering. The entity and attribute tokens include the zero byte that ends them in a key. Each of the fact's four keys names the same three tokens, and the history key adds one more for the version:
 
+A composite value is the one exception. Its bytes start with a table of its atoms, every scalar it holds once, each as the bytes a key holds that scalar in. The file keeps each atom as a token of its own, the same token a key holding that scalar alone names, and the composite as a **packed token**: `22`, the bytes `FF 'C' 'T' 01`, how many atoms it has, each atom's token id in four bytes, and the composite's body, which names its atoms by their place in the table. Ten facts holding `{name: "Oat milk"}` and one holding `"Oat milk"` alone name one `"Oat milk"` token. A packed token is written only when it rebuilds the very value the key held; a composite too long for its key, whose key holds only a prefix of it, stays one token, whole.
+
 <figure class="dg">
 <svg class="dg" viewBox="0 0 760 210" width="760" height="210" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The fact&#x27;s four entries name the same three tokens; the history entry adds a version token">
 <defs><marker id="st-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>

@@ -23,6 +23,7 @@
 //! only ever grow, and its count is written after them, so a reader that
 //! reads the count reads whole frames below it.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io;
 
@@ -31,6 +32,7 @@ use dialog_common::{Blake3Hash, Buffer};
 use super::index::{FrameHeader, WHOLE};
 use super::put_frame;
 use crate::file::{HEADER, Kind, put_record, record_in, write_at};
+use crate::locks;
 use crate::rows::{Reader, invalid, put_varint};
 use crate::tokens::ALIGN;
 
@@ -154,6 +156,148 @@ impl Owned {
         count[8..16].copy_from_slice(&(!0u64).to_le_bytes());
         count[16..].copy_from_slice(&epoch.to_le_bytes());
         write_at(file, count_at(self.record), &count)
+    }
+}
+
+/// The extents this process writes: those idle, free for a writer to take,
+/// and the records of those a thread has taken.
+///
+/// An extent's owner byte belongs to the whole process (see the `locks`
+/// module): a thread's lock on a byte another thread of this process
+/// holds succeeds, and either thread's unlock lets go of it for both. So
+/// this process holds an extent's byte only while exactly one of its
+/// threads has the extent, and only that thread lets go of the byte. The
+/// fields are private to this module so every path keeps to that: a
+/// thread takes an extent only through [`own`](Self::own), which refuses
+/// one any thread has already, or [`take_idle`](Self::take_idle); and it
+/// lets go only of what it holds, a [`Claim`] or an [`Owned`], which
+/// cannot be copied.
+#[derive(Default)]
+pub(crate) struct Extents {
+    idle: Vec<Owned>,
+    busy: HashSet<u64>,
+}
+
+/// An extent a thread of this process took with [`Extents::own`]: its
+/// owner byte held, and marked busy. Not copied, so only the thread
+/// holding it lets go of it ([`Extents::let_go`]) or makes it the
+/// [`Owned`] it writes ([`Extents::owned`]).
+#[must_use]
+#[derive(Debug)]
+pub(crate) struct Claim {
+    record: u64,
+}
+
+impl Claim {
+    /// The extent's record.
+    pub fn record(&self) -> u64 {
+        self.record
+    }
+}
+
+impl Extents {
+    /// Whether a thread of this process has the extent at `record`, idle
+    /// or busy.
+    pub fn has(&self, record: u64) -> bool {
+        self.busy.contains(&record) || self.idle.iter().any(|owned| owned.record == record)
+    }
+
+    /// Whether this process has no extent at all.
+    pub fn is_empty(&self) -> bool {
+        self.idle.is_empty() && self.busy.is_empty()
+    }
+
+    /// The records of every extent this process has, idle or busy.
+    pub fn records(&self) -> impl Iterator<Item = u64> + '_ {
+        self.idle
+            .iter()
+            .map(|owned| owned.record)
+            .chain(self.busy.iter().copied())
+    }
+
+    /// Takes the extent at `record` of `file` for the caller: its owner
+    /// byte tried, never waited for, and the extent marked busy. `None`
+    /// when a thread of this process has it already, whose lock would not
+    /// keep this one out and whose unlock this one's would undo, or when
+    /// another process holds its byte.
+    pub fn own(&mut self, file: &File, record: u64) -> io::Result<Option<Claim>> {
+        if self.has(record) || !locks::lock(file, locks::owner(record), true, false)? {
+            return Ok(None);
+        }
+        self.busy.insert(record);
+        Ok(Some(Claim { record }))
+    }
+
+    /// Lets go of what `claim` took: the owner byte, then the mark, so no
+    /// thread takes the extent while this one still holds its byte.
+    pub fn let_go(&mut self, file: &File, claim: Claim) -> io::Result<()> {
+        let unlocked = locks::unlock(file, locks::owner(claim.record));
+        self.busy.remove(&claim.record);
+        unlocked
+    }
+
+    /// The extent `claim` took, as `bytes` (the file, mapped) hold it, to
+    /// write; on an error, let go of.
+    pub fn owned(&mut self, file: &File, bytes: &[u8], claim: Claim) -> io::Result<Owned> {
+        match Owned::of(bytes, claim.record) {
+            Ok(owned) => Ok(owned),
+            Err(error) => {
+                let _ = self.let_go(file, claim);
+                Err(error)
+            }
+        }
+    }
+
+    /// An idle extent, taken for a writer: marked busy.
+    pub fn take_idle(&mut self) -> Option<Owned> {
+        let owned = self.idle.pop()?;
+        self.busy.insert(owned.record);
+        Some(owned)
+    }
+
+    /// The idle extent at `record`, taken if `pick` chooses it: marked
+    /// busy.
+    pub fn take_idle_at(
+        &mut self,
+        record: u64,
+        pick: impl FnOnce(&Owned) -> bool,
+    ) -> Option<Owned> {
+        let at = self.idle.iter().position(|owned| owned.record == record)?;
+        if !pick(self.idle.get(at)?) {
+            return None;
+        }
+        let owned = self.idle.swap_remove(at);
+        self.busy.insert(owned.record);
+        Some(owned)
+    }
+
+    /// Gives back an extent the caller took, idle for the next writer.
+    pub fn give_back(&mut self, owned: Owned) {
+        self.busy.remove(&owned.record);
+        self.idle.push(owned);
+    }
+
+    /// Lets go of an extent the caller took, to write no more: its owner
+    /// byte, then its mark.
+    pub fn release(&mut self, file: &File, owned: Owned) -> io::Result<()> {
+        self.let_go(
+            file,
+            Claim {
+                record: owned.record,
+            },
+        )
+    }
+
+    /// The records of the idle extents, for tests.
+    #[cfg(test)]
+    pub fn idle_records(&self) -> Vec<u64> {
+        self.idle.iter().map(|owned| owned.record).collect()
+    }
+
+    /// Whether the extent at `record` is marked busy, for tests.
+    #[cfg(test)]
+    pub fn is_busy(&self, record: u64) -> bool {
+        self.busy.contains(&record)
     }
 }
 

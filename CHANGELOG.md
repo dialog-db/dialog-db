@@ -93,28 +93,40 @@ composites are equal exactly when they hold the same content, whatever
 order it was given in, and the natural `3` and the float `3.0` are one value
 in a composite as anywhere.
 
-A composite has one canonical encoding: a table of every key it and the
-maps nested in it use, once, then its body; a sequence of more than
-`SCAN_LIMIT` items carries a table of offsets, and every nested body says
-its size. Bytes that are not that encoding are refused, so equal composites
-have equal bytes and a composite is keyed in the tree by them. A
-`Composite` is a view, its buffer shared and the place of its body, so a
-nested composite, a field or an item is read where it sits: the length,
-a field by key, an item by index and iteration decode only what they
-return. Its identity is its merkle reference: for a map, a map under
-`composite:` from each key's reference to its value's (or to the `set:` of
-its values'); for a list, the `list:` of its items' references. No part of
-the layout enters it.
+A composite has one canonical encoding: a table of its atoms, every
+scalar it and the composites nested in it hold, keys and values alike,
+once, sorted by their bytes; then its body, in which every scalar is a
+reference to its place in the table (a slot that starts with type byte
+26, reserved for that and for nothing else) and a nested composite is its
+own body, which says its size. A sequence of more than `SCAN_LIMIT` items
+carries a table of offsets. Bytes that are not that encoding are refused,
+so equal composites have equal bytes and a composite is keyed in the
+tree by them. A `Composite` is a view, its buffer shared and the place of
+its body, so a nested composite, a field or an item is read where it
+sits: the length, a field by key, an item by index and iteration decode
+only what they return. Its identity is its merkle reference: for a map, a
+map under `composite:` from each key's reference to its value's (or to
+the `set:` of its values'); for a list, the `list:` of its items'
+references. No part of the layout enters it.
+
+An atom is a scalar in the bytes a tree key holds it in, so the
+single-file archive (`dialog-chronicle`) keeps a composite in a key as
+the token ids of its atoms and its body, and each atom as the token a
+key holding that scalar alone names: a text a thousand composites hold
+is stored once. A composite whose key holds only a prefix of it (one
+that spilled) is kept whole, and a composite is kept as its atoms only
+when that rebuilds the very key it was given. Blocks, sync and identity
+are unchanged: the atoms are shared inside the file only.
 
 What this changes for you:
 
 - `Value` has a new variant, `Composite`, keyed with type byte 22.
   `ValueDataType` (the query layer's `Type`) has `Composite`
   (`composite:`, any composite, the band every composite is keyed under),
-  and in its band `CompositeMap` (`composite:map`), `CompositeRecord`
-  (`composite:record`) and `CompositeList` (`composite:list`), which type
+  and in its band `Map` (`composite:map`), `CompositeRecord`
+  (`composite:record`) and `List` (`composite:list`), which type
   slots and never keys, as the sized number types do. A composite value's
-  `data_type()` is `CompositeMap` or `CompositeList`. A `match` over either
+  `data_type()` is `Map` or `List`. A `match` over either
   enum needs arms. `Value::Record` and `record:` are unchanged, identities
   included.
 - Build with `Composite::map`, `Composite::record` (`Composite::new` is the
@@ -125,8 +137,17 @@ What this changes for you:
   but the canonical ones with a `CompositeError` saying why;
   `Composite::to_bytes` gives them; `Composite::reference` gives the
   identity. Refused on construction: a composite as a key
-  (`CompositeError::CompositeKey`), NaN (`NotANumber`) and nesting past
-  `MAX_DEPTH`, 128 (`TooDeep`).
+  (`CompositeError::CompositeKey`), NaN (`NotANumber`), nesting past
+  `MAX_DEPTH`, 128 (`TooDeep`), and bytes past 4 GiB (`TooLarge`).
+- `Composite::split_atoms` splits a composite's bytes into its atoms and
+  its body, and `Composite::join_atoms` writes them back, for a store
+  that keeps scalars once. `ValueDataType::ATOM_REFERENCE` (26) is the
+  reserved reference byte; no type takes it. `key_value_is_spilled` says
+  whether a key holds its value only as a prefix.
+- A composite says its layout in the high four bits of its first byte;
+  this release writes layout 0, so no byte of its encoding moves, and
+  `Composite::from_bytes` refuses any other layout by name,
+  `CompositeError::UnsupportedLayout`.
 - `ValueView` has a `Composite` variant: a scanned row holding a composite
   binds in place, as every other value does.
 - An attribute declared `as: composite:`, `composite:map`,
@@ -148,6 +169,90 @@ which concurrent writers can leave half updated, or packed into opaque
 bytes no query could read and no two writers spelled alike. The notation
 keeps its syntax trees as maps and lists, and a composite that is read
 without decoding all of it is what lets a rule reach one node of one.
+
+### A block `append` acknowledged stays readable while threads of one process append to one file
+
+[#851](https://github.com/dialog-db/dialog-db/pull/851)
+
+Since 0.5.0, when several threads of one process appended to one
+Chronicle file while sync points freed extents and claims reused them, a
+block `append` had acknowledged could be missing afterwards: `get`
+returned `None` for it, on the handle that wrote it and after reopening
+the file. A thread gathering extents to fold in, on a snapshot taken
+before one of them was retired, took that extent as abandoned. A claim in
+the writer's turn then reused the same extent from the free list and
+handed it to a writer, because it marked the extent busy without looking
+whether a thread of this process held it already, and its lock on the
+extent's byte succeeded since POSIX locks belong to the process. When the
+gathering thread let go, it unmarked the extent and unlocked its byte
+under the writer. Another thread could then fold the extent in and retire
+it while the writer still wrote to it, and the writer gave the retired
+extent back to be written again: what went into it after that was listed
+by no slot.
+
+A thread of a process now takes an extent only if no other thread of the
+process has it, idle or busy, so the thread that marked an extent and
+took its byte is the only one that lets go of either. The claim passes
+over an extent a stale gather holds and takes the next free one, or a new
+one at the file's end.
+
+What this changes for you:
+
+- Appends from many threads of one process to one file no longer lose
+  blocks. Nothing in the API changes.
+- Another process can no longer take an extent a writer of this process
+  holds, which the unlock above allowed: two processes could have written
+  one extent.
+- A claim that finds the only free extent held by a stale gather grows
+  the file by one extent instead of waiting for it.
+
+Why: an extent's owner byte cannot keep threads of one process apart, so
+the process's own record of who has each extent has to, and it has to
+refuse a second taker rather than let two share one mark that either can
+erase.
+
+### A rule over an attribute a deductive rule derives from what a commit writes fires for what is derived
+
+[#791](https://github.com/dialog-db/dialog-db/pull/791), following
+[#802](https://github.com/dialog-db/dialog-db/pull/802).
+
+Since 0.5.0 an inductive rule is evaluated seeded, with each row of a
+commit bound into the premises that read it, unless what it reads
+changed derivedly. An attribute counted as derived only when no row of
+the commit wrote it. So when a commit wrote an attribute that a
+deductive rule also derives from something the commit touched, the rule
+over it was seeded with the rows written and missed what was derived
+from them: the kind of an event mirroring the one written, a value
+derived beside the one written at the same entity, or a value derived
+from another attribute written in the same commit, at another entity.
+Such an attribute now counts as derived, written or not, and a rule
+premised on it is evaluated in full.
+
+What this changes for you:
+
+- A rule premised on an attribute that a deductive rule derives from
+  what a commit touched fires for every match the commit made, derived
+  ones included. The firings 0.5.0 missed now happen.
+- Evaluated in full, such a rule also fires for matches the commit did
+  not make: a command is issued again for every entity it matches, and
+  a durable head is written again where it differs from what the
+  entity holds, over a later write by hand. This is what a rule over an
+  attribute that changed only derivedly already did.
+- A commit writing such an attribute costs what a full evaluation of
+  the rule costs. One row written under a rule over 1,000 events whose
+  kind a deductive rule restates from itself: 283M instructions in
+  0.5.0, 379M now; over 10,000 events, 2.79G and 3.76G. Without the
+  deductive rule the same commit costs 4.3M and 5.6M: reading a derived
+  attribute already evaluated the deductive rule over the relation.
+- Rules over attributes no deductive rule derives from what a commit
+  touched are seeded as before.
+
+Why: a seed finds the matches a row is part of, at its value and its
+entity, and a fact derived from the row is another fact. Narrowing the
+full evaluation to deductive rules that can derive for another entity
+than the one they read is not sound: a value derived at the entity
+read, or derived from another attribute written beside it, is missed
+as well.
 
 ### A concept read copies no inner evaluation, and a concept's descriptor clones without copying its fields
 
@@ -173,7 +278,6 @@ What this changes for you:
 
 Why: copying that stream was 28% of the instructions of a single-entity
 read of a rule-derived concept, more than the read's tree scans.
-
 ### A poll scopes its diff to the cover as it stands, copying none of it
 
 [#844](https://github.com/dialog-db/dialog-db/pull/844).
@@ -595,6 +699,16 @@ and names the rule.
   composite cannot be read by an older release, which takes a key with type
   byte 22 for corruption: once a replica writes one, every replica reading
   that space needs this release. Nothing an embedder has to run.
+  A single-file archive keeps a composite's atoms as tokens of their own;
+  a file this release writes holding a composite is read by no older
+  release, as the space is not. Nothing in a file an older release wrote
+  is rewritten.
+- A rule over an attribute a deductive rule derives from what a commit
+  writes (#791): nothing stored changes shape and nothing is rewritten on
+  upgrade, and an older release reads everything this one writes. What
+  induction writes can differ: the firings 0.5.0 missed happen from
+  the first commit after the upgrade, and are not replayed for commits
+  made before it. An embedder runs nothing.
 - A rule an older release stored spells its attributes under picks (0.3 to 0.5) or under the older `cardinality` (0.2), and sits under an
   identity that hashed them. This release reads a rule body only in its
   own format and only under the identity it gives it now,
