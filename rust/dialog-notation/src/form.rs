@@ -502,12 +502,22 @@ pub(crate) fn atom(token: &str) -> Form {
     }
 }
 
+/// Whether a token is a number: digits, a fraction after a `.`, and an
+/// exponent after an `e` or `E`, signed or not, as a float is printed.
 fn is_number(token: &str) -> bool {
-    let digits = token.strip_prefix('-').unwrap_or(token);
-    let mut parts = digits.splitn(2, '.');
-    let whole = parts.next().unwrap_or_default();
     let all_digits = |part: &str| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit());
-    all_digits(whole) && parts.next().is_none_or(all_digits)
+    let digits = token.strip_prefix('-').unwrap_or(token);
+    let (mantissa, exponent) = match digits.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, Some(exponent)),
+        None => (digits, None),
+    };
+    let mut parts = mantissa.splitn(2, '.');
+    let whole = parts.next().unwrap_or_default();
+    all_digits(whole)
+        && parts.next().is_none_or(all_digits)
+        && exponent.is_none_or(|exponent| {
+            all_digits(exponent.strip_prefix(['+', '-']).unwrap_or(exponent))
+        })
 }
 
 fn form(tokens: &[Token], at: &mut usize, depth: usize) -> Result<(Form, Mark), Misread> {
