@@ -261,7 +261,7 @@ where
     // A tree node the replica lacks (after a fast-forward pull only the
     // revision pointer is local) hydrates through the env's load.
     let store = erased(env);
-    let tree = Index::at(view.catalog(), NodeHash::from(*revision.tree.hash()));
+    let tree = Index::at(view.subject(), NodeHash::from(*revision.tree.hash()));
     Ok(tree.content_size(&store, hash.as_bytes()).await?)
 }
 
@@ -294,7 +294,7 @@ where
     // A tree node the replica lacks (after a fast-forward pull only the
     // revision pointer is local) hydrates through the env's load.
     let store = erased(env);
-    let tree = Index::at(view.catalog(), NodeHash::from(*revision.tree.hash()));
+    let tree = Index::at(view.subject(), NodeHash::from(*revision.tree.hash()));
     Ok(tree.get_blob(&store, hash.as_bytes()).await?.is_some())
 }
 
@@ -783,7 +783,7 @@ mod tests {
         let store = &operator;
         let revision = branch.revision().expect("the import minted a revision");
         let tree = crate::Index::at(
-            branch.archive().index(),
+            branch.subject(),
             super::NodeHash::from(*revision.tree.hash()),
         );
         assert_eq!(

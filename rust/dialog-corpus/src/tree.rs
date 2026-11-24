@@ -928,8 +928,12 @@ impl CorpusExt for Corpus {
         while let Some(entry) = stream.next().await {
             let entry = entry?;
             if let State::Added(datum) = &entry.value {
-                let spilled =
-                    fetch_spilled(&storage, &self.catalog().archive(), &entry.key).await?;
+                let spilled = fetch_spilled(
+                    &storage,
+                    &ArchiveScope::new(self.subject().clone()),
+                    &entry.key,
+                )
+                .await?;
                 records.push(Fact::from_key_datum_with_value(&entry.key, datum, spilled)?);
             }
         }
@@ -1033,8 +1037,8 @@ impl CorpusExt for Corpus {
     {
         let tree = self;
         // Spilled value blocks are fetched by reference from the blobs of
-        // the archive the tree's catalog belongs to.
-        let archive = tree.catalog().archive();
+        // the archive of the subject whose tree this is.
+        let archive = ArchiveScope::new(tree.subject().clone());
         let storage = store;
         try_stream! {
             // Both the scan range and the per-entry match must be built under
@@ -1152,8 +1156,8 @@ impl CorpusExt for Corpus {
     {
         let tree = self;
         // Spilled value blocks are fetched by reference from the blobs of
-        // the archive the tree's catalog belongs to.
-        let archive = tree.catalog().archive();
+        // the archive of the subject whose tree this is.
+        let archive = ArchiveScope::new(tree.subject().clone());
         let storage = store;
         try_stream! {
             // Both the scan range and the per-entry match must be built under
@@ -1652,7 +1656,7 @@ where
                         if let State::Added(current_element) = &candidate.value {
                             let spilled = fetch_spilled(
                                 storage,
-                                &transient.catalog().archive(),
+                                &ArchiveScope::new(transient.subject().clone()),
                                 &candidate.key,
                             )
                             .await?;
@@ -1880,7 +1884,8 @@ where
 
 #[cfg(test)]
 mod spill_cache_tests {
-    use dialog_search_tree::helpers::test_catalog;
+    use dialog_effects::archive::prelude::ArchiveScope;
+    use dialog_search_tree::helpers::test_subject;
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -1915,7 +1920,7 @@ mod spill_cache_tests {
             })
             .collect();
         let mut delta = ArchiveDelta::zero();
-        let mut tree = Corpus::empty_in(test_catalog());
+        let mut tree = Corpus::empty_in(test_subject());
         tree.apply(
             &store,
             &mut delta,
@@ -1932,7 +1937,7 @@ mod spill_cache_tests {
 
         for owned in [false, true] {
             // A fresh spill cache and node cache: every spilled block reads.
-            let cold = Corpus::at(test_catalog(), tree.root().clone());
+            let cold = Corpus::at(test_subject(), tree.root().clone());
             store.reset();
             let values: Vec<Value> = if owned {
                 cold.scan_owned(store.clone(), spill_cache(), selector.clone())
@@ -2026,7 +2031,7 @@ mod spill_cache_tests {
         .collect();
         let store = CountingBlocks::new();
         let mut delta = ArchiveDelta::zero();
-        let mut tree = Corpus::empty_in(test_catalog());
+        let mut tree = Corpus::empty_in(test_subject());
         tree.apply(
             &store,
             &mut delta,
@@ -2041,7 +2046,7 @@ mod spill_cache_tests {
         store.flush(&mut delta);
 
         let read = |selector: Selector<Constrained>| {
-            let tree = Corpus::at(test_catalog(), tree.root().clone());
+            let tree = Corpus::at(test_subject(), tree.root().clone());
             let store = store.clone();
             async move {
                 let mut values: Vec<Value> = tree
@@ -2114,7 +2119,7 @@ mod spill_cache_tests {
         let value = Value::String("q".repeat(inline_n + 1));
         let store = CountingBlocks::new();
         let mut delta = ArchiveDelta::zero();
-        let mut tree = Corpus::empty_in(test_catalog());
+        let mut tree = Corpus::empty_in(test_subject());
         let fact = Fact {
             the: "doc/body".parse().unwrap(),
             of: "doc:1".parse().unwrap(),
@@ -2145,9 +2150,11 @@ mod spill_cache_tests {
         let cache = spill_cache();
 
         let before = store.reads();
-        let first = fetch_spilled_cached(&store, &test_catalog().archive(), &cache, &key).await?;
+        let first =
+            fetch_spilled_cached(&store, &ArchiveScope::new(test_subject()), &cache, &key).await?;
         let after_miss = store.reads();
-        let second = fetch_spilled_cached(&store, &test_catalog().archive(), &cache, &key).await?;
+        let second =
+            fetch_spilled_cached(&store, &ArchiveScope::new(test_subject()), &cache, &key).await?;
         let after_hit = store.reads();
 
         assert_eq!(first, Some(value.to_bytes()), "miss returns the block");
@@ -2165,8 +2172,9 @@ mod spill_cache_tests {
     async fn it_matches_the_uncached_fetch() -> anyhow::Result<()> {
         let (store, key, _value) = spilled_setup().await;
         let cache = spill_cache();
-        let cached = fetch_spilled_cached(&store, &test_catalog().archive(), &cache, &key).await?;
-        let uncached = fetch_spilled(&store, &test_catalog().archive(), &key).await?;
+        let cached =
+            fetch_spilled_cached(&store, &ArchiveScope::new(test_subject()), &cache, &key).await?;
+        let uncached = fetch_spilled(&store, &ArchiveScope::new(test_subject()), &key).await?;
         assert_eq!(cached, uncached);
         assert!(cached.is_some());
         Ok(())
@@ -2178,7 +2186,7 @@ mod spill_cache_tests {
     async fn it_returns_none_for_an_inline_key() -> anyhow::Result<()> {
         let store = CountingBlocks::new();
         let mut delta = ArchiveDelta::zero();
-        let mut tree = Corpus::empty_in(test_catalog());
+        let mut tree = Corpus::empty_in(test_subject());
         let fact = Fact {
             the: "user/name".parse().unwrap(),
             of: "user:1".parse().unwrap(),
@@ -2197,11 +2205,11 @@ mod spill_cache_tests {
         let key = EntityKey::from_fact(&fact, &dialog_search_tree::Manifest::default()).into_key();
         let cache = spill_cache();
         assert_eq!(
-            fetch_spilled_cached(&store, &test_catalog().archive(), &cache, &key).await?,
+            fetch_spilled_cached(&store, &ArchiveScope::new(test_subject()), &cache, &key).await?,
             None
         );
         assert_eq!(
-            fetch_spilled(&store, &test_catalog().archive(), &key).await?,
+            fetch_spilled(&store, &ArchiveScope::new(test_subject()), &key).await?,
             None
         );
         Ok(())
@@ -2437,7 +2445,7 @@ mod selector_range_tests {
 
 #[cfg(test)]
 mod corrupt_row_tests {
-    use dialog_search_tree::helpers::test_catalog;
+    use dialog_search_tree::helpers::test_subject;
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -2462,7 +2470,7 @@ mod corrupt_row_tests {
     async fn poisoned_tree() -> anyhow::Result<(Corpus, Blocks)> {
         let store = Blocks::new();
         let mut delta = ArchiveDelta::zero();
-        let mut tree = Corpus::empty_in(test_catalog());
+        let mut tree = Corpus::empty_in(test_subject());
 
         let valid: Vec<Instruction> = ["user:alice", "user:bob", "user:carol"]
             .into_iter()

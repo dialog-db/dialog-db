@@ -238,7 +238,7 @@ async fn main() {
     println!();
 
     // Build in transaction-sized batches, tracking write amplification.
-    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_subject());
     let mut delta = Delta::zero();
     let mut written_nodes = 0usize;
     let mut written_bytes = 0u64;
@@ -297,7 +297,7 @@ async fn main() {
     // Point lookups on a cold tree (fresh cache), counting storage reads.
     let mut rng = Rng::new(7);
     let cold = Tree::at(
-        dialog_search_tree::helpers::test_catalog(),
+        dialog_search_tree::helpers::test_subject(),
         tree.root().clone(),
     );
     let fresh = dialog_search_tree::helpers::Holding::new(&storage);
@@ -320,7 +320,7 @@ async fn main() {
 
     // Bounded range scans (~one entity's facts each) on a cold tree.
     let cold = Tree::at(
-        dialog_search_tree::helpers::test_catalog(),
+        dialog_search_tree::helpers::test_subject(),
         tree.root().clone(),
     );
     let fresh = dialog_search_tree::helpers::Holding::new(&storage);
@@ -361,11 +361,11 @@ async fn main() {
     flush(&mut delta, &storage).await;
 
     let old = Tree::at(
-        dialog_search_tree::helpers::test_catalog(),
+        dialog_search_tree::helpers::test_subject(),
         tree.root().clone(),
     );
     let new = Tree::at(
-        dialog_search_tree::helpers::test_catalog(),
+        dialog_search_tree::helpers::test_subject(),
         modified.root().clone(),
     );
     let fresh = dialog_search_tree::helpers::Holding::new(&storage);

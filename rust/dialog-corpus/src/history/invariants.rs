@@ -7,7 +7,7 @@ use crate::tree::{Corpus, CorpusExt as _, SpillCache};
 use crate::{Cardinality, Changes, Entity, Fact, Instruction, Relation, Update as _, Value};
 use anyhow::Result;
 use dialog_search_tree::helpers::Blocks;
-use dialog_search_tree::helpers::test_catalog;
+use dialog_search_tree::helpers::test_subject;
 use futures_util::{TryStreamExt as _, stream};
 
 use super::{Edition, HistorySelector, Origin, TreeHistory, Version};
@@ -72,7 +72,7 @@ async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Resul
         is: Value::UnsignedInt(value.into()),
         cause: None,
     };
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     apply(
         &mut tree,
         &store,
@@ -154,7 +154,7 @@ async fn a_claim_succeeded_within_its_own_batch_leaves_no_standing_record() -> R
         is: Value::UnsignedInt(value.into()),
         cause: None,
     };
-    let mut tree = Corpus::empty_in(test_catalog());
+    let mut tree = Corpus::empty_in(test_subject());
     apply(
         &mut tree,
         &store,
@@ -236,7 +236,7 @@ async fn copies_of_a_head_land_the_same_tree() -> Result<()> {
             .len())
     }
 
-    let mut base = Corpus::empty_in(test_catalog());
+    let mut base = Corpus::empty_in(test_subject());
     apply(&mut base, &store, version(0), vec![assert_all(1)]).await?;
 
     // A set head over a cell holding nothing of the value.

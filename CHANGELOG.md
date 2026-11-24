@@ -56,6 +56,76 @@ What this changes for you:
 Why: composite values (#843) made a map or a list a constant a rule can
 hold, and a rule that can be built and run should run once it is stored.
 
+### A tree names the subject whose nodes it reads, and holds no reader
+
+[#785](https://github.com/dialog-db/dialog-db/pull/785),
+[design/tree-node-reads.md](./design/tree-node-reads.md), a follow-up to
+[#755](https://github.com/dialog-db/dialog-db/pull/755); the
+[journal](./design/tree-node-reads/journal.md) records the two decisions
+and the inventory behind them.
+
+A tree is a root and a `Reading`: the subject whose nodes it reads, the
+priority its hydrations rank at, and whether it reads only this replica.
+Every operation is handed the environment it reads through and performs
+`nodes::Read` and `nodes::Preload` on it; nothing in the tree crate keeps
+an environment. The node requests name a subject instead of a catalog,
+and which block catalog a node is kept in, when it is kept as a block, is
+the translation layer's business.
+
+What this changes for you:
+
+- `Accessor` is gone. `Reading` carries the subject (`Reading { subject,
+  priority, local }`, `Reading::new(subject)`, `.ranked(priority)`,
+  `.locally()`), builds the requests (`read(&hash)`, `preload(&hash)`), and
+  reads a node a tree links to with `node(env, &hash)`, where absence is
+  an error. `Accessor::new(env, &catalog).get_node(&hash)` becomes
+  `tree.reading().node(env, &hash)`, or `Reading::new(subject).node(env,
+  &hash)`; a forced local read becomes `nodes::Read::new(subject,
+  hash).locally().perform(env)`.
+- The free `dialog_search_tree::load_node(env, &catalog, &hash)` is gone:
+  `nodes::Read::new(subject, hash).perform(env)` is the same read, `None`
+  for a node nobody can reach.
+- `nodes::Read`, `nodes::Preload` and `nodes::Write` carry `subject:
+  Subject` where they carried `catalog: CatalogScope`, and their `new`
+  takes the subject. `Read::load()` still hands the translation layer the
+  block load, in the subject's index catalog, and
+  `dialog_search_tree::nodes::blocks_of(&subject)` names that catalog for
+  a store that answers the node requests over blocks of its own, as the
+  single-file archive (`dialog-chronicle`) does.
+- The trees take a `Subject` where they took a `CatalogScope`:
+  `PersistentTree::empty_in`, `empty_with_manifest` and `at`,
+  `TransientTree::new`, `empty_with_manifest`, `with_manifest` and
+  `stitch`, `HitchhikerTree::empty`, and above them
+  `TreeHistory::from_root` and `empty` and
+  `dialog_corpus::tree::distribution::capture`. `catalog()` is
+  `subject()` on each tree and on `CorpusWriter`;
+  `PersistentTree::reading()` returns `&Reading`, and `TransientTree`
+  has one too.
+- An edit reads as the tree it was opened from, and the tree it persists
+  reads that way too. `tree.locally().edit()` reads only this replica and
+  fails with `DialogSearchTreeError::Node` on a node it lacks instead of
+  hydrating it; `tree.ranked(priority).edit()` ranks its hydrations at
+  that priority; `HitchhikerTree::open` inherits the same way. Before,
+  every edit read on demand and could hydrate, and the tree it persisted
+  read on demand whatever it was opened from.
+- For tests, `dialog_search_tree::helpers::test_subject()` names the test
+  trees' subject and `Blocks::subject()` a block store's;
+  `test_catalog()` is the block catalog beneath them.
+
+Nothing a replica stores or syncs changes: a node is still kept as a block
+in its subject's `index` catalog, and no data is rewritten.
+
+Why: after #755 the `Accessor` no longer owned the cache, and what was
+left bundled an environment with a catalog and a reading policy, which
+put a storage handle back into the tree's vocabulary and gave callers
+outside the crate a second way to read a node. The catalog name was
+always `index`, so the part of it that mattered was the subject; an
+environment serving several subjects (a peer, a query over lines of
+several repositories, a push reading one tree locally and forwarding
+another's blocks) routes, caches and hydrates by it. The edit's reading
+policy was dropped by accident, so a local tree could hydrate the nodes
+its edit rewrote.
+
 ### A standing fold steps a group's value instead of folding the group again
 
 [#856](https://github.com/dialog-db/dialog-db/pull/856). The design it follows is

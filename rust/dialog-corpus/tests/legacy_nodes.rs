@@ -54,7 +54,7 @@ async fn it_reads_an_fact_tree_written_in_the_legacy_layout() -> anyhow::Result<
     store.store(spill.into());
 
     let tree = Corpus::at(
-        dialog_search_tree::helpers::test_catalog(),
+        dialog_search_tree::helpers::test_subject(),
         root.expect("a root line"),
     );
     for attribute in ["fixture/name", "fixture/bio"] {

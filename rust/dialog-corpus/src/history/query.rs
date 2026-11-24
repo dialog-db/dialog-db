@@ -1,5 +1,6 @@
 use crate::reads::*;
-use dialog_effects::archive::prelude::CatalogScope;
+use dialog_capability::Subject;
+use dialog_effects::archive::prelude::ArchiveScope;
 use std::ops::Bound;
 use std::str::FromStr;
 
@@ -104,8 +105,8 @@ where
     /// skip table construction of [`extend_skips`](super::extend_skips))
     /// that re-walk the same spine are answered from whatever node cache the
     /// store keeps.
-    pub fn from_root(catalog: CatalogScope, root: &Blake3Hash, store: S) -> Self {
-        Self::new(Corpus::at(catalog, NodeHash::from(*root)), store)
+    pub fn from_root(subject: Subject, root: &Blake3Hash, store: S) -> Self {
+        Self::new(Corpus::at(subject, NodeHash::from(*root)), store)
     }
 
     /// Attach a shared verified-record memo (see the `records` field).
@@ -185,7 +186,7 @@ where
                 let (key, datum) = entry?;
                 let spilled = fetch_spilled_cached(
                     &self.store,
-                    &self.tree.catalog().archive(),
+                    &ArchiveScope::new(self.tree.subject().clone()),
                     &self.spill,
                     &key,
                 )
@@ -201,8 +202,8 @@ where
     /// Read history over no tree at all — the shape of a branch with no
     /// revision. There is no root to read records from, so every lookup
     /// resolves to nothing without touching storage.
-    pub fn empty(catalog: CatalogScope, store: S) -> Self {
-        Self::new(Corpus::empty_in(catalog), store)
+    pub fn empty(subject: Subject, store: S) -> Self {
+        Self::new(Corpus::empty_in(subject), store)
     }
 
     /// Every record in the history region, in key order (ascending by
@@ -241,7 +242,7 @@ where
             if let State::Added(datum) = entry.value {
                 let spilled = fetch_spilled_cached(
                     &self.store,
-                    &self.tree.catalog().archive(),
+                    &ArchiveScope::new(self.tree.subject().clone()),
                     &self.spill,
                     &entry.key,
                 )
