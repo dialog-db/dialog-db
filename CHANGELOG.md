@@ -14,6 +14,50 @@ says how to cut a release.
 
 ## Unreleased
 
+### Every identity generation a release computed is named, and the current one is a constant
+
+`dialog_query::migration` now says, for attributes, concepts and rules,
+which identity each release computed and what it hashed, and exports a
+function for each generation an embedder can reproduce, named by its
+generation, beside `IDENTITY_GENERATION`, the generation this release
+computes. Generation 0 is 0.1.0's (`attribute_uri_v0`,
+`concept_identity_v0`), generation 1 is 0.3.0 to 0.5.0's
+(`attribute_uri_v1`, `concept_identity_v1`), and generation 2 is this
+release's (`attribute_uri_v2`, `concept_identity_v2`,
+`rule_identity_v2`). 0.2.0 computed identities of its own, which nothing
+reproduces; no embedder is known to hold them. Rule identities of
+generations 0 and 1 are not exported: no fact holds a rule's identity as
+a value, and `Branch::upgrade_rules` finds an earlier rule by the entity
+it is stored under.
+
+What this changes for you:
+
+- New: `migration::IDENTITY_GENERATION` (2), `attribute_uri_v2`,
+  `concept_identity_v2`, `rule_identity_v2` (taking a `DeductiveRule` or
+  an `InductiveRule` through `migration::AnyRule`, and returning `None`
+  for a rule with no stored form). They return what `to_uri`, `this` and
+  `try_this` return today, and keep returning it when a later release
+  moves identities.
+- New: `migration::picked_attribute_uri_v1` and
+  `picked_attribute_reference_v1`, the identity 0.3.0 to 0.5.0 gave an
+  attribute read under `max`, `min` or `top` (a listed `as` with no pick
+  read as `top`) on its own, not through a concept. It was computed
+  privately for `concept_reference_v1` and is now public.
+- An embedder that writes dialog identities into its own facts records
+  `IDENTITY_GENERATION` beside them, and when a release reports another,
+  rewrites each value from the earlier generation's identity to the
+  current one. The module documentation has the table of releases and
+  generations, and an example.
+- The documentation of `attribute_uri_v0` and `concept_identity_v0` said
+  they reproduce 0.2's identities. They reproduce 0.1.0's; the functions
+  compute what they always did.
+
+Why: an embedder rekeys its own facts when dialog's identities move, and
+had no way to tell that they had moved, nor a name for each generation
+it had to compute the old identity in. A test now pins this
+generation's identities beside the constant, so moving one means bumping
+it.
+
 ### A rule that holds a pattern is stored, in rule body format 5
 
 Stacked on [#778](https://github.com/dialog-db/dialog-db/pull/778); the
@@ -809,8 +853,13 @@ and names the rule.
   each, read by a field with a selective aggregator. When to run the upgrade,
   once after a full replication or on every pull, is the embedder's
   decision, as before.
+- Identity generations: nothing stored changes, no identity is
+  computed differently and nothing is rewritten on upgrade. An older
+  release reads everything this one writes as it did. An embedder runs
+  nothing for this; the constant and the generation 2 functions are for
+  the rewrite it runs when identities move.
 - The upgrade also moves a `dialog.concept/transient` marker keyed by a
-  concept's 0.3 to 0.5 identity, as it moves one keyed by its 0.2
+  concept's 0.3 to 0.5 identity, as it moves one keyed by its 0.1.0
   identity. An application that keyed its own facts by an attribute or
   concept identity moves them with `dialog_query::migration`.
 - An older release cannot read what this one writes: a rule body in
