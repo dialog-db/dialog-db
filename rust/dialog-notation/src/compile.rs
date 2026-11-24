@@ -236,6 +236,27 @@ enum Slot {
     /// The row says the value this pattern is, with what its variables
     /// were bound to.
     Built(Pattern),
+    /// The row says what the record this variable was bound to holds
+    /// under this key.
+    Field(String, String),
+}
+
+/// What the record `record` was bound to in `conclusion` holds under
+/// `key`.
+fn within(conclusion: &ConceptConclusion, record: &str, key: &str) -> Result<Value, Error> {
+    let value = conclusion
+        .source()
+        .lookup(&Variable::<Any>::var(record))
+        .and_then(|binding| binding.content())
+        .map_err(|error| Error::Refused(format!("a match binds no {record}: {error}")))?;
+    let entries = crate::data::entries(&value)?.ok_or_else(|| {
+        Error::Refused(format!(
+            "{record} was bound to {value:?}, which is no record"
+        ))
+    })?;
+    crate::data::field(&entries, key)
+        .cloned()
+        .ok_or_else(|| Error::Refused(format!("the record {record} holds no {key}")))
 }
 
 /// A query: what to select, and how a match reads as a row.
@@ -269,6 +290,7 @@ impl Query {
             Slot::Built(pattern) => pattern
                 .build(conclusion.source())
                 .ok_or_else(|| Error::Refused("a match leaves a part of a struct unbound".into())),
+            Slot::Field(record, key) => within(conclusion, record, key),
         };
         self.fields
             .iter()
@@ -355,6 +377,9 @@ impl Query {
                 .build(conclusion.source())
                 .map(|value| written(&value))
                 .ok_or_else(|| Error::Refused("a match leaves a part of a struct unbound".into())),
+            Slot::Field(record, key) => {
+                within(conclusion, record, key).map(|value| written(&value))
+            }
         };
         let mut operand = Parameters {
             items: vec![fill(&self.entity)?],
@@ -428,6 +453,10 @@ pub(crate) fn written(value: &Value) -> Syntax {
 /// describes. Dialog-DB reserves `dialog.` for what it writes itself, so
 /// `dialog.meta/description` cannot be written from here.
 pub const DESCRIBED: &str = "syntax.meta";
+
+/// The field a report's row of several columns is concluded under, as
+/// one record.
+const RECORD: &str = "row";
 
 /// The namespace of the relations a report derives, each named by the
 /// reference of its site.
@@ -1817,6 +1846,48 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
             key: None,
         });
     }
+    // Two columns beside the entity are two fields of it, and two rows
+    // of one entity would be read back crossed, a field of one beside a
+    // field of the other. The row is concluded as one record too, which
+    // is one value, and read back from it. A query's row is one already.
+    let recorded = columns.len() > 1 && read.domain != crate::select::ROW;
+    if recorded {
+        for column in &columns {
+            scope
+                .names
+                .insert(column.label.clone(), column.label.clone());
+        }
+        let record = Syntax::Map(
+            columns
+                .iter()
+                .map(|column| {
+                    (
+                        Syntax::Reference(column.label.clone()),
+                        Syntax::Variable(column.label.clone()),
+                    )
+                })
+                .collect(),
+        );
+        columns.push(Field {
+            label: RECORD.into(),
+            attribute: format!("{relation}/{RECORD}"),
+            term: Term::Struct(record),
+            kind: None,
+            pick: None,
+            cardinality: None,
+            listed: Vec::new(),
+            layer: None,
+            key: None,
+        });
+        let read_back = |slot: Slot| match slot {
+            Slot::Bound(name) if name != "this" => Slot::Field(RECORD.into(), name),
+            other => other,
+        };
+        slots = slots
+            .into_iter()
+            .map(|(label, key, slot)| (label, key.map(read_back), read_back(slot)))
+            .collect();
+    }
     scope.body(rule)?;
     let head = Read {
         domain: relation,
@@ -1828,7 +1899,9 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
     let mut terms = Map::new();
     terms.insert("this".into(), variable("this"));
     for column in &head.fields {
-        terms.insert(column.label.clone(), variable(&column.label));
+        if !recorded || column.label == RECORD {
+            terms.insert(column.label.clone(), variable(&column.label));
+        }
     }
     let select = json!({ "assert": concept.clone(), "where": terms });
     Ok(Step::Query(Box::new(Query {
