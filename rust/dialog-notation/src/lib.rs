@@ -89,6 +89,18 @@ pub use view::tree::{
 pub use view::{Attribute, CALLED, Element, Event, Input, Node, Piece};
 pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};
 
+/// A form whose expansion does not end, as the expander refused it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Endless {
+    /// The form that was to be rewritten once more.
+    pub form: String,
+    /// The bound it went past: so many steps, so deep, or so many parts.
+    pub past: String,
+    /// The definitions it was rewritten through, each by its pattern, in
+    /// the order first met.
+    pub through: Vec<String>,
+}
+
 /// Why a document was not read, expanded or compiled.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Error {
@@ -111,8 +123,7 @@ pub enum Error {
     /// each by its pattern: its expansion would never end.
     #[error("{form} expands to itself again, through {through}", form = .0, through = .1.join(", then "))]
     Cycle(String, Vec<String>),
-    /// A form is still expanding past a bound the expander keeps, the
-    /// second part, through the definitions named, each by its pattern.
-    #[error("{form} is still expanding past {past}, through {through}", form = .0, past = .1, through = .2.join(", then "))]
-    Endless(String, String, Vec<String>),
+    /// A form is still expanding past a bound the expander keeps.
+    #[error("{} is still expanding past {}, through {}", .0.form, .0.past, .0.through.join(", then "))]
+    Endless(Box<Endless>),
 }

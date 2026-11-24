@@ -104,8 +104,26 @@ pub const ONCE: &str = "once";
 const HEAD_WORDS: [&str; 3] = ["assert", "retract", "report"];
 
 /// How many times one form may be rewritten on its way to the kernel,
-/// counted along the path from the top-level form.
-pub(crate) const STEPS: usize = 64;
+/// counted along the path from the top-level form. The prelude and every
+/// test of the crate rewrite a form at most twice; one rewritten 32
+/// times is one whose expansion does not end. It is below what a form
+/// that grows a level each step reaches before it is too deep to be
+/// named: a level of syntax is up to three of a composite value, which
+/// nests 128 deep.
+pub(crate) const STEPS: usize = 32;
+
+/// How deep a tree may nest, given to the expander or made by it: as
+/// deep as a composite value nests, and a level of syntax is at least
+/// one of a composite, so nothing past it can be named or kept, and the
+/// stages that walk a tree are never given one deeper.
+pub(crate) const DEEPEST: usize = 2 * crate::form::DEPTH;
+
+/// What one form may expand to is at most sixteen times the parts of
+/// the top-level form it is in, and 1024 more: a template that writes a
+/// variable twice doubles a form each step, and is refused past this
+/// long before the steps run out.
+const GROWTH: usize = 16;
+const SPARE: usize = 1024;
 
 /// What the two writes were called while a mark told what is kept from
 /// what holds one round. Unrefused, either would be read as a name that
@@ -672,8 +690,8 @@ fn open(tree: &Syntax) -> (Syntax, bool) {
 /// called in a template names its concept and its view first, and those
 /// two are not counted. `...` and
 /// what follows it are the parts not named, and no part of their own.
-fn valid(tree: &Syntax) -> Result<(), (Syntax, Error)> {
-    let refuse = |why: String| Err((tree.clone(), Error::Refused(why)));
+fn valid(tree: &Syntax) -> Result<(), Box<(Syntax, Error)>> {
+    let refuse = |why: String| Err(Box::new((tree.clone(), Error::Refused(why))));
     match tree {
         Syntax::Reference(name) if name.starts_with(REST) && name != REST => refuse(format!(
             "`{name}`: `...` stands apart from what follows it, `... {}`",
@@ -862,6 +880,16 @@ pub struct Expander {
     reporting: bool,
     /// Whether the premise being expanded is one that must not hold.
     negating: bool,
+    /// The forms rewritten on the way to the one being expanded, from
+    /// the top-level form, each with the pattern of the definition that
+    /// rewrote it: a form met again on it is a cycle.
+    path: Vec<(Syntax, String)>,
+    /// The pattern of the definition the last form asked about was
+    /// rewritten by.
+    answered: String,
+    /// How many parts one form of the top-level tree being expanded may
+    /// expand to.
+    largest: usize,
 }
 
 impl Expander {
@@ -979,7 +1007,17 @@ impl Expander {
         // is expanded once a definition: what is read is what any of
         // them reads. Within one rule a form that recurs is the same
         // definition's each time.
-        if let Err((part, error)) = valid(tree) {
+        let (depth, parts) = tree.extent();
+        if depth > DEEPEST {
+            return self.about(tree, |_| {
+                Err(Error::Refused(format!(
+                    "a form nested {depth} deep: the expander takes {DEEPEST}"
+                )))
+            });
+        }
+        self.largest = SPARE.saturating_add(parts.saturating_mul(GROWTH));
+        if let Err(refused) = valid(tree) {
+            let (part, error) = *refused;
             return self.about(&part, |_| Err(error));
         }
         if let Some(rules) = self.query_forms(tree)? {
@@ -1438,6 +1476,7 @@ impl Expander {
         // `...` adds nothing to one and is taken off.
         let (said, _) = open(tree);
         let mut found: Vec<(Syntax, Option<Signature>)> = Vec::new();
+        let mut patterns: Vec<String> = Vec::new();
         let mut least = usize::MAX;
         for rule in &self.syntax {
             if let (Answer::Syntax(template), Some(bindings)) =
@@ -1457,11 +1496,13 @@ impl Expander {
                 if left < least {
                     least = left;
                     found.clear();
+                    patterns.clear();
                 }
                 let answer = fill(template, &bindings, &site)?;
                 let same = unnamed(&answer, &site);
                 if !found.iter().any(|(other, _)| unnamed(other, &site) == same) {
                     found.push((answer, rule.signature.clone()));
+                    patterns.push(rule.pattern.to_string());
                 }
             }
         }
@@ -1476,19 +1517,19 @@ impl Expander {
                     .join(" | "),
             )
         };
-        match found.len() {
+        let chosen = match found.len() {
             0 => Err(Error::Unknown(tree.to_string())),
-            1 => Ok(found.remove(0).0),
+            1 => Ok(0),
             _ if self.negating => Err(ambiguous(&found)),
             _ if position == Position::Head && !self.reporting => {
                 let written = Signature::of(&said, "concept");
-                let mut exact = found.iter().filter(|(_, signature)| {
+                let mut exact = found.iter().enumerate().filter(|(_, (_, signature))| {
                     signature.is_some()
                         && signature.as_ref().map(|signature| &signature.parameters)
                             == written.as_ref().map(|written| &written.parameters)
                 });
                 match (exact.next(), exact.next()) {
-                    (Some((answer, _)), None) => Ok(answer.clone()),
+                    (Some((at, _)), None) => Ok(at),
                     _ => Err(ambiguous(&found)),
                 }
             }
@@ -1504,11 +1545,65 @@ impl Expander {
                         0
                     }
                 };
-                found
-                    .get(taken)
-                    .map(|(answer, _)| answer.clone())
+                (taken < of)
+                    .then_some(taken)
                     .ok_or_else(|| ambiguous(&found))
             }
+        }?;
+        self.answered = patterns.swap_remove(chosen);
+        Ok(found.swap_remove(chosen).0)
+    }
+
+    /// `asked` rewritten once, as [`ask`](Self::ask) does, on the path
+    /// of the forms rewritten before it. A form met again on the path is
+    /// a cycle, and a path longer than [`STEPS`], or an answer deeper
+    /// than [`DEEPEST`] or larger than the tree allows, is an expansion
+    /// that does not end: each is refused, naming the definitions on the
+    /// way.
+    fn rewrite(&mut self, asked: &Syntax, position: Position) -> Result<Syntax, Error> {
+        let through = |path: &[(Syntax, String)]| {
+            let mut named: Vec<String> = Vec::new();
+            for (_, definition) in path {
+                if !named.contains(definition) {
+                    named.push(definition.clone());
+                }
+            }
+            named
+        };
+        if let Some(at) = self.path.iter().position(|(form, _)| form == asked) {
+            return Err(Error::Cycle(
+                asked.to_string(),
+                self.path[at..]
+                    .iter()
+                    .map(|(_, definition)| definition.clone())
+                    .collect(),
+            ));
+        }
+        if self.path.len() >= STEPS {
+            return Err(Error::Endless(Box::new(crate::Endless {
+                form: asked.to_string(),
+                past: format!("{STEPS} steps"),
+                through: through(&self.path),
+            })));
+        }
+        let answer = self.ask(asked, position)?;
+        let definition = std::mem::take(&mut self.answered);
+        self.path.push((asked.clone(), definition));
+        let (depth, parts) = answer.extent();
+        let past = if depth > DEEPEST {
+            Some(format!("{DEEPEST} deep"))
+        } else if parts > self.largest {
+            Some(format!("{} parts", self.largest))
+        } else {
+            None
+        };
+        match past {
+            Some(past) => Err(Error::Endless(Box::new(crate::Endless {
+                form: asked.to_string(),
+                past,
+                through: through(&self.path),
+            }))),
+            None => Ok(answer),
         }
     }
 
@@ -1547,7 +1642,17 @@ impl Expander {
 
     /// A head or a premise, rewritten until it applies a relation or a
     /// formula. `(all …)` comes back when it stands for several.
-    fn application(&mut self, mut tree: Syntax, position: Position) -> Result<Syntax, Error> {
+    fn application(&mut self, tree: Syntax, position: Position) -> Result<Syntax, Error> {
+        // What this form is rewritten through is on its own path, not on
+        // the path of the form beside it.
+        let depth = self.path.len();
+        let done = self.applied(tree, position);
+        self.path.truncate(depth);
+        done
+    }
+
+    /// [`application`](Self::application), on the path it is given.
+    fn applied(&mut self, mut tree: Syntax, position: Position) -> Result<Syntax, Error> {
         loop {
             let word = tree.applies().map(str::to_string);
             if tree.is_read()
@@ -1630,7 +1735,7 @@ impl Expander {
             let asked = tree;
             tree = self.about(&asked, |this| {
                 former(&asked)?;
-                this.ask(&asked, position)
+                this.rewrite(&asked, position)
             })?;
         }
     }
@@ -1714,6 +1819,7 @@ impl Expander {
     /// several, as a concept of several reads does, is a rule each, with
     /// the premises again.
     fn top(&mut self, mut tree: Syntax) -> Result<Vec<Syntax>, Error> {
+        self.path.clear();
         let written = tree.clone();
         while tree.applies() != Some("rule") {
             // A call stands in a rule, a query or a write. Alone at the
@@ -1777,7 +1883,7 @@ impl Expander {
                 }
                 _ => self.about(&tree, |this| {
                     former(&tree)?;
-                    this.ask(&tree, Position::Head)
+                    this.rewrite(&tree, Position::Head)
                 })?,
             };
         }
@@ -1965,13 +2071,29 @@ mod tests {
         ];
         for (setup, text, bound) in endless {
             match expanded_soon(setup, text) {
-                Err(Error::Endless(_, past, definitions)) => {
-                    assert!(past.contains(bound), "{text}: {past}");
-                    assert!(!definitions.is_empty(), "{text}");
+                Err(Error::Endless(endless)) => {
+                    assert!(endless.past.contains(bound), "{text}: {endless:?}");
+                    assert!(!endless.through.is_empty(), "{text}");
                 }
                 other => panic!("{text}: {other:?}"),
             }
         }
+        // A tree given to the expander deeper than it takes, as no reader
+        // made it, is refused before anything walks it. (A tree is
+        // cloned and dropped by recursion, so one too deep for those is
+        // the caller's to never build.)
+        let mut deep = Syntax::Constant(Value::UnsignedInt(1));
+        for _ in 0..DEEPEST * 4 {
+            deep = Syntax::Tuple(vec![deep]);
+        }
+        let tree = apply("assert", vec![apply("xyz.note", vec![deep])]);
+        let refused = std::thread::spawn(move || Expander::new()?.expand(vec![tree]))
+            .join()
+            .map_err(|_| Error::Refused("the expander overflowed".into()));
+        assert!(
+            matches!(&refused, Ok(Err(Error::Refused(why))) if why.contains("nested")),
+            "{refused:?}"
+        );
         // A chain as long as the bound allows, ending in a read.
         let chain: String = (1..STEPS)
             .map(|at| format!("(rule (syntax (step{} ?x)) (expand (step{at} ?x)))", at + 1))
