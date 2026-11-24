@@ -14,6 +14,64 @@ says how to cut a release.
 
 ## Unreleased
 
+### A parameter can hold a pattern: a map or a list of terms, taken apart or built
+
+[#778](https://github.com/dialog-db/dialog-db/pull/778), on the composite
+value of [#843](https://github.com/dialog-db/dialog-db/pull/843). The design
+is in [design/patterns.md](design/patterns.md).
+
+A premise's parameter held one variable or one constant. It can now hold a
+`Pattern`: a term, or a map or a list of patterns, with an optional rest (the
+entries a map pattern does not name, bound as a map) or run (the items after
+a list pattern's, bound as a list). Where the value is bound, the pattern
+takes it apart and binds the variables inside it; where every variable
+inside it is bound, the pattern builds the value. A map pattern with no rest
+matches a map of exactly its entries, and a list pattern with no run a list
+of exactly its items. The planner counts a pattern bound when every variable
+inside it is, and inference types a slot that holds one as a composite and
+each leaf as its term is typed. A rule that holds a pattern has an identity
+and runs where it was built, in a query layer, but the stored rule format
+cannot write it, so it cannot be installed.
+
+What this changes for you:
+
+- `Equality.this` and `Equality.is` are a `Pattern` where they were a
+  `Term<Any>`. `Equality::new` takes terms as before, and a `Pattern`
+  compares with a `Term<Any>` and answers `name` and `is_constant`.
+- New: `Pattern`, `MapPattern` (`MapPattern::new` refuses a key given
+  twice, as a map holds it, with `MapPatternError::DuplicateKey`),
+  `ListPattern`, and on `Parameters` `set` (a pattern under a name),
+  `shape`, `pattern`, `shapes`, `has_shapes`, `leaves`, `lowered`, `plain`
+  and `map_terms`. `get` and `iter` still answer terms: under a name that
+  holds a pattern, a variable that stands for the whole value.
+- New: `Update::hold`, a target keeping a thing it cannot write as facts,
+  and `Update::refuse`, a target recording a statement it cannot write, a
+  required method for every `Update` implementor. `Changes::refused` gives
+  the first refusal, and `Refusal` carries the entity and the typed reason.
+- New: `TypeError::UnstorablePattern`, from `DeductiveRule::storable` and
+  `InductiveRule::storable`.
+- `Parameters` and a pattern above a leaf have no wire form: serializing
+  `Parameters` that hold a pattern fails, and so does serializing a
+  `Changes` that holds a refusal.
+- Asserting a rule that holds a pattern stages nothing for it in a batch
+  that is committed: the batch records a `Refusal` carrying
+  `TypeError::UnstorablePattern`, and committing a transaction that holds
+  it fails with `CommitError::Refused` before anything is written.
+  `Ephemeral::apply`, and so the branch's session overlay, refuses such a
+  batch with `DialogCorpusError::Refused`. A `QueryLayer`
+  (`Branch::with`) keeps the rule and its index facts and runs it; a copy
+  of the layer's `changes()` carries the refusal and is refused wherever
+  it is committed or applied.
+- An inductive rule that holds a pattern is refused the same way
+  everywhere, a query layer included.
+
+Why: a rule could not say a value by its shape, so a command could not be
+given a record, an entity could not be derived from one, and a syntax tree
+could not be taken apart in a rule. The pattern is the notation's struct
+with variables in it, one thing both ways. Committing a rule that holds a
+pattern used to panic, which aborts the page on wasm; it is now an error the
+commit returns.
+
 ### A value can be a composite: a map, a record or a list, held as one value and read in place
 
 [#843](https://github.com/dialog-db/dialog-db/pull/843).
@@ -251,6 +309,12 @@ dropping that scope.
 
 #### Compatibility and migration
 
+- Patterns: nothing stored changes. No rule format, up to format 4 that
+  this release writes, holds a pattern, and a rule that holds one is
+  refused at commit, so no replica stores one and an older release reads
+  everything this one writes. The format that stores a pattern in a rule
+  body will be format 5 and is not built yet. Nothing an embedder has to
+  run.
 - Nothing stored or synced changes.
 
 

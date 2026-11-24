@@ -384,13 +384,13 @@ fn decides_on(rule: &DeductiveRule, index: usize, term: Option<&Term<Any>>) -> b
                         (&equality.this, &equality.is),
                         (&equality.is, &equality.this),
                     ] {
-                        if !carries(one) {
+                        if !one.terms().iter().any(|term| carries(term)) {
                             continue;
                         }
-                        match other {
-                            Term::Constant(_) => return true,
-                            term => aliases.extend(named(term)),
+                        if other.is_constant() {
+                            return true;
                         }
+                        aliases.extend(other.variables().into_iter().map(str::to_string));
                     }
                     carried.extend(aliases);
                 }

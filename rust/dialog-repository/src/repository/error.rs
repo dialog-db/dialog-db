@@ -579,6 +579,15 @@ pub enum CommitError {
     #[error("Failed to resolve during commit: {0}")]
     Resolve(#[from] ResolveError),
 
+    /// The transaction holds a statement that cannot be written as
+    /// facts: a rule that holds a pattern, which the stored rule format
+    /// has no way to write, for one. The refusal names the statement's
+    /// entity and carries the reason, typed (see
+    /// [`Refusal::reason`](dialog_corpus::Refusal::reason)). Nothing the
+    /// transaction holds is written.
+    #[error("The transaction cannot be committed: {0}")]
+    Refused(dialog_corpus::Refusal),
+
     /// Commit-time induction still emitted novelty or transients after
     /// the round bound — a self-feeding cascade (e.g. a transient
     /// ping-pong between two rules, or an unguarded rule deriving from

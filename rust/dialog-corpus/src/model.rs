@@ -26,7 +26,7 @@ pub use asset::*;
 
 mod update;
 pub use update::{
-    AssetChange, Cardinality, Change, ChangeStream, Changes, Contender, SortKey, Standing,
+    AssetChange, Cardinality, Change, ChangeStream, Changes, Contender, Refusal, SortKey, Standing,
     Statement, Update, sort_key,
 };
 

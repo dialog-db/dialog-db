@@ -50,6 +50,45 @@ pub async fn test_repo<S: PeerSpace, M: Mode>(
         .expect("test_repo: failed to open repository")
 }
 
+/// A session on a fresh peer kept on the filesystem under `root`, and the
+/// peer it is a session of: the native provider a peer stores its
+/// repositories with on a machine of its own.
+///
+/// Native only: the filesystem provider is the native one. In the browser
+/// a peer is kept in IndexedDB and OPFS.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub async fn filesystem_session_with_peer(
+    root: &Path,
+) -> anyhow::Result<(Peer<NativeSpace, Session>, Peer<NativeSpace>)> {
+    use dialog_capability::Subject;
+    use dialog_effects::storage::{Directory, Location};
+    use dialog_peer::helpers::{onboard, test_grant, test_state, test_system, unique_name};
+    use dialog_storage::provider::storage::CredentialStore;
+    use dialog_varsig::Principal as _;
+
+    let base = Directory::At(root.to_string_lossy().into_owned());
+    let name = unique_name("peer");
+    let storage = Storage::<NativeSpace>::default().owned_by(test_system().await.did());
+    let credential = dialog_peer::OpenCredential::open(name.clone())
+        .at(base.clone())
+        .perform(&CredentialStore::<NativeSpace>::default())
+        .await?;
+    let peer = Peer::new(credential.clone())
+        .at(Location::new(base.clone(), name))
+        .with(storage)
+        .space(test_state(&credential.did()))
+        .grant(test_grant().await)
+        .base(base)
+        .await?;
+    onboard(&peer).await?;
+    let session = peer
+        .session(b"test")
+        .space(peer.state())
+        .allow(Subject::any())
+        .await?;
+    Ok((session, peer))
+}
+
 /// The space a flaky test peer runs over: volatile, with a memory
 /// provider that loses the publishes a test plans.
 #[cfg(test)]
@@ -98,6 +137,8 @@ use dialog_effects::blob::Read as BlobRead;
 use dialog_peer::{Mode, Peer, PeerSpace, Session};
 #[cfg(test)]
 use dialog_storage::Flaky;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+use dialog_storage::provider::storage::NativeSpace;
 #[cfg(test)]
 use dialog_storage::provider::storage::Storage;
 #[cfg(test)]
@@ -108,6 +149,8 @@ use dialog_storage::provider::{Space, Volatile};
 use dialog_varsig::Did;
 #[cfg(test)]
 use std::iter::once;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+use std::path::Path;
 
 /// Make the peer reached at `address` a contact named `name`, and connect
 /// to its replica of the repository `subject`: what tests once did by

@@ -744,30 +744,48 @@ enum This {
 /// pins `this` to a constant, and the rows it yields must still
 /// compare equal to the ones retained from the open query, or every
 /// maintenance emits a retract-and-reassert of unchanged rows.
+///
+/// An operand that holds a pattern is a row's by the variables inside
+/// it: the variable standing for the whole value is not the one a run
+/// binds when the pattern holds a blank, so two rows that took apart
+/// different values would otherwise compare equal.
 impl PartialEq for ConceptConclusion {
     fn eq(&self, other: &Self) -> bool {
-        self.entity() == other.entity() && self.values() == other.values()
+        self.entity() == other.entity()
+            && self.values() == other.values()
+            && (!self.terms.has_shapes() || self.leaves() == other.leaves())
     }
 }
 
 impl ConceptConclusion {
+    /// What `term` resolves to in this row, `None` when absent or unbound.
+    fn resolve(&self, term: &Term<Any>) -> Option<Value> {
+        match term {
+            Term::Constant(value) => Some(value.clone()),
+            Term::Variable {
+                name: Some(name), ..
+            } => match self.source.lookup(&Term::<Any>::var(name.clone())) {
+                Ok(Binding::Present(value)) => Some(value),
+                _ => None,
+            },
+            Term::Variable { name: None, .. } => None,
+        }
+    }
+
     /// Each operand's resolved value, `None` when absent or unbound.
     fn values(&self) -> BTreeMap<&str, Option<Value>> {
         self.terms
             .iter()
-            .map(|(operand, term)| {
-                let value = match term {
-                    Term::Constant(value) => Some(value.clone()),
-                    Term::Variable {
-                        name: Some(name), ..
-                    } => match self.source.lookup(&Term::<Any>::var(name.clone())) {
-                        Ok(Binding::Present(value)) => Some(value),
-                        _ => None,
-                    },
-                    Term::Variable { name: None, .. } => None,
-                };
-                (operand.as_str(), value)
-            })
+            .map(|(operand, term)| (operand.as_str(), self.resolve(term)))
+            .collect()
+    }
+
+    /// The value of each variable inside the patterns the operands hold.
+    fn leaves(&self) -> BTreeMap<&str, Option<Value>> {
+        self.terms
+            .shapes()
+            .flat_map(|(_, pattern)| pattern.terms())
+            .filter_map(|term| Some((term.name()?, self.resolve(term))))
             .collect()
     }
 }

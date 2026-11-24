@@ -19,6 +19,7 @@ use std::fmt;
 use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::corpus::{CorpusRelation, Type, Value};
+use crate::pattern;
 use crate::planner::{Disjunction, Plan};
 use crate::rule::deductive::DeductiveRule;
 use crate::schema::CONCEPT_OVERHEAD;
@@ -493,13 +494,46 @@ impl ConceptQuery {
         // generic over the stream handed the next level a type that held
         // this level's, and the compiler unrolled the recursion forty
         // levels deep (a 50 KB type term) in a workload's binary.
-        self.conformed().evaluate_erased(Box::pin(selection), env)
+        if !self.terms.has_shapes() {
+            return self
+                .conformed()
+                .evaluate_erased(Box::pin(selection), env, false);
+        }
+        // A parameter that is a map or a list of terms: the concept is
+        // read with a variable standing for the whole value in its place.
+        // Where the pattern's variables are bound the whole is built
+        // first and the concept is read by it. What the concept binds the
+        // whole to is then taken apart by the pattern, and a row that
+        // does not match is dropped. A rule's body has this done by its
+        // plan (see `pattern::lower`); a query run by itself, and a
+        // negated premise, come here.
+        //
+        // Both ways leave by the one stream `evaluate_erased` makes, and
+        // that stream holds nothing for the patterns: it reads them from
+        // the terms it is given. A stream wrapped around it, or a box
+        // around it to give the two ways one type, would be more for
+        // every query of terms alone to be moved and polled through.
+        let (terms, shapes) = self.terms.told_apart();
+        let built: Pin<Box<dyn Selection + 'a>> =
+            Box::pin(pattern::build(shapes.into(), selection));
+        ConceptQuery {
+            predicate: self.predicate,
+            terms,
+        }
+        .conformed()
+        .evaluate_erased(built, env, true)
     }
 
+    /// Evaluates the application. Where its terms hold a map or a list,
+    /// which `apart` says, the concept is read with the whole of each in
+    /// its slot, and each row it yields has what the concept bound each
+    /// whole to taken apart by its pattern; a row that does not match is
+    /// dropped (see [`pattern::take_apart`]).
     fn evaluate_erased<'a, Env>(
         self,
         selection: Pin<Box<dyn Selection + 'a>>,
         env: &'a Env,
+        apart: bool,
     ) -> impl Selection + 'a
     where
         Env: crate::Scope<'a>,
@@ -511,13 +545,26 @@ impl ConceptQuery {
         let asked = picking.then(|| self.clone());
         let app = self.canonical();
         let this = app.terms.get("this").cloned();
+        // The application is given whole to its evaluation where its
+        // terms are terms alone, as it was before a parameter could hold
+        // a pattern, and is kept where they hold one, to take each row
+        // apart by. It is held as an option for that, which is no larger
+        // than the application: the stream of a read of terms alone
+        // holds what it held, and nothing for the patterns.
+        let mut app = Some(app);
 
         try_stream! {
             let mut selection = selection;
             if let Some(asked) = asked {
                 match Box::pin(asked.picked(selection, env)).await? {
                     Picked::Answered(mut rows) => {
-                        while let Some(row) = rows.next().await {
+                        while let Some(mut row) = rows.next().await {
+                            if apart && let Some(query) = &app {
+                                row = match pattern::take_apart(&query.terms, row) {
+                                    Some(row) => row,
+                                    None => continue,
+                                };
+                            }
                             yield row?;
                         }
                         return;
@@ -530,29 +577,49 @@ impl ConceptQuery {
             };
             let first = first?;
 
-            let rules = Provider::<SelectRules>::execute(env, app.predicate.clone()).await?;
+            let Some(query) = app.as_ref() else {
+                return;
+            };
+            let rules = Provider::<SelectRules>::execute(env, query.predicate.clone()).await?;
+            let Some(query) = app.as_ref() else {
+                return;
+            };
             // An attribute concept read with its entity free is a merge
             // input (see `Conjunction::merge_variable`): its rows leave
             // sorted on the entity, as a scan's would. Derived rows arrive
             // in their rules' order, so the read is buffered and sorted
             // whenever something derives the attribute.
-            let sort = app.predicate.attribute_field().is_some()
+            let sort = query.predicate.attribute_field().is_some()
                 && !rules.installed().is_empty()
                 && this
                     .as_ref()
                     .is_some_and(|term| term.name().is_some() && !first.contains(term));
+            let reading = if apart {
+                query.clone()
+            } else {
+                let Some(query) = app.take() else {
+                    return;
+                };
+                query
+            };
             // The inner evaluation is boxed. Held inline, its state would
             // be part of this stream's state, which every caller moves when
             // it returns and again when it boxes it: the inner state's size
             // copied per evaluation of a concept, before any row is read.
-            let mut unsorted = Box::pin(app.evaluate_unsorted(
+            let mut unsorted = Box::pin(reading.evaluate_unsorted(
                 rules,
                 Box::pin(stream::iter([Ok(first)]).chain(selection)),
                 env,
             ));
             if sort {
                 let mut rows: Vec<(Vec<u8>, Match)> = Vec::new();
-                while let Some(row) = unsorted.next().await {
+                while let Some(mut row) = unsorted.next().await {
+                    if let Some(query) = &app {
+                        row = match pattern::take_apart(&query.terms, row) {
+                            Some(row) => row,
+                            None => continue,
+                        };
+                    }
                     let row = row?;
                     let key = this
                         .as_ref()
@@ -567,7 +634,18 @@ impl ConceptQuery {
                 }
                 return;
             }
-            while let Some(row) = unsorted.next().await {
+            while let Some(mut row) = unsorted.next().await {
+                // A row is taken apart in the place it arrived in. A
+                // second value held across the yield, or a second place
+                // this loop could fail from, is kept in the stream of
+                // every read, and a read of terms alone is to be moved
+                // as what it was.
+                if let Some(query) = &app {
+                    row = match pattern::take_apart(&query.terms, row) {
+                        Some(row) => row,
+                        None => continue,
+                    };
+                }
                 yield row?;
             }
         }
@@ -1244,17 +1322,35 @@ impl ConceptQuery {
         }
         let key = The::key_operand(name);
         let canonical_key = The::key_operand(ConceptDescriptor::VALUE);
-        let mut terms = Parameters::new();
-        for (param, term) in self.terms.iter() {
-            let param = if param == name {
-                ConceptDescriptor::VALUE.to_string()
-            } else if *param == key {
-                canonical_key.clone()
-            } else {
-                param.clone()
-            };
-            terms.insert(param, term.clone());
-        }
+        // Renamed with what each name holds, a pattern included, so a
+        // read that holds one takes its rows apart under the new name.
+        let terms = if self.terms.has_shapes() {
+            self.terms.rekeyed(|param| {
+                if param == name {
+                    ConceptDescriptor::VALUE.to_string()
+                } else if param == key {
+                    canonical_key.clone()
+                } else {
+                    param.to_string()
+                }
+            })
+        } else {
+            // Terms alone are moved under their names one by one, as
+            // they were before a parameter could hold a pattern: every
+            // concept read comes through here.
+            let mut terms = Parameters::new();
+            for (param, term) in self.terms.iter() {
+                let param = if param == name {
+                    ConceptDescriptor::VALUE.to_string()
+                } else if *param == key {
+                    canonical_key.clone()
+                } else {
+                    param.clone()
+                };
+                terms.insert(param, term.clone());
+            }
+            terms
+        };
         ConceptQuery {
             predicate: ConceptDescriptor::of_attribute(field),
             terms,

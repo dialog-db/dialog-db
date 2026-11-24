@@ -125,6 +125,8 @@ mod integration_tests;
 
 #[cfg(test)]
 mod isolation_tests;
+#[cfg(test)]
+mod pattern_rule_tests;
 #[cfg(all(
     test,
     any(feature = "integration-tests", feature = "web-integration-tests")
