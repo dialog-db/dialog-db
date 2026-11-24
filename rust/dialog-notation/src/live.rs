@@ -155,6 +155,13 @@ static HOLDERS: AtomicU64 = AtomicU64::new(0);
 /// on each other only for that long.
 static LAYING: Mutex<()> = Mutex::new(());
 
+/// For tests: after how many more writes laying a rule fails, on this
+/// thread. Only with the `inspect` feature.
+#[cfg(feature = "inspect")]
+thread_local! {
+    pub(crate) static FAIL_LAYING: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 /// A fact of the notation's own on the overlay.
 struct Mark {
     the: &'static str,

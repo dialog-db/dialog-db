@@ -398,6 +398,71 @@ async fn it_keeps_a_rule_two_lives_hold_until_both_let_go() -> Result<()> {
     Ok(())
 }
 
+/// Laying a rule is all or nothing: a write that fails part way, after
+/// the rule and before its marks or its holder, leaves nothing laid on
+/// the overlay, and laying again afterwards works.
+#[dialog_common::test]
+async fn it_leaves_nothing_laid_when_laying_fails_part_way() -> Result<()> {
+    let notebook = tasks().await?;
+    let overlay = notebook.branch.overlay().clone();
+    let before = overlay.len();
+    let live = Live::new(notebook.branch.clone());
+    for writes in 1..=3 {
+        dialog_notation::fail_laying_after(Some(writes));
+        let failed = live.standing(pairs()?);
+        dialog_notation::fail_laying_after(None);
+        assert!(
+            matches!(failed, Err(dialog_notation::live::LiveError::Rule(_))),
+            "after {writes} writes: {:?}",
+            failed.err()
+        );
+        assert_eq!(
+            overlay.len(),
+            before,
+            "after {writes} writes, nothing is left laid"
+        );
+    }
+    let kept = live.standing(pairs()?)?;
+    assert!(overlay.len() > before);
+    drop(kept);
+    assert_eq!(overlay.len(), before);
+    Ok(())
+}
+
+/// What the notation lays it takes off with its last holder, even where
+/// an embedder asserted the same rule after it was laid: the rule is one
+/// fact on the overlay, and it is the notation's. An embedder that
+/// asserts a rule before the notation lays it keeps it, as the notation
+/// only holds a rule it finds there. This pins what `Live` documents.
+#[dialog_common::test]
+async fn it_takes_off_a_rule_an_embedder_asserted_after_it_was_laid() -> Result<()> {
+    let notebook = tasks().await?;
+    let overlay = notebook.branch.overlay().clone();
+    let before = overlay.len();
+    let live = Live::new(notebook.branch.clone());
+    let rule = pairs()?
+        .queries
+        .iter()
+        .find_map(|query| query.rule.clone())
+        .ok_or_else(|| anyhow::anyhow!("a query with a rule"))?;
+    // Asserted after: taken off with the last holder.
+    let kept = live.standing(pairs()?)?;
+    overlay.assert(rule.clone())?;
+    drop(kept);
+    assert_eq!(overlay.len(), before, "the rule went with the last holder");
+    // Asserted before: held, never laid, so kept.
+    overlay.assert(rule.clone())?;
+    let asserted = overlay.len();
+    let kept = live.standing(pairs()?)?;
+    drop(kept);
+    assert_eq!(
+        overlay.len(),
+        asserted,
+        "the embedder's rule is still there"
+    );
+    Ok(())
+}
+
 /// Two documents laid on one branch whose report relations are named
 /// alike, after two sites, are refused where the second is laid: the two
 /// would answer as one. Names are shortened until two sites meet.

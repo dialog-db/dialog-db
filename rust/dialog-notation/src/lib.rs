@@ -96,6 +96,15 @@ pub fn name_sites_with(length: usize) {
     compile::SITE_LENGTH.with(|held| held.set(length));
 }
 
+/// For tests only: laying a rule on the overlay on this thread fails at
+/// its write after `writes` more have been made, as a failing overlay
+/// would; `None` lets every write through. Only with the `inspect`
+/// feature.
+#[cfg(feature = "inspect")]
+pub fn fail_laying_after(writes: Option<usize>) {
+    live::FAIL_LAYING.with(|held| held.set(writes));
+}
+
 /// Reading the values in the rows a query gives ([`Query::values`], a
 /// view's rows, a fold's): a row reported as one record is a composite
 /// map keyed by its names, and the whole of a fold, a set or a list, a
