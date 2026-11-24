@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use dialog_corpus::{Composite, Entity, Relation, Value};
+use dialog_corpus::{Entity, Relation, Value};
 use dialog_query::concept::descriptor::ConceptStatement;
 use dialog_query::formula::entity::derive;
 use dialog_query::{
@@ -36,7 +36,6 @@ use dialog_query::{
 use serde_json::{Map, Value as Json, json};
 
 use crate::Error;
-use crate::data;
 use crate::kernel::{Field, Formula, Head, Keyed, Premise, QUOTE, Read, Rule, TYPES, Term};
 use crate::pattern::REST;
 use crate::syntax::{self, Parameters, Syntax};
@@ -203,6 +202,8 @@ fn once(rule: &Rule, form: &Syntax) -> Result<Step, Error> {
             term: Term::Variable(name.clone()),
             kind: None,
             pick: None,
+            cardinality: None,
+            listed: Vec::new(),
             layer: None,
             key: None,
         })
@@ -372,43 +373,39 @@ impl Query {
     }
 }
 
+/// Whether a map's text key reads as a name.
+fn label(key: &str) -> bool {
+    key.starts_with(|first: char| first.is_ascii_lowercase())
+        && key.chars().all(|part| {
+            part.is_ascii_lowercase() || part.is_ascii_digit() || matches!(part, '-' | '.' | '/')
+        })
+}
+
 /// A value, as the tree that says it. A list is said as `[a b]`: the data
 /// model has one sequence, and `[ ]` is how it is written where a value
 /// stands.
 pub(crate) fn written(value: &Value) -> Syntax {
     match value {
-        Value::Record(_) if matches!(value.composite(), Ok(Some(_))) => {
-            match value.composite() {
-                // A record has no order. It is said by its keys in the
-                // order of the alphabet, which is not the order it is
-                // kept in.
-                Ok(Some(Composite::Map(map))) => Syntax::Map(
-                    map.iter()
-                        .collect::<std::collections::BTreeMap<_, _>>()
-                        .into_iter()
-                        .map(|(key, value)| {
-                            // A key that reads as a name is the label
-                            // it was written as; any other is text.
-                            let label = key.starts_with(|first: char| first.is_ascii_lowercase())
-                                && key.chars().all(|part| {
-                                    part.is_ascii_lowercase()
-                                        || part.is_ascii_digit()
-                                        || matches!(part, '-' | '.' | '/')
-                                });
-                            let key = if label {
-                                Syntax::Reference(key.to_string())
-                            } else {
-                                Syntax::Constant(data::text(key))
-                            };
-                            (key, written(value))
-                        })
-                        .collect(),
-                ),
-                Ok(Some(Composite::List(items))) => {
-                    Syntax::Tuple(items.iter().map(written).collect())
-                }
-                _ => Syntax::Blank,
-            }
+        // A map has no order. It is said by its keys in the order of
+        // their written form, which is not the order it is kept in.
+        Value::Composite(composite) if composite.is_map() => {
+            let mut entries: Vec<(Syntax, Syntax)> = composite
+                .entries()
+                .map(|(key, value)| {
+                    let key = match key {
+                        // A key that reads as a name is the label it was
+                        // written as; any other text is text.
+                        Value::String(key) if label(&key) => Syntax::Reference(key),
+                        other => written(&other),
+                    };
+                    (key, written(&value))
+                })
+                .collect();
+            entries.sort_by_key(|(key, _)| key.to_string());
+            Syntax::Map(entries)
+        }
+        Value::Composite(composite) => {
+            Syntax::Tuple(composite.items().map(|item| written(&item)).collect())
         }
         Value::Bytes(bytes) | Value::Record(bytes) => Syntax::Tuple(
             bytes
@@ -509,7 +506,9 @@ pub fn compile(form: &Syntax) -> Result<Vec<Step>, Error> {
                 attribute: format!("{DESCRIBED}/description"),
                 term: Term::Text(description.clone()),
                 kind: Some("text".into()),
-                pick: Some("last".into()),
+                pick: None,
+                cardinality: Some("one".into()),
+                listed: Vec::new(),
                 layer: None,
                 key: None,
             }],
@@ -712,7 +711,9 @@ fn shape(
                     entries
                         .iter()
                         .filter(|(at, _)| !dots(at))
-                        .map(|(at, value)| Ok((key(at)?, walk(value, name, quoted, open)?)))
+                        .map(|(at, value)| {
+                            Ok((Value::String(key(at)?), walk(value, name, quoted, open)?))
+                        })
                         .collect::<Result<Vec<_>, Error>>()?,
                 )
                 .map_err(|error| refused("the struct", error))?;
@@ -832,13 +833,30 @@ fn collection(field: &Field) -> Option<(&str, &'static str)> {
 /// The descriptor of the attribute a field reads or writes, as Dialog-DB
 /// reads it.
 pub(crate) fn descriptor(field: &Field) -> Result<AttributeDescriptor, Error> {
-    serde_json::from_value(attribute(field)).map_err(|error| refused("the attribute", error))
+    serde_json::from_value(attribute(field, Role::Attribute)?)
+        .map_err(|error| refused("the attribute", error))
 }
 
-/// The attribute a field reads or writes. With no pick written the
-/// field holds every value: it is a relation, and a relation is a set.
-/// A field that is every entry of a collection reads the collection.
-fn attribute(field: &Field) -> Json {
+/// What a field's attribute stands as: a concept field, which may
+/// choose one of its claims by an elector, or an attribute on its own,
+/// which a write and a rule's conclusion go by and which chooses
+/// nothing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Field,
+    Attribute,
+}
+
+/// The attribute a field reads or writes, with its cardinality: `one`,
+/// whose read is the newest claim and whose write succeeds it, or
+/// `many`, every claim. A field written under neither is many: it holds
+/// every value, as a relation does. Read as a concept field it carries
+/// the elector it was written under, `max`, `min` or `top`, which
+/// chooses one of the claims a cardinality-many attribute holds; an
+/// attribute on its own carries none. A variant's cases are listed, best
+/// first, so `top` can rank by them. A field that is every entry of a
+/// collection reads the collection.
+fn attribute(field: &Field, role: Role) -> Result<Json, Error> {
     let mut attribute = Map::new();
     match collection(field) {
         Some((domain, keyed)) => {
@@ -848,12 +866,32 @@ fn attribute(field: &Field) -> Json {
             attribute.insert("the".into(), json!(field.attribute));
         }
     }
-    if let Some(kind) = &field.kind {
+    if !field.listed.is_empty() {
+        let cases: Vec<String> = field.listed.iter().map(|case| format!("{case}:")).collect();
+        attribute.insert("as".into(), json!(cases));
+    } else if let Some(kind) = &field.kind {
         attribute.insert("as".into(), json!(format!("{kind}:")));
     }
-    let pick = field.pick.as_deref().unwrap_or("all");
-    attribute.insert("pick".into(), json!(format!("{pick}:")));
-    Json::Object(attribute)
+    let written = field.cardinality.as_deref();
+    let (cardinality, pick) = match (field.pick.as_deref(), written) {
+        (None, written) => (written.unwrap_or("many"), None),
+        (Some("last"), None | Some("one")) => ("one", None),
+        (Some("last"), Some(written)) => (written, Some("last")),
+        (Some("all"), None | Some("many")) => ("many", None),
+        (Some(elector), None | Some("many")) => ("many", Some(elector)),
+        (Some(pick), Some(written)) => {
+            return Err(Error::Refused(format!(
+                "{} is read under `{pick}` and cardinality {written}: `{pick}` chooses among \
+                 the claims of cardinality many",
+                field.attribute
+            )));
+        }
+    };
+    attribute.insert("cardinality".into(), json!(cardinality));
+    if let (Role::Field, Some(pick)) = (role, pick) {
+        attribute.insert("pick".into(), json!(pick));
+    }
+    Ok(Json::Object(attribute))
 }
 
 /// Facts with nothing left to bind: what a head with no premise says.
@@ -880,7 +918,7 @@ fn statement(read: &Read) -> Result<ConceptStatement, Error> {
                 field.attribute
             ))
         })?;
-        let mut written = attribute(field);
+        let mut written = attribute(field, Role::Attribute)?;
         // One entry of a collection is written under its key: the
         // attribute `domain/key`, of the collection's key shape. A
         // relation spelled as text takes no position for its name, so
@@ -1168,7 +1206,10 @@ impl Scope {
             if let Some((key, _)) = &field.key {
                 term = json!({ "the": self.term(key, None)?, "is": term });
             }
-            if with.insert(field.label.clone(), attribute(field)).is_some() {
+            if with
+                .insert(field.label.clone(), attribute(field, Role::Field)?)
+                .is_some()
+            {
                 return Err(Error::Refused(format!(
                     "{} names {} twice",
                     read.domain, field.label
@@ -1310,7 +1351,10 @@ impl Scope {
         }
         let mut with = Map::new();
         for field in fields {
-            if with.insert(field.label.clone(), attribute(field)).is_some() {
+            if with
+                .insert(field.label.clone(), attribute(field, Role::Attribute)?)
+                .is_some()
+            {
                 return Err(Error::Refused(format!(
                     "{} names {} twice",
                     read.domain, field.label
@@ -1701,6 +1745,8 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                         term: key.clone(),
                         kind: None,
                         pick: None,
+                        cardinality: None,
+                        listed: Vec::new(),
                         layer: None,
                         key: None,
                     });
@@ -1724,6 +1770,8 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                     term: field.term.clone(),
                     kind: None,
                     pick: None,
+                    cardinality: None,
+                    listed: Vec::new(),
                     layer: None,
                     key: None,
                 });
@@ -1747,6 +1795,8 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
             term: Term::Symbol("true".into()),
             kind: None,
             pick: None,
+            cardinality: None,
+            listed: Vec::new(),
             layer: None,
             key: None,
         });
@@ -1794,9 +1844,15 @@ mod tests {
         assert_eq!(statement.this.to_string(), "todo:1");
         // A tree keeps no order of labels, so the fields come by label.
         assert_eq!(statement.with[0].is, Value::UnsignedInt(3));
-        assert_eq!(statement.with[0].pick, dialog_query::Pick::All);
+        assert_eq!(
+            statement.with[0].cardinality,
+            dialog_query::Cardinality::Many
+        );
         assert_eq!(statement.with[1].is, Value::String("Buy milk".into()));
-        assert_eq!(statement.with[1].pick, dialog_query::Pick::Last);
+        assert_eq!(
+            statement.with[1].cardinality,
+            dialog_query::Cardinality::One
+        );
     }
 
     #[test]

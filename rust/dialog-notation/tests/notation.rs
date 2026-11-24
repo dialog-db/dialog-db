@@ -2016,7 +2016,7 @@ async fn it_keeps_a_form_on_a_branch_under_the_entity_that_names_it() -> Result<
 async fn it_finds_a_kept_form_by_a_pattern_over_its_tree() -> Result<()> {
     let mut notebook = Notebook::open().await?;
     let is: AttributeDescriptor =
-        serde_json::from_value(json!({ "the": "syntax.form/is", "as": "record:" }))?;
+        serde_json::from_value(json!({ "the": "syntax.form/is", "as": "composite:map" }))?;
     let mut entities = Vec::new();
     for text in [
         "(todo ?t)",

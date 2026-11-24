@@ -46,7 +46,7 @@ use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
 
 use base58::ToBase58;
-use dialog_corpus::{CompositeMap, Entity, Value};
+use dialog_corpus::{Composite, Entity, Value};
 use merkle_reference::Reference;
 
 use crate::Error;
@@ -323,12 +323,12 @@ fn node<'a>(
 }
 
 fn list(nodes: &[Syntax]) -> Result<Value, Error> {
-    Ok(data::list(
+    data::list(
         nodes
             .iter()
             .map(Syntax::value)
             .collect::<Result<Vec<_>, _>>()?,
-    ))
+    )
 }
 
 impl Parameters {
@@ -397,8 +397,9 @@ impl Syntax {
                         data::list(
                             pairs
                                 .into_iter()
-                                .map(|(key, value)| data::list([key, value])),
-                        )
+                                .map(|(key, value)| data::list([key, value]))
+                                .collect::<Result<Vec<_>, Error>>()?,
+                        )?
                     },
                 )],
             ),
@@ -419,6 +420,14 @@ impl Syntax {
 
     /// What this application's operator is applied to.
     pub fn operand(&self) -> Option<&Parameters> {
+        match self {
+            Syntax::Application(_, operand) => Some(operand),
+            _ => None,
+        }
+    }
+
+    /// What this applies its operator to, to change.
+    pub fn operand_mut(&mut self) -> Option<&mut Parameters> {
         match self {
             Syntax::Application(_, operand) => Some(operand),
             _ => None,
@@ -490,18 +499,22 @@ impl Syntax {
         .map_err(|error| refused("not an entity", error))
     }
 
-    /// The tree as bytes: the ones the `record:` value it is kept as
-    /// holds.
+    /// The tree as bytes: the canonical bytes of the composite it is
+    /// kept as.
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         match self.value()? {
-            Value::Record(bytes) => Ok(bytes),
-            other => Err(Error::Read(format!("a node that is no record: {other:?}"))),
+            Value::Composite(composite) => Ok(composite.to_bytes().into_owned()),
+            other => Err(Error::Read(format!(
+                "a node that is no composite: {other:?}"
+            ))),
         }
     }
 
     /// The tree `bytes` hold.
     pub fn decode(bytes: &[u8]) -> Result<Syntax, Error> {
-        Syntax::try_from(&Value::Record(bytes.to_vec()))
+        let composite =
+            Composite::from_bytes(bytes).map_err(|error| Error::Read(error.to_string()))?;
+        Syntax::try_from(&Value::from(composite))
     }
 
     /// The way from this node to the first node inside it that is
@@ -591,8 +604,8 @@ impl Syntax {
                     _ => Form::Symbol(entity.as_str().to_string()),
                 },
                 Value::Symbol(_) => Form::Symbol(data::spelled(value).unwrap_or_default()),
-                // The notation writes neither.
-                Value::Bytes(_) | Value::Record(_) => Form::Blank,
+                // The notation writes none of these as a constant.
+                Value::Bytes(_) | Value::Record(_) | Value::Composite(_) => Form::Blank,
             },
             Syntax::Reference(name) => Form::Symbol(name.clone()),
             Syntax::Map(entries) => Form::Map(
@@ -617,11 +630,11 @@ fn unread(what: &str) -> Error {
 }
 
 /// The node `value` is: a map that says its type.
-fn fields(value: &Value) -> Result<CompositeMap, Error> {
+fn fields(value: &Value) -> Result<data::Entries, Error> {
     data::entries(value)?.ok_or_else(|| unread("type"))
 }
 
-fn nodes(node: &CompositeMap, field: &str) -> Result<Vec<Syntax>, Error> {
+fn nodes(node: &data::Entries, field: &str) -> Result<Vec<Syntax>, Error> {
     data::field(node, field)
         .map(data::items)
         .transpose()?
@@ -632,7 +645,7 @@ fn nodes(node: &CompositeMap, field: &str) -> Result<Vec<Syntax>, Error> {
         .collect()
 }
 
-fn text(node: &CompositeMap, field: &str) -> Result<String, Error> {
+fn text(node: &data::Entries, field: &str) -> Result<String, Error> {
     match data::field(node, field) {
         Some(Value::String(text)) => Ok(text.clone()),
         _ => Err(unread(field)),
@@ -640,7 +653,7 @@ fn text(node: &CompositeMap, field: &str) -> Result<String, Error> {
 }
 
 /// The type a node says it is: the name of the entity under `type`.
-fn kind(node: &CompositeMap) -> Result<&str, Error> {
+fn kind(node: &data::Entries) -> Result<&str, Error> {
     match data::field(node, "type") {
         Some(Value::Entity(entity)) => entity
             .as_str()
@@ -687,9 +700,10 @@ impl TryFrom<&Value> for Syntax {
             "variable" => Syntax::Variable(text(&node, "name")?),
             "blank" => Syntax::Blank,
             "constant" => match part("value")? {
-                Value::Bytes(_) | Value::Record(_) => {
+                Value::Bytes(_) | Value::Record(_) | Value::Composite(_) => {
                     return Err(Error::Unsupported(
-                        "a constant that is bytes or a record: the notation writes neither".into(),
+                        "a constant that is bytes, a record or a composite: the notation writes none of them"
+                            .into(),
                     ));
                 }
                 value => Syntax::Constant(value.clone()),
@@ -768,7 +782,7 @@ impl Signature {
             ("subject", data::entity(&format!("{}:", self.subject))?),
             (
                 "parameters",
-                data::list(self.parameters.iter().map(data::text)),
+                data::list(self.parameters.iter().map(data::text))?,
             ),
         ])
     }
@@ -838,7 +852,7 @@ mod tests {
                         data::list([data::record([
                             ("type", keyword("variable")),
                             ("name", data::text("t")),
-                        ])?]),
+                        ])?])?,
                     ),
                     (
                         "terms",
@@ -1078,19 +1092,20 @@ mod tests {
     }
 
     /// A name does not move with how a tree's bytes are laid out. It
-    /// is the name of the tree as data, so it did move once, when a
-    /// record's key became text and a struct's entries pairs: these are
-    /// the names since.
+    /// is the name of the tree as data, so it moved when a record's key
+    /// became text and a struct's entries pairs, and again when the tree
+    /// came to be kept as Dialog-DB's composite value: these are the
+    /// names since.
     #[test]
     fn it_names_a_tree_apart_from_how_it_is_kept() -> Result<(), Error> {
         for (text, name) in [
             (
                 "(todo ?t state: :open)",
-                "form:9TQWsJPcwttfkd7sWufN62rsyASugixRYZVs1LwmNx7A",
+                "form:9Un5DfjUwfoT164kEXGCky9jesHX4ouitmuzYgWBgyWu",
             ),
             (
                 "(rule (xyz.todo ?t done: true) (xyz.todo ?t state: :done) (unless (f 1.5 x/y +)))",
-                "form:6PWrKmJedtsCGApUiQxCSSU556HMDyqWGtJHcugzsZvY",
+                "form:2q6BQJToSvhaNUnDLcRB3NoXvzd7aWLZkgCXkGdVruXn",
             ),
         ] {
             assert_eq!(one(text).entity()?.as_str(), name, "{text}");
@@ -1100,7 +1115,7 @@ mod tests {
                 .unwrap()
                 .entity()?
                 .as_str(),
-            "name:9ejwBqd2F4Zef6rpryYD1FKQKCsmbPs4YsuHBxgLTZGz"
+            "name:9swvZUPk8zcaUij6tHQUv8qUUbCzUFKUARy1v7UXMQd3"
         );
         Ok(())
     }
@@ -1112,10 +1127,7 @@ mod tests {
     fn it_keeps_a_tree_as_a_composite_value() -> Result<(), Error> {
         let tree = one(r#"(f ?x 2.0 {:a [1 "b"]} label: _ ... ?rest)"#);
         let kept = tree.value()?;
-        assert!(matches!(
-            kept.composite(),
-            Ok(Some(dialog_corpus::Composite::Map(_)))
-        ));
+        assert!(matches!(&kept, Value::Composite(composite) if composite.is_map()));
         let back = Syntax::try_from(&kept)?;
         assert_eq!(
             back.to_string(),
@@ -1133,7 +1145,7 @@ mod tests {
             Err(Error::Read("a node with no type".into()))
         );
         assert_eq!(
-            Syntax::try_from(&data::list([keyword("verb")])),
+            Syntax::try_from(&data::list([keyword("verb")])?),
             Err(Error::Read("a node with no type".into()))
         );
         assert_eq!(

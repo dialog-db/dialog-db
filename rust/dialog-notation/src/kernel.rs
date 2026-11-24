@@ -18,8 +18,22 @@ pub const TYPES: [&str; 8] = [
     "text", "natural", "integer", "float", "boolean", "entity", "bytes", "symbol",
 ];
 
-/// The picks a term may be read under: `(:last ?x)`.
-pub const PICKS: [&str; 4] = ["last", "all", "max", "min"];
+/// The picks a term may be read under: `(:last ?x)`. `last` and `all`
+/// say what a cardinality does, one and many; `max`, `min` and `top`
+/// are a concept field's electors, which choose one of the claims a
+/// field of cardinality many holds.
+pub const PICKS: [&str; 5] = ["last", "all", "max", "min", "top"];
+
+/// The electors a concept's head may choose a field's claim by:
+/// `(top ?s)`.
+pub const ELECTORS: [&str; 4] = ["last", "max", "min", "top"];
+
+/// The cardinalities a term may be read under: `(:one ?x)`, `(:many ?x)`.
+pub const CARDINALITIES: [&str; 2] = ["one", "many"];
+
+/// The wrapper that lists the cases of a variant, best first:
+/// `(:among ?x cases: [:open :done])`.
+pub const AMONG: &str = "among";
 
 /// The layers a term may be read on: `(:control ?x)`. A claim on the
 /// control layer holds for the tick it is asserted in and is gone after
@@ -100,6 +114,13 @@ pub struct Field {
     pub kind: Option<String>,
     /// The pick, when the term was written under one.
     pub pick: Option<String>,
+    /// The cardinality, `one` or `many`, when the term was written
+    /// under one.
+    pub cardinality: Option<String>,
+    /// The cases of a variant the value is one of, best first, each the
+    /// name of the entity it is: empty unless the term was written under
+    /// `(:among …)`.
+    pub listed: Vec<String>,
     /// The layer, when the term was written on one.
     pub layer: Option<String>,
     /// Where the field is every entry of a collection: the term its key
@@ -287,12 +308,14 @@ fn formula(node: &Syntax) -> Result<Formula, Error> {
     })
 }
 
-/// A field's term, with the type, pick and layer it was written under
-/// taken off: `(:control (:last (:text ?x)))` is `?x`, text, last, on
-/// the control layer.
+/// A field's term, with the type, pick, cardinality and layer it was
+/// written under taken off: `(:control (:one (:text ?x)))` is `?x`,
+/// text, cardinality one, on the control layer.
 fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
     let mut kind = None;
     let mut pick = None;
+    let mut cardinality = None;
+    let mut listed = Vec::new();
     let mut layer = None;
     let mut key = None;
     // `(:entry ?x key: ?p by: :position)`: every entry of a collection.
@@ -316,6 +339,23 @@ fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
         node = inner;
     }
     while let Syntax::Application(operator, operand) = node {
+        if let (Some(AMONG), [inner], Some(Syntax::Tuple(cases)), 1) = (
+            operator.keyword(),
+            operand.items.as_slice(),
+            operand.terms.get("cases"),
+            operand.terms.len(),
+        ) {
+            listed = cases
+                .iter()
+                .map(|case| {
+                    case.keyword().map(str::to_string).ok_or_else(|| {
+                        Error::Refused(format!("{case} is not a case: a case is a keyword"))
+                    })
+                })
+                .collect::<Result<_, Error>>()?;
+            node = inner;
+            continue;
+        }
         let (Some(word), [inner], true) = (
             operator.keyword(),
             operand.items.as_slice(),
@@ -327,6 +367,8 @@ fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
             kind = Some(word.to_string());
         } else if PICKS.contains(&word) {
             pick = Some(word.to_string());
+        } else if CARDINALITIES.contains(&word) {
+            cardinality = Some(word.to_string());
         } else if LAYERS.contains(&word) {
             layer = Some(word.to_string());
         } else {
@@ -344,6 +386,8 @@ fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
         term: term(node)?,
         kind,
         pick,
+        cardinality,
+        listed,
         layer,
         key,
     })

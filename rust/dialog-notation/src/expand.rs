@@ -38,7 +38,7 @@ use crate::Error;
 use crate::diagnostic::Diagnostic;
 use crate::form::Kind;
 use crate::kernel::QUOTE;
-use crate::kernel::{CONTROL, Head, Keyed, Rule, TYPES};
+use crate::kernel::{AMONG, CONTROL, ELECTORS, Head, Keyed, Rule, TYPES};
 use crate::parse::parse;
 use crate::pattern::{Binding, Bindings, REST, fill, matches};
 use crate::syntax::{self, DERIVED, Parameters, Signature, Syntax};
@@ -146,6 +146,87 @@ fn wrap(word: &str, inner: Syntax) -> Result<Syntax, Error> {
     ))
 }
 
+/// A rule about syntax whose pattern chooses a field by an elector,
+/// `(account ?a status: (top ?s))`, as the rule that applies the field as
+/// written and reads its line under the elector: the pattern takes
+/// `status: ?s`, and the line whose value is `?s` reads `is: (top ?s)`.
+/// Any other rule is as it was.
+fn electing(rule: Syntax) -> Syntax {
+    let Syntax::Application(operator, mut operand) = rule else {
+        return rule;
+    };
+    let mut chosen: BTreeMap<String, String> = BTreeMap::new();
+    for premise in operand.items.iter_mut().skip(1) {
+        if premise.applies() != Some("expand") {
+            continue;
+        }
+        let Some(Syntax::Application(_, pattern)) = premise
+            .operand_mut()
+            .and_then(|expand| expand.items.first_mut())
+        else {
+            continue;
+        };
+        for term in pattern.terms.values_mut() {
+            if let Some((word, Syntax::Variable(name))) = elected(term) {
+                chosen.insert(name.clone(), word.to_string());
+                *term = Syntax::Variable(name.clone());
+            }
+        }
+    }
+    if !chosen.is_empty()
+        && let Some(head) = operand.items.first_mut()
+        && head.applies() == Some("syntax")
+        && let Some(template) = head
+            .operand_mut()
+            .and_then(|syntax| syntax.items.first_mut())
+    {
+        elect(template, &chosen);
+    }
+    Syntax::Application(operator, operand)
+}
+
+/// Every line in `template` whose value is a variable `chosen` names,
+/// read under that variable's elector.
+fn elect(template: &mut Syntax, chosen: &BTreeMap<String, String>) {
+    let Syntax::Application(operator, operand) = template else {
+        return;
+    };
+    match &**operator {
+        Syntax::Reference(word) if word == "all" => {
+            for member in &mut operand.items {
+                elect(member, chosen);
+            }
+        }
+        Syntax::Reference(name) if Kind::of(name) == Kind::Attribute => {
+            let value = match operand.terms.get_mut("is") {
+                Some(value) => Some(value),
+                None => operand.items.get_mut(1),
+            };
+            if let Some(value) = value
+                && let Syntax::Variable(name) = value
+                && let Some(word) = chosen.get(name.as_str())
+            {
+                *value = apply(word, vec![value.clone()]);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The elector a term is written under and the term it chooses from:
+/// `(top ?s)` is `top` over `?s`.
+pub(crate) fn elected(term: &Syntax) -> Option<(&str, &Syntax)> {
+    match (term.applies(), term.operand()) {
+        (Some(word), Some(operand)) if ELECTORS.contains(&word) && operand.terms.is_empty() => {
+            match operand.items.as_slice() {
+                [inner] => Some((word, inner)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// The read a line is. A line is one attribute, by its full name:
 ///
 /// ```clj
@@ -157,7 +238,9 @@ fn wrap(word: &str, inner: Syntax) -> Result<Syntax, Error> {
 /// entity and then the value, `(xyz.todo/title ?i ?t)`. `as:` is the type the value
 /// is read under. `cardinality:` says how many claims the attribute
 /// holds for one entity: `:one` reads the newest, `:many` every one.
-/// Either may be left out, and then the read says nothing of it. `in:`
+/// Either may be left out; with no cardinality the read takes every
+/// claim. An elector on the value, `is: (top ?s)`, chooses one claim of
+/// many, as one in the concept's head does. `in:`
 /// is the layer, and the one taken is a command's, `:control`.
 ///
 /// `None` when `tree` applies no attribute.
@@ -226,13 +309,22 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
             )));
         }
     };
+    // An elector written on the value, `is: (top ?s)`, chooses one of
+    // the line's claims, as one in the concept's head does.
+    let mut elector = None;
+    if let Some((word, inner)) = elected(&value) {
+        elector = Some(word.to_string());
+        value = inner.clone();
+    }
+    let mut cases = None;
     if let Some(kind) = terms.remove("as") {
         let word = match &kind {
-            // A variant, `[:open :done]`: each of its cases is an entity.
-            // That the value is one of them is not checked.
-            Syntax::Tuple(cases)
-                if !cases.is_empty() && cases.iter().all(|case| case.keyword().is_some()) =>
+            // A variant, `[:open :done]`: each of its cases is an entity,
+            // listed best first.
+            Syntax::Tuple(listed)
+                if !listed.is_empty() && listed.iter().all(|case| case.keyword().is_some()) =>
             {
+                cases = Some(kind.clone());
                 "entity"
             }
             kind => kind
@@ -247,17 +339,28 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
         };
         value = wrap(word, value)?;
     }
+    if let Some(cases) = cases {
+        value = Syntax::Application(
+            Box::new(Syntax::Constant(syntax::entity(&format!("{AMONG}:"))?)),
+            Parameters {
+                items: vec![value],
+                terms: BTreeMap::from([("cases".into(), cases)]),
+            },
+        );
+    }
     if let Some(cardinality) = terms.remove("cardinality") {
-        let pick = match cardinality.keyword() {
-            Some("one") => "last",
-            Some("many") => "all",
+        let word = match cardinality.keyword() {
+            Some(word @ ("one" | "many")) => word,
             _ => {
                 return Err(Error::Refused(format!(
                     "{cardinality} is not a cardinality: `:one` or `:many`"
                 )));
             }
         };
-        value = wrap(pick, value)?;
+        value = wrap(word, value)?;
+    }
+    if let Some(elector) = elector {
+        value = wrap(&elector, value)?;
     }
     if let Some(layer) = terms.remove("in") {
         if layer.keyword() != Some(CONTROL) {
@@ -921,6 +1024,7 @@ impl Expander {
 
     /// Keep a rule about syntax, and note what any other rule reads.
     fn install(&mut self, rule: Syntax) -> Result<Option<Syntax>, Error> {
+        let rule = electing(rule);
         let clauses = Clauses::of(&rule);
         let answer = match clauses.head.as_ref() {
             Some(head) if head.applies() == Some("syntax") => match items(head) {
@@ -1765,7 +1869,7 @@ mod tests {
 
     const TODO: &str = r#"
         (concept (todo ?t list: ?l text: ?x state: ?s)
-          (xyz.todo ?t list: (:last (:entity ?l)) text: (:last (:text ?x)) state: (:last ?s)))
+          (xyz.todo ?t list: (:one (:entity ?l)) text: (:one (:text ?x)) state: (:last ?s)))
         (concept (todo/add todo: ?t list: ?l text: ?x)
           (xyz.todo.add/todo of: ?c is: ?t in: :control)
           (xyz.todo.add/list of: ?c is: ?l in: :control)
@@ -1795,8 +1899,8 @@ mod tests {
             )
             .unwrap(),
             vec![
-                "(rule (report (xyz.tonk.notebook notebook:1 entry: (:entry (:last (:entity ?x)) by: :position key: ?p))) \
-                 (xyz.tonk.notebook notebook:1 entry: (:entry (:last (:entity ?x)) by: :position key: ?p)))"
+                "(rule (report (xyz.tonk.notebook notebook:1 entry: (:entry (:one (:entity ?x)) by: :position key: ?p))) \
+                 (xyz.tonk.notebook notebook:1 entry: (:entry (:one (:entity ?x)) by: :position key: ?p)))"
             ]
         );
         for (text, why) in [
@@ -1956,7 +2060,7 @@ mod tests {
     fn it_expands_a_document_in_any_order() {
         let declarations = r#"
             (concept (todo ?t list: ?l text: ?x state: ?s)
-              (xyz.todo ?t list: (:last (:entity ?l)) text: (:last (:text ?x)) state: (:last ?s)))
+              (xyz.todo ?t list: (:one (:entity ?l)) text: (:one (:text ?x)) state: (:last ?s)))
             (concept (todo/add todo: ?t list: ?l text: ?x)
               (xyz.todo.add/todo of: ?c is: ?t in: :control)
               (xyz.todo.add/list of: ?c is: ?l in: :control)
@@ -2008,7 +2112,7 @@ mod tests {
     fn it_reads_a_concept_by_the_fields_a_read_says() {
         let bare = expanded(TODO, "(select (todo ?t text: ?x))").unwrap();
         assert_eq!(bare.len(), 1);
-        assert!(bare[0].contains("text: (:last (:text ?x))"), "{bare:?}");
+        assert!(bare[0].contains("text: (:one (:text ?x))"), "{bare:?}");
         let open = expanded(TODO, "(select (todo ?t text: ?x ...))").unwrap();
         assert_eq!(open.len(), 1);
         // `...` alone is `... _`. The two say one thing, and differ in
@@ -2119,8 +2223,8 @@ mod tests {
     fn it_writes_a_concept_of_several_reads_as_a_rule_each() {
         let kernel = expanded(
             "(concept (card ?c title: ?x owner: ?o)
-               (xyz.card ?c title: (:last (:text ?x)))
-               (xyz.owned ?c by: (:last (:entity ?o))))",
+               (xyz.card ?c title: (:one (:text ?x)))
+               (xyz.owned ?c by: (:one (:entity ?o))))",
             "(rule (assert (card ?c title: ?x owner: ?o))
                (xyz.draft ?c title: ?x by: ?o))",
         )
@@ -2128,8 +2232,8 @@ mod tests {
         assert_eq!(
             kernel,
             vec![
-                "(rule (assert (xyz.card ?c title: (:last (:text ?x)))) (xyz.draft ?c by: ?o title: ?x))",
-                "(rule (assert (xyz.owned ?c by: (:last (:entity ?o)))) (xyz.draft ?c by: ?o title: ?x))",
+                "(rule (assert (xyz.card ?c title: (:one (:text ?x)))) (xyz.draft ?c by: ?o title: ?x))",
+                "(rule (assert (xyz.owned ?c by: (:one (:entity ?o)))) (xyz.draft ?c by: ?o title: ?x))",
             ]
         );
     }
@@ -2139,13 +2243,13 @@ mod tests {
     fn it_reports_only_the_reads_a_query_names_a_field_of() {
         let kernel = expanded(
             "(concept (card ?c title: ?x owner: ?o)
-               (xyz.card ?c title: (:last (:text ?x)))
-               (xyz.owned ?c by: (:last (:entity ?o))))",
+               (xyz.card ?c title: (:one (:text ?x)))
+               (xyz.owned ?c by: (:one (:entity ?o))))",
             "(select (card ?c title: ?x ...))",
         )
         .unwrap();
         assert_eq!(kernel.len(), 1, "{kernel:?}");
-        assert!(kernel[0].starts_with("(rule (report (xyz.card ?c title: (:last (:text ?x))))"));
+        assert!(kernel[0].starts_with("(rule (report (xyz.card ?c title: (:one (:text ?x))))"));
     }
 
     /// A pattern is any form, not an application only: here a form in
@@ -2176,7 +2280,7 @@ mod tests {
         // rule uses once, is a blank.
         assert_eq!(
             rule,
-            "(rule (assert (xyz.todo ?t list: (:last (:entity ?l)) state: (:last :open) text: (:last (:text ?x)))) \
+            "(rule (assert (xyz.todo ?t list: (:one (:entity ?l)) state: (:last :open) text: (:one (:text ?x)))) \
              (xyz.todo.add _ list: (:control ?l) text: (:control ?x) todo: (:control ?t)))"
         );
         assert!(diagnostics.is_empty());
@@ -2202,8 +2306,8 @@ mod tests {
         assert_eq!(reported.applies(), Some("report"));
         let head = &items(reported)[0];
         assert_eq!(at(head, "text"), at(&rule.when[0], "text"));
-        assert!(own(head).starts_with("(:last (:entity ?l."));
-        assert!(own(&rule.when[0]).starts_with("(:last (:entity ?l."));
+        assert!(own(head).starts_with("(:one (:entity ?l."));
+        assert!(own(&rule.when[0]).starts_with("(:one (:entity ?l."));
         assert_ne!(own(head), own(&rule.when[0]));
     }
 
@@ -2478,16 +2582,16 @@ mod tests {
         };
         assert_eq!(
             read("(xyz.todo/title of: ?i is: ?t as: :text cardinality: :one)"),
-            "(xyz.todo ?i title: (:last (:text ?t)))"
+            "(xyz.todo ?i title: (:one (:text ?t)))"
         );
         assert_eq!(
             read("(xyz.list/task of: ?l is: ?i as: :entity cardinality: :many)"),
-            "(xyz.list ?l task: (:all (:entity ?i)))"
+            "(xyz.list ?l task: (:many (:entity ?i)))"
         );
         // The entity with no label, as any primary may be written.
         assert_eq!(
             read("(xyz.todo/title ?i is: ?t as: :text cardinality: :one)"),
-            "(xyz.todo ?i title: (:last (:text ?t)))"
+            "(xyz.todo ?i title: (:one (:text ?t)))"
         );
         // Unlabeled, the entity and then the value.
         assert_eq!(read("(xyz.todo/title ?i ?t)"), "(xyz.todo ?i title: ?t)");
@@ -2502,12 +2606,12 @@ mod tests {
         );
         assert_eq!(
             read("(xyz.todo/title of: ?i is: ?t cardinality: :many)"),
-            "(xyz.todo ?i title: (:all ?t))"
+            "(xyz.todo ?i title: (:many ?t))"
         );
         // The cases of a variant are entities.
         assert_eq!(
             read("(xyz.todo/state of: ?i is: ?s as: [:open :done] cardinality: :one)"),
-            "(xyz.todo ?i state: (:last (:entity ?s)))"
+            "(xyz.todo ?i state: (:one (:among (:entity ?s) cases: [:open :done])))"
         );
         // A line stands where a read does: in a write, and in a rule.
         assert_eq!(
@@ -2516,7 +2620,7 @@ mod tests {
                 "(assert (xyz.todo/state of: todo:1 is: :done as: :entity cardinality: :one))"
             )
             .unwrap(),
-            vec!["(rule (assert (xyz.todo todo:1 state: (:last (:entity :done)))))"]
+            vec!["(rule (assert (xyz.todo todo:1 state: (:one (:entity :done)))))"]
         );
         assert_eq!(
             expanded(
@@ -2527,7 +2631,7 @@ mod tests {
             )
             .unwrap(),
             vec![
-                "(rule (xyz.done ?i title: ?t) (xyz.todo ?i title: (:last (:text ?t))) (xyz.todo ?i state: (:last (:entity :done))))"
+                "(rule (xyz.done ?i title: ?t) (xyz.todo ?i title: (:one (:text ?t))) (xyz.todo ?i state: (:one (:entity :done))))"
             ]
         );
     }
@@ -2583,8 +2687,8 @@ mod tests {
                        (xyz.todo/state of: ?i is: ?s as: [:open :done] cardinality: :one)
                        (xyz.list/task of: ?l is: ?i as: :entity cardinality: :many))";
         let reads = "(concept (todo ?i list: ?l title: ?t state: ?s)
-                       (xyz.todo ?i title: (:last (:text ?t)) state: (:last (:entity ?s)))
-                       (xyz.list ?l task: (:all (:entity ?i))))";
+                       (xyz.todo ?i title: (:one (:text ?t)) state: (:one (:among (:entity ?s) cases: [:open :done])))
+                       (xyz.list ?l task: (:many (:entity ?i))))";
         for text in [
             "(select (todo ?i list: ?l title: ?t state: ?s))",
             "(select (todo ?i title: ?t))",
@@ -2602,8 +2706,8 @@ mod tests {
             )
             .unwrap(),
             vec![
-                r#"(rule (assert (xyz.todo todo:1 state: (:last (:entity :open)) title: (:last (:text "Buy milk")))))"#,
-                "(rule (assert (xyz.list list:home task: (:all (:entity todo:1)))))",
+                r#"(rule (assert (xyz.todo todo:1 state: (:one (:among (:entity :open) cases: [:open :done])) title: (:one (:text "Buy milk")))))"#,
+                "(rule (assert (xyz.list list:home task: (:many (:entity todo:1)))))",
             ]
         );
 
@@ -2616,7 +2720,7 @@ mod tests {
             )
             .unwrap(),
             vec![
-                "(rule (report (xyz.list list:home task: (:all ?t))) (xyz.list list:home task: (:all ?t)))"
+                "(rule (report (xyz.list list:home task: (:many ?t))) (xyz.list list:home task: (:many ?t)))"
             ]
         );
     }

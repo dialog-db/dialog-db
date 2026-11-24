@@ -13,22 +13,24 @@
 //! | truth | `Value::Boolean` | `boolean:` |
 //! | entity | `Value::Entity` | `entity:` |
 //! | symbol, of a domain or of none | `Value::Symbol`, `xyz.todo/text`, `/todo` | `symbol:` |
-//! | list | a `Value::Record` that holds a [`Composite::List`] | the list type |
-//! | map | a `Value::Record` that holds a [`Composite::Map`] | the map type |
+//! | list | a `Value::Composite` that is a list | the list type |
+//! | map | a `Value::Composite` that is a map keyed by text | the map type |
 //!
 //! The composite gives what a layout of the notation's own gave before
 //! it: a name that is the merkle reference of the parts, which no
-//! layout of the bytes moves; one byte string for one piece of data,
-//! whatever order a map's entries were given in; and a version byte, so
-//! bytes of a layout this release does not read are refused by its
-//! number.
+//! layout of the bytes moves; and one byte string for one piece of
+//! data, whatever order a map's entries were given in.
 //!
 //! What is left here is what the notation adds: how a name is spelled
-//! as a symbol, and a map whose keys are names.
+//! as a symbol, and a map whose keys are names, each held once
+//! ([`Entries`]). The composite holds a key once for each value it is
+//! given; the notation refuses a key given twice.
 
 use std::str::FromStr;
 
-use dialog_corpus::{Composite, CompositeError, CompositeMap, Entity, Relation, Value};
+use std::cmp::Ordering;
+
+use dialog_corpus::{Composite, CompositeError, Entity, Relation, Value};
 
 use crate::Error;
 
@@ -75,17 +77,21 @@ pub fn entity(uri: &str) -> Result<Value, Error> {
         .map_err(|error| refused("not an entity", error))
 }
 
-/// A list of `items`.
-pub fn list(items: impl IntoIterator<Item = Value>) -> Value {
-    Composite::list(items).into()
+/// A list of `items`. Refused only for what a composite cannot hold: a
+/// float that is not a number, or lists nested past the composite's
+/// depth.
+pub fn list(items: impl IntoIterator<Item = Value>) -> Result<Value, Error> {
+    Composite::list(items)
+        .map(Value::from)
+        .map_err(|error| Error::Refused(error.to_string()))
 }
 
 /// A map of `entries`, in whatever order. A key is text, and one given
 /// twice is refused.
 pub fn map<K: Into<String>>(entries: impl IntoIterator<Item = (K, Value)>) -> Result<Value, Error> {
-    Composite::map(entries)
-        .map(Value::from)
-        .map_err(|error| Error::Refused(error.to_string()))
+    Entries::new(entries)
+        .map_err(|key| Error::Refused(format!("the key {key} is given twice")))?
+        .value()
 }
 
 /// A map whose keys are names, each the text it is written as.
@@ -93,31 +99,115 @@ pub fn record<'a>(fields: impl IntoIterator<Item = (&'a str, Value)>) -> Result<
     map(fields)
 }
 
-fn unread(error: CompositeError) -> Error {
-    Error::Read(error.to_string())
-}
-
-/// The map `value` is. A value that is no map is not one, and a record
-/// under a version this release does not read is refused by its
-/// number.
-pub fn entries(value: &Value) -> Result<Option<CompositeMap>, Error> {
-    match value.composite().map_err(unread)? {
-        Some(Composite::Map(map)) => Ok(Some(map)),
-        _ => Ok(None),
+/// The map `value` is, when it is a composite map keyed by text with no
+/// key twice. A value that is no such map is not one.
+pub fn entries(value: &Value) -> Result<Option<Entries>, Error> {
+    let Value::Composite(composite) = value else {
+        return Ok(None);
+    };
+    if !composite.is_map() {
+        return Ok(None);
     }
+    let mut held = Vec::with_capacity(composite.len());
+    for (key, value) in composite.entries() {
+        match key {
+            Value::String(key) => held.push((key, value)),
+            _ => return Ok(None),
+        }
+    }
+    Entries::new(held)
+        .map(Some)
+        .map_err(|key| Error::Read(format!("a map holds the key {key} more than once")))
 }
 
 /// The members of the list `value` is.
 pub fn items(value: &Value) -> Result<Option<Vec<Value>>, Error> {
-    match value.composite().map_err(unread)? {
-        Some(Composite::List(items)) => Ok(Some(items.into_values())),
+    match value {
+        Value::Composite(composite) if composite.is_list() => Ok(Some(composite.items().collect())),
         _ => Ok(None),
     }
 }
 
 /// What a map holds under the name `field`.
-pub fn field<'a>(map: &'a CompositeMap, field: &str) -> Option<&'a Value> {
+pub fn field<'a>(map: &'a Entries, field: &str) -> Option<&'a Value> {
     map.get(field)
+}
+
+/// The entries of a map whose keys are text, each held once, in the
+/// order dag-cbor writes a map's keys: the shorter first, and two of one
+/// length by their bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct Entries {
+    entries: Vec<(String, Value)>,
+}
+
+fn order(left: &str, right: &str) -> Ordering {
+    left.len()
+        .cmp(&right.len())
+        .then_with(|| left.as_bytes().cmp(right.as_bytes()))
+}
+
+impl Entries {
+    /// The map of `entries`, in whatever order they come. Refuses a key
+    /// given twice, answering with it.
+    pub fn new<K: Into<String>>(
+        entries: impl IntoIterator<Item = (K, Value)>,
+    ) -> Result<Self, String> {
+        let mut entries: Vec<(String, Value)> = entries
+            .into_iter()
+            .map(|(key, value)| (key.into(), value))
+            .collect();
+        entries.sort_by(|(left, _), (right, _)| order(left, right));
+        if let Some(pair) = entries.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+            return Err(pair[1].0.clone());
+        }
+        Ok(Self { entries })
+    }
+
+    /// The value under `key`, if the map holds it.
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.entries
+            .binary_search_by(|(held, _)| order(held, key))
+            .ok()
+            .map(|index| &self.entries[index].1)
+    }
+
+    /// Whether the map holds `key`.
+    pub fn contains(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// The entries, in order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.entries
+            .iter()
+            .map(|(key, value)| (key.as_str(), value))
+    }
+
+    /// How many entries the map holds.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the map holds no entry.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The composite value this map is kept as.
+    pub fn value(&self) -> Result<Value, Error> {
+        Composite::map(
+            self.entries
+                .iter()
+                .map(|(key, value)| (Value::String(key.clone()), value.clone())),
+        )
+        .map(Value::from)
+        .map_err(refusal)
+    }
+}
+
+fn refusal(error: CompositeError) -> Error {
+    Error::Refused(error.to_string())
 }
 
 /// Whether a name is written with a domain: something stands before
@@ -163,7 +253,7 @@ mod tests {
     /// A map's key is text: a name as it is written, or any text.
     #[test]
     fn it_keys_a_map_by_text() -> Result<(), Error> {
-        let pair = list([natural(1), natural(2)]);
+        let pair = list([natural(1), natural(2)])?;
         let kept = map([
             ("pair", pair.clone()),
             ("xyz.todo/text", text("attribute")),
@@ -181,25 +271,11 @@ mod tests {
     /// The natural 3 and the float 3.0 are one number to Dialog-DB, so
     /// they are one piece of data: one name and one byte string.
     #[test]
-    fn it_keeps_one_number_one_way() {
-        let natural = list([natural(3)]);
-        let float = list([Value::Float(3.0)]);
+    fn it_keeps_one_number_one_way() -> Result<(), Error> {
+        let natural = list([natural(3)])?;
+        let float = list([Value::Float(3.0)])?;
         assert_eq!(natural.reference(), float.reference());
         assert_eq!(natural, float);
-    }
-
-    #[test]
-    fn it_refuses_a_version_it_does_not_know() -> Result<(), Error> {
-        let Value::Record(mut bytes) = record([("a", natural(1))])? else {
-            panic!("a record");
-        };
-        bytes[0] += 1;
-        assert_eq!(
-            entries(&Value::Record(bytes)),
-            Err(Error::Read(
-                CompositeError::UnknownVersion { version: 2 }.to_string()
-            ))
-        );
         Ok(())
     }
 
