@@ -613,6 +613,8 @@ mod tests {
 
     use serde_json::{Value, json};
 
+    use crate::error::TypeError;
+
     use crate::concept::query::ConceptRules;
     use crate::rule::deductive::DeductiveRule;
     use crate::rule::deductive::descriptor::DeductiveRuleDescriptor;
@@ -644,6 +646,26 @@ mod tests {
 
     fn rule(when: Vec<Value>) -> DeductiveRule {
         rule_headed("friend", when)
+    }
+
+    /// A head field named `this`, the entity's own name, is refused
+    /// with a typed error where it panicked looking up its canonical
+    /// name, which only the entity does not get.
+    #[dialog_common::test]
+    fn it_refuses_a_head_field_named_this() {
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(json!({
+            "deduce": head("this", "social/friend"),
+            "when": [knows("this", "x")],
+        }))
+        .expect("descriptor parses");
+        let compiled = descriptor.compile();
+        assert!(
+            matches!(
+                &compiled,
+                Err(TypeError::ReservedField { field }) if field == "this"
+            ),
+            "{compiled:?}"
+        );
     }
 
     /// Calling a local `x` or `a` does not make another rule.
