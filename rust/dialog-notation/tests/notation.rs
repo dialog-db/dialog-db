@@ -1688,6 +1688,48 @@ async fn it_reads_a_concept_a_macro_declares_above_a_query() -> Result<()> {
     Ok(())
 }
 
+/// A name rules installed in an earlier document conclude or read as a
+/// derived attribute is not declared as a concept later: the installed
+/// rules would keep the derived relation while the same text written now
+/// would read the stored one. The declaration is refused, naming where
+/// the name was used, and the derived attribute still answers.
+#[dialog_common::test]
+async fn it_refuses_a_concept_over_a_name_installed_rules_derive() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(concept (todo ?t title: ?x)
+                 (xyz.todo/title of: ?t is: ?x as: :text cardinality: :one))
+               (rule (todo/tag ?t ?g) (todo ?t title: ?g))
+               (rule (xyz.seen ?t v: ?g) (todo/tag ?t ?g))
+               (assert (todo todo:1 title: "milk"))"#,
+        )
+        .await?;
+    let before = report(&mut notebook, "(select (xyz.seen ?t v: ?g))").await?;
+    assert_eq!(before, vec![r#"(xyz.seen todo:1 v: "milk")"#]);
+    for declared in [
+        "(concept (todo/tag ?t is: ?g)
+           (xyz.todo/tag of: ?t is: ?g as: :text cardinality: :many))",
+        "(concept (todo/tag ?t tag: ?g)
+           (xyz.todo/tag of: ?t is: ?g as: :text cardinality: :many))",
+    ] {
+        let refused = notebook
+            .submit(declared)
+            .await
+            .map_err(|error| error.downcast::<Error>());
+        assert!(
+            matches!(&refused, Err(Ok(Error::Refused(why)))
+                if why.contains("todo/tag") && why.contains("(rule (todo/tag ?t ?g)")),
+            "{declared}: {refused:?}"
+        );
+    }
+    assert_eq!(
+        report(&mut notebook, "(select (xyz.seen ?t v: ?g))").await?,
+        before
+    );
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a
