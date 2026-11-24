@@ -81,3 +81,31 @@ unchanged:
 ```sh
 python3 research/benchmark-dataset/se-transform.py <extracted-dump-dir> <output.csv> [--limit N]
 ```
+
+## `design/macros/` and `rust/dialog-notation/examples/`
+
+What the notation's proof of concept (`design/macros` on `main`, #773)
+was explored and measured with, taken off the pull request before it
+landed, at the paths they had on `feat/notation-poc` at `79979af`:
+
+- `design/macros/model/`: the model of the kernel and the core forms
+  in Python (`model.py`, `checks.py`) and the prelude and to-do it ran.
+- `design/macros/rounds/`: the reader rounds (`k01`, `k02`) and the
+  output of every cost run the journal cites (`cost-*.txt`).
+- `design/macros/sketches/`: the design's first sketches of tonk's core
+  and notebook. The crate's own, which its tests run, are on `main`
+  under `rust/dialog-notation/tests/fixtures/`.
+- `design/macros/*.md`: the status reports, plans and comparisons the
+  journal and the ledger cite: `alignment.md`, `synthesis.md`,
+  `poc.md`, `decisions-overnight.md`, `where-things-stand.md`, the
+  `tonk*.md` readings, the composite and definitions plans. Every
+  decision of the maintainer's they held is a dated row of
+  `design/macros/claims.md` on `main`.
+- `rust/dialog-notation/examples/`: the crate's examples, kept as files
+  for the record: the cost harness that produced the `cost-*.txt` runs
+  (`cost.rs`), the notebook bar (`bar.rs`, `notebook/bar.rs`), the
+  shapes count (`shapes.rs`) and the runner (`notebook.rs`,
+  `notebook/session.rs`, `todo.clj`, `done.clj`). They are not built
+  here and are not expected to build against a later `main`; check out
+  `79979af` of `feat/notation-poc`, or the branch
+  `archive/notation-poc-2026-11-24`, to run them as they were.

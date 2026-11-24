@@ -1,0 +1,56 @@
+You are using a notation for a database language. Work from the text below alone. Do not use any tools other than the one Read you were told to make, and do not search files or the web.
+
+Basics you can rely on:
+- The database stores facts: entity, attribute, value. Entities are written like `todo:1` or `page:a`.
+- `(xyz.todo ?t text: ?x state: ?s)` is a read. It matches every entity that has those fields. `?t`, `?x`, `?s` are variables; a constant such as `:open` in a field's place matches only that value.
+- A command is something a person issues, for example `(complete (xyz.todo todo:1))`. It holds only at the moment it is issued. Nothing is stored by issuing it.
+- `(assert! A)` stores A, and it stays stored. `(retract! A)` removes A. Something a rule gives with neither word is derived: it holds for as long as what the rule needs holds, and is never stored.
+- `(unless …)` holds when what is inside it has no match.
+
+Nobody has told you how a rule is written. These three rules are all you have:
+```
+(rule (assert! (xyz.todo ?t state: :done))
+  (complete (xyz.todo ?t)))
+
+(rule (xyz.pending ?t text: ?x)
+  (xyz.todo ?t text: ?x state: :open))
+
+(rule (xyz.blocked ?t by: ?b)
+  (xyz.todo ?t after: ?b state: :open)
+  (xyz.todo ?b state: :open)
+  (unless (xyz.waived ?t)))
+```
+
+Answer every task. Number your answers A to F.
+
+Task A. Read these two rules:
+```
+(rule (xyz.reach ?a to: ?b)
+  (xyz.link ?a to: ?b))
+
+(rule (xyz.reach ?a to: ?c)
+  (xyz.link ?a to: ?b)
+  (xyz.reach ?b to: ?c))
+```
+The database stores four facts and nothing else: `(xyz.link page:a to: page:b)`, `(xyz.link page:b to: page:c)`, `(xyz.link page:c to: page:d)`, `(xyz.link page:x to: page:y)`. List every `xyz.reach` that holds from `page:a`. Say whether the second rule stores anything, and whether it gives anything when the database holds no `xyz.link` at all.
+
+Task B. Read this rule:
+```
+(rule (assert! (xyz.todo ?t text: ?x state: :open))
+  (add (xyz.todo ?t text: ?x)))
+```
+First: the database is empty and nobody issues anything. What is stored? Second: someone issues `(add (xyz.todo todo:7 text: "Buy milk"))`. What is stored now? Third: does this rule ever issue `add` itself?
+
+Task C. Write a rule: a to-do is `xyz.stale` when it is open, the list it is on has state `:archived` (a list is read as `(xyz.list ?l state: ?s)`, and a to-do's list as `(xyz.todo ?t list: ?l)`), and it has no pin (a pin is read as `(xyz.pin ?t)`). Stale is derived, not stored.
+
+Task D. Write one rule, not two: when someone issues `(finish (xyz.todo ?t))`, store state `:done` on that to-do, and also store `(xyz.log ?t event: :finished)`.
+
+Task E. Someone wrote this, meaning "when a to-do is finished, mark it done and log it":
+```
+(rule (assert! (xyz.todo ?t state: :done))
+      (assert! (xyz.log ?t event: :finished))
+  (finish (xyz.todo ?t)))
+```
+Say what you think it does, part by part: which parts are what the rule gives, and which are what it needs.
+
+Task F. Rate from 1 to 5 how sure you are that you know which parts of a rule are what it gives and which are what it needs (5 is certain). Name the one thing you found most confusing. If you would write a rule another way, show how.
