@@ -1348,6 +1348,41 @@ async fn it_renders_the_tables_page_and_directory() -> Result<()> {
     Ok(())
 }
 
+/// The source of a query not found names each field of the concept
+/// apart from an entry's key, whatever the fields are labelled: a field
+/// labelled `key` beside an entry is shown with its own value.
+#[dialog_common::test]
+async fn it_shows_a_field_labelled_key_beside_an_entry_apart_from_its_key() -> Result<()> {
+    let concepts = r#"
+        (concept (room ?r name: ?n)
+          (xyz.room/name of: ?r is: ?n as: :text cardinality: :one))
+        (concept (shelf ?s room: ?r key: ?k item: {?i ?b})
+          (xyz.shelf/room of: ?s is: ?r as: :entity cardinality: :one)
+          (xyz.shelf/key of: ?s is: ?k as: :text cardinality: :one)
+          (xyz.shelf.item/?i of: ?s is: ?b as: :entity cardinality: :many by: :position))"#;
+    let board = r#"
+        (query (room/board ?r is: ?board)
+          (room ?r name: ?name)
+          (shelf/missing _ room: ?r is: (collect ?shelves))
+          (view ?board [:article [:h2 ?name] ?shelves]))"#;
+    let mut notebook = Notebook::open().await?;
+    write(&mut notebook, concepts).await?;
+    write(
+        &mut notebook,
+        r#"(assert (room room:1 name: "Den"))
+           (assert (shelf shelf:1 room: room:1 key: "K1" item: {"A" book:a}))"#,
+    )
+    .await?;
+    let plan = plan_of(&[concepts, board], "(select (room/board ?r is: ?board))")?;
+    let mut shown = Driven::new(&notebook, plan, entity("room:1"), How::Subscribed).await?;
+    shown.step(&notebook).await?;
+    assert_eq!(
+        shown.tree.hiccup(),
+        r#"[:article [:h2 "Den"] [:view-source "(shelf shelf:1 item: {\"A\" book:a} key: \"K1\" room: room:1)"]]"#
+    );
+    Ok(())
+}
+
 /// A query named under a declared concept and defined by no document is
 /// shown as its source: the concept applied to the entity with its
 /// fields, narrowed by what the call gives. It follows a field.
