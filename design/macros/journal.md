@@ -1916,3 +1916,18 @@ The measurement that came in after (next entry but one above) bears on this: wha
 - An instance whose key changes is another instance. So a key must not hold what a person edits in place.
 - An input a person is typing in: its value arrives back as a patch after a round trip, later than keys typed since. Setting it moves the caret and can undo what was typed. The renderer must not write a value the element already holds, and has to know which change a value answers.
 - Changes should reach the renderer as one batch for one commit, so it can do the least to the document, as dominion did by edit distance and others do by the longest run already in order.
+
+## 2026-11-24, Building: the notation on the engine as it lands
+
+**Asked.** By the coordinating session for the maintainer: bring #773 onto the engine on main, quickly and with no new design.
+
+**Learned.** The branch's engine was an older history of #778 with #799 on it, both since rewritten, so it was moved onto `feat/patterns` by taking its engine files whole. Against it the notation broke in one place, the composite's API, and #827 broke it at run time only. A query's row of several columns is concluded as one record by a pattern (decision 15), and a branch refuses to store such a rule until format 5: asked once it runs, kept current it does not. 14 of 31 view layers in the sketches and tests are such rows, and so is every layer nested two levels deep.
+
+**Interpreted, for the maintainer to correct.**
+
+- A line with no `cardinality:` is read as `many`, which is what `all` did before.
+- A variant's cases, `as: [:open :done]`, are always the attribute's listed values, so its identity holds them; before, they were dropped.
+- An elector is taken in a concept's head and on a line's value, `is: (top ?s)`, both of which the note of 2026-11-20 named.
+- A write and a rule's conclusion go by the attribute and carry no elector; only a read's field does.
+
+**Decided.** By the coordinating session: format 5 is ported onto #778 as `feat/rule-format-5` and merged here when ready, and the measurements wait for it; `Aggregator::Distinct` stays, apart from the notation's commits.
