@@ -90,10 +90,10 @@ impl DiagnoseStore {
         } = explored;
 
         let (tx, message_rx) = channel();
-        let tree_catalog = tree.catalog().clone();
+        let tree_subject = tree.subject().clone();
         let cursor = FactsCursor::new(tree.clone(), storage.clone(), tx.clone());
         let analysis = FactsTreeAnalysis::new(tree, storage.clone(), tx.clone());
-        let hierarchy = FactsHierarchy::new(storage, tree_catalog, tx);
+        let hierarchy = FactsHierarchy::new(storage, tree_subject, tx);
 
         Self {
             message_rx,

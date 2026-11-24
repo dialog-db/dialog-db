@@ -173,6 +173,207 @@ What this changes for you:
 Why: #839 left it out because a list had no value to be on main; the
 composite value is that value now.
 
+### Every identity generation a release computed is named, and the current one is a constant
+
+[#859](https://github.com/dialog-db/dialog-db/pull/859).
+
+`dialog_query::migration` now says, for attributes, concepts and rules,
+which identity each release computed and what it hashed, and exports a
+function for each generation an embedder can reproduce, named by its
+generation, beside `IDENTITY_GENERATION`, the generation this release
+computes. Generation 0 is 0.1.0's (`attribute_uri_v0`,
+`concept_identity_v0`), generation 1 is 0.3.0 to 0.5.0's
+(`attribute_uri_v1`, `concept_identity_v1`), and generation 2 is this
+release's (`attribute_uri_v2`, `concept_identity_v2`,
+`rule_identity_v2`). 0.2.0 computed identities of its own, which nothing
+reproduces; no embedder is known to hold them. Rule identities of
+generations 0 and 1 are not exported: no fact holds a rule's identity as
+a value, and `Branch::upgrade_rules` finds an earlier rule by the entity
+it is stored under.
+
+What this changes for you:
+
+- New: `migration::IDENTITY_GENERATION` (2), `attribute_uri_v2`,
+  `concept_identity_v2`, `rule_identity_v2` (taking a `DeductiveRule` or
+  an `InductiveRule` through `migration::AnyRule`, and returning `None`
+  for a rule with no stored form). They return what `to_uri`, `this` and
+  `try_this` return today, and keep returning it when a later release
+  moves identities.
+- New: `migration::picked_attribute_uri_v1` and
+  `picked_attribute_reference_v1`, the identity 0.3.0 to 0.5.0 gave an
+  attribute read under `max`, `min` or `top` (a listed `as` with no pick
+  read as `top`) on its own, not through a concept. It was computed
+  privately for `concept_reference_v1` and is now public.
+- An embedder that writes dialog identities into its own facts records
+  `IDENTITY_GENERATION` beside them, and when a release reports another,
+  rewrites each value from the earlier generation's identity to the
+  current one. The module documentation has the table of releases and
+  generations, and an example.
+- The documentation of `attribute_uri_v0` and `concept_identity_v0` said
+  they reproduce 0.2's identities. They reproduce 0.1.0's; the functions
+  compute what they always did.
+
+Why: an embedder rekeys its own facts when dialog's identities move, and
+had no way to tell that they had moved, nor a name for each generation
+it had to compute the old identity in. A test now pins this
+generation's identities beside the constant, so moving one means bumping
+it.
+
+### A rule that holds a constant map or list reads back from its stored body
+
+[#855](https://github.com/dialog-db/dialog-db/pull/855)
+
+A stored rule body writes a constant map or list as its canonical
+bytes, and the reader of a rule body buffered each term through a
+form that holds no bytes. So a rule holding a composite constant, as a
+term or as a pattern with no variable in it (which is that constant),
+was written in format 4 and then refused on every read: `decode`
+failed with "invalid type: byte array", a branch listed the rule in
+`dialog.rule/invalid` as undecodable, and it never fired. The reader
+now reads such bytes as the composite they are. Only a composite is
+written as a byte string: a bytes constant is written as an array of
+integers under `bytes:`, so it reads back as bytes, and a bytes constant
+and a composite of the same bytes are two rules, of two bodies. That was
+also why format 5 refused a rule holding a constant map or list inside a
+pattern; it is stored now, every rule that compiles has a body, and the
+refusal is gone.
+
+What this changes for you:
+
+- `DeductiveRule::decode` and `InductiveRule::decode` read a body that
+  holds a composite constant, at any depth, as the rule that wrote it.
+  A branch fires such a rule instead of listing it in
+  `dialog.rule/invalid`.
+- A rule holding a constant map or list inside a pattern is stored in
+  format 5: `try_encode` returns its body, and asserting it into a
+  transaction, a batch, the session overlay or a query layer stages that
+  body.
+- Gone, as nothing produces them (none was released):
+  `DeductiveRule::storable`, `InductiveRule::storable`,
+  `TypeError::UnstorablePattern`, `Update::refuse`, `Update::hold`,
+  `Refusal`, `Changes::refused`, `CommitError::Refused` and
+  `DialogCorpusError::Refused`. An `Update` implementor implements the
+  methods it did before #778. A query layer no longer keeps rules in
+  memory beside its changes: it reads every rule from its stored body.
+- Bytes in a rule body that are no map or list are refused when the body
+  is decoded, with an error, as any malformed body is.
+
+Why: composite values (#843) made a map or a list a constant a rule can
+hold, and a rule that can be built and run should run once it is stored.
+
+### `max` and `min` over a listed type rank by the listing, least first
+
+[#858](https://github.com/dialog-db/dialog-db/pull/858).
+
+A listed `as` is a scale written least first, `[low, medium, high]`. A
+concept field picking `max` over an attribute that lists its values now
+reads the claim holding the last listed value present, and `min` the
+first, whatever the values' own order; before, both compared the values,
+so listed symbols ranked by their bytes. A value the listing does not
+hold loses to every listed one, claims holding one value fall to the
+newest, and a cell holding no listed value reads its newest claim, as
+under `top`. Over an attribute that lists nothing, `max` and `min` are
+unchanged. `top` reads as it did: the first listed value present, which
+is now also what `min` reads.
+
+What this changes for you:
+
+- A field with `pick: max` or `pick: min` over a listed attribute reads
+  a different claim wherever the listing's order and the values' order
+  disagree: over `[low, medium, high]`, `max` reads `high` where it read
+  `medium`, and `min` reads `low` where it read `high`. A subscription or
+  a rule reading such a field follows.
+- `max` and `min` over a listing are accepted whatever the listed values'
+  type: `TypeError::SelectiveAggregate`'s "type has no order" refusal
+  applies only to an attribute that lists nothing.
+- `Selective::compares` takes the listing (`compares(listed)`) and is
+  false for `max` and `min` over one.
+- Deprecated: `pick: top` (`Selective::Top`). It reads the first listed
+  value present, which is `min` over the same list; a list written least
+  first is read with `max`. It is still read and keeps its identity, is
+  marked deprecated in `notes/notation/schema.json`, and goes in the next
+  version.
+- Removed: `Selective::bounds`, which nothing called.
+- `ReduceEntry::try_listed` builds an entry ranking by a listing, and
+  `ReduceEntry::orders_by_standing` says whether a fold over it is
+  evaluated afresh: true for a `max` or `min` over a listing, as for
+  `top`.
+
+Why: a list written top to bottom read as "best first" only for `top`,
+and `max` over the same list, the reading a scale invites, ranked by
+bytes nobody chose. A listing written least first gives `max` and `min`
+the order its author wrote.
+
+### A tree names the subject whose nodes it reads, and holds no reader
+
+[#785](https://github.com/dialog-db/dialog-db/pull/785),
+[design/tree-node-reads.md](./design/tree-node-reads.md), a follow-up to
+[#755](https://github.com/dialog-db/dialog-db/pull/755); the
+[journal](./design/tree-node-reads/journal.md) records the two decisions
+and the inventory behind them.
+
+A tree is a root and a `Reading`: the subject whose nodes it reads, the
+priority its hydrations rank at, and whether it reads only this replica.
+Every operation is handed the environment it reads through and performs
+`nodes::Read` and `nodes::Preload` on it; nothing in the tree crate keeps
+an environment. The node requests name a subject instead of a catalog,
+and which block catalog a node is kept in, when it is kept as a block, is
+the translation layer's business.
+
+What this changes for you:
+
+- `Accessor` is gone. `Reading` carries the subject (`Reading { subject,
+  priority, local }`, `Reading::new(subject)`, `.ranked(priority)`,
+  `.locally()`), builds the requests (`read(&hash)`, `preload(&hash)`), and
+  reads a node a tree links to with `node(env, &hash)`, where absence is
+  an error. `Accessor::new(env, &catalog).get_node(&hash)` becomes
+  `tree.reading().node(env, &hash)`, or `Reading::new(subject).node(env,
+  &hash)`; a forced local read becomes `nodes::Read::new(subject,
+  hash).locally().perform(env)`.
+- The free `dialog_search_tree::load_node(env, &catalog, &hash)` is gone:
+  `nodes::Read::new(subject, hash).perform(env)` is the same read, `None`
+  for a node nobody can reach.
+- `nodes::Read`, `nodes::Preload` and `nodes::Write` carry `subject:
+  Subject` where they carried `catalog: CatalogScope`, and their `new`
+  takes the subject. `Read::load()` still hands the translation layer the
+  block load, in the subject's index catalog, and
+  `dialog_search_tree::nodes::blocks_of(&subject)` names that catalog for
+  a store that answers the node requests over blocks of its own, as the
+  single-file archive (`dialog-chronicle`) does.
+- The trees take a `Subject` where they took a `CatalogScope`:
+  `PersistentTree::empty_in`, `empty_with_manifest` and `at`,
+  `TransientTree::new`, `empty_with_manifest`, `with_manifest` and
+  `stitch`, `HitchhikerTree::empty`, and above them
+  `TreeHistory::from_root` and `empty` and
+  `dialog_corpus::tree::distribution::capture`. `catalog()` is
+  `subject()` on each tree and on `CorpusWriter`;
+  `PersistentTree::reading()` returns `&Reading`, and `TransientTree`
+  has one too.
+- An edit reads as the tree it was opened from, and the tree it persists
+  reads that way too. `tree.locally().edit()` reads only this replica and
+  fails with `DialogSearchTreeError::Node` on a node it lacks instead of
+  hydrating it; `tree.ranked(priority).edit()` ranks its hydrations at
+  that priority; `HitchhikerTree::open` inherits the same way. Before,
+  every edit read on demand and could hydrate, and the tree it persisted
+  read on demand whatever it was opened from.
+- For tests, `dialog_search_tree::helpers::test_subject()` names the test
+  trees' subject and `Blocks::subject()` a block store's;
+  `test_catalog()` is the block catalog beneath them.
+
+Nothing a replica stores or syncs changes: a node is still kept as a block
+in its subject's `index` catalog, and no data is rewritten.
+
+Why: after #755 the `Accessor` no longer owned the cache, and what was
+left bundled an environment with a catalog and a reading policy, which
+put a storage handle back into the tree's vocabulary and gave callers
+outside the crate a second way to read a node. The catalog name was
+always `index`, so the part of it that mattered was the subject; an
+environment serving several subjects (a peer, a query over lines of
+several repositories, a push reading one tree locally and forwarding
+another's blocks) routes, caches and hydrates by it. The edit's reading
+policy was dropped by accident, so a local tree could hydrate the nodes
+its edit rewrote.
+
 ### A standing fold steps a group's value instead of folding the group again
 
 [#856](https://github.com/dialog-db/dialog-db/pull/856). The design it follows is
@@ -206,10 +407,9 @@ that row, not the group it is in.
 Stacked on [#778](https://github.com/dialog-db/dialog-db/pull/778); the
 design is in [design/patterns/design-rule-identity.md](design/patterns/design-rule-identity.md).
 
-A rule that holds a map or a list of terms ran only where it was built,
-in a query layer: the stored rule body had no way to write a pattern, so
-asserting one into a transaction or the session overlay was refused. Rule
-body format 5 writes one. Where a parameter holds a map or a list, the
+A rule that holds a map or a list of terms needs a stored body that can
+write a pattern, which format 4 has no way to do. Rule body format 5
+writes one. Where a parameter holds a map or a list, the
 body writes it under the one key `match` as a composite value is written
 for a human reader: a map as its entries, each a pair of a key and a
 pattern, and a list as its items, with what takes the rest beside them
@@ -240,17 +440,11 @@ What this changes for you:
 
 - Asserting a rule that holds a pattern into a transaction, a batch, the
   session overlay or a query layer stages its `source` body with its
-  index facts. Committing it succeeds where it returned
-  `CommitError::Refused`, and `Ephemeral::apply` lands it where it
-  returned `DialogCorpusError::Refused`.
-- Still refused, with `TypeError::UnstorablePattern`, which now carries a
-  `reason`: a rule holding a constant map or list inside a pattern. A
-  composite is written in dag-cbor as its bytes, which a rule body's terms
-  are not read back from, so the rule would be stored and inert. A map
-  pattern keyed by any value is stored.
+  index facts, and committing it or applying it to an ephemeral line
+  lands it. A map pattern keyed by any value is stored, and so, since the
+  entry above, is a pattern that holds a constant map or list.
 - `Parameters` and `Pattern` serialize a map or a list of terms under
-  `match`, and read it back, in JSON and dag-cbor. A `Changes` that holds
-  a refusal still does not serialize. A `ConceptQuery` writes a name that holds a pattern as that
+  `match`, and read it back, in JSON and dag-cbor. A `ConceptQuery` writes a name that holds a pattern as that
   pattern in its `where`, where it wrote the variable standing for the
   whole value, and reads it back: a negated premise keeps its pattern in
   the concept application, so a rule negating one was written without it.
@@ -284,9 +478,8 @@ inside it is bound, the pattern builds the value. A map pattern with no rest
 matches a map of exactly its entries, and a list pattern with no run a list
 of exactly its items. The planner counts a pattern bound when every variable
 inside it is, and inference types a slot that holds one as a composite and
-each leaf as its term is typed. A rule that holds a pattern has an identity
-and runs where it was built, in a query layer; rule body format 5 (the
-entry above) stores it.
+each leaf as its term is typed. A rule that holds a pattern has an identity,
+and rule body format 5 (the entries above) stores it as any rule.
 
 What this changes for you:
 
@@ -299,33 +492,11 @@ What this changes for you:
   `shape`, `pattern`, `shapes`, `has_shapes`, `leaves`, `lowered`, `plain`
   and `map_terms`. `get` and `iter` still answer terms: under a name that
   holds a pattern, a variable that stands for the whole value.
-- New: `Update::hold`, a target keeping a thing it cannot write as facts,
-  and `Update::refuse`, a target recording a statement it cannot write, a
-  required method for every `Update` implementor. `Changes::refused` gives
-  the first refusal, and `Refusal` carries the entity and the typed reason.
-- New: `TypeError::UnstorablePattern`, from `DeductiveRule::storable` and
-  `InductiveRule::storable`.
-- `Parameters` and a pattern above a leaf have no wire form: serializing
-  `Parameters` that hold a pattern fails, and so does serializing a
-  `Changes` that holds a refusal.
-- Asserting a rule that holds a pattern stages nothing for it in a batch
-  that is committed: the batch records a `Refusal` carrying
-  `TypeError::UnstorablePattern`, and committing a transaction that holds
-  it fails with `CommitError::Refused` before anything is written.
-  `Ephemeral::apply`, and so the branch's session overlay, refuses such a
-  batch with `DialogCorpusError::Refused`. A `QueryLayer`
-  (`Branch::with`) keeps the rule and its index facts and runs it; a copy
-  of the layer's `changes()` carries the refusal and is refused wherever
-  it is committed or applied.
-- An inductive rule that holds a pattern is refused the same way
-  everywhere, a query layer included.
 
 Why: a rule could not say a value by its shape, so a command could not be
 given a record, an entity could not be derived from one, and a syntax tree
 could not be taken apart in a rule. The pattern is the notation's struct
-with variables in it, one thing both ways. Committing a rule that holds a
-pattern used to panic, which aborts the page on wasm; it is now an error the
-commit returns.
+with variables in it, one thing both ways.
 
 ### A value can be a composite: a map, a record or a list, held as one value and read in place
 
@@ -569,6 +740,22 @@ dropping that scope.
   the formula `entity/derive` is read by no older release, which does
   not know the formula; nothing an older release wrote is rewritten.
   `Aggregator::Distinct` is never stored. Nothing an embedder has to run.
+
+- A rule that holds a composite constant: one of terms is written in
+  format 4 byte for byte as before, and one holding the constant inside a
+  pattern is written in format 5. Only the reader changed: a body that
+  read before reads as it did, and nothing is rewritten. No release has
+  stored a composite, so no older release meets such a body. Nothing for
+  an embedder to run.
+- `max` and `min` over a listed type: nothing stored is rewritten and no
+  identity moves, an attribute's, a concept's or a rule's: a stored list
+  keeps its order and `top` keeps its name. What a stored concept field
+  with `pick: max` or `pick: min` over a listed attribute reads changes,
+  as above. An older release reading the same descriptor ranks by value.
+  A stored field with `pick: top` reads as before; `top` is deprecated
+  and goes in the next version, so such a field is to be rewritten as
+  `min` over the same list, which changes that concept's identity.
+  Nothing is rewritten automatically. An embedder runs nothing.
 - Rule body format 5: what a replica holds is unchanged. A rule that
   holds no pattern is written in format 4 as before, under the entity it
   had, so nothing is rewritten on upgrade, and `Branch::upgrade_rules`
@@ -581,12 +768,9 @@ dropping that scope.
   facts replicate untouched, and the rule fires once that replica
   upgrades. 0.5.0 reads up to format 3, so it treats format 4 and format 5
   bodies alike. Nothing an embedder has to run.
-- Patterns: nothing stored changes. No rule format, up to format 4 that
-  this release writes, holds a pattern, and a rule that holds one is
-  refused at commit, so no replica stores one and an older release reads
-  everything this one writes. The format that stores a pattern in a rule
-  body will be format 5 and is not built yet. Nothing an embedder has to
-  run.
+- Patterns: a rule that holds one is stored in format 5 (the entry on
+  format 5 above); nothing else stored changes. Nothing an embedder has
+  to run.
 - Nothing stored or synced changes.
 
 
@@ -981,7 +1165,7 @@ and names the rule.
   induction writes can differ: the firings 0.5.0 missed happen from
   the first commit after the upgrade, and are not replayed for commits
   made before it. An embedder runs nothing.
-- A rule an older release stored spells its attributes under picks (0.3 to 0.5) or under the older `cardinality` (0.2), and sits under an
+- A rule an older release stored spells its attributes under picks (0.2.0 to 0.5.0) or under the older `cardinality` (0.1.0), and sits under an
   identity that hashed them. This release reads a rule body only in its
   own format and only under the identity it gives it now,
   so every such rule is inert: it derives nothing, fires at no commit,
@@ -1001,8 +1185,13 @@ and names the rule.
   each, read by a field with a selective aggregator. When to run the upgrade,
   once after a full replication or on every pull, is the embedder's
   decision, as before.
+- Identity generations: nothing stored changes, no identity is
+  computed differently and nothing is rewritten on upgrade. An older
+  release reads everything this one writes as it did. An embedder runs
+  nothing for this; the constant and the generation 2 functions are for
+  the rewrite it runs when identities move.
 - The upgrade also moves a `dialog.concept/transient` marker keyed by a
-  concept's 0.3 to 0.5 identity, as it moves one keyed by its 0.2
+  concept's 0.3 to 0.5 identity, as it moves one keyed by its 0.1.0
   identity. An application that keyed its own facts by an attribute or
   concept identity moves them with `dialog_query::migration`.
 - An older release cannot read what this one writes: a rule body in

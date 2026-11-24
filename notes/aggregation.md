@@ -136,23 +136,27 @@ unless it is written (`last` is one, every other pick many).
 { "with": { "status": {
   "the": "account/status",
   "as": ["suspended", "active", "registered"],
-  "pick": "top"
+  "pick": "min"
 } } }
 ```
 
 | pick | reads |
 |------|-------|
 | `last`  | the newest claim |
-| `max`   | the greatest value, then the newest |
-| `min`   | the least value, then the newest |
-| `top`   | the value listed first in the attribute's `as`, then the newest |
+| `max`   | the greatest value, then the newest; over a listed `as`, the value listed last |
+| `min`   | the least value, then the newest; over a listed `as`, the value listed first |
+| `top`   | deprecated: the value listed first in the attribute's `as`, then the newest |
 
-A listed `as` ranks its values best first, so `top` is `max` under the
-order the listing gives a bounded set: the first listed value is the
-best any claim can hold. A value the
-listing does not hold ranks below every listed one. Every one is a
-total order, ties falling to standing and then to the value's hash, so
-every replica holding the same claims reads the same one.
+A listed `as` is a scale written least first, `[low, medium, high]`, so
+`max` and `min` over it rank by the listing, not by the values' own
+order, and take a listing of any type. `top` is deprecated and goes in
+the next version: it reads the first listed value present, which is
+`min` over the same list, and a list written least first is read with
+`max`. A value the listing does not hold loses to every listed one under
+all three. Every one is a total order, ties falling to standing and
+then to the value's hash, so every replica holding the same claims
+reads the same one. A read compares every claim of the cell: none
+stops at a listing's first or last value.
 
 Why a field and not a rule. A rule concluding the ranked value into a
 relation of its own made that value compete with the relation's stored

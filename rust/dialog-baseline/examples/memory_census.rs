@@ -34,7 +34,7 @@ use dialog_corpus::tree::{Corpus, CorpusExt, spill_cache};
 use dialog_corpus::{Datum, Fact, Key, Selector, State, Value};
 use dialog_search_tree::{
     NodeBody, PersistentNode,
-    helpers::{Holding, test_catalog},
+    helpers::{Holding, test_subject},
 };
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
@@ -170,7 +170,7 @@ fn main() -> anyhow::Result<()> {
     // through a node cache of its own: the cache's heap is what it holds.
     let replica = Replica::on_disk(blocks, Some(directory.join("blob")));
     let reader = Holding::new(&replica);
-    let catalog = test_catalog();
+    let subject = test_subject();
     println!(
         "replica {}: {} MiB of blocks, head {root}",
         directory.display(),
@@ -190,7 +190,7 @@ fn main() -> anyhow::Result<()> {
         let started = Instant::now();
         let mut rows = 0usize;
         {
-            let stream = Corpus::at(catalog.clone(), root.clone()).scan(
+            let stream = Corpus::at(subject.clone(), root.clone()).scan(
                 reader.clone(),
                 spill_cache(),
                 every(),
@@ -217,7 +217,7 @@ fn main() -> anyhow::Result<()> {
         // Layer 2: a materialized result of every fact.
         let before = held();
         PEAK.store(before, Ordering::Relaxed);
-        let artifacts: Vec<Fact> = Corpus::at(catalog.clone(), root.clone())
+        let artifacts: Vec<Fact> = Corpus::at(subject.clone(), root.clone())
             .scan_owned(reader.clone(), spill_cache(), every())
             .try_collect()
             .await?;

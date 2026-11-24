@@ -21,7 +21,7 @@ fn bench_get(c: &mut Criterion) {
         let storage = dialog_search_tree::helpers::Holding::new(&blocks);
         let (tree, keys) = runtime.block_on(async {
             let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty_in(
-                dialog_search_tree::helpers::test_catalog(),
+                dialog_search_tree::helpers::test_subject(),
             );
             let mut delta = Delta::zero();
 

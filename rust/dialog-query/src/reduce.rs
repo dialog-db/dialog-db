@@ -136,8 +136,8 @@ pub enum Aggregator {
     /// greatest, as a cardinality-one read elects among a cell's
     /// claims.
     Last,
-    /// The present value listed first in the attribute's `as`, which
-    /// ranks values best first. Never spelled in a rule's `reduce`:
+    /// The present value listed first in the attribute's `as`. Never
+    /// spelled in a rule's `reduce`:
     /// only a concept field picking `top`
     /// folds with it, its listing carried on the entry
     /// ([`ReduceEntry::listed`]).
@@ -282,8 +282,9 @@ pub struct ReduceSpec {
     pub apply: Aggregator,
     /// The term supplying the fold's input, one lookup per body row.
     pub of: Term<Any>,
-    /// The values the field's attribute lists, best first: what a
-    /// `top` ranks by. Set only by a concept field picking `top`.
+    /// The values the field's attribute lists, least first: what a
+    /// `top` ranks by, and a `max` or `min` when there are any. Set
+    /// only by a concept field picking `top`, `max` or `min`.
     #[serde(skip)]
     pub listed: Vec<Value>,
 }
@@ -334,8 +335,9 @@ pub struct ReduceEntry {
     /// `Absent` binding is skipped; an unbound variable is an
     /// evaluation error.
     pub input: Term<Any>,
-    /// The values a `top` ranks by, best first; empty for every other
-    /// fold.
+    /// The values a `top` ranks by, and a `max` or `min` when there
+    /// are any, least first; empty for every fold a concept field's
+    /// pick over a listed attribute did not make.
     #[serde(skip)]
     pub listed: Vec<Value>,
 }
@@ -400,16 +402,57 @@ impl ReduceEntry {
         })
     }
 
+    /// [`ReduceEntry::try_new`] ranking by `listed`, the values a
+    /// concept field's attribute lists, least first. A `max` or `min`
+    /// over a listing ranks by it as `top` does, so it takes an input of
+    /// any type, comparable or not.
+    pub fn try_listed(
+        field: impl Into<String>,
+        aggregator: Aggregator,
+        input: Term<Any>,
+        listed: Vec<Value>,
+        input_type: &Type,
+    ) -> Result<Self, TypeError> {
+        let entry = Self {
+            field: field.into(),
+            aggregator,
+            input,
+            listed,
+        };
+        entry.output_type(input_type)?;
+        Ok(entry)
+    }
+
+    /// The fold whose type rules this entry follows: a `max` or `min`
+    /// over a listing ranks by the listing as `top` does, and takes and
+    /// gives what `top` does; any other entry its own fold's.
+    fn typed(&self) -> Aggregator {
+        match self.aggregator {
+            Aggregator::Min | Aggregator::Max if !self.listed.is_empty() => Aggregator::Top,
+            aggregator => aggregator,
+        }
+    }
+
+    /// Whether this entry chooses its value by the standing of the
+    /// facts its inputs were bound from (see
+    /// [`Aggregator::orders_by_standing`]): a `max` or `min` over a
+    /// listing does, as `top` does, among the values the listing leaves
+    /// out.
+    pub fn orders_by_standing(&self) -> bool {
+        self.typed().orders_by_standing()
+    }
+
     /// The type this entry binds its output field to, given the
     /// input's type: [`Aggregator::output_type`] with the entry's
     /// field attached to the failure.
     pub fn output_type(&self, input_type: &Type) -> Result<Type, TypeError> {
-        self.aggregator
+        let typed = self.typed();
+        typed
             .output_type(input_type)
             .ok_or_else(|| TypeError::ReduceInput {
                 field: self.field.clone(),
                 aggregator: self.aggregator,
-                required: Box::new(self.aggregator.input_requirement()),
+                required: Box::new(typed.input_requirement()),
                 actual: Box::new(input_type.clone()),
             })
     }
@@ -613,7 +656,7 @@ fn fold_column(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>,
 /// values the one standing greatest is returned, so the choice carries
 /// the newest fact that holds it.
 fn choose(entry: &ReduceEntry, inputs: Vec<Input>) -> Result<Option<Input>, EvaluationError> {
-    if matches!(entry.aggregator, Aggregator::Min | Aggregator::Max) {
+    if matches!(entry.aggregator, Aggregator::Min | Aggregator::Max) && entry.listed.is_empty() {
         for pair in inputs.windows(2) {
             if order(&pair[0].0, &pair[1].0).is_none() {
                 return Err(fault(

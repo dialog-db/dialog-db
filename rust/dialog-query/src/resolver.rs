@@ -410,8 +410,8 @@ impl ResolverQuery {
     /// Evaluate this resolver over the incoming selection.
     ///
     /// Per input row: take the hash its handle names, ask the
-    /// environment for the node ([`nodes::Read`], [`anywhere`] the scope
-    /// reads), and project one output row per result. A node the
+    /// environment for the node ([`nodes::Read`] of the wildcard subject,
+    /// as [`anywhere`] names its archive), and project one output row per result. A node the
     /// environment cannot reach, a segment asked for spans, an index
     /// with nothing buffered asked for entries, and a handle that names
     /// no node all yield zero rows.
@@ -451,7 +451,7 @@ impl ResolverQuery {
                     }
                     _ => {
                         let read = nodes::Read::<CorpusNode>::new(
-                            anywhere().index(),
+                            Subject::any(),
                             Blake3Hash::from(reference),
                         );
                         let Some(node) = read

@@ -264,10 +264,12 @@ impl FromStr for The {
 /// An attribute is a relation, a type and a cardinality. Under
 /// cardinality one a read returns the cell's newest claim and a write
 /// succeeds it; under cardinality many a read returns every claim and a
-/// write adds one. `as: [v1, v2]` lists the values the attribute holds,
-/// best first: an enumerated type, ordered, so `[suspended, active,
-/// registered]` ranks `suspended` best. A read that ranks candidates
-/// (the greatest, the least, the first listed) is a concept field that
+/// write adds one. `as: [v1, v2]` lists the values the attribute holds:
+/// an enumerated type, a scale written least first, so over `[low,
+/// medium, high]` a field picking `max` reads `high` where it is
+/// claimed and `min` reads `low`; `top` reads the first listed, as
+/// `min` does. A read that ranks candidates (the greatest, the least,
+/// the first listed) is a concept field that
 /// picks `max`, `min` or `top` over a cardinality-many attribute
 /// (see [`Selective`](crate::selective::Selective)). Rules derive
 /// into relations and are found by them, so two attributes over one
@@ -299,8 +301,8 @@ pub struct AttributeDescriptor {
 /// The parts of an [`AttributeDescriptor`] few attributes have.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Rare {
-    /// The values `as` lists, best first: the domain a value is one
-    /// of, which a field picking `top` ranks by.
+    /// The values `as` lists, least first: the domain a value is one
+    /// of, which a field picking `max`, `min` or `top` ranks by.
     among: Vec<Value>,
     /// The layer the attribute's facts are read from and written to
     /// (`in:`): a constant layer, or a variable a concept field binds. A
@@ -406,7 +408,7 @@ enum As {
 pub const PICK_REFUSED: &str = "an attribute's `pick` is `last` (cardinality one) or `all` \
      (cardinality many), and agrees with its `cardinality` where both are written: a read \
      under `max`, `min` or `top` is a concept's field over a cardinality-many attribute \
-     (`pick: top` on the field), `top` ranking the values `as` lists best first";
+     (`pick: top` on the field), ranking the values `as` lists least first";
 
 /// Why an attribute listing relations under `the`, a ranked chain an
 /// earlier release read, is not read.
@@ -585,8 +587,8 @@ impl AttributeDescriptor {
     }
 
     /// This descriptor over the listed value domain: the values the
-    /// attribute holds, best first: the order a field picking `top`
-    /// ranks them by.
+    /// attribute holds, least first: the order a field picking `max`,
+    /// `min` or `top` ranks them by.
     pub fn with_domain(mut self, values: Vec<Value>) -> Self {
         self.rare_mut().among = values;
         self.settle();
@@ -947,7 +949,7 @@ mod tests {
     }
 
     /// A listed `as` is an enumerated type: the values the attribute
-    /// holds, best first, read under the cardinality the attribute
+    /// holds, least first, read under the cardinality the attribute
     /// declares. It is written back as listed, in its order.
     #[dialog_common::test]
     fn it_reads_a_listed_domain_as_an_enumerated_type() {

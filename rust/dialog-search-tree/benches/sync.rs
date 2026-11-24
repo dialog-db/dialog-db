@@ -153,7 +153,7 @@ async fn build_base(base_size: usize) -> (Tree, Storage) {
     let keys = data.sequential_buffers::<16>(base_size);
 
     let mut storage = CountingBackend::new();
-    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_catalog());
+    let mut tree = Tree::empty_in(dialog_search_tree::helpers::test_subject());
     let mut delta = Delta::zero();
     for key in &keys {
         tree = tree
@@ -225,7 +225,7 @@ async fn advance_hitchhiker(base: &Tree, keys: &[[u8; 16]], storage: &mut Storag
     let root = hh.persist(&mut delta).unwrap();
     let churn = flush_counting(&mut delta, storage).await;
     (
-        Tree::at(dialog_search_tree::helpers::test_catalog(), root),
+        Tree::at(dialog_search_tree::helpers::test_subject(), root),
         churn,
     )
 }

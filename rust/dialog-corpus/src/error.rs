@@ -69,13 +69,6 @@ pub enum DialogCorpusError {
     #[error("Assets can only be changed by a transaction's commit, not by {0}")]
     AssetsUnsupported(String),
 
-    /// The batch holds a statement it could not write as facts (see
-    /// [`Update::refuse`](crate::Update::refuse)): a rule that holds a
-    /// pattern, for one. A target that keeps facts alone refuses the
-    /// whole batch rather than land the rest of it.
-    #[error("The batch cannot be written: {0}")]
-    Refused(crate::Refusal),
-
     /// Raw bytes could not be interpreted as an entity
     #[error("Could not convert bytes into entity: {0}")]
     InvalidEntity(String),
@@ -190,7 +183,7 @@ mod tests {
 
     use dialog_capability::access::AuthorizeError;
     use dialog_effects::archive::ArchiveError;
-    use dialog_search_tree::helpers::test_catalog;
+    use dialog_search_tree::helpers::test_subject;
     use dialog_search_tree::nodes;
 
     use super::*;
@@ -227,7 +220,7 @@ mod tests {
         // A refusal the block layer makes while a node is read arrives as
         // the tree's error, and has to come out the same way.
         let read = nodes::Read::<CorpusNode>::new(
-            test_catalog(),
+            test_subject(),
             dialog_common::Blake3Hash::from([0u8; 32]),
         );
         let through_tree = read

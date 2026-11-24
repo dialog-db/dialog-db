@@ -742,7 +742,6 @@ impl TransactionCommit<&Branch> {
             + ConditionalSync
             + 'static,
     {
-        self.check_refused()?;
         let branch = self.line;
 
         // The head the transaction pinned when it opened: what its
@@ -926,7 +925,6 @@ impl TransactionCommit<TransactionBatch> {
             + ConditionalSync
             + 'static,
     {
-        self.check_refused()?;
         let mut batch = self.line;
         let (base, lineage) = batch.snapshot.head();
         let line = lineage.expect("a transaction batch's line is seeded at construction");

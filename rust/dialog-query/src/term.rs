@@ -20,13 +20,14 @@ use crate::Environment;
 use crate::Premise;
 use crate::attribute::Relation;
 use crate::constraint::{Coalesce, Constraint, Equality};
-use crate::corpus::{CorpusRelation, Entity, Type, Value};
+use crate::corpus::{Composite, CorpusRelation, Entity, Type, Value};
 use crate::error::{FieldTypeError, TypeError};
 use crate::proposition::Proposition;
 use crate::selection;
 use crate::type_system;
 use crate::types::{Any, Scalar, TypeDescriptor, Typed};
 use serde::de::Error as DeserializeError;
+use serde::de::{IntoDeserializer as _, MapAccess, SeqAccess, Visitor};
 use std::hash::Hash;
 
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -758,7 +759,7 @@ impl<'de, T: Typed> serde::Deserialize<'de> for Term<T> {
         // Deserialize into raw JSON first so we can handle the variable `{"?": ...}`
         // case and preserve integer types (u128/i128 don't survive serde_json's
         // untagged enum deserialization for Value).
-        let raw = serde_json::Value::deserialize(deserializer)?;
+        let raw = buffer(deserializer)?;
         Term::from_json(raw).map_err(DeserializeError::custom)
     }
 }
@@ -796,6 +797,118 @@ impl<T: Typed> Term<T> {
                 Ok(Term::Constant(value))
             }
         }
+    }
+}
+
+/// What a term, a pattern or a proposition is written as, read before it
+/// is known which it is, as JSON holds it. A stored rule body writes a
+/// constant map or list as its canonical bytes, and JSON holds no bytes:
+/// each byte string is read as the composite it is and held as JSON
+/// writes that composite, `{"map": [[key, value], ...]}` or `{"list":
+/// [...]}`, which a value reads back as the same composite. Bytes that
+/// are no composite are refused. Everything else is held as
+/// [`serde_json::Value`] holds it, so a body that holds no composite is
+/// read exactly as `serde_json::Value` reads it.
+pub(crate) fn buffer<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<serde_json::Value, D::Error> {
+    deserializer.deserialize_any(Buffer)
+}
+
+/// One part of what [`buffer`] reads.
+pub(crate) struct Buffered(pub(crate) serde_json::Value);
+
+impl<'de> serde::Deserialize<'de> for Buffered {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        buffer(deserializer).map(Buffered)
+    }
+}
+
+struct Buffer;
+
+impl Buffer {
+    /// A scalar, as `serde_json::Value` reads it.
+    fn json<'de, E: DeserializeError>(
+        scalar: impl serde::Deserializer<'de, Error = E>,
+    ) -> Result<serde_json::Value, E> {
+        <serde_json::Value as serde::Deserialize>::deserialize(scalar)
+    }
+}
+
+impl<'de> Visitor<'de> for Buffer {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("any valid JSON value, or the bytes of a composite")
+    }
+
+    fn visit_bool<E: DeserializeError>(self, value: bool) -> Result<Self::Value, E> {
+        Buffer::json(value.into_deserializer())
+    }
+
+    fn visit_i64<E: DeserializeError>(self, value: i64) -> Result<Self::Value, E> {
+        Buffer::json(value.into_deserializer())
+    }
+
+    fn visit_i128<E: DeserializeError>(self, value: i128) -> Result<Self::Value, E> {
+        Buffer::json(value.into_deserializer())
+    }
+
+    fn visit_u64<E: DeserializeError>(self, value: u64) -> Result<Self::Value, E> {
+        Buffer::json(value.into_deserializer())
+    }
+
+    fn visit_u128<E: DeserializeError>(self, value: u128) -> Result<Self::Value, E> {
+        Buffer::json(value.into_deserializer())
+    }
+
+    fn visit_f64<E: DeserializeError>(self, value: f64) -> Result<Self::Value, E> {
+        Buffer::json(value.into_deserializer())
+    }
+
+    fn visit_str<E: DeserializeError>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::String(value.to_owned()))
+    }
+
+    fn visit_string<E: DeserializeError>(self, value: String) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::String(value))
+    }
+
+    fn visit_none<E: DeserializeError>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_unit<E: DeserializeError>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        buffer(deserializer)
+    }
+
+    fn visit_bytes<E: DeserializeError>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+        let composite = Composite::from_bytes(bytes)
+            .map_err(|error| E::custom(format!("bytes that are no map or list: {error}")))?;
+        serde_json::to_value(&composite).map_err(E::custom)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut items: A) -> Result<Self::Value, A::Error> {
+        let mut array = Vec::new();
+        while let Some(Buffered(item)) = items.next_element()? {
+            array.push(item);
+        }
+        Ok(serde_json::Value::Array(array))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<Self::Value, A::Error> {
+        let mut object = serde_json::Map::new();
+        while let Some((key, Buffered(value))) = entries.next_entry::<String, Buffered>()? {
+            object.insert(key, value);
+        }
+        Ok(serde_json::Value::Object(object))
     }
 }
 
