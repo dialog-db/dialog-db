@@ -14,6 +14,38 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule that holds a constant map or list reads back from its stored body
+
+[#NNN](https://github.com/dialog-db/dialog-db/pull/NNN)
+
+A stored rule body writes a constant map or list as its canonical
+bytes, and the reader of a rule body buffered each term through a
+form that holds no bytes. So a rule holding a composite constant, as a
+term or as a pattern with no variable in it (which is that constant),
+was written in format 4 and then refused on every read: `decode`
+failed with "invalid type: byte array", a branch listed the rule in
+`dialog.rule/invalid` as undecodable, and it never fired. The reader
+now reads such bytes as the composite they are. That was also why
+format 5 refused a rule holding a constant map or list inside a
+pattern; it is stored now, and every rule that compiles has a body.
+
+What this changes for you:
+
+- `DeductiveRule::decode` and `InductiveRule::decode` read a body that
+  holds a composite constant, at any depth, as the rule that wrote it.
+  A branch fires such a rule instead of listing it in
+  `dialog.rule/invalid`.
+- A rule holding a constant map or list inside a pattern is stored in
+  format 5: `storable` returns `Ok`, `try_encode` returns its body, and
+  asserting it into a transaction, a batch, the session overlay or a
+  query layer stages that body where it recorded a refusal.
+  `TypeError::UnstorablePattern` is no longer returned for any rule.
+- Bytes in a rule body that are no map or list are refused when the body
+  is decoded, with an error, as any malformed body is.
+
+Why: composite values (#843) made a map or a list a constant a rule can
+hold, and a rule that can be built and run should run once it is stored.
+
 ### A rule that holds a pattern is stored, in rule body format 5
 
 Stacked on [#778](https://github.com/dialog-db/dialog-db/pull/778); the
@@ -56,11 +88,9 @@ What this changes for you:
   index facts. Committing it succeeds where it returned
   `CommitError::Refused`, and `Ephemeral::apply` lands it where it
   returned `DialogCorpusError::Refused`.
-- Still refused, with `TypeError::UnstorablePattern`, which now carries a
-  `reason`: a rule holding a constant map or list inside a pattern. A
-  composite is written in dag-cbor as its bytes, which a rule body's terms
-  are not read back from, so the rule would be stored and inert. A map
-  pattern keyed by any value is stored.
+- `TypeError::UnstorablePattern` now carries a `reason`. A map pattern
+  keyed by any value is stored, and so, since the entry above, is a
+  pattern that holds a constant map or list.
 - `Parameters` and `Pattern` serialize a map or a list of terms under
   `match`, and read it back, in JSON and dag-cbor. A `Changes` that holds
   a refusal still does not serialize. A `ConceptQuery` writes a name that holds a pattern as that
@@ -377,6 +407,12 @@ dropping that scope.
 
 #### Compatibility and migration
 
+- A rule that holds a composite constant: one of terms is written in
+  format 4 byte for byte as before, and one holding the constant inside a
+  pattern, refused before, is written in format 5. Only the reader
+  changed: a body that read before reads as it did, and nothing is
+  rewritten. No release has stored a composite, so no older release meets
+  such a body. Nothing for an embedder to run.
 - Rule body format 5: what a replica holds is unchanged. A rule that
   holds no pattern is written in format 4 as before, under the entity it
   had, so nothing is rewritten on upgrade, and `Branch::upgrade_rules`

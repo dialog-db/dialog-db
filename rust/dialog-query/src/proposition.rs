@@ -9,6 +9,7 @@ pub use crate::formula::query::FormulaQuery;
 use crate::optional::OptionalAttributeQuery;
 pub use crate::premise::{Negation, Premise};
 pub use crate::resolver::ResolverQuery;
+use crate::term::buffer;
 pub use crate::{Environment, Parameters, Schema};
 use serde::de;
 use serde::ser;
@@ -167,7 +168,7 @@ impl<'de> Deserialize<'de> for Proposition {
         // Deserialize into a raw JSON value first so we can peek at the
         // "assert" field, through a buffer that reads a stored body's
         // composite constants.
-        let raw: serde_json::Value = crate::term::buffer(deserializer)?;
+        let raw: serde_json::Value = buffer(deserializer)?;
 
         let assert_val = raw
             .get("assert")

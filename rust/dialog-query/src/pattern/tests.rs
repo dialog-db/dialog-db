@@ -18,11 +18,13 @@ use crate::query::Application as _;
 use crate::rule::body;
 use crate::session::RuleRegistry;
 use crate::source::test::TestEnv;
+use crate::term::Buffered;
 use crate::the;
 use crate::{ConceptDescriptor, DeductiveRule, FormulaQuery, Parameters};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_repository::Branch;
 use dialog_storage::provider::storage::VolatileSpace;
+use ipld_core::ipld::Ipld;
 
 type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
 
@@ -2203,8 +2205,7 @@ fn it_buffers_a_body_without_composites_as_json_does() {
     }
     for stored in bodies {
         let json: serde_json::Value = serde_ipld_dagcbor::from_slice(&stored).expect("reads");
-        let crate::term::Buffered(buffered) =
-            serde_ipld_dagcbor::from_slice(&stored).expect("buffers");
+        let Buffered(buffered) = serde_ipld_dagcbor::from_slice(&stored).expect("buffers");
         assert_eq!(buffered, json);
     }
 }
@@ -2213,9 +2214,8 @@ fn it_buffers_a_body_without_composites_as_json_does() {
 /// error and not a panic.
 #[dialog_common::test]
 fn it_refuses_bytes_that_are_no_composite() {
-    let stored = serde_ipld_dagcbor::to_vec(&ipld_core::ipld::Ipld::Bytes(vec![0xff, 0x00]))
-        .expect("encodes");
-    let refused = serde_ipld_dagcbor::from_slice::<crate::term::Buffered>(&stored)
+    let stored = serde_ipld_dagcbor::to_vec(&Ipld::Bytes(vec![0xff, 0x00])).expect("encodes");
+    let refused = serde_ipld_dagcbor::from_slice::<Buffered>(&stored)
         .err()
         .expect("refused");
     assert!(refused.to_string().contains("no map or list"), "{refused}");

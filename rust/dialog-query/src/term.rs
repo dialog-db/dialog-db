@@ -27,7 +27,7 @@ use crate::selection;
 use crate::type_system;
 use crate::types::{Any, Scalar, TypeDescriptor, Typed};
 use serde::de::Error as DeserializeError;
-use serde::de::IntoDeserializer as _;
+use serde::de::{IntoDeserializer as _, MapAccess, SeqAccess, Visitor};
 use std::hash::Hash;
 
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -828,57 +828,57 @@ struct Buffer;
 
 impl Buffer {
     /// A scalar, as `serde_json::Value` reads it.
-    fn json<'de, E: serde::de::Error>(
+    fn json<'de, E: DeserializeError>(
         scalar: impl serde::Deserializer<'de, Error = E>,
     ) -> Result<serde_json::Value, E> {
         <serde_json::Value as serde::Deserialize>::deserialize(scalar)
     }
 }
 
-impl<'de> serde::de::Visitor<'de> for Buffer {
+impl<'de> Visitor<'de> for Buffer {
     type Value = serde_json::Value;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         formatter.write_str("any valid JSON value, or the bytes of a composite")
     }
 
-    fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+    fn visit_bool<E: DeserializeError>(self, value: bool) -> Result<Self::Value, E> {
         Buffer::json(value.into_deserializer())
     }
 
-    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+    fn visit_i64<E: DeserializeError>(self, value: i64) -> Result<Self::Value, E> {
         Buffer::json(value.into_deserializer())
     }
 
-    fn visit_i128<E: serde::de::Error>(self, value: i128) -> Result<Self::Value, E> {
+    fn visit_i128<E: DeserializeError>(self, value: i128) -> Result<Self::Value, E> {
         Buffer::json(value.into_deserializer())
     }
 
-    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+    fn visit_u64<E: DeserializeError>(self, value: u64) -> Result<Self::Value, E> {
         Buffer::json(value.into_deserializer())
     }
 
-    fn visit_u128<E: serde::de::Error>(self, value: u128) -> Result<Self::Value, E> {
+    fn visit_u128<E: DeserializeError>(self, value: u128) -> Result<Self::Value, E> {
         Buffer::json(value.into_deserializer())
     }
 
-    fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+    fn visit_f64<E: DeserializeError>(self, value: f64) -> Result<Self::Value, E> {
         Buffer::json(value.into_deserializer())
     }
 
-    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+    fn visit_str<E: DeserializeError>(self, value: &str) -> Result<Self::Value, E> {
         Ok(serde_json::Value::String(value.to_owned()))
     }
 
-    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+    fn visit_string<E: DeserializeError>(self, value: String) -> Result<Self::Value, E> {
         Ok(serde_json::Value::String(value))
     }
 
-    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+    fn visit_none<E: DeserializeError>(self) -> Result<Self::Value, E> {
         Ok(serde_json::Value::Null)
     }
 
-    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+    fn visit_unit<E: DeserializeError>(self) -> Result<Self::Value, E> {
         Ok(serde_json::Value::Null)
     }
 
@@ -889,16 +889,13 @@ impl<'de> serde::de::Visitor<'de> for Buffer {
         buffer(deserializer)
     }
 
-    fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+    fn visit_bytes<E: DeserializeError>(self, bytes: &[u8]) -> Result<Self::Value, E> {
         let composite = Composite::from_bytes(bytes)
             .map_err(|error| E::custom(format!("bytes that are no map or list: {error}")))?;
         serde_json::to_value(&composite).map_err(E::custom)
     }
 
-    fn visit_seq<A: serde::de::SeqAccess<'de>>(
-        self,
-        mut items: A,
-    ) -> Result<Self::Value, A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(self, mut items: A) -> Result<Self::Value, A::Error> {
         let mut array = Vec::new();
         while let Some(Buffered(item)) = items.next_element()? {
             array.push(item);
@@ -906,10 +903,7 @@ impl<'de> serde::de::Visitor<'de> for Buffer {
         Ok(serde_json::Value::Array(array))
     }
 
-    fn visit_map<A: serde::de::MapAccess<'de>>(
-        self,
-        mut entries: A,
-    ) -> Result<Self::Value, A::Error> {
+    fn visit_map<A: MapAccess<'de>>(self, mut entries: A) -> Result<Self::Value, A::Error> {
         let mut object = serde_json::Map::new();
         while let Some((key, Buffered(value))) = entries.next_entry::<String, Buffered>()? {
             object.insert(key, value);

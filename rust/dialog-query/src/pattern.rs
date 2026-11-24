@@ -41,7 +41,7 @@ use crate::corpus::{Composite, CompositeError, CompositeKind, Value};
 use crate::error::EvaluationError;
 use crate::proposition::Proposition;
 use crate::selection::{Match, Selection};
-use crate::term::Term;
+use crate::term::{Term, buffer};
 use crate::try_stream;
 use crate::types::Any;
 
@@ -771,7 +771,7 @@ impl<'de> serde::Deserialize<'de> for Pattern {
         use serde::de::Error as _;
         // Read through a value that can be looked into before it is
         // known which of the two it is, as a term is read.
-        let raw = crate::term::buffer(deserializer)?;
+        let raw = buffer(deserializer)?;
         Pattern::read(raw).map_err(D::Error::custom)
     }
 }
