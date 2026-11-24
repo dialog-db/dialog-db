@@ -4,15 +4,12 @@ use crate::key::value_tail_bytes;
 use crate::{Asset, Cause, Entity, Fact, Instruction, Relation, Value};
 use dialog_search_tree::Manifest;
 use futures_util::Stream;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser};
-use std::any::Any;
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
-use std::error::Error as StdError;
-use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::mem::take;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::vec::IntoIter;
 
@@ -290,91 +287,6 @@ pub trait Update {
     /// size the line records for that hash, whatever size `asset` names, and
     /// changes nothing when the line records none.
     fn discard(&mut self, asset: Asset);
-
-    /// Keep `body` as what `entity` is, beside the facts, and say so by
-    /// returning nothing; or give the body back.
-    ///
-    /// A statement that names a thing by its facts and has no bytes to
-    /// write the thing itself as asks its target to hold it: a rule
-    /// that its stored body cannot write, for one. A batch that is
-    /// committed holds bytes only, so it gives the body back, and that
-    /// is what a target does unless it says otherwise. A target that
-    /// is never stored, the changes laid over a line for one query,
-    /// can keep the thing as it is.
-    fn hold(&mut self, entity: &Entity, body: Box<dyn Any>) -> Result<(), Box<dyn Any>> {
-        let _ = entity;
-        Err(body)
-    }
-
-    /// Record that a statement asked of this target cannot be written
-    /// as facts: a rule whose body the stored rule format cannot write,
-    /// for one. A statement that refuses writes nothing that would be
-    /// stored, and a batch keeps the first refusal it is handed, so its
-    /// commit fails with it before anything is written. A target that
-    /// is never stored, and holds what the statement could not write
-    /// (see [`hold`](Self::hold)), keeps the refusal beside it, so the
-    /// batch it hands on is refused wherever it is committed.
-    fn refuse(&mut self, refusal: Refusal);
-}
-
-/// A statement a batch was asked to write and could not: the entity the
-/// statement names and why it cannot be written.
-///
-/// The reason is the error of the layer that refused, kept whole: read it
-/// back typed with [`reason`](Self::reason).
-#[derive(Clone)]
-pub struct Refusal {
-    entity: Entity,
-    reason: Arc<dyn StdError + Send + Sync>,
-}
-
-impl Refusal {
-    /// A refusal to write what `entity` names, for `reason`.
-    // bare-send-ok: type-erased reason needs real auto-trait bounds
-    pub fn new(entity: Entity, reason: impl StdError + Send + Sync + 'static) -> Self {
-        Self {
-            entity,
-            reason: Arc::new(reason),
-        }
-    }
-
-    /// The entity the refused statement names.
-    pub fn entity(&self) -> &Entity {
-        &self.entity
-    }
-
-    /// The reason, when it is an `E`.
-    pub fn reason<E: StdError + 'static>(&self) -> Option<&E> {
-        self.reason.downcast_ref::<E>()
-    }
-}
-
-impl Debug for Refusal {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        f.debug_struct("Refusal")
-            .field("entity", &self.entity)
-            .field("reason", &self.reason.to_string())
-            .finish()
-    }
-}
-
-impl Display for Refusal {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{} cannot be written: {}", self.entity, self.reason)
-    }
-}
-
-impl StdError for Refusal {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        Some(&*self.reason)
-    }
-}
-
-/// Two refusals are one when they name one entity for one reason.
-impl PartialEq for Refusal {
-    fn eq(&self, other: &Self) -> bool {
-        self.entity == other.entity && self.reason.to_string() == other.reason.to_string()
-    }
 }
 
 /// A domain-level write operation that can be asserted or retracted.
@@ -459,10 +371,6 @@ pub struct Changes {
     /// The writes whose descriptor names a layer (`in:`), by layer. A
     /// write with no layer named is in `facts`, bound for the primary.
     layers: BTreeMap<Entity, Facts>,
-    /// The first statement this batch was asked to write and could not
-    /// (see [`Update::refuse`]). A refused batch is not committed and
-    /// does not serialize.
-    refused: Option<Refusal>,
 }
 
 /// [`ChangesWithAssets`] borrowed from a batch, for encoding without
@@ -486,9 +394,6 @@ impl Serialize for Changes {
     where
         S: Serializer,
     {
-        if let Some(refusal) = &self.refused {
-            return Err(ser::Error::custom(refusal));
-        }
         if self.assets.is_empty() && self.layers.is_empty() {
             FactsOnly(&self.facts).serialize(serializer)
         } else {
@@ -582,13 +487,6 @@ impl Changes {
         self.facts.is_empty() && self.assets.is_empty() && self.layers.is_empty()
     }
 
-    /// The first statement this batch was asked to write and could not,
-    /// if any (see [`Update::refuse`]). Whatever else the batch holds, it
-    /// is not to be committed.
-    pub fn refused(&self) -> Option<&Refusal> {
-        self.refused.as_ref()
-    }
-
     /// Whether the batch writes into any layer (`in:`).
     pub fn has_shares(&self) -> bool {
         !self.layers.is_empty()
@@ -608,7 +506,6 @@ impl Changes {
                         facts,
                         assets: BTreeMap::new(),
                         layers: BTreeMap::new(),
-                        refused: None,
                     },
                 )
             })
@@ -737,9 +634,6 @@ impl Changes {
     /// still supersedes earlier changes to its `(entity, attribute)`, and
     /// `other`'s asset changes follow this batch's.
     pub fn merge(&mut self, other: Changes) {
-        if let Some(refusal) = other.refused {
-            self.refuse(refusal);
-        }
         for change in other.assets.into_values() {
             self.change_asset(change);
         }
@@ -998,10 +892,6 @@ impl Update for Changes {
     fn discard(&mut self, asset: Asset) {
         self.change_asset(AssetChange::Discard(asset));
     }
-
-    fn refuse(&mut self, refusal: Refusal) {
-        self.refused.get_or_insert(refusal);
-    }
 }
 
 impl IntoIterator for Changes {
@@ -1150,9 +1040,6 @@ impl Statement for Changes {
     /// assertion under its cardinality, so a batch asserted into another
     /// keeps what its writes meant.
     fn assert(mut self, update: &mut impl Update) {
-        if let Some(refusal) = self.refused.take() {
-            update.refuse(refusal);
-        }
         for change in self.take_assets() {
             match change {
                 AssetChange::Import(asset) => update.import(asset),
@@ -1199,9 +1086,6 @@ impl Statement for Changes {
     }
 
     fn retract(mut self, update: &mut impl Update) {
-        if let Some(refusal) = self.refused.take() {
-            update.refuse(refusal);
-        }
         for change in self.take_assets() {
             match change {
                 AssetChange::Import(asset) => update.discard(asset),
