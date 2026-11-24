@@ -1043,33 +1043,39 @@ async fn it_refuses_top_naming_min_over_the_same_list() -> Result<()> {
     Ok(())
 }
 
-/// A concept's name may hold a `.`, as tonk's do, and an attribute
-/// derived under it is a relation of its own: two concepts and
-/// attributes whose names would spell one relation, `xyz.shelf/count`
-/// and `xyz/shelf.count`, each answer only their own.
+/// A concept's name is a name, `todo`, or a name and a `/`,
+/// `notebook/blocks`. A name with a `.` and no `/` is a domain, which a
+/// read applies as the kernel's: a concept declared under one would never
+/// be read, and the domain's own attributes would answer for it. It is
+/// refused, written or made by a macro, saying what a concept's name is,
+/// and nothing of the document is written.
 #[dialog_common::test]
-async fn it_derives_under_a_concept_whose_name_holds_a_dot() -> Result<()> {
+async fn it_refuses_a_concept_named_as_a_domain() -> Result<()> {
     let mut notebook = Notebook::open().await?;
-    let (_, diagnostics) = notebook
-        .submit(
-            r#"(concept (xyz ?l name: ?n)
-                 (xyz.top/name of: ?l is: ?n as: :text cardinality: :one))
-               (concept (xyz.shelf ?l name: ?n)
-                 (xyz.shelf/name of: ?l is: ?n as: :text cardinality: :one))
-               (rule (xyz.shelf/count ?l ?n) (xyz.shelf ?l name: ?n))
-               (rule (xyz/shelf.count ?l ?n) (xyz ?l name: ?n))
-               (assert (xyz.shelf shelf:1 name: "dotted"))
-               (assert (xyz top:1 name: "plain"))"#,
-        )
+    notebook
+        .submit(r#"(assert (xyz.memo x:1 text: "the domain's own"))"#)
         .await?;
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    for text in [
+        "(concept (xyz.memo ?t text: ?x)
+           (xyz.other/text of: ?t is: ?x as: :text cardinality: :one))",
+        "(rule (syntax (concept (?name ?t text: ?x)
+             (xyz.other/text of: ?t is: ?x as: :text cardinality: :one)))
+           (expand (memo-kind ?name)))
+         (memo-kind xyz.memo)",
+    ] {
+        let refused = notebook
+            .submit(text)
+            .await
+            .map_err(|error| error.downcast::<Error>());
+        assert!(
+            matches!(&refused, Err(Ok(Error::Refused(why)))
+                if why.contains("xyz.memo") && why.contains("concept's name")),
+            "{text}: {refused:?}"
+        );
+    }
     assert_eq!(
-        report(&mut notebook, "(select (xyz.shelf/count ?l ?n))").await?,
-        vec![r#"(dialog.notation.concept.9.xyz.shelf.count shelf:1 is: "dotted")"#]
-    );
-    assert_eq!(
-        report(&mut notebook, "(select (xyz/shelf.count ?l ?n))").await?,
-        vec![r#"(dialog.notation.concept.3.xyz.shelf.count top:1 is: "plain")"#]
+        report(&mut notebook, "(select (xyz.memo ?t text: ?x))").await?,
+        vec![r#"(xyz.memo x:1 text: "the domain's own")"#]
     );
     Ok(())
 }
