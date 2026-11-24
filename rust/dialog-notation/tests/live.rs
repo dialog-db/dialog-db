@@ -426,6 +426,56 @@ async fn it_leaves_nothing_laid_when_laying_fails_part_way() -> Result<()> {
     assert!(overlay.len() > before);
     drop(kept);
     assert_eq!(overlay.len(), before);
+    // A selection that lays more than one rule, failing on a later one
+    // after the first is laid whole: the first comes off with the lease
+    // the failure drops.
+    let both = || match step(
+        r#"(query (task/both ?t is: ?both)
+           (task ?t title: ?title)
+           (task/tag ?t tag: "errand")
+           (task/pair ?t is: ?pair)
+           (is ?both {:title ?title :pair ?pair}))
+         (select (task/both ?t is: ?both))"#,
+    )? {
+        Step::Select(selection) => Ok(*selection),
+        _ => Err(anyhow::anyhow!("no selection")),
+    };
+    let rules: std::collections::BTreeSet<_> = both()?
+        .queries
+        .iter()
+        .filter_map(|query| query.rule.as_ref().map(|rule| rule.this()))
+        .collect();
+    assert!(rules.len() > 1, "{rules:?}");
+    // Laying fails at its first write, then its second, and so on, until
+    // a lay makes all its writes: each that failed left nothing laid,
+    // those that failed on the second rule after the first was laid
+    // whole among them.
+    let mut failed_at = 0;
+    for writes in 0.. {
+        dialog_notation::fail_laying_after(Some(writes));
+        let laid = live.standing(both()?);
+        dialog_notation::fail_laying_after(None);
+        match laid {
+            Ok(kept) => {
+                drop(kept);
+                break;
+            }
+            Err(dialog_notation::live::LiveError::Rule(_)) => failed_at = writes,
+            Err(other) => return Err(other.into()),
+        }
+        assert_eq!(
+            overlay.len(),
+            before,
+            "after {writes} writes, nothing is left laid"
+        );
+    }
+    // One rule takes four writes: the rule, that it is laid, what it
+    // derives and its holder.
+    assert!(
+        failed_at >= 4,
+        "failed only within the first rule: {failed_at}"
+    );
+    assert_eq!(overlay.len(), before);
     Ok(())
 }
 
