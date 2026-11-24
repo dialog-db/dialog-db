@@ -483,6 +483,154 @@ mod tests {
         Ok(())
     }
 
+    /// What `text` is, as `check` and `check_forms` say it: for each
+    /// form, by its text, what it compiled to or that it was refused and
+    /// why; and the declarations. The same for every order of the forms
+    /// is what a document means whatever order it is written in.
+    fn meaning(text: &str) -> Result<(Vec<String>, Vec<String>), Error> {
+        let whole = check(&mut Analyzer::new()?, text);
+        let mut said: Vec<String> = match whole.refusals().next() {
+            Some(_) => {
+                let mut refused: Vec<String> = whole
+                    .refusals()
+                    .filter_map(|refused| refused.refusal.as_ref())
+                    .map(|error| format!("refused: {}", error_kind(error)))
+                    .collect();
+                refused.sort();
+                refused.dedup();
+                refused
+            }
+            None => {
+                let mut trees: Vec<String> =
+                    whole.analyzed.iter().map(ToString::to_string).collect();
+                trees.sort();
+                trees
+            }
+        };
+        let forms = check_forms(&mut Analyzer::new()?, text);
+        let trees = crate::parse(text)?;
+        let mut each: Vec<String> = Vec::new();
+        for (at, tree) in trees.iter().enumerate() {
+            let refused = forms
+                .refusals()
+                .any(|refused| refused.path.first() == Some(&Segment::Item(at)));
+            let compiled = forms.step_forms.iter().filter(|form| **form == at).count();
+            each.push(format!("{tree}: refused {refused}, {compiled} steps"));
+        }
+        each.sort();
+        said.extend(each);
+        let mut declared: Vec<String> = forms
+            .declarations
+            .iter()
+            .map(|declaration| format!("{declaration:?}"))
+            .collect();
+        declared.sort();
+        Ok((said, declared))
+    }
+
+    fn error_kind(error: &Error) -> &'static str {
+        match error {
+            Error::Read(_) => "read",
+            Error::Unknown(_) => "unknown",
+            Error::Ambiguous(..) => "ambiguous",
+            Error::Refused(_) => "refused",
+            Error::Unsupported(_) => "unsupported",
+            Error::Reserved(_) => "reserved",
+            Error::Clash(..) => "clash",
+            Error::Twice(..) => "twice",
+            Error::Cycle(..) => "cycle",
+            Error::Endless(..) => "endless",
+        }
+    }
+
+    /// Every order of `forms`, each once: Heap's algorithm.
+    fn orders(forms: &[&str]) -> Vec<Vec<String>> {
+        let mut forms: Vec<String> = forms.iter().map(ToString::to_string).collect();
+        let mut all = vec![forms.clone()];
+        let mut counts = vec![0; forms.len()];
+        let mut at = 0;
+        while at < forms.len() {
+            if counts[at] < at {
+                forms.swap(if at % 2 == 0 { 0 } else { counts[at] }, at);
+                all.push(forms.clone());
+                counts[at] += 1;
+                at = 0;
+            } else {
+                counts[at] = 0;
+                at += 1;
+            }
+        }
+        all
+    }
+
+    /// A document means the same in every order of its forms: what it
+    /// declares, what each form compiles to, or that it is refused and
+    /// why. A name a macro's expansion declares beside a concept of the
+    /// same signature, and a query and a concept of one name, are
+    /// refused naming both forms, whichever comes first.
+    #[test]
+    fn it_means_the_same_in_every_order_of_its_forms() -> Result<(), Error> {
+        let memo = "(concept (memo ?t text: ?x) (xyz.note ?t text: ?x))";
+        let kind = "(rule (syntax (concept (?name ?t text: ?x) (xyz.memo ?t text: ?x))) \
+                    (expand (memo-kind ?name)))";
+        let documents: Vec<Vec<&str>> = vec![
+            vec![
+                memo,
+                kind,
+                "(select (memo ?t text: ?x))",
+                "(memo-kind memo)",
+            ],
+            vec![
+                "(query (foo ?t is: ?x) (xyz.a ?t v: ?x))",
+                "(concept (foo ?t w: ?w) (xyz.b ?t w: ?w))",
+                "(select (xyz.c ?t v: ?v))",
+            ],
+            vec![
+                "(concept (task ?t title: ?x) (xyz.todo ?t text: ?x))",
+                "(rule (xyz.out ?t n: ?x) (task ?t title: ?x))",
+                "(select (task ?t title: ?x))",
+                "(query (task/card ?t is: ?c) (task ?t title: ?x) (is ?c {:title ?x}))",
+            ],
+            vec![
+                "(concept (a ?t v: ?x) (xyz.a ?t v: ?x))",
+                "(concept (a ?t v: ?x) (xyz.b ?t v: ?x))",
+                "(select (a ?t v: ?x))",
+            ],
+        ];
+        for forms in documents {
+            let first = meaning(&forms.join("\n"))?;
+            for order in orders(&forms) {
+                assert_eq!(
+                    meaning(&order.join("\n"))?,
+                    first,
+                    "{order:#?} against {forms:#?}"
+                );
+            }
+        }
+        // The two the reviewer wrote, refused naming both forms.
+        for (text, named) in [
+            (
+                format!("{memo}\n{kind}\n(select (memo ?t text: ?x))\n(memo-kind memo)"),
+                ["xyz.note", "memo-kind"],
+            ),
+            (
+                "(query (foo ?t is: ?x) (xyz.a ?t v: ?x))\n(concept (foo ?t w: ?w) (xyz.b ?t w: ?w))"
+                    .to_string(),
+                ["(query (foo", "(concept (foo"],
+            ),
+        ] {
+            let checked = check(&mut Analyzer::new()?, &text);
+            assert!(
+                checked.refusals().any(|refused| matches!(&refused.refusal,
+                    Some(Error::Twice(_, first, second))
+                        if named.iter().all(|name| first.contains(name) || second.contains(name)))),
+                "{text}: {:?}",
+                checked.diagnostics
+            );
+        }
+        Ok(())
+    }
+
     /// What a comment right above a rule says is the rule's
     /// description: the analyzed tree holds it, and the compiler is
     /// given it. A comment with a blank line under it is not about the
