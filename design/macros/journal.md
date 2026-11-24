@@ -1903,3 +1903,16 @@ The measurement that came in after (next entry but one above) bears on this: wha
 **Learned.** sapling pages by segments, ranges of an order key, each a live query, with layout kept in the front end and the next bound found by a read of the greatest keys below a key. A segment is a query with two parameters in our notation, and the window is session facts a collecting query reads, which is the maintainer's model and Chris's at once.
 
 **Decided.** Five things a view must keep true are written in [paginated-views.md](paginated-views.md). Two are facts today, two are hypotheses about the engine (a bound from a join reaching the scan, many small live queries being cheap), one is a read main does not have. Nothing is built.
+
+## 2026-11-24, Removing and inserting an element is not always the same as changing it
+
+**The maintainer:** naively removing an element and inserting one may not work well, above all for text inputs, where focus and selection are finicky. React goes to some length there, and so did dominion (gozala/dominion), which also used logic inspired by edit distance to avoid needless changes to the document.
+
+**Fact.** `Maintainer::apply` takes the rows that left and arrived of every layer as one change and looks at the touched instances once, so a row replaced within one change is a text or an attribute set on the same instance, not an instance removed and inserted. The patches are `Insert`, `Remove`, `SetText`, `SetAttribute` and what the list below it holds; none moves an instance.
+
+**Open, for the renderer and the patches, not decided:**
+
+- An instance whose place in its key order changes is a `Remove` and an `Insert` today. A renderer has to move the same node, or focus, selection, scroll and a playing video are lost. Either a `Move` patch, or the renderer pairing a remove and an insert of one key within a change.
+- An instance whose key changes is another instance. So a key must not hold what a person edits in place.
+- An input a person is typing in: its value arrives back as a patch after a round trip, later than keys typed since. Setting it moves the caret and can undo what was typed. The renderer must not write a value the element already holds, and has to know which change a value answers.
+- Changes should reach the renderer as one batch for one commit, so it can do the least to the document, as dominion did by edit distance and others do by the longest run already in order.
