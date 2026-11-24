@@ -342,13 +342,11 @@ async fn scenario<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>) -> R
     // Beside other statements, through the batch a statement stages.
     let mut staged = Changes::new();
     staged.assert(&rule);
-    assert!(staged.refused().is_none());
     committed(&repo, "staged", session, &rule, staged).await?;
 
     // A query layer's changes carry the body, so a copy into a
     // transaction commits the rule.
     let layer = branch.with(&rule);
-    assert!(layer.changes().refused().is_none());
     committed(&repo, "layer", session, &rule, layer.changes().clone()).await?;
 
     // A copy asserted as a statement commits the same way.
@@ -798,7 +796,6 @@ async fn it_keeps_rows_a_stored_rule_builds_as_records_current() -> Result<()> {
 
     for (symbols, overlay) in [(false, false), (false, true), (true, false), (true, true)] {
         let rule = row_rule(symbols)?;
-        assert_eq!(rule.storable(), Ok(()));
         let name = format!(
             "{}-{}",
             if symbols { "symbols" } else { "text" },

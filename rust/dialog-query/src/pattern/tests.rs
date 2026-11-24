@@ -1604,7 +1604,6 @@ fn it_types_a_pattern_by_its_shape() {
 fn it_stores_a_rule_that_holds_a_pattern() {
     let rule = card_rule([0, 1, 2]).expect("compiles");
     let named = rule.try_this().expect("it has an identity");
-    assert_eq!(rule.storable(), Ok(()));
     let stored = rule.try_encode().expect("and a stored body");
     assert_eq!(body::format_of(&stored), Some(5));
     let decoded = DeductiveRule::decode(&stored).expect("the body reads back");
@@ -1646,7 +1645,6 @@ fn it_stores_a_rule_that_holds_a_pattern() {
         vec![read("note/title", "text:", var("heading"))],
     )
     .expect("compiles");
-    assert_eq!(plain.storable(), Ok(()));
     let stored = plain.try_encode().expect("a body");
     assert_eq!(body::format_of(&stored), Some(4));
 }
@@ -1709,7 +1707,6 @@ fn it_installs_a_rule_that_holds_a_pattern() {
     let mut changes = Changes::new();
     changes.assert(&rule);
     assert_ne!(changes, Changes::new(), "the rule is staged");
-    assert!(changes.refused().is_none(), "and not refused");
     assert!(
         serde_json::to_string(&changes).is_ok(),
         "a batch that holds it is written"
@@ -1726,7 +1723,6 @@ fn it_installs_a_rule_that_holds_a_pattern() {
 #[dialog_common::test]
 fn it_stores_a_rule_that_builds_a_record_keyed_by_symbols() {
     let rule = symbol_rule();
-    assert_eq!(rule.storable(), Ok(()));
     let stored = rule.try_encode().expect("a body");
     assert_eq!(body::format_of(&stored), Some(5));
     let decoded = DeductiveRule::decode(&stored).expect("reads back");
@@ -1740,7 +1736,6 @@ fn it_stores_a_rule_that_builds_a_record_keyed_by_symbols() {
 #[dialog_common::test]
 fn it_stores_a_rule_that_holds_a_composite_constant_inside_a_pattern() {
     let rule = constant_rule();
-    assert_eq!(rule.storable(), Ok(()));
     let stored = rule.try_encode().expect("a body");
     assert_eq!(body::format_of(&stored), Some(5));
     let decoded = DeductiveRule::decode(&stored).expect("the body reads back");
@@ -1757,7 +1752,6 @@ fn it_installs_a_rule_that_holds_a_composite_constant_inside_a_pattern() {
     let rule = constant_rule();
     let mut changes = Changes::new();
     changes.assert(&rule);
-    assert!(changes.refused().is_none(), "nothing is refused");
     assert!(!changes.is_empty(), "the rule is staged");
     assert!(
         serde_json::to_string(&changes).is_ok(),
@@ -2051,7 +2045,6 @@ fn it_stores_a_composite_constant_inside_a_pattern() {
             vec![read("note/payload", "composite:map", pattern)],
         )
         .expect("compiles");
-        assert_eq!(rule.storable(), Ok(()));
         let stored = rule.try_encode().expect("a body");
         assert_eq!(body::format_of(&stored), Some(5), "{constant:?}");
         let decoded = DeductiveRule::decode(&stored).expect("the body reads back");
@@ -2075,7 +2068,6 @@ fn it_stores_a_rule_that_negates_a_pattern() {
         ],
     )
     .expect("compiles");
-    assert_eq!(rule.storable(), Ok(()));
     let stored = rule.try_encode().expect("a body");
     assert_eq!(body::format_of(&stored), Some(5));
     let decoded = DeductiveRule::decode(&stored).expect("reads back");

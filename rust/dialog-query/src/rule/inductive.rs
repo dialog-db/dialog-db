@@ -153,13 +153,6 @@ impl InductiveRule {
         body::encode(holds_pattern, &self.canonical_descriptor())
     }
 
-    /// Whether this rule can be stored, and so installed: every rule
-    /// that compiles can (see
-    /// [`DeductiveRule::storable`](crate::DeductiveRule::storable)).
-    pub fn storable(&self) -> Result<(), TypeError> {
-        Ok(())
-    }
-
     /// This rule's content-addressed identity, if it has an encodable
     /// body: `rule:` and the base58 of the merkle reference of its
     /// canonical spelling (see [`reference`](crate::rule::reference)),

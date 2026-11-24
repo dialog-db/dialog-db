@@ -462,17 +462,6 @@ impl DeductiveRule {
         body::encode(holds_pattern, &self.canonical_descriptor())
     }
 
-    /// Whether this rule can be stored, and so installed. Every rule that
-    /// compiles can: a rule that holds a map or a list of terms is stored
-    /// in format 5 of a rule body, which writes a pattern under `match`, a
-    /// map pattern's keys whatever values they are, and a constant map or
-    /// list as its canonical bytes, which a body reads back as that
-    /// constant. A constant no body carries is refused when the rule
-    /// compiles ([`TypeError::UnencodableConstant`]).
-    pub fn storable(&self) -> Result<(), TypeError> {
-        Ok(())
-    }
-
     /// This rule's content-addressed identity, if it has an encodable
     /// body: `rule:` and the base58 of the merkle reference of its
     /// canonical spelling (see [`reference`](crate::rule::reference)).

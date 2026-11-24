@@ -2,7 +2,6 @@ use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::blob::Load as BlobLoad;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_search_tree::nodes;
-use std::any::Any;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::iter::once;
@@ -13,11 +12,11 @@ use dialog_corpus::history::Edition;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::{
-    Asset, Changes, DialogCorpusError, Entity, Estimate, Fact, FactStream, FactView, LayerIndex,
-    Layered, Likelihood, Preload, PreloadRequest, Refusal, Select, SelectIn, Selector, SortKey,
-    Speculation, Statement, Update, sort_key,
+    Changes, DialogCorpusError, Entity, Estimate, Fact, FactStream, FactView, LayerIndex, Layered,
+    Likelihood, Preload, PreloadRequest, Select, SelectIn, Selector, SortKey, Speculation,
+    Statement, sort_key,
 };
-use dialog_corpus::{Cardinality, Relation as CorpusRelation, Standing, Value};
+use dialog_corpus::{Relation as CorpusRelation, Standing, Value};
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
@@ -46,7 +45,7 @@ use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped, merge_groupe
 use crate::placement::{memory_layer, session_layer};
 use crate::repository::archive::TreeEnv;
 use crate::repository::branch::select::line_manifest;
-use crate::repository::ephemeral::{Bodies, Window};
+use crate::repository::ephemeral::Window;
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Live, Source, View};
 use crate::repository::{CellSettlement, ReadObservation};
@@ -117,59 +116,6 @@ pub struct QueryLayer<'a> {
     /// layers.
     layers: Option<Box<StackLayers<'a>>>,
     changes: Changes,
-    /// Transient rules whose patterns have no stored rule notation.
-    bodies: Option<Bodies>,
-}
-
-/// An overlay target that keeps non-serializable rule bodies in memory.
-struct Laying<'a> {
-    changes: &'a mut Changes,
-    bodies: &'a mut Option<Bodies>,
-}
-
-impl Update for Laying<'_> {
-    fn associate(&mut self, the: CorpusRelation, of: Entity, is: Value, cardinality: Cardinality) {
-        self.changes.associate(the, of, is, cardinality);
-    }
-
-    fn dissociate(&mut self, the: CorpusRelation, of: Entity, is: Value) {
-        self.changes.dissociate(the, of, is);
-    }
-
-    fn associate_in(
-        &mut self,
-        layer: Entity,
-        the: CorpusRelation,
-        of: Entity,
-        is: Value,
-        cardinality: Cardinality,
-    ) {
-        self.changes.associate_in(layer, the, of, is, cardinality);
-    }
-
-    fn dissociate_in(&mut self, layer: Entity, the: CorpusRelation, of: Entity, is: Value) {
-        self.changes.dissociate_in(layer, the, of, is);
-    }
-
-    fn import(&mut self, asset: Asset) {
-        self.changes.import(asset);
-    }
-    fn discard(&mut self, asset: Asset) {
-        self.changes.discard(asset);
-    }
-
-    /// The refusal stays on the overlay's changes beside the rule this
-    /// layer holds, so a copy of them taken anywhere durable is refused
-    /// there.
-    fn refuse(&mut self, refusal: Refusal) {
-        self.changes.refuse(refusal);
-    }
-
-    fn hold(&mut self, entity: &Entity, body: Box<dyn Any>) -> Result<(), Box<dyn Any>> {
-        let rule = body.downcast::<DeductiveRule>()?;
-        Arc::make_mut(self.bodies.get_or_insert_default()).insert(entity.clone(), *rule);
-        Ok(())
-    }
 }
 
 /// The layers of a session a [`QueryLayer`] reads beside its lines.
@@ -230,10 +176,7 @@ impl<'a> QueryLayer<'a> {
     /// into the overlay — the query resolves it as a transient rule
     /// without persisting it.
     pub fn with<S: Statement>(mut self, statement: S) -> Self {
-        statement.assert(&mut Laying {
-            changes: &mut self.changes,
-            bodies: &mut self.bodies,
-        });
+        statement.assert(&mut self.changes);
         self
     }
 
@@ -250,13 +193,6 @@ impl<'a> QueryLayer<'a> {
             ours.named.extend(theirs.named);
         }
         other.changes.assert(&mut self.changes);
-        if let Some(bodies) = other.bodies {
-            Arc::make_mut(self.bodies.get_or_insert_default()).extend(
-                bodies
-                    .iter()
-                    .map(|(entity, rule)| (entity.clone(), rule.clone())),
-            );
-        }
         self
     }
 
@@ -390,7 +326,7 @@ impl<'a> QueryLayer<'a> {
         }
         let mut overlay = self.changes.clone();
         metadata.export().assert(&mut overlay);
-        Ephemeral::holding(overlay).keeping(self.bodies.clone())
+        Ephemeral::holding(overlay)
     }
 
     /// Stage a query application. Call `.perform(&operator)` to execute.
@@ -1874,10 +1810,6 @@ impl<'a> QueryEnv<'a> {
         let entities = rule_entities(overlay.scan(&conclusions));
         let mut rules = Vec::with_capacity(entities.len());
         for rule_entity in entities {
-            if let Some(rule) = overlay.body(&rule_entity) {
-                rules.push((rule, Installed::Pending));
-                continue;
-            }
             let sources = source_selector(&rule_entity);
             self.read_rules(&sources, manifest);
             let Some(bytes) = source_bytes(overlay.scan(&sources)) else {
@@ -2884,6 +2816,7 @@ mod rule_tests {
     use super::*;
     use crate::helpers::{Counting, connect, test_repo};
     use crate::{Branch, Repository, Transaction};
+    use dialog_corpus::Update as _;
     use dialog_credentials::Credential;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_peer::{Peer, Session};
@@ -6079,7 +6012,6 @@ mod transient_pattern_tests {
             .await?;
 
         let rule = heading_rule()?;
-        assert_eq!(rule.storable(), Ok(()));
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
         terms.insert("heading".into(), Term::var("heading"));

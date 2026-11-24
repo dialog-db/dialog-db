@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A rule that holds a constant map or list reads back from its stored body
 
-[#NNN](https://github.com/dialog-db/dialog-db/pull/NNN)
+[#855](https://github.com/dialog-db/dialog-db/pull/855)
 
 A stored rule body writes a constant map or list as its canonical
 bytes, and the reader of a rule body buffered each term through a
@@ -25,9 +25,13 @@ term or as a pattern with no variable in it (which is that constant),
 was written in format 4 and then refused on every read: `decode`
 failed with "invalid type: byte array", a branch listed the rule in
 `dialog.rule/invalid` as undecodable, and it never fired. The reader
-now reads such bytes as the composite they are. That was also why
-format 5 refused a rule holding a constant map or list inside a
-pattern; it is stored now, and every rule that compiles has a body.
+now reads such bytes as the composite they are. Only a composite is
+written as a byte string: a bytes constant is written as an array of
+integers under `bytes:`, so it reads back as bytes, and a bytes constant
+and a composite of the same bytes are two rules, of two bodies. That was
+also why format 5 refused a rule holding a constant map or list inside a
+pattern; it is stored now, every rule that compiles has a body, and the
+refusal is gone.
 
 What this changes for you:
 
@@ -36,10 +40,16 @@ What this changes for you:
   A branch fires such a rule instead of listing it in
   `dialog.rule/invalid`.
 - A rule holding a constant map or list inside a pattern is stored in
-  format 5: `storable` returns `Ok`, `try_encode` returns its body, and
-  asserting it into a transaction, a batch, the session overlay or a
-  query layer stages that body where it recorded a refusal.
-  `TypeError::UnstorablePattern` is no longer returned for any rule.
+  format 5: `try_encode` returns its body, and asserting it into a
+  transaction, a batch, the session overlay or a query layer stages that
+  body.
+- Gone, as nothing produces them (none was released):
+  `DeductiveRule::storable`, `InductiveRule::storable`,
+  `TypeError::UnstorablePattern`, `Update::refuse`, `Update::hold`,
+  `Refusal`, `Changes::refused`, `CommitError::Refused` and
+  `DialogCorpusError::Refused`. An `Update` implementor implements the
+  methods it did before #778. A query layer no longer keeps rules in
+  memory beside its changes: it reads every rule from its stored body.
 - Bytes in a rule body that are no map or list are refused when the body
   is decoded, with an error, as any malformed body is.
 
@@ -51,10 +61,9 @@ hold, and a rule that can be built and run should run once it is stored.
 Stacked on [#778](https://github.com/dialog-db/dialog-db/pull/778); the
 design is in [design/patterns/design-rule-identity.md](design/patterns/design-rule-identity.md).
 
-A rule that holds a map or a list of terms ran only where it was built,
-in a query layer: the stored rule body had no way to write a pattern, so
-asserting one into a transaction or the session overlay was refused. Rule
-body format 5 writes one. Where a parameter holds a map or a list, the
+A rule that holds a map or a list of terms needs a stored body that can
+write a pattern, which format 4 has no way to do. Rule body format 5
+writes one. Where a parameter holds a map or a list, the
 body writes it under the one key `match` as a composite value is written
 for a human reader: a map as its entries, each a pair of a key and a
 pattern, and a list as its items, with what takes the rest beside them
@@ -85,15 +94,11 @@ What this changes for you:
 
 - Asserting a rule that holds a pattern into a transaction, a batch, the
   session overlay or a query layer stages its `source` body with its
-  index facts. Committing it succeeds where it returned
-  `CommitError::Refused`, and `Ephemeral::apply` lands it where it
-  returned `DialogCorpusError::Refused`.
-- `TypeError::UnstorablePattern` now carries a `reason`. A map pattern
-  keyed by any value is stored, and so, since the entry above, is a
-  pattern that holds a constant map or list.
+  index facts, and committing it or applying it to an ephemeral line
+  lands it. A map pattern keyed by any value is stored, and so, since the
+  entry above, is a pattern that holds a constant map or list.
 - `Parameters` and `Pattern` serialize a map or a list of terms under
-  `match`, and read it back, in JSON and dag-cbor. A `Changes` that holds
-  a refusal still does not serialize. A `ConceptQuery` writes a name that holds a pattern as that
+  `match`, and read it back, in JSON and dag-cbor. A `ConceptQuery` writes a name that holds a pattern as that
   pattern in its `where`, where it wrote the variable standing for the
   whole value, and reads it back: a negated premise keeps its pattern in
   the concept application, so a rule negating one was written without it.
@@ -127,9 +132,8 @@ inside it is bound, the pattern builds the value. A map pattern with no rest
 matches a map of exactly its entries, and a list pattern with no run a list
 of exactly its items. The planner counts a pattern bound when every variable
 inside it is, and inference types a slot that holds one as a composite and
-each leaf as its term is typed. A rule that holds a pattern has an identity
-and runs where it was built, in a query layer; rule body format 5 (the
-entry above) stores it.
+each leaf as its term is typed. A rule that holds a pattern has an identity,
+and rule body format 5 (the entries above) stores it as any rule.
 
 What this changes for you:
 
@@ -142,33 +146,11 @@ What this changes for you:
   `shape`, `pattern`, `shapes`, `has_shapes`, `leaves`, `lowered`, `plain`
   and `map_terms`. `get` and `iter` still answer terms: under a name that
   holds a pattern, a variable that stands for the whole value.
-- New: `Update::hold`, a target keeping a thing it cannot write as facts,
-  and `Update::refuse`, a target recording a statement it cannot write, a
-  required method for every `Update` implementor. `Changes::refused` gives
-  the first refusal, and `Refusal` carries the entity and the typed reason.
-- New: `TypeError::UnstorablePattern`, from `DeductiveRule::storable` and
-  `InductiveRule::storable`.
-- `Parameters` and a pattern above a leaf have no wire form: serializing
-  `Parameters` that hold a pattern fails, and so does serializing a
-  `Changes` that holds a refusal.
-- Asserting a rule that holds a pattern stages nothing for it in a batch
-  that is committed: the batch records a `Refusal` carrying
-  `TypeError::UnstorablePattern`, and committing a transaction that holds
-  it fails with `CommitError::Refused` before anything is written.
-  `Ephemeral::apply`, and so the branch's session overlay, refuses such a
-  batch with `DialogCorpusError::Refused`. A `QueryLayer`
-  (`Branch::with`) keeps the rule and its index facts and runs it; a copy
-  of the layer's `changes()` carries the refusal and is refused wherever
-  it is committed or applied.
-- An inductive rule that holds a pattern is refused the same way
-  everywhere, a query layer included.
 
 Why: a rule could not say a value by its shape, so a command could not be
 given a record, an entity could not be derived from one, and a syntax tree
 could not be taken apart in a rule. The pattern is the notation's struct
-with variables in it, one thing both ways. Committing a rule that holds a
-pattern used to panic, which aborts the page on wasm; it is now an error the
-commit returns.
+with variables in it, one thing both ways.
 
 ### A value can be a composite: a map, a record or a list, held as one value and read in place
 
@@ -409,8 +391,7 @@ dropping that scope.
 
 - A rule that holds a composite constant: one of terms is written in
   format 4 byte for byte as before, and one holding the constant inside a
-  pattern, refused before, is written in format 5. Only the reader
-  changed: a body that read before reads as it did, and nothing is
+  pattern is written in format 5. Only the reader changed: a body that read before reads as it did, and nothing is
   rewritten. No release has stored a composite, so no older release meets
   such a body. Nothing for an embedder to run.
 - Rule body format 5: what a replica holds is unchanged. A rule that
@@ -425,12 +406,9 @@ dropping that scope.
   facts replicate untouched, and the rule fires once that replica
   upgrades. 0.5.0 reads up to format 3, so it treats format 4 and format 5
   bodies alike. Nothing an embedder has to run.
-- Patterns: nothing stored changes. No rule format, up to format 4 that
-  this release writes, holds a pattern, and a rule that holds one is
-  refused at commit, so no replica stores one and an older release reads
-  everything this one writes. The format that stores a pattern in a rule
-  body will be format 5 and is not built yet. Nothing an embedder has to
-  run.
+- Patterns: a rule that holds one is stored in format 5 (the entry on
+  format 5 above); nothing else stored changes. Nothing an embedder has
+  to run.
 - Nothing stored or synced changes.
 
 
