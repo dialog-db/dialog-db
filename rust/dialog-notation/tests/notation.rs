@@ -861,6 +861,110 @@ async fn it_retracts_every_field_of_a_concept_named_by_its_entity() -> Result<()
     Ok(())
 }
 
+/// The to-dos the write tests below start from: two, each with all
+/// three fields, and a command that names one to drop.
+const DROPPABLE: &str = r#"(concept (todo ?t title: ?title state: ?s list: ?l)
+      (xyz.todo/title of: ?t is: ?title as: :text cardinality: :one)
+      (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one)
+      (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one))
+    (concept (todo/drop subject: ?t)
+      (xyz.todo.drop/subject of: ?c is: ?t as: :entity in: :control cardinality: :many))
+    (assert (todo todo:1 title: "A" state: :open list: list:1))
+    (assert (todo todo:2 title: "B" state: :done list: list:1))"#;
+
+/// What every field of the two to-dos holds, field by field.
+async fn droppable(notebook: &mut Notebook) -> Result<Vec<String>> {
+    let mut held = Vec::new();
+    for field in ["title", "state", "list"] {
+        held.extend(report(notebook, &format!("(select (xyz.todo ?t {field}: ?x))")).await?);
+    }
+    Ok(held)
+}
+
+/// A write at the top level with no premise needs its entity: one whose
+/// entity is a variable nothing binds is refused, whether it names
+/// every field, some, or none, and nothing is retracted. By its entity
+/// alone, ground, it retracts that entity's fields.
+#[dialog_common::test]
+async fn it_refuses_a_top_level_write_whose_entity_nothing_binds() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook.submit(DROPPABLE).await?;
+    let before = droppable(&mut notebook).await?;
+    assert_eq!(before.len(), 6, "{before:?}");
+    for text in [
+        "(retract (todo ?t state: :open))",
+        "(retract (todo ?t title: ?x state: :open list: ?l))",
+        "(retract (todo ?t))",
+    ] {
+        let refused = notebook
+            .submit(text)
+            .await
+            .map_err(|error| error.downcast::<Error>());
+        assert!(
+            matches!(&refused, Err(Ok(Error::Refused(why)))
+                if why == "a write with no premise needs its entity: xyz.todo"),
+            "{text}: {refused:?}"
+        );
+        assert_eq!(droppable(&mut notebook).await?, before, "{text}");
+    }
+    notebook.submit("(retract (todo todo:1))").await?;
+    assert_eq!(
+        droppable(&mut notebook).await?,
+        vec![
+            r#"(xyz.todo todo:2 title: "B")"#,
+            "(xyz.todo todo:2 state: :done)",
+            "(xyz.todo todo:2 list: list:1)",
+        ]
+    );
+    Ok(())
+}
+
+/// One field is retracted through its attribute's relation, at the top
+/// level or in a rule's conclusion, and the concept's other fields stay:
+/// a retract through the concept that names some fields is refused.
+#[dialog_common::test]
+async fn it_retracts_one_field_through_the_attributes_relation() -> Result<()> {
+    let kept = vec![
+        r#"(xyz.todo todo:1 title: "A")"#,
+        r#"(xyz.todo todo:2 title: "B")"#,
+        "(xyz.todo todo:2 state: :done)",
+        "(xyz.todo todo:1 list: list:1)",
+        "(xyz.todo todo:2 list: list:1)",
+    ];
+    let mut top = Notebook::open().await?;
+    top.submit(DROPPABLE).await?;
+    top.submit("(retract (xyz.todo/state of: todo:1 is: :open))")
+        .await?;
+    assert_eq!(droppable(&mut top).await?, kept);
+
+    let mut ruled = Notebook::open().await?;
+    ruled
+        .submit(&format!(
+            "{DROPPABLE}
+             (rule (retract (xyz.todo/state of: ?t is: :open))
+               (todo/drop subject: ?t))"
+        ))
+        .await?;
+    ruled.submit("(assert (todo/drop subject: todo:1))").await?;
+    assert_eq!(droppable(&mut ruled).await?, kept);
+
+    let mut narrow = Notebook::open().await?;
+    narrow.submit(DROPPABLE).await?;
+    let refused = narrow
+        .submit(
+            "(rule (retract (todo ?t state: :open))
+               (todo/drop subject: ?t))",
+        )
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&refused, Err(Ok(Error::Refused(why)))
+            if why.contains("a write says every field") && why.contains("write the relation itself")),
+        "{refused:?}"
+    );
+    Ok(())
+}
+
 /// A concept written as lines, an attribute a line, runs as one written
 /// as a read of several fields does: written through by a rule a
 /// command fires and read back. `:one` reads the newest claim and
