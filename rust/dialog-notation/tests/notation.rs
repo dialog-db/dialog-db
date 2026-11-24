@@ -1442,7 +1442,9 @@ async fn it_shows_no_hash_of_a_derived_attribute() -> Result<()> {
 /// its name: under a name with a `/` whose first part is a declared
 /// concept it is read through its body, not as a derived attribute that
 /// nothing concludes, and so is one whose field is an entry with a
-/// constant key. In a document of its own or beside its parent alike.
+/// constant key. In a document of its own or beside its parent alike,
+/// and above the concept it reads or below it. One whose name has no
+/// `/` is a concept too: an attribute is derived under it.
 #[dialog_common::test]
 async fn it_reads_a_concept_over_another_concept_under_a_name_with_a_slash() -> Result<()> {
     let alt = r#"(concept (alt ?d v: ?v)
@@ -1453,10 +1455,13 @@ async fn it_reads_a_concept_over_another_concept_under_a_name_with_a_slash() -> 
          (assert (doc doc:1 title: "T"))"#;
     let plain = "(concept (doc/plain ?d part: ?v) (alt ?d v: ?v))";
     let keyed = r#"(concept (doc/parts ?d part: {"a" ?v}) (alt ?d v: ?v))"#;
-    for together in [false, true] {
+    for together in [false, true, true] {
         let mut notebook = Notebook::open().await?;
         if together {
+            // Above what it reads or below it alike.
             notebook.submit(&format!("{alt} {plain} {keyed}")).await?;
+            notebook = Notebook::open().await?;
+            notebook.submit(&format!("{plain} {keyed} {alt}")).await?;
         } else {
             notebook.submit(alt).await?;
             notebook.submit(plain).await?;
@@ -1471,6 +1476,27 @@ async fn it_reads_a_concept_over_another_concept_under_a_name_with_a_slash() -> 
             report(&mut notebook, r#"(select (doc/parts ?d part: {"a" ?w}))"#).await?,
             vec![r#"(xyz.alt doc:1 v: "x")"#],
             "together: {together}"
+        );
+    }
+    // A concept with no `/` over another, in either order, and an
+    // attribute derived under it, in the same document and in a later one.
+    let plain = "(concept (plain ?d part: ?v) (alt ?d v: ?v))";
+    let derived = "(rule (plain/len ?d ?v) (plain ?d part: ?v))";
+    for (first, second) in [(alt, plain), (plain, alt)] {
+        let mut notebook = Notebook::open().await?;
+        notebook
+            .submit(&format!("{first} {second} {derived}"))
+            .await?;
+        assert_eq!(
+            report(&mut notebook, "(select (plain/len ?d ?v))").await?,
+            vec![r#"(plain/len doc:1 is: "x")"#]
+        );
+        let mut later = Notebook::open().await?;
+        later.submit(&format!("{first} {second}")).await?;
+        later.submit(derived).await?;
+        assert_eq!(
+            report(&mut later, "(select (plain/len ?d ?v))").await?,
+            vec![r#"(plain/len doc:1 is: "x")"#]
         );
     }
     Ok(())

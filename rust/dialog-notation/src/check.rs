@@ -778,6 +778,36 @@ mod tests {
                 }
             }
         }
+        // A concept over another concept, under a name with a `/` and
+        // under one without, beside what reads it: every order means
+        // the same, with no exception, and none is refused.
+        let alt = "(concept (alt ?a text: ?x) \
+                   (xyz.alt/text of: ?a is: ?x as: :text cardinality: :one))";
+        for forms in [
+            vec![
+                "(concept (doc/plain ?d text: ?x) (alt ?d text: ?x))",
+                alt,
+                "(select (doc/plain ?d text: ?x))",
+            ],
+            vec![
+                "(concept (plain ?d text: ?x) (alt ?d text: ?x))",
+                alt,
+                "(rule (plain/len ?d ?x) (plain ?d text: ?x))",
+                "(select (plain/len ?d ?x))",
+            ],
+        ] {
+            let first = meaning(&forms.join("\n"))?;
+            assert!(
+                !first
+                    .0
+                    .iter()
+                    .any(|said| said.starts_with("refused:") || said.contains("refused true")),
+                "{forms:#?}: {first:#?}"
+            );
+            for order in orders(&forms) {
+                assert_eq!(meaning(&order.join("\n"))?, first, "{order:#?}");
+            }
+        }
         // The two the reviewer wrote, refused naming both forms.
         for (text, named) in [
             (
