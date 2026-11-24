@@ -66,7 +66,7 @@ A relation, a value type and a cardinality: how a relation is read and written. 
 { "the": "job/status", "as": ["case:suspended", "case:active"] }
 ```
 
-A listed `as` is an enumerated type: the values the attribute holds, a scale written least first, `[low, medium, high]`. A field picking `max` over it reads the last listed value present and `min` the first; `top`, kept for what is already stored, reads the first, as `min` does. An attribute's identity is a hash of its relation, its cardinality, its type and the values it lists.
+A listed `as` is an enumerated type: the values the attribute holds, a scale written least first, `[low, medium, high]`. A field picking `max` over it reads the last listed value present and `min` the first. `top`, the first listed value present, is deprecated and goes in the next version: it is `min` over the same list, and a list written least first is read with `max`. An attribute's identity is a hash of its relation, its cardinality, its type and the values it lists.
 
 #### Cardinality
 
@@ -75,7 +75,7 @@ How many claims a cell of an attribute holds, spelled `cardinality`:
 - `one` (the default): a read returns the cell's newest claim, and a write succeeds that claim, so the cell holds one live claim;
 - `many`: a read returns every claim, as a set, and a write adds a claim beside the others.
 
-A read that ranks a cell's claims, the greatest, the least or the first listed, is not a property of an attribute but of the concept field that reads it: the field picks `max`, `min` or `top` over a cardinality-many attribute (`"pick": "top"`, from which the field's cardinality follows; see [aggregation](./aggregation.md#selective-aggregators-on-concept-fields)). Over a listed `as`, `max` and `min` rank by the listing, least first, and `top` reads its first value. In Rust a cardinality is `dialog_corpus::Cardinality`, re-exported as `dialog_query::Cardinality`.
+A read that ranks a cell's claims, the greatest, the least or the first listed, is not a property of an attribute but of the concept field that reads it: the field picks `max` or `min` over a cardinality-many attribute (`"pick": "min"`, from which the field's cardinality follows; see [aggregation](./aggregation.md#selective-aggregators-on-concept-fields)). Over a listed `as`, `max` and `min` rank by the listing, least first. In Rust a cardinality is `dialog_corpus::Cardinality`, re-exported as `dialog_query::Cardinality`.
 
 The releases 0.3 and 0.4 spelled a `pick` in its place (`last`, `all`, `top`, `max`, `min`) and could list relations under `the`. This release refuses both by name; `Branch::upgrade_rules` rewrites a stored rule reading under `last` or `all` and reports one it cannot rewrite.
 

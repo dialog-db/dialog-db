@@ -24,9 +24,8 @@ so listed symbols ranked by their bytes. A value the listing does not
 hold loses to every listed one, claims holding one value fall to the
 newest, and a cell holding no listed value reads its newest claim, as
 under `top`. Over an attribute that lists nothing, `max` and `min` are
-unchanged. `top` is unchanged: it reads the first listed value present,
-which is now also what `min` reads, and stays for the concepts already
-stored with it.
+unchanged. `top` reads as it did: the first listed value present, which
+is now also what `min` reads.
 
 What this changes for you:
 
@@ -39,8 +38,13 @@ What this changes for you:
   type: `TypeError::SelectiveAggregate`'s "type has no order" refusal
   applies only to an attribute that lists nothing.
 - `Selective::compares` takes the listing (`compares(listed)`) and is
-  false for `max` and `min` over one. `Selective::bounds` names the last
-  listed value under `max` and the first under `min`.
+  false for `max` and `min` over one.
+- Deprecated: `pick: top` (`Selective::Top`). It reads the first listed
+  value present, which is `min` over the same list; a list written least
+  first is read with `max`. It is still read and keeps its identity, is
+  no longer offered by `notes/notation/schema.json`, and goes in the next
+  version.
+- Removed: `Selective::bounds`, which nothing called.
 - `ReduceEntry::try_listed` builds an entry ranking by a listing, and
   `ReduceEntry::orders_by_standing` says whether a fold over it is
   evaluated afresh: true for a `max` or `min` over a listing, as for
@@ -419,7 +423,10 @@ dropping that scope.
   keeps its order and `top` keeps its name. What a stored concept field
   with `pick: max` or `pick: min` over a listed attribute reads changes,
   as above. An older release reading the same descriptor ranks by value.
-  An embedder runs nothing.
+  A stored field with `pick: top` reads as before; `top` is deprecated
+  and goes in the next version, so such a field is to be rewritten as
+  `min` over the same list, which changes that concept's identity.
+  Nothing is rewritten automatically. An embedder runs nothing.
 - Rule body format 5: what a replica holds is unchanged. A rule that
   holds no pattern is written in format 4 as before, under the entity it
   had, so nothing is rewritten on upgrade, and `Branch::upgrade_rules`

@@ -145,7 +145,7 @@ as: "text:"
 cardinality: many
 ```
 
-A read that ranks a cell's claims, the greatest, the least or the first listed, is not a property of an attribute but of the concept field that reads it: the field picks `max`, `min` or `top` over a cardinality-many attribute (`"pick": "top"`, from which the field's cardinality follows; see [aggregation](./aggregation.md#selective-aggregators-on-concept-fields)). Over a listed `as`, `max` and `min` rank by the listing, least first, and `top` reads its first value.
+A read that ranks a cell's claims, the greatest, the least or the first listed, is not a property of an attribute but of the concept field that reads it: the field picks `max` or `min` over a cardinality-many attribute (`"pick": "min"`, from which the field's cardinality follows; see [aggregation](./aggregation.md#selective-aggregators-on-concept-fields)). Over a listed `as`, `max` and `min` rank by the listing, least first.
 
 The releases 0.3 and 0.4 spelled a `pick` (`last:`, `all:`, `top:`, `max:`, `min:`) where an attribute now spells its cardinality, and could list relations under `the`, a ranked chain. A descriptor spelling either is refused by name, so it is never read with another meaning. `Branch::upgrade_rules` rewrites a stored rule whose attributes read under `last` or `all` (cardinality one and many), and reports one reading under `max`, `min` or `top`, or over a chain, which it leaves inert.
 
@@ -220,7 +220,7 @@ makes of its own field.
 
 #### Listed values
 
-An attribute can constrain its values to a fixed list, an enumerated type. The list is a scale written least first, `[low, medium, high]`: a concept field with `"pick": "max"` over the attribute reads the claim holding the last listed value present, and `"pick": "min"` the first, whatever the values' own order. `"pick": "top"` reads the first listed value present, as `min` does; it stays for the concepts already stored with it.
+An attribute can constrain its values to a fixed list, an enumerated type. The list is a scale written least first, `[low, medium, high]`: a concept field with `"pick": "max"` over the attribute reads the claim holding the last listed value present, and `"pick": "min"` the first, whatever the values' own order. `"pick": "top"`, the first listed value present, is deprecated and goes in the next version: it is `min` over the same list, and a list written least first is read with `max`. It is still read, so a concept stored with it keeps its meaning until it is rewritten.
 
 ```json
 {

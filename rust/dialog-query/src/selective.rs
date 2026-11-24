@@ -19,10 +19,13 @@
 //!
 //! A listed `as` is a scale written least first, `[low, medium, high]`:
 //! `max` over it reads the claim holding the last listed value present,
-//! `min` the first, whatever the values' own order. `top` predates that
-//! reading and reads the first listed value present, as `min` does; it
-//! stays for the concepts already stored with it. A value the listing
+//! `min` the first, whatever the values' own order. A value the listing
 //! does not hold loses to every listed one under all three.
+//!
+//! `top` is deprecated and goes in the next version: it reads the first
+//! listed value present, which is `min` over the same list, and a list
+//! written least first is read with `max`. It is still read, so the
+//! concepts already stored with it keep their meaning and identity.
 //!
 //! Ties fall to standing and then to the value's hash
 //! ([`Cardinality::newer`]).
@@ -50,9 +53,12 @@ pub enum Selective {
     /// The claim holding the least value; over an attribute listing its
     /// values, the value listed first.
     Min,
-    /// The claim holding the value listed first in the attribute's `as`:
-    /// what `min` reads over a listed attribute. A value the list does
-    /// not hold ranks below every listed one.
+    /// Deprecated, and gone in the next version: the claim holding the
+    /// value listed first in the attribute's `as`, which is `min` over
+    /// the same list (a list written least first is read with `max`). A
+    /// value the list does not hold ranks below every listed one. Not
+    /// marked `#[deprecated]`, which would cost an
+    /// `#[allow(deprecated)]` on every match that still reads it.
     Top,
 }
 
@@ -117,18 +123,6 @@ impl Selective {
             });
         }
         best.map(|(index, _)| index)
-    }
-
-    /// Whether `value` is the greatest any claim can hold, so no other
-    /// claim can be elected over it on value: the first listed value
-    /// under `top` and `min`, the last under `max`. Unbounded orders
-    /// (`max`, `min` with no listing) and `last` have none.
-    pub fn bounds(self, listed: &[Value], value: &Value) -> bool {
-        match self {
-            Selective::Top | Selective::Min => listed.first() == Some(value),
-            Selective::Max => listed.last() == Some(value),
-            Selective::Last => false,
-        }
     }
 }
 
@@ -330,18 +324,6 @@ mod tests {
     }
 
     #[test]
-    fn a_listing_bounds_top_and_min_by_its_first_value_and_max_by_its_last() {
-        let listed = [text("suspended"), text("registered")];
-        assert!(Selective::Top.bounds(&listed, &text("suspended")));
-        assert!(!Selective::Top.bounds(&listed, &text("registered")));
-        assert!(Selective::Min.bounds(&listed, &text("suspended")));
-        assert!(Selective::Max.bounds(&listed, &text("registered")));
-        assert!(!Selective::Max.bounds(&listed, &text("suspended")));
-        assert!(!Selective::Max.bounds(&[], &text("suspended")));
-        assert!(!Selective::Last.bounds(&listed, &text("registered")));
-    }
-
-    #[test]
     fn max_and_min_over_a_listing_rank_by_it_least_first() {
         let listed = [text("low"), text("medium"), text("high")];
         // Bytewise `medium` is the greatest and `high` the least.
@@ -353,6 +335,24 @@ mod tests {
             Selective::Min.elect(&listed, contenders()),
             Selective::Top.elect(&listed, contenders())
         );
+    }
+
+    #[test]
+    fn min_over_a_listing_reads_what_max_over_it_reversed_reads() {
+        let listed = [text("a"), text("b"), text("c")];
+        let reversed = [text("c"), text("b"), text("a")];
+        for claims in [
+            vec![text("b"), text("c"), text("a")],
+            vec![text("c"), text("b")],
+            vec![text("zzz"), text("c")],
+        ] {
+            let contenders = || claims.iter().map(|value| (value, None));
+            assert_eq!(
+                Selective::Min.elect(&listed, contenders()),
+                Selective::Max.elect(&reversed, contenders()),
+                "{claims:?}"
+            );
+        }
     }
 
     #[test]

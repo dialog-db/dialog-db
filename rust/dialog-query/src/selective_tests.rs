@@ -36,7 +36,8 @@ fn text(text: &str) -> Value {
     Value::String(text.into())
 }
 
-/// The states an account's status lists: `top` reads the first present.
+/// The states an account's status lists: `min` (and the deprecated
+/// `top`) reads the first present.
 fn states() -> serde_json::Value {
     serde_json::json!(["suspended", "active", "registered"])
 }
@@ -44,12 +45,17 @@ fn states() -> serde_json::Value {
 /// An account: its name, read newest, and its status, elected by
 /// `elect` among every state written.
 fn account(elect: &str) -> ConceptDescriptor {
+    account_over(elect, states())
+}
+
+/// [`account`], its status listing `listed`.
+fn account_over(elect: &str, listed: serde_json::Value) -> ConceptDescriptor {
     serde_json::from_value(serde_json::json!({
         "with": {
             "name": { "the": "account/name", "as": "text:" },
             "status": {
                 "the": "account/status",
-                "as": states(),
+                "as": listed,
                 "cardinality": "many",
                 "pick": elect
             }
@@ -695,9 +701,10 @@ async fn it_reads_max_and_min_over_a_listing_least_first() -> anyhow::Result<()>
     Ok(())
 }
 
-/// "`top` reads the first listed value present, which is what `min`
-/// reads over a listed type": the two read the same claim of every
-/// account, and `max` the last listed present.
+/// "`top` reads the first listed value present, which is `min` over the
+/// same list, and `max` over the list written the other way": all three
+/// read the same claim of every account, and `max` over the list as
+/// written the last listed present.
 #[dialog_common::test]
 async fn it_reads_the_same_claim_under_top_and_min() -> anyhow::Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -706,23 +713,21 @@ async fn it_reads_the_same_claim_under_top_and_min() -> anyhow::Result<()> {
     store_accounts(&branch, &operator).await?;
     let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
-    let read = |pick: &'static str| {
+    let read = |concept: ConceptDescriptor| {
         let source = &source;
-        async move {
-            statuses(
-                source,
-                account(pick),
-                Term::var("this"),
-                Term::var("status"),
-            )
-            .await
-        }
+        async move { statuses(source, concept, Term::var("this"), Term::var("status")).await }
     };
-    let top = read("top").await?;
+    let reversed = serde_json::json!(["registered", "active", "suspended"]);
+    let top = read(account("top")).await?;
     assert_eq!(top, vec![pair("alice", "suspended"), pair("bob", "active")]);
-    assert_eq!(read("min").await?, top);
+    assert_eq!(read(account("min")).await?, top, "`min` over the same list");
     assert_eq!(
-        read("max").await?,
+        read(account_over("max", reversed)).await?,
+        top,
+        "`max` over the list reversed"
+    );
+    assert_eq!(
+        read(account("max")).await?,
         vec![pair("alice", "registered"), pair("bob", "registered")]
     );
     Ok(())

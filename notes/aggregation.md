@@ -136,7 +136,7 @@ unless it is written (`last` is one, every other pick many).
 { "with": { "status": {
   "the": "account/status",
   "as": ["suspended", "active", "registered"],
-  "pick": "top"
+  "pick": "min"
 } } }
 ```
 
@@ -145,13 +145,14 @@ unless it is written (`last` is one, every other pick many).
 | `last`  | the newest claim |
 | `max`   | the greatest value, then the newest; over a listed `as`, the value listed last |
 | `min`   | the least value, then the newest; over a listed `as`, the value listed first |
-| `top`   | the value listed first in the attribute's `as`, then the newest |
+| `top`   | deprecated: the value listed first in the attribute's `as`, then the newest |
 
 A listed `as` is a scale written least first, `[low, medium, high]`, so
 `max` and `min` over it rank by the listing, not by the values' own
-order, and take a listing of any type. `top` reads the first listed
-value, as `min` does; it stays for the concepts already stored with
-it. A value the listing does not hold loses to every listed one under
+order, and take a listing of any type. `top` is deprecated and goes in
+the next version: it reads the first listed value present, which is
+`min` over the same list, and a list written least first is read with
+`max`. A value the listing does not hold loses to every listed one under
 all three. Every one is a total order, ties falling to standing and
 then to the value's hash, so every replica holding the same claims
 reads the same one. A read compares every claim of the cell: none

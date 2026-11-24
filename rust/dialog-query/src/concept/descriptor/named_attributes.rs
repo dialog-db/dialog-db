@@ -89,6 +89,8 @@ enum PickName {
     All,
     Max,
     Min,
+    /// Deprecated, and gone in the next version: `min` over the same
+    /// list reads the same claim. Still read, and written back as read.
     Top,
 }
 

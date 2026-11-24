@@ -70,8 +70,8 @@
         },
         "aggregate": {
           "type": "string",
-          "enum": ["last", "max", "min", "top"],
-          "description": "The selective aggregator the field reads one of its relation's claims per entity with: 'last' the newest, 'max' the greatest value, 'min' the least, 'top' the value listed first in the attribute's listed `as`. A listed `as` is a scale written least first: over it 'max' reads the value listed last and 'min' the value listed first (what 'top' reads), and a value the list does not hold loses to every listed one. 'max', 'min' and 'top' read a cardinality-many attribute; 'top' needs a listed `as`, and 'max' and 'min' a listed `as` or a type with an order. Declaring one changes the concept's identity."
+          "enum": ["last", "max", "min"],
+          "description": "The selective aggregator the field reads one of its relation's claims per entity with: 'last' the newest, 'max' the greatest value, 'min' the least. A listed `as` is a scale written least first: over it 'max' reads the value listed last and 'min' the value listed first, and a value the list does not hold loses to every listed one. 'max' and 'min' read a cardinality-many attribute, and need a listed `as` or a type with an order. The deprecated 'top', the first listed value present, is still read but not written in the notation: it is 'min' over the same list, and goes in the next version. Declaring one changes the concept's identity."
         }
       },
       "required": [
