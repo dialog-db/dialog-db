@@ -222,6 +222,10 @@ pub fn read(text: &str) -> Result<Vec<Form>, Error> {
     }
 }
 
+/// How deep a form may nest: brackets and quotes, counted from the
+/// top-level form. A form nested deeper is refused where it goes too deep.
+pub(crate) const DEPTH: usize = 64;
+
 /// What in a text is not forms, and where it is.
 pub(crate) type Misread = (Error, Span);
 

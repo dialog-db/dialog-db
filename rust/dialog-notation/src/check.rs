@@ -228,6 +228,62 @@ mod tests {
     use crate::Error;
     use crate::written::Point;
 
+    /// A form nested past [`crate::form::DEPTH`] is refused where it
+    /// goes too deep, and the forms beside it are read; one nested to the
+    /// limit is read, analyzed, compiled and kept as a value, every stage
+    /// on a thread with the default stack. Nesting a list and a formula
+    /// both, since a quote, a bracket and an application each recurse.
+    #[test]
+    fn it_refuses_a_form_nested_too_deep_and_runs_one_at_the_limit() {
+        use crate::form::DEPTH;
+        let run = std::thread::spawn(|| -> Result<(), Error> {
+            let list = |depth: usize| format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
+            let formula =
+                |depth: usize| format!("{}?n{}", "(+ 1 : ".repeat(depth), ")".repeat(depth));
+            let quoted = |depth: usize| format!("{}x", "'".repeat(depth));
+            // `(assert (xyz.note note:1 v: X))` holds X two forms down.
+            for deep in [list(DEPTH - 2), quoted(DEPTH - 2)] {
+                let mut analyzer = Analyzer::new()?;
+                let checked = check(
+                    &mut analyzer,
+                    &format!("(assert (xyz.note note:1 v: {deep}))"),
+                );
+                assert!(checked.refusals().next().is_none() || checked.steps.is_empty());
+                for tree in &checked.analyzed {
+                    let _ = tree.value();
+                }
+            }
+            let mut analyzer = Analyzer::new()?;
+            let checked = check(
+                &mut analyzer,
+                &format!(
+                    "(rule (xyz.out ?t n: {}) (xyz.in ?t n: ?n))",
+                    formula((DEPTH - 3) / 2)
+                ),
+            );
+            for tree in &checked.analyzed {
+                let _ = tree.value();
+            }
+            for deep in [
+                format!("(select (xyz.note ?n v: {}))", list(DEPTH)),
+                format!("(select (xyz.note ?n v: {}))", quoted(DEPTH)),
+                format!("{}x{}", "(".repeat(2000), ")".repeat(2000)),
+            ] {
+                let mut analyzer = Analyzer::new()?;
+                let checked = check(&mut analyzer, &format!("{deep}\n(select (xyz.a ?a n: ?n))"));
+                let refusals: Vec<&Diagnostic> = checked.refusals().collect();
+                assert!(
+                    matches!(refusals.as_slice(), [refused] if matches!(&refused.refusal, Some(Error::Read(why)) if why.contains("nested"))
+                        && refused.span.is_some()),
+                    "{refusals:?}"
+                );
+                assert_eq!(checked.analyzed.len(), 1, "the form beside it is read");
+            }
+            Ok(())
+        });
+        assert!(matches!(run.join(), Ok(Ok(()))));
+    }
+
     /// What a comment right above a rule says is the rule's
     /// description: the analyzed tree holds it, and the compiler is
     /// given it. A comment with a blank line under it is not about the
