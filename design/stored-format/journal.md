@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | What is stored and read, by file. Identities are keyed by nothing a user fact uses; only dialog's own index facts and markers name them, inside dialog. Formats 4 and 5 are unreleased, and every identity already moved since 0.5.0, so a cut-over before the next tag costs a live space one migration. Main's upgrade would strand 88 of tonk-team's 89 transient markers. A 0.5.0 replica meets a newer body under the same index keys and fails the query (F1, run). | Directing. Six approaches and a matrix; D recommended by the agent (E, then F, before tonk's answers to T12 to T15). |
-| **Agenda** | U1 to U4 in the [direction](direction.md); U1 (can the fence be set without rewriting every node) first, by a run. The maintainer's answers to open questions 1 to 4 in the top story; 5 is answered.  | The maintainer reads the matrix and chooses. Then step 1 of the [plan](plan.md): tests pinning today's behaviour. |
+| **Agenda** | U1, U2 and U4 in the [direction](direction.md); U1 (can the fence be set without rewriting every node) first, by a run. Agreement with tonk #1329 on the six points in [last migration](last-migration.md). The maintainer's answers to open questions 1 to 4 in the top story; 5 is answered.  | The maintainer reads the matrix and chooses. Then step 1 of the [plan](plan.md): tests pinning today's behaviour. |
 
 ## 2026-11-24, Describing to Directing: what "format 5 for everything" would take
 
@@ -188,3 +188,24 @@ vocabulary, no keep or prune. Plan rewritten for D, with tonk's side.
 
 **Decided.** Nothing by the maintainer. The agent's opinion: D. Unsure:
 U1 to U4.
+
+## 2026-11-24, Directing: checked against tonk's last migration
+
+**Asked.** The maintainer approved plan step 1 (the exports), and asked
+that the plan be checked against tonk's last migration of every rule:
+"we also encountered some issues version after ... probably do
+something similar this time around". The coordinator relayed that
+migration as reconstructed from tonk's history.
+
+**Learned.** #1058 inferred "migrated" from the storage encoding, gated
+only some writers, left rules arriving by sync inert, and was never
+tested against a space an old binary wrote. Each maps to a step here
+([last migration](last-migration.md)). The 0.5.0 identity of a ranked
+attribute on its own is private in dialog, the gap tonk #1329 names.
+
+**Decided.** Nothing by the maintainer beyond step 1. The agent's: the
+recommendation stays D; the order changes, the v0.5.0 fixture and the
+gate before any format change; the fence is set last in one publish that
+carries the embedder's reinstall, its rekey and `upgrade_rules`; a tree
+with no rules is fenced at its first write; a pull rewrites rules that
+arrive after the fence (U3 closed).

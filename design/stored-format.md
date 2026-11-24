@@ -7,8 +7,9 @@ The [journal](stored-format/journal.md) has where the topic stands, the
 [inventory](stored-format/inventory.md) of what is stored and read, the
 [blast radius](stored-format/blast-radius.md) of an identity change with
 the questions for tonk, [two releases in one space](stored-format/mixed-fleets.md),
-[the order of a listed `as`](stored-format/listed-order.md), and the
-[plan](stored-format/plan.md).
+[the order of a listed `as`](stored-format/listed-order.md),
+[the last migration of every rule](stored-format/last-migration.md), and
+the [plan](stored-format/plan.md).
 
 ## Description
 

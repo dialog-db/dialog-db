@@ -142,9 +142,14 @@ What D now is, made as small as tonk's answers allow:
   uses (`repository/branch/migrate.rs`).
 
 The cost: an O device cannot sync until it updates, and a pull from an
-O device into N has to bring O's tree to the fenced form, as a pull
-aligns a tree laid out before the number band
-(`migrate.rs:266` to `:281`).
+O device into N rewrites the rules O wrote since, as a pull aligns a tree
+laid out before the number band (`migrate.rs:266` to `:281`).
+
+Checked against tonk's last migration of every rule
+([last migration](last-migration.md)): D answers each of its lessons, the
+fence being the explicit record of a migration that #1058 lacked. The
+order changes (a fixture and the gate first, the format change after),
+the recommendation does not.
 
 ## What can still go wrong quietly under D
 
@@ -173,9 +178,8 @@ aligns a tree laid out before the number band
 - **U2.** Whether tonk's `rekey` moves `dialog.concept/transient` facts
   (it rewrites "claims about" a moved identity). If it does, step 3 can
   go.
-- **U3.** How a pull on N aligns a tree O wrote after the fence went up:
-  rewriting its rules in the pull, or refusing until the upgrade runs.
-  The number band rewrites in the pull.
+- **U3.** Closed 2026-11-24: a pull rewrites the rule bodies that arrive
+  after the fence, in its merge ([last migration](last-migration.md)).
 - **U4.** Open question 1: what an identity hashes once there is one
   format. D does not depend on the answer, but step 2 carries it.
 
