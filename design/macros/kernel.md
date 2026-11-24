@@ -175,7 +175,7 @@ In the model that answers `?name = todo`. Any other labelled part of a rule is k
 
 ## The to-do, expanded
 
-[model/todo.clj](model/todo.clj) through the prelude, as the model printed it. The model is of 2026-11-11 and was left as it was: its writes carry `!`, and its issued head the word `assert`.
+[`design/macros/model/todo.clj`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/model/todo.clj) on `research-data` through the prelude, as the model printed it. The model is of 2026-11-11 and was left as it was: its writes carry `!`, and its issued head the word `assert`.
 
 ```clj
 ; (rule (assert! (todo ?t list: ?l text: ?x state: :open))
@@ -202,7 +202,7 @@ In the model that answers `?name = todo`. Any other labelled part of a rule is k
 
 ## What the model is
 
-[model/model.py](model/model.py) is a throwaway in Python: a reader, pattern matching and template filling, an evaluator for kernel rules over a dictionary of facts, the walker, and rounds in which what `assert` says is seen once. It reads the prelude as text and runs it, so the definitions above are checked as written. It shares no code with dialog.
+[`design/macros/model/model.py`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/model/model.py) on `research-data` is a throwaway in Python: a reader, pattern matching and template filling, an evaluator for kernel rules over a dictionary of facts, the walker, and rounds in which what `assert` says is seen once. It reads the prelude as text and runs it, so the definitions above are checked as written. It shares no code with dialog.
 
 It does not model the planner, picks (the wrapper is carried and ignored, and a write to a to-do's field replaces what was there), layers, canonical identities, names at a revision, source maps, or a document whose forms are in any order: it takes them top to bottom.
 
@@ -214,7 +214,7 @@ python3 -I checks.py
 
 ## What it showed
 
-Held, in [model/checks.py](model/checks.py):
+Held, in [`design/macros/model/checks.py`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/model/checks.py) on `research-data`:
 
 - A later document's `(finish (todo …))` moves one to-do to `:done`.
 - `(increment (xyz.counter ?c))`, declared nowhere and read by one rule, moves a counter from 0 to 1. The command is whatever that rule reads: its name, what it is around, and the fields it passes.
@@ -232,8 +232,8 @@ Found:
 
 1. **A read is one entity and several fields, across domains.** `unless` negates one proposition (`negation.rs`), so the reads a concept expands to are joined into one when their absence is asked for. An application that leaves a field out still requires it (`concept/query.rs`), which is why the concept's own variable stays in the read.
 2. **No macro needed rows assembled into a form.** A pattern and a template carry the per-field information.
-3. **`expand`, `syntax` and `:id` take whatever variables or labels they are given.** A formula in dialog has fixed cells, so these are premises of a new kind, with parameters per application as a concept query has. On dialog, `:id` did not need one: it is a chain of `entity/derive`, a link a value ([poc.md](poc.md)). Whether `expand` and `syntax` lower the same way is approach B of [design-forms.md](design-forms.md).
-4. **A command about something another command in the same document creates is lost.** `add` and `finish` together leave the to-do open: the to-do lands after the round, and the `finish` is gone by the next. `induce.rs` describes the same rounds. On dialog it is not lost: both rules fire in the one round, the state holds both claims, and `last` elects one by the hash of the value ([poc.md](poc.md), finding 6).
+3. **`expand`, `syntax` and `:id` take whatever variables or labels they are given.** A formula in dialog has fixed cells, so these are premises of a new kind, with parameters per application as a concept query has. On dialog, `:id` did not need one: it is a chain of `entity/derive`, a link a value ([`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`). Whether `expand` and `syntax` lower the same way is approach B of [design-forms.md](design-forms.md).
+4. **A command about something another command in the same document creates is lost.** `add` and `finish` together leave the to-do open: the to-do lands after the round, and the `finish` is gone by the next. `induce.rs` describes the same rounds. On dialog it is not lost: both rules fire in the one round, the state holds both claims, and `last` elects one by the hash of the value ([`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`, finding 6).
 5. **A write with a variable nothing binds has no meaning yet.** `(retract! (todo todo:1))` expands to a retract of three such variables and is refused. It has to mean "read, then retract what was read".
 6. **Refusals give the wrong reason.** A parameter the concept does not have is reported as an unknown form. With diagnostics as something a rule derives, a rule that knows why can say so.
 7. **A report's rows are named by the fields**, since the head expands too. Showing them as written needs the call site kept, as the source map would. Decided 2026-11-11: a query reports the relations queried.

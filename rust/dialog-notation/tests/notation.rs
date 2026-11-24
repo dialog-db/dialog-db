@@ -19,12 +19,9 @@ use dialog_query::query::Output as _;
 use dialog_query::{Any, AttributeDescriptor, ConceptConclusion, ConceptQuery, Term};
 use serde_json::json;
 
-#[path = "../examples/notebook/session.rs"]
+#[path = "support/session.rs"]
 mod session;
 use session::Notebook;
-
-#[path = "../examples/notebook/bar.rs"]
-mod bar;
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -718,7 +715,7 @@ async fn it_compiles_a_view_to_its_plan() -> Result<()> {
 #[dialog_common::test]
 async fn it_gives_what_a_document_declares_as_data() -> Result<()> {
     let mut analyzer = dialog_notation::Analyzer::new()?;
-    let checked = dialog_notation::check(&mut analyzer, include_str!("../examples/todo.clj"));
+    let checked = dialog_notation::check(&mut analyzer, include_str!("fixtures/todo.clj"));
     assert_eq!(checked.refusals().count(), 0);
     let concepts: Vec<&dialog_notation::Concept> = checked
         .declarations
@@ -2370,100 +2367,10 @@ async fn it_refuses_and_says_what_is_not_supported() -> Result<()> {
     Ok(())
 }
 
-/// How far tonk's notebook, written in the notation as designed, gets:
-/// every form read, how many expand and compile, and how many queries
-/// whose answer is markup, asked, are laid out in a plan. A plan compiles
-/// when every layer's query does, and each of the notebook's does. A step
-/// that moves these numbers moves them here on purpose.
-#[dialog_common::test]
-async fn it_measures_how_far_the_notebook_gets() -> Result<()> {
-    // Its views are queries of their own document, read after it.
-    let measured = bar::Bar::of_all(&[
-        include_str!("../sketches/notebook.clj"),
-        include_str!("../sketches/notebook-views.clj"),
-    ])?;
-    let groups: Vec<String> = measured
-        .groups()
-        .iter()
-        .map(|(said, stops)| {
-            let forms: Vec<String> = stops
-                .iter()
-                .map(|stop| format!("{:?}", stop.form))
-                .collect();
-            format!("{} {said} {}", stops.len(), forms.join(" "))
-        })
-        .collect();
-    assert_eq!(
-        (
-            measured.forms,
-            measured.read,
-            measured.expanded,
-            measured.compiled,
-            measured.described
-        ),
-        (58, 58, 55, 55, 7),
-        "{groups:#?}"
-    );
-    // With core in front, as tonk reads a component, the concepts the
-    // notebook takes from core are declared.
-    let joined = bar::Bar::of_all(&[
-        include_str!("../sketches/core.clj"),
-        include_str!("../sketches/notebook.clj"),
-        include_str!("../sketches/notebook-views.clj"),
-    ])?;
-    assert_eq!(
-        (
-            joined.forms,
-            joined.read,
-            joined.expanded,
-            joined.compiled,
-            joined.described
-        ),
-        (62, 62, 62, 62, 7)
-    );
-    Ok(())
-}
-
-/// How far tonk's table gets, read after core as tonk reads a component:
-/// a second document, against a build fitted to the notebook. Its views,
-/// queries whose answer is markup, compile to their plans. A step that moves these numbers moves
-/// them here on purpose.
-#[dialog_common::test]
-async fn it_measures_how_far_the_table_gets() -> Result<()> {
-    let measured = bar::Bar::of_all(&[
-        include_str!("../sketches/core.clj"),
-        include_str!("../sketches/table.clj"),
-        include_str!("../sketches/table-views.clj"),
-    ])?;
-    let groups: Vec<String> = measured
-        .groups()
-        .iter()
-        .map(|(said, stops)| {
-            let forms: Vec<String> = stops
-                .iter()
-                .map(|stop| format!("{:?}", stop.form))
-                .collect();
-            format!("{} {said} {}", stops.len(), forms.join(" "))
-        })
-        .collect();
-    assert_eq!(
-        (
-            measured.forms,
-            measured.read,
-            measured.expanded,
-            measured.compiled,
-            measured.described
-        ),
-        (54, 54, 54, 54, 6),
-        "{groups:#?}"
-    );
-    Ok(())
-}
-
 /// The table's own forms, its views left out: what is run on a branch
 /// is the rules, and nothing of a view is written.
 fn the_table_without_its_views() -> Result<String> {
-    let forms = dialog_notation::read(include_str!("../sketches/table.clj"))?;
+    let forms = dialog_notation::read(include_str!("fixtures/table.clj"))?;
     Ok(forms
         .iter()
         .filter(|form| form.head() != Some("view"))

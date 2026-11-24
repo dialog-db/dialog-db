@@ -2,7 +2,7 @@
 
 **Decision:** what a form is in dialog, so that a rule about syntax is a rule dialog stores and evaluates.
 
-**For:** the direction, macros as rules. The [proof of concept](poc.md) runs the kernel on dialog, and holds the rules about syntax in memory and matches patterns itself. Nothing about syntax is stored, named by hash, or synced.
+**For:** the direction, macros as rules. The proof of concept ([`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`) runs the kernel on dialog, and holds the rules about syntax in memory and matches patterns itself. Nothing about syntax is stored, named by hash, or synced.
 
 **Decided 2026-11-11, by the maintainer: a form is a record (C).** `entity/derive` takes a record too. The matrix below is how the approaches compared; what follows it is what the decision asks of records.
 

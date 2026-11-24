@@ -76,7 +76,7 @@ Backtracking moves a topic to an earlier phase and says so in its journal.
 - [Macros as rules](macros.md): **Designing.** A slim kernel (`rule`, two
   kinds of application, the write relations) and every other form a macro
   that is a rule. The [core forms](macros/kernel.md) are defined and
-  [run on Dialog-DB](macros/poc.md) as a proof of concept; syntax is not
+  run on Dialog-DB ([`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`) as a proof of concept; syntax is not
   stored yet.
 - [A replica cannot read or write what it held once a pull moves its head](held-across-pull.md):
   **Building.** A head adopted by root leaves every changed leaf by

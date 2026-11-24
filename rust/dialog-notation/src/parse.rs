@@ -107,10 +107,10 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_prints_the_prelude_and_the_examples_as_they_were_written() -> Result<(), Error> {
+    fn it_prints_the_prelude_and_the_to_do_documents_as_they_were_written() -> Result<(), Error> {
         back(include_str!("prelude.clj"))?;
-        back(include_str!("../examples/todo.clj"))?;
-        back(include_str!("../examples/done.clj"))
+        back(include_str!("../tests/fixtures/todo.clj"))?;
+        back(include_str!("../tests/fixtures/done.clj"))
     }
 
     #[dialog_common::test]

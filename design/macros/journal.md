@@ -4,7 +4,7 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([poc.md](poc.md)); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing** again from 2026-11-12, for the three phases ([design-pipeline.md](design-pipeline.md)); how the phases stand behind the query engine is still Directing. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
+| **Status** | The kernel and the core forms run on a real branch through `rust/dialog-notation` ([`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`); the prelude is rules only. The syntax tree is built, apart from the notation as parsed, and kept as data: maps that say their `type` ([design-forms.md](design-forms.md#the-syntax-tree)). A struct is a value and, with a variable in it, a pattern, which is a topic of its own with an agent on it (#777). Rules of several heads are #776. Expanding and compiling still read the notation as parsed, and `kernel.rs` still copies dialog's forms. | **Designing** again from 2026-11-12, for the three phases ([design-pipeline.md](design-pipeline.md)); how the phases stand behind the query engine is still Directing. Direction decided by the maintainer: phases as formulas and a resolver, one rule over them. A proof of concept runs. A name is kept as a name, what is named and a signature; a definition under it is read `last`; an application resolves by the labels written and a read that fits several is of all. Built and tested, by pattern, in the expander. |
 | **Agenda** | **One at a time, in the order of the queue at the end of this journal** (the maintainer, 2026-11-13: the threads were more than he could follow). The rest of this cell is what the queue was drawn from. Answered since, 2026-11-14: descriptions stay under `syntax.meta` and `dialog.` stays closed; a stored rule is written in the new format always (#799); `[ ]` where a value stands is a list, as `'( )` is. #791 is a bug (the maintainer), fixed in #802. Next: what a map's key is. Still to build: a reported row in the order asked; printing from the analyzed tree. Parked by the maintainer: authority, for two definitions of one signature written apart; `last` elects one until then. How a query reports. Decided 2026-11-13: a rule has one head and `(all …)` is not written; what that does to #776 and to several heads in #779 is the maintainer's to say. Whether a template says several things with `(all …)` or a spread. Whether a command takes fields beside what it is about, and a slash in its name. The prelude written without `when`. Parked by the maintainer: `update`, and with it what it does with a dependent that does not fit or arrives by sync. Whether the name as written is part of what names a macro. Whether the analyzer, a resolver by the maintainer's word, gives back the table of what each name meant. Whether dialog can be asked for an expansion a form at a time (H3). What a read with no pick reads. | The notation is on top of patterns (#778, merged in, its perf gate failing): a struct is a value in a write and a pattern in a query of one read. Next: a struct in a rule, which needs the compiler to build dialog's forms in Rust, since a pattern has no wire form; `entity/derive` over a record; then an application lowers to a `ConceptQuery` of the definition's concept. Not waiting: a helper rule for a negated conjunction. Waiting on patterns (#777, #778): a struct as a term, `entity/derive` over a record, syntax kept on the branch. |
 
 ## Candidate problems
@@ -85,7 +85,7 @@ Not examined yet. They are columns, not recommendations.
 
 **Learned.**
 
-- The kernel compiles to descriptors Dialog-DB already has, and the to-do, the counter, a backlink, a recursive relation and a query of several premises run on a real branch. See [poc.md](poc.md).
+- The kernel compiles to descriptors Dialog-DB already has, and the to-do, the counter, a backlink, a recursive relation and a query of several premises run on a real branch. See [`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`.
 - A rule and the command it reads can share a document: the rule fires in the transaction that installs it.
 - Dialog-DB has no formula that makes an entity, so a rule cannot issue a command yet.
 - `unless` takes one proposition whose own variables are blank. A formula inside it, a concept spanning entities under it, and a variable repeated inside it are each out of reach.
@@ -536,7 +536,7 @@ Not examined yet. They are columns, not recommendations.
 
 ## 2026-11-12, Directing: whether a rule needs `when`
 
-**Asked.** Irakli: use haiku readers to find out whether `when` is needed at all, or whether premises as plain clauses suffice. Run as #728's rounds were. Two rounds, ten readers each, five a spelling: [K1](rounds/k01.md), told how a rule is written; [K2](rounds/k02.md), shown three rules and told nothing.
+**Asked.** Irakli: use haiku readers to find out whether `when` is needed at all, or whether premises as plain clauses suffice. Run as #728's rounds were. Two rounds, ten readers each, five a spelling: K1 ([`design/macros/rounds/k01.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/rounds/k01.md) on `research-data`), told how a rule is written; K2 ([`design/macros/rounds/k02.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/rounds/k02.md) on `research-data`), shown three rules and told nothing.
 
 ```
  when    (rule head… (when premise…) (unless premise…))
@@ -1097,11 +1097,11 @@ In the same conversation he settled how a pattern is written in a stored rule (`
 **Learned.**
 
 - #728's `research/notation/design.md` is where the notation is designed, and it says so: "everything here is agreed unless it is marked Proposed". This branch took its spellings from it as of R25. It is at R45.
-- The two have drifted both ways: [alignment.md](alignment.md). The design has what this branch lacks (attribute lines, cardinality, electors, getters, layers, views, no `!`). This branch has what the design lacks (lists, the quote, structs, `...`, macros as rules).
+- The two have drifted both ways: [`design/macros/alignment.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/alignment.md) on `research-data`. The design has what this branch lacks (attribute lines, cardinality, electors, getters, layers, views, no `!`). This branch has what the design lacks (lists, the quote, structs, `...`, macros as rules).
 - The agent asked the maintainer here for decisions on the notation's surface that he was also making there, and did not read #728 again after the first sitting. A parameter left out of a read is the plainest: the design had "matches anything" all along; here it was refused on 2026-11-13 and opened again on 2026-11-15.
 - Three threads now hold decisions of his on overlapping ground, each in its own files: the notation's design (#728), this build (#772, #773), and the record (#748, #812). He carries messages between them by hand.
 
-**Decided.** By the agent, his to overrule: the surface of the notation is #728's to say. This branch builds it, and what it settles on the way goes back there or is not settled. The order is in [alignment.md](alignment.md); nothing of it is started.
+**Decided.** By the agent, his to overrule: the surface of the notation is #728's to say. This branch builds it, and what it settles on the way goes back there or is not settled. The order is in [`design/macros/alignment.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/alignment.md) on `research-data`; nothing of it is started.
 
 ## 2026-11-16, Designing: the maintainer asks for one notation of it all
 
@@ -1118,7 +1118,7 @@ In the same conversation he settled how a pattern is written in a stored rule (`
 - A view is the first form that needs both halves: the design's template is a list in order, kept as data, and that is a list and a form kept as a value, which this branch has.
 - #812 is not where the notation can stand yet: no list in order, nothing to take a record apart, its Perf gate failing. The notation's spelling of a record does not depend on which is under it.
 
-**Decided.** By the agent, as he left it: carry on with dag-cbor; the move to #812's record waits on a list in order there. The synthesis is [synthesis.md](synthesis.md), a proposal: its "what had two answers" table is where he can disagree row by row. The build goes in the order it ends on.
+**Decided.** By the agent, as he left it: carry on with dag-cbor; the move to #812's record waits on a list in order there. The synthesis is [`design/macros/synthesis.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/synthesis.md) on `research-data`, a proposal: its "what had two answers" table is where he can disagree row by row. The build goes in the order it ends on.
 
 ## 2026-11-16, Building: the first step, on the record as rebuilt
 
@@ -1200,7 +1200,7 @@ Not looked at: what a write under `:one` retires. It is what the engine does for
 
 - The engine has the fold a getter needs, `reduce` on a rule that derives, with `count`, `sum`, `min`, `max`, `avg` (`notes/aggregation.md`).
 - And refuses it there. `DeductiveRule::with_reduce` returns `ReduceInOpenRule` for any rule with a fold in it. `notes/attribute-heads.md` argues it: a fold has no reading over a set still growing, and belongs to a query, a subscription or a rule that writes. The agent's row in the alignment table, "over the engine's folds", was written without looking.
-- So the design's getter and the engine's rule cannot both stand ([alignment.md](alignment.md#two-things-that-cannot-both-be-true)). Both are the maintainer's.
+- So the design's getter and the engine's rule cannot both stand ([`design/macros/alignment.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/alignment.md) on `research-data`). Both are the maintainer's.
 - A pattern cannot require a labelled part: one the form leaves out leaves its variable unbound. So the getter's rule matched a command, `(increment (xyz.counter counter:a))`, with `is:` taken as left out, and the two were ambiguous. The rule now asks that `is:` be said, with a formula for that, `(:said ?value)`.
 
 **Decided.** Not decided: where a fold lives, which is his. By the agent, in the build: the surface is the design's, and the refusal is the engine's, said as unsupported. A getter is read and expanded to a relation of its own, `getter.<name>.<concept>`; one that folds nothing runs; one that folds is refused with where the engine admits a fold. `is:` written is what makes the words a getter.
@@ -1211,7 +1211,7 @@ Built: `Term::Fold` and `FOLDS` in `kernel.rs`; the refusal in `compile.rs`; `(:
 
 **Asked.** The maintainer: to start closing the gaps, to read #728's design again as "some things have shifted", and "perhaps instead of my special labels we should just use keyword based labeling".
 
-**Learned.** The design was read at `31929a6f`, eight commits past the last reading. What moved is a table at the top of [alignment.md](alignment.md). The largest is the command: it is now a declared concept whose head names no entity, on a control layer, issued with `assert`. That reverses the build's choice of 2026-11-16, which issued with no word and refused `assert`; the design said its own a day later, and it is the maintainer's, so the build follows. Getters are gone for attributes in a concept's own domain, which fold, and so is `view`, which is now a rule that folds: main still refuses both (`ReduceInOpenRule`).
+**Learned.** The design was read at `31929a6f`, eight commits past the last reading. What moved is a table at the top of [`design/macros/alignment.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/alignment.md) on `research-data`. The largest is the command: it is now a declared concept whose head names no entity, on a control layer, issued with `assert`. That reverses the build's choice of 2026-11-16, which issued with no word and refused `assert`; the design said its own a day later, and it is the maintainer's, so the build follows. Getters are gone for attributes in a concept's own domain, which fold, and so is `view`, which is now a rule that folds: main still refuses both (`ReduceInOpenRule`).
 
 On labels: paired by place, a keyword label cannot be told from a keyword value that has no label, and the design's `view` form has one, `(view todo :row …)`. The design also spells a map's key two ways in one template, which may be what prompted the question. Four ways to spell a label are a matrix in [design-labels.md](design-labels.md).
 
@@ -1219,7 +1219,7 @@ On labels: paired by place, a keyword label cannot be told from a keyword value 
 
 ## 2026-11-18, Building: a command is a declared concept on a control layer
 
-**Asked.** Gaps 1 and 2 of [alignment.md](alignment.md), together: a command declared as a concept whose head names no entity, its lines `in: :control`, issued with `assert`; with no word, a command in a head is a deduction. The old form, `(add (todo …))` under `command.`, goes.
+**Asked.** Gaps 1 and 2 of [`design/macros/alignment.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/alignment.md) on `research-data`, together: a command declared as a concept whose head names no entity, its lines `in: :control`, issued with `assert`; with no word, a command in a head is a deduction. The old form, `(add (todo …))` under `command.`, goes.
 
 **Learned.**
 
@@ -1282,14 +1282,14 @@ Built: the reader's `{` and `former_key` in `form.rs`, the two printers, every t
 
 ## 2026-11-18, Building: a document's forms in any order
 
-**Asked.** Step E of the tonk order ([tonk.md](tonk.md)): the design says the order of a document's forms does not matter, and the build expanded them top to bottom, so a command used above its declaration was read as an attribute.
+**Asked.** Step E of the tonk order ([`design/macros/tonk.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/tonk.md) on `research-data`): the design says the order of a document's forms does not matter, and the build expanded them top to bottom, so a command used above its declaration was read as an attribute.
 
 **Learned.**
 
 - What declares a name is a `concept`, or a `rule` whose head is `syntax` or `warning`. Each is known by its first word before it is expanded, so the walker expands those first, in the order written, and the rest after them.
 - A macro's expansion may also declare: `(note-kind memo)` expands to a concept. That is known only once it is expanded, so what failed before it is expanded again whenever a pass declared something, until a pass declares nothing. A name two such expansions need of each other is not a cycle the walker can break: it is refused with whatever the first one met, an unknown form or an attribute with no entity. Built and pinned, `it_expands_again_what_a_later_expansion_declares_a_name_for`; the mutual case is not pinned, since no core form makes one.
 - A document's kernel rules come back in the order of the trees they came of, whatever order they were expanded in, and so do its refusals.
-- A concept installed by one document is known to the next one on the same branch, since the walker keeps it (`it_runs_a_document_whose_uses_stand_above_its_declarations`). Nothing stores it on the branch: a new walker over the same branch does not know it ([poc.md](poc.md), syntax is not stored).
+- A concept installed by one document is known to the next one on the same branch, since the walker keeps it (`it_runs_a_document_whose_uses_stand_above_its_declarations`). Nothing stores it on the branch: a new walker over the same branch does not know it ([`design/macros/poc.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/poc.md) on `research-data`, syntax is not stored).
 
 **Decided.** Nothing new. 110 unit tests, 29 on a branch, 2 doc tests; lint clean.
 
@@ -1349,7 +1349,7 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 ## 2026-11-18, Building: a bar for the notebook
 
-**Asked.** Step O: measure each step by tonk's notebook. [sketches/notebook.clj](sketches/notebook.clj) is `notebook.yaml` in the notation as designed. For each top-level form, how far it gets: read, expanded, compiled, and the first error of each that stops.
+**Asked.** Step O: measure each step by tonk's notebook. [`design/macros/sketches/notebook.clj`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/sketches/notebook.clj) on `research-data` is `notebook.yaml` in the notation as designed. For each top-level form, how far it gets: read, expanded, compiled, and the first error of each that stops.
 
 **Learned.**
 
@@ -1433,13 +1433,13 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 - What the walker checks, as the design says: the conditions apply the view's concept once, and that application's entity is the one rendered; every variable of the template, events included, is one a condition binds; every event posts a declared command with every field of it and no other; every nested view names a view of the document or of one before it.
 - Unsupported, as the design leaves them open: a valueless attribute, `:hidden true` (the design has no boolean term); an attribute built of several parts, `:href ["/notebook/" ?n]`; a nested view by anything but its name and entity, `:model`, `:with`; a nested view of no entity.
 - The design's own example nests a view as the map right after the tag, `[:ul {view: :row of: ?t}]`, where Hiccup puts an element's attributes. The description reads a map there as attributes unless it has a `:view` key, so an element has no attribute named `view`.
-- No event of the sketch needs a flag: none prevents a default or stops propagation (as [tonk-port.md](tonk-port.md) counts it), so none is read and none was needed.
+- No event of the sketch needs a flag: none prevents a default or stops propagation (as [`design/macros/tonk-port.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/tonk-port.md) on `research-data` counts it), so none is read and none was needed.
 
 **Decided.** By the agent: a map with a `:view` key is a nested view wherever it stands. The bar moves to 48 expanded, 43 compiled: one of the notebook's five views, `notebook/block :directory`, expands, and stops at Dialog-DB; the other four stop at what is unsupported in their templates. 118 unit tests, 39 on a branch, 2 doc tests; lint clean.
 
 ## 2026-11-18, Building: a declaration as data
 
-**Asked.** Step P, from [tonk-claims-diff.md](tonk-claims-diff.md): a tonk back end writes tonk's own declaration claims for each concept and command, and the crate gave no public way to get what a document declares. It read a concept's descriptor back by compiling a query over it. Expose, for each declared concept and command, its name, its description, whether it is a command, its lines with theirs, and the Dialog-DB descriptor it compiles to, in one list with the views.
+**Asked.** Step P, from [`design/macros/tonk-claims-diff.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/tonk-claims-diff.md) on `research-data`: a tonk back end writes tonk's own declaration claims for each concept and command, and the crate gave no public way to get what a document declares. It read a concept's descriptor back by compiling a query over it. Expose, for each declared concept and command, its name, its description, whether it is a command, its lines with theirs, and the Dialog-DB descriptor it compiles to, in one list with the views.
 
 **Learned.**
 
@@ -1469,7 +1469,7 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 
 **Learned.**
 
-- The notebook uses four of core's concepts: `site`, `route`, `intent/expression` and `intent`. [sketches/core.clj](sketches/core.clj) holds them, from `core.yaml` at tonk `c006b50`, each line `cardinality: :one` since core's fields give no pick and tonk reads the newest.
+- The notebook uses four of core's concepts: `site`, `route`, `intent/expression` and `intent`. [`design/macros/sketches/core.clj`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/sketches/core.clj) on `research-data` holds them, from `core.yaml` at tonk `c006b50`, each line `cardinality: :one` since core's fields give no pick and tonk reads the newest.
 - What has no spelling, as `; GAP:` comments: a concept pinned to an entity (`this: tonk:site`, `this: tonk:route`), an optional field (`maybe: selection`, on `site` and on `intent/expression`), and a layer core names only in prose ("Session facts").
 - With core in front, the forms that stopped on `route` and `intent` expand and compile: the two route asserts with `when (id …)` and the palette's retitle rule. None stops on anything new.
 - The bar reads several files, joined in order (`cargo run -p dialog-notation --example bar -- core.clj notebook.clj`, the two sketches by default).
@@ -1548,7 +1548,7 @@ Not decided, unsupported: what a retract of a collection concept takes, every en
 **Where the threads talk.** Since 2026-11-16: the `dialog-db` space on Tonk. Each thread is the same agent there, `id:daneel`, so a memo says which thread it is for in its first words. Read `inbox: { this: id:daneel, memo: ?m }` at the start of a sitting; the space's skills (`skill:`) say how to post. Posted from here: a memo for the conduct thread, in reply to the notation thread's, and notes on #728 and #812 on GitHub. The notation thread's memo on #793 says the order of `as: [..]` against `among` wants settling "before format 4 fixes it", which is #799.
 
 
-**Answered 2026-11-16:** which composite is the record was left to the agent: dag-cbor for now ([synthesis.md](synthesis.md)). The order of the build is there.
+**Answered 2026-11-16:** which composite is the record was left to the agent: dag-cbor for now ([`design/macros/synthesis.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/synthesis.md) on `research-data`). The order of the build is there.
 
 
 In order. One is asked, answered and written down before the next.
@@ -1831,7 +1831,7 @@ The measurement that came in after (next entry but one above) bears on this: wha
 
 ## 2026-11-19, Designing: definitions on the branch, and a question asked twice
 
-**Asked.** How concepts, macros and queries reach the branch. The maintainer: names are attributes pointing at a definition's entity, as in tonk and roughly as in Unison; starting with option A of [definitions-on-the-branch.md](definitions-on-the-branch.md) is fine. The agent then asked whether a stored form may refer to what it uses by name.
+**Asked.** How concepts, macros and queries reach the branch. The maintainer: names are attributes pointing at a definition's entity, as in tonk and roughly as in Unison; starting with option A of [`design/macros/definitions-on-the-branch.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/definitions-on-the-branch.md) on `research-data` is fine. The agent then asked whether a stored form may refer to what it uses by name.
 
 **Learned.** That was decided on 2026-11-12 (above: a macro resolves its names when it is defined) and the agent asked it again, having taken the research report's wording of option A, which keeps source forms, without checking the ledger. The maintainer: all references are resolved at compile time.
 
@@ -1854,7 +1854,7 @@ The measurement that came in after (next entry but one above) bears on this: wha
 
 **Question.** The ledger's second hypothesis: with rows reported under the entity they are about and `select` pushed into its reads, does one change cost the same at 10 and 1000? And what does the engine's `Fold` cost under a subscription?
 
-**Method.** `cargo run -p dialog-notation --example cost -- 5` on `wip/engine-fold` at `144ddf8`, dev profile. [Output](rounds/cost-2026-11-19.txt).
+**Method.** `cargo run -p dialog-notation --example cost -- 5` on `wip/engine-fold` at `144ddf8`, dev profile. Output ([`design/macros/rounds/cost-2026-11-19.txt`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/rounds/cost-2026-11-19.txt) on `research-data`).
 
 | one change | N=10 | N=100 | N=1000 | growth | plain at 1000 | times plain | bar |
 |---|---|---|---|---|---|---|---|
@@ -1882,7 +1882,7 @@ The measurement that came in after (next entry but one above) bears on this: wha
 
 **Asked.** What had been agreed about names. The maintainer: tonk's `name` is of cardinality one. An agent pointed out a merge could then point a name elsewhere unseen, and he wants overloading, so one referent is not kept. Petnames make most sense to him: the name I gave, else the name someone I name uses. That is too much to build now, so a `#hash` qualifier tells several apart in the meantime.
 
-**Learned.** "By authority" in the entry of 2026-11-11 was petnames, not yet named so. The overnight choice of a name's entity from its signature with one definition is overruled ([decisions-overnight.md](decisions-overnight.md), row 4). The worry about a merge is half answered already: what is compiled holds what its names meant, so a merge that adds a definition under a name is met only at the next compile.
+**Learned.** "By authority" in the entry of 2026-11-11 was petnames, not yet named so. The overnight choice of a name's entity from its signature with one definition is overruled ([`design/macros/decisions-overnight.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/decisions-overnight.md) on `research-data`, row 4). The worry about a merge is half answered already: what is compiled holds what its names meant, so a merge that adds a definition under a name is met only at the next compile.
 
 **Decided.** By the maintainer: many definitions under one name; a signature tells them apart; where it does not, `#hash`, until petnames. Not decided: the qualifier's spelling, and what an unqualified reference that fits several does.
 
@@ -1936,7 +1936,7 @@ The measurement that came in after (next entry but one above) bears on this: wha
 
 **Question.** The ledger's second hypothesis (claims.md, "the cost measured is of two choices in the build"), on the engine as it lands, release build, and at ten thousand.
 
-**Method.** `cargo run --release -p dialog-notation --example cost -- 5 10 1000 10000`, with format 5 (`feat/rule-format-5` at `618233f`) merged locally, since the card's rows need it. [Output](rounds/cost-2026-11-24.txt). The 2026-11-19 run was the dev build, so its column is not the same build.
+**Method.** `cargo run --release -p dialog-notation --example cost -- 5 10 1000 10000`, with format 5 (`feat/rule-format-5` at `618233f`) merged locally, since the card's rows need it. Output ([`design/macros/rounds/cost-2026-11-24.txt`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/rounds/cost-2026-11-24.txt) on `research-data`). The 2026-11-19 run was the dev build, so its column is not the same build.
 
 | one change | N=10 | N=1000 | N=10000 | growth to 1000 | growth to 10000 | times plain at 1000 | at 10000 | 2026-11-19, 1000 | bar |
 |---|---|---|---|---|---|---|---|---|---|
@@ -1962,7 +1962,7 @@ Node reads stay between 46 and 100 for every change, and no layer is evaluated w
 
 - `Maintainer::apply` counted a counted place and found an inserted instance's index by collecting every instance under the parent again, on every change. With each parent's instances kept in key order, one changed row costs 0.05 to 0.11 ms at a thousand and at ten thousand, where it cost 0.4 to 0.6 and 16 to 24 ms.
 - A view's count was folded by the selection's fold, which also builds the distinct set of the group's values. A count reads none of it; folded alone, a view needs no `distinct`.
-- What is left is the engine's: a fold's subscription folds a touched group again over all its kept rows, 28 to 34 ms for the one list of ten thousand. A running count for a group would remove it (decision 2 of [decisions-overnight.md](decisions-overnight.md)).
+- What is left is the engine's: a fold's subscription folds a touched group again over all its kept rows, 28 to 34 ms for the one list of ten thousand. A running count for a group would remove it (decision 2 of [`design/macros/decisions-overnight.md`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/decisions-overnight.md) on `research-data`).
 - The cover of a row layer holds a range of the entity index for each to-do and attribute read, 10011 and 20010 at ten thousand, where one range of the attribute index would do. The engine's, reported on 2026-11-19.
 
 | one change, through `Live::watch` | N=1000 before | after | N=10000 before | after |
@@ -1971,6 +1971,16 @@ Node reads stay between 46 and 100 for every change, and no layer is evaluated w
 | to-do added | 3.7 | 3.0 | 62 | 28 |
 | tag added | 1.3 | 1.5 | 5.1 | 5.0 |
 
-[Output](rounds/cost-2026-11-24-after.txt).
+Output ([`design/macros/rounds/cost-2026-11-24-after.txt`](https://github.com/dialog-db/dialog-db/blob/research-data/design/macros/rounds/cost-2026-11-24-after.txt) on `research-data`).
 
 **Decided.** Not decided: whether a view's count stays on the fold while the fold refolds the group, or is counted from the layer's rows, which now costs one lookup.
+
+## 2026-11-24, Archived: the exploration, so what lands is what main needs
+
+**Asked.** The maintainer: no Python or other exploratory code reaches main.
+
+**Done.** Moved to the `research-data` branch at the paths they had here at `79979af`, as research artifacts are kept off `main` (the maintainer, 2026-11-24): the Python model (`model/`), the rounds and cost dumps (`rounds/`), the design's sketches (`sketches/`), the crate's examples (the cost harness, the notebook bar, the shapes count, the notebook runner), and the status reports, plans and comparisons: `alignment.md`, `composite-next.md`, `composites-compared.md`, `decisions-overnight.md`, `definitions-on-the-branch.md`, `definitions-plan.md`, `poc.md`, `slotting-cardinality.md`, `synthesis.md`, `tonk.md`, `tonk-claims-diff.md`, `tonk-dialog-move.md`, `tonk-integration.md`, `tonk-notebook-bar.md`, `tonk-notebook-runs.md`, `tonk-port.md`, `where-things-stand.md`. A file this journal or the ledger names and this tree does not hold is on `research-data`, at the path named; the history is on `archive/notation-poc-2026-11-24`.
+
+The maintainer's decisions those files held and nothing else did are rows of the ledger now, each with its date: what the notation is for first, tonk's events, elements and routes, a query's definition synced, the fold landed without `distinct`, a name's entity and the canonical form hashed, formats 4 and 5 and the listed `as`, and the one composite. Also his, 2026-11-19, and not a design matter: commits are authored by the environment's identity. The grouping of what `Unsupported` refuses moved to [gaps.md](gaps.md).
+
+The sketches of tonk's notebook and table, and the two to-do documents, stay as the crate's test fixtures, under `rust/dialog-notation/tests/fixtures/`, read by tests that run them. The two tests that counted how far the sketches get are gone with the bar that counted.

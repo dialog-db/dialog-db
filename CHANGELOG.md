@@ -18,7 +18,7 @@ says how to cut a release.
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
 [design/macros/design-queries.md](./design/macros/design-queries.md) and
-[design/macros/slotting-cardinality.md](./design/macros/slotting-cardinality.md).
+[design/macros/claims.md](./design/macros/claims.md).
 
 `dialog-notation` reads a Lisp-like notation and compiles it to
 Dialog-DB's own descriptors. A small kernel (`rule`, the application of
@@ -82,7 +82,7 @@ folds, and the notation evaluates only what the engine cannot yet state.
 ### A rule can name an entity it did not read
 
 [#773](https://github.com/dialog-db/dialog-db/pull/773), argued in
-[design/macros/poc.md](./design/macros/poc.md).
+[design/macros/kernel.md](./design/macros/kernel.md).
 
 A rule that concludes a fact of an entity its premises did not bind, the
 row of a command it issues or a record it creates, had no way to name

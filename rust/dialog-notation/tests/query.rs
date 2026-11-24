@@ -10,7 +10,7 @@
 use anyhow::Result;
 use dialog_notation::Error;
 
-#[path = "../examples/notebook/session.rs"]
+#[path = "support/session.rs"]
 mod session;
 use session::Notebook;
 

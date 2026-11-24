@@ -25,7 +25,7 @@ use dialog_query::query::Output as _;
 use dialog_query::{ConceptConclusion, ConceptQuery};
 use dialog_repository::Subscription;
 
-#[path = "../examples/notebook/session.rs"]
+#[path = "support/session.rs"]
 mod session;
 use session::Notebook;
 
@@ -1077,11 +1077,11 @@ fn concepts_of(text: &str) -> Result<String> {
         .join("\n"))
 }
 
-const CORE: &str = include_str!("../sketches/core.clj");
-const NOTEBOOK: &str = include_str!("../sketches/notebook.clj");
-const NOTEBOOK_VIEWS: &str = include_str!("../sketches/notebook-views.clj");
-const TABLE: &str = include_str!("../sketches/table.clj");
-const TABLE_VIEWS: &str = include_str!("../sketches/table-views.clj");
+const CORE: &str = include_str!("fixtures/core.clj");
+const NOTEBOOK: &str = include_str!("fixtures/notebook.clj");
+const NOTEBOOK_VIEWS: &str = include_str!("fixtures/notebook-views.clj");
+const TABLE: &str = include_str!("fixtures/table.clj");
+const TABLE_VIEWS: &str = include_str!("fixtures/table-views.clj");
 
 /// A branch with core and a sketch's concepts on it.
 async fn sketched(sketch: &str) -> Result<Notebook> {

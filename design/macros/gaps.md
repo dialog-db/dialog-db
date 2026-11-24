@@ -22,7 +22,7 @@ The notebook bar no longer finds failures: 58 forms read, 55 expand and compile 
 | 14 | `distinct` for `collect` and `{... ?entries}`, decided and not built. Not taken from `wip/engine-fold` (`7b7484a`) on 2026-11-24, at the coordinating session's word | `claims.md`; `where-things-stand.md` | L | a day | 18 |
 | 15 | writes not supported: retracting a command, a partial retract, a command with a `when`, a `when` that sees the document's own writes, `fresh`; `update` parked. Retract by the entity alone is built, and the ledger's row saying otherwise is stale | `tests/notation.rs` 820, 2300; `expand.rs` 1537 | N for the notebook | a day each | decisions |
 | 16 | forms of the design not built: variant cases, layers but `:control`, a limit, a query that calls itself. The `top` elector is built (2026-11-24): an elector in a concept's head or on a line's value is the field's `pick`, and a variant's cases are the attribute's listed values | `kernel.rs` `PICKS`, `ELECTORS`; `it_elects_a_claim_by_the_elector_in_a_concepts_head` | N | days | none |
-| 17 | hygiene. Done 2026-11-24: a CHANGELOG entry introduces the crate; `test:web` run for the crate (the browser fails the five tests row 18 fails); the example's runner is `live`. Open: #773 is a draft on `design/macros` and not on main; 47 `Unsupported(` sites, grouped in [where-things-stand.md](where-things-stand.md) | | L | hours | 18 |
+| 17 | hygiene. Done 2026-11-24: a CHANGELOG entry introduces the crate; `test:web` run for the crate (the browser fails the five tests row 18 fails); the example's runner is `live`. Open: #773 is a draft on `design/macros` and not on main; 32 `Unsupported(` sites, grouped below | | L | hours | 18 |
 
 | 18 | 🔴 a rule that holds a pattern cannot be stored, so a query whose row has more than one column beside its entity cannot be kept current: decision 15 concludes the row as one record by a map pattern, and the session overlay refuses the rule. Asked once it runs (a query layer holds it). 14 of 31 layers of the sketches' and tests' views hold one; every layer nested two levels deep does; no `rule` form of the sketches does (0 of 33). Waits on format 5, ported onto #778 as `feat/rule-format-5` | `it_keeps_a_struct_and_takes_it_apart_by_a_pattern`, `it_folds_a_collected_entry_keeping_its_key_beside_its_value`, `it_maintains_a_row_whose_chips_are_collected`, `it_renders_the_tables_page_and_directory`, `it_maintains_a_view_nested_two_levels_deep` fail | L, T | the port | `feat/rule-format-5` |
 | 19 | measured 2026-11-24 with format 5 merged locally ([journal](journal.md)): at 1000 the three changes fall between the bars (8 to 11 times a plain subscription); at 10000 a rename and a to-do added are refuted (56 and 62 ms, 61 and 65 times plain), and `Maintainer::apply` is most of it (16 to 24 ms); the engine's fold is flat | `rounds/cost-2026-11-24.txt` | L | days | the maintainer, on the bar |
@@ -37,3 +37,16 @@ The notebook bar no longer finds failures: 58 forms read, 55 expand and compile 
 ```
 
 Not known: what tonk#1338's head holds now. Nesting of two levels has a test since 2026-11-24 (`it_maintains_a_view_nested_two_levels_deep`), red until row 18.
+
+## What `Unsupported` refuses, 32 sites, 2026-11-24
+
+| refuses | sites |
+|---|---|
+| negation of more than one proposition: `!=`, a formula, `(:id …)` or a variable twice inside `unless` | 4, `compile.rs` |
+| commands and writes not decided: a command with a `when`, a retract of a command, a retract of a collection without its key or value, a concept that names its entity and holds control lines, one that names none and holds stored lines or both, lines of several entities or domains | 9, `compile.rs`, `kernel.rs`, `expand.rs` |
+| an entity a rule makes: `fresh`, and whether `id` names a domain or a concept | 3, `expand.rs` |
+| what the engine refuses to derive: from no premise, a fold in a rule that derives, a report of a computed value from one read | 3, `compile.rs` |
+| a layer other than `:control` | 1, `expand.rs` |
+| a formula the build does not know | 1, `compile.rs` |
+| values: `... x` where a value stands, a constant that is bytes, a record or a composite, a boolean in a template | 3, `compile.rs`, `syntax.rs`, `view.rs` |
+| queries and views not built: conditions that bind nothing, markup not collected, a function in a shape other than `count`, a view through several definitions, a required call in markup, a shape, a count of what is not collected, or the whole of a read in markup | 8, `expand/query.rs`, `select.rs`, `view/plan.rs` |

@@ -871,15 +871,15 @@ mod tests {
         Ok(())
     }
 
-    /// Every form the prelude and the examples are written in has a
+    /// Every form the prelude and the to-do documents are written in has a
     /// tree, the tree is data, and the data reads back as the tree.
     #[test]
-    fn it_keeps_every_form_of_the_prelude_and_the_examples() -> Result<(), Error> {
+    fn it_keeps_every_form_of_the_prelude_and_the_to_do_documents() -> Result<(), Error> {
         let mut count = 0;
         for text in [
             include_str!("prelude.clj"),
-            include_str!("../examples/todo.clj"),
-            include_str!("../examples/done.clj"),
+            include_str!("../tests/fixtures/todo.clj"),
+            include_str!("../tests/fixtures/done.clj"),
         ] {
             for form in read(text)? {
                 let syntax = Syntax::try_from(&form)?;

@@ -1,5 +1,5 @@
 //! A branch of a repository kept in memory, and the syntax submitted
-//! to it so far. The example and the tests share it.
+//! to it so far, which the tests share.
 //!
 //! A notebook is the one writer of its branch, so it publishes with the
 //! call that fails when a commit loses a race, which is deprecated for
