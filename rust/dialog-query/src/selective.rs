@@ -10,17 +10,22 @@
 //! the greatest claim under a total order, so every replica holding the
 //! same claims reads the same one:
 //!
-//! | aggregator | orders by                                                     |
-//! |------------|---------------------------------------------------------------|
-//! | `last`     | standing: the newest claim                                    |
-//! | `max`      | value, greatest first, then standing                          |
-//! | `min`      | value, least first, then standing                             |
-//! | `top`      | the attribute's listed `as`, the first listed best, then standing |
+//! | aggregator | orders by                                                      |
+//! |------------|----------------------------------------------------------------|
+//! | `last`     | standing: the newest claim                                     |
+//! | `max`      | value, greatest first, then standing; over a listed `as`, the last listed first |
+//! | `min`      | value, least first, then standing; over a listed `as`, the first listed first   |
+//! | `top`      | the attribute's listed `as`, the first listed first, then standing |
+//!
+//! A listed `as` is a scale written least first, `[low, medium, high]`:
+//! `max` over it reads the claim holding the last listed value present,
+//! `min` the first, whatever the values' own order. `top` predates that
+//! reading and reads the first listed value present, as `min` does; it
+//! stays for the concepts already stored with it. A value the listing
+//! does not hold loses to every listed one under all three.
 //!
 //! Ties fall to standing and then to the value's hash
-//! ([`Cardinality::newer`]). `top` is `max` under the order the
-//! attribute's listing gives its values, which is bounded: the first
-//! listed value is the best any claim can hold.
+//! ([`Cardinality::newer`]).
 
 use std::cmp::Ordering;
 use std::fmt::{self, Display};
@@ -39,13 +44,15 @@ pub enum Selective {
     /// The newest claim: what a field with no aggregator reads under
     /// cardinality one.
     Last,
-    /// The claim holding the greatest value.
+    /// The claim holding the greatest value; over an attribute listing
+    /// its values, the value listed last.
     Max,
-    /// The claim holding the least value.
+    /// The claim holding the least value; over an attribute listing its
+    /// values, the value listed first.
     Min,
-    /// The claim holding the value listed first in the attribute's `as`,
-    /// which ranks its values best first. A value the list does not hold
-    /// ranks below every listed one.
+    /// The claim holding the value listed first in the attribute's `as`:
+    /// what `min` reads over a listed attribute. A value the list does
+    /// not hold ranks below every listed one.
     Top,
 }
 
@@ -61,13 +68,15 @@ impl Selective {
     }
 
     /// Whether the aggregator compares values, so its claims must be of a
-    /// comparable type.
-    pub fn compares(self) -> bool {
-        matches!(self, Selective::Max | Selective::Min)
+    /// comparable type, when the attribute lists none (`listed`): over a
+    /// listing `max` and `min` rank by it, as `top` does.
+    pub fn compares(self, listed: &[Value]) -> bool {
+        matches!(self, Selective::Max | Selective::Min) && listed.is_empty()
     }
 
     /// Whether `candidate` is elected over `incumbent`. `listed` is the
-    /// attribute's `as` list, best first, which only `top` reads.
+    /// attribute's `as` list, least first, which `top` reads, and `max`
+    /// and `min` when it lists anything.
     pub fn prefers(
         self,
         listed: &[Value],
@@ -87,7 +96,9 @@ impl Selective {
     pub fn order(self, listed: &[Value], a: &Value, b: &Value) -> Ordering {
         match self {
             Selective::Last => Ordering::Equal,
-            Selective::Top => rank(listed, a).cmp(&rank(listed, b)),
+            Selective::Top => first(listed, a).cmp(&first(listed, b)),
+            Selective::Min if !listed.is_empty() => first(listed, a).cmp(&first(listed, b)),
+            Selective::Max if !listed.is_empty() => last(listed, a).cmp(&last(listed, b)),
             Selective::Max => compare(a, b),
             Selective::Min => compare(b, a),
         }
@@ -109,20 +120,36 @@ impl Selective {
     }
 
     /// Whether `value` is the greatest any claim can hold, so no other
-    /// claim can be elected over it on value: `top`'s first listed value.
-    /// Unbounded orders (`max`, `min` over numbers) and `last` have none.
+    /// claim can be elected over it on value: the first listed value
+    /// under `top` and `min`, the last under `max`. Unbounded orders
+    /// (`max`, `min` with no listing) and `last` have none.
     pub fn bounds(self, listed: &[Value], value: &Value) -> bool {
-        matches!(self, Selective::Top) && listed.first() == Some(value)
+        match self {
+            Selective::Top | Selective::Min => listed.first() == Some(value),
+            Selective::Max => listed.last() == Some(value),
+            Selective::Last => false,
+        }
     }
 }
 
-/// Where `value` ranks in `listed`, which lists best first: the greater
-/// the rank the better, and zero for a value the list does not hold.
-fn rank(listed: &[Value], value: &Value) -> usize {
+/// Where `value` ranks in `listed` when the first listed is elected:
+/// the greater the rank the earlier it is listed, and zero for a value
+/// the list does not hold.
+fn first(listed: &[Value], value: &Value) -> usize {
     listed
         .iter()
         .position(|candidate| candidate == value)
         .map_or(0, |position| listed.len() - position)
+}
+
+/// Where `value` ranks in `listed` when the last listed is elected: the
+/// greater the rank the later it is listed, and zero for a value the
+/// list does not hold.
+fn last(listed: &[Value], value: &Value) -> usize {
+    listed
+        .iter()
+        .position(|candidate| candidate == value)
+        .map_or(0, |position| position + 1)
 }
 
 /// The order of two values, falling back on their encoding for values
@@ -167,13 +194,14 @@ impl<'de> Deserialize<'de> for Selective {
     }
 }
 
-/// A selective aggregator with the values its attribute lists, best first: what a
-/// read of a cell needs to elect one of its claims.
+/// A selective aggregator with the values its attribute lists, least
+/// first: what a read of a cell needs to elect one of its claims.
 #[derive(Debug, Clone, Serialize)]
 pub struct Ranking {
     /// The aggregator.
     pub aggregate: Selective,
-    /// The attribute's listed values, best first; `top` ranks by them.
+    /// The attribute's listed values, least first; `top` ranks by them,
+    /// and `max` and `min` when there are any.
     pub listed: Vec<Value>,
 }
 
@@ -215,6 +243,8 @@ impl Hash for Ranking {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dialog_corpus::history::Edition;
+    use dialog_corpus::{Cause, Standing};
 
     fn text(value: &str) -> Value {
         Value::String(value.to_string())
@@ -234,6 +264,44 @@ mod tests {
         let claims = [text("unknown"), text("registered")];
         let elected = Selective::Top.elect(&listed, claims.iter().map(|value| (value, None)));
         assert_eq!(elected, Some(1));
+    }
+
+    fn standing(edition: u8) -> Standing {
+        Standing::new(
+            Some((Edition::new(u64::from(edition)), [0; 32])),
+            Cause([edition; 32]),
+        )
+    }
+
+    #[test]
+    fn claims_holding_one_listed_value_fall_to_the_newest() {
+        let listed = [text("low"), text("medium"), text("high")];
+        let (older, newer) = (standing(3), standing(4));
+        for (aggregate, value) in [
+            (Selective::Top, text("low")),
+            (Selective::Min, text("low")),
+            (Selective::Max, text("high")),
+        ] {
+            let claims = [
+                (&value, Some(&older)),
+                (&value, Some(&newer)),
+                (&listed[1], Some(&newer)),
+            ];
+            assert_eq!(aggregate.elect(&listed, claims), Some(1), "{aggregate}");
+            let reversed = [claims[1], claims[0], claims[2]];
+            assert_eq!(aggregate.elect(&listed, reversed), Some(0), "{aggregate}");
+        }
+    }
+
+    #[test]
+    fn a_cell_holding_no_listed_value_falls_to_the_newest() {
+        let listed = [text("low"), text("medium"), text("high")];
+        let (older, newer) = (standing(3), standing(4));
+        let (urgent, later) = (text("urgent"), text("later"));
+        let claims = [(&urgent, Some(&newer)), (&later, Some(&older))];
+        for aggregate in [Selective::Top, Selective::Min, Selective::Max] {
+            assert_eq!(aggregate.elect(&listed, claims), Some(0), "{aggregate}");
+        }
     }
 
     #[test]
@@ -262,11 +330,43 @@ mod tests {
     }
 
     #[test]
-    fn top_is_bounded_by_its_first_listed_value() {
+    fn a_listing_bounds_top_and_min_by_its_first_value_and_max_by_its_last() {
         let listed = [text("suspended"), text("registered")];
         assert!(Selective::Top.bounds(&listed, &text("suspended")));
         assert!(!Selective::Top.bounds(&listed, &text("registered")));
+        assert!(Selective::Min.bounds(&listed, &text("suspended")));
+        assert!(Selective::Max.bounds(&listed, &text("registered")));
         assert!(!Selective::Max.bounds(&listed, &text("suspended")));
+        assert!(!Selective::Max.bounds(&[], &text("suspended")));
+        assert!(!Selective::Last.bounds(&listed, &text("registered")));
+    }
+
+    #[test]
+    fn max_and_min_over_a_listing_rank_by_it_least_first() {
+        let listed = [text("low"), text("medium"), text("high")];
+        // Bytewise `medium` is the greatest and `high` the least.
+        let claims = [text("medium"), text("high"), text("low")];
+        let contenders = || claims.iter().map(|value| (value, None));
+        assert_eq!(Selective::Max.elect(&listed, contenders()), Some(1));
+        assert_eq!(Selective::Min.elect(&listed, contenders()), Some(2));
+        assert_eq!(
+            Selective::Min.elect(&listed, contenders()),
+            Selective::Top.elect(&listed, contenders())
+        );
+    }
+
+    #[test]
+    fn max_and_min_over_a_listing_rank_an_unlisted_value_below_every_listed_one() {
+        let listed = [text("low"), text("medium"), text("high")];
+        let claims = [text("unknown"), text("medium"), text("zzz")];
+        let contenders = || claims.iter().map(|value| (value, None));
+        for aggregate in [Selective::Max, Selective::Min, Selective::Top] {
+            assert_eq!(
+                aggregate.elect(&listed, contenders()),
+                Some(1),
+                "{aggregate}"
+            );
+        }
     }
 
     #[test]

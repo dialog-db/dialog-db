@@ -303,6 +303,7 @@ async fn equivalence_of(
     const STEPS: usize = 200;
     const TODOS: usize = 20;
     let aggregator = entry.aggregator;
+    let afresh = entry.orders_by_standing();
     let (operator, branch) = opened().await?;
     let fold = folded_by(Term::from(the.clone()), entry);
     let mut subscription = branch.subscribe_fold(fold.clone());
@@ -432,7 +433,7 @@ async fn equivalence_of(
         refused < STEPS / 2,
         "{refused} of {STEPS} steps refused: the comparison compared little"
     );
-    if aggregator.orders_by_standing() {
+    if afresh {
         // A fold that orders by standing is evaluated afresh on every
         // poll a row moved in: the inner queries' first polls, and more.
         assert!(
@@ -494,8 +495,8 @@ async fn it_keeps_the_newest_equal_to_a_select() -> anyhow::Result<()> {
     equivalence(the!("todo/tag"), Aggregator::Last, &texts(), 0x5eed_0009).await
 }
 
-/// `top` over tags, ranked by a listing best first. A retraction of the
-/// tag it chose folds the group again over the tags left, and the best
+/// `top` over tags, reading the first listed. A retraction of the tag
+/// it chose folds the group again over the tags left, and the first
 /// listed of them stands.
 #[dialog_common::test]
 async fn it_keeps_the_top_listed_equal_to_a_select() -> anyhow::Result<()> {
@@ -518,6 +519,26 @@ async fn it_keeps_the_top_of_a_partial_listing_equal_to_a_select() -> anyhow::Re
         .map(|text| Value::String(text.to_string()))
         .collect();
     equivalence_of(the!("todo/tag"), entry, &texts(), 0x5eed_000b).await
+}
+
+/// `max` and `min` over tags whose listing, least first, leaves two of
+/// them out: each ranks by the listing, among the unlisted ones the
+/// newest stands, and a retraction of the tag it chose folds the group
+/// again over the tags left, so the standing fold equals a select.
+#[dialog_common::test]
+async fn it_keeps_the_max_and_min_of_a_listing_equal_to_a_select() -> anyhow::Result<()> {
+    for (aggregator, seed) in [
+        (Aggregator::Max, 0x5eed_000c),
+        (Aggregator::Min, 0x5eed_000d),
+    ] {
+        let mut entry = ReduceEntry::new("tags", aggregator, Term::var("g"));
+        entry.listed = ["work", "call"]
+            .into_iter()
+            .map(|text| Value::String(text.to_string()))
+            .collect();
+        equivalence_of(the!("todo/tag"), entry, &texts(), seed).await?;
+    }
+    Ok(())
 }
 
 /// A `sum` is maintained per group: after its first poll no poll

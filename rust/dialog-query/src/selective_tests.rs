@@ -36,7 +36,7 @@ fn text(text: &str) -> Value {
     Value::String(text.into())
 }
 
-/// The states an account's status lists, best first.
+/// The states an account's status lists: `top` reads the first present.
 fn states() -> serde_json::Value {
     serde_json::json!(["suspended", "active", "registered"])
 }
@@ -129,8 +129,8 @@ fn pair(name: &str, status: &str) -> (String, String) {
     (name.to_string(), status.to_string())
 }
 
-/// `top` reads the state listed last among those an account holds,
-/// whichever was written last, and `last` the one written last.
+/// `top` reads the state listed first among those an account holds,
+/// whichever was written last.
 #[dialog_common::test]
 async fn it_elects_the_greatest_listed_claim() -> anyhow::Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -229,7 +229,7 @@ async fn it_elects_the_next_claim_once_the_greatest_is_retracted() -> anyhow::Re
     Ok(())
 }
 
-/// `max` and `min` elect by value.
+/// `max` and `min` over an attribute listing no values elect by value.
 #[dialog_common::test]
 async fn it_elects_by_value_under_max_and_min() -> anyhow::Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -381,6 +381,20 @@ fn it_refuses_an_aggregator_its_attribute_cannot_be_read_under() {
             .picking(Selective::Last)
             .is_ok()
     );
+    let listed_flags = serde_json::from_value::<AttributeDescriptor>(serde_json::json!({
+        "the": "account/flag",
+        "as": [false, true],
+        "cardinality": "many"
+    }))
+    .expect("a listed attribute is well formed");
+    for pick in [Selective::Max, Selective::Min] {
+        assert!(
+            ConceptFieldDescriptor::required(listed_flags.clone())
+                .picking(pick)
+                .is_ok(),
+            "`{pick}` over a listing ranks by it, whatever the listed values' type"
+        );
+    }
     assert!(
         ConceptFieldDescriptor::required(listed(Cardinality::Many))
             .picking(Selective::Top)
@@ -574,6 +588,365 @@ fn it_derives_a_fields_cardinality_from_its_pick() -> anyhow::Result<()> {
         serde_json::json!({ "pick": "sum" }),
     ] {
         assert!(field(refused.clone()).is_err(), "{refused}");
+    }
+    Ok(())
+}
+
+/// The levels a task's priority lists, least first. Their bytes order
+/// them `high`, `low`, `medium`, so a read by value and a read by the
+/// listing differ under both `max` and `min`.
+fn levels() -> serde_json::Value {
+    serde_json::json!(["low", "medium", "high"])
+}
+
+/// A task: its title, read newest, and its priority, elected by `pick`
+/// among every level claimed, over `listed` (`null` for no listing).
+fn task(pick: &str, listed: serde_json::Value) -> ConceptDescriptor {
+    let as_ = if listed.is_null() {
+        serde_json::json!("text:")
+    } else {
+        listed
+    };
+    serde_json::from_value(serde_json::json!({
+        "with": {
+            "name": { "the": "task/title", "as": "text:" },
+            "status": {
+                "the": "task/priority",
+                "as": as_,
+                "cardinality": "many",
+                "pick": pick
+            }
+        }
+    }))
+    .expect("a picking task is well formed")
+}
+
+/// Store `tasks`, each a title and the priorities claimed for it, all
+/// in one transaction, and return their entities in order.
+async fn store_tasks(
+    branch: &Branch,
+    operator: &Operator,
+    tasks: &[(&str, &[&str])],
+) -> anyhow::Result<Vec<Entity>> {
+    let mut entities = Vec::new();
+    let mut transaction = branch.transaction();
+    for (title, priorities) in tasks {
+        let entity = Entity::new()?;
+        transaction = transaction.assert(claim(the!("task/title"), &entity, text(title)));
+        for priority in *priorities {
+            transaction = transaction.assert(claim(the!("task/priority"), &entity, text(priority)));
+        }
+        entities.push(entity);
+    }
+    transaction.commit().publish().perform(operator).await?;
+    Ok(entities)
+}
+
+/// "Over a listed type, `max` reads the claim holding the last listed
+/// value present and `min` the first." Over `[low, medium, high]`,
+/// `max` reads `high` when all three are claimed and `medium` when
+/// `high` is not, and `min` reads `low`, whether the read names the
+/// task or leaves it free.
+#[dialog_common::test]
+async fn it_reads_max_and_min_over_a_listing_least_first() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let tasks = store_tasks(
+        &branch,
+        &operator,
+        &[
+            ("all", &["medium", "high", "low"]),
+            ("no high", &["low", "medium"]),
+        ],
+    )
+    .await?;
+    let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+    for (pick, expected) in [
+        ("max", [pair("all", "high"), pair("no high", "medium")]),
+        ("min", [pair("all", "low"), pair("no high", "low")]),
+    ] {
+        assert_eq!(
+            statuses(
+                &source,
+                task(pick, levels()),
+                Term::var("this"),
+                Term::var("status")
+            )
+            .await?,
+            expected.to_vec(),
+            "`{pick}` over a free task"
+        );
+        for (entity, expected) in tasks.iter().zip(&expected) {
+            assert_eq!(
+                statuses(
+                    &source,
+                    task(pick, levels()),
+                    Term::Constant(Value::Entity(entity.clone())),
+                    Term::var("status")
+                )
+                .await?,
+                vec![expected.clone()],
+                "`{pick}` over a named task"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// "`top` reads the first listed value present, which is what `min`
+/// reads over a listed type": the two read the same claim of every
+/// account, and `max` the last listed present.
+#[dialog_common::test]
+async fn it_reads_the_same_claim_under_top_and_min() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    store_accounts(&branch, &operator).await?;
+    let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+    let read = |pick: &'static str| {
+        let source = &source;
+        async move {
+            statuses(
+                source,
+                account(pick),
+                Term::var("this"),
+                Term::var("status"),
+            )
+            .await
+        }
+    };
+    let top = read("top").await?;
+    assert_eq!(top, vec![pair("alice", "suspended"), pair("bob", "active")]);
+    assert_eq!(read("min").await?, top);
+    assert_eq!(
+        read("max").await?,
+        vec![pair("alice", "registered"), pair("bob", "registered")]
+    );
+    Ok(())
+}
+
+/// "A value the listing does not hold loses to every listed one, under
+/// `max` and `min` as under `top`, and a cell holding no listed value
+/// reads its newest claim." A task claiming `urgent` beside `low` reads
+/// `low` under all three; a task claiming only unlisted values reads
+/// the one claimed last.
+#[dialog_common::test]
+async fn it_ranks_an_unlisted_value_below_every_listed_one() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let tasks = store_tasks(
+        &branch,
+        &operator,
+        &[("mixed", &["urgent", "low"]), ("unlisted", &["urgent"])],
+    )
+    .await?;
+    branch
+        .transaction()
+        .assert(claim(the!("task/priority"), &tasks[1], text("later")))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+    for pick in ["top", "min", "max"] {
+        assert_eq!(
+            statuses(
+                &source,
+                task(pick, levels()),
+                Term::var("this"),
+                Term::var("status")
+            )
+            .await?,
+            vec![pair("mixed", "low"), pair("unlisted", "later")],
+            "`{pick}`"
+        );
+    }
+    Ok(())
+}
+
+/// "Over an attribute with no list, `max` and `min` are unchanged":
+/// they compare the values, so over the same claims as
+/// [`it_reads_max_and_min_over_a_listing_least_first`] text orders by
+/// its bytes, `medium` the greatest and `high` the least.
+#[dialog_common::test]
+async fn it_reads_max_and_min_by_value_where_nothing_is_listed() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    store_tasks(&branch, &operator, &[("all", &["medium", "high", "low"])]).await?;
+    let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+    for (pick, expected) in [("max", "medium"), ("min", "high")] {
+        assert_eq!(
+            statuses(
+                &source,
+                task(pick, serde_json::Value::Null),
+                Term::var("this"),
+                Term::var("status")
+            )
+            .await?,
+            vec![pair("all", expected)],
+            "`{pick}`"
+        );
+    }
+    Ok(())
+}
+
+/// A rule deriving a priority adds a candidate `max` and `min` rank by
+/// the listing with the stored claims, and a rule reading the task
+/// concept concludes the claim the field elects.
+#[dialog_common::test]
+async fn it_reads_max_and_min_over_a_listing_through_rules() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let tasks = store_tasks(&branch, &operator, &[("escalated", &["medium"])]).await?;
+    branch
+        .transaction()
+        .assert(claim(the!("escalation/priority"), &tasks[0], text("high")))
+        .assert(claim(the!("escalation/priority"), &tasks[0], text("low")))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let priority = serde_json::json!({
+        "the": "task/priority",
+        "as": levels(),
+        "cardinality": "many"
+    });
+    let escalated = serde_json::json!({
+        "the": "escalation/priority",
+        "as": levels(),
+        "cardinality": "many"
+    });
+    let derive: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+        "deduce": { "with": { "is": priority } },
+        "when": [{
+            "assert": { "with": { "is": escalated } },
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "is": { "?": { "name": "is" } }
+            }
+        }]
+    }))?;
+
+    for (pick, expected) in [("max", "high"), ("min", "low")] {
+        let level = serde_json::json!({ "the": format!("report/{pick}"), "as": "text:" });
+        let report: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": { "is": level } },
+            "when": [{
+                "assert": serde_json::to_value(task(pick, levels()))?,
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "name": { "?": { "name": "name" } },
+                    "status": { "?": { "name": "is" } }
+                }
+            }]
+        }))?;
+        let mut registry = RuleRegistry::new();
+        registry.register(derive.clone().compile()?)?;
+        registry.register(report.compile()?)?;
+        let source = TestEnv::new(&branch, &operator, registry);
+
+        assert_eq!(
+            statuses(
+                &source,
+                task(pick, levels()),
+                Term::var("this"),
+                Term::var("status")
+            )
+            .await?,
+            vec![pair("escalated", expected)],
+            "`{pick}` ranks the derived claims with the stored one"
+        );
+        let reported: ConceptDescriptor =
+            serde_json::from_value(serde_json::json!({ "with": { "is": level } }))?;
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("is".into(), Term::var("is"));
+        let rows = ConceptQuery {
+            terms,
+            predicate: reported,
+        }
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+        let concluded = rows
+            .iter()
+            .map(|row| row.lookup(&Term::<Any>::var("is"))?.content())
+            .collect::<Result<Vec<Value>, _>>()?;
+        assert_eq!(
+            concluded,
+            vec![text(expected)],
+            "a rule reading the concept under `{pick}` concludes its claim"
+        );
+    }
+    Ok(())
+}
+
+/// "`max` and `min` over a listed type are accepted whatever the list's
+/// value type": over `[false, true]`, whose type has no order of its
+/// own, `max` reads `true` and `min` `false`, a stored claim ranked with
+/// a derived one.
+#[dialog_common::test]
+async fn it_reads_max_and_min_over_a_listing_of_an_unordered_type() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let flagged = Entity::new()?;
+    branch
+        .transaction()
+        .assert(claim(the!("review/flag"), &flagged, Value::Boolean(false)))
+        .assert(claim(the!("audit/flag"), &flagged, Value::Boolean(true)))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let flag = serde_json::json!({
+        "the": "review/flag",
+        "as": [false, true],
+        "cardinality": "many"
+    });
+    let audit = serde_json::json!({ "the": "audit/flag", "as": "boolean:" });
+    let rule: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+        "deduce": { "with": { "is": flag } },
+        "when": [{
+            "assert": { "with": { "is": audit } },
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "is": { "?": { "name": "is" } }
+            }
+        }]
+    }))?;
+    let mut registry = RuleRegistry::new();
+    registry.register(rule.compile()?)?;
+    let source = TestEnv::new(&branch, &operator, registry);
+
+    for (pick, expected) in [("max", true), ("min", false)] {
+        let mut field = flag.clone();
+        field["pick"] = pick.into();
+        let concept: ConceptDescriptor =
+            serde_json::from_value(serde_json::json!({ "with": { "flag": field } }))?;
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("flag".into(), Term::var("flag"));
+        let rows = ConceptQuery {
+            terms,
+            predicate: concept,
+        }
+        .evaluate(Match::new().seed(), &source)
+        .try_vec()
+        .await?;
+        let flags = rows
+            .iter()
+            .map(|row| row.lookup(&Term::<Any>::var("flag"))?.content())
+            .collect::<Result<Vec<Value>, _>>()?;
+        assert_eq!(flags, vec![Value::Boolean(expected)], "`{pick}`");
     }
     Ok(())
 }
