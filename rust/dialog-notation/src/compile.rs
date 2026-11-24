@@ -1144,7 +1144,11 @@ impl Scope {
         self.negated = true;
         for premise in &rule.when {
             if let Some(equal) = unequal(premise) {
-                let compiled = self.formula(&equal, None)?;
+                // What is refused of it is said of the `!=` written.
+                let compiled = self.formula(&equal, None).map_err(|error| match error {
+                    Error::Refused(why) => Error::Refused(why.replacen("(== ", "(!= ", 1)),
+                    other => other,
+                })?;
                 self.unless.push(compiled);
             }
         }
