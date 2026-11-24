@@ -136,7 +136,11 @@ const TAGGED: &str = r#"
     (query (task/card ?t is: ?card)
       (task ?t title: ?title)
       (task/tag ?t tag: (collect ?tags))
-      (is ?card {:title ?title :tags ?tags}))"#;
+      (is ?card {:title ?title :tags ?tags}))
+    (query (task/flat ?t is: ?row)
+      (task ?t title: ?title)
+      (task/tag ?t tag: ?g)
+      (view ?row [:li ?title [:span {:class "tag"} ?g]]))"#;
 
 /// The one step `asked` compiles to.
 fn step(asked: &str) -> Result<Step> {
@@ -154,6 +158,14 @@ fn step(asked: &str) -> Result<Step> {
 
 fn plan() -> Result<Plan> {
     match step("(select (task/row ?t is: ?row))")? {
+        Step::View(plan) => Ok(*plan),
+        _ => Err(anyhow::anyhow!("no plan")),
+    }
+}
+
+/// A view whose layer joins two reads, and so has a rule of its own.
+fn flat() -> Result<Plan> {
+    match step("(select (task/flat ?t is: ?row))")? {
         Step::View(plan) => Ok(*plan),
         _ => Err(anyhow::anyhow!("no plan")),
     }
@@ -273,5 +285,64 @@ async fn it_loses_nothing_of_a_selection_when_a_poll_fails() -> Result<()> {
         );
     }
     assert!(failures > 0, "no poll was made to fail");
+    Ok(())
+}
+
+/// The rules a watch and a selection kept standing lay on the branch's
+/// session overlay are taken off when the last that holds them is
+/// dropped: two watches of one view share their rules, and the one left
+/// is kept current after the other is dropped. A rule on the overlay the
+/// driver did not lay stays.
+#[dialog_common::test]
+async fn it_takes_off_the_overlay_what_it_laid_when_the_last_holder_goes() -> Result<()> {
+    let mut notebook = tasks().await?;
+    let overlay = notebook.branch.overlay().clone();
+    let before = overlay.len();
+    let live = Live::new(notebook.branch.clone());
+    let first = live.watch(flat()?, None)?;
+    let laid = overlay.len();
+    assert!(laid > before, "a watch lays its rules");
+    let mut second = live.watch(flat()?, None)?;
+    assert_eq!(
+        overlay.len(),
+        laid,
+        "the rules two watches share are laid once"
+    );
+    second.poll(&notebook.operator).await?;
+    drop(first);
+    assert_eq!(overlay.len(), laid, "the rules the second holds stay");
+    notebook.submit(CHANGE).await?;
+    second.poll(&notebook.operator).await?;
+    let rendered = live.render(second.plan(), None, &notebook.operator).await?;
+    assert_eq!(second.tree().hiccup(), rendered.hiccup());
+    drop(second);
+    assert_eq!(
+        overlay.len(),
+        before,
+        "the last watch dropped takes its rules off"
+    );
+
+    let standing = live.standing(selection()?)?;
+    assert!(
+        overlay.len() > before,
+        "a standing selection lays its rules"
+    );
+    drop(standing);
+    assert_eq!(overlay.len(), before, "and takes them off");
+
+    // A rule of the view laid by someone else before the watch.
+    let plan = flat()?;
+    let theirs = (0..plan.layers.len())
+        .filter(|layer| !plan.layers[*layer].conditions.is_empty())
+        .find_map(|layer| plan.query(layer, None).ok()?.rule)
+        .ok_or_else(|| anyhow::anyhow!("a layer with a rule"))?;
+    overlay.assert(theirs)?;
+    let with_theirs = overlay.len();
+    drop(live.watch(plan, None)?);
+    assert_eq!(
+        overlay.len(),
+        with_theirs,
+        "a rule the driver did not lay stays"
+    );
     Ok(())
 }
