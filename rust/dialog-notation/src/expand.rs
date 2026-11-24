@@ -560,15 +560,34 @@ fn derived(tree: &Syntax, concept: &str, name: &str) -> Result<Syntax, Error> {
             )));
         }
     };
-    // A concept of more than 35 bytes leaves no room for a relation in
-    // the 64 the engine allows, whatever the attribute.
-    let Some(length) = u32::try_from(concept.len())
-        .ok()
-        .and_then(|length| char::from_digit(length, 36))
-    else {
+    // The relation is a domain the engine reads as lowercase letters,
+    // digits, hyphens and dots: a concept or a name with anything else
+    // cannot be one.
+    if let Some(odd) = concept
+        .chars()
+        .chain(name.chars())
+        .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.')))
+    {
         return Err(Error::Refused(format!(
-            "{tree} derives under a concept whose name is longer than a derived relation has \
-             room for"
+            "{tree} derives `{concept}/{name}`, which holds `{odd}`: a derived attribute's \
+             relation is made of the concept's name and the attribute's, and holds only \
+             lowercase letters, digits, hyphens and dots"
+        )));
+    }
+    // The engine allows a relation 64 bytes, its attribute's part, the
+    // longest label, counted. A concept of more than 35 bytes has no
+    // length digit at all.
+    let label = terms.keys().map(String::len).max().unwrap_or(0);
+    let total = DERIVED.len() + 2 + concept.len() + 1 + name.len() + 1 + label;
+    let length = u32::try_from(concept.len())
+        .ok()
+        .and_then(|length| char::from_digit(length, 36));
+    let (Some(length), true) = (length, total <= 64) else {
+        return Err(Error::Refused(format!(
+            "{tree} derives `{concept}/{name}`, whose relation would be {total} bytes, past the \
+             64 the engine allows: the concept's name, the attribute's and its longest label \
+             together may have {} bytes",
+            64 - (DERIVED.len() + 2 + 1 + 1)
         )));
     };
     Ok(Syntax::Application(

@@ -958,6 +958,10 @@ fn attribute(field: &Field, role: Role) -> Result<Json, Error> {
             attribute.insert("the".into(), json!({ "domain": domain, "keyed": keyed }));
         }
         None => {
+            // The engine's own check of a relation, so a name it would
+            // refuse is refused saying why.
+            dialog_query::Relation::validate(&field.attribute)
+                .map_err(|invalid| Error::Refused(invalid.to_string()))?;
             attribute.insert("the".into(), json!(field.attribute));
         }
     }
