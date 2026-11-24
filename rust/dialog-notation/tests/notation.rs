@@ -1036,7 +1036,10 @@ async fn it_refuses_top_naming_min_over_the_same_list() -> Result<()> {
         .submit("(select (account ?a status: ?s))")
         .await
         .map_err(|error| error.downcast::<Error>());
-    assert!(after.is_err(), "{after:?}");
+    assert!(
+        matches!(&after, Err(Ok(Error::Unknown(form))) if form == "(account ?a status: ?s)"),
+        "{after:?}"
+    );
     Ok(())
 }
 

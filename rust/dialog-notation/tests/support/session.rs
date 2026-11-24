@@ -172,8 +172,9 @@ impl Notebook {
                 );
             }
         }
+        // Sorted, so a report reads the same whatever order the rows came
+        // in, and never deduplicated: an answer given twice is seen twice.
         report.sort();
-        report.dedup();
         Ok((report, diagnostics))
     }
 }
