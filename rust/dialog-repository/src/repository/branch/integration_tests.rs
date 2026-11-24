@@ -75,9 +75,7 @@ use dialog_search_tree::Manifest;
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_search_tree::NoveltyOp;
 use dialog_search_tree::{NodeBody, Traversable as _, Visit, into_owned};
-#[cfg(not(feature = "web-integration-tests"))]
-use dialog_storage::provider::storage::Storage;
-use dialog_storage::provider::storage::VolatileSpace;
+use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use futures_util::{StreamExt, stream};
 
 fn s3_site_address(s3: &S3Address) -> S3SiteAddress {
@@ -2915,7 +2913,7 @@ async fn session_of(
 async fn layered(
     seed: &Seed,
     s3: &S3Address,
-    storage: &dialog_storage::provider::storage::Storage<VolatileSpace>,
+    storage: &Storage<VolatileSpace>,
     location: &Location,
 ) -> Result<Layered> {
     use crate::{LayerDeclaration, LayerType};
