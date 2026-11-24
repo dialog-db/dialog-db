@@ -30,6 +30,8 @@ use dialog_query::{
     Pattern, Premise, Proposition, Term, the,
 };
 use futures_util::TryStreamExt as _;
+use futures_util::stream;
+use ipld_core::ipld::Ipld;
 
 use crate::helpers::test_repo;
 use crate::rules::source_attr;
@@ -949,14 +951,11 @@ async fn it_keeps_rows_a_stored_rule_builds_as_records_current() -> Result<()> {
 
 /// `bytes`, a stored body, stamped with `format` instead.
 fn restamped(bytes: &[u8], format: u64) -> Result<Vec<u8>> {
-    let mut body: ipld_core::ipld::Ipld = serde_ipld_dagcbor::from_slice(bytes)?;
-    let ipld_core::ipld::Ipld::Map(envelope) = &mut body else {
+    let mut body: Ipld = serde_ipld_dagcbor::from_slice(bytes)?;
+    let Ipld::Map(envelope) = &mut body else {
         anyhow::bail!("a body is a map");
     };
-    envelope.insert(
-        "format".into(),
-        ipld_core::ipld::Ipld::Integer(i128::from(format)),
-    );
+    envelope.insert("format".into(), Ipld::Integer(i128::from(format)));
     Ok(serde_ipld_dagcbor::to_vec(&body)?)
 }
 
@@ -983,7 +982,7 @@ async fn install_as<S: PeerSpace>(
         })
         .collect();
     branch
-        .commit(futures_util::stream::iter(instructions))
+        .commit(stream::iter(instructions))
         .perform(session)
         .await?;
     Ok(())

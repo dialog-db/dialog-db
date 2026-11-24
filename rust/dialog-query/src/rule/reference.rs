@@ -643,7 +643,8 @@ mod tests {
     use crate::Value;
     use crate::attribute::Relation;
     use crate::corpus::Entity;
-    use crate::rule::{DeductiveRule, DeductiveRuleDescriptor};
+    use crate::rule::body::format_of;
+    use crate::rule::{DeductiveRule, DeductiveRuleDescriptor, InductiveRuleDescriptor};
 
     /// A constant inside a premise's wire form references as the value it
     /// is, so a constant has one identity wherever it appears.
@@ -817,22 +818,21 @@ mod tests {
     /// found, retracted and left alone by `upgrade_rules` as it was.
     #[dialog_common::test]
     fn it_keeps_the_name_and_the_bytes_of_a_rule_that_holds_no_pattern() {
-        let inductive: crate::rule::InductiveRuleDescriptor =
-            serde_json::from_value(serde_json::json!({
-                "assert!": { "with": {
-                    "tag": { "the": "org/tag", "as": "text:", "cardinality": "many" }
+        let inductive: InductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "assert!": { "with": {
+                "tag": { "the": "org/tag", "as": "text:", "cardinality": "many" }
+            } },
+            "when": [{
+                "assert": { "with": {
+                    "label": { "the": "org/label", "as": "text:" }
                 } },
-                "when": [{
-                    "assert": { "with": {
-                        "label": { "the": "org/label", "as": "text:" }
-                    } },
-                    "where": {
-                        "this": { "?": { "name": "this" } },
-                        "label": { "?": { "name": "tag" } }
-                    }
-                }]
-            }))
-            .expect("descriptor parses");
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "label": { "?": { "name": "tag" } }
+                }
+            }]
+        }))
+        .expect("descriptor parses");
         let inductive = inductive.compile().expect("rule compiles");
         let rules = [
             (
@@ -854,7 +854,7 @@ mod tests {
             PINNED.map(|(a, b)| (a.to_string(), b.to_string())).to_vec()
         );
         for (_, body) in &rules {
-            assert_eq!(crate::rule::body::format_of(body), Some(4));
+            assert_eq!(format_of(body), Some(4));
         }
     }
 

@@ -2056,3 +2056,26 @@ fn it_refuses_to_store_a_composite_constant_inside_a_pattern() {
         "{refused:?}"
     );
 }
+
+/// A negated premise keeps its pattern, where a positive one is read
+/// through an equality beside it, so the stored body writes the pattern
+/// inside the concept application: a rule that negates one reads back as
+/// the rule it was, under its name, and writes the same body again.
+#[dialog_common::test]
+fn it_stores_a_rule_that_negates_a_pattern() {
+    let done = shape(&[("done", Pattern::from(Value::Boolean(true)))]).with_rest(Term::blank());
+    let rule = DeductiveRule::new(
+        concept("open", "note/open", "composite:map"),
+        vec![
+            read("note/payload", "composite:map", var("open")),
+            !read("note/payload", "composite:map", done),
+        ],
+    )
+    .expect("compiles");
+    assert_eq!(rule.storable(), Ok(()));
+    let stored = rule.try_encode().expect("a body");
+    assert_eq!(body::format_of(&stored), Some(5));
+    let decoded = DeductiveRule::decode(&stored).expect("reads back");
+    assert!(decoded.stored_as(&rule.this()), "under its name");
+    assert_eq!(decoded.try_encode(), Some(stored));
+}

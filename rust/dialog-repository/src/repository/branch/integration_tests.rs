@@ -7394,6 +7394,7 @@ async fn it_does_not_take_a_rival_head_of_one_version_as_seen(s3: S3Address) -> 
 async fn it_replicates_a_rule_that_holds_a_pattern(s3: S3Address) -> Result<()> {
     use dialog_query::concept::query::ConceptQuery;
     use dialog_query::query::Output as _;
+    use dialog_query::rule::body::format_of;
     use dialog_query::types::Any;
     use dialog_query::{
         ConceptConclusion, ConceptDescriptor, DeductiveRule, MapPattern, Parameters, Pattern,
@@ -7535,7 +7536,7 @@ async fn it_replicates_a_rule_that_holds_a_pattern(s3: S3Address) -> Result<()> 
     };
     assert!(
         matches!(&source.is, Value::Bytes(bytes)
-            if dialog_query::rule::body::format_of(bytes) == Some(5)),
+            if format_of(bytes) == Some(5)),
         "the pulled body is in format 5"
     );
     let mut subscription = bob_branch.subscribe(headings()?);

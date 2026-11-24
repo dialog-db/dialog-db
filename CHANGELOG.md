@@ -57,7 +57,10 @@ What this changes for you:
 - `Parameters` and `Pattern` serialize a map or a list of terms under
   `match`, and read it back, in JSON and dag-cbor; a pattern with no written
   form still fails to serialize, and so does a `Changes` that holds a
-  refusal.
+  refusal. A `ConceptQuery` writes a name that holds a pattern as that
+  pattern in its `where`, where it wrote the variable standing for the
+  whole value, and reads it back: a negated premise keeps its pattern in
+  the concept application, so a rule negating one was written without it.
 - `dialog_query::rule::body::FORMAT` is 5, the latest format this release
   reads and the one a pattern rule is written in.
   `rule::body::TERMS_FORMAT` is 4, the format of a rule that holds no

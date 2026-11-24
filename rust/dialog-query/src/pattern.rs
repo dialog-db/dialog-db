@@ -37,7 +37,7 @@ use crate::Parameters;
 use crate::Premise;
 use crate::concept::query::ConceptQuery;
 use crate::constraint::{Constraint, Equality};
-use crate::corpus::{Composite, CompositeError, CompositeKind, Value};
+use crate::corpus::{Composite, CompositeError, CompositeKind, Type, Value};
 use crate::error::EvaluationError;
 use crate::proposition::Proposition;
 use crate::selection::{Match, Selection};
@@ -696,11 +696,7 @@ const VARIABLE: &str = "?";
 /// map pattern of one entry: `?` is a variable, and the name of a type
 /// (`text:`, `composite:map`, or any key that ends in `:`) a constant.
 fn names_a_term(key: &str) -> bool {
-    key == VARIABLE
-        || key.ends_with(':')
-        || crate::corpus::Type::ALL
-            .iter()
-            .any(|kind| kind.uri() == key)
+    key == VARIABLE || key.ends_with(':') || Type::ALL.iter().any(|kind| kind.uri() == key)
 }
 
 impl Pattern {
