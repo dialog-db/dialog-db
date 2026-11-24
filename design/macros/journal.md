@@ -1984,3 +1984,20 @@ Output ([`design/macros/rounds/cost-2026-11-24-after.txt`](https://github.com/di
 The maintainer's decisions those files held and nothing else did are rows of the ledger now, each with its date: what the notation is for first, tonk's events, elements and routes, a query's definition synced, the fold landed without `distinct`, a name's entity and the canonical form hashed, formats 4 and 5 and the listed `as`, and the one composite. Also his, 2026-11-19, and not a design matter: commits are authored by the environment's identity. The grouping of what `Unsupported` refuses moved to [gaps.md](gaps.md).
 
 The sketches of tonk's notebook and table, and the two to-do documents, stay as the crate's test fixtures, under `rust/dialog-notation/tests/fixtures/`, read by tests that run them. The two tests that counted how far the sketches get are gone with the bar that counted.
+
+## 2026-11-24, Measuring: one change, with a fold that keeps a running value
+
+**Question.** With the running value of a standing fold (`perf/fold-running-value` at `63957c3`, on main as #856) merged, a fold whose entries are `count`, `count-distinct`, `sum`, `min` or `max` keeps a running value for each group. Is one change to a view through `Live::watch` now flat from a thousand to ten thousand?
+
+**Method.** The cost harness of [`rust/dialog-notation/examples/cost.rs`](https://github.com/dialog-db/dialog-db/blob/research-data/rust/dialog-notation/examples/cost.rs) on `research-data`, run on this branch untracked, release build, medians of 5, the changes in its order: a rename, a tag added, a to-do added. A view's count folds `count-distinct` alone, so it runs; `distinct` keeps no running value.
+
+| one change | N=1000 before | after | N=10000 before | after | plain at 10000 |
+|---|---|---|---|---|---|
+| rename | 2.4 ms | 2.4 | 35 | 25 | 0.95 |
+| tag added | 1.2 | 1.6 | 4.5 | 5.2 | 0.77 |
+| to-do added | 2.4 | 1.1 | 25 | 4.6 | 0.89 |
+| `select` one card | 2.1 | 2.3 | 2.5 | 3.1 | |
+
+**Learned.** A to-do added is flat now: the count's fold steps its running value, 1.8 ms at ten thousand where it folded the list's one group again for 28 to 34 ms. A rename is not, and the cause is the harness's order and the running value's start: a group's running value is made by folding it whole the first time a row of it moves, and the rename is the first change the list's group sees after the first render. The fold's subscription says so: `refolds` rises on the rename, `steps` on the to-do added after it. Every later change to the group steps. What is left of a change at ten thousand is the four layers' polls, 3 to 5 ms in all, about 5 times a plain subscription.
+
+**Decided.** Not decided: whether a group's running value is made when the group is first folded, so its first change steps too.
