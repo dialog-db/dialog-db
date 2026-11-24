@@ -14,6 +14,41 @@ says how to cut a release.
 
 ## Unreleased
 
+### A replica reads the revision records it wrote from the buffers above the leaves
+
+A commit reads its parent's revision record to carry the skip links
+along, and a stack reads a durable layer's revision from its record. A
+commit writes its record into a buffer of the tree, in an index node,
+and only a flush moves it into the leaf it belongs in, so a record a
+replica wrote a moment ago sits above a leaf the replica may never have
+read. A branch remembers the records it mints in memory, which hid this
+until the process restarted. A durable layer's line remembers nothing
+from one write to the next, so the next write into the layer read its
+own record through that leaf. The readers of a revision's record now
+look in the buffers on the route to it first, read from what the replica
+holds, and take a record there that verifies. Two valid records cannot
+share a version, so the leaf has nothing better to offer.
+
+What this changes for you:
+
+- After a restart, a replica's first commit, and its stack's open and
+  first write into a durable layer, read the record of the replica's own
+  last revision without a fetch. Before, they fetched the leaf beneath
+  it when the replica had never held it.
+- A second write into a durable layer reads the first's record without
+  a fetch.
+- `dialog_search_tree::PersistentTree::first_buffered` is new. It offers
+  a callback the newest buffered op of each key in a range, along the
+  route to the range's start, reading only nodes the replica holds and
+  no leaf, and returns the first answer the callback gives.
+- A buffered record that does not verify, one whose value spilled out of
+  its key, or one a newer op retracted is never taken from a buffer: the
+  read falls back to the walk to the leaf, as before.
+
+Why: an editor that answered a keystroke at once must answer the next at
+once, after a restart too, and the record of its own last revision is
+the one thing every commit on that revision reads.
+
 ### The first commit after a `QueriedRanges` pull reads from the replica's own blocks
 
 [#861](https://github.com/dialog-db/dialog-db/pull/861)

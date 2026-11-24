@@ -3135,6 +3135,65 @@ mod tests {
         Ok((tree, base, storage))
     }
 
+    /// What [`PersistentTree::first_buffered`] offers for a key buffered at
+    /// two depths of the route is the shallower op, the newer, alone: an
+    /// assert one level down is never offered under a newer op at the root,
+    /// a retraction included, and is offered when nothing newer covers it.
+    #[dialog_common::test]
+    async fn it_offers_only_the_newest_buffered_op_of_a_key() -> Result<()> {
+        // What `first_buffered` offers for the probe in `tree`, persisted.
+        async fn offered(
+            tree: SpecHitchhiker,
+            storage: &mut SpecStorage,
+        ) -> Result<Vec<NoveltyOp<Vec<u8>>>> {
+            let mut delta = Delta::zero();
+            let root = tree.persist(&mut delta)?;
+            spec_flush(&mut delta, storage).await?;
+            let mut offered = Vec::new();
+            let answer = SpecTree::at(crate::helpers::test_subject(), root)
+                .first_buffered(&probe(), &probe(), &*storage, |_, op| {
+                    offered.push(op);
+                    None::<()>
+                })
+                .await?;
+            assert!(answer.is_none(), "nothing was taken");
+            Ok(offered)
+        }
+
+        for newer in [NoveltyOp::Retract, NoveltyOp::Assert(vec![2])] {
+            let (tree, _, mut storage) = buffered_at_two_levels(newer.clone()).await?;
+            assert_eq!(
+                offered(tree, &mut storage).await?,
+                vec![newer.clone()],
+                "only the newest op of the key is offered, not the older assert below it"
+            );
+        }
+
+        // The assert one level down, with nothing newer above it.
+        let spec = tree_spec![
+            [                   ..p]
+            [        ..h,       ..p]
+            [..d, ..h, ..l, ..p]
+        ]
+        .build(test_storage())
+        .await
+        .expect("the fixture spec is valid");
+        let mut storage = spec.storage().clone();
+        let base = SpecTree::at(crate::helpers::test_subject(), spec.tree().root().clone());
+        let tree = SpecHitchhiker::open(&base)
+            .with_op_buf_size(1)
+            .insert(probe(), vec![1], &storage)
+            .await?
+            .insert(far_key(), vec![9], &storage)
+            .await?;
+        assert_eq!(
+            offered(tree, &mut storage).await?,
+            vec![NoveltyOp::Assert(vec![1])],
+            "an assert below the root, with nothing newer above it, is offered"
+        );
+        Ok(())
+    }
+
     /// For a key buffered at two depths the SHALLOWEST op is the newest:
     /// writes land in the root buffer and a flush only moves ops downward, so
     /// deeper always means older. The live read resolves this correctly (the
