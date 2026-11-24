@@ -149,26 +149,15 @@ impl InductiveRule {
     /// premises encode to nothing, because `Proposition`'s
     /// formal-notation `Serialize` rejects attribute propositions.
     pub fn try_encode(&self) -> Option<Vec<u8>> {
-        // A body it would not read back is no body.
-        if pattern::unstorable(self.analysis.premises()).is_some() {
-            return None;
-        }
         let holds_pattern = pattern::held(self.analysis.premises()).is_some();
         body::encode(holds_pattern, &self.canonical_descriptor())
     }
 
-    /// Whether this rule can be stored, and so installed: whether every
-    /// pattern it holds has a written form (see
+    /// Whether this rule can be stored, and so installed: every rule
+    /// that compiles can (see
     /// [`DeductiveRule::storable`](crate::DeductiveRule::storable)).
     pub fn storable(&self) -> Result<(), TypeError> {
-        match pattern::unstorable(self.analysis.premises()) {
-            Some((pattern, reason)) => Err(TypeError::UnstorablePattern {
-                pattern,
-                format: body::FORMAT,
-                reason,
-            }),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     /// This rule's content-addressed identity, if it has an encodable

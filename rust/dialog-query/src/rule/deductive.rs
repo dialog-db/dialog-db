@@ -458,30 +458,19 @@ impl DeductiveRule {
     /// (what `rule!:` notation and stored `dialog.rule/*` rules produce)
     /// have a body.
     pub fn try_encode(&self) -> Option<Vec<u8>> {
-        // A body it would not read back is no body.
-        if pattern::unstorable(self.analysis.premises()).is_some() {
-            return None;
-        }
         let holds_pattern = pattern::held(self.analysis.premises()).is_some();
         body::encode(holds_pattern, &self.canonical_descriptor())
     }
 
-    /// Whether this rule can be stored, and so installed. A rule that
-    /// holds a map or a list of terms is stored in format 5 of a rule
-    /// body, which writes a pattern under `match`, a map pattern's keys
-    /// whatever values they are. One that holds a constant map or list
-    /// inside a pattern cannot be stored: a body holds it as bytes it does
-    /// not read back. Such a rule has an identity and runs where it was
-    /// built, and [`try_encode`](Self::try_encode) gives it no body.
+    /// Whether this rule can be stored, and so installed. Every rule that
+    /// compiles can: a rule that holds a map or a list of terms is stored
+    /// in format 5 of a rule body, which writes a pattern under `match`, a
+    /// map pattern's keys whatever values they are, and a constant map or
+    /// list as its canonical bytes, which a body reads back as that
+    /// constant. A constant no body carries is refused when the rule
+    /// compiles ([`TypeError::UnencodableConstant`]).
     pub fn storable(&self) -> Result<(), TypeError> {
-        match pattern::unstorable(self.analysis.premises()) {
-            Some((pattern, reason)) => Err(TypeError::UnstorablePattern {
-                pattern,
-                format: body::FORMAT,
-                reason,
-            }),
-            None => Ok(()),
-        }
+        Ok(())
     }
 
     /// This rule's content-addressed identity, if it has an encodable

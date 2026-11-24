@@ -6022,9 +6022,8 @@ mod transient_pattern_tests {
         .expect("a concept")
     }
 
-    /// A rule whose map pattern holds a constant map, which a stored
-    /// body writes as bytes it does not read back, so it has no body: a
-    /// query layer holds it as it is.
+    /// A rule whose map pattern holds a constant map: a query layer
+    /// stages it with its body, as it stages any rule.
     fn heading_rule() -> Result<DeductiveRule> {
         let title: dialog_corpus::Relation = "note/title".parse()?;
         let meta: dialog_corpus::Relation = "note/meta".parse()?;
@@ -6080,7 +6079,7 @@ mod transient_pattern_tests {
             .await?;
 
         let rule = heading_rule()?;
-        assert!(rule.storable().is_err());
+        assert_eq!(rule.storable(), Ok(()));
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
         terms.insert("heading".into(), Term::var("heading"));
@@ -6099,9 +6098,13 @@ mod transient_pattern_tests {
             dialog_corpus::Instruction::Assert(fact, _)
             | dialog_corpus::Instruction::Retract(fact) => fact.of == rule.this(),
         }));
-        assert!(staged.iter().all(|instruction| match instruction {
-            dialog_corpus::Instruction::Assert(fact, _)
-            | dialog_corpus::Instruction::Retract(fact) => fact.the != source_attr(),
+        assert!(staged.iter().any(|instruction| match instruction {
+            dialog_corpus::Instruction::Assert(fact, _) => {
+                fact.of == rule.this()
+                    && fact.the == source_attr()
+                    && fact.is == Value::Bytes(rule.encode())
+            }
+            dialog_corpus::Instruction::Retract(_) => false,
         }));
 
         let rows = layer.select(query).perform(&operator).try_vec().await?;

@@ -1732,49 +1732,34 @@ fn it_stores_a_rule_that_builds_a_record_keyed_by_symbols() {
     assert_eq!(decoded.try_encode(), Some(stored));
 }
 
-/// A rule that holds a constant map inside a pattern, which a stored
-/// body writes as bytes it does not read back, runs where it was built
-/// and cannot be stored, and says why. It has an identity, by its parts,
-/// and no body.
+/// A rule that holds a constant map inside a pattern is stored: format 5
+/// writes the constant as its canonical bytes, and the body reads back as
+/// the rule, under its name, and encodes to the bytes it was read from.
 #[dialog_common::test]
-fn it_refuses_to_store_a_rule_whose_pattern_a_body_cannot_hold() {
+fn it_stores_a_rule_that_holds_a_composite_constant_inside_a_pattern() {
     let rule = constant_rule();
-    assert!(rule.try_this().is_some(), "it has an identity");
-    assert_eq!(rule.try_encode(), None, "and no stored body");
-    let refused = rule.storable().expect_err("its pattern is not stored");
-    assert!(
-        matches!(&refused, TypeError::UnstorablePattern { format, .. } if *format == body::FORMAT),
-        "{refused:?}"
-    );
-    let reason = refused.to_string();
-    assert!(
-        reason.contains(&format!("format {}", body::FORMAT)),
-        "{reason}"
-    );
-    assert!(reason.contains("bytes"), "{reason}");
+    assert_eq!(rule.storable(), Ok(()));
+    let stored = rule.try_encode().expect("a body");
+    assert_eq!(body::format_of(&stored), Some(5));
+    let decoded = DeductiveRule::decode(&stored).expect("the body reads back");
+    assert!(decoded.stored_as(&rule.this()), "under its name");
+    assert_eq!(decoded.try_encode(), Some(stored));
 }
 
-/// Asserting a rule whose pattern a stored body cannot hold into a batch
-/// that is committed records the refusal, typed, and stages nothing: an
-/// assertion has no error to return, and a commit of the batch returns
-/// this one (see the branch's `pattern_rule_tests`).
+/// Asserting a rule that holds a constant map inside a pattern stages it
+/// with its body, as asserting any rule does, and refuses nothing.
 #[dialog_common::test]
-fn it_refuses_to_install_a_rule_whose_pattern_a_body_cannot_hold() {
+fn it_installs_a_rule_that_holds_a_composite_constant_inside_a_pattern() {
     use crate::statement::Changes;
 
     let rule = constant_rule();
     let mut changes = Changes::new();
     changes.assert(&rule);
-    let refusal = changes.refused().expect("the assertion is refused");
-    assert_eq!(refusal.entity(), &rule.this());
-    assert!(matches!(
-        refusal.reason::<TypeError>(),
-        Some(TypeError::UnstorablePattern { .. })
-    ));
-    assert!(changes.is_empty(), "nothing was staged");
+    assert!(changes.refused().is_none(), "nothing is refused");
+    assert!(!changes.is_empty(), "the rule is staged");
     assert!(
-        serde_json::to_string(&changes).is_err(),
-        "a refused batch does not serialize"
+        serde_json::to_string(&changes).is_ok(),
+        "a batch that holds it is written"
     );
 }
 
@@ -2043,34 +2028,34 @@ fn it_is_a_constant_when_it_holds_no_variable() {
 }
 
 /// A constant map or list inside a pattern is written as its canonical
-/// bytes in a stored body, which a rule body's terms are not read back
-/// from, so a rule holding one is refused where it would be stored and
-/// would be inert. Written as JSON it reads back.
+/// bytes in a stored body, and as its entries in JSON, and reads back
+/// from both: a rule holding one, at any depth, is stored in format 5 and
+/// its body reads back as the rule.
 #[dialog_common::test]
-fn it_refuses_to_store_a_composite_constant_inside_a_pattern() {
-    let pattern = Pattern::map([
-        (
-            text("by"),
-            Pattern::Term(Term::Constant(map(&[("a", text("b"))]))),
-        ),
-        (text("title"), var("heading")),
-    ])
-    .expect("a pattern");
-    let json = serde_json::to_value(&pattern).expect("is written");
-    assert_eq!(
-        serde_json::from_value::<Pattern>(json).expect("reads"),
-        pattern
-    );
-    let rule = DeductiveRule::new(
-        concept("heading", "note/heading", "text:"),
-        vec![read("note/payload", "composite:map", pattern)],
-    )
-    .expect("compiles");
-    let refused = rule.storable().expect_err("not stored");
-    assert!(
-        matches!(&refused, TypeError::UnstorablePattern { reason, .. } if reason.contains("bytes")),
-        "{refused:?}"
-    );
+fn it_stores_a_composite_constant_inside_a_pattern() {
+    for (constant, _) in composite_constants() {
+        let pattern = Pattern::map([
+            (text("by"), Pattern::Term(Term::Constant(constant.clone()))),
+            (text("title"), var("heading")),
+        ])
+        .expect("a pattern");
+        let json = serde_json::to_value(&pattern).expect("is written");
+        assert_eq!(
+            serde_json::from_value::<Pattern>(json).expect("reads"),
+            pattern
+        );
+        let rule = DeductiveRule::new(
+            concept("heading", "note/heading", "text:"),
+            vec![read("note/payload", "composite:map", pattern)],
+        )
+        .expect("compiles");
+        assert_eq!(rule.storable(), Ok(()));
+        let stored = rule.try_encode().expect("a body");
+        assert_eq!(body::format_of(&stored), Some(5), "{constant:?}");
+        let decoded = DeductiveRule::decode(&stored).expect("the body reads back");
+        assert!(decoded.stored_as(&rule.this()));
+        assert_eq!(decoded.try_encode(), Some(stored));
+    }
 }
 
 /// A negated premise keeps its pattern, where a positive one is read
@@ -2192,4 +2177,46 @@ fn it_reads_back_an_inductive_rule_that_holds_a_composite_constant() {
         assert!(decoded.stored_as(&rule.this()), "{constant:?}");
         assert_eq!(decoded.try_encode(), Some(stored));
     }
+}
+
+/// A stored body that holds no composite constant is buffered as
+/// `serde_json::Value` buffers it, part for part, so every body that read
+/// before reads as it did: rules of terms in format 4, rules that hold a
+/// pattern in format 5, and the bodies of earlier formats.
+#[dialog_common::test]
+fn it_buffers_a_body_without_composites_as_json_does() {
+    let plain = DeductiveRule::new(
+        concept("heading", "note/heading", "text:"),
+        vec![read("note/title", "text:", var("heading"))],
+    )
+    .expect("compiles");
+    let mut bodies = vec![
+        plain.try_encode().expect("a body"),
+        card_rule([0, 1, 2])
+            .expect("compiles")
+            .try_encode()
+            .expect("a body"),
+        symbol_rule().try_encode().expect("a body"),
+    ];
+    for format in [0, 2, 3] {
+        bodies.push(body::encode_as(format, &plain.canonical_descriptor()).expect("a body"));
+    }
+    for stored in bodies {
+        let json: serde_json::Value = serde_ipld_dagcbor::from_slice(&stored).expect("reads");
+        let crate::term::Buffered(buffered) =
+            serde_ipld_dagcbor::from_slice(&stored).expect("buffers");
+        assert_eq!(buffered, json);
+    }
+}
+
+/// Bytes in a stored body that are no map or list are refused, by an
+/// error and not a panic.
+#[dialog_common::test]
+fn it_refuses_bytes_that_are_no_composite() {
+    let stored = serde_ipld_dagcbor::to_vec(&ipld_core::ipld::Ipld::Bytes(vec![0xff, 0x00]))
+        .expect("encodes");
+    let refused = serde_ipld_dagcbor::from_slice::<crate::term::Buffered>(&stored)
+        .err()
+        .expect("refused");
+    assert!(refused.to_string().contains("no map or list"), "{refused}");
 }

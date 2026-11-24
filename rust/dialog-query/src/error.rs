@@ -303,9 +303,10 @@ pub enum TypeError {
     },
 
     /// A rule holds a pattern of a map or a list that a stored rule
-    /// body cannot hold: one with a constant map or list inside it, which
-    /// a body writes as bytes it does not read back. The rule runs where
-    /// it was built, and cannot be installed.
+    /// body cannot hold. The rule runs where it was built, and cannot be
+    /// installed. A body holds every pattern a rule that compiles holds,
+    /// constant maps and lists inside it included, so no rule this
+    /// release compiles is refused this way.
     #[error(
         "The rule holds the pattern {pattern} and cannot be stored in format {format} of a rule body: {reason}"
     )]

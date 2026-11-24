@@ -199,7 +199,7 @@ struct ConceptQueryOut<'a> {
 struct ConceptQueryIn {
     assert: ConceptDescriptor,
     #[serde(rename = "where")]
-    terms: BTreeMap<String, serde_json::Value>,
+    terms: BTreeMap<String, crate::term::Buffered>,
 }
 
 impl Serialize for ConceptQuery {
@@ -243,7 +243,7 @@ impl<'de> Deserialize<'de> for ConceptQuery {
         use serde::de::Error as _;
         let raw = ConceptQueryIn::deserialize(deserializer)?;
         let mut terms = Parameters::new();
-        for (name, value) in raw.terms {
+        for (name, crate::term::Buffered(value)) in raw.terms {
             let collection = raw.assert.collections().any(|(field, _)| field == name);
             // An entry object carries `the`/`is` and no `?`, and is
             // empty when both are blank, which are left out; anything

@@ -259,15 +259,13 @@ pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
 /// those facts, uninstalling it.
 ///
 /// A rule that holds a pattern is stored as any other, its body in
-/// format 5 (see [`body`](crate::rule::body)). One whose pattern a body
-/// cannot hold, a constant map or list inside it
-/// ([`DeductiveRule::storable`]), has no body: asserting it records a
-/// [`Refusal`] carrying
-/// [`TypeError::UnstorablePattern`](crate::TypeError::UnstorablePattern)
-/// on the target and stages nothing, so a transaction holding it fails
-/// to commit. A target that can hold the rule itself, the changes laid
-/// over a line for a query, keeps it and stages its index facts, the
-/// refusal beside them.
+/// format 5 (see [`body`](crate::rule::body)). A rule that cannot be
+/// stored ([`DeductiveRule::storable`]) would have no body: asserting it
+/// records a [`Refusal`] on the target and stages nothing, so a
+/// transaction holding it fails to commit, and a target that can hold the
+/// rule itself, the changes laid over a line for a query, keeps it and
+/// stages its index facts, the refusal beside them. Every rule that
+/// compiles can be stored now, so no rule is refused this way.
 ///
 /// ```no_run
 /// # use dialog_query::DeductiveRule;
@@ -367,8 +365,8 @@ impl Statement for DeductiveRule {
 /// dispatches on the head field), the `induces` head index, and the
 /// `on` trigger index dispatch probes by touched attribute. Retracting
 /// the same rule erases those facts, uninstalling it. A rule that holds
-/// a pattern is stored in format 5; one whose pattern has no written
-/// form is refused as a deductive one is, and no target holds it.
+/// a pattern is stored in format 5; one that could not be stored would
+/// be refused as a deductive one is, and no target would hold it.
 impl Statement for &InductiveRule {
     /// An inductive rule fires at commit, from its stored body, so one
     /// whose pattern a stored body cannot write is refused wherever it

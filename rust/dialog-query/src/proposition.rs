@@ -164,8 +164,10 @@ impl Serialize for Proposition {
 
 impl<'de> Deserialize<'de> for Proposition {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // Deserialize into a raw JSON value first so we can peek at the "assert" field
-        let raw: serde_json::Value = serde_json::Value::deserialize(deserializer)?;
+        // Deserialize into a raw JSON value first so we can peek at the
+        // "assert" field, through a buffer that reads a stored body's
+        // composite constants.
+        let raw: serde_json::Value = crate::term::buffer(deserializer)?;
 
         let assert_val = raw
             .get("assert")

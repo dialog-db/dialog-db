@@ -771,7 +771,7 @@ impl<'de> serde::Deserialize<'de> for Pattern {
         use serde::de::Error as _;
         // Read through a value that can be looked into before it is
         // known which of the two it is, as a term is read.
-        let raw = serde_json::Value::deserialize(deserializer)?;
+        let raw = crate::term::buffer(deserializer)?;
         Pattern::read(raw).map_err(D::Error::custom)
     }
 }
@@ -948,28 +948,6 @@ pub(crate) fn held<'a>(premises: impl IntoIterator<Item = &'a Premise>) -> Optio
             .shapes()
             .next()
             .map(|(_, pattern)| pattern.to_string())
-    })
-}
-
-/// The first map or list of terms `premises` hold that a stored rule
-/// body cannot hold, as it is written, with why: one that holds a
-/// constant map or list. A composite is written in a stored body as its
-/// canonical bytes, and a rule body's terms are read through a form that
-/// holds no bytes, so such a constant would not read back and the rule
-/// would be inert wherever it is stored.
-pub(crate) fn unstorable<'a>(
-    premises: impl IntoIterator<Item = &'a Premise>,
-) -> Option<(String, String)> {
-    premises.into_iter().find_map(|premise| {
-        premise.parameters().shapes().find_map(|(_, pattern)| {
-            let reason = pattern.terms().into_iter().find_map(|term| match term {
-                Term::Constant(Value::Composite(constant)) => Some(format!(
-                    "the constant {constant:?} inside it is a map or a list, which a stored rule body holds as bytes it does not read back"
-                )),
-                _ => None,
-            })?;
-            Some((pattern.to_string(), reason))
-        })
     })
 }
 

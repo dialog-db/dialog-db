@@ -4,10 +4,8 @@
 //! afresh, held in the session overlay, and kept current by a
 //! subscription. Run on the volatile and the filesystem providers.
 //!
-//! A rule whose pattern a stored body cannot hold, one with a constant map
-//! or list inside it, is still refused: committing one fails with
-//! [`CommitError::Refused`], carrying [`TypeError::UnstorablePattern`] and
-//! the rule's entity, and nothing the transaction holds is written.
+//! A rule that holds a constant map or list, inside a pattern or as a
+//! term, is stored and runs from what is stored the same way.
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -15,13 +13,11 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use anyhow::Result;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
-    Changes, Composite, DialogCorpusError, Entity, Fact, Relation as CorpusRelation, Selector,
-    Value,
+    Changes, Composite, Entity, Fact, Relation as CorpusRelation, Selector, Value,
 };
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_peer::{Peer, PeerSpace, Session};
 use dialog_query::concept::query::ConceptQuery;
-use dialog_query::error::TypeError;
 use dialog_query::query::Output as _;
 use dialog_query::rule::body::format_of;
 use dialog_query::types::Any;
@@ -35,7 +31,7 @@ use ipld_core::ipld::Ipld;
 
 use crate::helpers::test_repo;
 use crate::rules::source_attr;
-use crate::{Branch, CommitError, Repository};
+use crate::{Branch, Repository};
 
 fn text(value: &str) -> Value {
     Value::String(value.into())
@@ -86,11 +82,9 @@ fn inductive() -> Result<InductiveRule> {
     )?)
 }
 
-/// A deductive rule whose pattern holds a constant map, which a stored
-/// body writes as bytes it does not read back, so it cannot be stored:
-/// `note/payload` of `?this` matches `{"title" ?heading, "by" {"name"
-/// "me"} ..}`.
-fn unwritable() -> Result<DeductiveRule> {
+/// A deductive rule whose pattern holds a constant map: `note/payload`
+/// of `?this` matches `{"title" ?heading, "by" {"name" "me"} ..}`.
+fn by_me() -> Result<DeductiveRule> {
     let by: Value = Composite::map([(text("name"), text("me"))])?.into();
     let mut terms = Parameters::new();
     terms.insert("this".into(), Term::var("this"));
@@ -129,19 +123,6 @@ async fn read<S: PeerSpace>(
         .await?
         .try_collect::<Vec<Fact>>()
         .await?)
-}
-
-/// Whether `error` is the refusal of `rule` for the pattern it holds.
-fn refuses(error: &CommitError, rule: &Entity) -> bool {
-    matches!(
-        error,
-        CommitError::Refused(refusal)
-            if refusal.entity() == rule
-                && matches!(
-                    refusal.reason::<TypeError>(),
-                    Some(TypeError::UnstorablePattern { .. })
-                )
-    )
 }
 
 fn payload(title: &str) -> Result<Composite> {
@@ -300,58 +281,10 @@ async fn committed<S: PeerSpace>(
     Ok(())
 }
 
-/// Asserts `stage` into a transaction beside a plain fact and commits:
-/// the commit is refused for `rule`, the head stays, and neither the
-/// rule's facts nor the plain fact are written.
-async fn refused<S: PeerSpace>(
-    repo: &Repository<dialog_credentials::Credential>,
-    branch: &Branch,
-    session: &Peer<S, Session>,
-    rule: &Entity,
-    stage: Changes,
-) -> Result<()> {
-    let before = branch.revision();
-    let bystander: Entity = "id:bystander".parse()?;
-    #[allow(deprecated)]
-    let error = branch
-        .transaction()
-        .assert(
-            the!("note/title")
-                .of(bystander.clone())
-                .is("kept?".to_string()),
-        )
-        .integrate(stage)
-        .commit()
-        .publish()
-        .perform(session)
-        .await
-        .expect_err("a transaction holding an unwritable pattern rule does not commit");
-    assert!(refuses(&error, rule), "{error:?}");
-    assert_eq!(branch.revision(), before, "the head did not move");
-    assert!(
-        read(
-            repo,
-            branch.name(),
-            Selector::new().of(rule.clone()),
-            session
-        )
-        .await?
-        .is_empty(),
-        "no fact of the rule was written"
-    );
-    assert!(
-        read(repo, branch.name(), Selector::new().of(bystander), session)
-            .await?
-            .is_empty(),
-        "nothing else the transaction held was written"
-    );
-    Ok(())
-}
-
 /// A deductive and an inductive rule that hold a pattern commit,
 /// asserted on the transaction itself, staged in a batch, or carried in
-/// a query layer's changes, and fire from what is stored. A rule whose
-/// pattern has no written form is refused the same ways.
+/// a query layer's changes, and fire from what is stored. So does a rule
+/// that holds a constant map inside its pattern.
 async fn scenario<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>) -> Result<()> {
     let repo = test_repo(session, peer).await;
     let rule = deductive()?;
@@ -460,40 +393,47 @@ async fn scenario<S: PeerSpace>(session: &Peer<S, Session>, peer: &Peer<S>) -> R
             .iter()
             .map(|fact| (fact.of.clone(), fact.is.clone()))
             .collect::<Vec<_>>(),
-        vec![(call, text("Call mum"))],
+        vec![(call.clone(), text("Call mum"))],
         "the inductive rule wrote the heading at commit"
     );
 
-    // A rule whose pattern has no written form is still refused.
-    let unwritable = unwritable()?;
-    let refusing = repo.branch("refused").open().perform(session).await?;
-    seed(&refusing, session).await?;
-    let before = refusing.revision();
+    // A rule that holds a constant map inside its pattern commits, and
+    // fires from its stored body on the payload that holds the constant.
+    let by_me = by_me()?;
+    let holding = repo.branch("by-me").open().perform(session).await?;
+    seed(&holding, session).await?;
     #[allow(deprecated)]
-    let error = refusing
+    holding
         .transaction()
-        .assert(&unwritable)
+        .assert(&by_me)
         .commit()
         .publish()
         .perform(session)
-        .await
-        .expect_err("an unwritable pattern rule does not commit");
-    assert!(refuses(&error, &unwritable.this()), "{error:?}");
-    assert_eq!(refusing.revision(), before);
-    let mut staged = Changes::new();
-    staged.assert(&unwritable);
-    assert!(staged.is_empty(), "a durable batch stages nothing for it");
-    refused(&repo, &refusing, session, &unwritable.this(), staged).await?;
-    let layer = refusing.with(&unwritable);
-    assert!(layer.changes().refused().is_some());
-    refused(
-        &repo,
-        &refusing,
-        session,
-        &unwritable.this(),
-        layer.changes().clone(),
-    )
-    .await?;
+        .await?;
+    let body = stored(&repo, "by-me", session, &by_me.this()).await?;
+    assert_eq!(body, by_me.encode(), "the body is the rule's encoding");
+    assert!(
+        DeductiveRule::decode(&body)
+            .map_err(anyhow::Error::msg)?
+            .stored_as(&by_me.this())
+    );
+    let by: Value = Composite::map([(text("name"), text("me"))])?.into();
+    #[allow(deprecated)]
+    holding
+        .transaction()
+        .assert(the!("note/payload").of(call.clone()).is(Composite::map([
+            (text("title"), text("Call mum")),
+            (text("by"), by),
+        ])?))
+        .commit()
+        .publish()
+        .perform(session)
+        .await?;
+    assert_eq!(
+        derived(&repo, "by-me", session).await?,
+        vec![(call, text("Call mum"))],
+        "the stored rule fires on the payload by me alone"
+    );
     Ok(())
 }
 
@@ -523,8 +463,8 @@ async fn it_commits_a_pattern_rule_on_a_filesystem_branch() -> Result<()> {
 /// The branch's session overlay holds a pattern rule as it holds any
 /// rule, its body in format 5: asserted there, or applied from a query
 /// layer's changes, it lands, and every query of the branch derives
-/// through it. A rule whose pattern has no written form is still refused
-/// there with [`DialogCorpusError::Refused`], and nothing lands.
+/// through it. So does a rule that holds a constant map inside its
+/// pattern.
 #[dialog_common::test]
 async fn it_holds_a_pattern_rule_in_the_session_overlay() -> Result<()> {
     let (session, peer) = test_session_with_peer().await;
@@ -579,36 +519,24 @@ async fn it_holds_a_pattern_rule_in_the_session_overlay() -> Result<()> {
         .await?;
     assert_eq!(titles(&rows), vec![(milk, text("Buy milk"))]);
 
-    // A rule whose pattern has no written form is refused, typed.
-    let unwritable = unwritable()?;
-    let refused = |error: &DialogCorpusError| {
-        matches!(
-            error,
-            DialogCorpusError::Refused(refusal)
-                if refusal.entity() == &unwritable.this()
-                    && matches!(
-                        refusal.reason::<TypeError>(),
-                        Some(TypeError::UnstorablePattern { .. })
-                    )
-        )
-    };
-    let before = branch.overlay().revision();
-    let Err(error) = branch.overlay().assert(&unwritable) else {
-        panic!("the overlay refuses the unwritable rule");
-    };
-    assert!(refused(&error), "{error:?}");
-    let layer = branch.with(&unwritable);
-    let error = branch
+    // A rule that holds a constant map inside its pattern lands, its body
+    // in format 5, which reads back as the rule.
+    let by_me = by_me()?;
+    branch.overlay().assert(&by_me)?;
+    let sources = branch
         .overlay()
-        .apply(layer.changes().clone())
-        .expect_err("the overlay refuses a layer's changes");
-    assert!(refused(&error), "{error:?}");
-    assert_eq!(branch.overlay().revision(), before, "nothing landed");
+        .scan(&Selector::new().of(by_me.this()).the(source_attr()));
+    let [source] = sources.as_slice() else {
+        anyhow::bail!("one body, found {}", sources.len());
+    };
+    let Value::Bytes(body) = &source.is else {
+        anyhow::bail!("the body is bytes");
+    };
+    assert_eq!(format_of(body), Some(5));
     assert!(
-        branch
-            .overlay()
-            .scan(&Selector::new().of(unwritable.this()))
-            .is_empty()
+        DeductiveRule::decode(body)
+            .map_err(anyhow::Error::msg)?
+            .stored_as(&by_me.this())
     );
     Ok(())
 }
