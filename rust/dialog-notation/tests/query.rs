@@ -1137,3 +1137,26 @@ async fn it_reads_a_record_and_a_list_through_value() -> Result<()> {
     assert!(dialog_notation::value::record(&Value::String("x".into()))?.is_none());
     Ok(())
 }
+
+/// A call that takes a query's answer apart by a record's keys matches
+/// it whatever order the keys are written in, the call's or the
+/// query's: a record says the same in any order.
+#[dialog_common::test]
+async fn it_takes_an_answer_apart_by_its_keys_in_any_order() -> Result<()> {
+    let mut notebook = todos().await?;
+    let mut answers = Vec::new();
+    for written in ["{:title ?x :tags ?g}", "{:tags ?g :title ?x}"] {
+        let asked = format!(
+            "{TODOS}{CARD}
+             (query (todo/titled ?t is: ?title)
+               (todo/card ?t is: {written})
+               (is ?title ?x))
+             (select (todo/titled ?t is: ?title))"
+        );
+        let found = report(&mut notebook, &asked).await?;
+        answers.push(found);
+    }
+    assert!(!answers[0].is_empty(), "{answers:?}");
+    assert_eq!(answers[0], answers[1]);
+    Ok(())
+}
