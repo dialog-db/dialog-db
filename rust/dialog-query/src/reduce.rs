@@ -1150,6 +1150,64 @@ mod tests {
         assert_eq!(outputs[0], outputs[2]);
     }
 
+    /// `distinct` folds a group to the set of its present values, a
+    /// composite list in the order of their bytes, each value once,
+    /// whatever order the rows came in; a group whose inputs are all
+    /// absent folds to the empty list.
+    #[dialog_common::test]
+    async fn it_folds_a_group_to_the_set_of_its_values() {
+        let base = vec![
+            row(&[("dept", Some(dept("eng"))), ("x", Some(dept("b")))]),
+            row(&[("dept", Some(dept("eng"))), ("x", Some(dept("a")))]),
+            row(&[("dept", Some(dept("eng"))), ("x", Some(dept("b")))]),
+            row(&[("dept", Some(dept("ops"))), ("x", None)]),
+        ];
+        let mut outputs = Vec::new();
+        for permutation in [[0, 1, 2, 3], [3, 2, 1, 0], [1, 3, 0, 2]] {
+            let rows = permutation
+                .into_iter()
+                .map(|index: usize| base[index].clone())
+                .collect();
+            let reduce = Reduce::new(
+                vec!["dept".to_string()],
+                vec![ReduceEntry::new(
+                    "values",
+                    Aggregator::Distinct,
+                    Term::var("x"),
+                )],
+            );
+            outputs.push(reduce.fold(selection(rows)).await.unwrap());
+        }
+        assert_eq!(outputs[0], outputs[1]);
+        assert_eq!(outputs[0], outputs[2]);
+        let eng = find(&outputs[0], "dept", &dept("eng"));
+        assert_eq!(
+            present(eng, "values"),
+            Value::Composite(Composite::list([dept("a"), dept("b")]).unwrap())
+        );
+        let ops = find(&outputs[0], "dept", &dept("ops"));
+        assert_eq!(
+            present(ops, "values"),
+            Value::Composite(Composite::list([]).unwrap())
+        );
+    }
+
+    /// `distinct` takes any present value and gives a list that is never
+    /// absent, and no rule's `reduce` spells it.
+    #[dialog_common::test]
+    fn it_types_distinct_as_a_list_no_rule_spells() {
+        assert_eq!(
+            Aggregator::Distinct.input_requirement(),
+            Type::from(Primitive::ALL)
+        );
+        assert_eq!(
+            Aggregator::Distinct.output_type(&Type::from(ValueType::String).optional()),
+            Some(Type::from(ValueType::CompositeList))
+        );
+        assert_eq!(Aggregator::Distinct.to_string(), "distinct");
+        assert!(serde_json::from_value::<Aggregator>(serde_json::json!("distinct")).is_err());
+    }
+
     /// min/max order through the range-predicate machinery for
     /// numerics and through natural order for strings.
     #[dialog_common::test]
