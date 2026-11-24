@@ -220,6 +220,54 @@ async fn it_refuses_a_set_whose_members_are_not_constants() -> Result<()> {
     Ok(())
 }
 
+/// Two concepts of one name and other labels stand side by side, and a
+/// use finds the one its labels fit, whichever is declared first: a
+/// collection of entries under one, a plain field under the other. No
+/// refusal names a variable the compiler made.
+#[dialog_common::test]
+async fn it_finds_the_concept_of_one_name_its_labels_fit_in_any_order() -> Result<()> {
+    let entries = "(concept (notebook/blocks ?n block: {?k ?b})
+       (xyz.tonk.notebook/?k of: ?n is: ?b as: :entity cardinality: :many by: :position))";
+    let notes = "(concept (notebook/blocks ?n note: ?x)
+       (xyz.tonk.notebook/note of: ?n is: ?x as: :text cardinality: :one))";
+    let query = "(concept (notebook/named ?n title: ?title)
+       (xyz.tonk.notebook/title of: ?n is: ?title as: :text cardinality: :one))
+     (query (notebook/outline ?n is: ?outline)
+       (notebook/named ?n title: ?title)
+       (notebook/blocks ?n block: (collect ?blocks))
+       (is ?outline {:title ?title :blocks ?blocks}))";
+    let mut answers = Vec::new();
+    for (first, second) in [(entries, notes), (notes, entries)] {
+        let mut notebook = Notebook::open().await?;
+        notebook
+            .submit(&format!(
+                "{first}\n{second}\n{query}
+                 (assert (notebook/blocks notebook:1 block: {{\"N1\" block:a}}))
+                 (assert (notebook/blocks notebook:1 note: \"hello\"))
+                 (assert (notebook/named notebook:1 title: \"Field notes\"))"
+            ))
+            .await
+            .map_err(|error| anyhow::anyhow!("{first} first: {error:#}"))?;
+        let answer = notebook
+            .submit("(select (notebook/outline ?n is: ?outline))")
+            .await;
+        if let Err(error) = &answer {
+            assert!(!error.to_string().contains("?["), "{error}");
+        }
+        answers.push(
+            answer
+                .map_err(|error| anyhow::anyhow!("{first} first: {error:#}"))?
+                .0,
+        );
+    }
+    assert_eq!(answers[0], answers[1]);
+    assert_eq!(
+        answers[0],
+        vec![r#"(notebook/outline notebook:1 is: {:title "Field notes" :blocks {"N1" block:a}})"#]
+    );
+    Ok(())
+}
+
 /// The folds a selection asks Dialog-DB for.
 fn folds(text: &str) -> Result<usize> {
     let analysis = dialog_notation::Analyzer::new()?.analyze(&dialog_notation::parse(text)?);

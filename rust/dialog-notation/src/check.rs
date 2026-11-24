@@ -618,6 +618,19 @@ mod tests {
                 "(concept (a ?t v: ?x) (xyz.b ?t v: ?x))",
                 "(select (a ?t v: ?x))",
             ],
+            // Two concepts of one name and other labels: an entry field
+            // under one, a plain field under the other.
+            vec![
+                "(concept (notebook/blocks ?n block: {?k ?b}) \
+                 (xyz.tonk.notebook/?k of: ?n is: ?b as: :entity cardinality: :many by: :position))",
+                "(concept (notebook/blocks ?n note: ?x) \
+                 (xyz.tonk.notebook/note of: ?n is: ?x as: :text cardinality: :one))",
+                "(concept (notebook/named ?n title: ?t) \
+                 (xyz.tonk.notebook/title of: ?n is: ?t as: :text cardinality: :one))",
+                "(query (notebook/outline ?n is: ?o) (notebook/named ?n title: ?t) \
+                 (notebook/blocks ?n block: (collect ?blocks)) (is ?o {:title ?t :blocks ?blocks}))",
+                "(select (notebook/outline ?n is: ?o))",
+            ],
         ];
         for forms in documents {
             let first = meaning(&forms.join("\n"))?;
