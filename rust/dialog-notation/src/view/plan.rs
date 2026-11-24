@@ -1122,7 +1122,7 @@ impl Plan {
                 _ => condition.premise.clone(),
             })
             .collect();
-        let row = self.columns(layer, entity.is_some());
+        let row = self.columns(layer, entity.is_some())?;
         let mut items = Vec::new();
         if row.is_empty() {
             // A row binds nothing but the entity given: it says it.
@@ -1190,18 +1190,26 @@ impl Plan {
 
     /// The variables a layer's query reports, the entity left out where
     /// it is given.
-    fn columns(&self, layer: usize, given: bool) -> Vec<String> {
-        self.layers[layer]
+    fn columns(&self, layer: usize, given: bool) -> Result<Vec<String>, Error> {
+        let layer = self.layers.get(layer).ok_or_else(|| {
+            Error::Refused(format!(
+                "a plan of {} layers has no layer {layer}",
+                self.layers.len()
+            ))
+        })?;
+        Ok(layer
             .row
             .iter()
             .filter(|name| !given || **name != self.entity)
             .cloned()
-            .collect()
+            .collect())
     }
 
     /// A match of layer `layer`'s query as a row: each variable of
     /// [`Layer::row`] and what it was bound to, the entity rendered too
-    /// where it was given.
+    /// where it was given. Every column is bound by the layer's query, so
+    /// one the match leaves out, a row record that is no record, and a
+    /// layer the plan has not are errors.
     pub fn row(
         &self,
         layer: usize,
@@ -1210,12 +1218,15 @@ impl Plan {
         entity: Option<&Value>,
     ) -> Result<BTreeMap<String, Value>, Error> {
         let values = query.values(conclusion)?;
-        let names = self.columns(layer, entity.is_some());
-        let record = values
-            .get(ROW_FIELD)
-            .map(crate::data::entries)
-            .transpose()?
-            .flatten();
+        let names = self.columns(layer, entity.is_some())?;
+        let record = match values.get(ROW_FIELD) {
+            Some(record) => Some(crate::data::entries(record)?.ok_or_else(|| {
+                Error::Refused(format!(
+                    "a row reported as one record is {record:?}, which is no record"
+                ))
+            })?),
+            None => None,
+        };
         let mut row = BTreeMap::new();
         for (at, name) in names.iter().enumerate() {
             let label = format!("c{at}");
@@ -1223,9 +1234,10 @@ impl Plan {
                 Some(record) => crate::data::field(record, &label).cloned(),
                 None => values.get(&label).cloned(),
             };
-            if let Some(value) = value {
-                row.insert(name.clone(), value);
-            }
+            let value = value.ok_or_else(|| {
+                Error::Refused(format!("a match of layer {layer} binds no {name}"))
+            })?;
+            row.insert(name.clone(), value);
         }
         if let Some(entity) = entity
             && !self.entity.is_empty()
