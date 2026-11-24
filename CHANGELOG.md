@@ -43,6 +43,11 @@ What this changes for you:
   `(retract (todo todo:1))`, and the same in a rule with premises, are
   unchanged. One field is retracted through its relation,
   `(retract (xyz.todo/state of: todo:1 is: :open))`.
+- A refusal names what the author wrote: the author's form where it
+  quoted the compiled rule, `?t` for the notation's `?t[0]`, and `_`
+  for a variable the notation made for none. Dialog-DB's "Required
+  bindings ?[2], part" is said as the head concluding under `part:` what
+  its premises do not bind.
 - A concept whose body reads another concept, `(concept (doc/plain ?d
   part: ?v) (alt ?d v: ?v))`, is declared as a concept whatever its name.
   Under a name whose first part was a declared concept it was read as a

@@ -142,6 +142,7 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
     for (tree, origin) in analysis.analyzed.iter().zip(&analysis.origin) {
         let tree = described(tree, &checked.written, *origin);
         let compiled = compile(&tree);
+        let shown = tree.to_string();
         analyzed.push(tree);
         match compiled {
             Ok(compiled) => {
@@ -149,12 +150,23 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
                 steps.extend(compiled);
             }
             // What the compiler refuses is said of the tree the rule
-            // came of: nothing yet says which part of it.
-            Err(error) => checked.diagnostics.push(Diagnostic::refused(
-                trees.get(*origin).cloned(),
-                vec![Segment::Item(*origin)],
-                error,
-            )),
+            // came of: nothing yet says which part of it. Where it
+            // quotes the rule it compiled, the author's form is quoted.
+            Err(error) => {
+                let written = trees.get(*origin).cloned();
+                let error = match &written {
+                    Some(written) => {
+                        let written = written.to_string();
+                        error.said(&|text| text.replace(&shown, &written))
+                    }
+                    None => error,
+                };
+                checked.diagnostics.push(Diagnostic::refused(
+                    written,
+                    vec![Segment::Item(*origin)],
+                    error,
+                ))
+            }
         }
     }
     for (origin, error) in clashes(steps.iter().zip(forms.iter().copied()), &trees) {
@@ -251,11 +263,54 @@ pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
 /// `diagnostic` as a person reads it: a derived attribute it names is
 /// written as the name it is written by, never the hash of it.
 fn spell(diagnostic: &mut Diagnostic, analyzer: &Analyzer) {
-    diagnostic.message = analyzer.spelled(&diagnostic.message);
+    diagnostic.message = said(&diagnostic.message, analyzer);
     diagnostic.refusal = diagnostic
         .refusal
         .take()
-        .map(|error| error.said(&|text| analyzer.spelled(text)));
+        .map(|error| error.said(&|text| said(text, analyzer)));
+}
+
+/// `text` as an author is given it: what the notation named spelled as
+/// written, and its variables untagged.
+fn said(text: &str, analyzer: &Analyzer) -> String {
+    untagged(&analyzer.spelled(text))
+}
+
+/// `text` with each variable the notation tagged as the author wrote it,
+/// `?t[0]` as `?t`, and one the notation made for no variable of the
+/// author's, `?[2]`, as `_`.
+fn untagged(text: &str) -> String {
+    let mut said = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('?') {
+        said.push_str(&rest[..at]);
+        let tail = &rest[at + 1..];
+        let name_end = tail
+            .find(|c: char| !(c.is_alphanumeric() || "-_./*+!<>=".contains(c)))
+            .unwrap_or(tail.len());
+        let (name, after) = tail.split_at(name_end);
+        let tag = after
+            .strip_prefix('[')
+            .and_then(|inside| inside.find(']').map(|close| close + 2));
+        match tag {
+            Some(length) if name.is_empty() => {
+                said.push('_');
+                rest = &after[length..];
+            }
+            Some(length) => {
+                said.push('?');
+                said.push_str(name);
+                rest = &after[length..];
+            }
+            None => {
+                said.push('?');
+                said.push_str(name);
+                rest = after;
+            }
+        }
+    }
+    said.push_str(rest);
+    said
 }
 
 /// Each form of `steps` whose report relation is named as one of an

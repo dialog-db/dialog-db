@@ -1668,9 +1668,35 @@ fn deductive(written: Json, patterns: Vec<Proposition>) -> Result<DeductiveRule,
     let mut descriptor: DeductiveRuleDescriptor =
         serde_json::from_value(written).map_err(|error| refused("the rule", error))?;
     descriptor.when.extend(patterns);
-    descriptor
-        .compile()
-        .map_err(|error| refused("the rule", error))
+    descriptor.compile().map_err(rule_refused)
+}
+
+/// Dialog-DB's refusal of a rule, said in the author's terms: a binding
+/// it finds missing is named by what the author wrote, and a variable
+/// the notation made for a part of a pattern is left out.
+fn rule_refused(error: dialog_query::error::TypeError) -> Error {
+    match error {
+        dialog_query::error::TypeError::RequiredBindings { required } => {
+            // A variable is named with its `?`, and a field of the
+            // head by its label.
+            let mut named: Vec<String> = required
+                .iter()
+                .filter(|name| !crate::syntax::unwritten(name))
+                .map(|name| match name.starts_with('?') {
+                    true => name.to_string(),
+                    false => format!("{name}:"),
+                })
+                .collect();
+            named.sort();
+            Error::Refused(format!(
+                "Dialog-DB refuses the rule: its premises do not bind what its head \
+                 concludes under {}; a rule that derives concludes values its premises \
+                 bind, and a pattern in its head is not built from them",
+                named.join(", ")
+            ))
+        }
+        error => refused("the rule", error),
+    }
 }
 
 fn deduce(rule: &Rule, read: &Read) -> Result<Step, Error> {
@@ -1696,9 +1722,7 @@ fn induce(rule: &Rule, read: &Read, head: &str) -> Result<InductiveRule, Error> 
     let mut descriptor: InductiveRuleDescriptor =
         serde_json::from_value(written).map_err(|error| refused("the rule", error))?;
     descriptor.when.extend(patterns);
-    descriptor
-        .compile()
-        .map_err(|error| refused("the rule", error))
+    descriptor.compile().map_err(rule_refused)
 }
 
 /// A report. When the premises are one read, the read is what is
