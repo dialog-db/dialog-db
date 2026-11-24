@@ -18,10 +18,10 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-use crate::Branch;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::helpers::filesystem_session_with_peer;
 use crate::helpers::test_repo;
+use crate::{Branch, LayerDeclaration, LayerType};
 use anyhow::Result;
 use dialog_corpus::{Cardinality, Changes, Entity, Relation, Selector, Update, Value};
 use dialog_peer::helpers::test_session_with_peer;
@@ -619,6 +619,292 @@ async fn direct_writes_in_order<S: PeerSpace>(
     Ok(())
 }
 
+/// `assert! task{title: ?title} when <domain>{task: ?this, <name>:
+/// ?title}`: asserts the title the command names in its field `name`.
+fn assert_title_from(domain: &str, name: &str) -> Result<InductiveRule> {
+    Ok(serde_json::from_value(json!({
+        "assert!": { "with": { "title": field("task/title", Cardinality::One) } },
+        "when": [
+            command_premise(
+                domain,
+                &[("task", "entity:"), (name, "text:")],
+                json!({ "task": var("this"), name: var("title") }),
+            )
+        ]
+    }))?)
+}
+
+/// The permutation of `rules` their identities sort them in: the order
+/// they fire in when they meet in a round.
+fn firing_order(rules: &[InductiveRule]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..rules.len()).collect();
+    order.sort_by_key(|at| rules[*at].this());
+    order
+}
+
+/// On a cardinality-one cell holding `A`, one round in which a rule
+/// asserts `A`, another asserts `B` and a third retracts `A`: two
+/// claims asserted for one cell, a conflict before any retraction
+/// meets it. Every one of the six firing orders the rules can take
+/// leaves the cell as the others do, holding `B` alone: the assertion
+/// of `B` succeeds `A` whether or not the retraction of `A` is kept.
+async fn retract_beside_two_asserts<S: PeerSpace>(
+    session: &Peer<S, Session>,
+    peer: &Peer<S>,
+) -> Result<()> {
+    let mut seen: Vec<Vec<usize>> = Vec::new();
+    for n in 0..512 {
+        let domain = format!("cmd.conflict{n}");
+        let rules = vec![
+            assert_title_from(&domain, "same")?,
+            assert_title_from(&domain, "other")?,
+            retract_title(&domain)?,
+        ];
+        let order = firing_order(&rules);
+        if seen.contains(&order) {
+            continue;
+        }
+        seen.push(order.clone());
+
+        let repo = test_repo(session, peer).await;
+        let branch = repo.branch("main").open().perform(session).await?;
+        let mut ground = Changes::new();
+        write(
+            &mut ground,
+            "task/title",
+            &task(),
+            text("A"),
+            Cardinality::One,
+        );
+        commit(&branch, session, &rules, ground).await?;
+        dispatch(
+            &branch,
+            session,
+            command(
+                &domain,
+                &[
+                    ("task", Value::Entity(task())),
+                    ("same", text("A")),
+                    ("other", text("B")),
+                ],
+            ),
+        )
+        .await?;
+        assert_eq!(
+            values(&branch, session, "task/title", &task()).await?,
+            vec![text("B")],
+            "the cell holds the other assertion alone (firing order {order:?})"
+        );
+        if seen.len() == 6 {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("only the firing orders {seen:?} were found")
+}
+
+/// `assert! task{pinned: "yes"} when task{wanted: "yes"} unless
+/// task{pinned: "no"}`: watches `task/pinned` through its `unless`, so
+/// a round touching the claim evaluates it.
+fn pin() -> Result<InductiveRule> {
+    Ok(serde_json::from_value(json!({
+        "assert!": { "with": { "pinned": field("task/pinned", Cardinality::One) } },
+        "when": [
+            {
+                "assert": { "with": { "wanted": field("task/wanted", Cardinality::One) } },
+                "where": { "this": var("this"), "wanted": "yes" }
+            },
+            { "assert": "==", "where": { "this": var("pinned"), "is": "yes" } }
+        ],
+        "unless": [
+            {
+                "assert": { "with": { "pinned": field("task/pinned", Cardinality::One) } },
+                "where": { "this": var("this"), "pinned": "no" }
+            }
+        ]
+    }))?)
+}
+
+/// `retract! task{pinned: ?pinned} when task{pinned: ?pinned}, task{wanted:
+/// "yes"}`: takes back the pin wherever the task is wanted.
+fn unpin() -> Result<InductiveRule> {
+    Ok(serde_json::from_value(json!({
+        "retract!": { "with": { "pinned": field("task/pinned", Cardinality::One) } },
+        "when": [
+            {
+                "assert": { "with": { "pinned": field("task/pinned", Cardinality::One) } },
+                "where": { "this": var("this"), "pinned": var("pinned") }
+            },
+            {
+                "assert": { "with": { "wanted": field("task/wanted", Cardinality::One) } },
+                "where": { "this": var("this"), "wanted": "yes" }
+            }
+        ]
+    }))?)
+}
+
+/// An `assert!` rule and a `retract!` rule of one claim, both watching
+/// its attribute, meeting with the claim held. They retract the old
+/// value and assert the new, and the two coincide, so the claim holds
+/// and the round writes nothing: the commit settles. (Before, the
+/// retraction was kept, the next round asserted the claim again, the
+/// one after retracted it, and the commit failed with
+/// `InductionDivergence`.)
+async fn opposed_rules_settle<S: PeerSpace>(
+    session: &Peer<S, Session>,
+    peer: &Peer<S>,
+) -> Result<()> {
+    let repo = test_repo(session, peer).await;
+    let branch = repo.branch("main").open().perform(session).await?;
+    let mut ground = Changes::new();
+    write(
+        &mut ground,
+        "task/pinned",
+        &task(),
+        text("yes"),
+        Cardinality::One,
+    );
+    commit(&branch, session, &[pin()?, unpin()?], ground).await?;
+
+    let mut wanted = Changes::new();
+    write(
+        &mut wanted,
+        "task/wanted",
+        &task(),
+        text("yes"),
+        Cardinality::One,
+    );
+    commit(&branch, session, &[], wanted).await?;
+    assert_eq!(
+        values(&branch, session, "task/pinned", &task()).await?,
+        vec![text("yes")],
+        "the pin both rules name holds"
+    );
+    Ok(())
+}
+
+/// The layer the layered cases write in.
+fn state() -> Entity {
+    entity("session:state")
+}
+
+/// `task/title` as a head or premise field landing in the state layer.
+fn layered_title() -> Json {
+    json!({ "the": "task/title", "as": "text:", "in": "session:state" })
+}
+
+/// [`retract_title`], its head and premise in the state layer.
+fn retract_layered_title(domain: &str) -> Result<InductiveRule> {
+    Ok(serde_json::from_value(json!({
+        "retract!": { "with": { "title": layered_title() } },
+        "when": [
+            command_premise(domain, &[("task", "entity:")], json!({ "task": var("this") })),
+            {
+                "assert": { "with": { "title": layered_title() } },
+                "where": { "this": var("this"), "title": var("title") }
+            }
+        ]
+    }))?)
+}
+
+/// [`assert_title`], its head in the state layer.
+fn assert_layered_title(domain: &str) -> Result<InductiveRule> {
+    Ok(serde_json::from_value(json!({
+        "assert!": { "with": { "title": layered_title() } },
+        "when": [
+            command_premise(
+                domain,
+                &[("task", "entity:"), ("title", "text:")],
+                json!({ "task": var("this"), "title": var("title") }),
+            )
+        ]
+    }))?)
+}
+
+/// Renames `task:1`, titled `from` in the state layer, to `to` there in
+/// one tick, through a stack, the rules firing in the order asked. What
+/// the layer holds of the task's title afterwards.
+async fn rename_in_a_layer<S: PeerSpace>(
+    session: &Peer<S, Session>,
+    peer: &Peer<S>,
+    from: &str,
+    to: &str,
+    retract_first: bool,
+) -> Result<Vec<Value>> {
+    let repo = test_repo(session, peer).await;
+    let branch = repo.branch("main").open().perform(session).await?;
+    let pair = Pair::build(
+        "relabel",
+        retract_first,
+        retract_layered_title,
+        assert_layered_title,
+    )?;
+    let mut transaction = branch
+        .transaction()
+        .assert(LayerDeclaration::new(state(), LayerType::Session));
+    for rule in pair.rules() {
+        transaction = transaction.assert(rule);
+    }
+    transaction.commit().publish().perform(session).await?;
+    branch.refresh(session).await?;
+
+    let stack = branch.stack().perform(session).await?;
+    let mut ground = Changes::new();
+    ground.associate_in(
+        state(),
+        relation("task/title"),
+        task(),
+        text(from),
+        Cardinality::One,
+    );
+    stack
+        .transaction()
+        .assert(ground)
+        .commit()
+        .publish()
+        .perform(session)
+        .await?;
+    stack
+        .invoke(command(
+            &pair.domain,
+            &[("task", Value::Entity(task())), ("title", text(to))],
+        ))
+        .perform(session)
+        .await?;
+
+    let memory = stack
+        .layer(&state())
+        .and_then(|layer| layer.ephemeral().cloned())
+        .ok_or_else(|| anyhow::anyhow!("the state layer"))?;
+    let mut held: Vec<Value> = memory
+        .scan(&Selector::new().the(relation("task/title")).of(task()))
+        .into_iter()
+        .map(|fact| fact.is)
+        .collect();
+    held.sort_by_key(|value| format!("{value:?}"));
+    Ok(held)
+}
+
+/// In a layer, a rename to the title the task has keeps it, and a
+/// rename to another title leaves the new one alone.
+async fn rename_in_a_layer_cases<S: PeerSpace>(
+    session: &Peer<S, Session>,
+    peer: &Peer<S>,
+) -> Result<()> {
+    for retract_first in [true, false] {
+        assert_eq!(
+            rename_in_a_layer(session, peer, "Buy milk", "Buy milk", retract_first).await?,
+            vec![text("Buy milk")],
+            "renamed to its own title in the layer, the task keeps it (retract fires first: {retract_first})"
+        );
+        assert_eq!(
+            rename_in_a_layer(session, peer, "Buy milk", "Buy oat milk", retract_first).await?,
+            vec![text("Buy oat milk")],
+            "renamed in the layer, the task holds the new title alone (retract fires first: {retract_first})"
+        );
+    }
+    Ok(())
+}
+
 /// Every case, on one provider.
 macro_rules! cases {
     ($provider:ident, $root:ident = $make:expr, $session:expr) => {
@@ -680,6 +966,28 @@ macro_rules! cases {
                 let $root = $make;
                 let (session, peer) = $session;
                 direct_writes_in_order(&session, &peer).await
+            }
+
+            #[dialog_common::test]
+            async fn it_settles_opposed_rules_of_a_held_claim() -> Result<()> {
+                let $root = $make;
+                let (session, peer) = $session;
+                opposed_rules_settle(&session, &peer).await
+            }
+
+            #[dialog_common::test]
+            async fn it_leaves_one_value_whatever_order_two_asserts_and_a_retract_fire_in()
+            -> Result<()> {
+                let $root = $make;
+                let (session, peer) = $session;
+                retract_beside_two_asserts(&session, &peer).await
+            }
+
+            #[dialog_common::test]
+            async fn it_keeps_a_layered_title_renamed_to_itself() -> Result<()> {
+                let $root = $make;
+                let (session, peer) = $session;
+                rename_in_a_layer_cases(&session, &peer).await
             }
         }
     };
