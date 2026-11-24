@@ -84,6 +84,43 @@ Why: #858 ranks `max` and `min` over a listed type by the listing and
 deprecates `top`; the notation does not keep a spelling the engine is
 taking away.
 
+### The first commit after a `QueriedRanges` pull reads from the replica's own blocks
+
+[#861](https://github.com/dialog-db/dialog-db/pull/861)
+
+A commit reads its parent's revision record to carry the skip links
+along. Before a pull, that parent is the replica's own last revision,
+whose record it wrote. After a pull that adopted another device's head,
+it is that head, whose record the replica never read. A record is kept
+at a key hashed from its version, so whether it fell in a leaf the
+replica held was chance, and the first commit after a pull usually
+waited on the remote. In a long history that was nearly every time. A
+pull asked for `Download::QueriedRanges` now also brings the record of
+the head it adopts. Separately, a range scan whose range ended at the
+last key of a leaf read the leaf after it as well, and now stops at a
+separator past its end.
+
+What this changes for you:
+
+- A pull with `Download::QueriedRanges` that adopts a head fetches the
+  leaf holding that head's revision record, when the replica does not
+  hold it already. At most one leaf, and its path, per pull.
+- The first commit after such a pull answers from the replica's own
+  blocks. Before, it fetched that leaf.
+- Such a pull can now fail where it used to land: with
+  `DownloadError::Snapshot` when the remote cannot serve that one leaf,
+  or when every record kept at the head's slot fails verification.
+  Before, the pull landed and the next commit failed on the same read.
+  A head with no record at all, from history written before records
+  existed, is adopted as before.
+- A range scan (`PersistentTree::stream_range` and everything built on
+  it) no longer reads the subtree after a range that ends at the last
+  key of a subtree.
+
+Why: `QueriedRanges` exists so that an editor that answered one
+keystroke at once does not take a round trip for the next, and the
+record of a head is the one thing every commit on that head reads.
+
 ### A rule whose head has a field named `this` is refused, not a panic
 
 [#860](https://github.com/dialog-db/dialog-db/pull/860)
