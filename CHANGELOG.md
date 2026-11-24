@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A rule whose head has a field named `this` is refused, not a panic
 
-Pull request link to be added when it opens.
+[#860](https://github.com/dialog-db/dialog-db/pull/860)
 
 `this` is what every query and rule calls the entity, and a rule's
 identity names every head field but the entity. A head field named
