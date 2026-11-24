@@ -24,7 +24,7 @@ The branch was moved onto the engine as it will land: `feat/patterns` (#778) mer
 ## In the way
 
 1. 🔴 A rule that holds a pattern cannot be stored (format 5, #799), and the session overlay refuses one. A query whose row has more than one column beside its entity concludes it as one record by a map pattern, so it runs asked once and cannot be kept current. 14 of 31 layers of the views in the sketches and tests hold one, and every layer nested two levels deep does. The coordinating session has #799 ported onto #778 as `feat/rule-format-5`; it is merged here when ready.
-2. The cost on the new engine is not measured: `examples/cost.rs` stops at the card's rules (1). The bars are in the ledger and in [gaps.md](gaps.md).
+2. The cost, measured with format 5 merged locally ([journal](journal.md), 2026-11-24): at a thousand the three changes fall between the bars, at ten thousand a rename and a to-do added are refuted, and the notation's `Maintainer::apply` is most of it. The engine's fold is flat.
 3. Still evaluated in memory: a collected call to another query, a call every answer needs, a read whose conditions or rows are more than one query, a read grouped by more than one field beside a recorded row, a shape `(is ?x …)`, the joins between queries; and a view's count of a collected call, of a count in a collected query's template, of entries, or grouped by other than the root.
 4. Not built: `distinct` and the spread, definitions on the branch, names and namespaces, composites for syntax trees beyond what is kept now, variant cases, layers but `:control`, a limit, a query that calls itself.
 5. Not decided: `cardinality: :one` beside `top` (refused, as #827 does); rows of one head; what two entries of one key leave in a map.

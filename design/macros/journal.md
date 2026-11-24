@@ -1931,3 +1931,25 @@ The measurement that came in after (next entry but one above) bears on this: wha
 - A write and a rule's conclusion go by the attribute and carry no elector; only a read's field does.
 
 **Decided.** By the coordinating session: format 5 is ported onto #778 as `feat/rule-format-5` and merged here when ready, and the measurements wait for it; `Aggregator::Distinct` stays, apart from the notation's commits.
+
+## 2026-11-24, Measuring: one change at a thousand and ten thousand, on the engine
+
+**Question.** The ledger's second hypothesis (claims.md, "the cost measured is of two choices in the build"), on the engine as it lands, release build, and at ten thousand.
+
+**Method.** `cargo run --release -p dialog-notation --example cost -- 5 10 1000 10000`, with format 5 (`feat/rule-format-5` at `618233f`) merged locally, since the card's rows need it. [Output](rounds/cost-2026-11-24.txt). The 2026-11-19 run was the dev build, so its column is not the same build.
+
+| one change | N=10 | N=1000 | N=10000 | growth to 1000 | growth to 10000 | times plain at 1000 | at 10000 | 2026-11-19, 1000 | bar |
+|---|---|---|---|---|---|---|---|---|---|
+| rename | 1.6 ms | 3.3 | 56 | 2.1 | 35 | 8.3 | 61 | 4.5 | between at 1000; refuted at 10000 |
+| tag added | 1.9 | 1.3 | 5.1 | 0.7 | 2.6 | 8.2 | 7.1 | 4.3 | between |
+| to-do added | 1.6 | 3.7 | 62 | 2.3 | 39 | 11.2 | 65 | 5.4 | between at 1000; refuted at 10000 |
+| `select` one card | 1.9 | 2.1 | 2.8 | 1.1 | 1.5 | | | 4.4 | confirmed |
+| tags folded by the engine (B8) | 0.86 | 0.48 | 1.2 | 0.6 | 1.4 | 1.5 of its inner subscriptions | 1.7 | 138 | within |
+
+Node reads stay between 46 and 100 for every change, and no layer is evaluated whole again.
+
+**Where.** Driving the card's four layers by hand on the same seed, at ten thousand: the four polls take 3 to 5 ms together, each maintained, and the two whose cover grows with the page (10011 and 20010 ranges) take 1.2 to 1.6 ms each. `Maintainer::apply` takes 16 to 24 ms, against 0.4 to 0.6 ms at a thousand: it is the notation's own tree that does not scale. For a tag added, the chips' poll is the cost, 9 to 11 ms.
+
+**Learned.** The engine's fold meets the bar the maintainer was offered, flat and within 2 times of a plain subscription. The notation does not, and at ten thousand the cost is its own.
+
+**Decided.** Not decided. Nothing is made faster.
