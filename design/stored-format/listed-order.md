@@ -45,10 +45,11 @@ note is about what the migration does to what is stored.
 Until a space migrates, its lists stay as written, best first. `top`
 picks the first listed value present; `max` by the listing picks the
 last listed present, `min` the first. So `top` over a list is `min` over
-the same list, whichever order the list is in, for every value the
-list holds (a value it does not hold ranks below every listed one under
-`top`, `selective.rs:46` to `:48`; where `min` puts it is for
-`feat/listed-type-order` to say), and a concept with one
+the same list, whichever order the list is in, unlisted values
+included: an unlisted value loses to every listed one under `top`
+(`selective.rs:46` to `:48`) and, as the engine worker reports
+`feat/listed-type-order` (47a6a3c, to re-check when pushed), under `min`
+and `max` alike. A concept with one
 field of each is well defined: the two read opposite ends. What can
 mislead is the author's intent: over a list written best first, `max`
 picks the worst value. A field picking `max` over a list that some
