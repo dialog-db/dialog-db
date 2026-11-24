@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Error;
 use crate::form::Kind;
-use crate::select::{COLLECT, COUNT, ROW, SELECTED, collected, unknown_function};
+use crate::select::{COLLECT, COUNT, PART, ROW, ROW_FIELD, SELECTED, collected, unknown_function};
 use crate::syntax::{Parameters, Syntax};
 
 use super::{Expander, apply, items};
@@ -787,9 +787,9 @@ impl Expander {
     }
 
     /// The kernel rules that report what `conditions` bind, a column a
-    /// variable of `columns` in order, `c0` and on. Each row is told
-    /// apart by an entity made of all of them, so a row's values stay
-    /// together.
+    /// variable of `columns` in order, `c0` and on, under the entity the
+    /// conditions are about; with more than one column beside it, as one
+    /// record under [`ROW_FIELD`] too.
     fn reported(
         &mut self,
         columns: &[String],
@@ -806,36 +806,124 @@ impl Expander {
                     .join(" ")
             )));
         }
-        let row = Syntax::Variable(ROW_ENTITY.into());
-        let terms: BTreeMap<String, Syntax> = columns
+        let mut terms: BTreeMap<String, Syntax> = columns
             .iter()
             .enumerate()
             .map(|(at, name)| (format!("c{at}"), Syntax::Variable(name.clone())))
             .collect();
-        let head = apply(
-            "report",
-            vec![Syntax::Application(
-                Box::new(Syntax::Reference(ROW.into())),
-                Parameters {
-                    items: vec![row.clone()],
-                    terms: terms.clone(),
-                },
-            )],
-        );
-        let mut parts = vec![head];
-        parts.extend(conditions.iter().cloned());
-        parts.push(Syntax::Application(
-            Box::new(Syntax::Reference("id".into())),
-            Parameters {
-                items: vec![row],
-                terms,
-            },
-        ));
-        let rule = apply("rule", parts);
+        // A row is reported under the entity its reads are about, so a
+        // change to that entity's facts is maintained for that entity
+        // alone. Each column is a field. Where more than one column is
+        // not the entity, two rows of one entity could be read crossed,
+        // a field of one beside a field of the other, so the row is
+        // also one record, which is one value and keeps them together.
+        let about = about(conditions)
+            .filter(|about| matches!(about, Syntax::Variable(name) if columns.contains(name)));
+        let rule = match about {
+            Some(about) => {
+                if columns.len() > 2 {
+                    terms.insert(
+                        ROW_FIELD.into(),
+                        Syntax::Map(
+                            columns
+                                .iter()
+                                .enumerate()
+                                .map(|(at, name)| {
+                                    (
+                                        Syntax::Reference(format!("c{at}")),
+                                        Syntax::Variable(name.clone()),
+                                    )
+                                })
+                                .collect(),
+                        ),
+                    );
+                }
+                let mut parts = vec![apply(
+                    "report",
+                    vec![Syntax::Application(
+                        Box::new(Syntax::Reference(ROW.into())),
+                        Parameters {
+                            items: vec![about],
+                            terms,
+                        },
+                    )],
+                )];
+                parts.extend(conditions.iter().cloned());
+                apply("rule", parts)
+            }
+            // Reads of no entity a variable names: the row is told apart
+            // by an entity made of all its values.
+            None => {
+                let row = Syntax::Variable(ROW_ENTITY.into());
+                let head = apply(
+                    "report",
+                    vec![Syntax::Application(
+                        Box::new(Syntax::Reference(ROW.into())),
+                        Parameters {
+                            items: vec![row.clone()],
+                            terms: terms.clone(),
+                        },
+                    )],
+                );
+                let mut parts = vec![head];
+                parts.extend(conditions.iter().cloned());
+                parts.push(Syntax::Application(
+                    Box::new(Syntax::Reference("id".into())),
+                    Parameters {
+                        items: vec![row],
+                        terms,
+                    },
+                ));
+                apply("rule", parts)
+            }
+        };
         let mut rules = Vec::new();
         self.each(&rule, &mut rules)?;
+        // Read through several definitions, each is a rule of its own;
+        // they are told they report one part, so that they derive one
+        // relation, and one query reads every row of the part.
+        if rules.len() > 1 {
+            let part = Syntax::Constant(crate::data::text(rule.reference()?.to_string()));
+            rules = rules.iter().map(|each| parted(each, &part)).collect();
+        }
         Ok(rules)
     }
+}
+
+/// A kernel rule that reports a query's row, with the row naming
+/// `part`.
+fn parted(rule: &Syntax, part: &Syntax) -> Syntax {
+    let mut rule = rule.clone();
+    if let Syntax::Application(_, operand) = &mut rule
+        && let Some(Syntax::Application(_, report)) = operand.items.first_mut()
+        && let Some(Syntax::Application(_, row)) = report.items.first_mut()
+    {
+        row.terms.insert(PART.into(), part.clone());
+    }
+    rule
+}
+
+/// The entity a query's conditions are about: the variable most of the
+/// reads among them are of, the first of those that tie. A read is a
+/// concept, an attribute or a domain applied to its entity first.
+fn about(conditions: &[Syntax]) -> Option<Syntax> {
+    let mut counted: Vec<(String, usize)> = Vec::new();
+    for condition in conditions {
+        if condition.is_formula() || condition.applies().is_none() {
+            continue;
+        }
+        if let Some(Syntax::Variable(entity)) = items(condition).first() {
+            match counted.iter_mut().find(|(name, _)| name == entity) {
+                Some((_, count)) => *count += 1,
+                None => counted.push((entity.clone(), 1)),
+            }
+        }
+    }
+    let most = counted.iter().map(|(_, count)| *count).max()?;
+    counted
+        .into_iter()
+        .find(|(_, count)| *count == most)
+        .map(|(name, _)| Syntax::Variable(name))
 }
 
 /// The head's variables a call gives a value for: its entity and each

@@ -6,8 +6,26 @@ authors.workspace = true
 description = "A notation for Dialog-DB: a small kernel, and the core forms defined in it as rules"
 license.workspace = true
 
+[features]
+default = ["repository"]
+# The driver that keeps selections and views current on a branch
+# (`live`). Without it the crate is the analyzer and compiler alone, and
+# does not depend on the repository.
+repository = [
+    "dep:dialog-repository",
+    "dep:dialog-capability",
+    "dep:dialog-common",
+    "dep:dialog-effects",
+    "dep:dialog-search-tree",
+]
+
 [dependencies]
 dialog-corpus = { workspace = true }
+dialog-repository = { workspace = true, optional = true }
+dialog-capability = { workspace = true, optional = true }
+dialog-common = { workspace = true, optional = true }
+dialog-effects = { workspace = true, optional = true }
+dialog-search-tree = { workspace = true, optional = true }
 dialog-query = { workspace = true }
 merkle-reference = { workspace = true }
 base58 = { workspace = true }

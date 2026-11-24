@@ -32,7 +32,7 @@ use dialog_query::ConceptConclusion;
 
 use crate::Error;
 use crate::compile::{Query, Step, compile};
-use crate::select::{COLLECT, COUNT, ROW};
+use crate::select::{COLLECT, COUNT, Folded, ROW, SELECTED, Selection};
 use crate::syntax::{Parameters, Syntax};
 use crate::view::{Attribute, Element, Input, Node, Piece};
 
@@ -111,6 +111,8 @@ pub struct Layer {
 pub struct Count {
     /// The variable the count is.
     pub variable: String,
+    /// The variable of the whole it counts, a read collected.
+    pub whole: String,
     /// The place that shows it.
     pub host: usize,
     /// The counted place.
@@ -157,6 +159,26 @@ pub struct Plan {
     /// The entity the question names, where it names one by its value:
     /// `(select (todo/row todo:1 is: ?row))`.
     pub given: Option<Value>,
+    /// The conditions of the query asked and the reads it counts in its
+    /// own markup, as a selection is compiled from them: what
+    /// [`Plan::folds`] lowers to the folds Dialog-DB keeps the counts by.
+    /// `None` where it counts nothing so.
+    pub folding: Option<Syntax>,
+}
+
+/// A count a view shows that Dialog-DB keeps, by a fold: each folded row
+/// is an instance of the count's host, named by the terms it groups by,
+/// and how many the count is there.
+#[derive(Clone, Debug)]
+pub struct FoldedCount {
+    /// The count, by its index in [`Plan::counts`].
+    pub count: usize,
+    /// The fold, with the rules its queries read.
+    pub folded: Folded,
+    /// The terms it groups by, the keys of the host's instances.
+    pub shared: Vec<String>,
+    /// The field of a folded row that holds the count.
+    pub field: String,
 }
 
 /// The tag a query not found, shown as its source, is wrapped in.
@@ -437,6 +459,7 @@ struct Spec {
 struct Counted {
     host: Vec<usize>,
     variable: String,
+    whole: String,
     conditions: Vec<Syntax>,
     key: Vec<String>,
 }
@@ -601,6 +624,7 @@ impl Builder<'_> {
             self.counted.push(Counted {
                 host: path.clone(),
                 variable: held.clone(),
+                whole: whole.clone(),
                 conditions: premises.clone(),
                 key,
             });
@@ -868,6 +892,7 @@ impl Plan {
             });
             counts.push(Count {
                 variable: counted.variable,
+                whole: counted.whole,
                 host,
                 place,
             });
@@ -884,7 +909,9 @@ impl Plan {
             Some(Syntax::Constant(value)) => Some(value.clone()),
             _ => None,
         };
+        let folding = folding(call, &name, queries, &defined, &elements, &counts);
         let mut plan = Plan {
+            folding,
             given,
             name,
             entity,
@@ -897,6 +924,39 @@ impl Plan {
         plan.join();
         plan.rows();
         Ok(plan)
+    }
+
+    /// The counts of [`Plan::counts`] Dialog-DB keeps, each by the fold
+    /// the lowering of a selection gives the read it counts: a read the
+    /// query asked counts in its own markup, one query, grouped by the
+    /// entity the query answers of. A count of a query collected into the
+    /// markup, a count of an entry, and a read the lowering leaves in
+    /// memory are kept from the rows of their layer instead.
+    pub fn folds(&self) -> Vec<FoldedCount> {
+        let Some(tree) = &self.folding else {
+            return Vec::new();
+        };
+        let Ok(selection) = Selection::compile(tree) else {
+            return Vec::new();
+        };
+        let key: BTreeSet<&String> = self.elements[0].key.iter().collect();
+        let parts = selection.folded(&self.name);
+        let mut folds = Vec::new();
+        for (count, shown) in self.counts.iter().enumerate() {
+            let Some(part) = parts.iter().find(|part| part.target == shown.whole) else {
+                continue;
+            };
+            if part.entry || part.shared.iter().collect::<BTreeSet<_>>() != key {
+                continue;
+            }
+            folds.push(FoldedCount {
+                count,
+                folded: selection.folds[part.fold].clone(),
+                shared: part.shared.clone(),
+                field: part.count.clone(),
+            });
+        }
+        folds
     }
 
     /// A layer that does not bind a key of an element above it takes the
@@ -1178,6 +1238,63 @@ impl Plan {
             .filter(|at| self.elements[*at].layer == layer)
             .collect()
     }
+}
+
+/// The query asked, as a selection is compiled from it, with no more than
+/// what its own markup counts: its conditions every answer needs, and each
+/// read collected that a count of [`Plan::counts`] counts. `None` where
+/// there is none.
+fn folding(
+    call: &Syntax,
+    name: &str,
+    queries: &[Syntax],
+    defined: &BTreeMap<String, Defined>,
+    elements: &[Place],
+    counts: &[Count],
+) -> Option<Syntax> {
+    let own = defined.get(name)?;
+    let wholes: BTreeSet<&String> = counts
+        .iter()
+        .filter(|count| elements[count.host].layer == 0)
+        .filter(|count| {
+            own.collects
+                .iter()
+                .any(|(target, _, from)| target == &count.whole && matches!(from, From::Rows(_)))
+        })
+        .map(|count| &count.whole)
+        .collect();
+    if wholes.is_empty() {
+        return None;
+    }
+    let query = queries
+        .iter()
+        .find(|query| items(query).first().and_then(Syntax::applies) == Some(name))?;
+    let [head, parts @ ..] = items(query) else {
+        return None;
+    };
+    let mut kept = vec![head.clone()];
+    for part in parts {
+        let keep = match (part.applies(), items(part)) {
+            (Some("required"), _) => true,
+            (Some(COLLECT), [Syntax::Variable(target), _, source]) => {
+                wholes.contains(target) && source.applies() == Some("rows")
+            }
+            _ => false,
+        };
+        if keep {
+            kept.push(part.clone());
+        }
+    }
+    let apply = |operator: &str, items: Vec<Syntax>| {
+        Syntax::Application(
+            Box::new(Syntax::Reference(operator.into())),
+            Parameters {
+                items,
+                ..Parameters::default()
+            },
+        )
+    };
+    Some(apply(SELECTED, vec![call.clone(), apply("query", kept)]))
 }
 
 /// The entity a layer's reads are about: the variable most of its reads

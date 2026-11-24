@@ -663,25 +663,133 @@ async fn it_maintains_a_row_whose_chips_are_collected() -> Result<()> {
     Ok(())
 }
 
+/// The rows with their chips collected, kept by the crate's driver,
+/// `Live::watch`, beside the subscriptions driven by this file: through
+/// an item added, a member added to its collected part, a member
+/// removed, the last member removed and the item removed, the driver
+/// gives the patches driven here give. The last chip removed leaves the
+/// row, with no chip; the row removed is one remove.
+#[dialog_common::test]
+async fn it_drives_a_view_with_a_collected_part_as_the_layers_do() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    write(
+        &mut notebook,
+        &dialog_notation::read(TAGGED)?
+            .iter()
+            .filter(|form| form.head() == Some("concept"))
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .await?;
+    write(
+        &mut notebook,
+        r#"(assert (task task:1 title: "Buy milk"))
+           (assert (task/tag task:1 tag: "errand"))"#,
+    )
+    .await?;
+    let plan = plan_of(&[TAGGED], "(select (task/row ?t is: ?row))")?;
+    let mut here = Driven::new(&notebook, plan.clone(), None, How::Subscribed).await?;
+    let live = dialog_notation::live::Live::new(notebook.branch.clone());
+    let mut watched = live.watch(plan, None)?;
+    assert_eq!(
+        watched.poll(&notebook.operator).await?,
+        here.step(&notebook).await?
+    );
+    let three = || vec![(0, vec![entity("task:3")])];
+    let steps: Vec<(&str, Vec<Patch>)> = vec![
+        (
+            r#"(assert (task task:3 title: "Water plants"))"#,
+            vec![Patch::Insert {
+                parent: Vec::new(),
+                slot: 0,
+                index: 1,
+                instance: row("task:3", "Water plants", Vec::new()),
+            }],
+        ),
+        (
+            r#"(assert (task/tag task:3 tag: "home"))"#,
+            vec![Patch::Insert {
+                parent: three(),
+                slot: 1,
+                index: 0,
+                instance: chip("home"),
+            }],
+        ),
+        (
+            r#"(assert (task/tag task:3 tag: "garden"))"#,
+            vec![Patch::Insert {
+                parent: three(),
+                slot: 1,
+                index: 0,
+                instance: chip("garden"),
+            }],
+        ),
+        (
+            r#"(retract (task/tag task:3 tag: "garden"))"#,
+            vec![Patch::Remove {
+                at: vec![
+                    (0, vec![entity("task:3")]),
+                    (1, vec![Value::String("garden".into())]),
+                ],
+            }],
+        ),
+        (
+            r#"(retract (task/tag task:3 tag: "home"))"#,
+            vec![Patch::Remove {
+                at: vec![
+                    (0, vec![entity("task:3")]),
+                    (1, vec![Value::String("home".into())]),
+                ],
+            }],
+        ),
+        (
+            r#"(retract (task task:3 title: "Water plants"))"#,
+            vec![Patch::Remove { at: three() }],
+        ),
+    ];
+    for (change, expected) in steps {
+        write(&mut notebook, change).await?;
+        let driven = watched.poll(&notebook.operator).await?;
+        assert_eq!(driven, here.step(&notebook).await?, "after {change}");
+        assert_eq!(driven, expected, "after {change}");
+        if change.contains(r#"tag: "home""#) && change.starts_with("(retract") {
+            assert_eq!(
+                watched.tree().roots,
+                [
+                    row("task:1", "Buy milk", vec![chip("errand")]),
+                    row("task:3", "Water plants", Vec::new()),
+                ],
+                "the last chip removed leaves the row, with none"
+            );
+        }
+    }
+    assert_eq!(watched.tree(), here.tree);
+    Ok(())
+}
+
+/// The list card with a count of what is open, and an item a to-do.
+const SUMMARY: &str = r#"
+    (query (todo/item ?t list: ?l is: ?item)
+      (todo ?t list: ?l title: ?title state: ?s)
+      (view ?item [:li {:class ?s} ?title]))
+    (query (list/summary ?l is: ?card)
+      (list ?l name: ?name)
+      (todo (collect ?open) list: ?l state: :open)
+      (todo/item _ list: ?l is: (collect ?items))
+      (is ?count (count ?open))
+      (view ?card
+        [:article
+          [:h2 ?name]
+          [:p ?count " open"]
+          [:ul ?items]]))"#;
+
 /// The list card with a count of what is open: `0 open` and an empty
 /// `ul` for a list with nothing on it. Adding a to-do is one insert under
 /// the `ul` and the count's text set.
 #[dialog_common::test]
 async fn it_counts_what_a_card_collects() -> Result<()> {
-    let counted = r#"
-        (query (todo/item ?t list: ?l is: ?item)
-          (todo ?t list: ?l title: ?title state: ?s)
-          (view ?item [:li {:class ?s} ?title]))
-        (query (list/summary ?l is: ?card)
-          (list ?l name: ?name)
-          (todo (collect ?open) list: ?l state: :open)
-          (todo/item _ list: ?l is: (collect ?items))
-          (is ?count (count ?open))
-          (view ?card
-            [:article
-              [:h2 ?name]
-              [:p ?count " open"]
-              [:ul ?items]]))"#;
+    let counted = SUMMARY;
     let mut notebook = Notebook::open().await?;
     write(&mut notebook, CONCEPTS).await?;
     write(&mut notebook, r#"(assert (list list:home name: "Home"))"#).await?;
@@ -724,6 +832,114 @@ async fn it_counts_what_a_card_collects() -> Result<()> {
         r#"[:article [:h2 "Home"] [:p "1" " open"] [:ul [:li {:class "open:"} "Buy milk"]]]"#
     );
     Ok(())
+}
+
+/// The card's count kept by the driver, `Live::watch`, on a fold of
+/// Dialog-DB's, beside the layers driven by this file, whose count the
+/// maintainer counts from the rows of its layer: through a member added,
+/// a member removed, and the last member removed, the driver gives the
+/// patches driven here give. The last removed leaves the card, counting
+/// 0. The driver's maintainer is given no row of the counted layer, and
+/// a list with nothing open counts 0 from its first render.
+#[dialog_common::test]
+async fn it_keeps_a_views_count_on_a_fold() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    write(&mut notebook, CONCEPTS).await?;
+    write(
+        &mut notebook,
+        r#"(assert (list list:home name: "Home"))
+           (assert (list list:work name: "Work"))
+           (assert (todo todo:1 list: list:home title: "Buy milk" state: :open))"#,
+    )
+    .await?;
+    let plan = plan_of(&[CONCEPTS, SUMMARY], "(select (list/summary ?l is: ?card))")?;
+    let counted = plan.elements[plan.counts[0].place].layer;
+    let mut here = Driven::new(&notebook, plan.clone(), None, How::Subscribed).await?;
+    let live = dialog_notation::live::Live::new(notebook.branch.clone());
+    let mut watched = live.watch(plan, None)?;
+    assert_eq!(watched.folded(), [counted], "the count is on a fold");
+    assert_eq!(
+        watched.poll(&notebook.operator).await?,
+        here.step(&notebook).await?
+    );
+    assert_eq!(
+        watched.tree().hiccup(),
+        r#"[:article [:h2 "Home"] [:p "1" " open"] [:ul [:li {:class "open:"} "Buy milk"]]] [:article [:h2 "Work"] [:p "0" " open"] [:ul]]"#
+    );
+    let mut count = card();
+    count.push((1, Vec::new()));
+    let text = |text: &str| Patch::SetText {
+        at: count.clone(),
+        slot: 0,
+        text: text.into(),
+    };
+    let steps: Vec<(&str, Vec<Patch>)> = vec![
+        (
+            r#"(assert (todo todo:2 list: list:home title: "Call mum" state: :open))"#,
+            vec![
+                text("2"),
+                Patch::Insert {
+                    parent: items_of_summary(),
+                    slot: 0,
+                    index: 1,
+                    instance: li("todo:2", "Call mum", "open:"),
+                },
+            ],
+        ),
+        (
+            r#"(retract (todo todo:2 list: list:home title: "Call mum" state: :open))"#,
+            vec![
+                text("1"),
+                Patch::Remove {
+                    at: item_of_summary("todo:2"),
+                },
+            ],
+        ),
+        (
+            r#"(retract (todo todo:1 list: list:home title: "Buy milk" state: :open))"#,
+            vec![
+                text("0"),
+                Patch::Remove {
+                    at: item_of_summary("todo:1"),
+                },
+            ],
+        ),
+    ];
+    for (change, expected) in steps {
+        write(&mut notebook, change).await?;
+        let mut driven = watched.poll(&notebook.operator).await?;
+        assert_eq!(driven, here.step(&notebook).await?, "after {change}");
+        driven.sort_by_key(|patch| format!("{patch:?}"));
+        let mut expected = expected;
+        expected.sort_by_key(|patch| format!("{patch:?}"));
+        assert_eq!(driven, expected, "after {change}");
+        assert_eq!(
+            watched.maintainer().rows(counted),
+            0,
+            "the maintainer holds no row of the counted layer"
+        );
+    }
+    assert_eq!(
+        watched.tree().hiccup(),
+        r#"[:article [:h2 "Home"] [:p "0" " open"] [:ul]] [:article [:h2 "Work"] [:p "0" " open"] [:ul]]"#,
+        "the last removed leaves the card, counting 0"
+    );
+    assert_eq!(watched.tree(), here.tree);
+    Ok(())
+}
+
+/// Where the summary card's items stand.
+fn items_of_summary() -> dialog_notation::Address {
+    let mut at = card();
+    at.push((2, Vec::new()));
+    at
+}
+
+/// Where an item of the summary card stands.
+fn item_of_summary(t: &str) -> dialog_notation::Address {
+    let mut at = items_of_summary();
+    at.push((0, vec![entity(t)]));
+    at
 }
 
 /// The forms of a document, its writes kept or not.

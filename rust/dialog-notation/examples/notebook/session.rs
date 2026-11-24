@@ -8,6 +8,7 @@
 #![allow(deprecated)]
 
 use anyhow::Result;
+use dialog_notation::live::{Live, LiveError};
 use dialog_notation::{Analyzer, Diagnostic, Step, check};
 use dialog_peer::helpers::{test_repo, test_session_with_peer};
 use dialog_peer::{Peer, Session};
@@ -144,58 +145,24 @@ impl Notebook {
                 report.push(query.row(row)?.to_string());
             }
         }
-        // A query asked: every query its rows come from runs on the
-        // branch, and the rows are put together into its answers.
+        // A query asked, and a query whose answer is markup rendered
+        // once: the driver asks every query their rows come from, with
+        // the rules each reads laid over the branch for it alone.
+        let live = Live::new(self.branch.clone());
         for selection in selections {
-            let mut results = Vec::new();
-            for query in &selection.queries {
-                let mut layer = self.branch.query();
-                if let Some(rule) = &query.rule {
-                    layer = layer.with(rule.clone());
-                }
-                let rows: Vec<ConceptConclusion> = layer
-                    .select(query.select.clone())
-                    .perform(&self.operator)
-                    .try_vec()
-                    .await?;
-                results.push(
-                    rows.iter()
-                        .map(|row| query.values(row))
-                        .collect::<Result<Vec<_>, _>>()?,
-                );
-            }
-            for answer in selection.answer(&results)? {
+            for answer in live
+                .select(&selection, &self.operator)
+                .await
+                .map_err(unwrapped)?
+            {
                 report.push(answer.to_string());
             }
         }
-        // A query whose answer is markup: every layer's rows, and the
-        // tree they make, written as Hiccup.
         for plan in views {
-            let entity = plan.given.clone();
-            let mut rows = Vec::new();
-            for layer in 0..plan.layers.len() {
-                if plan.layers[layer].conditions.is_empty() {
-                    rows.push(Vec::new());
-                    continue;
-                }
-                let query = plan.query(layer, entity.as_ref())?;
-                let mut asked = self.branch.query();
-                if let Some(rule) = &query.rule {
-                    asked = asked.with(rule.clone());
-                }
-                let found: Vec<ConceptConclusion> = asked
-                    .select(query.select.clone())
-                    .perform(&self.operator)
-                    .try_vec()
-                    .await?;
-                rows.push(
-                    found
-                        .iter()
-                        .map(|row| plan.row(layer, &query, row, entity.as_ref()))
-                        .collect::<Result<Vec<_>, _>>()?,
-                );
-            }
-            let tree = dialog_notation::render(&plan, entity.as_ref(), &rows);
+            let tree = live
+                .render(&plan, plan.given.as_ref(), &self.operator)
+                .await
+                .map_err(unwrapped)?;
             for root in &tree.roots {
                 report.push(
                     dialog_notation::Rendered {
@@ -208,5 +175,14 @@ impl Notebook {
         report.sort();
         report.dedup();
         Ok((report, diagnostics))
+    }
+}
+
+/// The notation's own error where the driver failed with one, so a
+/// refusal reads as it does when nothing is driven.
+fn unwrapped(error: LiveError) -> anyhow::Error {
+    match error {
+        LiveError::Notation(error) => anyhow::Error::new(error),
+        other => anyhow::Error::new(other),
     }
 }

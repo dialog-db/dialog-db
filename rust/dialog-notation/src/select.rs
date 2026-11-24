@@ -41,9 +41,13 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use dialog_corpus::Value;
+use dialog_query::reduce::{Aggregator, Reduce, ReduceEntry};
+use dialog_query::rule::DeductiveRule;
+use dialog_query::{ConceptQuery, Fold, FoldConclusion, Term};
 
 use crate::Error;
 use crate::compile::{Query, Step, compile, written};
+use crate::data;
 use crate::syntax::{Parameters, Syntax};
 
 /// What a query's analyzed tree is applied as.
@@ -52,6 +56,14 @@ pub const SELECTED: &str = "select.query";
 /// The relation a query's conditions are reported in, a column a
 /// variable.
 pub const ROW: &str = "query.row";
+
+/// The field a row of a query's conditions is reported under as one
+/// record, where more than one of its columns is not its entity.
+pub const ROW_FIELD: &str = "row";
+
+/// The field a query's row of a part read through several definitions
+/// names the part by, so that each definition derives one relation.
+pub const PART: &str = "part";
 
 /// The one function of a collection there is yet.
 pub const COUNT: &str = "count";
@@ -130,6 +142,72 @@ struct Collect {
     /// One of what is collected: a variable, or an entry `{?k ?v}`.
     item: Syntax,
     source: Source,
+    /// The fold Dialog-DB gives the whole by, where it gives it.
+    folded: Option<Lowered>,
+}
+
+/// A read that collects, as Dialog-DB folds it.
+#[derive(Clone, Debug)]
+struct Lowered {
+    /// An index into [`Selection::folds`].
+    fold: usize,
+    /// The terms it groups by.
+    shared: Vec<String>,
+    /// Where what is collected is an entry `{?k ?v}`: the fields of the
+    /// record each member is that hold its key and its value.
+    entry: Option<(String, String)>,
+}
+
+/// The prefix of a variable a fold's groups read that no column is.
+const GROUPS: &str = "fold.groups.";
+
+/// The prefix of a variable a fold's inputs read that no column is.
+const INPUTS: &str = "fold.inputs.";
+
+/// The field a fold counts the whole of `target` in.
+fn counted(target: &str) -> String {
+    format!("count.{target}")
+}
+
+/// A read that collects, as Dialog-DB folds it: the conditions every
+/// answer needs as the groups, the read as the inputs, each group
+/// folded to the distinct values of the read and how many there are.
+/// A group the read matches nothing of is folded over inputs all
+/// absent: the empty set, and 0.
+#[derive(Clone, Debug)]
+pub struct Folded {
+    /// The rules the two queries read, laid over the branch for the
+    /// fold alone.
+    pub rules: Vec<DeductiveRule>,
+    /// The fold.
+    pub fold: Fold<ConceptQuery, ConceptQuery>,
+}
+
+impl Folded {
+    /// A folded row, as each term it groups by and each fold, by its
+    /// name, and the value it was bound to.
+    pub fn values(&self, row: &FoldConclusion) -> BTreeMap<String, Value> {
+        row.values()
+            .iter()
+            .filter_map(|(name, value)| Some((name.clone(), value.clone()?)))
+            .collect()
+    }
+}
+
+/// A read that collects, as [`Selection::folded`] says Dialog-DB folds
+/// it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FoldedPart {
+    /// The variable the whole is bound to.
+    pub target: String,
+    /// Its fold, by its index in [`Selection::folds`].
+    pub fold: usize,
+    /// The terms the fold groups by: a folded row binds each of them.
+    pub shared: Vec<String>,
+    /// The field of a folded row that holds how many the whole holds.
+    pub count: String,
+    /// Whether what is collected is an entry `{?k ?v}`.
+    pub entry: bool,
 }
 
 /// A query, as its analyzed tree says it.
@@ -151,6 +229,9 @@ pub struct Selection {
     /// Every Dialog-DB query the answer needs. Each is run once, and its
     /// rows read with [`Query::values`].
     pub queries: Vec<Query>,
+    /// Every read that collects that Dialog-DB folds. Each is run once,
+    /// and its rows read with [`Folded::values`].
+    pub folds: Vec<Folded>,
     defined: BTreeMap<String, Defined>,
 }
 
@@ -185,6 +266,7 @@ impl Selection {
         let mut selection = Selection {
             call: call.clone(),
             queries: Vec::new(),
+            folds: Vec::new(),
             defined: BTreeMap::new(),
         };
         for query in defined {
@@ -217,6 +299,7 @@ impl Selection {
                             target: target.clone(),
                             item: item.clone(),
                             source,
+                            folded: None,
                         });
                     }
                     (Some("is"), [Syntax::Variable(target), shape]) => {
@@ -231,9 +314,182 @@ impl Selection {
                     _ => return Err(malformed(part)),
                 }
             }
+            let required = defined.required.clone();
+            for collect in &mut defined.collects {
+                collect.folded = required
+                    .as_ref()
+                    .and_then(|required| selection.fold(required, collect));
+            }
             selection.defined.insert(name, defined);
         }
         Ok(selection)
+    }
+
+    /// The fold of a read that collects, where Dialog-DB can give it:
+    /// the read is one query, and the terms it shares with the rest are
+    /// bound by the conditions every answer needs, which are one query
+    /// too.
+    ///
+    /// Each query reports its rows under the entity they are about, a
+    /// field a column, and, where more than one column is not that
+    /// entity, the whole row as one record beside. A field beside
+    /// another can be read crossed with a row of the same entity, so the
+    /// fold groups by fields that cannot be: the entity, or a field of a
+    /// query with no record. A member is the field of the variable
+    /// collected, folded to its distinct values, which crossing leaves
+    /// as they are. An entry `{?k ?v}` is the record, which keeps its
+    /// key beside its value, and is counted by its distinct keys.
+    fn fold(&mut self, required: &Rows, collect: &Collect) -> Option<Lowered> {
+        let Source::Rows(rows) = &collect.source else {
+            return None;
+        };
+        let (groups, inputs) = (self.one(required)?, self.one(rows)?);
+        let mut wanted = Vec::new();
+        collect.item.variables(&mut wanted);
+        let shared: Vec<String> = rows
+            .columns
+            .iter()
+            .filter(|column| !wanted.contains(column))
+            .cloned()
+            .collect();
+        let (groups, inputs) = (&self.queries[groups], &self.queries[inputs]);
+        let label = |columns: &[String], name: &str| {
+            columns
+                .iter()
+                .position(|column| column == name)
+                .map(|at| format!("c{at}"))
+        };
+        let recorded = |query: &Query| query.bound(ROW_FIELD).is_some();
+        let mut grouped = Vec::new();
+        let mut read = Vec::new();
+        for term in &shared {
+            grouped.push((label(&required.columns, term)?, term.clone()));
+            read.push((label(&rows.columns, term)?, term.clone()));
+        }
+        let loose = grouped
+            .iter()
+            .filter(|(field, _)| groups.about() != Some(field.as_str()))
+            .count();
+        if recorded(groups) && loose > 1 {
+            return None;
+        }
+        if recorded(inputs)
+            && read
+                .iter()
+                .any(|(field, _)| inputs.about() != Some(field.as_str()))
+        {
+            return None;
+        }
+        let (member, counted_by, entry) = match &collect.item {
+            Syntax::Variable(member) => {
+                read.push((label(&rows.columns, member)?, member.clone()));
+                (member.clone(), member.clone(), None)
+            }
+            Syntax::Map(pair) => match pair.as_slice() {
+                [(Syntax::Variable(key), Syntax::Variable(value))] if recorded(inputs) => {
+                    let record = format!("{INPUTS}{ROW_FIELD}");
+                    read.push((ROW_FIELD.to_string(), record.clone()));
+                    read.push((label(&rows.columns, key)?, key.clone()));
+                    let fields = (label(&rows.columns, key)?, label(&rows.columns, value)?);
+                    (record, key.clone(), Some(fields))
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let reduce = Reduce::new(
+            shared.clone(),
+            vec![
+                ReduceEntry::new(
+                    collect.target.clone(),
+                    Aggregator::Distinct,
+                    Term::var(member.as_str()),
+                ),
+                ReduceEntry::new(
+                    counted(&collect.target),
+                    Aggregator::CountDistinct,
+                    Term::var(counted_by.as_str()),
+                ),
+            ],
+        );
+        let fold = Fold::new(
+            groups.renamed(&grouped, GROUPS)?,
+            inputs.renamed(&read, INPUTS)?,
+            reduce,
+        );
+        let rules = required
+            .runs
+            .iter()
+            .chain(&rows.runs)
+            .filter_map(|run| self.queries[*run].rule.clone())
+            .collect();
+        self.folds.push(Folded { rules, fold });
+        Some(Lowered {
+            fold: self.folds.len() - 1,
+            shared,
+            entry,
+        })
+    }
+
+    /// The reads of the query `name` that collect and that Dialog-DB
+    /// folds, each with the fold that gives its whole.
+    pub fn folded(&self, name: &str) -> Vec<FoldedPart> {
+        self.defined
+            .get(name)
+            .map(|defined| {
+                defined
+                    .collects
+                    .iter()
+                    .filter_map(|collect| {
+                        let lowered = collect.folded.as_ref()?;
+                        Some(FoldedPart {
+                            target: collect.target.clone(),
+                            fold: lowered.fold,
+                            shared: lowered.shared.clone(),
+                            count: counted(&collect.target),
+                            entry: lowered.entry.is_some(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The one query that reads every row of a part, by its index in
+    /// [`Selection::queries`]: its one run, or the first of several that
+    /// select one relation, each deriving a part of it.
+    fn one(&self, rows: &Rows) -> Option<usize> {
+        let (first, rest) = rows.runs.split_first()?;
+        let select = |run: &usize| serde_json::to_value(&self.queries[*run].select).ok();
+        let selected = select(first)?;
+        rest.iter()
+            .all(|run| select(run).as_ref() == Some(&selected))
+            .then_some(*first)
+    }
+
+    /// Which of [`Selection::queries`] [`Selection::answer`] reads the
+    /// rows of: those of the conditions every answer needs, and those of
+    /// a collecting read Dialog-DB does not fold. The rows of a query
+    /// only a fold reads may be given as none.
+    pub fn read(&self) -> Vec<bool> {
+        let mut read = vec![false; self.queries.len()];
+        for defined in self.defined.values() {
+            let parts = defined
+                .required
+                .iter()
+                .chain(defined.collects.iter().filter_map(|collect| {
+                    match (&collect.source, &collect.folded) {
+                        (Source::Rows(rows), None) => Some(rows),
+                        _ => None,
+                    }
+                }));
+            for rows in parts {
+                for run in &rows.runs {
+                    read[*run] = true;
+                }
+            }
+        }
+        read
     }
 
     /// The rules of a part compiled, each a query of its own.
@@ -257,19 +513,28 @@ impl Selection {
         Ok(Rows { columns, runs })
     }
 
-    /// The answers, given the rows of each of [`Selection::queries`] in
-    /// its order: the call, filled once an answer.
-    pub fn answer(&self, results: &[Vec<BTreeMap<String, Value>>]) -> Result<Vec<Syntax>, Error> {
-        if results.len() != self.queries.len() {
+    /// The answers, given the rows of each of [`Selection::queries`] and
+    /// of each of [`Selection::folds`] in its order: the call, filled
+    /// once an answer.
+    pub fn answer(
+        &self,
+        results: &[Vec<BTreeMap<String, Value>>],
+        folded: &[Vec<BTreeMap<String, Value>>],
+    ) -> Result<Vec<Syntax>, Error> {
+        if results.len() != self.queries.len() || folded.len() != self.folds.len() {
             return Err(Error::Refused(format!(
-                "a selection of {} queries is given the rows of {}",
+                "a selection of {} queries and {} folds is given the rows of {} and {}",
                 self.queries.len(),
-                results.len()
+                self.folds.len(),
+                results.len(),
+                folded.len()
             )));
         }
         let mut evaluation = Evaluation {
             selection: self,
             results,
+            folded,
+            folds: BTreeMap::new(),
             done: BTreeMap::new(),
             read: BTreeMap::new(),
             grouped: BTreeMap::new(),
@@ -299,6 +564,10 @@ fn keyed<'a>(values: impl Iterator<Item = Option<&'a Syntax>>) -> String {
 struct Evaluation<'a> {
     selection: &'a Selection,
     results: &'a [Vec<BTreeMap<String, Value>>],
+    /// The rows of each fold.
+    folded: &'a [Vec<BTreeMap<String, Value>>],
+    /// The rows of each fold by the terms it groups by.
+    folds: BTreeMap<usize, HashMap<String, usize>>,
     done: BTreeMap<String, Vec<Row>>,
     /// The rows of each part's queries, by its first query.
     read: BTreeMap<usize, Vec<Row>>,
@@ -323,14 +592,20 @@ impl Evaluation<'_> {
         let mut seen = HashSet::new();
         for run in &rows.runs {
             for values in &self.results[*run] {
+                let record = values
+                    .get(ROW_FIELD)
+                    .and_then(|record| data::entries(record).ok().flatten());
                 let row: Row = rows
                     .columns
                     .iter()
                     .enumerate()
                     .filter_map(|(at, name)| {
-                        values
-                            .get(&format!("c{at}"))
-                            .map(|value| (name.clone(), written(value)))
+                        let label = format!("c{at}");
+                        match &record {
+                            Some(record) => data::field(record, &label),
+                            None => values.get(&label),
+                        }
+                        .map(|value| (name.clone(), written(value)))
                     })
                     .collect();
                 if seen.insert(format!("{row:?}")) {
@@ -366,6 +641,12 @@ impl Evaluation<'_> {
         }
         for collect in &defined.collects {
             for row in &mut rows {
+                if let Some(lowered) = &collect.folded {
+                    let (whole, count) = self.fold(lowered, &collect.target, row);
+                    row.insert(collect.target.clone(), whole);
+                    row.insert(counted(&collect.target), count);
+                    continue;
+                }
                 let whole = self.whole(collect, row)?;
                 row.insert(collect.target.clone(), whole);
             }
@@ -462,6 +743,53 @@ impl Evaluation<'_> {
             extended.push(joined);
         }
         Ok(extended)
+    }
+
+    /// The whole of `target` Dialog-DB folded for `row`, a set, and how
+    /// many it holds: the folded row whose groups agree with `row`. A
+    /// row no fold gives is of a group the conditions did not give, and
+    /// holds nothing.
+    fn fold(&mut self, lowered: &Lowered, target: &str, row: &Row) -> (Syntax, Syntax) {
+        let shared = &lowered.shared;
+        let folded = &self.folded[lowered.fold];
+        let index = self.folds.entry(lowered.fold).or_insert_with(|| {
+            folded
+                .iter()
+                .enumerate()
+                .map(|(at, found)| {
+                    let values: Vec<Syntax> = shared
+                        .iter()
+                        .map(|term| found.get(term).map(written).unwrap_or(Syntax::Blank))
+                        .collect();
+                    (keyed(values.iter().map(Some)), at)
+                })
+                .collect()
+        });
+        let found = index
+            .get(&keyed(shared.iter().map(|term| row.get(term))))
+            .map(|at| &folded[*at]);
+        let members = found
+            .and_then(|found| found.get(target))
+            .and_then(|whole| data::items(whole).ok().flatten())
+            .unwrap_or_default();
+        let count = found
+            .and_then(|found| found.get(&counted(target)).cloned())
+            .unwrap_or(Value::UnsignedInt(0));
+        let entries = members
+            .iter()
+            .filter_map(|member| match &lowered.entry {
+                // An entry is the record of the row it was read from.
+                Some((key, value)) => {
+                    let record = data::entries(member).ok().flatten()?;
+                    Some((
+                        written(data::field(&record, key)?),
+                        written(data::field(&record, value)?),
+                    ))
+                }
+                None => Some((Syntax::Reference(String::new()), written(member))),
+            })
+            .collect();
+        (Syntax::Map(gathered(entries)), Syntax::Constant(count))
     }
 
     /// The whole of what a collecting read gives for `row`: a map of
@@ -611,6 +939,10 @@ fn build(shape: &Syntax, row: &Row) -> Result<Syntax, Error> {
                 .collect::<Result<_, Error>>()?,
         ),
         Syntax::Application(..) if shape.applies() == Some(COUNT) => match items(shape) {
+            // The whole of a read Dialog-DB folded, which counted it.
+            [Syntax::Variable(whole)] if row.contains_key(&counted(whole)) => {
+                row[&counted(whole)].clone()
+            }
             [whole] => match build(whole, row)? {
                 Syntax::Map(entries) => {
                     Syntax::Constant(Value::UnsignedInt((entries.len() as u64).into()))

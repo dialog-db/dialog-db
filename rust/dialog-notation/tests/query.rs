@@ -105,6 +105,235 @@ async fn it_collects_the_whole_of_a_field_as_a_set() -> Result<()> {
     Ok(())
 }
 
+/// The folds a selection asks Dialog-DB for.
+fn folds(text: &str) -> Result<usize> {
+    let analysis = dialog_notation::Analyzer::new()?.analyze(&dialog_notation::parse(text)?);
+    for tree in &analysis.analyzed {
+        if let [dialog_notation::Step::Select(selection)] =
+            dialog_notation::compile(tree)?.as_slice()
+        {
+            return Ok(selection.folds.len());
+        }
+    }
+    Err(anyhow::anyhow!("no selection: {:?}", analysis.diagnostics))
+}
+
+/// A read that collects one variable, whose shared terms the conditions
+/// every answer needs bind, is folded by Dialog-DB, with `distinct` and
+/// `count-distinct`: the card's tags are one fold, asked for every card
+/// or for one. A read that collects entries is folded too, each entry
+/// the record of the row it was read from.
+#[dialog_common::test]
+fn it_asks_dialog_db_to_fold_a_collected_read() -> Result<()> {
+    assert_eq!(
+        folds(&format!("{TODOS}{CARD}(select (todo/card ?t is: ?card))"))?,
+        1
+    );
+    assert_eq!(
+        folds(&format!(
+            "{TODOS}{CARD}(select (todo/card todo:2 is: ?card))"
+        ))?,
+        1
+    );
+    let outline = "(query (notebook/outline ?n is: ?outline)
+           (notebook/named ?n title: ?title)
+           (notebook/blocks ?n block: (collect ?blocks))
+           (is ?outline {:title ?title :blocks ?blocks}))
+         (select (notebook/outline ?n is: ?outline))";
+    assert_eq!(folds(&format!("{NOTEBOOK}{outline}"))?, 1);
+    Ok(())
+}
+
+/// The selection a document compiles to.
+fn selection(text: &str) -> Result<dialog_notation::Selection> {
+    let analysis = dialog_notation::Analyzer::new()?.analyze(&dialog_notation::parse(text)?);
+    for tree in &analysis.analyzed {
+        if let [dialog_notation::Step::Select(selection)] =
+            dialog_notation::compile(tree)?.as_slice()
+        {
+            return Ok((**selection).clone());
+        }
+    }
+    Err(anyhow::anyhow!("no selection: {:?}", analysis.diagnostics))
+}
+
+/// The card's tags, the fold of two concept queries whose rules are laid
+/// on the branch's session overlay, kept by a standing fold: after a tag
+/// added, a tag taken away and a to-do added, what it has reported is
+/// what a select of the fold gives, and neither query was asked again
+/// whole.
+#[dialog_common::test]
+async fn it_keeps_a_collected_read_folded_under_a_subscription() -> Result<()> {
+    use dialog_query::query::Output as _;
+    let mut notebook = todos().await?;
+    let selection = selection(&format!("{TODOS}{CARD}(select (todo/card ?t is: ?card))"))?;
+    let folded = &selection.folds[0];
+    for rule in &folded.rules {
+        notebook.branch.overlay().assert(rule.clone())?;
+    }
+    let mut standing = notebook.branch.subscribe_fold(folded.fold.clone());
+    let mut answer = Vec::new();
+    for write in [
+        None,
+        Some(r#"(assert (todo/tag todo:2 tag: "call"))"#),
+        Some(r#"(retract (todo/tag todo:1 tag: "home"))"#),
+        Some(r#"(assert (todo todo:3 title: "Water plants"))"#),
+    ] {
+        if let Some(write) = write {
+            let (_, diagnostics) = notebook.submit(write).await?;
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        }
+        let delta = standing
+            .poll(&notebook.operator)
+            .await?
+            .expect("each write moves a card");
+        for row in &delta.retracted {
+            let at = answer.iter().position(|held| held == row).expect("held");
+            answer.swap_remove(at);
+        }
+        answer.extend(delta.asserted);
+        let selected = notebook
+            .branch
+            .query()
+            .select(folded.fold.clone())
+            .perform(&notebook.operator)
+            .try_vec()
+            .await?;
+        let rows = |rows: &[dialog_query::FoldConclusion]| {
+            let mut rows: Vec<String> = rows
+                .iter()
+                .map(|row| format!("{:?}", folded.values(row)))
+                .collect();
+            rows.sort();
+            rows
+        };
+        assert_eq!(rows(&answer), rows(&selected), "after {write:?}");
+    }
+    assert_eq!(answer.len(), 3);
+    assert_eq!(standing.recomputes(), 2);
+    Ok(())
+}
+
+/// What a tag added to one of `n` to-dos costs the card's standing fold
+/// once it has been polled: how many times its inner subscriptions were
+/// evaluated whole again, and how many tree nodes the poll read.
+async fn tag_added(n: usize) -> Result<(usize, u64)> {
+    let mut notebook = Notebook::open().await?;
+    let mut seed = String::from(TODOS);
+    for i in 0..n {
+        seed.push_str(&format!(
+            "\n(assert (todo todo:n{i} title: \"Task {i}\"))\
+             \n(assert (todo/tag todo:n{i} tag: \"a{}\"))\
+             \n(assert (todo/tag todo:n{i} tag: \"b{}\"))",
+            i % 7,
+            i % 5
+        ));
+    }
+    let (_, diagnostics) = notebook.submit(&seed).await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let selection = selection(&format!("{TODOS}{CARD}(select (todo/card ?t is: ?card))"))?;
+    let folded = &selection.folds[0];
+    for rule in &folded.rules {
+        notebook.branch.overlay().assert(rule.clone())?;
+    }
+    let env = dialog_repository::helpers::Interposing::new(notebook.operator.clone());
+    let mut standing = notebook.branch.subscribe_fold(folded.fold.clone());
+    standing.poll(&env).await?;
+    let recomputed = standing.recomputes();
+    notebook
+        .submit(&format!(
+            r#"(assert (todo/tag todo:n{} tag: "new"))"#,
+            n / 2
+        ))
+        .await?;
+    let reads = env.reads();
+    let delta = standing.poll(&env).await?.expect("the tag moves a card");
+    assert_eq!((delta.asserted.len(), delta.retracted.len()), (1, 1));
+    Ok((standing.recomputes() - recomputed, env.reads() - reads))
+}
+
+/// A tag added to one to-do is maintained for that to-do alone: the
+/// fold's inner subscriptions are not evaluated whole again, and the
+/// poll reads a few nodes, as many among 200 to-dos as among 20 (about
+/// 20 each; reported under an entity made of the row's values, as they
+/// were, the poll read 88 and 94, and its time grew with the to-dos). Each
+/// inner query reports its rows under the entity they are about, the
+/// to-do, so the subscription re-derives the one to-do whose fact moved.
+#[dialog_common::test]
+async fn it_maintains_a_folded_read_for_the_entity_that_changed() -> Result<()> {
+    let (few, few_reads) = tag_added(20).await?;
+    let (many, many_reads) = tag_added(200).await?;
+    assert_eq!((few, many), (0, 0), "an inner subscription recomputed");
+    assert!(
+        few_reads <= 40 && many_reads <= 40,
+        "node reads grew: {few_reads} at 20, {many_reads} at 200"
+    );
+    Ok(())
+}
+
+/// The card kept standing by the crate's driver, `Live::standing`: the
+/// tags are a standing fold, which alone reads the tags' query, and each
+/// poll after a write gives what a select gives then, with no query
+/// evaluated whole again. The last tag removed is the empty set.
+#[dialog_common::test]
+async fn it_keeps_a_selection_standing_through_the_driver() -> Result<()> {
+    let mut notebook = todos().await?;
+    notebook.submit(CARD).await?;
+    let selection = selection(&format!("{TODOS}{CARD}(select (todo/card ?t is: ?card))"))?;
+    let live = dialog_notation::live::Live::new(notebook.branch.clone());
+    let mut standing = live.standing(selection.clone())?;
+    assert_eq!(standing.folds().len(), 1);
+    assert_eq!(
+        standing
+            .feeds()
+            .iter()
+            .filter(|feed| feed.is_some())
+            .count(),
+        1,
+        "the tags are read by the fold alone"
+    );
+    let answers = |answers: Vec<dialog_notation::Syntax>| -> Vec<String> {
+        answers.iter().map(ToString::to_string).collect()
+    };
+    let first = standing
+        .poll(&notebook.operator)
+        .await?
+        .expect("the first poll answers");
+    assert_eq!(
+        answers(first),
+        report(&mut notebook, "(select (todo/card ?t is: ?card))").await?
+    );
+    assert_eq!(
+        answers(live.select(&selection, &notebook.operator).await?),
+        report(&mut notebook, "(select (todo/card ?t is: ?card))").await?
+    );
+    let evaluated = standing.recomputes();
+    for change in [
+        r#"(assert (todo/tag todo:2 tag: "call"))"#,
+        r#"(retract (todo/tag todo:1 tag: "home"))"#,
+        r#"(retract (todo/tag todo:2 tag: "call"))"#,
+        r#"(assert (todo todo:3 title: "Water plants"))"#,
+    ] {
+        notebook.submit(change).await?;
+        let now = standing
+            .poll(&notebook.operator)
+            .await?
+            .expect("a card moved");
+        assert_eq!(
+            answers(now),
+            report(&mut notebook, "(select (todo/card ?t is: ?card))").await?,
+            "after {change}"
+        );
+    }
+    assert_eq!(standing.recomputes(), evaluated);
+    assert!(
+        report(&mut notebook, "(select (todo/card todo:2 is: ?card))")
+            .await?
+            .contains(&r#"(todo/card todo:2 is: {:title "Call mum" :tags {}})"#.to_string())
+    );
+    Ok(())
+}
+
 /// A fold is a function of what was collected: `count` of the tags is 2
 /// and 0. A function other than `count` is refused.
 #[dialog_common::test]
@@ -185,6 +414,193 @@ async fn it_collects_a_keyed_collection_as_a_map() -> Result<()> {
             r#"(notebook/outline notebook:1 is: {:title "Field notes" :blocks {"N1" block:a "N2" block:b "N3" block:c}})"#,
             r#"(notebook/outline notebook:2 is: {:title "Untitled" :blocks {}})"#,
         ]
+    );
+    Ok(())
+}
+
+/// The outline: a notebook's title and the whole of its blocks, a map.
+const OUTLINE: &str = "(query (notebook/outline ?n is: ?outline)
+       (notebook/named ?n title: ?title)
+       (notebook/blocks ?n block: (collect ?blocks))
+       (is ?outline {:title ?title :blocks ?blocks :count (count ?blocks)}))";
+
+/// The answers of a selection, its rows asked once and its folds kept
+/// standing: each fold polled after its rules are laid, its rows those a
+/// standing fold reports, so a map Dialog-DB folds is the same selected
+/// and maintained.
+async fn standing(
+    notebook: &Notebook,
+    selection: &dialog_notation::Selection,
+) -> Result<Vec<String>> {
+    use dialog_query::query::Output as _;
+    let mut results = Vec::new();
+    for query in &selection.queries {
+        let mut layer = notebook.branch.query();
+        if let Some(rule) = &query.rule {
+            layer = layer.with(rule.clone());
+        }
+        let rows: Vec<dialog_query::ConceptConclusion> = layer
+            .select(query.select.clone())
+            .perform(&notebook.operator)
+            .try_vec()
+            .await?;
+        results.push(
+            rows.iter()
+                .map(|row| query.values(row))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    }
+    let mut folded = Vec::new();
+    for fold in &selection.folds {
+        for rule in &fold.rules {
+            notebook.branch.overlay().assert(rule.clone())?;
+        }
+        let mut kept = notebook.branch.subscribe_fold(fold.fold.clone());
+        let rows = match kept.poll(&notebook.operator).await? {
+            Some(delta) => delta.asserted,
+            None => Vec::new(),
+        };
+        folded.push(rows.iter().map(|row| fold.values(row)).collect());
+    }
+    Ok(selection
+        .answer(&results, &folded)?
+        .iter()
+        .map(ToString::to_string)
+        .collect())
+}
+
+/// A collected entry `{?k ?v}` is folded by Dialog-DB as the record of
+/// the row it was read from, so its key stays beside its value: two
+/// blocks of one source under two keys are two entries, and two blocks
+/// under one key are one, the first in the order of their values, as
+/// what is put together in memory keeps. It is counted by its keys.
+#[dialog_common::test]
+async fn it_folds_a_collected_entry_keeping_its_key_beside_its_value() -> Result<()> {
+    let mut notebook = notebooks().await?;
+    let (_, diagnostics) = notebook
+        .submit(
+            r#"(assert (notebook/named notebook:3 title: "Shared"))
+               (assert (notebook/blocks notebook:3 block: {"N1" block:a}))
+               (assert (notebook/blocks notebook:3 block: {"N2" block:a}))
+               (assert (notebook/named notebook:4 title: "Keyed"))
+               (assert (notebook/blocks notebook:4 block: {"N1" block:b}))
+               (assert (notebook/blocks notebook:4 block: {"N1" block:a}))"#,
+        )
+        .await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let asked = format!("{NOTEBOOK}{OUTLINE}(select (notebook/outline ?n is: ?outline))");
+    let selection = selection(&asked)?;
+    assert_eq!(selection.folds.len(), 1);
+    let expected = vec![
+        r#"(notebook/outline notebook:1 is: {:title "Field notes" :blocks {"N1" block:a "N2" block:b "N3" block:c} :count 3})"#,
+        r#"(notebook/outline notebook:2 is: {:title "Untitled" :blocks {} :count 0})"#,
+        r#"(notebook/outline notebook:3 is: {:title "Shared" :blocks {"N1" block:a "N2" block:a} :count 2})"#,
+        r#"(notebook/outline notebook:4 is: {:title "Keyed" :blocks {"N1" block:a} :count 1})"#,
+    ];
+    assert_eq!(standing(&notebook, &selection).await?, expected);
+    notebook.submit(OUTLINE).await?;
+    assert_eq!(
+        report(&mut notebook, "(select (notebook/outline ?n is: ?outline))").await?,
+        expected
+    );
+    Ok(())
+}
+
+/// Items whose tags are read through two definitions of `item/tag`, one
+/// of the tag attribute and one of the label attribute.
+const LABELLED: &str = r#"
+    (concept (item ?t title: ?title)
+      (xyz.item/title of: ?t is: ?title as: :text cardinality: :one))
+    (concept (item/tag ?t tag: ?g)
+      (xyz.item/tag of: ?t is: ?g as: :text cardinality: :many))
+    (concept (item/tag ?t tag: ?g source: ?s)
+      (xyz.item/label of: ?t is: ?g as: :text cardinality: :many)
+      (xyz.item/source of: ?t is: ?s as: :text cardinality: :one))
+    (query (item/card ?t is: ?card)
+      (item ?t title: ?title)
+      (item/tag ?t tag: (collect ?tags) ...)
+      (is ?card {:title ?title :tags ?tags}))"#;
+
+/// A collected read through two definitions is one query: each
+/// definition derives the one relation of the part, so Dialog-DB folds
+/// the tags of both.
+#[dialog_common::test]
+async fn it_folds_a_collected_read_through_several_definitions() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let (_, diagnostics) = notebook
+        .submit(&format!(
+            r#"{LABELLED}
+               (assert (item item:1 title: "One"))
+               (assert (item/tag item:1 tag: "a"))
+               (assert (item/tag item:1 tag: "b" source: "s"))
+               (assert (item item:2 title: "Two"))"#
+        ))
+        .await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let selection = selection(&format!("{LABELLED}(select (item/card ?t is: ?card))"))?;
+    assert_eq!(
+        selection.queries.len(),
+        3,
+        "the title, and the tags through each definition"
+    );
+    assert_eq!(selection.folds.len(), 1);
+    let expected = vec![
+        r#"(item/card item:1 is: {:title "One" :tags {: "a" : "b"}})"#,
+        r#"(item/card item:2 is: {:title "Two" :tags {}})"#,
+    ];
+    assert_eq!(standing(&notebook, &selection).await?, expected);
+    assert_eq!(
+        report(&mut notebook, "(select (item/card ?t is: ?card))").await?,
+        expected
+    );
+    Ok(())
+}
+
+/// A collected call is put together in memory: what a query answers may
+/// itself be collected, and a query is not a relation Dialog-DB can
+/// fold. The fallback answers it.
+#[dialog_common::test]
+fn it_puts_a_collected_call_together_in_memory() -> Result<()> {
+    let chips = "(query (todo/chip ?t tag: ?g is: ?chip)
+           (todo/tag ?t tag: ?g)
+           (is ?chip {:tag ?g}))
+         (query (todo/chips ?t is: ?card)
+           (todo ?t title: ?title)
+           (todo/chip ?t is: (collect ?chips))
+           (is ?card {:title ?title :chips ?chips}))
+         (select (todo/chips ?t is: ?card))";
+    assert_eq!(folds(&format!("{TODOS}{chips}"))?, 0);
+    Ok(())
+}
+
+/// A collected read that shares a term with the rest beside its entity,
+/// and has more than one column beside the entity, is put together in
+/// memory: its rows are reported as a record under the entity, and a
+/// field of one row could be read beside a field of another, so a fold
+/// could not group by the term the read shares. The fallback answers.
+#[dialog_common::test]
+async fn it_puts_a_read_grouped_beside_its_entity_together_in_memory() -> Result<()> {
+    let noted = r#"
+        (concept (todo/note ?t day: ?d text: ?x)
+          (xyz.todo.note/day of: ?t is: ?d as: :text cardinality: :many)
+          (xyz.todo.note/text of: ?t is: ?x as: :text cardinality: :many))
+        (query (todo/day ?t is: ?card)
+          (todo ?t title: ?title)
+          (todo/note ?t day: ?d)
+          (todo/note ?t day: ?d text: (collect ?texts))
+          (is ?card {:title ?title :day ?d :texts ?texts}))"#;
+    assert_eq!(
+        folds(&format!("{TODOS}{noted}(select (todo/day ?t is: ?card))"))?,
+        0
+    );
+    let mut notebook = todos().await?;
+    notebook.submit(noted).await?;
+    notebook
+        .submit(r#"(assert (todo/note todo:1 day: "mon" text: "early"))"#)
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(select (todo/day ?t is: ?card))").await?,
+        vec![r#"(todo/day todo:1 is: {:title "Buy milk" :day "mon" :texts {: "early"}})"#]
     );
     Ok(())
 }

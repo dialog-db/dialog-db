@@ -275,6 +275,66 @@ impl Query {
             .collect()
     }
 
+    /// The variable the select binds a field to, by the field's label,
+    /// where the field is what a variable was bound to.
+    pub fn bound(&self, label: &str) -> Option<&str> {
+        self.fields.iter().find_map(|(field, _, slot)| match slot {
+            Slot::Bound(name) if field == label => Some(name.as_str()),
+            _ => None,
+        })
+    }
+
+    /// The label of the field that is the entity a row is reported
+    /// under, where one is.
+    pub fn about(&self) -> Option<&str> {
+        let Slot::Bound(entity) = &self.entity else {
+            return None;
+        };
+        self.fields.iter().find_map(|(field, _, slot)| match slot {
+            Slot::Bound(name) if name == entity => Some(field.as_str()),
+            _ => None,
+        })
+    }
+
+    /// What to select with the variable of each field `labels` names
+    /// renamed to the name beside it, and every other variable
+    /// `{prefix}` and its name, so that the rows of two queries join on
+    /// those fields alone. `None` where a field named is not what a
+    /// variable was bound to.
+    pub fn renamed(&self, labels: &[(String, String)], prefix: &str) -> Option<ConceptQuery> {
+        let mut names = BTreeMap::new();
+        for (label, name) in labels {
+            names.insert(self.bound(label)?.to_string(), name.clone());
+        }
+        fn rename(json: &mut Json, names: &BTreeMap<String, String>, prefix: &str) {
+            match json {
+                Json::Object(object) => {
+                    if let Some(Json::Object(variable)) = object.get_mut("?")
+                        && let Some(Json::String(name)) = variable.get_mut("name")
+                    {
+                        *name = names
+                            .get(name.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| format!("{prefix}{name}"));
+                        return;
+                    }
+                    for value in object.values_mut() {
+                        rename(value, names, prefix);
+                    }
+                }
+                Json::Array(items) => {
+                    for item in items {
+                        rename(item, names, prefix);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut select = serde_json::to_value(&self.select).ok()?;
+        rename(&mut select, &names, prefix);
+        serde_json::from_value(select).ok()
+    }
+
     /// A match, as the head the query reports with its variables
     /// replaced by what they were bound to.
     pub fn row(&self, conclusion: &ConceptConclusion) -> Result<Syntax, Error> {
@@ -1469,6 +1529,26 @@ fn induce(rule: &Rule, read: &Read, head: &str) -> Result<InductiveRule, Error> 
 /// rule derives a relation of the report's own, a column for each
 /// variable the head holds, and that relation is what is selected.
 fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
+    // A query's row of a part read through several definitions names
+    // the part: each definition is a rule of its own, and every one of
+    // them derives the one relation the part is named by, so one select
+    // reads them all.
+    let mut read = read.clone();
+    let mut site = site.to_string();
+    let mut parted = false;
+    if read.domain == crate::select::ROW
+        && let Some(at) = read
+            .fields
+            .iter()
+            .position(|field| field.label == crate::select::PART)
+        && let Term::Text(part) = &read.fields[at].term
+    {
+        site = part.clone();
+        read.fields.remove(at);
+        parted = true;
+    }
+    let site = site.as_str();
+    let read = &read;
     let bound = rule.bound();
     // A read of a command names no entity, so where it is reported each
     // side of the query has an entity of its expansion's own. The row
@@ -1518,7 +1598,16 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
         | Term::Fold { .. } => None,
     };
 
-    if let ([Premise::Read(only)], []) = (rule.when.as_slice(), rule.unless.as_slice()) {
+    // A query's row that is one record too is derived by a rule, so the
+    // record is a value the select binds, which a fold can collect.
+    let recorded = parted
+        || read.domain == crate::select::ROW
+            && fields
+                .iter()
+                .any(|field| matches!(field.term, Term::Struct(_)));
+    if let ([Premise::Read(only)], []) = (rule.when.as_slice(), rule.unless.as_slice())
+        && !recorded
+    {
         let mut scope = Scope::default();
         let select = scope.read(only)?;
         if scope.when.is_empty() {
@@ -1640,6 +1729,14 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                 });
                 Slot::Bound(column)
             }
+        };
+        // A field that is the entity reads as the entity, so the select
+        // binds one variable to both.
+        let slot = match (&field.term, &read.entity) {
+            (Term::Variable(term), Term::Variable(entity)) if term == entity => {
+                Slot::Bound("this".into())
+            }
+            _ => slot,
         };
         slots.push((field.label.clone(), key, slot));
     }
