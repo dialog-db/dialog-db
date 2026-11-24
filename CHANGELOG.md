@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A standing fold steps a group's value instead of folding the group again
 
-Pull request to come. The design it follows is
+[#856](https://github.com/dialog-db/dialog-db/pull/856). The design it follows is
 `design/fold-maintenance/design-fold-state.md` (#837), approach 2.
 
 `Branch::subscribe_fold` folded a group again over all its kept input rows
