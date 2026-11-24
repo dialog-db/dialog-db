@@ -1325,9 +1325,7 @@ mod tests {
             .find(|root| &root.key == key)
             .expect("the root");
         for (slot, key) in below {
-            let Content::Element { slots, .. } = &mut shown.content else {
-                panic!("an element");
-            };
+            let Content::Element { slots, .. } = &mut shown.content;
             let Slot::Instances(instances) = &mut slots[*slot] else {
                 panic!("instances at {slot}");
             };
@@ -1348,9 +1346,7 @@ mod tests {
         if parent.is_empty() {
             return roots;
         }
-        let Content::Element { slots, .. } = &mut found(roots, parent).content else {
-            panic!("an element");
-        };
+        let Content::Element { slots, .. } = &mut found(roots, parent).content;
         match &mut slots[slot] {
             Slot::Instances(instances) => instances,
             other => panic!("no instances: {other:?}"),
@@ -1379,28 +1375,19 @@ mod tests {
                     assert_eq!(from.len() + 1, before, "{patch:?}");
                 }
                 Patch::SetText { at, slot, text } => {
-                    let Content::Element { slots, .. } = &mut found(&mut tree.roots, at).content
-                    else {
-                        panic!("an element");
-                    };
+                    let Content::Element { slots, .. } = &mut found(&mut tree.roots, at).content;
                     slots[*slot] = Slot::Text(text.clone());
                 }
                 Patch::SetAttribute { at, name, value } => {
                     let Content::Element { attributes, .. } =
-                        &mut found(&mut tree.roots, at).content
-                    else {
-                        panic!("an element");
-                    };
+                        &mut found(&mut tree.roots, at).content;
                     match attributes.iter_mut().find(|(held, _)| held == name) {
                         Some(attribute) => attribute.1 = value.clone(),
                         None => attributes.push((name.clone(), value.clone())),
                     }
                 }
                 Patch::SetEvent { at, index, event } => {
-                    let Content::Element { events, .. } = &mut found(&mut tree.roots, at).content
-                    else {
-                        panic!("an element");
-                    };
+                    let Content::Element { events, .. } = &mut found(&mut tree.roots, at).content;
                     events[*index] = event.clone();
                 }
             }
