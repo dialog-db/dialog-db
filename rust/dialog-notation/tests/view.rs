@@ -16,7 +16,7 @@
 
 use anyhow::Result;
 use dialog_corpus::Value;
-use dialog_notation::view::tree::Slot;
+use dialog_notation::view::Slot;
 use dialog_notation::{
     Analyzer, Change, Content, Error, Maintainer, Patch, Plan, Query, Rendered, Row, Shown, Step,
     compile, parse, render,

@@ -12,6 +12,13 @@
 //! slots of what the element holds, a text or the instances of a child.
 //! It is not markup and not a document object model.
 
+// The maintainer is what the driver keeps a view with; without the
+// driver nothing in the crate uses it.
+#![cfg_attr(
+    not(any(feature = "repository", feature = "inspect")),
+    allow(dead_code)
+)]
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -323,6 +330,7 @@ impl Maintainer {
         self.given.insert(place);
     }
 
+    #[cfg(any(test, feature = "inspect"))]
     /// How many rows stand behind the instances of a layer's places, each
     /// as many times as it was given.
     pub fn rows(&self, layer: usize) -> usize {
@@ -347,6 +355,7 @@ impl Maintainer {
         self.kids[place].get(host).map_or(0, Vec::len) as u64
     }
 
+    #[cfg(any(test, feature = "inspect"))]
     /// The plan it maintains.
     pub fn plan(&self) -> &Plan {
         &self.plan

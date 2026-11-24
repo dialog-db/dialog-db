@@ -18,6 +18,9 @@ repository = [
     "dep:dialog-effects",
     "dep:dialog-search-tree",
 ]
+# What the tests look into: the maintainer of a view's tree and the
+# counts of what a driver evaluated. Not part of the crate's surface.
+inspect = []
 
 [dependencies]
 dialog-corpus = { workspace = true }
@@ -33,6 +36,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+# The integration tests look into the driver and the maintainer.
+dialog-notation = { path = ".", features = ["inspect"] }
 # The tests run documents against a real branch, which only the
 # repository's helpers build.
 dialog-common = { workspace = true, features = ["helpers"] }

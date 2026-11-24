@@ -186,19 +186,6 @@ pub enum Head {
     Report(Read),
 }
 
-impl Head {
-    /// The relation the head is about, whatever it does with it.
-    pub fn read(&self) -> &Read {
-        match self {
-            Head::Derive(read)
-            | Head::Assert(read)
-            | Head::Retract(read)
-            | Head::Hold(read)
-            | Head::Report(read) => read,
-        }
-    }
-}
-
 impl Read {
     /// The fields the author named. A field an expansion added, under a
     /// variable of its own that no premise binds, is one the author

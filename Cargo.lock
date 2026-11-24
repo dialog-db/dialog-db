@@ -1667,6 +1667,7 @@ dependencies = [
  "dialog-common",
  "dialog-corpus",
  "dialog-effects",
+ "dialog-notation",
  "dialog-peer",
  "dialog-query",
  "dialog-repository",

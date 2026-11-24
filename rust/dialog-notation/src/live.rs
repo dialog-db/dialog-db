@@ -9,7 +9,7 @@
 //! session overlay, where a subscription finds them and from which
 //! nothing is committed. What is put together from the rows, a call
 //! joined to the query it calls and a collection the lowering does not
-//! fold, is put together by [`Selection::answer`] and the [`Maintainer`],
+//! fold, is put together by [`Selection::answer`] and the maintainer of a view's tree,
 //! as when the rows are asked once.
 //!
 //! ```no_run
@@ -343,8 +343,8 @@ impl Live {
     /// rendered for where it answers of one: its layers' rules laid and a
     /// subscription of each layer's query, but for a count Dialog-DB
     /// keeps, [`Plan::folds`], whose layer is a standing fold instead.
-    /// The [`Maintainer`] is given the fold's counts and no row of that
-    /// layer.
+    /// The tree's maintainer is given the fold's counts and no row of
+    /// that layer.
     pub fn watch(&self, plan: Plan, entity: Option<Value>) -> Result<Watched, LiveError> {
         let mut maintainer = Maintainer::new(plan.clone(), entity.clone());
         let mut lease = self.lease();
@@ -450,17 +450,20 @@ impl Standing {
 
     /// The subscription of each query the answers read, by its index in
     /// [`Selection::queries`]; `None` for one only a fold reads.
+    #[cfg(feature = "inspect")]
     pub fn feeds(&self) -> &[Option<Subscription<ConceptQuery>>] {
         &self.feeds
     }
 
     /// The standing fold of each of [`Selection::folds`].
+    #[cfg(feature = "inspect")]
     pub fn folds(&self) -> &[FoldSubscription<ConceptQuery, ConceptQuery>] {
         &self.folds
     }
 
     /// Full evaluations of every query kept so far, the inner queries of
     /// each fold among them.
+    #[cfg(feature = "inspect")]
     pub fn recomputes(&self) -> usize {
         self.feeds
             .iter()
@@ -570,6 +573,7 @@ impl Watched {
 
     /// For each layer with a query, how many times its subscription
     /// evaluated it whole: a fold's, both of its queries.
+    #[cfg(feature = "inspect")]
     pub fn recomputes(&self) -> Vec<usize> {
         self.layers
             .iter()
@@ -583,12 +587,14 @@ impl Watched {
 
     /// The maintainer of the tree, which holds the rows each layer gave
     /// it.
+    #[cfg(feature = "inspect")]
     pub fn maintainer(&self) -> &Maintainer {
         &self.maintainer
     }
 
     /// The layers whose count Dialog-DB keeps by a fold, by their index
     /// in [`Plan::layers`].
+    #[cfg(feature = "inspect")]
     pub fn folded(&self) -> Vec<usize> {
         self.layers
             .iter()
@@ -600,6 +606,7 @@ impl Watched {
 
     /// How many rows each layer delivered at the last poll, come and
     /// gone, by its index in [`Plan::layers`].
+    #[cfg(feature = "inspect")]
     pub fn delivered(&self) -> &[usize] {
         &self.delivered
     }

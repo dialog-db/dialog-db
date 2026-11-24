@@ -37,8 +37,8 @@ entry is folded by Dialog-DB's `Fold` where its shape allows; a collected
 call to another query, the shapes built in an answer and the joins
 between queries are put together by the crate from the rows. A view
 compiles to a `Plan` of layers, each one Dialog-DB query, and the
-`Maintainer` turns the rows that arrive and leave into patches of the
-rendered tree. `dialog_notation::live` keeps a selection or a view
+driver turns the rows that arrive and leave into patches of the rendered
+tree. `dialog_notation::live` keeps a selection or a view
 current on a branch: `Live::select` asks once, `Live::standing` and
 `Live::watch` subscribe and give the answers or the patches on each
 poll.
@@ -54,9 +54,16 @@ What this changes for you:
   rule laid over a query layer for it alone. `Live::standing(selection)`
   gives a `Standing` and `Live::watch(plan, entity)` a `Watched`, whose
   `poll(env)` gives the answers again when a row moved, or the view's
-  patches; their rules are laid on the branch's session overlay, and
-  `recomputes()` says how often a query was evaluated whole. `Reader` is
-  the env a poll reads through, and `LiveError` what fails.
+  patches. Their rules are laid on the branch's session overlay and taken
+  off when the last `Standing` or `Watched` holding them is dropped. A
+  poll that fails loses nothing that the next poll does not give. `Reader`
+  is the env a poll reads through, and `LiveError` what fails.
+- The crate's surface is what is named at its root: `read`, `parse`,
+  `parse_document`, `parse_written`, `print`, `check`, `check_forms`,
+  `Analyzer`, `compile` and the types they give, the `Plan` and the
+  `Patch`es of a view, the markup types in `view`, and `live`. Its
+  modules are private. The `inspect` feature also exposes the maintainer
+  of a view's tree and what a driver evaluated, for tests.
 - `check(analyzer, text)` gives, form by form, what a document compiles
   to, its diagnostics, and its declarations as data
   (`Declaration::Concept`, `Declaration::Query`).

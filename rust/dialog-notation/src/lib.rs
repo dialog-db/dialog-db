@@ -4,8 +4,8 @@
 //! in it as rules.
 //!
 //! This crate is a proof of concept. It works in three phases, and what
-//! passes between them is the syntax tree ([`syntax`]), which is kept
-//! as data ([`data`]):
+//! passes between them is the syntax tree ([`Syntax`]), which is kept
+//! as Dialog-DB's composite value:
 //!
 //! | phase | takes | gives |
 //! |---|---|---|
@@ -13,15 +13,14 @@
 //! | [`Analyzer::analyze`] | syntax trees | analyzed trees, every one a rule of the kernel, which tree each came of, and diagnostics: every refusal and every warning, each with the way to the form it is about |
 //! | [`compile`](compile()) | an analyzed tree | what Dialog-DB already runs: concept queries, deductive and inductive rules, facts and dispatched commands |
 //!
-//! Analysis is the walker ([`expand`]) and the patterns it matches
-//! ([`pattern`]); the compiler reads the analyzed tree through
-//! [`kernel`]. The notation as parsed ([`form`]) is the parser's own,
-//! and what a tree is printed as: nothing after [`parse`](parse())
-//! reads it.
+//! Analysis is the walker and the patterns it matches; the compiler
+//! reads the analyzed tree as the kernel's forms. The notation as parsed
+//! ([`Form`], what [`read`](read()) gives) is the parser's own, and what
+//! a tree is printed as: nothing after [`parse`](parse()) reads it.
 //!
 //! A tree says what a text means and not how it was written.
 //! [`parse_written`] gives, beside the trees, the mapping that holds
-//! what they left out ([`written`]): where each node is, the order its
+//! what they left out ([`Written`]): where each node is, the order its
 //! parts were written in, a token spelled its own way, and the
 //! comments. [`print`](print()) takes the two back to the text, and a
 //! [`Diagnostic`] says the way to the form it is about, which the
@@ -51,41 +50,39 @@
 //! # }
 //! ```
 
-pub mod analyze;
-pub mod check;
-pub mod compile;
-pub mod data;
-pub mod declare;
-pub mod diagnostic;
-pub mod expand;
-pub mod form;
-pub mod kernel;
+mod analyze;
+mod check;
+mod compile;
+mod data;
+mod declare;
+mod diagnostic;
+mod expand;
+mod form;
+mod kernel;
 #[cfg(feature = "repository")]
 pub mod live;
-pub mod parse;
-pub mod pattern;
-pub mod print;
-pub mod select;
-pub mod syntax;
+mod parse;
+mod pattern;
+mod print;
+mod select;
+mod syntax;
 pub mod view;
-pub mod written;
+mod written;
 
 pub use analyze::{Analysis, Analyzer};
 pub use check::{Checked, check, check_forms};
 pub use compile::{Query, Step, Write, compile};
 pub use declare::{Concept, Declaration, Key, Line};
 pub use diagnostic::{Diagnostic, Severity};
-pub use expand::{Expander, Position};
 pub use form::{Form, Part, read};
 pub use parse::{Parsed, parse, parse_document, parse_written};
 pub use print::print;
-pub use select::{Folded, FoldedPart, Selection};
+pub use select::{Folded, Selection};
 pub use syntax::{Parameters, Signature, Syntax};
 pub use view::plan::{Condition, Count, FoldedCount, Layer, Place, Placed, Plan, Source, Why};
-pub use view::tree::{
-    Address, Change, Content, Counts, Given, Maintainer, Patch, Posted, Rendered, Row, Shown,
-    render,
-};
+pub use view::tree::{Address, Content, Patch, Posted, Rendered, Shown};
+#[cfg(feature = "inspect")]
+pub use view::tree::{Change, Counts, Given, Maintainer, Row, render};
 pub use view::{Attribute, CALLED, Element, Event, Input, Node, Piece};
 pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};
 

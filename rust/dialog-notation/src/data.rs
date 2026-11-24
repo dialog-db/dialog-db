@@ -172,26 +172,11 @@ impl Entries {
             .map(|index| &self.entries[index].1)
     }
 
-    /// Whether the map holds `key`.
-    pub fn contains(&self, key: &str) -> bool {
-        self.get(key).is_some()
-    }
-
     /// The entries, in order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
         self.entries
             .iter()
             .map(|(key, value)| (key.as_str(), value))
-    }
-
-    /// How many entries the map holds.
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Whether the map holds no entry.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 
     /// The composite value this map is kept as.

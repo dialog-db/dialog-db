@@ -16,10 +16,10 @@
 //! collects, which stands there as children, in the order of their keys.
 //! [`template`] reads one into a [`Node`].
 //!
-//! [`plan`] lays a query and every query it collects out in layers, each
-//! a query of its own, and [`tree`] keeps their instances from the rows
-//! of those queries as they come and go, and says each change as
-//! patches. No value is folded. The Dialog-DB back end,
+//! A [`Plan`](crate::Plan) lays a query and every query it collects out
+//! in layers, each a query of its own, and the tree keeps their
+//! instances from the rows of those queries as they come and go, and
+//! says each change as [`Patch`]es. No value is folded. The Dialog-DB back end,
 //! [`compile`](crate::compile()), gives a query whose answer is markup as
 //! its plan.
 
@@ -28,8 +28,15 @@ use dialog_corpus::Value;
 use crate::Error;
 use crate::syntax::Syntax;
 
-pub mod plan;
-pub mod tree;
+pub(crate) mod plan;
+pub(crate) mod tree;
+
+pub use tree::{Address, Content, Patch, Posted, Rendered, Shown, Slot};
+/// What keeps a view's tree from rows handed to it, for a driver of its
+/// own and for the tests; [`Live::watch`](crate::live::Live::watch)
+/// keeps one itself.
+#[cfg(feature = "inspect")]
+pub use tree::{Change, Counts, Given, Maintainer, Row, render};
 
 /// The variable a view not found, shown as its source, names the entity
 /// it reads by where the call names none.

@@ -1034,9 +1034,9 @@ struct Scope {
     /// The variables only what must not hold names, seen so far.
     absent: BTreeSet<String>,
     /// The patterns that stand where a term does, each under the
-    /// variable written in its place. The rest is written as JSON and
-    /// read by Dialog-DB, and a pattern is put in after: this was built
-    /// before a pattern had a written form (format 4 of a rule body).
+    /// variable written in its place. The rest of the rule is written as
+    /// JSON and read by Dialog-DB, and each pattern is put in where its
+    /// variable stands once the rule is read.
     shapes: Vec<(String, Syntax, Pattern)>,
     /// The records a head builds, each from what its premises bind, under
     /// the field it concludes.

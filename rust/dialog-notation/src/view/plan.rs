@@ -124,7 +124,7 @@ pub struct Count {
 /// writes it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Source {
-    /// The place that shows it, a [`SOURCE_TAG`] element.
+    /// The place that shows it, a `view-source` element.
     pub place: usize,
     /// The variable its text is held under.
     pub text: String,
