@@ -102,6 +102,23 @@ fn lists(
     aggregator: Aggregator,
     input: &str,
 ) -> anyhow::Result<Fold<AttributeQuery, ConceptQuery>> {
+    lists_over(kind, aggregator, input, &[])
+}
+
+/// [`lists`], the fold ranking by `listed`, least first, when it lists
+/// any: what a concept field's `max` or `min` over a listed attribute
+/// folds with.
+fn lists_over(
+    kind: Kind,
+    aggregator: Aggregator,
+    input: &str,
+    listed: &[&str],
+) -> anyhow::Result<Fold<AttributeQuery, ConceptQuery>> {
+    let mut entry = ReduceEntry::new("out", aggregator, Term::var(input));
+    entry.listed = listed
+        .iter()
+        .map(|value| Value::String((*value).to_string()))
+        .collect();
     Ok(Fold::new(
         AttributeQuery::new(
             Term::from(the!("list/name")),
@@ -111,10 +128,7 @@ fn lists(
             None,
         ),
         todos(kind)?,
-        Reduce::new(
-            vec!["l".into()],
-            vec![ReduceEntry::new("out", aggregator, Term::var(input))],
-        ),
+        Reduce::new(vec!["l".into()], vec![entry]),
     ))
 }
 
@@ -291,9 +305,23 @@ async fn differential(
     input: &str,
     seed: u64,
 ) -> anyhow::Result<()> {
+    differential_over(kind, aggregator, input, &[], seed).await
+}
+
+/// [`differential`], the fold ranking by `listed` when it lists any. A
+/// `max` or `min` over a listing has no running value: every poll that
+/// moved a row evaluates the fold afresh, and the comparison with a
+/// select holds all the same.
+async fn differential_over(
+    kind: Kind,
+    aggregator: Aggregator,
+    input: &str,
+    listed: &[&str],
+    seed: u64,
+) -> anyhow::Result<()> {
     const STEPS: usize = 160;
     let (operator, branch) = opened().await?;
-    let fold = lists(kind, aggregator, input)?;
+    let fold = lists_over(kind, aggregator, input, listed)?;
     let mut subscription = branch.subscribe_fold(fold.clone());
     let mut random = Random(seed);
     let mut model = Model::default();
@@ -349,6 +377,14 @@ async fn differential(
         assert_eq!(held, selected, "step {step}: the rows it holds");
         before = selected;
     }
+    if !listed.is_empty() {
+        assert_eq!(subscription.steps(), 0, "{aggregator}: no running value");
+        assert!(
+            subscription.recomputes() > 2,
+            "{aggregator}: evaluated afresh"
+        );
+        return Ok(());
+    }
     assert_eq!(
         subscription.recomputes(),
         2,
@@ -367,6 +403,21 @@ async fn differential(
             steps > refolds,
             "{aggregator}: {steps} steps, {refolds} folds"
         );
+    }
+    Ok(())
+}
+
+/// `max` and `min` of each list's tags over a listing, least first,
+/// that leaves `errand` out: each ranks by the listing, an unlisted tag
+/// loses to every listed one and among unlisted ones the newest stands,
+/// and the standing fold, evaluated afresh, equals a select.
+#[dialog_common::test]
+async fn it_keeps_a_max_and_min_over_a_listing_equal_to_a_select() -> anyhow::Result<()> {
+    for (aggregator, seed) in [
+        (Aggregator::Max, 0x5eed_1007),
+        (Aggregator::Min, 0x5eed_1008),
+    ] {
+        differential_over(Kind::Text, aggregator, "v", &["work", "home"], seed).await?;
     }
     Ok(())
 }
