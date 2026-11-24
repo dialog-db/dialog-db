@@ -284,4 +284,67 @@ mod tests {
         assert_eq!(after.analyzed.len(), 1);
         Ok(())
     }
+
+    /// `tree` with the variable `from` named `to`, as a caller that builds
+    /// trees itself may name it.
+    fn renamed(tree: &Syntax, from: &str, to: &str) -> Syntax {
+        match tree {
+            Syntax::Variable(name) if name == from => Syntax::Variable(to.into()),
+            Syntax::Application(operator, operand) => Syntax::Application(
+                Box::new(renamed(operator, from, to)),
+                crate::syntax::Parameters {
+                    items: operand
+                        .items
+                        .iter()
+                        .map(|item| renamed(item, from, to))
+                        .collect(),
+                    terms: operand
+                        .terms
+                        .iter()
+                        .map(|(label, term)| (label.clone(), renamed(term, from, to)))
+                        .collect(),
+                },
+            ),
+            Syntax::Map(entries) => Syntax::Map(
+                entries
+                    .iter()
+                    .map(|(key, value)| (renamed(key, from, to), renamed(value, from, to)))
+                    .collect(),
+            ),
+            Syntax::Tuple(items) => {
+                Syntax::Tuple(items.iter().map(|item| renamed(item, from, to)).collect())
+            }
+            other => other.clone(),
+        }
+    }
+
+    /// Trees a caller builds itself, not read from text, may name a
+    /// variable the notation makes, `?z[1]` or `?[source]b`, or a name
+    /// under its namespace. Both entry points that take trees refuse
+    /// them as the reader would never give them.
+    #[dialog_common::test]
+    fn it_refuses_trees_that_name_what_the_notation_makes() -> Result<(), Error> {
+        let trees = parse(
+            "(concept (memo ?t text: ?w) (xyz.memo/text of: ?t is: ?w as: :text cardinality: :one))
+             (rule (xyz.out ?t v: ?w) (memo ?t text: ?w))",
+        )?;
+        for made in ["z[1]", "[source]b"] {
+            let trees: Vec<Syntax> = trees.iter().map(|tree| renamed(tree, "w", made)).collect();
+            for (entry, analysis) in [
+                ("analyze", Analyzer::new()?.analyze(&trees)),
+                ("analyze_forms", Analyzer::new()?.analyze_forms(&trees)),
+            ] {
+                assert!(
+                    analysis.diagnostics.iter().any(|diagnostic| matches!(
+                        &diagnostic.refusal,
+                        Some(Error::Reserved(name)) if name == &format!("?{made}")
+                    )),
+                    "{entry} {made}: {:?}",
+                    analysis.diagnostics
+                );
+                assert!(analysis.analyzed.is_empty(), "{entry} {made}");
+            }
+        }
+        Ok(())
+    }
 }

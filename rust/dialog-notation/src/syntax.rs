@@ -1467,4 +1467,44 @@ mod tests {
         }
         Ok(())
     }
+
+    /// A tree read back from a value, or made from forms a caller built,
+    /// may name a variable the notation makes, or a name under its
+    /// namespace, which no text can: both are refused as `Reserved`.
+    #[test]
+    fn it_refuses_a_tree_from_a_value_or_forms_that_names_what_the_notation_makes()
+    -> Result<(), Error> {
+        for made in ["z[1]", "[source]b"] {
+            let tree = Syntax::Application(
+                Box::new(Syntax::Reference("xyz.a".into())),
+                Parameters {
+                    items: vec![Syntax::Variable("t".into())],
+                    terms: [("v".to_string(), Syntax::Variable(made.into()))].into(),
+                },
+            );
+            let value = tree.value()?;
+            assert!(
+                matches!(Syntax::try_from(&value), Err(Error::Reserved(name)) if name == format!("?{made}")),
+                "{made}"
+            );
+            let form = tree.form();
+            assert!(
+                matches!(Syntax::try_from(&form), Err(Error::Reserved(name)) if name == format!("?{made}")),
+                "{made}"
+            );
+        }
+        let tree = Syntax::Application(
+            Box::new(Syntax::Reference("dialog.notation.select".into())),
+            Parameters::default(),
+        );
+        assert!(matches!(
+            Syntax::try_from(&tree.value()?),
+            Err(Error::Reserved(name)) if name == "dialog.notation.select"
+        ));
+        assert!(matches!(
+            Syntax::try_from(&tree.form()),
+            Err(Error::Reserved(name)) if name == "dialog.notation.select"
+        ));
+        Ok(())
+    }
 }
