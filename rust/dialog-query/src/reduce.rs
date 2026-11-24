@@ -1156,7 +1156,7 @@ mod tests {
     /// absent folds to the empty list.
     #[dialog_common::test]
     async fn it_folds_a_group_to_the_set_of_its_values() {
-        let base = vec![
+        let base = [
             row(&[("dept", Some(dept("eng"))), ("x", Some(dept("b")))]),
             row(&[("dept", Some(dept("eng"))), ("x", Some(dept("a")))]),
             row(&[("dept", Some(dept("eng"))), ("x", Some(dept("b")))]),
