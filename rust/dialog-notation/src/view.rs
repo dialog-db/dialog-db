@@ -31,12 +31,12 @@ use crate::syntax::Syntax;
 pub(crate) mod plan;
 pub(crate) mod tree;
 
-pub use tree::{Address, Content, Patch, Posted, Rendered, Shown, Slot};
+pub use tree::{Address, Content, Given, Patch, Posted, Rendered, Shown, Slot};
 /// What keeps a view's tree from rows handed to it, for a driver of its
 /// own and for the tests; [`Live::watch`](crate::live::Live::watch)
 /// keeps one itself.
 #[cfg(feature = "inspect")]
-pub use tree::{Change, Counts, Given, Maintainer, Row, render};
+pub use tree::{Change, Counts, Maintainer, Row, render};
 
 /// The variable a view not found, shown as its source, names the entity
 /// it reads by where the call names none.

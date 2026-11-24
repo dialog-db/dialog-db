@@ -80,9 +80,9 @@ pub use print::print;
 pub use select::{Folded, Selection};
 pub use syntax::{Parameters, Signature, Syntax};
 pub use view::plan::{Condition, Count, FoldedCount, Layer, Place, Placed, Plan, Source, Why};
-pub use view::tree::{Address, Content, Patch, Posted, Rendered, Shown};
+pub use view::tree::{Address, Content, Given, Patch, Posted, Rendered, Shown};
 #[cfg(feature = "inspect")]
-pub use view::tree::{Change, Counts, Given, Maintainer, Row, render};
+pub use view::tree::{Change, Counts, Maintainer, Row, render};
 pub use view::{Attribute, CALLED, Element, Event, Input, Node, Piece};
 pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};
 
@@ -92,6 +92,36 @@ pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};
 #[cfg(feature = "inspect")]
 pub fn name_sites_with(length: usize) {
     compile::SITE_LENGTH.with(|held| held.set(length));
+}
+
+/// Reading the values in the rows a query gives ([`Query::values`], a
+/// view's rows, a fold's): a row reported as one record is a composite
+/// map keyed by its names, and the whole of a fold, a set or a list, a
+/// composite list. These read one back without the composite's own
+/// encoding of keys.
+///
+/// ```no_run
+/// # fn main() -> Result<(), dialog_notation::Error> {
+/// # let answered: dialog_corpus::Value = unimplemented!();
+/// use dialog_notation::value;
+///
+/// if let Some(card) = value::record(&answered)? {
+///     let title = card.get("title");
+///     let tags = card.get("tags").map(value::list).transpose()?.flatten();
+/// #   let _ = (title, tags);
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub mod value {
+    /// A record's entries, by name, in order.
+    pub use crate::data::Entries as Record;
+    /// The record a value is, when it is a composite map keyed by text
+    /// with no key twice; `None` for any other value.
+    pub use crate::data::entries as record;
+    /// The members of the list or set a value is; `None` for any other
+    /// value.
+    pub use crate::data::items as list;
 }
 
 /// A form whose expansion does not end, as the expander refused it.

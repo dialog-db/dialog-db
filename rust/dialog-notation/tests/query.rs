@@ -1088,3 +1088,52 @@ async fn it_refuses_the_rows_it_cannot_read() -> Result<()> {
     );
     Ok(())
 }
+
+/// A value a query's rows hold is read with `value`: a row reported as
+/// one record by its names, and the whole of a fold by its members, as an
+/// embedder reads one.
+#[dialog_common::test]
+async fn it_reads_a_record_and_a_list_through_value() -> Result<()> {
+    let notebook = todos().await?;
+    let pairs = selection(&format!(
+        "{TODOS}(query (todo/pair ?t is: ?pair)
+           (todo ?t title: ?title)
+           (todo/tag ?t tag: ?g)
+           (is ?pair {{:title ?title :tag ?g}}))
+         (select (todo/pair ?t is: ?pair))"
+    ))?;
+    let (results, _) = given(&notebook, &pairs).await?;
+    let records: Vec<_> = results
+        .iter()
+        .flatten()
+        .flat_map(|row| row.values())
+        .filter_map(|value| dialog_notation::value::record(value).transpose())
+        .collect::<Result<_, _>>()?;
+    assert!(!records.is_empty(), "a row of two columns is one record");
+    for record in &records {
+        assert!(
+            record.iter().count() >= 2,
+            "{:?}",
+            record.iter().collect::<Vec<_>>()
+        );
+    }
+
+    let notebook = notebooks().await?;
+    let outline = selection(&format!(
+        "{NOTEBOOK}{OUTLINE}(select (notebook/outline ?n is: ?outline))"
+    ))?;
+    let (_, folded) = given(&notebook, &outline).await?;
+    let lists: Vec<Vec<Value>> = folded
+        .iter()
+        .flatten()
+        .flat_map(|row| row.values())
+        .filter_map(|value| dialog_notation::value::list(value).transpose())
+        .collect::<Result<_, _>>()?;
+    assert!(
+        lists.iter().any(|members| members.len() == 3),
+        "the three blocks of notebook:1: {lists:?}"
+    );
+    assert!(dialog_notation::value::list(&Value::String("x".into()))?.is_none());
+    assert!(dialog_notation::value::record(&Value::String("x".into()))?.is_none());
+    Ok(())
+}
