@@ -926,6 +926,33 @@ mod tests {
         );
     }
 
+    /// The empty set is `{:}`, a set of one blank member, and is told
+    /// apart from the empty map `{}`. A blank is no member of a set
+    /// otherwise: `{: _}` written out, and `{: 1 :}` or `{: 1 : _}`, are
+    /// refused at the blank.
+    #[test]
+    fn it_reads_the_empty_set_apart_from_the_empty_map() {
+        let forms = read("{:} {}").unwrap();
+        assert_eq!(
+            forms,
+            vec![
+                Form::Map(vec![(Form::symbol(""), Form::Blank)]),
+                Form::Map(vec![])
+            ]
+        );
+        assert_eq!(
+            forms.iter().map(Form::to_string).collect::<Vec<_>>(),
+            vec!["{:}", "{}"]
+        );
+        for text in ["{: _}", "{: 1 :}", "{: 1 : _}", "{: _ : 1}"] {
+            assert!(
+                matches!(read(text), Err(Error::Read(why)) if why.contains("{:}")),
+                "{text}: {:?}",
+                read(text)
+            );
+        }
+    }
+
     /// A key a struct ends on has `_` for its value, whatever the key.
     #[test]
     fn it_reads_a_key_a_struct_ends_on_as_a_key_of_a_blank() {

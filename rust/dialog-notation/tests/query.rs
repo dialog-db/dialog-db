@@ -86,7 +86,7 @@ async fn it_answers_a_row_for_each_way_its_conditions_hold() -> Result<()> {
 }
 
 /// The whole of a field: one row a to-do, its tags a set, and the empty
-/// set, `{}`, for a to-do with none. Collecting never keeps the row.
+/// set, `{:}`, for a to-do with none. Collecting never keeps the row.
 #[dialog_common::test]
 async fn it_collects_the_whole_of_a_field_as_a_set() -> Result<()> {
     let mut notebook = todos().await?;
@@ -95,13 +95,13 @@ async fn it_collects_the_whole_of_a_field_as_a_set() -> Result<()> {
         report(&mut notebook, "(select (todo/card ?t is: ?card))").await?,
         vec![
             r#"(todo/card todo:1 is: {:title "Buy milk" :tags {: "errand" : "home"}})"#,
-            r#"(todo/card todo:2 is: {:title "Call mum" :tags {}})"#,
+            r#"(todo/card todo:2 is: {:title "Call mum" :tags {:}})"#,
         ]
     );
     // A field passed bound is a parameter.
     assert_eq!(
         report(&mut notebook, "(select (todo/card todo:2 is: ?card))").await?,
-        vec![r#"(todo/card todo:2 is: {:title "Call mum" :tags {}})"#]
+        vec![r#"(todo/card todo:2 is: {:title "Call mum" :tags {:}})"#]
     );
     Ok(())
 }
@@ -111,9 +111,8 @@ async fn it_collects_the_whole_of_a_field_as_a_set() -> Result<()> {
 /// in a record, and none. A set says the same in any order of its
 /// members, and says a member once.
 ///
-/// The empty set and the empty map are both written `{}`: the notation
-/// has no written form that tells them apart, so they read back as one
-/// tree.
+/// The empty set is written `{:}` and the empty map `{}`: they read
+/// back as two trees and make two values.
 #[dialog_common::test]
 async fn it_reads_back_a_set_or_a_map_it_answers() -> Result<()> {
     use dialog_notation::{Syntax, parse};
@@ -151,15 +150,24 @@ async fn it_reads_back_a_set_or_a_map_it_answers() -> Result<()> {
     assert_eq!(
         answers
             .iter()
+            .filter(|answer| answer.contains("{:}"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        answers
+            .iter()
             .filter(|answer| answer.contains("{}"))
             .count(),
-        2
+        1
     );
     for answer in answers.iter().map(String::as_str).chain([
         r#"{: "errand" : "home"}"#,
         r#"{: {: 1 : 2} : {:a 1}}"#,
         r#"{"N1" block:a "N2" block:b}"#,
         "{}",
+        "{:}",
+        "{:tags {:} :blocks {}}",
     ]) {
         let read = parse(answer)?;
         assert_eq!(read.len(), 1, "{answer}");
@@ -181,8 +189,10 @@ async fn it_reads_back_a_set_or_a_map_it_answers() -> Result<()> {
         parse(r#"{: "home" : "home"}"#)?[0].value(),
         Err(Error::Refused(why)) if why.contains("twice")
     ));
-    // The empty set and the empty map read back as one tree.
-    assert_eq!(parse("{}")?, parse("{}")?);
+    // The empty set and the empty map read back as two trees, and make
+    // two values.
+    assert_ne!(parse("{:}")?, parse("{}")?);
+    assert_ne!(parse("{:}")?[0].value()?, parse("{}")?[0].value()?);
     Ok(())
 }
 
@@ -512,7 +522,7 @@ async fn it_keeps_a_selection_standing_through_the_driver() -> Result<()> {
     assert!(
         report(&mut notebook, "(select (todo/card todo:2 is: ?card))")
             .await?
-            .contains(&r#"(todo/card todo:2 is: {:title "Call mum" :tags {}})"#.to_string())
+            .contains(&r#"(todo/card todo:2 is: {:title "Call mum" :tags {:}})"#.to_string())
     );
     Ok(())
 }
@@ -729,7 +739,7 @@ async fn it_folds_a_collected_read_through_several_definitions() -> Result<()> {
     assert_eq!(selection.folds.len(), 1);
     let expected = vec![
         r#"(item/card item:1 is: {:title "One" :tags {: "a" : "b"}})"#,
-        r#"(item/card item:2 is: {:title "Two" :tags {}})"#,
+        r#"(item/card item:2 is: {:title "Two" :tags {:}})"#,
     ];
     assert_eq!(standing(&notebook, &selection).await?, expected);
     assert_eq!(
@@ -823,7 +833,7 @@ async fn it_collects_a_query_whose_answer_is_an_entry_as_a_map() -> Result<()> {
 }
 
 /// `collect` in the entity position: the to-dos of a list that are open,
-/// a set of entities, and `{}` for a list with none.
+/// a set of entities, and `{:}` for a list with none.
 #[dialog_common::test]
 async fn it_collects_in_the_entity_position() -> Result<()> {
     let mut notebook = Notebook::open().await?;
@@ -850,14 +860,14 @@ async fn it_collects_in_the_entity_position() -> Result<()> {
         report(&mut notebook, "(select (list/open ?l is: ?open))").await?,
         vec![
             "(list/open list:home is: {: task:1 : task:3})",
-            "(list/open list:work is: {})",
+            "(list/open list:work is: {:})",
         ]
     );
     Ok(())
 }
 
 /// A query of no entity that only collects is an index: it answers once,
-/// with what there is, and once with `{}` when there is nothing. It may
+/// with what there is, and once with `{:}` when there is nothing. It may
 /// collect the answers of another query too.
 #[dialog_common::test]
 async fn it_answers_an_index_once_whatever_there_is() -> Result<()> {
@@ -866,6 +876,9 @@ async fn it_answers_an_index_once_whatever_there_is() -> Result<()> {
           (todo _ title: (collect ?titles)))
         (query (todo/deck is: ?deck)
           (todo/card _ is: (collect ?deck)))
+        (query (todo/size is: ?size)
+          (todo/card _ is: (collect ?deck))
+          (is ?size {:cards (count ?deck)}))
     "#;
     let mut notebook = todos().await?;
     notebook.submit(&format!("{CARD} {index}")).await?;
@@ -876,7 +889,7 @@ async fn it_answers_an_index_once_whatever_there_is() -> Result<()> {
     assert_eq!(
         report(&mut notebook, "(select (todo/deck is: ?deck))").await?,
         vec![
-            r#"(todo/deck is: {: {:title "Buy milk" :tags {: "errand" : "home"}} : {:title "Call mum" :tags {}}})"#
+            r#"(todo/deck is: {: {:title "Buy milk" :tags {: "errand" : "home"}} : {:title "Call mum" :tags {:}}})"#
         ]
     );
 
@@ -889,11 +902,16 @@ async fn it_answers_an_index_once_whatever_there_is() -> Result<()> {
     empty.submit(&format!("{declared} {CARD} {index}")).await?;
     assert_eq!(
         report(&mut empty, "(select (todo/titles is: ?titles))").await?,
-        vec!["(todo/titles is: {})"]
+        vec!["(todo/titles is: {:})"]
     );
     assert_eq!(
         report(&mut empty, "(select (todo/deck is: ?deck))").await?,
-        vec!["(todo/deck is: {})"]
+        vec!["(todo/deck is: {:})"]
+    );
+    // The empty set counts none.
+    assert_eq!(
+        report(&mut empty, "(select (todo/size is: ?size))").await?,
+        vec!["(todo/size is: {:cards 0})"]
     );
     Ok(())
 }
@@ -1154,6 +1172,29 @@ async fn it_stores_a_set_in_a_record_as_a_list() -> Result<()> {
     assert_eq!(
         report(&mut notebook, "(select (xyz.thing ?x about: ?about))").await?,
         vec![r#"(xyz.thing thing:1 about: {:tags ["errand" "home"]})"#]
+    );
+    Ok(())
+}
+
+/// The empty set, `{:}`, is stored as the empty list, and a pattern
+/// `{:}` finds it and nothing else.
+#[dialog_common::test]
+async fn it_stores_and_finds_the_empty_set() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    notebook
+        .submit(
+            r#"(assert (xyz.thing thing:1 about: {:tags {:}}))
+               (assert (xyz.s/v of: s:1 is: {:}))
+               (assert (xyz.s/v of: s:2 is: {: 1}))"#,
+        )
+        .await?;
+    assert_eq!(
+        report(&mut notebook, "(select (xyz.thing ?x about: ?about))").await?,
+        vec![r#"(xyz.thing thing:1 about: {:tags []})"#]
+    );
+    assert_eq!(
+        report(&mut notebook, "(select (xyz.s/v of: ?e is: {:}))").await?,
+        vec!["(xyz.s s:1 v: [])"]
     );
     Ok(())
 }
