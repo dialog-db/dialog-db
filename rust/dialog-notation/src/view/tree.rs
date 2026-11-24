@@ -1261,4 +1261,256 @@ mod tests {
         assert_eq!(maintainer.apply(&[both()]), []);
         assert_eq!(maintainer.tree().roots.len(), 1);
     }
+
+    /// A list's card with a count of its open to-dos and its to-dos, each
+    /// with its tags: nested two levels deep. Its layers: the lists
+    /// `(l name)`, the to-dos `(l q1.t q1.s q1.title)`, the tags
+    /// `(l q1.t q2.g)` and the open to-dos counted `(l collect-0)`.
+    fn nested() -> Plan {
+        let document = r#"
+            (concept (list ?l name: ?name)
+              (xyz.list/name of: ?l is: ?name as: :text cardinality: :one))
+            (concept (todo ?t list: ?l title: ?title state: ?s)
+              (xyz.todo/list of: ?t is: ?l as: :entity cardinality: :one)
+              (xyz.todo/title of: ?t is: ?title as: :text cardinality: :one)
+              (xyz.todo/state of: ?t is: ?s as: [:open :done] cardinality: :one))
+            (concept (todo/tag ?t tag: ?g)
+              (xyz.todo/tag of: ?t is: ?g as: :text cardinality: :many))
+            (query (todo/chip ?t tag: ?g is: ?chip)
+              (todo/tag ?t tag: ?g)
+              (view ?chip [:span ?g]))
+            (query (todo/item ?t list: ?l is: ?item)
+              (todo ?t list: ?l title: ?title state: ?s)
+              (todo/chip ?t is: (collect ?chips))
+              (view ?item [:li {:class ?s} ?title ?chips]))
+            (query (list/summary ?l is: ?card)
+              (list ?l name: ?name)
+              (todo (collect ?open) list: ?l state: :open)
+              (todo/item _ list: ?l is: (collect ?items))
+              (is ?count (count ?open))
+              (view ?card [:article [:h2 ?name] [:p ?count " open"] [:ul ?items]]))
+            (select (list/summary ?l is: ?card))"#;
+        let analysis = Analyzer::new().unwrap().analyze(&parse(document).unwrap());
+        assert!(
+            analysis.diagnostics.is_empty(),
+            "{:?}",
+            analysis.diagnostics
+        );
+        let steps = compile(&analysis.analyzed[0]).unwrap();
+        let [crate::compile::Step::View(plan)] = steps.as_slice() else {
+            panic!("a plan");
+        };
+        let rows: Vec<Vec<&str>> = plan
+            .layers
+            .iter()
+            .map(|layer| layer.row.iter().map(String::as_str).collect())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                vec!["l", "name"],
+                vec!["l", "q1.t", "q1.s", "q1.title"],
+                vec!["l", "q1.t", "q2.g"],
+                vec!["l", "collect-0"],
+            ]
+        );
+        (**plan).clone()
+    }
+
+    /// The instance at `at` in `roots`.
+    fn found<'a>(roots: &'a mut [Shown], at: &[(usize, Vec<Value>)]) -> &'a mut Shown {
+        let ((_, key), below) = at.split_first().expect("an address");
+        let mut shown = roots
+            .iter_mut()
+            .find(|root| &root.key == key)
+            .expect("the root");
+        for (slot, key) in below {
+            let Content::Element { slots, .. } = &mut shown.content else {
+                panic!("an element");
+            };
+            let Slot::Instances(instances) = &mut slots[*slot] else {
+                panic!("instances at {slot}");
+            };
+            shown = instances
+                .iter_mut()
+                .find(|instance| &instance.key == key)
+                .expect("the instance");
+        }
+        shown
+    }
+
+    /// The instances of `slot` of the instance at `parent`, or the roots.
+    fn instances<'a>(
+        roots: &'a mut Vec<Shown>,
+        parent: &[(usize, Vec<Value>)],
+        slot: usize,
+    ) -> &'a mut Vec<Shown> {
+        if parent.is_empty() {
+            return roots;
+        }
+        let Content::Element { slots, .. } = &mut found(roots, parent).content else {
+            panic!("an element");
+        };
+        match &mut slots[slot] {
+            Slot::Instances(instances) => instances,
+            other => panic!("no instances: {other:?}"),
+        }
+    }
+
+    /// `tree` with `patches` applied, as a back end applies them.
+    fn patched(mut tree: Rendered, patches: &[Patch]) -> Rendered {
+        for patch in patches {
+            match patch {
+                Patch::Insert {
+                    parent,
+                    slot,
+                    index,
+                    instance,
+                } => {
+                    let into = instances(&mut tree.roots, parent, *slot);
+                    assert!(*index <= into.len(), "{patch:?}");
+                    into.insert(*index, instance.clone());
+                }
+                Patch::Remove { at } => {
+                    let (last, parent) = at.split_last().expect("an address");
+                    let from = instances(&mut tree.roots, parent, last.0);
+                    let before = from.len();
+                    from.retain(|instance| instance.key != last.1);
+                    assert_eq!(from.len() + 1, before, "{patch:?}");
+                }
+                Patch::SetText { at, slot, text } => {
+                    let Content::Element { slots, .. } = &mut found(&mut tree.roots, at).content
+                    else {
+                        panic!("an element");
+                    };
+                    slots[*slot] = Slot::Text(text.clone());
+                }
+                Patch::SetAttribute { at, name, value } => {
+                    let Content::Element { attributes, .. } =
+                        &mut found(&mut tree.roots, at).content
+                    else {
+                        panic!("an element");
+                    };
+                    match attributes.iter_mut().find(|(held, _)| held == name) {
+                        Some(attribute) => attribute.1 = value.clone(),
+                        None => attributes.push((name.clone(), value.clone())),
+                    }
+                }
+                Patch::SetEvent { at, index, event } => {
+                    let Content::Element { events, .. } = &mut found(&mut tree.roots, at).content
+                    else {
+                        panic!("an element");
+                    };
+                    events[*index] = event.clone();
+                }
+            }
+        }
+        tree
+    }
+
+    /// A tree with each element's attributes in one order.
+    fn normal(mut tree: Rendered) -> Rendered {
+        fn walk(shown: &mut Shown) {
+            let Content::Element {
+                attributes, slots, ..
+            } = &mut shown.content;
+            attributes.sort();
+            for slot in slots {
+                if let Slot::Instances(instances) = slot {
+                    instances.iter_mut().for_each(walk);
+                }
+            }
+        }
+        tree.roots.iter_mut().for_each(walk);
+        tree
+    }
+
+    /// The maintainer against itself: random rows arrive and leave, of
+    /// every layer, one change or several at once, a key given other
+    /// values, to-dos and tags before their list, a list taken away with
+    /// its to-dos under it, rendered for every list and for one. After
+    /// each change the patches applied to the tree before it give the
+    /// tree the maintainer holds, and that is the tree rendered afresh
+    /// from every row standing.
+    #[test]
+    fn it_patches_what_a_fresh_render_gives_whatever_comes_and_goes() {
+        let plan = nested();
+        let lists = ["list:1", "list:2", "list:3"];
+        let todos = ["todo:1", "todo:2", "todo:3", "todo:4"];
+        let text = |word: &str| Value::String(word.into());
+        // A row of a layer, from three numbers.
+        let make = |layer: usize, a: u64, b: u64, c: u64| -> Row {
+            let l = entity(lists[(a % 3) as usize]);
+            let t = entity(todos[(b % 4) as usize]);
+            let values = match layer {
+                0 => vec![l, text(["Home", "Work"][(b % 2) as usize])],
+                1 => vec![
+                    l,
+                    t,
+                    text(["open", "done"][(c % 2) as usize]),
+                    text(["milk", "mum"][((c / 2) % 2) as usize]),
+                ],
+                2 => vec![l, t, text(["a", "b", "c"][(c % 3) as usize])],
+                _ => vec![l, t],
+            };
+            row(&plan, layer, &values)
+        };
+        for seed in 1..=24u64 {
+            for entity in [None, Some(entity("list:1"))] {
+                let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+                let mut next = move || {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    state
+                };
+                let mut maintainer = Maintainer::new(plan.clone(), entity.clone());
+                let mut standing: Vec<Vec<Row>> = vec![Vec::new(); plan.layers.len()];
+                let mut tree = maintainer.tree();
+                for step in 0..200 {
+                    let mut changes: Vec<Change> = Vec::new();
+                    for _ in 0..1 + next() % 3 {
+                        let layer = (next() % 4) as usize;
+                        let made = make(layer, next(), next(), next());
+                        let change = match changes.iter().position(|change| change.layer == layer) {
+                            Some(at) => &mut changes[at],
+                            None => {
+                                changes.push(Change {
+                                    layer,
+                                    ..Change::default()
+                                });
+                                changes.last_mut().expect("a change")
+                            }
+                        };
+                        if change.arrived.contains(&made) || change.left.contains(&made) {
+                            continue;
+                        }
+                        match standing[layer].iter().position(|held| *held == made) {
+                            Some(at) => {
+                                standing[layer].remove(at);
+                                change.left.push(made);
+                            }
+                            None => {
+                                standing[layer].push(made.clone());
+                                change.arrived.push(made);
+                            }
+                        }
+                    }
+                    let patches = maintainer.apply(&changes);
+                    let now = maintainer.tree();
+                    assert_eq!(
+                        normal(patched(tree, &patches)),
+                        normal(now.clone()),
+                        "seed {seed}, step {step}, for {entity:?}: the patches of {changes:?}"
+                    );
+                    assert_eq!(
+                        normal(now.clone()),
+                        normal(render(&plan, entity.as_ref(), &standing)),
+                        "seed {seed}, step {step}, for {entity:?}: after {changes:?}"
+                    );
+                    tree = now;
+                }
+            }
+        }
+    }
 }
