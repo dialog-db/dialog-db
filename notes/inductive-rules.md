@@ -329,7 +329,17 @@ Semantics:
   fixpoint's convergence test — a rule whose head re-derives existing
   state terminates for free, which makes `Replace`-headed
   (cardinality-one) rules and `assert-unless-present` rules naturally
-  idempotent.
+  idempotent. Each write is judged against the view before the round,
+  and a round is one instant, so the round settles its writes once
+  every candidate has fired: a claim one rule retracts and another
+  asserts in it is retracted and asserted at once, and holds. Its
+  assertion is no news, and the `retract!` head's retraction of it is
+  withdrawn (`Changes::withdraw_retractions`), so nothing is written
+  for it and nothing feeds the next round. A claim a cardinality-one
+  write succeeds is replaced, and its retraction stays. Without this,
+  "retract the old value, assert the new" lost the claim whenever the
+  two coincided, and which write won depended only on whether the claim
+  held, not on what the rules meant.
 - **Termination = empty stimulus**, backstopped by `MAX_ROUNDS`. With
   durable triggers, "no transients emitted" is no longer sufficient —
   durable novelty can enable further rules, so the loop runs until
@@ -373,8 +383,13 @@ It doesn't, and the distinction between the shapes matters:
   re-enables the rule**, and only two shapes do: value generators
   (`?c + 1` — every firing novel by construction) and polarity
   oscillators (an `assert! X` rule and a `retract! X` rule flipping X's
-  presence each round, each flip novel; neither rule is individually
-  suspect). Excluding these statically is undecidable in general, so
+  presence round after round, each flip novel; neither rule is
+  individually suspect). An oscillator whose two rules meet in one
+  round with X held no longer flips: the round retracts and asserts X
+  at once, X holds, nothing is written and the loop exits, with X
+  held. Only a pair that never matches in the same round (the
+  `assert!` rule guarded by `unless X`, say) still flips X and hits
+  `MAX_ROUNDS`. Excluding these statically is undecidable in general, so
   the guards layer: the analysis-time tautology check for the trivial
   shape, the `unless`-own-head idempotence idiom (which makes the
   *body* stop matching, not just the emission go stale), and

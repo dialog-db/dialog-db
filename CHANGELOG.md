@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### A replica reads the revision records it wrote from the buffers above the leaves
 
+[#864](https://github.com/dialog-db/dialog-db/pull/864)
+
 A commit reads its parent's revision record to carry the skip links
 along, and a stack reads a durable layer's revision from its record. A
 commit writes its record into a buffer of the tree, in an index node,
@@ -48,6 +50,51 @@ What this changes for you:
 Why: an editor that answered a keystroke at once must answer the next at
 once, after a restart too, and the record of its own last revision is
 the one thing every commit on that revision reads.
+
+### A claim one round of induction both retracts and asserts holds afterwards
+
+[#863](https://github.com/dialog-db/dialog-db/pull/863)
+
+Induction runs in rounds, and every rule a round triggers reads the
+state before the round. A rule that retracts the old value of a field
+beside a rule that asserts the new one is how a rename or a record
+replacement is written. When the old and the new value coincided in a
+round, the claim was lost: the retraction of a held claim was news and
+was written, while the assertion of it was no news and was dropped. A
+round now settles its writes once every rule has fired: a retraction a
+`retract!` rule wrote of a claim another rule of the same round asserts
+again is withdrawn, so the claim keeps the row it had and nothing is
+written for it. The outcome does not depend on the order the rules
+fire in.
+
+What this changes for you:
+
+- A rule retracting `title = ?old` beside a rule asserting
+  `title = ?new` for one entity, with `?old` and `?new` bound to the
+  same value, leaves the title. Before, the entity lost it.
+- A rule retracting a record, every field named, beside a rule
+  asserting it with one field changed, leaves the record with that
+  field changed. Before, only the changed field was left.
+- The same holds for a cardinality-many attribute and for a head
+  landing in a layer (`in:`).
+- A commit that used to fail now succeeds: an `assert!` rule and a
+  `retract!` rule of one claim, both watching its attribute, that meet
+  in a round with the claim held. Before, the claim flipped round after
+  round and the commit failed with `CommitError::InductionDivergence`.
+  Now the round writes nothing for the claim, and the commit settles
+  with it held.
+- Unchanged: a retraction with no assertion beside it removes the
+  claim, an assertion with none beside it adds it, and a write under
+  cardinality one still succeeds the claim it replaces, so a round
+  asserting `A`, asserting `B` and retracting `A` of a cardinality-one
+  cell leaves `B`, as before.
+- Unchanged: a transaction's own writes are a sequence and are applied
+  in the order written, so retracting a claim and then asserting it in
+  one transaction leaves it, and asserting it and then retracting it
+  removes it.
+
+Why: retracting the old value and asserting the new one is how a rule
+states a change, and it must not lose data when the two coincide.
 
 ### The first commit after a `QueriedRanges` pull reads from the replica's own blocks
 
@@ -1073,6 +1120,13 @@ and names the rule.
 
 ### Compatibility and migration
 
+- A claim one round of induction both retracts and asserts: nothing
+  stored changes shape, no identity moves and nothing is rewritten on
+  upgrade. What induction writes differs: such a claim keeps its row,
+  where an older release retracted it. An older release reads what
+  this one writes. An older replica committing under the same rules
+  still drops such claims in its own commits until it upgrades; what it
+  pulls from a newer one simply holds them. An embedder runs nothing.
 - Composites: nothing an existing space holds is rewritten or read
   differently, and opaque `record:` values keep their encoding and identity.
   No release up to and including 0.5.0 wrote a composite (the draft #812 was
