@@ -2829,16 +2829,38 @@ mod tests {
         assert_eq!(expander.origin(), &[0]);
     }
 
-    /// A part a read leaves out matches anything, so a read of a
-    /// concept may say some of its fields. A trailing `...` is allowed
-    /// and adds nothing.
+    /// A read of a concept that says some of its fields ends with
+    /// `...`: one that leaves fields out without it is refused, naming
+    /// the fields left out and saying to write `...`. Every field said,
+    /// it needs none, and a trailing `...` adds nothing.
     #[test]
-    fn it_reads_a_concept_by_the_fields_a_read_says() {
-        let bare = expanded(TODO, "(select (todo ?t text: ?x))").unwrap();
-        assert_eq!(bare.len(), 1);
-        assert!(bare[0].contains("text: (:one (:text ?x))"), "{bare:?}");
+    fn it_refuses_a_concept_read_that_leaves_fields_out_untold() {
+        for (text, left) in [
+            ("(select (todo ?t text: ?x))", "list: state:"),
+            (
+                "(rule (xyz.seen ?t text: ?x) (todo ?t text: ?x))",
+                "list: state:",
+            ),
+            (
+                "(query (todo/text ?t is: ?x) (todo ?t text: ?x state: :open))",
+                "list:",
+            ),
+            (
+                "(rule (xyz.lonely ?t text: ?x) (todo ?t list: ?l text: ?x state: ?s) \
+                   (unless (todo ?t state: :done)))",
+                "list: text:",
+            ),
+        ] {
+            let refused = expanded(TODO, text);
+            assert!(
+                matches!(&refused, Err(Error::Refused(why))
+                    if why.contains(left) && why.contains("`...`")),
+                "{text}: {refused:?}"
+            );
+        }
         let open = expanded(TODO, "(select (todo ?t text: ?x ...))").unwrap();
         assert_eq!(open.len(), 1);
+        assert!(open[0].contains("text: (:one (:text ?x))"), "{open:?}");
         // `...` alone is `... _`. The two say one thing, and differ in
         // the names the expansion gives its own variables, which are
         // made of the form as written.
@@ -2848,8 +2870,9 @@ mod tests {
                 .len(),
             1
         );
-        // Every field said, it needs no `...`.
+        // Every field said, it needs no `...`, and `...` adds nothing.
         assert!(expanded(TODO, "(select (todo ?t list: ?l text: ?x state: ?s))").is_ok());
+        assert!(expanded(TODO, "(select (todo ?t list: ?l text: ?x state: ?s ...))").is_ok());
         // What it leaves out may not be bound: a concept's fields are
         // facts, and no record of them is kept. No definition takes a
         // read with its rest bound, so nothing says what it is.
@@ -2858,9 +2881,60 @@ mod tests {
             matches!(&bound, Err(Error::Unknown(form)) if form == "(todo ?t ... ?others text: ?x)"),
             "{bound:?}"
         );
-        // A relation.
+        // A relation is read by the fields it says: it is no concept.
         assert!(expanded(TODO, "(select (xyz.todo ?t text: ?x))").is_ok());
         assert!(expanded(TODO, "(select (xyz.todo ?t text: ?x ...))").is_ok());
+        // A write is not a read: an assert says every field, and a
+        // retract every field or its entity alone, as before.
+        assert!(
+            expanded(
+                TODO,
+                "(assert (todo todo:1 list: list:1 text: \"a\" state: :open))"
+            )
+            .is_ok()
+        );
+        assert!(expanded(TODO, "(retract (todo todo:1))").is_ok());
+    }
+
+    /// Of two concepts of one name, a read without `...` fits the one
+    /// whose fields are those it says, and one with `...` fits every one
+    /// whose fields include them, each read in turn: a read is a
+    /// selector, and selects all it fits. A read that says fields only
+    /// one has fits that one with or without `...`.
+    #[test]
+    fn it_fits_a_read_to_concepts_by_its_fields_and_its_dots() {
+        let both = "(concept (item/tag ?t tag: ?g)
+               (xyz.item/tag of: ?t is: ?g as: :text cardinality: :many))
+             (concept (item/tag ?t tag: ?g source: ?s)
+               (xyz.item/label of: ?t is: ?g as: :text cardinality: :many)
+               (xyz.item/source of: ?t is: ?s as: :text cardinality: :one))";
+        let exact = expanded(both, "(rule (xyz.seen ?t tag: ?g) (item/tag ?t tag: ?g))").unwrap();
+        assert_eq!(exact.len(), 1, "{exact:?}");
+        assert!(
+            exact[0].contains("xyz.item/tag") && !exact[0].contains("xyz.item/label"),
+            "{exact:?}"
+        );
+        let every = expanded(
+            both,
+            "(rule (xyz.seen ?t tag: ?g) (item/tag ?t tag: ?g ...))",
+        )
+        .unwrap();
+        assert_eq!(every.len(), 2, "{every:?}");
+        let labelled = expanded(
+            both,
+            "(rule (xyz.seen ?t tag: ?g) (item/tag ?t tag: ?g source: ?s))",
+        )
+        .unwrap();
+        assert_eq!(labelled.len(), 1, "{labelled:?}");
+        assert!(labelled[0].contains("xyz.item/label"), "{labelled:?}");
+        let sourced = expanded(
+            both,
+            "(rule (xyz.seen ?t source: ?s) (item/tag ?t source: ?s))",
+        );
+        assert!(
+            matches!(&sourced, Err(Error::Refused(why)) if why.contains("tag:") && why.contains("`...`")),
+            "{sourced:?}"
+        );
     }
 
     /// `(unless …)` once, last, or several times among the premises, is
