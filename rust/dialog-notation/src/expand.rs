@@ -749,6 +749,42 @@ fn open(tree: &Syntax) -> (Syntax, bool) {
     )
 }
 
+/// How many parts of `said` the rule's `pattern` leaves to a `...`: at
+/// the top, the parts it does not name, whether its `...` names them or
+/// not; below, what each repeat took. A rule that names more leaves
+/// fewer.
+fn left(pattern: &Syntax, said: &Syntax, bindings: &Bindings) -> usize {
+    let mut rest: Vec<String> = Vec::new();
+    let mut top = 0;
+    if let (Some(pattern), Some(said)) = (pattern.operand(), said.operand())
+        && let Some(at) = pattern
+            .items
+            .iter()
+            .position(|part| matches!(part, Syntax::Reference(name) if name == REST))
+    {
+        if let Some(Syntax::Variable(name)) = pattern.items.get(at + 1) {
+            rest.push(name.clone());
+            rest.push(crate::pattern::row_key(name));
+        }
+        top = said.items.len().saturating_sub(at)
+            + said
+                .terms
+                .keys()
+                .filter(|label| !pattern.terms.contains_key(*label))
+                .count();
+    }
+    let below: usize = bindings
+        .iter()
+        .filter(|(name, _)| !rest.contains(name))
+        .map(|(_, binding)| match binding {
+            Binding::Many(taken) => taken.len(),
+            Binding::Row(taken) => taken.len(),
+            Binding::One(_) => 0,
+        })
+        .sum();
+    top + below
+}
+
 /// Whether `tree` is written as a form may be, and otherwise the part
 /// that is not and why. The reader gives labels and `...` no meaning,
 /// so what they may not say is said here.
@@ -1628,14 +1664,7 @@ impl Expander {
             if let (Answer::Syntax(template), Some(bindings)) =
                 (&rule.answer, self.applies(rule, &said, position))
             {
-                let left: usize = bindings
-                    .values()
-                    .map(|binding| match binding {
-                        Binding::Many(taken) => taken.len(),
-                        Binding::Row(taken) => taken.len(),
-                        Binding::One(_) => 0,
-                    })
-                    .sum();
+                let left = left(&rule.pattern, &said, &bindings);
                 if left > least {
                     continue;
                 }
@@ -1679,6 +1708,10 @@ impl Expander {
                     _ => Err(ambiguous(&found)),
                 }
             }
+            // Reads through several concepts are each read in turn; two
+            // rules about syntax that name as much as each other are a
+            // tie, at a premise as anywhere.
+            _ if found.iter().any(|(_, signature)| signature.is_none()) => Err(ambiguous(&found)),
             of => {
                 let taken = match self.choices.iter().find(|choice| choice.form == *tree) {
                     Some(choice) => choice.taken,
@@ -2985,7 +3018,9 @@ mod tests {
     /// Of the rules about syntax that apply, the one that names the most
     /// of what is written is taken, and a part left to `...` is left
     /// whether `...` names it or not: `...` and `... ?r` rank the same. A
-    /// real tie at a premise is refused, as it is elsewhere.
+    /// tie of rules about syntax that are no concepts is refused at a
+    /// premise, as it is elsewhere; concepts whose labels fit are each
+    /// read, as the design has it.
     #[test]
     fn it_takes_the_rule_that_names_the_most_however_the_rest_is_written() {
         let any = "(rule (syntax (xyz.any ?e)) (expand (thing ?e ...)))";
@@ -3004,11 +3039,24 @@ mod tests {
                 .map(|rule| rule.replace("xyz.any", "xyz.rest"))
                 .collect::<Vec<_>>(),
         );
-        // `(thing ?e ...)` and `(thing ?e ... ?r)` leave the same parts.
+        // `(thing ?e ...)` and `(thing ?e ... ?r)` leave the same parts,
+        // so they are one signature, defined twice.
         assert!(matches!(
             expanded(&format!("{any} {rest}"), asked),
-            Err(Error::Ambiguous(..))
+            Err(Error::Twice(..))
         ));
+        // Two rules about syntax that are no concepts, and leave the
+        // same parts, are a tie, refused at a premise as elsewhere.
+        let first = "(rule (syntax (== ?e : 1)) (expand (thing ?e ...)))";
+        let second = "(rule (syntax (== ?e : 2)) (expand (thing ?e ... ?r)))";
+        assert!(
+            matches!(
+                expanded(&format!("{first} {second}"), asked),
+                Err(Error::Ambiguous(..))
+            ),
+            "{:?}",
+            expanded(&format!("{first} {second}"), asked)
+        );
     }
 
     /// Where the labels written fit several definitions, a read is of

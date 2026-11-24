@@ -29,7 +29,7 @@ pub const REST: &str = "...";
 
 /// What the labelled parts a `... ?name` took are kept under: a key no
 /// variable has, since the name holds the parts with no label.
-fn row(name: &str) -> String {
+pub(crate) fn row_key(name: &str) -> String {
     format!("{REST}{name}")
 }
 
@@ -190,7 +190,7 @@ pub fn matches(tree: &Syntax, pattern: &Syntax, bindings: Bindings) -> Option<Bi
                 .map(|(label, item)| (label.clone(), item.clone()))
                 .collect();
             match split(&named.items).rest {
-                Some(Syntax::Variable(name)) => bind(bindings, &row(name), Binding::Row(extra)),
+                Some(Syntax::Variable(name)) => bind(bindings, &row_key(name), Binding::Row(extra)),
                 Some(Syntax::Blank) => Some(bindings),
                 _ => extra.is_empty().then_some(bindings),
             }
@@ -272,7 +272,7 @@ pub fn fill(template: &Syntax, bindings: &Bindings, fresh: &str) -> Result<Synta
                     .insert(label.clone(), fill(item, bindings, fresh)?);
             }
             let taken = match split(&operand.items).rest {
-                Some(Syntax::Variable(name)) => bindings.get(&row(name)),
+                Some(Syntax::Variable(name)) => bindings.get(&row_key(name)),
                 _ => None,
             };
             if let Some(Binding::Row(taken)) = taken {
