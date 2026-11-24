@@ -213,3 +213,44 @@ What dialog has to give it:
   (the Unreleased changelog). Does the lowering write `pick: "top"` on
   the field, or does tonk rely on the implied `top` that main no longer
   has?
+
+## What tonk answered to T12 to T15
+
+Same session, tonk @ b125f0d, relayed 2026-11-24. Facts as reported.
+
+- **T12.** Yes, a space holds rules no library installs, and tonk records
+  nothing about them: the worker's `/evaluate`, the CLI's eval path and
+  the hosted `tonk_evaluate` commit any document, a `rule!:` included;
+  `space/create` from a seed URL or a catalog template evaluates on top
+  of core with no seed record. Two kinds of space are skipped by the
+  seed upgrade entirely, library rules included: spaces with no seed
+  record (`repository.rs:5148` to `:5156`) and welcome snapshots
+  (`:5135` to `:5144`). Such rules can be found only through dialog, by
+  `dialog.rule/source`. Dialog cannot tell which rules a library
+  installed.
+- **T13.** Installing beside the old library is blocked by what tonk's
+  code assumes: the uninstall leaves nothing of the old library, so the
+  install commit holds every claim of the new one and the next upgrade
+  reverts exactly that commit (`repository.rs:5160` to `:5172`); one
+  live seed record per lineage; a library route is written only "unless
+  a route already claims its path" (`core.yaml:1845` to `:1880`);
+  `db.name/referent` is cardinality one; old and new rule bodies would
+  both be stored, and the analyzer treats overlapping transient-rule
+  triggers as an error; providers are registered for one concept
+  identity; `rekey` assumes the old definitions are gone.
+- **T14.** `xyz.tonk.route/concept` and `xyz.tonk.site/concept` read the
+  newest claim, so a new value shadows the old; `db.name/referent` cannot
+  hold both; views can sit side by side; `db.concept.with/*` can hold two
+  values, and tonk's reconstruction keeps one. Old and new cannot
+  usefully coexist in tonk's facts.
+- **T15.** Tonk hands dialog a listed `as` with no pick and relies on
+  0.5.0 implying `top`, pinned by two tonk tests (`analyzer.rs:1630` to
+  `:1672`, `tonk-schema/src/concept.rs:2166` to `:2219`). It then writes
+  `db.attribute/pick` = `top:` and `db.attribute/among` = the list as a
+  JSON string, best first. On main the same shape ranks nothing: another
+  attribute, another identity, a read of the newest claim. The FAB reads
+  the same relation as `"as": "Entity", "cardinality": "one"`.
+
+So: keep-beside (approaches B, E, F) is not available to tonk (T13,
+T14); a dialog-side migration over every rule body is needed whatever
+the embedder does (T12); and mixing cannot be seen (T9).

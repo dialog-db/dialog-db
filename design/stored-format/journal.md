@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | What is stored and read, by file. Identities are keyed by nothing a user fact uses; only dialog's own index facts and markers name them, inside dialog. Formats 4 and 5 are unreleased, and every identity already moved since 0.5.0, so a cut-over before the next tag costs a live space one migration. Main's upgrade would strand 88 of tonk-team's 89 transient markers. A 0.5.0 replica meets a newer body under the same index keys and fails the query (F1, run). | Directing. Six approaches and a matrix; F recommended by the agent (E before tonk's answers). |
-| **Agenda** | Tonk's answers to T12 to T15 ([blast radius](blast-radius.md)), T13 first: whether tonk can reinstall without retracting the previous install. The maintainer's answers to open questions 1 to 4 in the top story; 5 is answered.  | The maintainer reads the matrix and chooses. Then step 1 of the [plan](plan.md): tests pinning today's behaviour. |
+| **Status** | What is stored and read, by file. Identities are keyed by nothing a user fact uses; only dialog's own index facts and markers name them, inside dialog. Formats 4 and 5 are unreleased, and every identity already moved since 0.5.0, so a cut-over before the next tag costs a live space one migration. Main's upgrade would strand 88 of tonk-team's 89 transient markers. A 0.5.0 replica meets a newer body under the same index keys and fails the query (F1, run). | Directing. Six approaches and a matrix; D recommended by the agent (E, then F, before tonk's answers to T12 to T15). |
+| **Agenda** | U1 to U4 in the [direction](direction.md); U1 (can the fence be set without rewriting every node) first, by a run. The maintainer's answers to open questions 1 to 4 in the top story; 5 is answered.  | The maintainer reads the matrix and chooses. Then step 1 of the [plan](plan.md): tests pinning today's behaviour. |
 
 ## 2026-11-24, Describing to Directing: what "format 5 for everything" would take
 
@@ -166,3 +166,25 @@ are a step of a rule migration, never a migration of their own. For a
 0.5.0 space that is this version's migration (tonk's reinstall under F,
 `rewrite_body` for other rules). Replaces the coordinator's reading.
 Plan steps 3 and 7 carry it.
+
+## 2026-11-24, Directing: tonk can keep nothing beside, so fence
+
+**Asked.** T12 to T15, answered from tonk @ b125f0d and relayed. The
+coordinator asked for the recommendation now, its strongest reason, the
+smallest sound version, what goes wrong quietly, and what is unsure.
+
+**Learned.** Tonk cannot install a library beside the previous one, nor
+hold old and new values of its identity-valued facts (T13, T14). Spaces
+hold rules no library installs, which only dialog can find (T12). Tonk
+relies on 0.5.0 implying `top` from a listed `as` (T15). v0.5.0 checks
+the manifest of every node it decodes, so a critical field on a
+migrated root fences it.
+
+**Backtracked.** The recommendation, from F to D. B, E and F each keep
+something old beside the new; tonk can keep none of it, and mixing
+cannot be seen, so the only safe treatment of an old device is to make
+it refuse by name. D shrinks: in-place migration as today, no second
+vocabulary, no keep or prune. Plan rewritten for D, with tonk's side.
+
+**Decided.** Nothing by the maintainer. The agent's opinion: D. Unsure:
+U1 to U4.

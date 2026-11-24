@@ -60,6 +60,11 @@ reverses the definitions it ships. Under C a format 3 body is read on
 every read path for a release, so C also reverses on every read, not
 only in the upgrade.
 
+Revised 2026-11-24 after T12 to T15: B, E and F assume something can be
+kept beside the new (an old body, an old marker, an old install), and
+T13 and T14 say tonk can keep none of it. They stay in the matrix as
+examined and set aside; the recommendation below is D.
+
 ## The matrix
 
 | criterion \ approach | A. Status quo | B. One format, cut over once | C. Read old, write new, one cycle | D. Fence, then migrate | E. A new vocabulary | F. E, rewritten by the embedder |
@@ -103,43 +108,76 @@ only in the upgrade.
 
 ## Recommendation
 
-F, landed before the next tag, as the [plan](plan.md) orders it. The
-agent's recommendation, revised 2026-11-24 after tonk's answers; not a
-decision. It was E before.
+**D, the fence, with the rules migrated in place.** The agent's,
+revised a second time on 2026-11-24 after tonk's answers to T12 to T15
+(it was E, then F). Not a decision.
 
-Why F over E: tonk's answers move the rewrite out of dialog.
+The single strongest reason: devices of one space run different
+releases and nobody can tell (T9), and nothing old can be kept beside
+the new (T13, T14). So under every approach that lets a 0.5.0 device go
+on syncing with a migrated space, that device fails queries (F1), loses
+its rules, or commits command facts as durable data, and nobody sees it.
+A fence is the one way to make that a refusal the device states by name.
 
-- Tonk already migrates definitions: it reinstalls its library by
-  replaying the previous install commit's retractions and asserting the
-  new library (T4). A dialog-side rewrite of those rules sits outside any
-  install commit, so tonk's replay never retracts it, and a stale copy
-  outlives the next library change ([mixed fleets](mixed-fleets.md),
-  "A dialog-side rewrite against uninstall by replay").
-- Tonk writes dialog identities into its own facts and moves them with
-  its own `rekey` (T2, T3). Only tonk can rewrite those, and it needs
-  dialog to export the identity of each generation, which today it gets
-  for 0.2 only.
-- Versions mix in a space and nobody can tell (T9). F keeps E's new
-  vocabulary, so an O device meets no format 5 body and fails no query
-  (F1), for as long as tonk keeps the previous install (T13).
+What D now is, made as small as tonk's answers allow:
 
-What F asks of dialog is small: format 5 under new names, refusal and
-listing of what it does not read, and three exports. What it asks of
-tonk is to reinstall when dialog's identity generation moves, not only
-when its library does, to keep the previous install until a prune it
-schedules, and to reverse its three lists.
+- **One format, migrated in place.** Every rule body is rewritten to
+  format 5 and the old facts retracted, as `upgrade_rules` does today.
+  Nothing kept, nothing pruned, no second vocabulary: with 0.5.0 fenced
+  out, no older replica reads the space, so there is nobody to keep the
+  old facts for. E's new attribute names and F's keep-and-prune go.
+- **Dialog migrates every rule body it finds** (T12: only dialog can find
+  them all). It cannot tell a library's rules from the rest, and need
+  not: the embedder reinstalls its library first, so by the time the
+  upgrade runs, the library's rules are already current and the upgrade
+  finds nothing to do for them. What it rewrites are the rules no library
+  installed, which no replay touches. That is the order tonk already runs
+  (`upgrade_definitions`, then `upgrade_rules`, T4); it only has to
+  reinstall on a dialog upgrade too.
+- **The fence is a critical tree manifest field**, written by the
+  migration. v0.5.0 decodes every node's manifest and refuses one with an
+  unknown critical (odd) field (`dialog-search-tree/src/node/persistent.rs:745`
+  to `:756` at v0.5.0), so an O device fails at the migrated root, on
+  open and on pull, by name. It is the mechanism the number band already
+  uses (`repository/branch/migrate.rs`).
 
-What would change it:
+The cost: an O device cannot sync until it updates, and a pull from an
+O device into N has to bring O's tree to the fenced form, as a pull
+aligns a tree laid out before the number band
+(`migrate.rs:266` to `:281`).
 
-- if tonk cannot keep the previous install across a reinstall (T13),
-  every O device loses the library's rules and markers on the first sync
-  with an upgraded peer, in E and F alike; then D, the fence, is the only
-  approach under which nothing goes wrong silently;
-- if a space holds many rules no library installs (T12), dialog's
-  upgrade stays a real part of the work, in keep mode;
-- if tonk's records name concepts by dialog identity in places `rekey`
-  does not reach, those are the embedder's to find; nothing here changes
-  that.
+## What can still go wrong quietly under D
+
+- **Tonk's own records of a listed attribute.** If tonk rekeys the
+  attribute's identity but leaves `db.attribute/among` best first, its
+  reconstruction of the concept hashes to another identity than the one
+  it installed, and a transient minted from it reaches no handler (tonk's
+  own warning, T1). Silent until a command goes unanswered.
+- **Spaces the seed upgrade skips** (no seed record, welcome snapshots,
+  T12): their library rules are rewritten by `upgrade_rules`, outside any
+  install commit. Harmless while no seed upgrade ever runs for them; if
+  tonk later gives such a space a seed record, its first replay will not
+  retract those rules.
+- **Markers no one hands over.** A transient marker on a concept neither
+  the embedder's list nor a stored rule names stays on its old identity,
+  and that concept's facts are committed as durable data.
+- **Fenced but stale.** An O device keeps working on its own copy
+  offline and cannot sync. Loud on sync, quiet before it.
+
+## What the agent is unsure of
+
+- **U1.** Whether the fence can be set without rewriting every node.
+  v0.5.0 checks each node it decodes, so a new root fences it; whether a
+  tree may hold nodes under two manifests is for the search tree to say,
+  and the number band rewrote every node.
+- **U2.** Whether tonk's `rekey` moves `dialog.concept/transient` facts
+  (it rewrites "claims about" a moved identity). If it does, step 3 can
+  go.
+- **U3.** How a pull on N aligns a tree O wrote after the fence went up:
+  rewriting its rules in the pull, or refusing until the upgrade runs.
+  The number band rewrites in the pull.
+- **U4.** Open question 1: what an identity hashes once there is one
+  format. D does not depend on the answer, but step 2 carries it.
 
 ## Scope
 

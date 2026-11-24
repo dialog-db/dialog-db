@@ -75,17 +75,15 @@ same index keys and, on 0.5.0, fail a query over a body they cannot read.
 
 ## Approach
 
-Not decided. The agent recommends approach F of the
-[matrix](stored-format/direction.md), revised from E on 2026-11-24 after
-tonk's answers: one format, 5, for every rule, read on every read path
-and nothing else; rule facts and the transient marker under new
-attribute names an older release does not read; and dialog rewrites
-nothing an embedder installs. It lists what it cannot read and exports
-what a migration needs (each generation's identity functions, an
-identity generation constant, the body rewrite with the reversal). The
-embedder reinstalls its library, rekeys its own facts and retracts the
-previous install when it decides. All of it before the next tag, so a
-live space moves once.
+Not decided. The agent recommends approach D of the
+[matrix](stored-format/direction.md), revised twice on 2026-11-24 as
+tonk's answers came in (E, then F, then D): every rule body migrated in
+place to format 5, the library first by the embedder's reinstall and
+every other rule by `upgrade_rules`, and the migrated tree fenced with a
+critical manifest field that 0.5.0 refuses by name, so a device left on
+0.5.0 cannot sync with the space rather than fail or misbehave silently.
+No second vocabulary, nothing kept, nothing pruned. All before the next
+tag, so a live space moves once.
 
 Open questions for the maintainer:
 
