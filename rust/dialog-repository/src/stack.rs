@@ -4572,6 +4572,110 @@ mod tests {
         Ok(())
     }
 
+    /// A layer write that loses the primary's compare-and-swap and is
+    /// minted again under the same version mints the same record, byte for
+    /// byte, whatever either attempt wrote: the record the losing attempt
+    /// left in the tree nothing names is the record the attempt that landed
+    /// wrote in another tree.
+    ///
+    /// This is the premise a revision record is read on: a version's
+    /// record is immutable (`TreeHistory::revision_record` memoizes it, and
+    /// takes one found in a buffer above the leaf once it verifies), which
+    /// holds because a record is a function of what its version is derived
+    /// from: the line and issuer, which give the origin, and the parents,
+    /// which give the edition and the skips, signed deterministically. If a
+    /// change ever let two attempts at one version differ, this fails, and
+    /// every reader that takes the first record that verifies would have
+    /// to choose between them.
+    #[dialog_common::test]
+    async fn it_mints_one_record_for_a_layer_version_however_many_attempts() -> Result<()> {
+        use crate::erased;
+        use crate::stack::durable::{elected, pointed};
+        use dialog_corpus::history::{History as _, TreeHistory, Version};
+
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let notes = declare_notes(&branch, &operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        stack
+            .assert(note(&doc, "kept", &notes))
+            .perform(&operator)
+            .await?;
+
+        // The losing attempt: staged, then overtaken by another handle's
+        // commit of the primary.
+        let staged = stack
+            .transaction()
+            .assert(note(&doc, "lost", &notes))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let losing = staged.revision();
+        let other = repo.branch("main").open().perform(&operator).await?;
+        other
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of("doc:2".parse::<Entity>()?)
+                    .is("other".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let lost = staged.publish().perform(&operator).await;
+        assert!(
+            matches!(
+                lost,
+                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
+            ),
+            "{lost:?}"
+        );
+
+        // The attempt that lands: another write on the same layer
+        // revision, so another tree under the same version.
+        branch.refresh(&operator).await?;
+        let stack = branch.stack().perform(&operator).await?;
+        stack
+            .assert(note(&doc, "landed", &notes))
+            .perform(&operator)
+            .await?;
+        let landed = stack.pointed(&notes).expect("the layer moved");
+
+        // The layer revision the losing attempt minted, from the tree its
+        // primary revision pointed the layer at.
+        let store = erased(&operator);
+        let archive = stack.durables().archive();
+        let claims = pointed(&archive, &losing.tree, &notes, store).await?;
+        let orphan = elected(&claims).expect("the losing attempt pointed the layer");
+        assert_ne!(
+            orphan.tree, landed.tree,
+            "the losing attempt left a tree of its own"
+        );
+        assert_eq!(
+            Version::current_of(&orphan.revision),
+            Some(landed.entity()),
+            "the losing attempt minted the version the landed one has"
+        );
+        let version = landed.version();
+        let losing_record = TreeHistory::from_root(branch.subject(), orphan.tree.hash(), store)
+            .revision_record(&version)
+            .await?
+            .expect("the losing attempt recorded the version the landed one has");
+        let landed_record = TreeHistory::from_root(branch.subject(), landed.tree.hash(), store)
+            .revision_record(&version)
+            .await?
+            .expect("the attempt that landed recorded its version");
+        assert_eq!(
+            losing_record.to_bytes()?,
+            landed_record.to_bytes()?,
+            "one version, one record, whichever attempt minted it"
+        );
+        Ok(())
+    }
+
     /// A write `in: memory:missing`, a layer declared nowhere, is refused
     /// with `UnboundLayer` before anything is committed: the primary does
     /// not move, its pointer of the durable layer stays as it was, and it

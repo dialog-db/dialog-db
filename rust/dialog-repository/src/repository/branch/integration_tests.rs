@@ -2879,6 +2879,262 @@ async fn it_commits_after_a_restart_from_its_own_blocks(s3: S3Address) -> Result
     Ok(())
 }
 
+/// A durable layer an author wrote many rows into and synced, and a
+/// follower that synced it, both on `storage` under keys `seed` derives
+/// (the follower's space included), with the follower's stack.
+struct Layered {
+    notes: Entity,
+    /// The name of the follower's space.
+    space: String,
+    follower: crate::Stack,
+    env: Counting<Peer<VolatileSpace, dialog_peer::Session>>,
+}
+
+/// The `doc/note` of `doc` as `text`, written into `layer`.
+fn noted(doc: &Entity, text: &str, layer: &Entity) -> impl dialog_corpus::Statement {
+    use dialog_corpus::Statement as _;
+    dialog_query::the!("doc/note")
+        .of(doc.clone())
+        .is(text.to_string())
+        .at(layer.clone())
+}
+
+/// The session a test performs through on `peer`.
+async fn session_of(
+    peer: &Peer<VolatileSpace>,
+) -> Result<Peer<VolatileSpace, dialog_peer::Session>> {
+    Ok(peer
+        .session(b"test")
+        .space(peer.state())
+        .allow(Subject::any())
+        .await?)
+}
+
+/// [`Layered`] over `s3`, its profile opened at `location` on `storage`.
+async fn layered(
+    seed: &Seed,
+    s3: &S3Address,
+    storage: &dialog_storage::provider::storage::Storage<VolatileSpace>,
+    location: &Location,
+) -> Result<Layered> {
+    use crate::{LayerDeclaration, LayerType};
+    use dialog_corpus::{Changes, Statement as _};
+
+    let credential = seed.credential("profile").await?;
+    let profile = open_peer_as(storage.clone(), location.clone(), credential).await?;
+    let operator = session_of(&profile).await?;
+    let site = s3_site_address(s3);
+    profile
+        .secrets()
+        .site(&site)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&profile)
+        .await?;
+
+    let notes: Entity = "memory:notes".parse()?;
+    let first = profile
+        .space(seed.name("author"))
+        .create()
+        .with_credential(seed.signer("repository").await?)
+        .perform(&operator)
+        .await?;
+    let main = first.branch("main").open().perform(&operator).await?;
+    main.transaction()
+        .assert(LayerDeclaration::new(notes.clone(), LayerType::Branch))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    main.refresh(&operator).await?;
+    let origin = connect("origin", site.clone(), first.did(), &operator).await?;
+    main.set_upstream(origin.branch("main").open().perform(&operator).await?)
+        .perform(&operator)
+        .await?;
+    let author = main.stack().perform(&operator).await?;
+    for round in 0..4 {
+        let mut bulk = Changes::new();
+        for at in 0..100 {
+            noted(
+                &format!("doc:bulk-{round}-{at}").parse()?,
+                &format!("bulk {round} {at} ").repeat(8),
+                &notes,
+            )
+            .assert(&mut bulk);
+        }
+        author.assert(bulk).perform(&operator).await?;
+    }
+    author
+        .sync(crate::Download::MinimalRanges)
+        .perform(&operator)
+        .await?;
+
+    let env = Counting::new(operator.clone());
+    let space = seed.name("follower");
+    let second = profile
+        .space(space.clone())
+        .create()
+        .with_credential(seed.signer("follower").await?)
+        .perform(&env)
+        .await?;
+    let origin = connect("origin", site, first.did(), &env).await?;
+    let replica = second.branch("main").open().perform(&env).await?;
+    replica
+        .set_upstream(origin.branch("main").open().perform(&env).await?)
+        .perform(&env)
+        .await?;
+    let follower = replica
+        .stack()
+        .declare(LayerDeclaration::new(notes.clone(), LayerType::Branch))
+        .perform(&env)
+        .await?;
+    follower
+        .sync(crate::Download::QueriedRanges)
+        .perform(&env)
+        .await?;
+    Ok(Layered {
+        notes,
+        space,
+        follower,
+        env,
+    })
+}
+
+impl Layered {
+    /// The follower writes its note as `text`, and how many blocks it
+    /// fetched from the remote to write it.
+    async fn write(&self, text: &str) -> Result<u64> {
+        self.env.reset();
+        self.follower
+            .assert(noted(&"doc:follower".parse()?, text, &self.notes))
+            .perform(&self.env)
+            .await?;
+        Ok(self.env.count("Hydrate"))
+    }
+}
+
+/// A replica writes into a durable layer again from its own blocks.
+///
+/// A write into a durable layer builds on the layer's revision, and its
+/// commit reads that revision's record to carry the skip links along.
+/// After the replica's own write that record is its own, and a commit
+/// writes its record into a buffer of the tree, not into the leaf the
+/// record routes to. A durable layer's line keeps no memo of the records
+/// it minted from one write to the next, so the next write read its own
+/// record through that leaf, and fetched it when the replica had never
+/// held it.
+///
+/// The keys here derive from a seed under which the replica does not
+/// hold that leaf (4 of the first 1000 seeds give that layout, and each
+/// of the 4 fetched), and the test asserts that layout before relying on
+/// it.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_writes_a_durable_layer_again_from_its_own_blocks(s3: S3Address) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    let storage = test_storage().await;
+    let location = Location::profile(seed.name("layered"));
+    let layered = layered(&seed, &s3, &storage, &location).await?;
+
+    layered.write("first").await?;
+    let layer = layered
+        .follower
+        .pointed(&layered.notes)
+        .context("the follower's write moved the layer")?;
+    assert!(
+        !holds_the_leaf_of_its_record(layered.follower.primary(), &layer, &layered.env).await?,
+        "the fixture's layout moved: under seed {} the follower holds the \
+         leaf a lookup of its layer revision's record starts at, so choose \
+         the seed again",
+        seed.value()
+    );
+    assert_eq!(
+        layered.write("second").await?,
+        0,
+        "the follower writes into the layer again from its own blocks"
+    );
+    Ok(())
+}
+
+/// A replica writes into a durable layer after a restart from its own
+/// blocks: the restart variant of
+/// [`it_writes_a_durable_layer_again_from_its_own_blocks`], where no memo
+/// of any kind survives to stand in for the leaf.
+///
+/// The restarted replica opens its stack, which reads where the primary
+/// points the layer and the layer revision's record, then writes. Both
+/// the open and the write read the record the replica minted before the
+/// restart, so the fetches counted are those of the open and the write
+/// together: a replica that restarts offline opens its stack and writes.
+///
+/// The keys here derive from a seed under which the replica, after its
+/// first write, does not hold the leaf a lookup of its layer revision's
+/// record starts at, and the test asserts that layout before relying on
+/// it. A restart reads nothing, so it holds no more after it.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_writes_a_durable_layer_after_a_restart_from_its_own_blocks(
+    s3: S3Address,
+) -> Result<()> {
+    let seed = Seed::new(415);
+    let _entropy = seed.entropy();
+    let storage = test_storage().await;
+    let location = Location::profile(seed.name("layered"));
+    let before = layered(&seed, &s3, &storage, &location).await?;
+    before.write("first").await?;
+    let layer = before
+        .follower
+        .pointed(&before.notes)
+        .context("the follower's write moved the layer")?;
+    assert!(
+        !holds_the_leaf_of_its_record(before.follower.primary(), &layer, &before.env).await?,
+        "the fixture's layout moved: under seed {} the follower holds the \
+         leaf a lookup of its layer revision's record starts at, so choose \
+         the seed again",
+        seed.value()
+    );
+    let notes = before.notes.clone();
+    let follower = before.space.clone();
+    drop(before);
+
+    let credential = seed.credential("profile").await?;
+    let restarted = open_peer_as(storage, location, credential).await?;
+    let env = Counting::new(session_of(&restarted).await?);
+    env.reset();
+    let repository = restarted.space(follower).open().perform(&env).await?;
+    let replica = repository.branch("main").open().perform(&env).await?;
+    let stack = replica
+        .stack()
+        .declare(crate::LayerDeclaration::new(
+            notes.clone(),
+            crate::LayerType::Branch,
+        ))
+        .perform(&env)
+        .await?;
+    assert_eq!(
+        named_layer(stack.pointed(&notes)),
+        named_layer(Some(layer)),
+        "the layer survives the restart"
+    );
+    stack
+        .assert(noted(&"doc:follower".parse()?, "second", &notes))
+        .perform(&env)
+        .await?;
+    assert_eq!(
+        env.count("Hydrate"),
+        0,
+        "the follower opens its stack and writes into the layer after a \
+         restart from its own blocks"
+    );
+    Ok(())
+}
+
+/// A revision a durable layer is pointed at, by what names it: its entity
+/// and its tree.
+fn named_layer(revision: Option<Revision>) -> Option<(Entity, crate::TreeReference)> {
+    revision.map(|revision| (revision.entity(), revision.tree))
+}
+
 /// Whether `branch`'s replica holds, without asking any remote, the leaf a
 /// lookup of `head`'s own revision record starts at: the leaf a commit on
 /// `head` reads to carry the skip links along.
