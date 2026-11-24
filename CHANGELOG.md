@@ -54,8 +54,8 @@ What this changes for you:
   is decoded, with an error, as any malformed body is.
 
 Why: composite values (#843) made a map or a list a constant a rule can
-
 hold, and a rule that can be built and run should run once it is stored.
+
 ### A standing fold steps a group's value instead of folding the group again
 
 [#856](https://github.com/dialog-db/dialog-db/pull/856). The design it follows is
