@@ -8,6 +8,7 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Branch;
@@ -246,9 +247,9 @@ impl Model {
                         facts.push(Fact::In(of, from, false));
                     }
                     facts.push(Fact::In(of, to, true));
-                    if !self.values.contains_key(&of) {
+                    if let Entry::Vacant(entry) = self.values.entry(of) {
                         let held = values[random.below(values.len())].clone();
-                        self.values.insert(of, held.clone());
+                        entry.insert(held.clone());
                         facts.push(Fact::Holds(of, held, true));
                     }
                 }

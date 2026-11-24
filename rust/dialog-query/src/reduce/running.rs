@@ -383,19 +383,19 @@ mod tests {
 
     /// The fold of `rows`, as [`Reduce::fold_rows`] gives it.
     fn folded(reduce: &Reduce, rows: &[Match]) -> Result<Option<Binding>, EvaluationError> {
-        Ok(reduce
+        reduce
             .clone()
             .fold_rows(rows)?
             .first()
             .map(|row| row.lookup(&Term::<Any>::var("out")))
-            .transpose()?)
+            .transpose()
     }
 
     fn running(reduce: &Reduce, running: &Running) -> Result<Option<Binding>, EvaluationError> {
-        Ok(running
+        running
             .finish(reduce)?
             .map(|row| row.lookup(&Term::<Any>::var("out")))
-            .transpose()?)
+            .transpose()
     }
 
     /// A small deterministic generator (xorshift64).
