@@ -40,8 +40,9 @@
 //! group's running value takes those rows in, joined with its group row,
 //! and gives its row; no fold. It keeps exactly what a fold of the
 //! group's rows needs, so it gives the row such a fold gives, and the
-//! poll reports it as it reports a folded one. A group is folded again
-//! instead, and its running value made again from its rows, when the
+//! poll reports it as it reports a folded one. A group is read whole
+//! again instead, its running value made again from all its rows (and
+//! its rows folded where none can be made), when the
 //! value cannot take a change in (an integer `sum` met by a float, the
 //! last row holding a `max` taken away, a value a `min` cannot order),
 //! when a row of its groups query moved, when it has no input row or
@@ -491,23 +492,34 @@ where
                         None => {
                             self.running.remove(key);
                             refolds += 1;
-                            let folded = self
-                                .fold
-                                .fold_groups(groups.iter().map(|(_, row)| row), |key| {
-                                    self.rows.get(key).into_iter().flatten().map(|(_, row)| row)
-                                })?;
                             // Past the first poll a group folded again is
                             // one that moved: it gets a running value for
-                            // its next change.
-                            if self.runs
-                                && self.initialized
-                                && let (Some(group), Some(inputs)) = (one, inputs)
-                                && let Some(running) =
+                            // its next change, made from its rows, which
+                            // gives its row as a fold of them would. Where
+                            // none can be made the rows are folded.
+                            let built = match (one, inputs) {
+                                (Some(group), Some(inputs)) if self.runs && self.initialized => {
                                     build(reduce, group, inputs.iter().map(|(_, row)| row))
-                            {
-                                self.running.insert(key.clone(), running);
+                                }
+                                _ => None,
+                            };
+                            let row = match &built {
+                                Some(running) => running.finish(reduce)?,
+                                None => None,
+                            };
+                            match (built, row) {
+                                (Some(running), Some(row)) => {
+                                    self.running.insert(key.clone(), running);
+                                    Some(row)
+                                }
+                                _ => self
+                                    .fold
+                                    .fold_groups(groups.iter().map(|(_, row)| row), |key| {
+                                        self.rows.get(key).into_iter().flatten().map(|(_, row)| row)
+                                    })?
+                                    .into_iter()
+                                    .next(),
                             }
-                            folded.into_iter().next()
                         }
                     };
                     match folded {
