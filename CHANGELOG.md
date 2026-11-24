@@ -86,6 +86,11 @@ What this changes for you:
   `Error::Reserved`. Its own variables are spelled with a `[`, which no
   document can write in a variable. A field may not be labelled `this:`.
   `syntax.meta` is read and never written.
+- A view's template is refused with `Error::Unsafe` where a row's values
+  could reach script: `script`, `iframe`, `object` and `embed`, an
+  attribute named `on…`, `srcdoc`, a `style` a value writes, and a URL a
+  value writes from its start. A back end still escapes every text and
+  attribute value it serialises.
 - `check(analyzer, text)` gives, form by form, what a document compiles
   to, its diagnostics, and its declarations as data
   (`Declaration::Concept`, `Declaration::Query`).

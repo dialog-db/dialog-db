@@ -22,6 +22,16 @@
 //! says each change as [`Patch`]es. No value is folded. The Dialog-DB back end,
 //! [`compile`](crate::compile()), gives a query whose answer is markup as
 //! its plan.
+//!
+//! A row's values come from any writer of the branch, so a template is
+//! refused where they could reach script: an element that runs what it
+//! holds (`script`, `iframe`, `object`, `embed`), an attribute named
+//! `on…` that is no `on/` event, `srcdoc`, a `style` a value writes, and
+//! a URL (`href`, `src`, `action`, `formaction`) a value writes from its
+//! start; a fixed start, `["/notebook/" ?n]`, is taken. What is left is
+//! the back end's: it escapes every text and attribute value it writes,
+//! as for any text, and sets them as text and attributes, never as
+//! markup.
 
 use dialog_corpus::Value;
 
@@ -211,6 +221,11 @@ fn node(tree: &Syntax) -> Result<Node, Error> {
                     ))
                 })?
                 .to_string();
+            if RUNS.contains(&tag.to_ascii_lowercase().as_str()) {
+                return Err(Error::Unsafe(format!(
+                    "{tree}: a [:{tag} …] runs what it holds"
+                )));
+            }
             // A map right after the tag is the element's attributes, as in
             // Hiccup.
             let (map, children) = match rest.split_first() {
@@ -243,9 +258,11 @@ fn node(tree: &Syntax) -> Result<Node, Error> {
                 };
                 match name.strip_prefix("on/") {
                     Some(kind) => element.events.push(event(kind, value)?),
-                    None => element
-                        .attributes
-                        .push((name.clone(), attribute(name, value)?)),
+                    None => {
+                        let attribute = attribute(name, value)?;
+                        safe(&element.tag, name, &attribute)?;
+                        element.attributes.push((name.clone(), attribute));
+                    }
                 }
             }
             Node::Element(element)
@@ -277,6 +294,59 @@ fn node(tree: &Syntax) -> Result<Node, Error> {
             )));
         }
     })
+}
+
+/// The elements that run what they hold or load: a template never makes
+/// one, since a row's values would be in it.
+const RUNS: [&str; 4] = ["script", "iframe", "object", "embed"];
+
+/// The attributes whose value is a URL a browser follows or loads.
+const URLS: [&str; 4] = ["href", "src", "action", "formaction"];
+
+/// The starts of a URL that no value after them turns into a scheme: a
+/// path, a fragment, a query, or a scheme of the web or of mail.
+const SAFE_STARTS: [&str; 6] = ["/", "#", "?", "http://", "https://", "mailto:"];
+
+/// Refuse an attribute through which a row's values could reach script:
+/// one named `on…`, which is an inline handler, `srcdoc`, which is a
+/// document, a `style` a value writes, and a URL a value writes from its
+/// start. A value is written into the others as text, which the back end
+/// escapes.
+fn safe(tag: &str, name: &str, attribute: &Attribute) -> Result<(), Error> {
+    let lowered = name.to_ascii_lowercase();
+    let refuse = |why: &str| Err(Error::Unsafe(format!("[:{tag} {{:{name} …}}]: {why}")));
+    let written = |attribute: &Attribute| match attribute {
+        Attribute::Variable(_) => true,
+        Attribute::Parts(pieces) => pieces
+            .iter()
+            .any(|piece| matches!(piece, Piece::Variable(_))),
+        _ => false,
+    };
+    if lowered.starts_with("on") {
+        return refuse("an attribute named on… is a handler: an event is :on/<type>");
+    }
+    if lowered == "srcdoc" {
+        return refuse("srcdoc is a document of its own");
+    }
+    if lowered == "style" && written(attribute) {
+        return refuse("a style a value writes");
+    }
+    if URLS.contains(&lowered.as_str()) && written(attribute) {
+        let start = match attribute {
+            Attribute::Parts(pieces) => match pieces.first() {
+                Some(Piece::Text(text)) => Some(text.to_ascii_lowercase()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if !start.is_some_and(|start| SAFE_STARTS.iter().any(|safe| start.starts_with(safe))) {
+            return refuse(
+                "a URL a value writes from its start: give it a fixed start, \
+                 [\"/notebook/\" ?n]",
+            );
+        }
+    }
+    Ok(())
 }
 
 /// An attribute's value.
@@ -410,7 +480,7 @@ mod safety {
             "[:a {:href [\"https://example.org/\" ?n]}]",
             "[:a {:href \"#top\"}]",
             "[:div {:style \"display: block;\" :class ?c :title ?t} ?text]",
-            "[:button {:on/click {:command :todo/add :text ?t}} \"Add\"]",
+            "[:button {:on/click (todo/add text: ?t)} \"Add\"]",
         ] {
             assert!(read(text).is_ok(), "{text}: {:?}", read(text));
         }
