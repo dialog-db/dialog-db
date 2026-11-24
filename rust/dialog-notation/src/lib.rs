@@ -86,6 +86,14 @@ pub use view::tree::{Change, Counts, Given, Maintainer, Row, render};
 pub use view::{Attribute, CALLED, Element, Event, Input, Node, Piece};
 pub use written::{Comment, Note, Path, Point, Segment, Slot, Span, Written};
 
+/// How many characters of a site's reference name the report relations
+/// compiled on this thread from now on: a test shortens it to make two
+/// sites meet. Twelve by default.
+#[cfg(feature = "inspect")]
+pub fn name_sites_with(length: usize) {
+    compile::SITE_LENGTH.with(|held| held.set(length));
+}
+
 /// A form whose expansion does not end, as the expander refused it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endless {

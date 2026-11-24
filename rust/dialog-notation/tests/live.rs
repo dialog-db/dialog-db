@@ -314,11 +314,14 @@ async fn it_takes_off_the_overlay_what_it_laid_when_the_last_holder_goes() -> Re
     let first = live.watch(flat()?, None)?;
     let laid = overlay.len();
     assert!(laid > before, "a watch lays its rules");
+    let rules = (0..flat()?.layers.len())
+        .filter_map(|layer| flat().ok()?.query(layer, None).ok()?.rule)
+        .count();
     let mut second = live.watch(flat()?, None)?;
     assert_eq!(
         overlay.len(),
-        laid,
-        "the rules two watches share are laid once"
+        laid + rules,
+        "the rules two watches share are laid once, and each is held by both"
     );
     second.poll(&notebook.operator).await?;
     drop(first);
@@ -369,9 +372,15 @@ async fn it_keeps_a_rule_two_lives_hold_until_both_let_go() -> Result<()> {
     let before = overlay.len();
     let first = Live::new(notebook.branch.clone());
     let second = Live::new(notebook.branch.clone());
-    let one = first.watch(flat()?, None)?;
+    let mut one = first.watch(flat()?, None)?;
+    one.poll(&notebook.operator).await?;
+    let evaluated = one.recomputes();
     let mut other = second.watch(flat()?, None)?;
     other.poll(&notebook.operator).await?;
+    // The second only writes that it holds the rule, beside it: a
+    // subscription already standing evaluates nothing again for it.
+    assert!(one.poll(&notebook.operator).await?.is_empty());
+    assert_eq!(one.recomputes(), evaluated, "a hold costs a poll nothing");
     drop(one);
     drop(first);
     notebook.submit(CHANGE).await?;
@@ -386,5 +395,41 @@ async fn it_keeps_a_rule_two_lives_hold_until_both_let_go() -> Result<()> {
     );
     drop(other);
     assert_eq!(overlay.len(), before, "both gone, nothing is left laid");
+    Ok(())
+}
+
+/// Two documents laid on one branch whose report relations are named
+/// alike, after two sites, are refused where the second is laid: the two
+/// would answer as one. Names are shortened until two sites meet.
+#[dialog_common::test]
+async fn it_refuses_a_report_two_sites_would_derive_alike() -> Result<()> {
+    let notebook = tasks().await?;
+    dialog_notation::name_sites_with(0);
+    let pairs = pairs();
+    let other = step(
+        "(query (task/other ?t is: ?pair)
+           (task/tag ?t tag: ?g)
+           (task ?t title: ?title)
+           (is ?pair {:tag ?g :title ?title :other true}))
+         (select (task/other ?t is: ?pair))",
+    );
+    dialog_notation::name_sites_with(12);
+    let (pairs, Step::Select(other)) = (pairs?, other?) else {
+        return Err(anyhow::anyhow!("no selection"));
+    };
+    let live = Live::new(notebook.branch.clone());
+    let kept = live.standing(pairs)?;
+    let refused = live.standing(*other);
+    assert!(
+        matches!(
+            refused,
+            Err(dialog_notation::live::LiveError::Notation(
+                dialog_notation::Error::Clash(..)
+            ))
+        ),
+        "{:?}",
+        refused.err()
+    );
+    drop(kept);
     Ok(())
 }

@@ -35,7 +35,8 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -119,48 +120,110 @@ pub enum LiveError {
 ///
 /// What a selection kept standing or a view watched needs of a rule is
 /// laid on the branch's session overlay, and taken off when the last
-/// selection or view that holds it is dropped. A `Live` and its clones
-/// count what they laid together: keep one for a branch and clone it. A
-/// rule that was on the overlay before a `Live` laid it is not its own,
-/// and it never takes it off.
+/// selection or view that holds it is dropped, whichever `Live` made it.
+/// Who holds a rule is written on the overlay itself, so every `Live` on
+/// the branch sees one count. A rule that was on the overlay before the
+/// notation laid it is used and never taken off.
 #[derive(Clone)]
 pub struct Live {
     branch: Branch,
-    laid: Laid,
 }
 
-/// The rules a [`Live`] and its clones laid on the overlay, each by its
-/// entity, with how many selections and views hold it.
-type Laid = Arc<Mutex<BTreeMap<String, usize>>>;
+/// The relation a selection or a view holding a rule on the overlay is
+/// written in: the rule's entity, and the holder's own name.
+const HOLDER: &str = "dialog.notation.live/holder";
+
+/// The relation that says the notation laid a rule on the overlay, and
+/// may take it off: the rule's entity, and `true`.
+const LAID: &str = "dialog.notation.live/laid";
+
+/// The relation that says which site a rule the notation laid derives a
+/// report relation for: the rule's entity, and the relation and the site.
+const DERIVES: &str = "dialog.notation.live/derives";
+
+/// The names of the holders in this process, each once. The overlay is
+/// never synced, so a holder is named in this process alone.
+static HOLDERS: AtomicU64 = AtomicU64::new(0);
+
+/// What laying a rule and letting it go read and then write, kept one at
+/// a time in this process.
+static LAYING: Mutex<()> = Mutex::new(());
+
+/// A fact of the notation's own on the overlay.
+struct Mark {
+    the: &'static str,
+    of: Entity,
+    is: Value,
+}
+
+impl Mark {
+    fn relation(&self) -> Option<dialog_corpus::Relation> {
+        self.the.parse().ok()
+    }
+}
+
+impl dialog_corpus::Statement for Mark {
+    fn assert(self, update: &mut impl dialog_corpus::Update) {
+        if let Some(the) = self.relation() {
+            update.associate(the, self.of, self.is, dialog_corpus::Cardinality::Many);
+        }
+    }
+
+    fn retract(self, update: &mut impl dialog_corpus::Update) {
+        if let Some(the) = self.relation() {
+            update.dissociate(the, self.of, self.is);
+        }
+    }
+}
+
+/// The facts of the overlay about `entity`, a rule's: whether the rule
+/// itself is there, whether the notation laid it, and how many hold it.
+fn standing(overlay: &Ephemeral, entity: &Entity) -> (bool, bool, usize) {
+    let facts = overlay.scan(&Selector::new().of(entity.clone()));
+    let rule = facts
+        .iter()
+        .any(|fact| ![HOLDER, LAID, DERIVES].contains(&fact.the.as_str()));
+    let laid = facts.iter().any(|fact| fact.the.as_str() == LAID);
+    let holders = facts
+        .iter()
+        .filter(|fact| fact.the.as_str() == HOLDER)
+        .count();
+    (rule, laid, holders)
+}
 
 /// The rules a selection kept standing or a view watched holds on the
-/// overlay: each one's hold is let go when it is dropped, and a rule no
-/// longer held is taken off.
+/// overlay: its holds are let go when it is dropped, and a rule the
+/// notation laid and no one holds is taken off.
 struct Lease {
     overlay: Ephemeral,
-    laid: Laid,
+    /// The holder's name, written beside each rule it holds.
+    holder: Value,
     /// The rules held, by their entities, each once.
     held: Vec<Entity>,
 }
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        let mut laid = self.laid.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut gone: Vec<String> = Vec::new();
+        let _laying = LAYING.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut gone: Vec<Entity> = Vec::new();
         for entity in &self.held {
-            let key = entity.to_string();
-            if let Some(count) = laid.get_mut(&key) {
-                *count -= 1;
-                if *count == 0 {
-                    laid.remove(&key);
-                    gone.push(key);
-                }
+            // A holder is a fact the overlay holds, so retracting it
+            // removes it and hides nothing. Drop has no one to tell of a
+            // failure: the rule would stay laid, as it was before a count
+            // was kept.
+            let _ = self.overlay.retract(Mark {
+                the: HOLDER,
+                of: entity.clone(),
+                is: self.holder.clone(),
+            });
+            if let (_, true, 0) = standing(&self.overlay, entity) {
+                gone.push(entity.clone());
             }
         }
         if !gone.is_empty() {
             // Dropped outright, so nothing beneath the overlay is hidden.
             self.overlay
-                .retain_entities(|entity| !gone.contains(&entity.to_string()));
+                .retain_entities(|entity| !gone.contains(entity));
         }
     }
 }
@@ -168,10 +231,7 @@ impl Drop for Lease {
 impl Live {
     /// Keep selections and views on `branch`.
     pub fn new(branch: Branch) -> Live {
-        Live {
-            branch,
-            laid: Arc::default(),
-        }
+        Live { branch }
     }
 
     /// The branch.
@@ -179,34 +239,74 @@ impl Live {
         &self.branch
     }
 
-    /// Lay `rules` on the overlay, and hold them in `lease`: a rule this
-    /// `Live` laid already is held once more, a rule on the overlay that
-    /// it did not lay is used and not held, and any other is laid.
+    /// Lay `rules` on the overlay, and hold them in `lease`: a rule that
+    /// is not there is laid and marked as the notation's, and each is
+    /// held by a fact beside it naming the lease.
+    ///
+    /// A rule that derives a report relation another site's rule on the
+    /// overlay derives too, laid by another document, is refused: the two
+    /// would answer as one.
     fn lay<'r>(
         &self,
         lease: &mut Lease,
         rules: impl IntoIterator<Item = &'r dialog_query::DeductiveRule>,
+        derives: Option<&(String, String)>,
     ) -> Result<(), LiveError> {
         let overlay = self.branch.overlay();
-        let mut laid = self.laid.lock().unwrap_or_else(PoisonError::into_inner);
+        let _laying = LAYING.lock().unwrap_or_else(PoisonError::into_inner);
+        let failed = |error: dialog_corpus::DialogCorpusError| LiveError::Rule(error.to_string());
+        let claim = derives.map(|(relation, site)| format!("{relation} {site}"));
+        if let (Some((relation, site)), Ok(the)) = (derives, DERIVES.parse()) {
+            let other = overlay
+                .scan(&Selector::new().the(the))
+                .into_iter()
+                .find_map(|fact| match fact.is {
+                    Value::String(said) => said
+                        .strip_prefix(&format!("{relation} "))
+                        .filter(|other| *other != site)
+                        .map(str::to_string),
+                    _ => None,
+                });
+            if let Some(other) = other {
+                return Err(LiveError::Notation(Error::Clash(
+                    relation.clone(),
+                    other,
+                    site.clone(),
+                )));
+            }
+        }
         for rule in rules {
             let entity = rule.this();
             if lease.held.contains(&entity) {
                 continue;
             }
-            let key = entity.to_string();
-            match laid.get_mut(&key) {
-                Some(count) => *count += 1,
-                None if !overlay.scan(&Selector::new().of(entity.clone())).is_empty() => {
-                    continue;
-                }
-                None => {
+            let (there, _, _) = standing(overlay, &entity);
+            if !there {
+                overlay.assert(rule.clone()).map_err(failed)?;
+                overlay
+                    .assert(Mark {
+                        the: LAID,
+                        of: entity.clone(),
+                        is: Value::Boolean(true),
+                    })
+                    .map_err(failed)?;
+                if let Some(claim) = &claim {
                     overlay
-                        .assert(rule.clone())
-                        .map_err(|error| LiveError::Rule(error.to_string()))?;
-                    laid.insert(key, 1);
+                        .assert(Mark {
+                            the: DERIVES,
+                            of: entity.clone(),
+                            is: Value::String(claim.clone()),
+                        })
+                        .map_err(failed)?;
                 }
             }
+            overlay
+                .assert(Mark {
+                    the: HOLDER,
+                    of: entity.clone(),
+                    is: lease.holder.clone(),
+                })
+                .map_err(failed)?;
             lease.held.push(entity);
         }
         Ok(())
@@ -214,9 +314,10 @@ impl Live {
 
     /// A lease of nothing yet, on this branch's overlay.
     fn lease(&self) -> Lease {
+        let holder = HOLDERS.fetch_add(1, Ordering::Relaxed);
         Lease {
             overlay: self.branch.overlay().clone(),
-            laid: self.laid.clone(),
+            holder: Value::String(format!("holder-{holder}")),
             held: Vec::new(),
         }
     }
@@ -317,7 +418,7 @@ impl Live {
         let mut feeds = Vec::new();
         for (query, read) in selection.queries.iter().zip(read) {
             feeds.push(if read {
-                self.lay(&mut lease, &query.rule)?;
+                self.lay(&mut lease, &query.rule, query.derives.as_ref())?;
                 Some(self.branch.subscribe(query.select.clone()))
             } else {
                 None
@@ -325,7 +426,7 @@ impl Live {
         }
         let mut folds = Vec::new();
         for folded in &selection.folds {
-            self.lay(&mut lease, &folded.rules)?;
+            self.lay(&mut lease, &folded.rules, None)?;
             folds.push(self.branch.subscribe_fold(folded.fold.clone()));
         }
         Ok(Standing {
@@ -360,14 +461,14 @@ impl Live {
                 continue;
             }
             if let Some(folded) = folds.remove(&layer) {
-                self.lay(&mut lease, &folded.folded.rules)?;
+                self.lay(&mut lease, &folded.folded.rules, None)?;
                 let feed = self.branch.subscribe_fold(folded.folded.fold.clone());
                 maintainer.given(plan.counts[folded.count].place);
                 layers.push(Some(Feed::Counted(Box::new((folded, feed)))));
                 continue;
             }
             let query = plan.query(layer, entity.as_ref())?;
-            self.lay(&mut lease, &query.rule)?;
+            self.lay(&mut lease, &query.rule, query.derives.as_ref())?;
             let feed = self.branch.subscribe(query.select.clone());
             layers.push(Some(Feed::Rows(Box::new((query, feed)))));
         }
