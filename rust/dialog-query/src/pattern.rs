@@ -629,24 +629,249 @@ impl fmt::Display for Pattern {
     }
 }
 
-/// A leaf is written as a [`Term`] is. A map or a list has no
-/// wire form yet, and is refused.
+/// A pattern as it is written where a parameter stands, in a stored rule
+/// body (format 5, see [`body`](crate::rule::body)) and wherever a rule
+/// or a query is printed.
+///
+/// A leaf is written as a [`Term`] is: a variable under `?`, a constant
+/// as its value. A map or a list is written under the one key `match`,
+/// as a composite value is written for a human reader (see
+/// [`Composite`]): a map as its entries, each a pair of a key and a
+/// pattern, and a list as its items. What takes the entries or the items
+/// a pattern does not name stands beside them under `...`:
+///
+/// ```text
+/// {"author": ?who, "pinned": true, ...?others}
+///
+/// { "match": { "map": [
+///     [ { "text:": "author" }, { "?": { "name": "who" } } ],
+///     [ { "text:": "pinned" }, { "boolean:": true } ]
+///   ], "...": { "?": { "name": "others" } } } }
+///
+/// [?first, "math", ...?more]
+///
+/// { "match": { "list": [
+///     { "?": { "name": "first" } },
+///     { "text:": "math" }
+///   ], "...": { "?": { "name": "more" } } } }
+/// ```
+///
+/// Inside a pattern a map or a list is `{ "map": .. }` or
+/// `{ "list": .. }` again, with no `match`. A key is any value a map
+/// holds as a key, text, a symbol or a number alike, and a constant is
+/// written under the name of its type wherever it stands in a pattern.
+/// Every pattern is written one way: the entries in the order the map
+/// holds them, so one rule is always one body.
 impl serde::Serialize for Pattern {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::Error as _;
+        use serde::ser::SerializeMap;
         match self {
             Pattern::Term(term) => term.serialize(serializer),
-            composite => Err(S::Error::custom(format!(
-                "the pattern {composite} has no wire form: only a variable or a constant is written"
-            ))),
+            composite => {
+                let mut written = serializer.serialize_map(Some(1))?;
+                written.serialize_entry(MATCH, &Within(composite))?;
+                written.end()
+            }
         }
     }
 }
 
-/// Reads a leaf, as a [`Term`] is read.
+/// The key a map or a list of patterns is written under where a
+/// parameter stands.
+const MATCH: &str = "match";
+/// The key a map pattern's entries are written under, as a map's are.
+const MAP: &str = "map";
+/// The key a list pattern's items are written under, as a list's are.
+const LIST: &str = "list";
+/// The key what takes the rest of a map or of a list is written under.
+const REST: &str = "...";
+
+/// A pattern as it is written under `match`.
+struct Within<'a>(&'a Pattern);
+
+/// A term as it is written under `match`: a constant under the name of
+/// its type whoever reads it, where [`Value`] is written bare for a
+/// reader that can tell what it is.
+struct Leaf<'a>(&'a Term<Any>);
+
+/// A map pattern's entries, each a pair of a key and a pattern.
+struct Entries<'a>(&'a MapPattern);
+
+/// A list pattern's items.
+struct Items<'a>(&'a ListPattern);
+
+impl serde::Serialize for Within<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let rest = match self.0 {
+            Pattern::Term(term) => return Leaf(term).serialize(serializer),
+            Pattern::Map(map) => map.rest(),
+            Pattern::List(list) => list.run(),
+        };
+        let mut written = serializer.serialize_map(Some(1 + usize::from(rest.is_some())))?;
+        match self.0 {
+            Pattern::Map(map) => written.serialize_entry(MAP, &Entries(map))?,
+            Pattern::List(list) => written.serialize_entry(LIST, &Items(list))?,
+            Pattern::Term(_) => {}
+        }
+        if let Some(rest) = rest {
+            written.serialize_entry(REST, &Leaf(rest))?;
+        }
+        written.end()
+    }
+}
+
+impl serde::Serialize for Entries<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut written = serializer.serialize_seq(Some(self.0.entries().len()))?;
+        for (key, pattern) in self.0.entries() {
+            written.serialize_element(&(Tagged(key), Within(pattern)))?;
+        }
+        written.end()
+    }
+}
+
+impl serde::Serialize for Items<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut written = serializer.serialize_seq(Some(self.0.items().len()))?;
+        for pattern in self.0.items() {
+            written.serialize_element(&Within(pattern))?;
+        }
+        written.end()
+    }
+}
+
+/// A value under the name of its type.
+struct Tagged<'a>(&'a Value);
+
+impl serde::Serialize for Tagged<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut written = serializer.serialize_map(Some(1))?;
+        written.serialize_entry(self.0.data_type().uri(), &self.0.untagged())?;
+        written.end()
+    }
+}
+
+impl serde::Serialize for Leaf<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            Term::Constant(value) => Tagged(value).serialize(serializer),
+            variable => variable.serialize(serializer),
+        }
+    }
+}
+
+/// Reads a pattern as it is written: what is under `match` as a map or
+/// a list of patterns, and anything else as a [`Term`] is read.
 impl<'de> serde::Deserialize<'de> for Pattern {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Term::<Any>::deserialize(deserializer).map(Pattern::Term)
+        use serde::de::Error as _;
+        // Read through a value that can be looked into before it is
+        // known which of the two it is, as a term is read.
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        Pattern::read(raw).map_err(D::Error::custom)
+    }
+}
+
+impl Pattern {
+    /// What stands where a parameter does.
+    fn read(raw: serde_json::Value) -> Result<Pattern, String> {
+        match raw {
+            serde_json::Value::Object(mut shape) if shape.contains_key(MATCH) => {
+                let within = shape.remove(MATCH).unwrap_or_default();
+                if let Some(other) = shape.keys().next() {
+                    return Err(format!(
+                        "`{other}` stands beside `{MATCH}`, which stands alone"
+                    ));
+                }
+                match Pattern::within(within)? {
+                    Pattern::Term(term) => Err(format!(
+                        "under `{MATCH}` stands a map or a list of patterns, not the term {}",
+                        Pattern::Term(term)
+                    )),
+                    composite => Ok(composite),
+                }
+            }
+            term => Pattern::term(term).map(Pattern::Term),
+        }
+    }
+
+    fn term(raw: serde_json::Value) -> Result<Term<Any>, String> {
+        Term::from_json(raw).map_err(|error| error.to_string())
+    }
+
+    /// What takes the rest of a map or of a list: a term.
+    fn rest(raw: serde_json::Value) -> Result<Term<Any>, String> {
+        Pattern::term(raw)
+    }
+
+    /// What stands under `match`, at any depth: `{ "map": .. }` or
+    /// `{ "list": .. }`, each with what takes the rest beside it, or a
+    /// term.
+    fn within(raw: serde_json::Value) -> Result<Pattern, String> {
+        let serde_json::Value::Object(mut shape) = raw else {
+            return Pattern::term(raw).map(Pattern::Term);
+        };
+        let kind = match (shape.contains_key(MAP), shape.contains_key(LIST)) {
+            (true, false) => MAP,
+            (false, true) => LIST,
+            (true, true) => return Err(format!("`{MAP}` and `{LIST}` stand together")),
+            (false, false) => {
+                return Pattern::term(serde_json::Value::Object(shape)).map(Pattern::Term);
+            }
+        };
+        let parts = shape.remove(kind).unwrap_or_default();
+        let rest = shape.remove(REST).map(Pattern::rest).transpose()?;
+        if let Some(other) = shape.keys().next() {
+            return Err(format!("`{other}` stands beside `{kind}`"));
+        }
+        let serde_json::Value::Array(parts) = parts else {
+            return Err(format!("under `{kind}` stands a list, not {parts}"));
+        };
+        if kind == LIST {
+            let list = ListPattern::new(
+                parts
+                    .into_iter()
+                    .map(Pattern::within)
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            return Ok(match rest {
+                Some(run) => list.with_run(run),
+                None => list,
+            }
+            .into());
+        }
+        let entries = parts
+            .into_iter()
+            .map(|entry| {
+                let serde_json::Value::Array(pair) = entry else {
+                    return Err(format!("an entry is a key and a pattern, not {entry}"));
+                };
+                let [key, part]: [serde_json::Value; 2] =
+                    pair.try_into().map_err(|pair: Vec<_>| {
+                        format!("an entry is a key and a pattern, not {} parts", pair.len())
+                    })?;
+                let key = match Pattern::term(key)? {
+                    Term::Constant(key) => key,
+                    variable => {
+                        return Err(format!(
+                            "a key is a value, not the variable {}",
+                            Pattern::Term(variable)
+                        ));
+                    }
+                };
+                Ok((key, Pattern::within(part)?))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let map = MapPattern::new(entries).map_err(|error| error.to_string())?;
+        Ok(match rest {
+            Some(rest) => map.with_rest(rest),
+            None => map,
+        }
+        .into())
     }
 }
 
@@ -723,6 +948,28 @@ pub(crate) fn held<'a>(premises: impl IntoIterator<Item = &'a Premise>) -> Optio
             .shapes()
             .next()
             .map(|(_, pattern)| pattern.to_string())
+    })
+}
+
+/// The first map or list of terms `premises` hold that a stored rule
+/// body cannot hold, as it is written, with why: one that holds a
+/// constant map or list. A composite is written in a stored body as its
+/// canonical bytes, and a rule body's terms are read through a form that
+/// holds no bytes, so such a constant would not read back and the rule
+/// would be inert wherever it is stored.
+pub(crate) fn unstorable<'a>(
+    premises: impl IntoIterator<Item = &'a Premise>,
+) -> Option<(String, String)> {
+    premises.into_iter().find_map(|premise| {
+        premise.parameters().shapes().find_map(|(_, pattern)| {
+            let reason = pattern.terms().into_iter().find_map(|term| match term {
+                Term::Constant(Value::Composite(constant)) => Some(format!(
+                    "the constant {constant:?} inside it is a map or a list, which a stored rule body holds as bytes it does not read back"
+                )),
+                _ => None,
+            })?;
+            Some((pattern.to_string(), reason))
+        })
     })
 }
 

@@ -302,17 +302,20 @@ pub enum TypeError {
         reason: String,
     },
 
-    /// A rule holds a pattern of a map or a list, and the
-    /// stored rule format has no way to write one. The rule runs where
+    /// A rule holds a pattern of a map or a list that a stored rule
+    /// body cannot hold: one with a constant map or list inside it, which
+    /// a body writes as bytes it does not read back. The rule runs where
     /// it was built, and cannot be installed.
     #[error(
-        "The rule holds the pattern {pattern} and cannot be stored: format {format} of a rule body writes a variable or a constant where a parameter stands, and has no way to write a pattern"
+        "The rule holds the pattern {pattern} and cannot be stored in format {format} of a rule body: {reason}"
     )]
     UnstorablePattern {
         /// The pattern, as it is written.
         pattern: String,
-        /// The rule body format this release writes.
+        /// The rule body format this release writes a pattern in.
         format: u64,
+        /// Why the pattern has no written form.
+        reason: String,
     },
 
     /// A rule application omits a required parameter.

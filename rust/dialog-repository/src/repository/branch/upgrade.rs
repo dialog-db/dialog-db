@@ -15,11 +15,15 @@
 //! writes.
 //!
 //! It also rewrites every body still in an earlier format, under its
-//! identity or not, into the format this release writes (see
+//! identity or not, into the format this release writes for it (see
 //! [`dialog_query::rule::body`]): the stored body is retracted by its
 //! bytes and the rule asserted again. After one run every body is in
-//! the current format, which holds the rule's canonical spelling, so a
-//! later retraction finds the body by encoding the rule.
+//! the format this release writes for its rule, format 4 for a rule of
+//! terms and format 5 for a rule that holds a pattern, which holds the
+//! rule's canonical spelling, so a later retraction finds the body by
+//! encoding the rule. A body in format 4 or 5 is left as it is: no
+//! earlier format wrote a pattern, so no body is rewritten into format
+//! 5, and a format 4 body is the bytes this release writes for its rule.
 //!
 //! The earlier releases also gave every attribute and concept other
 //! identities (see [`dialog_query::migration`]), and keyed a concept's
@@ -69,7 +73,7 @@ use dialog_query::attribute::Relation;
 use dialog_query::migration::{
     Rewritten, Unmapped, concept_identity_v0, concept_identity_v1, rewrite_body,
 };
-use dialog_query::rule::body::{FORMAT, format_of};
+use dialog_query::rule::body::{TERMS_FORMAT, format_of};
 use dialog_query::rule::statement::source_attr;
 use dialog_query::rule::{DeductiveRule, InductiveRule};
 use dialog_query::{AttributeStatement, Cardinality, ConceptDescriptor};
@@ -148,10 +152,10 @@ impl Decoded {
     /// first ([`rewrite_body`]): its attributes may spell the picks 0.3
     /// and 0.4 wrote, or list values without one, which those releases
     /// read under `top` and this one reads as an enumerated type, so such
-    /// a body is never decoded as it stands. A body in the current
-    /// format is decoded as it is.
+    /// a body is never decoded as it stands. A body in format 4 or 5,
+    /// the two this release writes, is decoded as it is.
     fn read(bytes: &[u8]) -> Read {
-        if format_of(bytes) != Some(FORMAT) {
+        if !format_of(bytes).is_some_and(|format| format >= TERMS_FORMAT) {
             match rewrite_body(bytes) {
                 Ok(Rewritten::Rewritten(rewritten)) => {
                     return match Decoded::decode(&rewritten) {
