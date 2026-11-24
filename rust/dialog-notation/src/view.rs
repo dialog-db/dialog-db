@@ -485,4 +485,55 @@ mod safety {
             assert!(read(text).is_ok(), "{text}: {:?}", read(text));
         }
     }
+
+    /// The rest of the shapes a row's values reach script by: a tag or an
+    /// attribute's name that is no fixed text, more elements that load or
+    /// run, every attribute that takes a URL, a constant URL with a
+    /// scheme other than the web's or mail's, names in any case, and a
+    /// fixed start with a control character or a space before the scheme.
+    #[test]
+    fn it_refuses_the_rest_of_the_shapes_that_reach_script() {
+        for text in ["[?tag \"x\"]", "[:a {?attr \"x\"}]"] {
+            assert!(matches!(read(text), Err(Error::Refused(_))), "{text}");
+        }
+        for (text, part) in [
+            ("[:style ?css]", "style"),
+            ("[:link {:rel \"stylesheet\"}]", "link"),
+            ("[:meta {:content ?c}]", "meta"),
+            ("[:base {:href \"/\"}]", "base"),
+            ("[:frame]", "frame"),
+            ("[:frameset]", "frameset"),
+            ("[:applet]", "applet"),
+            ("[:SCRIPT ?x]", "SCRIPT"),
+            ("[:a {:HREF ?url}]", "HREF"),
+            ("[:img {:srcset ?url}]", "srcset"),
+            ("[:video {:poster ?url}]", "poster"),
+            ("[:a {:ping ?url}]", "ping"),
+            ("[:td {:background ?url}]", "background"),
+            ("[:q {:cite ?url}]", "cite"),
+            ("[:html {:manifest ?url}]", "manifest"),
+            ("[:a {:href \"javascript:alert(1)\"}]", "href"),
+            ("[:a {:href \"JavaScript:go()\"}]", "href"),
+            ("[:a {:href \"data:text/html,x\"}]", "href"),
+            ("[:a {:href \" javascript:go()\"}]", "href"),
+            ("[:a {:href \"java\tscript:go()\"}]", "href"),
+            ("[:a {:href [\" /x/\" ?n]}]", "href"),
+            ("[:a {:href [\"notes\" ?n]}]", "href"),
+        ] {
+            assert!(
+                matches!(read(text), Err(Error::Unsafe(said)) if said.contains(part)),
+                "{text}: {:?}",
+                read(text)
+            );
+        }
+        for text in [
+            "[:a {:href \"notes/today.html\"}]",
+            "[:a {:href \"https://example.org\"}]",
+            "[:a {:href \"mailto:a@example.org\"}]",
+            "[:a {:href [\"notes/\" ?n]}]",
+            "[:img {:src [\"/image/\" ?n] :alt ?t}]",
+        ] {
+            assert!(read(text).is_ok(), "{text}: {:?}", read(text));
+        }
+    }
 }
