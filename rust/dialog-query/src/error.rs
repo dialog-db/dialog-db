@@ -302,17 +302,24 @@ pub enum TypeError {
         reason: String,
     },
 
-    /// A rule holds a pattern of a map or a list, and the
-    /// stored rule format has no way to write one. The rule runs where
-    /// it was built, and cannot be installed.
+    /// A rule holds a pattern of a map or a list that a stored rule
+    /// body cannot hold. A map pattern is written with text keys (see
+    /// [`Pattern::unwritable`](crate::Pattern::unwritable)), so one with
+    /// another key, or with a key that reads as a variable, the rest or a
+    /// constant where a pattern is written, has no written form; and a
+    /// constant map or list inside a pattern is written as bytes a body
+    /// does not read back. The rule runs where it was built, and cannot
+    /// be installed.
     #[error(
-        "The rule holds the pattern {pattern} and cannot be stored: format {format} of a rule body writes a variable or a constant where a parameter stands, and has no way to write a pattern"
+        "The rule holds the pattern {pattern} and cannot be stored in format {format} of a rule body: {reason}"
     )]
     UnstorablePattern {
         /// The pattern, as it is written.
         pattern: String,
-        /// The rule body format this release writes.
+        /// The rule body format this release writes a pattern in.
         format: u64,
+        /// Why the pattern has no written form.
+        reason: String,
     },
 
     /// A rule application omits a required parameter.

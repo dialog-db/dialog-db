@@ -149,18 +149,19 @@ impl InductiveRule {
     /// premises encode to nothing, because `Proposition`'s
     /// formal-notation `Serialize` rejects attribute propositions.
     pub fn try_encode(&self) -> Option<Vec<u8>> {
-        body::encode(&self.canonical_descriptor())
+        let holds_pattern = pattern::held(self.analysis.premises()).is_some();
+        body::encode(holds_pattern, &self.canonical_descriptor())
     }
 
-    /// Whether this rule can be stored, and so installed. A rule that
-    /// holds a map or a list of terms cannot: the stored rule
-    /// format has no way to write a pattern (see
+    /// Whether this rule can be stored, and so installed: whether every
+    /// pattern it holds has a written form (see
     /// [`DeductiveRule::storable`](crate::DeductiveRule::storable)).
     pub fn storable(&self) -> Result<(), TypeError> {
-        match pattern::held(self.analysis.premises()) {
-            Some(pattern) => Err(TypeError::UnstorablePattern {
+        match pattern::unstorable(self.analysis.premises()) {
+            Some((pattern, reason)) => Err(TypeError::UnstorablePattern {
                 pattern,
                 format: body::FORMAT,
+                reason,
             }),
             None => Ok(()),
         }
@@ -225,7 +226,9 @@ impl InductiveRule {
     /// did not compile.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let descriptor: InductiveRuleDescriptor = body::decode(bytes)?;
-        descriptor.compile().map_err(|e| e.to_string())
+        let rule = descriptor.compile().map_err(|e| e.to_string())?;
+        body::check_pattern(bytes, pattern::held(rule.analysis.premises()))?;
+        Ok(rule)
     }
 
     /// Round-trip this rule back to its serializable form. The head
