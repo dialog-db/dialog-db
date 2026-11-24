@@ -84,11 +84,14 @@ enum Step {
 }
 
 impl Reduce {
-    /// Whether every entry has a running value (see [`Running`]).
+    /// Whether every entry has a running value (see [`Running`]). A
+    /// `max` or `min` over a listing has none: it ranks by the listing,
+    /// as `top` does, and the values the listing leaves out tie and fall
+    /// to standing, which a running value does not keep.
     pub fn runs(&self) -> bool {
         self.entries.iter().all(|entry| {
             matches!(
-                entry.aggregator,
+                entry.typed(),
                 Aggregator::Count
                     | Aggregator::CountDistinct
                     | Aggregator::Sum
@@ -106,7 +109,7 @@ impl Running {
         let entries = reduce
             .entries
             .iter()
-            .map(|entry| match entry.aggregator {
+            .map(|entry| match entry.typed() {
                 Aggregator::Count => Some(Accumulator::Count(0)),
                 Aggregator::CountDistinct => Some(Accumulator::Distinct(HashMap::new())),
                 Aggregator::Sum => Some(Accumulator::Sum {
@@ -556,6 +559,22 @@ mod tests {
         for aggregator in [Aggregator::Avg, Aggregator::Last, Aggregator::Top] {
             assert!(!reduce(aggregator).runs());
             assert!(Running::new(&reduce(aggregator)).is_none());
+        }
+    }
+
+    /// "A `max` or `min` over a listing has no running value": it ranks
+    /// by the listing, and the values it leaves out fall to standing.
+    /// The same fold over no listing has one.
+    #[dialog_common::test]
+    fn it_runs_no_max_or_min_over_a_listing() {
+        for aggregator in [Aggregator::Min, Aggregator::Max] {
+            let mut entry = ReduceEntry::new("out", aggregator, Term::var("x"));
+            entry.listed = vec![Value::String("low".into()), Value::String("high".into())];
+            let listed = Reduce::new(vec!["g".into()], vec![entry]);
+            assert!(!listed.runs(), "{aggregator}");
+            assert!(Running::new(&listed).is_none(), "{aggregator}");
+            assert!(reduce(aggregator).runs(), "{aggregator}");
+            assert!(Running::new(&reduce(aggregator)).is_some(), "{aggregator}");
         }
     }
 }
