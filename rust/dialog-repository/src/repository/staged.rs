@@ -33,8 +33,8 @@ use std::sync::{Arc, OnceLock};
 use dialog_common::Blake3Hash;
 use dialog_corpus::selector::Constrained;
 use dialog_corpus::{
-    AssetChange, Cardinality, Change, Changes, Entity, Fact, Instruction, Refusal, Relation,
-    Selector, SortKey, Statement, Update, Value, sort_key,
+    AssetChange, Cardinality, Change, Changes, Entity, Fact, Instruction, Relation, Selector,
+    SortKey, Statement, Update, Value, sort_key,
 };
 use dialog_search_tree::Manifest;
 
@@ -240,14 +240,6 @@ impl Staged {
     }
 
     pub(crate) fn apply(&mut self, mut changes: Changes) {
-        // A statement the batch refused is kept beside the asset changes,
-        // which every copy of the store carries, for the commit to
-        // refuse the whole transaction with.
-        if let Some(refusal) = changes.refused()
-            && self.0.assets.refused().is_none()
-        {
-            Arc::make_mut(&mut self.0).assets.refuse(refusal.clone());
-        }
         if changes.is_empty() {
             return;
         }
@@ -390,14 +382,6 @@ impl Staged {
             let (the, of) = key;
             changes.put_cell(the, of, squash(cell, &|_| true));
         }
-    }
-
-    /// The first statement this store was asked to hold and could not
-    /// write (see [`Update::refuse`](dialog_corpus::Update::refuse)): a
-    /// commit of the store is refused with it before anything is
-    /// written.
-    pub(crate) fn refused(&self) -> Option<&Refusal> {
-        self.0.assets.refused()
     }
 
     /// Whether nothing was written.

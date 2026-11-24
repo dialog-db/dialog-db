@@ -60,6 +60,91 @@ it had to compute the old identity in. A test now pins this
 generation's identities beside the constant, so moving one means bumping
 it.
 
+### A rule that holds a constant map or list reads back from its stored body
+
+[#855](https://github.com/dialog-db/dialog-db/pull/855)
+
+A stored rule body writes a constant map or list as its canonical
+bytes, and the reader of a rule body buffered each term through a
+form that holds no bytes. So a rule holding a composite constant, as a
+term or as a pattern with no variable in it (which is that constant),
+was written in format 4 and then refused on every read: `decode`
+failed with "invalid type: byte array", a branch listed the rule in
+`dialog.rule/invalid` as undecodable, and it never fired. The reader
+now reads such bytes as the composite they are. Only a composite is
+written as a byte string: a bytes constant is written as an array of
+integers under `bytes:`, so it reads back as bytes, and a bytes constant
+and a composite of the same bytes are two rules, of two bodies. That was
+also why format 5 refused a rule holding a constant map or list inside a
+pattern; it is stored now, every rule that compiles has a body, and the
+refusal is gone.
+
+What this changes for you:
+
+- `DeductiveRule::decode` and `InductiveRule::decode` read a body that
+  holds a composite constant, at any depth, as the rule that wrote it.
+  A branch fires such a rule instead of listing it in
+  `dialog.rule/invalid`.
+- A rule holding a constant map or list inside a pattern is stored in
+  format 5: `try_encode` returns its body, and asserting it into a
+  transaction, a batch, the session overlay or a query layer stages that
+  body.
+- Gone, as nothing produces them (none was released):
+  `DeductiveRule::storable`, `InductiveRule::storable`,
+  `TypeError::UnstorablePattern`, `Update::refuse`, `Update::hold`,
+  `Refusal`, `Changes::refused`, `CommitError::Refused` and
+  `DialogCorpusError::Refused`. An `Update` implementor implements the
+  methods it did before #778. A query layer no longer keeps rules in
+  memory beside its changes: it reads every rule from its stored body.
+- Bytes in a rule body that are no map or list are refused when the body
+  is decoded, with an error, as any malformed body is.
+
+Why: composite values (#843) made a map or a list a constant a rule can
+hold, and a rule that can be built and run should run once it is stored.
+
+### `max` and `min` over a listed type rank by the listing, least first
+
+[#858](https://github.com/dialog-db/dialog-db/pull/858).
+
+A listed `as` is a scale written least first, `[low, medium, high]`. A
+concept field picking `max` over an attribute that lists its values now
+reads the claim holding the last listed value present, and `min` the
+first, whatever the values' own order; before, both compared the values,
+so listed symbols ranked by their bytes. A value the listing does not
+hold loses to every listed one, claims holding one value fall to the
+newest, and a cell holding no listed value reads its newest claim, as
+under `top`. Over an attribute that lists nothing, `max` and `min` are
+unchanged. `top` reads as it did: the first listed value present, which
+is now also what `min` reads.
+
+What this changes for you:
+
+- A field with `pick: max` or `pick: min` over a listed attribute reads
+  a different claim wherever the listing's order and the values' order
+  disagree: over `[low, medium, high]`, `max` reads `high` where it read
+  `medium`, and `min` reads `low` where it read `high`. A subscription or
+  a rule reading such a field follows.
+- `max` and `min` over a listing are accepted whatever the listed values'
+  type: `TypeError::SelectiveAggregate`'s "type has no order" refusal
+  applies only to an attribute that lists nothing.
+- `Selective::compares` takes the listing (`compares(listed)`) and is
+  false for `max` and `min` over one.
+- Deprecated: `pick: top` (`Selective::Top`). It reads the first listed
+  value present, which is `min` over the same list; a list written least
+  first is read with `max`. It is still read and keeps its identity, is
+  marked deprecated in `notes/notation/schema.json`, and goes in the next
+  version.
+- Removed: `Selective::bounds`, which nothing called.
+- `ReduceEntry::try_listed` builds an entry ranking by a listing, and
+  `ReduceEntry::orders_by_standing` says whether a fold over it is
+  evaluated afresh: true for a `max` or `min` over a listing, as for
+  `top`.
+
+Why: a list written top to bottom read as "best first" only for `top`,
+and `max` over the same list, the reading a scale invites, ranked by
+bytes nobody chose. A listing written least first gives `max` and `min`
+the order its author wrote.
+
 ### A tree names the subject whose nodes it reads, and holds no reader
 
 [#785](https://github.com/dialog-db/dialog-db/pull/785),
@@ -163,10 +248,9 @@ that row, not the group it is in.
 Stacked on [#778](https://github.com/dialog-db/dialog-db/pull/778); the
 design is in [design/patterns/design-rule-identity.md](design/patterns/design-rule-identity.md).
 
-A rule that holds a map or a list of terms ran only where it was built,
-in a query layer: the stored rule body had no way to write a pattern, so
-asserting one into a transaction or the session overlay was refused. Rule
-body format 5 writes one. Where a parameter holds a map or a list, the
+A rule that holds a map or a list of terms needs a stored body that can
+write a pattern, which format 4 has no way to do. Rule body format 5
+writes one. Where a parameter holds a map or a list, the
 body writes it under the one key `match` as a composite value is written
 for a human reader: a map as its entries, each a pair of a key and a
 pattern, and a list as its items, with what takes the rest beside them
@@ -197,17 +281,11 @@ What this changes for you:
 
 - Asserting a rule that holds a pattern into a transaction, a batch, the
   session overlay or a query layer stages its `source` body with its
-  index facts. Committing it succeeds where it returned
-  `CommitError::Refused`, and `Ephemeral::apply` lands it where it
-  returned `DialogCorpusError::Refused`.
-- Still refused, with `TypeError::UnstorablePattern`, which now carries a
-  `reason`: a rule holding a constant map or list inside a pattern. A
-  composite is written in dag-cbor as its bytes, which a rule body's terms
-  are not read back from, so the rule would be stored and inert. A map
-  pattern keyed by any value is stored.
+  index facts, and committing it or applying it to an ephemeral line
+  lands it. A map pattern keyed by any value is stored, and so, since the
+  entry above, is a pattern that holds a constant map or list.
 - `Parameters` and `Pattern` serialize a map or a list of terms under
-  `match`, and read it back, in JSON and dag-cbor. A `Changes` that holds
-  a refusal still does not serialize. A `ConceptQuery` writes a name that holds a pattern as that
+  `match`, and read it back, in JSON and dag-cbor. A `ConceptQuery` writes a name that holds a pattern as that
   pattern in its `where`, where it wrote the variable standing for the
   whole value, and reads it back: a negated premise keeps its pattern in
   the concept application, so a rule negating one was written without it.
@@ -241,9 +319,8 @@ inside it is bound, the pattern builds the value. A map pattern with no rest
 matches a map of exactly its entries, and a list pattern with no run a list
 of exactly its items. The planner counts a pattern bound when every variable
 inside it is, and inference types a slot that holds one as a composite and
-each leaf as its term is typed. A rule that holds a pattern has an identity
-and runs where it was built, in a query layer; rule body format 5 (the
-entry above) stores it.
+each leaf as its term is typed. A rule that holds a pattern has an identity,
+and rule body format 5 (the entries above) stores it as any rule.
 
 What this changes for you:
 
@@ -256,33 +333,11 @@ What this changes for you:
   `shape`, `pattern`, `shapes`, `has_shapes`, `leaves`, `lowered`, `plain`
   and `map_terms`. `get` and `iter` still answer terms: under a name that
   holds a pattern, a variable that stands for the whole value.
-- New: `Update::hold`, a target keeping a thing it cannot write as facts,
-  and `Update::refuse`, a target recording a statement it cannot write, a
-  required method for every `Update` implementor. `Changes::refused` gives
-  the first refusal, and `Refusal` carries the entity and the typed reason.
-- New: `TypeError::UnstorablePattern`, from `DeductiveRule::storable` and
-  `InductiveRule::storable`.
-- `Parameters` and a pattern above a leaf have no wire form: serializing
-  `Parameters` that hold a pattern fails, and so does serializing a
-  `Changes` that holds a refusal.
-- Asserting a rule that holds a pattern stages nothing for it in a batch
-  that is committed: the batch records a `Refusal` carrying
-  `TypeError::UnstorablePattern`, and committing a transaction that holds
-  it fails with `CommitError::Refused` before anything is written.
-  `Ephemeral::apply`, and so the branch's session overlay, refuses such a
-  batch with `DialogCorpusError::Refused`. A `QueryLayer`
-  (`Branch::with`) keeps the rule and its index facts and runs it; a copy
-  of the layer's `changes()` carries the refusal and is refused wherever
-  it is committed or applied.
-- An inductive rule that holds a pattern is refused the same way
-  everywhere, a query layer included.
 
 Why: a rule could not say a value by its shape, so a command could not be
 given a record, an entity could not be derived from one, and a syntax tree
 could not be taken apart in a rule. The pattern is the notation's struct
-with variables in it, one thing both ways. Committing a rule that holds a
-pattern used to panic, which aborts the page on wasm; it is now an error the
-commit returns.
+with variables in it, one thing both ways.
 
 ### A value can be a composite: a map, a record or a list, held as one value and read in place
 
@@ -521,6 +576,21 @@ dropping that scope.
 
 #### Compatibility and migration
 
+- A rule that holds a composite constant: one of terms is written in
+  format 4 byte for byte as before, and one holding the constant inside a
+  pattern is written in format 5. Only the reader changed: a body that
+  read before reads as it did, and nothing is rewritten. No release has
+  stored a composite, so no older release meets such a body. Nothing for
+  an embedder to run.
+- `max` and `min` over a listed type: nothing stored is rewritten and no
+  identity moves, an attribute's, a concept's or a rule's: a stored list
+  keeps its order and `top` keeps its name. What a stored concept field
+  with `pick: max` or `pick: min` over a listed attribute reads changes,
+  as above. An older release reading the same descriptor ranks by value.
+  A stored field with `pick: top` reads as before; `top` is deprecated
+  and goes in the next version, so such a field is to be rewritten as
+  `min` over the same list, which changes that concept's identity.
+  Nothing is rewritten automatically. An embedder runs nothing.
 - Rule body format 5: what a replica holds is unchanged. A rule that
   holds no pattern is written in format 4 as before, under the entity it
   had, so nothing is rewritten on upgrade, and `Branch::upgrade_rules`
@@ -533,12 +603,9 @@ dropping that scope.
   facts replicate untouched, and the rule fires once that replica
   upgrades. 0.5.0 reads up to format 3, so it treats format 4 and format 5
   bodies alike. Nothing an embedder has to run.
-- Patterns: nothing stored changes. No rule format, up to format 4 that
-  this release writes, holds a pattern, and a rule that holds one is
-  refused at commit, so no replica stores one and an older release reads
-  everything this one writes. The format that stores a pattern in a rule
-  body will be format 5 and is not built yet. Nothing an embedder has to
-  run.
+- Patterns: a rule that holds one is stored in format 5 (the entry on
+  format 5 above); nothing else stored changes. Nothing an embedder has
+  to run.
 - Nothing stored or synced changes.
 
 

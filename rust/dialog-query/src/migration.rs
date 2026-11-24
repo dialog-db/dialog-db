@@ -495,9 +495,10 @@ pub enum Rewritten {
 /// `select: last`) under cardinality one, each under `all` under
 /// cardinality many, and each under `max`, `min` or `top` (or listed
 /// with no pick, which read as `top`) under cardinality many with the
-/// aggregate of the pick's name, a `top`'s listing reversed to rank least
-/// first. An attribute over a chain of relations has no such spelling,
-/// and the body is reported rather than rewritten with another meaning.
+/// aggregate of the pick's name, a `top`'s listing kept in the order it
+/// had, best first. An attribute over a chain of relations has no such
+/// spelling, and the body is reported rather than rewritten with
+/// another meaning.
 /// `Err` when the bytes are not dag-cbor.
 pub fn rewrite_body(bytes: &[u8]) -> Result<Rewritten, String> {
     let mut body: Ipld = serde_ipld_dagcbor::from_slice(bytes)

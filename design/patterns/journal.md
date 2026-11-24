@@ -2,7 +2,7 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | A parameter holds a variable, constant, map pattern or list pattern. Patterns build and take apart `Value::Composite`; nested atoms use the shared canonical table and Chronicle tokens from #849. A rule that holds a pattern runs in a query layer and is refused at commit. | **Implementation.** Planning, typing, rule identity and the refusal are built in #778, on the composite API of #843. |
+| **Status** | A parameter holds a variable, constant, map pattern or list pattern. Patterns build and take apart `Value::Composite`; nested atoms use the shared canonical table and Chronicle tokens from #849. A rule that holds a pattern is stored, in rule body format 5, and runs from what is stored. | **Implementation.** Planning, typing and rule identity are built in #778, on the composite API of #843; format 5 in #853; a body reads composite constants back in #855. |
 | **Agenda** | Whether a key that holds several values should be matchable by a map pattern ([meaning](design-pattern-meaning.md)). The format that stores a pattern in a rule ([rule identity](design-rule-identity.md)). | Review and merge #778 after #843. |
 
 ## 2026-11-11, Directing: a pattern in place of a term
@@ -40,3 +40,11 @@
 - A subscription to a query that holds a pattern with a blank inside missed a change: two rows of one entity compared equal, since the whole is bound under a name of each run's own. A row now compares the variables inside its patterns.
 
 **Decided.** By the builder, on the review's list: the refusal's shape above, and the semantics of the edges, written in [design-pattern-meaning.md](design-pattern-meaning.md).
+
+## 2026-11-24, Building: a composite constant reads back, and the refusal is gone
+
+**Learned.**
+
+- A rule holding a composite constant, as a term or inside a pattern, was written and never read back: a body writes a composite as its canonical bytes, and the reader buffered terms through `serde_json::Value`, which holds no bytes. Only a composite is written as a byte string (a bytes constant is an array of integers under `bytes:`), so reading a byte string as the composite it is reads every such body back and changes nothing for a body that read before (`it_buffers_a_body_without_composites_as_json_does`, `it_keeps_a_bytes_constant_apart_from_a_composite_of_the_same_bytes`).
+
+**Decided.** By the coordinating session, on #855: with nothing left to refuse, the refusal of 2026-11-23 is removed whole (`storable`, `TypeError::UnstorablePattern`, `Update::refuse`, `Update::hold`, `Refusal`, `CommitError::Refused`, `DialogCorpusError::Refused`, the held rule bodies of a query layer), none of it released.
