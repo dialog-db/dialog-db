@@ -67,6 +67,15 @@ main writes, format 4 included, fails a 0.5.0 replica's queries over
 the relations it derives. That holds for main as it stands (approach
 A), not only for format 5.
 
+On main, the tests the topic leans on, run 2026-11-24, all pass:
+`rule::body::tests::it_reads_every_format_up_to_its_own`,
+`it_refuses_a_later_format`,
+`rule::reference::tests::it_keeps_the_name_and_the_bytes_of_a_rule_that_holds_no_pattern`
+(dialog-query), and in dialog-repository the six of
+`transaction::pick_migration`, `it_leaves_a_body_in_a_later_format_inert`
+and `it_rewrites_only_bodies_below_format_4_on_upgrade`. 11 passed, 0
+failed. None of them covers a marker on a concept no rule concludes.
+
 ## 2026-11-24, Directing: the order of a listed `as`
 
 **Asked.** Relayed by the coordinator from the maintainer: reverse the
