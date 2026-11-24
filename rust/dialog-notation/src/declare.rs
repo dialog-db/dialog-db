@@ -8,10 +8,10 @@
 
 use dialog_query::{AttributeDescriptor, ConceptDescriptor};
 
+use crate::Error;
 use crate::analyze::Analyzer;
 use crate::compile::{Step, compile};
 use crate::form::Kind;
-use crate::kernel::{LAYERS, PICKS, TYPES};
 use crate::syntax::{Parameters, Syntax};
 use crate::written::{Comment, Segment, Written};
 
@@ -63,7 +63,10 @@ pub struct Line {
     pub is: Syntax,
     /// `as:`, as written: a type's keyword, or a variant's cases.
     pub kind: Option<Syntax>,
-    /// `cardinality:` as written, `one` or `many`, or none.
+    /// The attribute's cardinality, `one` or `many`, as Dialog-DB reads
+    /// it: as written, by `cardinality:` or `(:one …)`, or by a pick, or
+    /// `many` where none is written, since such a line reads every
+    /// claim. None only where the line does not compile.
     pub cardinality: Option<String>,
     /// `in:`, the layer, as written.
     pub layer: Option<String>,
@@ -110,9 +113,9 @@ fn keyword(node: Option<&Syntax>) -> Option<String> {
 
 /// The lines a body part says: one, for a line, or one a field, for a
 /// read written with wrappers.
-fn lines(part: &Syntax, description: Option<String>) -> Vec<Line> {
+fn lines_of(part: &Syntax, description: Option<String>) -> Result<Vec<Line>, Error> {
     let (Some(name), Some(operand)) = (part.applies(), part.operand()) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     if Kind::of(name) == Kind::Attribute {
         let (of, is) = match (operand.items.as_slice(), operand.terms.get("is")) {
@@ -134,7 +137,7 @@ fn lines(part: &Syntax, description: Option<String>) -> Vec<Line> {
                 label: None,
             }
         });
-        return vec![Line {
+        return Ok(vec![Line {
             attribute: name.to_string(),
             of,
             is,
@@ -145,55 +148,44 @@ fn lines(part: &Syntax, description: Option<String>) -> Vec<Line> {
             description,
             label: None,
             descriptor: None,
-        }];
+        }]);
     }
     // A read, `(xyz.todo ?t title: (:last (:text ?x)))`: a line a field,
-    // its type, pick and layer taken off the wrappers.
+    // what it is written under taken off it as the kernel reads it.
     let of = operand.items.first().cloned().unwrap_or(Syntax::Blank);
     operand
         .terms
         .iter()
         .map(|(label, term)| {
-            let mut line = Line {
-                attribute: if label.contains('/') {
-                    label.clone()
-                } else {
-                    format!("{name}/{label}")
-                },
+            let wrapped = crate::kernel::wrapped(term)?;
+            let cardinality = wrapped.cardinality.or(match wrapped.pick.as_deref() {
+                Some("last") => Some("one".into()),
+                // `all` reads every claim, and an elector chooses one of
+                // several: the attribute holds many.
+                Some(_) => Some("many".into()),
+                None => None,
+            });
+            let attribute = if label.contains('/') {
+                label.clone()
+            } else {
+                format!("{name}/{label}")
+            };
+            Ok(Line {
+                attribute,
                 of: of.clone(),
-                is: term.clone(),
-                kind: None,
-                cardinality: None,
-                layer: None,
-                key: None,
+                is: wrapped.inner.clone(),
+                kind: wrapped.cases.or(wrapped.kind.map(|(_, written)| written)),
+                cardinality,
+                layer: wrapped.layer,
+                key: wrapped.key.map(|(at, by, _)| Key {
+                    term: at.clone(),
+                    by,
+                    label: None,
+                }),
                 description: description.clone(),
                 label: None,
                 descriptor: None,
-            };
-            let mut node = term;
-            while let Syntax::Application(operator, Parameters { items, terms }) = node {
-                let (Some(word), [inner], true) =
-                    (operator.keyword(), items.as_slice(), terms.is_empty())
-                else {
-                    break;
-                };
-                if TYPES.contains(&word) {
-                    line.kind = Some((**operator).clone());
-                } else if PICKS.contains(&word) {
-                    line.cardinality = match word {
-                        "last" => Some("one".into()),
-                        "all" => Some("many".into()),
-                        _ => None,
-                    };
-                } else if LAYERS.contains(&word) {
-                    line.layer = Some(word.to_string());
-                } else {
-                    break;
-                }
-                node = inner;
-            }
-            line.is = node.clone();
-            line
+            })
         })
         .collect()
 }
@@ -205,45 +197,50 @@ pub(crate) fn concept(
     at: usize,
     written: &Written,
     analyzer: &Analyzer,
-) -> Option<Concept> {
-    let [head, body @ ..] = tree.operand()?.items.as_slice() else {
-        return None;
+) -> Result<Option<Concept>, Error> {
+    let Some([head, body @ ..]) = tree.operand().map(|operand| operand.items.as_slice()) else {
+        return Ok(None);
     };
-    let name = head.applies()?.to_string();
-    let head_operand = head.operand()?;
+    let (Some(name), Some(head_operand)) = (head.applies(), head.operand()) else {
+        return Ok(None);
+    };
+    let name = name.to_string();
     let entity = match head_operand.items.first() {
         Some(Syntax::Variable(variable)) => Some(variable.clone()),
         _ => None,
     };
-    let mut lines: Vec<Line> = body
-        .iter()
-        .enumerate()
-        .flat_map(|(index, part)| {
-            let mut lines = lines(
-                part,
-                said(written, &[Segment::Item(at), Segment::Item(index + 1)]),
-            );
-            // The descriptor each line compiles to: the kernel read the
-            // part is, a field a line.
-            let read = match crate::expand::line(part) {
-                Ok(Some(read)) => Some(read),
-                Ok(None) if part.is_read() => Some(part.clone()),
-                _ => None,
-            };
-            // A declaration says what is written, for an editor. A line
-            // that does not compile is refused by `check`, which says so
-            // where it is written, so here it has no descriptor rather
-            // than a second refusal.
-            if let Some(read) = read.and_then(|read| crate::kernel::read(&read).ok())
-                && read.fields.len() == lines.len()
-            {
-                for (line, field) in lines.iter_mut().zip(&read.fields) {
-                    line.descriptor = crate::compile::descriptor(field).ok();
+    let mut lines: Vec<Line> = Vec::new();
+    for (index, part) in body.iter().enumerate() {
+        let mut these = lines_of(
+            part,
+            said(written, &[Segment::Item(at), Segment::Item(index + 1)]),
+        )?;
+        // The descriptor each line compiles to: the kernel read the part
+        // is, a field a line. Its cardinality is the line's, as Dialog-DB
+        // reads it.
+        let read = match crate::expand::line(part)? {
+            Some(read) => Some(read),
+            None if part.is_read() => Some(part.clone()),
+            None => None,
+        };
+        if let Some(read) = read {
+            let read = crate::kernel::read(&read)?;
+            if read.fields.len() == these.len() {
+                for (line, field) in these.iter_mut().zip(&read.fields) {
+                    let descriptor = crate::compile::descriptor(field)?;
+                    line.cardinality = Some(
+                        match descriptor.cardinality() {
+                            dialog_query::Cardinality::One => "one",
+                            dialog_query::Cardinality::Many => "many",
+                        }
+                        .into(),
+                    );
+                    line.descriptor = Some(descriptor);
                 }
             }
-            lines
-        })
-        .collect();
+        }
+        lines.extend(these);
+    }
     // The label the head gives each line's value and key.
     // A collection's field is one entry, `block: {?k ?b}`: its label is
     // the value's, and the key has none of its own.
@@ -256,6 +253,9 @@ pub(crate) fn concept(
                 },
                 _ => field,
             };
+            // A field an elector chooses is labelled as the value it
+            // chooses from.
+            let value = crate::expand::elected(value).map_or(value, |(_, inner)| inner);
             (value == term && matches!(term, Syntax::Variable(_))).then(|| label.clone())
         })
     };
@@ -275,27 +275,39 @@ pub(crate) fn concept(
             .all(|line| line.layer.as_deref() == Some("control"));
     // What a read of it compiles to: the descriptors Dialog-DB reads it
     // through.
+    // The head is asked with what an elector in it chooses from: the
+    // elector is the concept's pick, and a read is of the value.
+    let mut asked = head.clone();
+    if let Syntax::Application(_, operand) = &mut asked {
+        for term in operand.terms.values_mut() {
+            if let Some((_, inner)) = crate::expand::elected(term) {
+                *term = inner.clone();
+            }
+        }
+    }
     let query = Syntax::Application(
         Box::new(Syntax::Reference("select".into())),
         Parameters {
-            items: vec![head.clone()],
+            items: vec![asked],
             ..Parameters::default()
         },
     );
-    let analysis = analyzer.clone().analyze(&[query]);
-    let descriptors = analysis
-        .analyzed
-        .iter()
-        // What does not compile is refused by `check`; a declaration
-        // describes only what does.
-        .filter_map(|rule| compile(rule).ok())
-        .flatten()
-        .filter_map(|step| match step {
-            Step::Query(query) => Some(query.select.predicate),
-            _ => None,
-        })
-        .collect();
-    Some(Concept {
+    let analysis = analyzer.trial(&[query]);
+    if let Some(error) = analysis
+        .refusals()
+        .find_map(|refused| refused.refusal.clone())
+    {
+        return Err(error);
+    }
+    let mut descriptors = Vec::new();
+    for rule in &analysis.analyzed {
+        for step in compile(rule)? {
+            if let Step::Query(query) = step {
+                descriptors.push(query.select.predicate);
+            }
+        }
+    }
+    Ok(Some(Concept {
         name,
         description: said(written, &[Segment::Item(at)]),
         command,
@@ -307,7 +319,7 @@ pub(crate) fn concept(
             .collect(),
         lines,
         descriptors,
-    })
+    }))
 }
 
 /// The query a tree defines, with the comment above it.

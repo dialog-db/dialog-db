@@ -68,14 +68,32 @@ impl Checked {
 
     /// The declarations of the forms `trees` analyzed to, a form in
     /// `refused` left out.
-    fn declare(&mut self, trees: &[Syntax], analyzer: &Analyzer, refused: &BTreeSet<usize>) {
+    ///
+    /// A concept whose lines or read do not compile is refused, and the
+    /// forms refused so are given back.
+    fn declare(
+        &mut self,
+        trees: &[Syntax],
+        analyzer: &Analyzer,
+        refused: &BTreeSet<usize>,
+    ) -> BTreeSet<usize> {
         let mut declared: Vec<(usize, Declaration)> = Vec::new();
+        let mut failed = BTreeSet::new();
         for (at, tree) in trees.iter().enumerate() {
-            if tree.applies() == Some("concept")
-                && !refused.contains(&at)
-                && let Some(concept) = declare::concept(tree, at, &self.written, analyzer)
-            {
-                declared.push((at, Declaration::Concept(concept)));
+            if tree.applies() != Some("concept") || refused.contains(&at) {
+                continue;
+            }
+            match declare::concept(tree, at, &self.written, analyzer) {
+                Ok(Some(concept)) => declared.push((at, Declaration::Concept(concept))),
+                Ok(None) => {}
+                Err(error) => {
+                    failed.insert(at);
+                    self.diagnostics.push(Diagnostic::refused(
+                        Some(tree.clone()),
+                        vec![Segment::Item(at)],
+                        error,
+                    ));
+                }
             }
         }
         for (at, tree) in trees.iter().enumerate() {
@@ -91,6 +109,7 @@ impl Checked {
             self.declaration_forms.push(at);
             self.declarations.push(declaration);
         }
+        failed
     }
 }
 
@@ -111,6 +130,7 @@ pub fn check(analyzer: &mut Analyzer, text: &str) -> Checked {
     let analysis = trial.analyze(&trees);
     checked.diagnostics = analysis.diagnostics.clone();
     if checked.refusals().next().is_none() {
+        // A refusal is among the diagnostics, which refuse the whole.
         checked.declare(&trees, &trial, &BTreeSet::new());
     }
     let mut steps = Vec::new();
@@ -175,7 +195,8 @@ pub fn check_forms(analyzer: &mut Analyzer, text: &str) -> Checked {
             _ => None,
         })
         .collect();
-    checked.declare(&trees, analyzer, &refused);
+    let failed = checked.declare(&trees, analyzer, &refused);
+    refused.extend(failed);
     let mut compiled: Vec<(usize, Syntax, Vec<Step>)> = Vec::new();
     for (tree, origin) in analysis.analyzed.iter().zip(&analysis.origin) {
         if refused.contains(origin) {

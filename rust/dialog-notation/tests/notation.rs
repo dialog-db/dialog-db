@@ -778,8 +778,8 @@ async fn it_gives_what_a_document_declares_as_data() -> Result<()> {
             ))
             .collect::<Vec<_>>(),
         vec![
-            ("xyz.todo.add/list", None, Some("control")),
-            ("xyz.todo.add/text", None, Some("control")),
+            ("xyz.todo.add/list", Some("many"), Some("control")),
+            ("xyz.todo.add/text", Some("many"), Some("control")),
         ]
     );
     assert_eq!(add.descriptors.len(), 1);
@@ -808,7 +808,8 @@ async fn it_gives_what_a_document_declares_as_data() -> Result<()> {
         panic!("a concept and a view: {:?}", checked.declarations);
     };
     assert_eq!(note.lines[0].description.as_deref(), Some("What it says."));
-    assert_eq!(note.lines[0].cardinality, None);
+    // No cardinality written: the line reads every claim.
+    assert_eq!(note.lines[0].cardinality.as_deref(), Some("many"));
     assert_eq!(description.as_deref(), Some("One note, as a row."));
     assert_eq!((name.as_str(), *markup), ("note/row", true));
     Ok(())

@@ -83,6 +83,18 @@ impl Analyzer {
         analysis
     }
 
+    /// What `trees` analyze to, with nothing of them kept: the
+    /// analyzer is as it was.
+    pub(crate) fn trial(&self, trees: &[Syntax]) -> Analysis {
+        let mut trial = self.expander.clone();
+        let (analyzed, diagnostics) = trial.check(trees.to_vec());
+        Analysis {
+            analyzed,
+            origin: trial.origin().to_vec(),
+            diagnostics,
+        }
+    }
+
     /// Analyze `trees` form by form. A form that is refused gives no
     /// analyzed tree, and every other form gives its own; each refusal
     /// says the way to the form it is about. What the forms define is

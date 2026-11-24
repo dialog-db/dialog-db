@@ -298,41 +298,69 @@ fn formula(node: &Syntax) -> Result<Formula, Error> {
 /// A field's term, with the type, pick, cardinality and layer it was
 /// written under taken off: `(:control (:one (:text ?x)))` is `?x`,
 /// text, cardinality one, on the control layer.
-fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
-    let mut kind = None;
-    let mut pick = None;
-    let mut cardinality = None;
-    let mut listed = Vec::new();
-    let mut layer = None;
-    let mut key = None;
+/// What a field's value is written under, taken off it: its type, its
+/// pick, its cardinality, a variant's cases, its layer, and the key
+/// where it is every entry of a collection; and the value under them.
+pub(crate) struct Wrapped<'a> {
+    /// The type, by name, and as written.
+    pub kind: Option<(String, Syntax)>,
+    pub pick: Option<String>,
+    pub cardinality: Option<String>,
+    /// The cases of a variant, by name, and as written.
+    pub listed: Vec<String>,
+    pub cases: Option<Syntax>,
+    pub layer: Option<String>,
+    /// The key's term and what a key is, by name and as read.
+    pub key: Option<(&'a Syntax, String, Keyed)>,
+    /// The value under every wrapper.
+    pub inner: &'a Syntax,
+}
+
+/// The wrappers of a field's value taken off it, as the kernel reads
+/// them: `(:entry …)` outermost, then any of a type, a pick, a
+/// cardinality, `(:among …)` and a layer, each once at most.
+pub(crate) fn wrapped(mut node: &Syntax) -> Result<Wrapped<'_>, Error> {
+    let mut wrapped = Wrapped {
+        kind: None,
+        pick: None,
+        cardinality: None,
+        listed: Vec::new(),
+        cases: None,
+        layer: None,
+        key: None,
+        inner: node,
+    };
     // `(:entry ?x key: ?p by: :position)`: every entry of a collection.
     if let Syntax::Application(operator, operand) = node
         && operator.keyword() == Some("entry")
     {
-        let (Some(at), Some(keyed), [inner]) = (
+        let by = operand.terms.get("by").and_then(Syntax::keyword);
+        let (Some(at), Some(by), Some(keyed), [inner]) = (
             operand.terms.get("key"),
-            operand
-                .terms
-                .get("by")
-                .and_then(Syntax::keyword)
-                .and_then(Keyed::of),
+            by,
+            by.and_then(Keyed::of),
             operand.items.as_slice(),
         ) else {
             return Err(Error::Refused(format!(
                 "{node} is an entry: `(:entry value key: term by: :name)`"
             )));
         };
-        key = Some((term(at)?, keyed));
+        wrapped.key = Some((at, by.to_string(), keyed));
         node = inner;
     }
     while let Syntax::Application(operator, operand) = node {
-        if let (Some(AMONG), [inner], Some(Syntax::Tuple(cases)), 1) = (
+        if let (Some(AMONG), [inner], Some(cases @ Syntax::Tuple(listed)), 1) = (
             operator.keyword(),
             operand.items.as_slice(),
             operand.terms.get("cases"),
             operand.terms.len(),
         ) {
-            listed = cases
+            if wrapped.cases.is_some() {
+                return Err(Error::Refused(format!(
+                    "{node} is written under two variants: a value has one"
+                )));
+            }
+            wrapped.listed = listed
                 .iter()
                 .map(|case| {
                     case.keyword().map(str::to_string).ok_or_else(|| {
@@ -340,6 +368,7 @@ fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
                     })
                 })
                 .collect::<Result<_, Error>>()?;
+            wrapped.cases = Some(cases.clone());
             node = inner;
             continue;
         }
@@ -350,19 +379,37 @@ fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
         ) else {
             break;
         };
+        // Each kind of wrapper once: an inner one would say otherwise
+        // what the outer one said.
+        let twice = |held: bool, what: &str| match held {
+            true => Err(Error::Refused(format!(
+                "{node} is written under two {what}s: a value has one"
+            ))),
+            false => Ok(()),
+        };
         if TYPES.contains(&word) {
-            kind = Some(word.to_string());
+            twice(wrapped.kind.is_some(), "type")?;
+            wrapped.kind = Some((word.to_string(), (**operator).clone()));
         } else if PICKS.contains(&word) {
-            pick = Some(word.to_string());
+            twice(wrapped.pick.is_some(), "pick")?;
+            wrapped.pick = Some(word.to_string());
         } else if CARDINALITIES.contains(&word) {
-            cardinality = Some(word.to_string());
+            twice(wrapped.cardinality.is_some(), "cardinalitie")?;
+            wrapped.cardinality = Some(word.to_string());
         } else if LAYERS.contains(&word) {
-            layer = Some(word.to_string());
+            twice(wrapped.layer.is_some(), "layer")?;
+            wrapped.layer = Some(word.to_string());
         } else {
             break;
         }
         node = inner;
     }
+    wrapped.inner = node;
+    Ok(wrapped)
+}
+
+fn field(domain: &str, label: &str, node: &Syntax) -> Result<Field, Error> {
+    let wrapped = wrapped(node)?;
     Ok(Field {
         label: label.to_string(),
         attribute: if label.contains('/') {
@@ -370,13 +417,16 @@ fn field(domain: &str, label: &str, mut node: &Syntax) -> Result<Field, Error> {
         } else {
             format!("{domain}/{label}")
         },
-        term: term(node)?,
-        kind,
-        pick,
-        cardinality,
-        listed,
-        layer,
-        key,
+        term: term(wrapped.inner)?,
+        kind: wrapped.kind.map(|(kind, _)| kind),
+        pick: wrapped.pick,
+        cardinality: wrapped.cardinality,
+        listed: wrapped.listed,
+        layer: wrapped.layer,
+        key: wrapped
+            .key
+            .map(|(at, _, keyed)| Ok::<_, Error>((term(at)?, keyed)))
+            .transpose()?,
     })
 }
 
@@ -779,5 +829,27 @@ mod tests {
         assert!(
             matches!(Rule::parse(&several), Err(Error::Refused(why)) if why.contains("has one"))
         );
+    }
+
+    /// A value written under two wrappers of one kind is refused, where
+    /// the inner one said otherwise what the outer one said.
+    #[test]
+    fn it_refuses_a_value_under_two_wrappers_of_one_kind() {
+        for text in [
+            "(xyz.n ?e v: (:text (:integer ?x)))",
+            "(xyz.n ?e v: (:one (:many ?x)))",
+            "(xyz.n ?e v: (:last (:all ?x)))",
+            "(xyz.n ?e v: (:control (:control ?x)))",
+        ] {
+            let tree = crate::parse(text).unwrap().remove(0);
+            assert!(
+                matches!(read(&tree), Err(Error::Refused(why)) if why.contains("written under two")),
+                "{text}"
+            );
+        }
+        let tree = crate::parse("(xyz.n ?e v: (:one (:text ?x)))")
+            .unwrap()
+            .remove(0);
+        assert!(read(&tree).is_ok());
     }
 }
