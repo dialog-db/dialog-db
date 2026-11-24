@@ -2392,7 +2392,7 @@ async fn followed(s3: &S3Address, name: &str) -> Result<Followed> {
         profile,
         repository,
         s3,
-        &unique_name(&format!("{name}-b")),
+        Follower::Opened(&unique_name(&format!("{name}-b"))),
     )
     .await
 }
@@ -2410,18 +2410,36 @@ async fn followed_from(seed: &Seed, s3: &S3Address) -> Result<Followed> {
         .with_credential(seed.signer("repository").await?)
         .perform(&operator)
         .await?;
-    following(operator, profile, repository, s3, &seed.name("follow-b")).await
+    following(
+        operator,
+        profile,
+        repository,
+        s3,
+        Follower::Opened(&seed.name("follow-b")),
+    )
+    .await
+}
+
+/// The follower's space: opened under a name, with a key of its own
+/// that no seed derives, or created with a given key, so that its line,
+/// and where its own revisions' records fall, are the same in every run.
+enum Follower<'a> {
+    Opened(&'a str),
+    Created(
+        &'a str,
+        dialog_credentials::Ed25519Signer<dialog_credentials::Extractable>,
+    ),
 }
 
 /// The author's `repository` published over `s3` with four batches of
-/// residents, and a follower's replica of it named `follower`, which
-/// adopted that head and read none of it.
+/// residents, and the `follower`'s replica of it, which adopted that head
+/// and read none of it.
 async fn following(
     operator: Peer<VolatileSpace, dialog_peer::Session>,
     profile: Peer<VolatileSpace>,
     alice_repo: Repository<SignerCredential>,
     s3: &S3Address,
-    follower: &str,
+    follower: Follower<'_>,
 ) -> Result<Followed> {
     let site = s3_site_address(s3);
     profile
@@ -2443,9 +2461,22 @@ async fn following(
     alice.push().perform(&operator).await?;
 
     let env = Counting::new(operator.clone());
-    let bob_repo = profile.space(follower).open().perform(&env).await?;
+    let bob = match follower {
+        Follower::Opened(name) => {
+            let repository = profile.space(name).open().perform(&env).await?;
+            repository.branch("main").open().perform(&env).await?
+        }
+        Follower::Created(name, key) => {
+            let repository = profile
+                .space(name)
+                .create()
+                .with_credential(key)
+                .perform(&env)
+                .await?;
+            repository.branch("main").open().perform(&env).await?
+        }
+    };
     let origin = connect("origin", s3_site_address(s3), alice_repo.did(), &env).await?;
-    let bob = bob_repo.branch("main").open().perform(&env).await?;
     let remote = origin.branch("main").open().perform(&env).await?;
     bob.set_upstream(remote).perform(&env).await?;
     bob.pull(crate::Download::MinimalRanges)
@@ -2774,14 +2805,15 @@ async fn it_writes_where_it_wrote_after_adopting_a_head_another_device_moved(
 /// its own last revision through a leaf it may never have held.
 ///
 /// A reproduction: it fails on main. Under random keys the commit after
-/// the restart fetched in 2 runs of 400, and of the first 600 seeds 3
-/// fetch, exactly the 3 under which the restarted follower does not hold
-/// the leaf a lookup of its head's record starts at. The keys here derive
+/// the restart fetched in 2 runs of 400. With every key derived from a
+/// seed, the follower's own included, 5 of the first 1000 seeds fetch,
+/// exactly the 5 under which the restarted follower does not hold the
+/// leaf a lookup of its head's record starts at. The keys here derive
 /// from one of them, and the test asserts that layout before relying on
 /// it.
 #[dialog_common::test]
 async fn it_commits_after_a_restart_from_its_own_blocks(s3: S3Address) -> Result<()> {
-    let seed = Seed::new(278);
+    let seed = Seed::new(328);
     let _entropy = seed.entropy();
     let storage = test_storage().await;
     let location = Location::profile(seed.name("restart"));
@@ -2803,7 +2835,15 @@ async fn it_commits_after_a_restart_from_its_own_blocks(s3: S3Address) -> Result
         .perform(&operator)
         .await?;
     let follower = seed.name("restart-b");
-    let devices = following(operator, profile, alice_repo, &s3, &follower).await?;
+    let key = seed.signer("follower").await?;
+    let devices = following(
+        operator,
+        profile,
+        alice_repo,
+        &s3,
+        Follower::Created(&follower, key),
+    )
+    .await?;
 
     devices.name("user:0-0", "first").await?;
     assert_eq!(
