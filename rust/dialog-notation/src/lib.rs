@@ -119,6 +119,9 @@ pub enum Error {
     /// A kernel form has no counterpart in Dialog-DB yet.
     #[error("not supported yet: {0}")]
     Unsupported(String),
+    /// A document writes a name the build writes itself, the one given.
+    #[error("{0} is a name the notation writes itself, and a document cannot")]
+    Reserved(String),
     /// A form expands to itself again, through the definitions named,
     /// each by its pattern: its expansion would never end.
     #[error("{form} expands to itself again, through {through}", form = .0, through = .1.join(", then "))]

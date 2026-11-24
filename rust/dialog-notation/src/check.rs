@@ -285,6 +285,57 @@ mod tests {
         assert!(matches!(run.join(), Ok(Ok(()))));
     }
 
+    /// A name the build writes itself, a relation, a variable or a
+    /// namespace, written in a document is refused where it is written,
+    /// naming it, and nothing of the form is compiled. Reading
+    /// `syntax.meta`, which is there to be read, is not refused.
+    #[test]
+    fn it_refuses_a_name_the_notation_writes_itself() -> Result<(), Error> {
+        let cases = [
+            (r#"(select (query.row ?x part: "ab"))"#, "query.row"),
+            (r#"(select (query.row ?x part: "é"))"#, "query.row"),
+            ("(rule (query.row ?x row: 1) (xyz.a ?x))", "query.row"),
+            ("(select (select.query ?x))", "select.query"),
+            ("(assert (once.write once:1 n: 1))", "once.write"),
+            ("(select (view.layer ?x row: ?r))", "view.layer"),
+            ("(select (report.qabc ?x c0: ?y))", "report.qabc"),
+            (
+                "(rule (xyz.a ?x) (concept.list.count-open ?x is: ?n))",
+                "concept.list.count-open",
+            ),
+            (
+                r#"(assert (syntax.meta rule:1 description: "mine"))"#,
+                "syntax.meta",
+            ),
+            ("(select (xyz.a ?a.0 n: ?n))", "?a.0"),
+            ("(select (xyz.a ?a n: ?view-of))", "?view-of"),
+            ("(select (xyz.a ?a n: ?source-key))", "?source-key"),
+            (
+                "(rule (syntax (query.row ?x)) (expand (mine ?x)))\n(rule (xyz.out ?a) (mine ?a))",
+                "query.row",
+            ),
+        ];
+        for (text, name) in cases {
+            let mut analyzer = Analyzer::new()?;
+            let checked = check(&mut analyzer, text);
+            let refusals: Vec<&Diagnostic> = checked.refusals().collect();
+            assert!(
+                refusals
+                    .iter()
+                    .any(|refused| matches!(&refused.refusal, Some(Error::Reserved(said)) if said == name)),
+                "{text}: {refusals:?}"
+            );
+            assert!(checked.steps.is_empty(), "{text}");
+        }
+        let mut analyzer = Analyzer::new()?;
+        let checked = check(
+            &mut analyzer,
+            "(select (syntax.meta ?rule description: ?text))",
+        );
+        assert!(checked.refusals().next().is_none());
+        Ok(())
+    }
+
     /// What a comment right above a rule says is the rule's
     /// description: the analyzed tree holds it, and the compiler is
     /// given it. A comment with a blank line under it is not about the
