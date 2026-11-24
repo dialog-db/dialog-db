@@ -35,11 +35,12 @@
 //! ```
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
-use dialog_corpus::Value;
 use dialog_corpus::tree::CorpusNode;
+use dialog_corpus::{Entity, Selector, Value};
 use dialog_effects::archive::Load as ArchiveLoad;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -49,7 +50,7 @@ use dialog_effects::memory::Resolve;
 use dialog_query::error::EvaluationError;
 use dialog_query::query::Output as _;
 use dialog_query::{ConceptConclusion, ConceptQuery, FoldConclusion};
-use dialog_repository::{Branch, Delta, FoldSubscription, RemoteSite, Subscription};
+use dialog_repository::{Branch, Delta, Ephemeral, FoldSubscription, RemoteSite, Subscription};
 use dialog_search_tree::nodes;
 
 use crate::select::Selection;
@@ -115,15 +116,62 @@ pub enum LiveError {
 }
 
 /// A branch the notation's selections and views are kept on.
+///
+/// What a selection kept standing or a view watched needs of a rule is
+/// laid on the branch's session overlay, and taken off when the last
+/// selection or view that holds it is dropped. A `Live` and its clones
+/// count what they laid together: keep one for a branch and clone it. A
+/// rule that was on the overlay before a `Live` laid it is not its own,
+/// and it never takes it off.
 #[derive(Clone)]
 pub struct Live {
     branch: Branch,
+    laid: Laid,
+}
+
+/// The rules a [`Live`] and its clones laid on the overlay, each by its
+/// entity, with how many selections and views hold it.
+type Laid = Arc<Mutex<BTreeMap<String, usize>>>;
+
+/// The rules a selection kept standing or a view watched holds on the
+/// overlay: each one's hold is let go when it is dropped, and a rule no
+/// longer held is taken off.
+struct Lease {
+    overlay: Ephemeral,
+    laid: Laid,
+    /// The rules held, by their entities, each once.
+    held: Vec<Entity>,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let mut laid = self.laid.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut gone: Vec<String> = Vec::new();
+        for entity in &self.held {
+            let key = entity.to_string();
+            if let Some(count) = laid.get_mut(&key) {
+                *count -= 1;
+                if *count == 0 {
+                    laid.remove(&key);
+                    gone.push(key);
+                }
+            }
+        }
+        if !gone.is_empty() {
+            // Dropped outright, so nothing beneath the overlay is hidden.
+            self.overlay
+                .retain_entities(|entity| !gone.contains(&entity.to_string()));
+        }
+    }
 }
 
 impl Live {
     /// Keep selections and views on `branch`.
     pub fn new(branch: Branch) -> Live {
-        Live { branch }
+        Live {
+            branch,
+            laid: Arc::default(),
+        }
     }
 
     /// The branch.
@@ -131,17 +179,46 @@ impl Live {
         &self.branch
     }
 
+    /// Lay `rules` on the overlay, and hold them in `lease`: a rule this
+    /// `Live` laid already is held once more, a rule on the overlay that
+    /// it did not lay is used and not held, and any other is laid.
     fn lay<'r>(
         &self,
+        lease: &mut Lease,
         rules: impl IntoIterator<Item = &'r dialog_query::DeductiveRule>,
     ) -> Result<(), LiveError> {
+        let overlay = self.branch.overlay();
+        let mut laid = self.laid.lock().unwrap_or_else(PoisonError::into_inner);
         for rule in rules {
-            self.branch
-                .overlay()
-                .assert(rule.clone())
-                .map_err(|error| LiveError::Rule(error.to_string()))?;
+            let entity = rule.this();
+            if lease.held.contains(&entity) {
+                continue;
+            }
+            let key = entity.to_string();
+            match laid.get_mut(&key) {
+                Some(count) => *count += 1,
+                None if !overlay.scan(&Selector::new().of(entity.clone())).is_empty() => {
+                    continue;
+                }
+                None => {
+                    overlay
+                        .assert(rule.clone())
+                        .map_err(|error| LiveError::Rule(error.to_string()))?;
+                    laid.insert(key, 1);
+                }
+            }
+            lease.held.push(entity);
         }
         Ok(())
+    }
+
+    /// A lease of nothing yet, on this branch's overlay.
+    fn lease(&self) -> Lease {
+        Lease {
+            overlay: self.branch.overlay().clone(),
+            laid: self.laid.clone(),
+            held: Vec::new(),
+        }
     }
 
     /// The answers of `selection` as the branch stands, asked once: each
@@ -236,10 +313,11 @@ impl Live {
     /// of each of [`Selection::folds`].
     pub fn standing(&self, selection: Selection) -> Result<Standing, LiveError> {
         let read = selection.read();
+        let mut lease = self.lease();
         let mut feeds = Vec::new();
         for (query, read) in selection.queries.iter().zip(read) {
             feeds.push(if read {
-                self.lay(&query.rule)?;
+                self.lay(&mut lease, &query.rule)?;
                 Some(self.branch.subscribe(query.select.clone()))
             } else {
                 None
@@ -247,7 +325,7 @@ impl Live {
         }
         let mut folds = Vec::new();
         for folded in &selection.folds {
-            self.lay(&folded.rules)?;
+            self.lay(&mut lease, &folded.rules)?;
             folds.push(self.branch.subscribe_fold(folded.fold.clone()));
         }
         Ok(Standing {
@@ -257,6 +335,7 @@ impl Live {
             feeds,
             folds,
             moved: true,
+            _lease: lease,
         })
     }
 
@@ -268,6 +347,7 @@ impl Live {
     /// layer.
     pub fn watch(&self, plan: Plan, entity: Option<Value>) -> Result<Watched, LiveError> {
         let mut maintainer = Maintainer::new(plan.clone(), entity.clone());
+        let mut lease = self.lease();
         let mut folds: BTreeMap<usize, FoldedCount> = BTreeMap::new();
         for folded in plan.folds() {
             let layer = plan.elements[plan.counts[folded.count].place].layer;
@@ -280,14 +360,14 @@ impl Live {
                 continue;
             }
             if let Some(folded) = folds.remove(&layer) {
-                self.lay(&folded.folded.rules)?;
+                self.lay(&mut lease, &folded.folded.rules)?;
                 let feed = self.branch.subscribe_fold(folded.folded.fold.clone());
                 maintainer.given(plan.counts[folded.count].place);
                 layers.push(Some(Feed::Counted(Box::new((folded, feed)))));
                 continue;
             }
             let query = plan.query(layer, entity.as_ref())?;
-            self.lay(&query.rule)?;
+            self.lay(&mut lease, &query.rule)?;
             let feed = self.branch.subscribe(query.select.clone());
             layers.push(Some(Feed::Rows(Box::new((query, feed)))));
         }
@@ -299,6 +379,7 @@ impl Live {
             entity,
             layers,
             polled: false,
+            _lease: lease,
         })
     }
 }
@@ -357,6 +438,8 @@ pub struct Standing {
     /// Whether rows moved since the answers were last given: kept across
     /// a poll that failed, so the next one gives them.
     moved: bool,
+    /// The rules it holds on the overlay.
+    _lease: Lease,
 }
 
 impl Standing {
@@ -463,6 +546,8 @@ pub struct Watched {
     /// here, and the next gives it.
     taken: Vec<Taken>,
     polled: bool,
+    /// The rules it holds on the overlay.
+    _lease: Lease,
 }
 
 /// What a layer's subscription reported, by its kind.

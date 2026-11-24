@@ -137,6 +137,10 @@ const TAGGED: &str = r#"
       (task ?t title: ?title)
       (task/tag ?t tag: (collect ?tags))
       (is ?card {:title ?title :tags ?tags}))
+    (query (task/pair ?t is: ?pair)
+      (task ?t title: ?title)
+      (task/tag ?t tag: ?g)
+      (is ?pair {:title ?title :tag ?g}))
     (query (task/flat ?t is: ?row)
       (task ?t title: ?title)
       (task/tag ?t tag: ?g)
@@ -168,6 +172,14 @@ fn flat() -> Result<Plan> {
     match step("(select (task/flat ?t is: ?row))")? {
         Step::View(plan) => Ok(*plan),
         _ => Err(anyhow::anyhow!("no plan")),
+    }
+}
+
+/// A selection whose query joins two reads, and so has a rule.
+fn pairs() -> Result<Selection> {
+    match step("(select (task/pair ?t is: ?pair))")? {
+        Step::Select(selection) => Ok(*selection),
+        _ => Err(anyhow::anyhow!("no selection")),
     }
 }
 
@@ -322,7 +334,7 @@ async fn it_takes_off_the_overlay_what_it_laid_when_the_last_holder_goes() -> Re
         "the last watch dropped takes its rules off"
     );
 
-    let standing = live.standing(selection()?)?;
+    let standing = live.standing(pairs()?)?;
     assert!(
         overlay.len() > before,
         "a standing selection lays its rules"
