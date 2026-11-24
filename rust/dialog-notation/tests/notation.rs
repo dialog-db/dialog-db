@@ -1074,6 +1074,52 @@ async fn it_derives_under_a_concept_whose_name_holds_a_dot() -> Result<()> {
     Ok(())
 }
 
+/// A name a macro's expansion declares as a concept is declared when
+/// that form is expanded. A rule or a select of the same document that
+/// read the name before, as an attribute's, would read another relation:
+/// it is refused, saying to declare the concept above it, and nothing of
+/// the document is written. Declared above, it reads the concept.
+#[dialog_common::test]
+async fn it_refuses_a_read_of_a_name_the_document_declares_after_it() -> Result<()> {
+    let kind = "(rule (syntax (concept (?name ?t is: ?x)
+                  (xyz.memo/text of: ?t is: ?x as: :text cardinality: :one)))
+                (expand (memo-kind ?name)))";
+    let rule = "(rule (xyz.out ?t v: ?x) (xyz.memo/note ?t is: ?x))";
+    let declare = "(memo-kind xyz.memo/note)";
+    let open = || async {
+        let mut notebook = Notebook::open().await?;
+        notebook
+            .submit(
+                r#"(assert (xyz.memo/note x:2 is: "an attribute of that name"))
+                   (assert (xyz.memo/text x:1 is: "the concept's"))"#,
+            )
+            .await?;
+        anyhow::Ok(notebook)
+    };
+    let mut notebook = open().await?;
+    let refused = notebook
+        .submit(&[kind, rule, declare].join("\n"))
+        .await
+        .map_err(|error| error.downcast::<Error>());
+    assert!(
+        matches!(&refused, Err(Ok(Error::Refused(why)))
+            if why.contains("xyz.memo/note") && why.contains("declare")),
+        "{refused:?}"
+    );
+    assert!(
+        report(&mut notebook, "(select (xyz.out ?t v: ?x))")
+            .await?
+            .is_empty()
+    );
+    let mut notebook = open().await?;
+    notebook.submit(&[kind, declare, rule].join("\n")).await?;
+    assert_eq!(
+        report(&mut notebook, "(select (xyz.out ?t v: ?x))").await?,
+        vec![r#"(xyz.out x:1 v: "the concept's")"#]
+    );
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a
