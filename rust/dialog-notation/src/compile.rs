@@ -1984,7 +1984,14 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
             terms.insert(column.label.clone(), variable(&column.label));
         }
     }
-    let select = json!({ "assert": concept.clone(), "where": terms });
+    // A recorded row is read back from its record alone: a select of the
+    // columns beside it would match each column of the entity's every
+    // row, and give one answer once for each way they cross.
+    let mut selected = concept.clone();
+    if recorded && let Some(Json::Object(with)) = selected.get_mut("with") {
+        with.retain(|label, _| label == RECORD);
+    }
+    let select = json!({ "assert": selected, "where": terms });
     Ok(Step::Query(Box::new(Query {
         rule: Some(deductive(scope.rule("deduce", concept, None), patterns)?),
         select: serde_json::from_value(select).map_err(|error| refused("the query", error))?,
