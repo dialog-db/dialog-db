@@ -763,6 +763,58 @@ impl Changes {
             .extend(changes);
     }
 
+    /// Drop every retraction of a claim `claims` asserts and does not
+    /// retract, in the writes bound for the primary and in each layer's.
+    /// A cell left with no change is removed.
+    ///
+    /// Induction calls it on a round's writes with what the round said of
+    /// the claims the view holds: an assertion for each it asserted
+    /// again, and a retraction for each a write under one succeeded. A
+    /// claim asserted again is retracted and asserted in one instant, so
+    /// it holds, and its retraction is not written; a claim a write
+    /// succeeds is replaced, so its retraction stays.
+    pub fn withdraw_retractions(&mut self, claims: &Changes) {
+        fn withdraw(facts: &mut Facts, claims: &Facts) {
+            for (of, attributes) in claims {
+                let Some(held) = facts.get_mut(of) else {
+                    continue;
+                };
+                for (the, asserted) in attributes {
+                    let Some(cell) = held.get_mut(the) else {
+                        continue;
+                    };
+                    let withdrawn = |is: &Value| {
+                        asserted
+                            .iter()
+                            .any(|claim| matches!(claim, Change::Assert(value, _) if value == is))
+                            && !asserted
+                                .iter()
+                                .any(|claim| matches!(claim, Change::Retract(value) if value == is))
+                    };
+                    cell.retain(|change| match change {
+                        Change::Retract(is) => !withdrawn(is),
+                        Change::Assert(..) => true,
+                    });
+                    if cell.is_empty() {
+                        held.remove(the);
+                    }
+                }
+                if held.is_empty() {
+                    facts.remove(of);
+                }
+            }
+        }
+        withdraw(&mut self.facts, &claims.facts);
+        for (layer, claims) in &claims.layers {
+            if let Some(facts) = self.layers.get_mut(layer) {
+                withdraw(facts, claims);
+                if facts.is_empty() {
+                    self.layers.remove(layer);
+                }
+            }
+        }
+    }
+
     /// Convert the fact changes to a vec of instructions.
     ///
     /// Asset changes are not instructions and are left out: a caller that
@@ -1402,6 +1454,63 @@ mod tests {
                 crate::Cardinality::One
             )]
         );
+    }
+
+    /// Withdrawing the retractions of asserted claims drops exactly
+    /// those, in the primary and in a layer: a retraction of another
+    /// value stays, an assertion stays, a retraction of a claim the
+    /// claims also retract stays, and a cell or layer left empty is
+    /// gone.
+    #[dialog_common::test]
+    fn it_withdraws_the_retractions_of_asserted_claims() {
+        let staff = || Value::String("staff".into());
+        let guest = || Value::String("guest".into());
+        let layer: Entity = "session:state".parse().unwrap();
+        let mut changes = Changes::new();
+        changes.dissociate(role_attr(), alice(), staff());
+        changes.dissociate(role_attr(), alice(), guest());
+        changes.associate(role_attr(), alice(), staff(), crate::Cardinality::Many);
+        changes.dissociate(role_attr(), bob(), staff());
+        changes.dissociate(role_attr(), bob(), guest());
+        changes.dissociate_in(layer.clone(), role_attr(), alice(), staff());
+
+        let mut claims = Changes::new();
+        claims.associate(role_attr(), alice(), staff(), crate::Cardinality::Many);
+        claims.associate(role_attr(), bob(), staff(), crate::Cardinality::Many);
+        claims.associate(role_attr(), bob(), guest(), crate::Cardinality::Many);
+        claims.dissociate(role_attr(), bob(), guest());
+        claims.associate_in(
+            layer.clone(),
+            role_attr(),
+            alice(),
+            staff(),
+            crate::Cardinality::Many,
+        );
+        changes.withdraw_retractions(&claims);
+
+        let of_alice: Vec<Change> = changes
+            .iter()
+            .filter(|(entity, _, _)| **entity == alice())
+            .map(|(_, _, change)| change.clone())
+            .collect();
+        assert_eq!(
+            of_alice,
+            vec![
+                Change::Retract(guest()),
+                Change::Assert(staff(), crate::Cardinality::Many),
+            ]
+        );
+        let of_bob: Vec<Change> = changes
+            .iter()
+            .filter(|(entity, _, _)| **entity == bob())
+            .map(|(_, _, change)| change.clone())
+            .collect();
+        assert_eq!(
+            of_bob,
+            vec![Change::Retract(guest())],
+            "a claim the claims also retract keeps its retraction"
+        );
+        assert_eq!(changes.iter_in().count(), 0, "the layer is left empty");
     }
 
     /// A batch an earlier release wrote, whose assertions carry the

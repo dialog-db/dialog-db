@@ -369,6 +369,10 @@ where
         let expanded = derived;
 
         let mut novelty = Changes::new();
+        // What this round's heads said of the claims the view holds: the
+        // ones asserted again, no news, so not in `novelty`, and the ones
+        // an assertion under one succeeds (see `note_held_claim`).
+        let mut held_claims = Changes::new();
         let mut emitted_transients = Changes::new();
         for entity in candidates {
             let Some(rule) = dispatch.load(&entity, &overlay, env).await? else {
@@ -403,6 +407,7 @@ where
                     selected,
                     &view,
                     &mut novelty,
+                    &mut held_claims,
                     &mut emitted_transients,
                 )
                 .await?;
@@ -414,10 +419,27 @@ where
                     &assert_rows,
                     &view,
                     &mut novelty,
+                    &mut held_claims,
                     &mut emitted_transients,
                 )
                 .await?;
             }
+        }
+
+        // A round is one instant: its rules fire in no order the outcome
+        // may depend on, so a claim one rule retracts and another asserts
+        // in it is retracted and asserted at once, and holds afterwards
+        // (the old value retracted, the new one asserted, and the two
+        // coincide). The assertion of a claim the view holds is no news
+        // and wrote nothing; a `retract!` head's retraction of it is
+        // withdrawn here, once every candidate has fired, so the claim
+        // keeps the row it had and the round leaves it unchanged. That is
+        // also what lets an `assert!` rule and a `retract!` rule meeting
+        // on a held claim settle instead of flipping it round after
+        // round. A claim an assertion under one succeeds in the round is
+        // replaced, whatever else asserts it, and stays retracted.
+        if !held_claims.is_empty() {
+            novelty.withdraw_retractions(&held_claims);
         }
 
         // Fold durable novelty into the commit; promote this round's
@@ -1113,6 +1135,7 @@ async fn fire<'a>(
     selected: Option<&Entity>,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
+    held_claims: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
     let plan = rule.plan(&Environment::new());
@@ -1131,6 +1154,7 @@ async fn fire<'a>(
         matches,
         view,
         novelty,
+        held_claims,
         transients,
     )
     .await
@@ -1170,6 +1194,7 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 /// first bound into one evaluation. It finds every match of the rows
 /// seeded one by one when it finds any (see [`seed_groups`] for why);
 /// when it finds none, the rows are seeded one by one.
+#[allow(clippy::too_many_arguments)]
 async fn fire_seeded<'a>(
     rule: &InductiveRule,
     transient_head: bool,
@@ -1177,11 +1202,12 @@ async fn fire_seeded<'a>(
     rows: &[Fact],
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
+    held_claims: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
     let matches = seeded_matches(rule, rows, view, Seeding::Grouped).await?;
     #[cfg(test)]
-    let before = (novelty.clone(), transients.clone());
+    let before = (novelty.clone(), held_claims.clone(), transients.clone());
     if !matches.is_empty() {
         emit_matches(
             rule,
@@ -1190,6 +1216,7 @@ async fn fire_seeded<'a>(
             matches,
             view,
             novelty,
+            held_claims,
             transients,
         )
         .await?;
@@ -1203,6 +1230,7 @@ async fn fire_seeded<'a>(
         view,
         before,
         novelty,
+        held_claims,
         transients,
     )
     .await?;
@@ -1523,10 +1551,12 @@ type WrittenHead = (
 
 /// Emit a rule's head for every produced match: the cells landing in
 /// `control:` into `transients`, the rest (novelty-checked against the
-/// frozen view) into `novelty`. A cell lands in `control:` when its
-/// descriptor names it (`in: control:`), or names no layer and the head
-/// is a command (`transient_head`); a command's cell naming another
-/// layer, a channel say, lands there as any head does.
+/// frozen view) into `novelty`, and what they say of claims the view
+/// holds into `held_claims` (see [`note_held_claim`]). A cell lands in
+/// `control:` when its descriptor names it (`in: control:`), or names no
+/// layer and the head is a command (`transient_head`); a command's cell
+/// naming another layer, a channel say, lands there as any head does.
+#[allow(clippy::too_many_arguments)]
 async fn emit_matches<'a>(
     rule: &InductiveRule,
     transient_head: bool,
@@ -1534,6 +1564,7 @@ async fn emit_matches<'a>(
     matches: Vec<Match>,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
+    held_claims: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
     // A transient head is a command: a cell of it naming no layer lands
@@ -1669,7 +1700,15 @@ async fn emit_matches<'a>(
             continue;
         }
         for (layer, instruction) in shared {
-            if is_novel_in(view, &instruction, Some(&layer)).await? {
+            let novel = is_novel_in(view, &instruction, Some(&layer)).await?;
+            note_held_claim(
+                held_claims,
+                Some(&layer),
+                &instruction,
+                novel,
+                rule.polarity(),
+            );
+            if novel {
                 match instruction {
                     Instruction::Assert(a, cardinality) => dialog_corpus::Update::associate_in(
                         novelty,
@@ -1688,9 +1727,16 @@ async fn emit_matches<'a>(
         // A head written by succession elects the claim it succeeds
         // against the round view, as a transaction's own writes do
         // against the line at commit.
-        Box::pin(super::succession::resolve_against(view, &mut head)).await?;
+        Box::pin(super::succession::resolve_against(
+            view,
+            &mut head,
+            held_claims,
+        ))
+        .await?;
         for instruction in head.into_instructions() {
-            if is_novel(view, &instruction).await? {
+            let novel = is_novel(view, &instruction).await?;
+            note_held_claim(held_claims, None, &instruction, novel, rule.polarity());
+            if novel {
                 match instruction {
                     Instruction::Assert(a, policy) => {
                         dialog_corpus::Update::associate(novelty, a.the, a.of, a.is, policy)
@@ -1703,6 +1749,47 @@ async fn emit_matches<'a>(
         }
     }
     Ok(())
+}
+
+/// Note in `held_claims` what a head write of a rule of `polarity` says of
+/// a claim the round view holds: an assertion of it that is no news
+/// (`novel` false) reaffirms it, and a retraction of it that an
+/// `assert!` head wrote, the claim a write under one succeeds, replaces
+/// it. Every other write says nothing of a held claim the round must
+/// weigh: a `retract!` head's retraction is what a reaffirmation
+/// withdraws (see [`Changes::withdraw_retractions`]).
+fn note_held_claim(
+    held_claims: &mut Changes,
+    layer: Option<&Entity>,
+    instruction: &Instruction,
+    novel: bool,
+    polarity: Polarity,
+) {
+    use dialog_corpus::Update as _;
+    match (instruction, novel, polarity) {
+        (Instruction::Assert(a, _), false, _) => match layer {
+            Some(layer) => held_claims.associate_in(
+                layer.clone(),
+                a.the.clone(),
+                a.of.clone(),
+                a.is.clone(),
+                dialog_corpus::Cardinality::Many,
+            ),
+            None => held_claims.associate(
+                a.the.clone(),
+                a.of.clone(),
+                a.is.clone(),
+                dialog_corpus::Cardinality::Many,
+            ),
+        },
+        (Instruction::Retract(a), true, Polarity::Assert) => match layer {
+            Some(layer) => {
+                held_claims.dissociate_in(layer.clone(), a.the.clone(), a.of.clone(), a.is.clone())
+            }
+            None => held_claims.dissociate(a.the.clone(), a.of.clone(), a.is.clone()),
+        },
+        _ => {}
+    }
 }
 
 /// The head each of `matches` writes, in order: its subject and the
@@ -1826,7 +1913,9 @@ fn layered_instructions(changes: &Changes) -> Vec<Instruction> {
 /// This is the fixpoint's convergence test — a rule whose head
 /// re-derives existing state terminates for free. The view is the
 /// frozen round view, so siblings within a round judge novelty against
-/// identical state.
+/// identical state, and what one sibling's write means beside
+/// another's is settled at the end of the round (see
+/// [`note_held_claim`]).
 async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<bool, CommitError> {
     is_novel_in(view, instruction, None).await
 }
@@ -1888,9 +1977,9 @@ mod oracle {
     }
 
     /// Seeding the rows of `rows` one by one, from the `before` the
-    /// grouped firing started from, writes the `novelty` and
-    /// `transients` the grouped firing wrote; panics with both when it
-    /// does not.
+    /// grouped firing started from, writes the `novelty`, `held_claims`
+    /// and `transients` the grouped firing wrote; panics with both when
+    /// it does not.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn agrees(
         rule: &InductiveRule,
@@ -1898,12 +1987,13 @@ mod oracle {
         selected: Option<&Entity>,
         rows: &[Fact],
         view: &QueryEnv<'_>,
-        before: (Changes, Changes),
+        before: (Changes, Changes, Changes),
         novelty: &Changes,
+        held_claims: &Changes,
         transients: &Changes,
     ) -> Result<(), CommitError> {
         let per_row = seeded_matches(rule, rows, view, Seeding::PerRow).await?;
-        let (mut expected_novelty, mut expected_transients) = before;
+        let (mut expected_novelty, mut expected_held_claims, mut expected_transients) = before;
         if !per_row.is_empty() {
             emit_matches(
                 rule,
@@ -1912,6 +2002,7 @@ mod oracle {
                 per_row,
                 view,
                 &mut expected_novelty,
+                &mut expected_held_claims,
                 &mut expected_transients,
             )
             .await?;
@@ -1919,6 +2010,10 @@ mod oracle {
         assert_eq!(
             novelty, &expected_novelty,
             "grouped seeding must write the novelty seeding row by row writes"
+        );
+        assert_eq!(
+            held_claims, &expected_held_claims,
+            "grouped seeding must note the held claims seeding row by row notes"
         );
         assert_eq!(
             transients, &expected_transients,
@@ -1930,6 +2025,9 @@ mod oracle {
 
 #[cfg(test)]
 mod subject_tests;
+
+#[cfg(test)]
+mod retract_assert_tests;
 
 #[cfg(test)]
 mod tests {
