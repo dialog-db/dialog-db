@@ -479,6 +479,25 @@ where
                     };
 
                     if child_index < index.len() {
+                        let visitable = index.children_within(match range.end_bound() {
+                            Bound::Included(bound) => Bound::Included(bound.as_ref()),
+                            Bound::Excluded(bound) => Bound::Excluded(bound.as_ref()),
+                            Bound::Unbounded => Bound::Unbounded,
+                        })?;
+                        // A sibling the walk moves on to begins at its
+                        // separator, and past the range's end so do every
+                        // later sibling and every later subtree of the
+                        // ancestors: the walk is over. A leaf that ends
+                        // exactly at the range's end holds no key past it to
+                        // stop the walk, so without this the scan read the
+                        // next subtree down to its first leaf, a fetch on a
+                        // replica that does not hold it, only to find that
+                        // leaf's first key past the end. The first child is
+                        // exempt: the walk entered this node, so some of it
+                        // is routed keys the range can hold.
+                        if child_index > 0 && child_index >= visitable {
+                            break 'walk;
+                        }
                         // The scan will walk this node's remaining children in
                         // turn, so start reading them now and let them land in
                         // the cache while the walk descends into the first of
@@ -495,11 +514,6 @@ where
                         // decision per site, where a read this scan has queued
                         // but the scheduler has not admitted costs nothing to
                         // abandon.
-                        let visitable = index.children_within(match range.end_bound() {
-                            Bound::Included(bound) => Bound::Included(bound.as_ref()),
-                            Bound::Excluded(bound) => Bound::Excluded(bound.as_ref()),
-                            Bound::Unbounded => Bound::Unbounded,
-                        })?;
                         // Whether there is anywhere for a read-ahead to
                         // land is the environment's business: one that
                         // keeps nothing does nothing with a preload, and
