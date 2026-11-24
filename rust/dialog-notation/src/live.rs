@@ -124,6 +124,17 @@ pub enum LiveError {
 /// Who holds a rule is written on the overlay itself, so every `Live` on
 /// the branch sees one count. A rule that was on the overlay before the
 /// notation laid it is used and never taken off.
+///
+/// A rule is one fact on the overlay, and the notation knows only
+/// whether it laid it. An embedder that asserts on the overlay a rule
+/// the notation has already laid, the same rule by its entity, asserts
+/// nothing new, and the rule is taken off with the notation's last
+/// holder. An embedder that needs a rule to stay asserts it before any
+/// selection or view of this branch lays it, or keeps a selection or a
+/// view that holds it standing for as long as it needs it.
+///
+/// Laying is all or nothing: a write to the overlay that fails part way
+/// takes off again the rule and the marks this lay wrote.
 #[derive(Clone)]
 pub struct Live {
     branch: Branch,
@@ -155,10 +166,10 @@ static HOLDERS: AtomicU64 = AtomicU64::new(0);
 /// on each other only for that long.
 static LAYING: Mutex<()> = Mutex::new(());
 
-/// For tests: after how many more writes laying a rule fails, on this
-/// thread. Only with the `inspect` feature.
 #[cfg(feature = "inspect")]
 thread_local! {
+    /// For tests: after how many more writes laying a rule fails, on
+    /// this thread. Only with the `inspect` feature.
     pub(crate) static FAIL_LAYING: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
@@ -288,38 +299,66 @@ impl Live {
                 )));
             }
         }
+        // A write that fails, as a test may make one.
+        let tripped = || -> Result<(), LiveError> {
+            #[cfg(feature = "inspect")]
+            if let Some(left) = FAIL_LAYING.with(std::cell::Cell::get) {
+                if left == 0 {
+                    return Err(LiveError::Rule("a write failed, as a test asked".into()));
+                }
+                FAIL_LAYING.with(|held| held.set(Some(left - 1)));
+            }
+            Ok(())
+        };
         for rule in rules {
             let entity = rule.this();
             if lease.held.contains(&entity) {
                 continue;
             }
             let (there, _, _) = standing(overlay, &entity);
-            if !there {
-                overlay.assert(rule.clone()).map_err(failed)?;
-                overlay
-                    .assert(Mark {
-                        the: LAID,
-                        of: entity.clone(),
-                        is: Value::Boolean(true),
-                    })
-                    .map_err(failed)?;
-                if let Some(claim) = &claim {
+            // All or nothing: a rule laid here and a write after it that
+            // fails takes the rule and its marks off again, so nothing is
+            // left laid with no holder. A rule found there is only held,
+            // and a holder not written holds nothing.
+            let laid = (|| -> Result<(), LiveError> {
+                if !there {
+                    tripped()?;
+                    overlay.assert(rule.clone()).map_err(failed)?;
+                    tripped()?;
                     overlay
                         .assert(Mark {
-                            the: DERIVES,
+                            the: LAID,
                             of: entity.clone(),
-                            is: Value::String(claim.clone()),
+                            is: Value::Boolean(true),
                         })
                         .map_err(failed)?;
+                    if let Some(claim) = &claim {
+                        tripped()?;
+                        overlay
+                            .assert(Mark {
+                                the: DERIVES,
+                                of: entity.clone(),
+                                is: Value::String(claim.clone()),
+                            })
+                            .map_err(failed)?;
+                    }
                 }
+                tripped()?;
+                overlay
+                    .assert(Mark {
+                        the: HOLDER,
+                        of: entity.clone(),
+                        is: lease.holder.clone(),
+                    })
+                    .map_err(failed)?;
+                Ok(())
+            })();
+            if let Err(error) = laid {
+                if !there {
+                    overlay.retain_entities(|other| *other != entity);
+                }
+                return Err(error);
             }
-            overlay
-                .assert(Mark {
-                    the: HOLDER,
-                    of: entity.clone(),
-                    is: lease.holder.clone(),
-                })
-                .map_err(failed)?;
             lease.held.push(entity);
         }
         Ok(())
