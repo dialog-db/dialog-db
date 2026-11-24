@@ -14,6 +14,34 @@ says how to cut a release.
 
 ## Unreleased
 
+### A standing fold steps a group's value instead of folding the group again
+
+[#856](https://github.com/dialog-db/dialog-db/pull/856). The design it follows is
+`design/fold-maintenance/design-fold-state.md` (#837), approach 2.
+
+`Branch::subscribe_fold` folded a group again over all its kept input rows
+whenever one of them moved: one to-do changed among 10,000 in one list cost
+the 10,000. Where every entry of the fold is `count`, `count-distinct`,
+`sum`, `min` or `max`, a group that has moved once now keeps a running value
+(`dialog_query::reduce::Running`): a count, an integer sum, the chosen
+extreme, or for `count-distinct` each distinct value with the number of rows
+holding it. A poll takes the rows it added and took away into it. A group is
+still folded again where a running value cannot be exact: a float sum, the
+last row holding a `min` or `max` taken away, a value that does not order, a
+moved group row, a group of no input rows or of two group rows, and `avg`.
+`last` and `top` are evaluated afresh as before.
+
+What this changes for you:
+
+- Nothing in the answers: every row and every delta is the one folding the
+  group again gives. This changes what a poll costs, not what it reports.
+- `FoldSubscription::refolds` counts fewer groups; `FoldSubscription::steps`
+  is new and counts the groups given by their running value.
+- New: `Reduce::runs` and `Running` in `dialog_query::reduce`.
+
+Why: a view keeps a count on a fold, and a change to one row has to cost
+that row, not the group it is in.
+
 ### A rule that holds a pattern is stored, in rule body format 5
 
 Stacked on [#778](https://github.com/dialog-db/dialog-db/pull/778); the
