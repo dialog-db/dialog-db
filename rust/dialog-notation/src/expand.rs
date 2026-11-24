@@ -1452,6 +1452,18 @@ impl Expander {
             _ => None,
         };
         if let Some(declared) = &signature {
+            // A name with a `.` and no `/` is a domain, which a read
+            // applies as the kernel's before any concept is looked up: a
+            // concept under it would never be read.
+            if Kind::of(&declared.name) == Kind::Domain {
+                return Err(Error::Refused(format!(
+                    "{pattern} declares a concept named `{}`, which is a domain's name: a \
+                     concept's name is a name, `todo`, or a name and a `/`, \
+                     `notebook/blocks`, and one with a `.` and no `/` is read as the domain's \
+                     own attributes",
+                    declared.name
+                )));
+            }
             // One document says one thing of a name, in any order: a
             // concept a form defines and another form defines again, or
             // names as a query, is refused naming both.

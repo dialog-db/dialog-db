@@ -1156,40 +1156,37 @@ mod tests {
 
     /// The names the notation makes from what a document writes are one
     /// name for one input. A derived attribute's relation says its
-    /// concept's length before the concept, so a concept and an attribute
-    /// whose names would spell one relation, `my.list/count` and
-    /// `my/list.count`, derive two. A head's key of an entry,
-    /// `entry/key`, is refused where a field of the same head is named so.
+    /// concept's length before the concept. A concept named as a domain,
+    /// `my.list`, is refused, so `my.list/count` derives nothing that
+    /// `my/list.count` could meet. A head's key of an entry, `entry/key`,
+    /// is refused where a field of the same head is named so.
     #[test]
     fn it_refuses_two_inputs_that_would_make_one_name() -> Result<(), Error> {
-        let concepts = "(concept (my ?l name: ?n) (xyz.my/name of: ?l is: ?n as: :text cardinality: :one))
-            (concept (my.list ?l name: ?n) (xyz.mylist/name of: ?l is: ?n as: :text cardinality: :one))";
+        let my =
+            "(concept (my ?l name: ?n) (xyz.my/name of: ?l is: ?n as: :text cardinality: :one))";
         let checked = check(
             &mut Analyzer::new()?,
-            &format!(
-                "{concepts} (rule (my.list/count ?l ?n) (my.list ?l name: ?n))
-                 (rule (my/list.count ?l ?n) (my ?l name: ?n))"
-            ),
+            "(concept (my.list ?l name: ?n) (xyz.mylist/name of: ?l is: ?n as: :text cardinality: :one))",
+        );
+        assert!(
+            checked.refusals().any(|refused| matches!(&refused.refusal,
+                Some(Error::Refused(why)) if why.contains("`my.list`"))),
+            "{:?}",
+            checked.diagnostics
+        );
+        let checked = check(
+            &mut Analyzer::new()?,
+            &format!("{my} (rule (my/list.count ?l ?n) (my ?l name: ?n))"),
         );
         assert!(
             checked.refusals().next().is_none(),
             "{:?}",
             checked.diagnostics
         );
-        let derived: Vec<String> = checked
-            .steps
-            .iter()
-            .flat_map(|step| {
-                let said = format!("{step:?}");
-                said.match_indices("dialog.notation.concept.")
-                    .map(|(at, _)| said[at..].split('"').next().unwrap_or_default().to_string())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+        let said = format!("{:?}", checked.steps);
         assert!(
-            derived.contains(&"dialog.notation.concept.7.my.list.count/is".to_string())
-                && derived.contains(&"dialog.notation.concept.2.my.list.count/is".to_string()),
-            "{derived:?}"
+            said.contains("dialog.notation.concept.2.my.list.count/is"),
+            "{said}"
         );
         let checked = check(
             &mut Analyzer::new()?,
