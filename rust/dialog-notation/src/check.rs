@@ -277,7 +277,8 @@ mod tests {
                         && refused.span.is_some()),
                     "{refusals:?}"
                 );
-                assert_eq!(checked.analyzed.len(), 1, "the form beside it is read");
+                let parsed = crate::parse_document(&format!("{deep}\n(select (xyz.a ?a n: ?n))"));
+                assert_eq!(parsed.trees.len(), 1, "the form beside it is read");
             }
             Ok(())
         });

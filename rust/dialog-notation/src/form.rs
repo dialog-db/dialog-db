@@ -271,7 +271,7 @@ pub(crate) fn read_marked(text: &str) -> (Vec<(Form, Mark)>, Tail, Vec<Misread>)
     let mut misread = Vec::new();
     while at < tokens.len() {
         let start = at;
-        match form(&tokens, &mut at) {
+        match form(&tokens, &mut at, 0) {
             Ok(read) => forms.push(read),
             Err(not) => {
                 misread.push(not);
@@ -510,7 +510,7 @@ fn is_number(token: &str) -> bool {
     all_digits(whole) && parts.next().is_none_or(all_digits)
 }
 
-fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
+fn form(tokens: &[Token], at: &mut usize, depth: usize) -> Result<(Form, Mark), Misread> {
     // Where the text ends and a form was to come: after a label, or as
     // what is applied.
     let token = tokens.get(*at).ok_or_else(|| {
@@ -520,6 +520,14 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
         )
     })?;
     *at += 1;
+    if depth > DEPTH {
+        return Err((
+            Error::Read(format!(
+                "a form nested more than {DEPTH} deep: no stage after the reader takes it"
+            )),
+            token.span,
+        ));
+    }
     // A form that never closes is said where it opens.
     let ended = || (Error::Read("a form that never closes".into()), token.span);
     let mut mark = Mark {
@@ -541,7 +549,7 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
         "[" => {
             let mut items = Vec::new();
             while tokens.get(*at).ok_or_else(ended)?.text != "]" {
-                let (item, inside) = form(tokens, at)?;
+                let (item, inside) = form(tokens, at, depth + 1)?;
                 items.push(item);
                 mark.parts.push(inside);
             }
@@ -596,7 +604,7 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
                     }
                     None => {
                         let start = next.span;
-                        let (key, inside) = form(tokens, at)?;
+                        let (key, inside) = form(tokens, at, depth + 1)?;
                         if let Some(name) = key.label() {
                             return Err((former_key(name), start));
                         }
@@ -619,7 +627,7 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
                     entries.push((key, Form::Blank));
                     break;
                 }
-                let (value, inside) = form(tokens, at)?;
+                let (value, inside) = form(tokens, at, depth + 1)?;
                 mark.parts.push(inside);
                 entries.push((key, value));
             }
@@ -628,7 +636,7 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
         }
         // `'x` is `(quote x)`, and nothing more to the reader.
         "'" => {
-            let (quoted, inside) = form(tokens, at)?;
+            let (quoted, inside) = form(tokens, at, depth + 1)?;
             mark.raw = "'".into();
             mark.span.end = inside.span.end;
             mark.after = inside.after.clone();
@@ -644,7 +652,7 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
             Form::application(Form::symbol("quote"), vec![Part::Bare(quoted)])
         }
         "(" => {
-            let (head, inside) = form(tokens, at)?;
+            let (head, inside) = form(tokens, at, depth + 1)?;
             mark.parts.push(inside);
             let mut parts = Vec::new();
             loop {
@@ -655,14 +663,14 @@ fn form(tokens: &[Token], at: &mut usize) -> Result<(Form, Mark), Misread> {
                 match label(&next.text) {
                     Some(name) => {
                         *at += 1;
-                        let (part, inside) = form(tokens, at)?;
+                        let (part, inside) = form(tokens, at, depth + 1)?;
                         mark.parts.push(inside);
                         mark.labels
                             .push(Some((next.span.start, next.comments.clone())));
                         parts.push(Part::Labelled(name.to_string(), part));
                     }
                     None => {
-                        let (part, inside) = form(tokens, at)?;
+                        let (part, inside) = form(tokens, at, depth + 1)?;
                         mark.parts.push(inside);
                         mark.labels.push(None);
                         parts.push(Part::Bare(part));
