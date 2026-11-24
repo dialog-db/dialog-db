@@ -231,7 +231,7 @@ impl Aggregator {
         Some(match self {
             Aggregator::Count | Aggregator::CountDistinct => Type::from(ValueType::UnsignedInt),
             // A list, never optional: the empty list is its identity.
-            Aggregator::Distinct => Type::from(ValueType::CompositeList),
+            Aggregator::Distinct => Type::from(ValueType::List),
             Aggregator::Sum => {
                 let integers = Primitive::singleton(ValueType::UnsignedInt)
                     .union(Primitive::singleton(ValueType::SignedInt));
@@ -1202,7 +1202,7 @@ mod tests {
         );
         assert_eq!(
             Aggregator::Distinct.output_type(&Type::from(ValueType::String).optional()),
-            Some(Type::from(ValueType::CompositeList))
+            Some(Type::from(ValueType::List))
         );
         assert_eq!(Aggregator::Distinct.to_string(), "distinct");
         assert!(serde_json::from_value::<Aggregator>(serde_json::json!("distinct")).is_err());
