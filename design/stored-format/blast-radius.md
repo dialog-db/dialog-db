@@ -116,3 +116,100 @@ what `db.name/referent` points at.
 - **T9.** How many devices of one space can be on different releases at
   once, and for how long: is there a way for tonk to know every device
   of a space has upgraded?
+
+## What tonk answered
+
+From a read-only session on tonk-labs/tonk, default branch `main` at
+b125f0d, relayed by the coordinator on 2026-11-24. Each is a fact as
+reported, backed "tonk @ b125f0d" with the file and line it gave; none
+was read in this session.
+
+- **Version.** Every tonk workspace pins dialog at revision 875cc7f1,
+  in all four lockfiles. That revision is the commit the `v0.5.0` tag
+  points at (`chore(release): 0.5.0 (#845)`, checked here), so O is
+  exactly 0.5.0. T6 is answered: no tonk client has written format 4.
+- **T1.** Transient markers are durable facts written when a library is
+  installed, not marked again at each open. The web worker reinstalls on
+  mount only if the library's hash differs from the recorded
+  `xyz.tonk.seed/version`; the CLI installs once at space creation. A
+  dialog upgrade does not change the library's hash, so tonk would not
+  reinstall, and the 88 stranded markers stay stranded.
+- **T2.** `db.name/referent` sits on a tonk entity `id:<name>`; its value
+  is dialog's `concept:..` identity, or an attribute identity.
+  `db.concept.with/*` values are attribute identities.
+- **T3.** Tonk facts hold dialog identities as values:
+  `xyz.tonk.route/concept`, `xyz.tonk.site/concept` (each open tab, in
+  the session overlay), `db.name/referent`, and the views, descriptions
+  and template concepts a space wrote about library concepts and
+  attributes. Tonk has its own `rekey`
+  (`tonk-worker/src/router/repository/identity.rs:159` to `:213`), which
+  rewrites claims whose value is a moved identity and claims about one,
+  and `rekey_sites` for overlay tabs. Providers are matched by a concept
+  identity the Rust derive computes, which must equal the YAML's.
+- **T4.** A reinstall is three staged commits behind one publish: retract
+  everything the previous install commit asserted (read back from branch
+  history, rules included), install the new library, write the record;
+  moved identities are then rekeyed. `Branch::upgrade_rules` is called in
+  `migrate_branch` after `migrate_storage` and tonk's
+  `upgrade_definitions` (`dialog-reactor/src/branch/reference.rs:89` to
+  `:105`), only when `needs_migration` (the storage layout) says so, once
+  per process per branch. Tonk's upgrade knows an earlier identity only
+  through `attribute_uri_v0` and `concept_identity_v0`.
+- **T5.** Definitions are committed to the branch, none to an overlay.
+  Overlays and `session:` hold rows naming concepts: tab sites, intent
+  answers, attributes declared `in: "session:"`.
+- **T7.** A site from before branches is refused with an export and
+  re-import remedy; the import writes a current-layout tree, which
+  `needs_migration` would not send through `upgrade_rules`.
+- **T8.** No batch is kept. Uninstall replays an earlier install commit's
+  assertions from dialog's own history.
+- **T9.** No version handshake, capability flag or minimum-version check
+  between replicas, or between a client and the worker. Versions can mix
+  in one space (the CLI updates itself, the web bundle deploys
+  separately), and tonk cannot tell when every device has upgraded.
+- **T10, T11.** In [listed order](listed-order.md).
+
+So the claim "no user fact moves with an identity" holds of dialog and
+not of tonk. Dialog keys no fact by an identity; tonk writes identities
+as values in its own facts, and moves them itself with `rekey`.
+
+### Who rewrites tonk's facts, and what dialog must export for it
+
+Tonk does, as it already does when a library changes: `rekey` and
+`rekey_sites`, given a map from each earlier identity to the current
+one. Dialog cannot: the facts are tonk's, under tonk's attributes, some
+in overlays only a running tonk holds.
+
+What dialog has to give it:
+
+1. **The identity of a definition as each generation spelled it.** Main
+   already exports the 0.3 to 0.5.0 generation (`attribute_uri_v1`,
+   `concept_identity_v1`, `migration.rs:152`, `:213`), which tonk at
+   0.5.0 never had; tonk uses v0 only. Any further move (open question
+   1, the reversal of listed `as`) needs one more, exported in the same
+   release as the move.
+2. **A generation number for identities**, a constant tonk can record
+   beside its library's hash, so `upgrade_seed` reinstalls and rekeys
+   when dialog's identities move, not only when the library changes.
+   Without it, tonk's reinstall does not run on a dialog upgrade (T1).
+3. **The rewrite of a stored body, as a pure function** (`rewrite_body`,
+   with the reversal), for rules no library installs.
+
+### Additional questions this raises
+
+- **T12.** Does a tonk space hold rules no library installs (written by a
+  user, an agent, a view)? Those are the only rules a dialog-side
+  rewrite would still be needed for.
+- **T13.** When a reinstall under new identities retracts the previous
+  install, an O device loses the library's rules and markers. Can tonk
+  reinstall without retracting the previous install, and retract it
+  later (a prune it schedules)?
+- **T14.** When N rekeys a tonk fact (a route, a tab) to a new identity,
+  an O device reading it names a concept it does not know. Can `rekey`
+  assert the new value beside the old for a while, as the rule facts
+  would be kept?
+- **T15.** tonk's analyzer makes a listed `as` imply `top`. On main a
+  listed `as` without a pick is an enumerated type and ranks nothing
+  (the Unreleased changelog). Does the lowering write `pick: "top"` on
+  the field, or does tonk rely on the implied `top` that main no longer
+  has?

@@ -4,8 +4,8 @@
 
 |  | Understanding | Activity |
 |---|---|---|
-| **Status** | What is stored and read, by file. Identities are keyed by nothing a user fact uses; only dialog's own index facts and markers name them, inside dialog. Formats 4 and 5 are unreleased, and every identity already moved since 0.5.0, so a cut-over before the next tag costs a live space one migration. Main's upgrade would strand 88 of tonk-team's 89 transient markers. A 0.5.0 replica meets a newer body under the same index keys and fails the query (F1, run). | Directing. Five approaches and a matrix; E recommended by the agent. |
-| **Agenda** | Tonk's answers T1 to T11 ([blast radius](blast-radius.md)), T1, T2 and T9 first. The maintainer's answers to the five open questions in the top story, question 5 (when the reversal runs) first.  | The maintainer reads the matrix and chooses. Then step 1 of the [plan](plan.md): tests pinning today's behaviour. |
+| **Status** | What is stored and read, by file. Identities are keyed by nothing a user fact uses; only dialog's own index facts and markers name them, inside dialog. Formats 4 and 5 are unreleased, and every identity already moved since 0.5.0, so a cut-over before the next tag costs a live space one migration. Main's upgrade would strand 88 of tonk-team's 89 transient markers. A 0.5.0 replica meets a newer body under the same index keys and fails the query (F1, run). | Directing. Six approaches and a matrix; F recommended by the agent (E before tonk's answers). |
+| **Agenda** | Tonk's answers to T12 to T15 ([blast radius](blast-radius.md)), T13 first: whether tonk can reinstall without retracting the previous install. The maintainer's answers to the five open questions in the top story, question 5 (when the reversal runs) first.  | The maintainer reads the matrix and chooses. Then step 1 of the [plan](plan.md): tests pinning today's behaviour. |
 
 ## 2026-11-24, Describing to Directing: what "format 5 for everything" would take
 
@@ -117,3 +117,35 @@ question 5); the coordinator reads the maintainer's words as "by a
 migration the owner runs before the next version", and that reading is
 the coordinator's. Open question 1 restated as what an identity is a
 hash of once there is one format.
+
+## 2026-11-24, Directing: tonk's answers, and the rewrite moves to the embedder
+
+**Asked.** T1 to T11, answered by a read-only session on tonk @ b125f0d
+and relayed by the coordinator, who asked what changes: who rewrites
+tonk's facts and what dialog must export; what undetectable mixing does
+to B and E; how a dialog-side rewrite must appear in history for tonk's
+uninstall by replay; the smallest plan safe for tonk.
+
+**Learned.**
+
+- Tonk runs exactly 0.5.0 (the tag's commit, pinned by revision).
+- "No user fact moves with an identity" holds of dialog and not of tonk:
+  tonk writes dialog identities as values in its own facts and moves
+  them with its own `rekey`. It knows earlier identities only through
+  dialog's v0 functions.
+- Tonk reinstalls its library by replaying the previous install's
+  retractions. A rewrite dialog makes outside an install commit is never
+  retracted by that replay, so it outlives the next library change.
+- Versions mix in a space and nobody can tell. Any step keyed on "every
+  device has upgraded" keys on something unobservable.
+- Tonk's three listed attributes are all ranked and best first; one of
+  them has two descriptors already.
+
+**Backtracked.** The recommendation, not the phase: from E to F. E's
+format and vocabulary stay; what moves is who rewrites. Dialog rewrites
+nothing an embedder installs, and exports each generation's identity
+functions and a generation constant. The plan is reordered so the
+exports land first, which every approach needs.
+
+**Decided.** Nothing by the maintainer in this entry. Recorded as the
+agent's opinion: F. Open with tonk: T12 to T15.

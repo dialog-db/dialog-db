@@ -117,3 +117,59 @@ cannot read and skip a rule it could have read. The upgrade avoids this
 by retracting and asserting in one commit (`upgrade.rs:276` to `:284`);
 a kept old body under the same entity would not. An identity move, or
 E's new names, keeps old and new under different keys.
+
+## What tonk adds
+
+Reported by tonk @ b125f0d ([blast radius](blast-radius.md), "What tonk
+answered").
+
+- **Mixing is real and cannot be seen.** One space can have a CLI, a
+  web bundle and a worker on different releases, and nothing tells a
+  replica or tonk which (T9). So any approach whose safety rests on "once
+  every device has upgraded" (a prune, a cut-over) rests on a moment
+  nobody can observe. A prune is then a guess or a deadline, and a
+  hazard that hits O (F1, a retracted rule, a stranded marker) hits it
+  silently, for as long as some device stays behind.
+- **Tonk reinstalls its library by replay.** It retracts what the
+  previous install commit asserted, as read back from history, then
+  installs the new library and records it (T4). Its own reinstall is
+  already a migration of definitions: it writes every rule and marker
+  fresh, under whatever identity the running dialog gives them.
+
+### A dialog-side rewrite against uninstall by replay
+
+Today tonk calls `Branch::upgrade_rules` after its own upgrade. If dialog
+rewrites a library rule (retracts the old facts, asserts new ones under
+a new identity) in a commit of its own:
+
+1. The next reinstall replays the previous install commit: it retracts
+   the old facts, which the upgrade already retracted. Nothing happens.
+2. The rewritten facts were asserted by no install commit, so no replay
+   ever retracts them. When the library next changes that rule, the
+   rewritten copy stays installed beside the new one, and keeps running.
+
+For replay to stay correct, the rewrite would have to be an install
+commit as tonk records them, which only tonk can make. The simpler rule
+is that dialog does not rewrite what an embedder installs: it writes and
+reads its current format, lists what it cannot read, and exports the
+functions a migration needs; the embedder reinstalls. `upgrade_rules`
+then has a place only for rules no embedder installs (T12), and tonk
+should not call it on library rules.
+
+### What mixing does to the approaches
+
+- **B** (one vocabulary, format 5, old kept): an O device meets format 5
+  bodies under the relations it queries and fails those queries (F1),
+  with no way for anyone to know a device is behind. Worse than it
+  looked.
+- **E** (new vocabulary): an O device never meets a format 5 body. It
+  keeps its library's rules and markers for as long as they are not
+  retracted, and they are retracted by tonk's replay, not by dialog. So
+  E holds for tonk only if its reinstall across the dialog upgrade keeps
+  the previous install and retracts it later (T13). What O cannot do is
+  read tonk facts N rekeyed to new identities (a route, a tab) unless
+  tonk keeps the old value beside the new (T14).
+- **D** (fence): turns every silent hazard into a refusal O states by
+  name, at the cost of locking O out until it updates. With mixing
+  unobservable, that is the one approach under which nothing goes wrong
+  quietly; how long a device stays locked out is tonk's deploy cadence.

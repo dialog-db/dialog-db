@@ -49,6 +49,11 @@ What is on main (2b12204), from the [inventory](stored-format/inventory.md):
   main. `Branch::upgrade_rules` rewrites a 0.5.0 space's rules under the
   new identities, retracts the old facts, and moves the transient
   marker of each concept a rule concludes.
+- Tonk (reported from tonk @ b125f0d) pins dialog at the v0.5.0 commit,
+  writes dialog identities into its own facts and moves them with a
+  `rekey` of its own, reinstalls its library by replaying the previous
+  install's retractions, and cannot tell which release each device of a
+  space runs ([blast radius](stored-format/blast-radius.md)).
 - Run against the tonk-team fixture in this repository: its 135 rule
   bodies are in format 3, all inert on main until upgraded; of its 89
   transient markers, the upgrade would move 1.
@@ -69,13 +74,17 @@ same index keys and, on 0.5.0, fail a query over a body they cannot read.
 
 ## Approach
 
-Not decided. The agent recommends approach E of the
-[matrix](stored-format/direction.md): one format, 5, for every rule,
-read on every read path and nothing else; rule facts and the transient
-marker written under new attribute names an older release does not
-read; an upgrade, given the embedder's concepts, that writes the new
-beside the old and a prune that deletes the old when the embedder says;
-and all of it before the next tag, so a live space moves once.
+Not decided. The agent recommends approach F of the
+[matrix](stored-format/direction.md), revised from E on 2026-11-24 after
+tonk's answers: one format, 5, for every rule, read on every read path
+and nothing else; rule facts and the transient marker under new
+attribute names an older release does not read; and dialog rewrites
+nothing an embedder installs. It lists what it cannot read and exports
+what a migration needs (each generation's identity functions, an
+identity generation constant, the body rewrite with the reversal). The
+embedder reinstalls its library, rekeys its own facts and retracts the
+previous install when it decides. All of it before the next tag, so a
+live space moves once.
 
 Open questions for the maintainer:
 

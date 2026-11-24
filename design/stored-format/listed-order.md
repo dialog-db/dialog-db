@@ -138,3 +138,38 @@ listing tonk stores as several values would not show there; T10.
    them by value order and would compare them by listing after the
    upgrade. The upgrade then has to report such a rule rather than
    rewrite it silently. To check when that branch lands.
+
+## What tonk holds
+
+Reported by tonk @ b125f0d.
+
+- **T10.** Five declarations of three listed attributes, all in tonk's
+  `profile.yaml`, all written best first, none with a pick: tonk's
+  analyzer makes a list imply `top`
+  (`tonk-analyzer/src/analyzer/declaration.rs:118` to `:121`).
+  `xyz.tonk.space/presence` `[seeding, replicating, replicated, remote]`,
+  `xyz.tonk.space/sync` `[paused, synced, local]`,
+  `xyz.tonk.account/status` `[suspended, active, registered, retired]`.
+  No `max` or `min` anywhere in the library. A list is stored in tonk's
+  records as a JSON string under `db.attribute/among`, best first.
+  So every listed attribute tonk has is ranked and best first: the
+  overruled worry (a list already least first) does not arise in tonk.
+- **T11.** Reversing is more than the YAML: tests pin the order
+  (`tonk-worker/tests/standard_library.rs:2234` to `:2246`,
+  `analyzer.rs:1194`, `:1635`, `:1670`,
+  `tonk-schema/src/concept.rs:2166` to `:2230`,
+  `tonk-template/src/resolve.rs:798`), Rust constants pin it
+  (`tonk-schema/src/account.rs:35` to `:47`), and docs describe it. The
+  `db.attribute/among` records are tonk facts and move with tonk's
+  `rekey`, since the attribute's identity hashes the list in order.
+- `xyz.tonk.account/status` has two descriptors already: a Rust
+  `#[pick(last)]` attribute typed entity, and the ranked list in YAML,
+  which leaves out `case:onboarding` that the Rust constants include.
+  One relation, two attributes, two identities, before any reversal.
+  That is tonk's to reconcile; it is the case "one relation, two orders"
+  warned about, in another form.
+- On main a listed `as` without a pick is an enumerated type and ranks
+  nothing; 0.5.0 read it as `top`. Whether tonk's lowering writes the
+  pick or relies on the implied one is T15. If it relies on it, tonk's
+  three ranked reads change meaning on the dialog upgrade whatever is
+  decided here about the reversal.
