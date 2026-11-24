@@ -2521,3 +2521,42 @@ async fn it_names_one_entity_of_a_number_read_and_written() -> Result<()> {
     );
     Ok(())
 }
+
+/// A formula in a select's head over two reads is the formula of each
+/// row's own values: four pairs, each with its one total. Its columns
+/// were reported as fields of the entity each, and read back crossed:
+/// eight rows, each pair with both totals (tonk's tour, T1).
+#[dialog_common::test]
+async fn it_reports_a_formula_in_the_head_of_each_rows_own_values() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let (_, diagnostics) = notebook
+        .submit(
+            r#"(concept (estimate ?t hours: ?h)
+                 (tour.todo/hours of: ?t is: ?h as: :natural cardinality: :one))
+               (assert (estimate todo:milk hours: 1))
+               (assert (estimate todo:mum hours: 1))
+               (assert (estimate todo:deck hours: 3))
+               (assert (estimate todo:seeds hours: 2))"#,
+        )
+        .await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let rows = report(
+        &mut notebook,
+        "(select (tour.morning ?a with: ?b total: (+ ?p : ?q))
+           (estimate ?a hours: ?p)
+           (estimate ?b hours: ?q)
+           (< ?p : ?q)
+           (<= (+ ?p : ?q) : 4))",
+    )
+    .await?;
+    assert_eq!(
+        rows,
+        [
+            "(tour.morning todo:milk total: 3 with: todo:seeds)",
+            "(tour.morning todo:milk total: 4 with: todo:deck)",
+            "(tour.morning todo:mum total: 3 with: todo:seeds)",
+            "(tour.morning todo:mum total: 4 with: todo:deck)",
+        ]
+    );
+    Ok(())
+}
