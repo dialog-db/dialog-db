@@ -205,8 +205,8 @@ namespace of the same length.
 `retrocomputing` log (`scripts/se-transform.py` on the April 2024 dump;
 the script is now
 [on the `research-data` branch](https://github.com/dialog-db/dialog-db/blob/research-data/research/benchmark-dataset/se-transform.py))
-through an
-in-memory branch. It keeps every distinct block the archive is asked to store, in write order, and models each store on the same
+through an in-memory branch. It keeps every distinct block the archive
+is asked to store, in write order, and models each store on the same
 bytes:
 
 - **fs**: one file per block, as the `fs` provider writes them; also

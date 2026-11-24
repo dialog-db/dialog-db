@@ -1823,13 +1823,13 @@ mod test {
     /// [`se-transform.py`] on the `research-data` branch makes from a Stack
     /// Exchange dump.
     ///
-    /// [`se-transform.py`]: https://github.com/dialog-db/dialog-db/blob/research-data/research/benchmark-dataset/se-transform.py
-    ///
     /// This is the fixture with genuine ancestry: one commit per source edit,
     /// so the per-commit history work (skip-table construction, ancestry
     /// lookups, context derivation) is measured against real depth rather than
     /// against the two-commit history every other seeder leaves behind.
     /// `DIALOG_TXN_LIMIT` caps the replay.
+    ///
+    /// [`se-transform.py`]: https://github.com/dialog-db/dialog-db/blob/research-data/research/benchmark-dataset/se-transform.py
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg(not(target_arch = "wasm32"))]
     async fn it_replays_a_transaction_log() -> Result<()> {
