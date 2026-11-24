@@ -2,7 +2,7 @@
 
 ## Transformed form
 
-`scripts/se-transform.py` turns an extracted Stack Exchange site dump into a flat, transaction-ordered fact log so the ingester does no joining, replaying, or type interpretation:
+`scripts/se-transform.py` turns an extracted Stack Exchange site dump into a flat, transaction-ordered fact log so the ingester does no joining, replaying, or type interpretation. The script is no longer on `main`; it is now [`research/benchmark-dataset/se-transform.py` on the `research-data` branch](https://github.com/dialog-db/dialog-db/blob/research-data/research/benchmark-dataset/se-transform.py).
 
 ```
 txn,at,the,of,as,is

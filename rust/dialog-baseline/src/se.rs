@@ -1,9 +1,10 @@
 //! Stack Exchange fact-log replay: the realistic workload.
 //!
-//! `scripts/se-transform.py` turns a Stack Exchange site dump into a flat,
-//! transaction-ordered fact log (`txn,at,the,of,as,is` — see
-//! `notes/benchmark-dataset.md`). Rows sharing a `txn` are one commit, and
-//! commit boundaries are the site's real ones. This module replays that log
+//! The log is a flat, transaction-ordered CSV of facts
+//! (`txn,at,the,of,as,is` — see `notes/benchmark-dataset.md`). Rows
+//! sharing a `txn` are one commit, and commit boundaries are the site's
+//! real ones. [`se-transform.py`] on the `research-data` branch makes one
+//! from a Stack Exchange site dump. This module replays that log
 //! against both stores, one commit per transaction, which exercises exactly
 //! the shape the synthetic `stuff` workload cannot: small skewed commits
 //! (p50 of 1 fact), genuine cardinality-one supersession (44% of pairs are
@@ -26,6 +27,8 @@
 //! dialog (remove all priors from the three indexes, insert the new value)
 //! and `DELETE (of, the)` + `INSERT` inside the same SQLite transaction.
 //! Multi-valued attributes (`se.post/tag`) are plain asserts / inserts.
+//!
+//! [`se-transform.py`]: https://github.com/dialog-db/dialog-db/blob/research-data/research/benchmark-dataset/se-transform.py
 
 use std::str::FromStr;
 
