@@ -7,10 +7,11 @@
 //! shape) and a point read of a heavily-superseded pair (`se.post/title`).
 //!
 //! Data source: the deterministic synthetic approximation by default;
-//! point `DIALOG_SE_CSV` at a transformed dump (produced by
-//! `scripts/se-transform.py`) to run against real data. `DIALOG_SE_TXNS`
-//! overrides the replayed transaction count (default 500 for writes,
-//! 2000 for the read-side seed).
+//! point `DIALOG_SE_CSV` at a transformed dump to run against real data:
+//! a CSV of `txn,at,the,of,as,is`, rows sharing a `txn` one commit, made
+//! from a Stack Exchange dump by [`se-transform.py`] on the `research-data`
+//! branch. `DIALOG_SE_TXNS` overrides the replayed transaction count
+//! (default 500 for writes, 2000 for the read-side seed).
 //!
 //! Run with:
 //!
@@ -18,6 +19,8 @@
 //! cargo bench -p dialog-baseline --bench se_replay
 //! DIALOG_SE_CSV=path/to/retro-facts.csv cargo bench -p dialog-baseline --bench se_replay
 //! ```
+//!
+//! [`se-transform.py`]: https://github.com/dialog-db/dialog-db/blob/research-data/research/benchmark-dataset/se-transform.py
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_baseline::repo::clean_temp_storage;
