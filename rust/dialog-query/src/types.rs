@@ -195,8 +195,8 @@ define_descriptor!(
 
 define_descriptor!(
     /// Descriptor for composite maps, records among them.
-    CompositeMapType,
-    Type::CompositeMap
+    MapType,
+    Type::Map
 );
 
 define_descriptor!(
@@ -208,8 +208,8 @@ define_descriptor!(
 
 define_descriptor!(
     /// Descriptor for composite lists.
-    CompositeListType,
-    Type::CompositeList
+    ListType,
+    Type::List
 );
 
 /// Descriptor for dynamically-typed values: carries an optional

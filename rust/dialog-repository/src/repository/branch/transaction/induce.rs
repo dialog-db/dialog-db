@@ -28,6 +28,37 @@
 //!    transients, or errors after [`MAX_ROUNDS`] rounds — the runaway
 //!    guard for self-feeding cascades.
 //!
+//! A candidate is evaluated *seeded* (the round's rows bound into the
+//! premises that read them) or *in full*. A seed finds the matches a
+//! row is part of: the row's value at the row's entity. So a candidate
+//! premised on an attribute that changed *derivedly*, one a deductive
+//! rule concludes from something the round touched, is evaluated in
+//! full, written by a row of the round or not. The cases this covers:
+//!
+//! - A rule deriving an attribute from itself for another entity (an
+//!   event mirroring another's kind): the row seeds the entity written,
+//!   and the mirror is another entity.
+//! - A rule deriving an attribute at the entity written but at another
+//!   value (an alias added to a kind): the seed binds the value written.
+//! - A rule deriving an attribute from another one (a kind from a tag):
+//!   the row of the other attribute seeds nothing of a rule that reads
+//!   only the derived one, at whatever entity.
+//! - Chains: the closure follows rule after rule, so an attribute
+//!   derived from one derived from what was written is derived too.
+//! - A rule with several premises, one reading a touched attribute:
+//!   whatever its other premises read, its conclusion changed derivedly.
+//! - A deductive rule installed in the round: its conclusions are
+//!   derived, whatever the round writes.
+//! - A retraction touches its attribute as an assertion does, so what
+//!   is derived from it is derived-touched alike.
+//!
+//! A narrower test, firing in full only when a rule can derive for an
+//! entity other than the one its touched premises read, is not sound:
+//! the second and third cases above derive at the entity read and are
+//! still missed by a seed. The full evaluation costs a scan of the
+//! candidate's relation each round an attribute is both written and
+//! derived from something touched.
+//!
 //! What is deliberately *not* here yet (see `notes/inductive-rules.md`):
 //! the per-head trigger footprint and alpha-discrimination caches that
 //! keep hot-attribute fan-out flat, delta-restricted body evaluation,
@@ -227,7 +258,6 @@ where
                 }
             })
             .collect();
-        let direct = touched.clone();
 
         // The overlay's trigger slice: rules, markers, and support
         // edges staged in this transaction (including novelty from
@@ -258,14 +288,20 @@ where
                 }
             }
         }
+        // What changed derivedly this round: every attribute a
+        // deductive rule concludes from something touched, or that a
+        // deductive rule installed this round concludes, whether or
+        // not a row of the round also writes it (see
+        // [`expand_through_deduction`](Dispatch::expand_through_deduction)).
+        let mut derived: BTreeSet<Reach> = BTreeSet::new();
         for entity in &installed_deductive {
             let Some(body) = dispatch.deductive(entity, &overlay, env).await? else {
                 continue;
             };
             for (_, field) in body.conclusion().with().iter() {
-                // Inserted after the `direct` snapshot, so these land
-                // in the expanded set and force full evaluation.
-                touched.insert(Reach::of(field.descriptor().the()));
+                let reach = Reach::of(field.descriptor().the());
+                derived.insert(reach.clone());
+                touched.insert(reach);
             }
         }
 
@@ -308,7 +344,7 @@ where
         // reaches inductive rules premised on the derived concepts it
         // (transitively) supports through deductive rules.
         dispatch
-            .expand_through_deduction(&mut touched, &overlay, env)
+            .expand_through_deduction(&mut touched, &mut derived, &overlay, env)
             .await?;
 
         // Trigger-indexed discovery: footprint gate, then one
@@ -322,10 +358,15 @@ where
         }
         candidates.extend(installed.iter().cloned());
 
-        // Attributes only reachable through the deductive closure: a
-        // candidate premised on one changed *derivedly*, which a base
-        // row cannot seed.
-        let expanded: BTreeSet<Reach> = touched.difference(&direct).cloned().collect();
+        // Attributes that changed derivedly: a candidate premised on
+        // one is evaluated in full, since a row seeds only the facts
+        // it is, and a fact derived from it is another. An attribute a
+        // row of the round writes is among them when a deductive rule
+        // also concludes it from something touched: the row seeds its
+        // own value at its own entity, and what the rule derives from
+        // the round's rows (for another entity, at another value, or
+        // from another attribute) is found only in full.
+        let expanded = derived;
 
         let mut novelty = Changes::new();
         let mut emitted_transients = Changes::new();
@@ -610,7 +651,9 @@ impl<'a> Dispatch<'a> {
     /// Close `touched` over the deductive support graph: for each
     /// touched attribute, `dialog.rule/reads` names the deductive rules
     /// whose bodies read it; their conclusions' attributes are
-    /// *derived-touched* and recurse until the frontier is exhausted.
+    /// *derived-touched*, collected in `derived` whether or not they
+    /// were touched already, and recurse until the frontier is
+    /// exhausted.
     /// Composed from per-rule facts at dispatch time, never stored, so
     /// late-installed deductive rules are picked up automatically.
     /// Polarity is deliberately ignored across derived edges: through
@@ -618,6 +661,7 @@ impl<'a> Dispatch<'a> {
     async fn expand_through_deduction<Env>(
         &self,
         touched: &mut BTreeSet<Reach>,
+        derived: &mut BTreeSet<Reach>,
         overlay: &OverlayTriggers,
         env: &Env,
     ) -> Result<(), CommitError>
@@ -676,9 +720,10 @@ impl<'a> Dispatch<'a> {
                     continue;
                 };
                 for (_, field) in body.conclusion().with().iter() {
-                    let derived = Reach::of(field.descriptor().the());
-                    if touched.insert(derived.clone()) {
-                        frontier.push(derived);
+                    let reach = Reach::of(field.descriptor().the());
+                    derived.insert(reach.clone());
+                    if touched.insert(reach.clone()) {
+                        frontier.push(reach);
                     }
                 }
             }

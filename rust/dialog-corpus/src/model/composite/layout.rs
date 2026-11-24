@@ -14,6 +14,18 @@ pub(super) const MAP: u8 = 1;
 /// A list: items, each a value's slot.
 pub(super) const LIST: u8 = 2;
 
+/// The layout this release writes and reads, in the high four bits of a
+/// composite's first byte, its table's head. A later layout takes another
+/// number; a reader refuses one it does not know by name.
+pub(super) const LAYOUT: u8 = 0;
+
+/// The layout `bytes` say they are in: the high four bits of the first
+/// byte, or this release's for no bytes at all, which read as no
+/// composite.
+pub(super) fn layout_of(bytes: &[u8]) -> u8 {
+    bytes.first().map_or(LAYOUT, |head| head >> 4)
+}
+
 /// The widths an offset may be written in, by the code a head carries:
 /// none, then one, two or four bytes.
 const WIDTHS: [usize; 4] = [0, 1, 2, 4];
@@ -170,7 +182,10 @@ pub(super) fn slot_end(bytes: &[u8], at: usize, end: usize) -> Option<usize> {
     } else {
         return None;
     };
-    Some(at + 1 + len)
+    // A slot ends within the bytes: a boolean's type byte with nothing
+    // after it does not.
+    let slot_end = at.checked_add(1)?.checked_add(len)?;
+    (slot_end <= bytes.len()).then_some(slot_end)
 }
 
 /// Whether a slot of type `kind` holds a terminated string.

@@ -409,28 +409,25 @@ fn it_tells_a_record_by_its_keys() {
     let of = |composite: &Composite| Value::Composite(composite.clone());
     assert!(ValueDataType::CompositeRecord.holds(&of(&record)));
     assert!(!ValueDataType::CompositeRecord.holds(&of(&map)));
-    assert!(ValueDataType::CompositeMap.holds(&of(&record)));
-    assert!(ValueDataType::CompositeMap.holds(&of(&map)));
-    assert!(!ValueDataType::CompositeMap.holds(&of(&list)));
-    assert!(ValueDataType::CompositeList.holds(&of(&list)));
+    assert!(ValueDataType::Map.holds(&of(&record)));
+    assert!(ValueDataType::Map.holds(&of(&map)));
+    assert!(!ValueDataType::Map.holds(&of(&list)));
+    assert!(ValueDataType::List.holds(&of(&list)));
     assert!(ValueDataType::Composite.holds(&of(&list)));
     assert!(ValueDataType::Composite.holds(&of(&map)));
     assert!(!ValueDataType::Composite.holds(&text("x")));
-    assert_eq!(of(&record).data_type(), ValueDataType::CompositeMap);
-    assert_eq!(of(&list).data_type(), ValueDataType::CompositeList);
+    assert_eq!(of(&record).data_type(), ValueDataType::Map);
+    assert_eq!(of(&list).data_type(), ValueDataType::List);
     for kind in [
-        ValueDataType::CompositeMap,
+        ValueDataType::Map,
         ValueDataType::CompositeRecord,
-        ValueDataType::CompositeList,
+        ValueDataType::List,
     ] {
         assert_eq!(kind.band(NUMBER_BAND), ValueDataType::Composite);
         assert_eq!(kind.band(0), ValueDataType::Composite);
         assert!(!kind.is_view() && !kind.is_number());
     }
-    assert_eq!(
-        ValueDataType::CompositeRecord.storage(),
-        ValueDataType::CompositeMap
-    );
+    assert_eq!(ValueDataType::CompositeRecord.storage(), ValueDataType::Map);
 }
 
 /// Names are kept once for a composite and everything nested in it,
@@ -829,24 +826,99 @@ fn it_refuses_keys_out_of_order() {
 fn it_refuses_a_key_no_entry_uses() {
     let used = Composite::map([(text("a"), natural(1))]).unwrap();
     let extra = Composite::map([(text("z"), natural(2))]).unwrap();
-    let mut tokens: Vec<Vec<u8>> = used
-        .atom_tokens()
-        .iter()
-        .map(|token| token.to_vec())
-        .collect();
-    tokens.push(
-        extra
-            .atom_tokens()
-            .into_iter()
-            .find(|token| token.first() == Some(&(ValueDataType::Number as u8)))
-            .unwrap()
-            .to_vec(),
+    let used_bytes = used.to_bytes();
+    let extra_bytes = extra.to_bytes();
+    let (atoms, body) = Composite::split_atoms(&used_bytes).unwrap();
+    let (more, _) = Composite::split_atoms(&extra_bytes).unwrap();
+    let mut atoms = atoms;
+    atoms.push(
+        more.into_iter()
+            .find(|atom| atom.first() == Some(&(ValueDataType::Number as u8)))
+            .unwrap(),
     );
-    tokens.sort();
-    let tokens: Vec<&[u8]> = tokens.iter().map(Vec::as_slice).collect();
+    atoms.sort();
+    let mut bytes = Vec::new();
+    Composite::join_atoms(&atoms, body, &mut bytes);
     assert!(matches!(
-        Composite::from_token_parts(&tokens, used.token_body()),
+        Composite::from_bytes(&bytes),
         Err(CompositeError::NotCanonical)
+    ));
+}
+
+/// A composite's bytes split into its atoms and its body, and join back
+/// into the very bytes, for every composite of the fixtures.
+#[dialog_common::test]
+fn it_splits_into_atoms_and_joins_back() {
+    let nested = Composite::map([(text("n"), natural(3))]).unwrap();
+    let many = Composite::list((0..40u32).map(|n| natural(n.into()))).unwrap();
+    for composite in [
+        Composite::map([]).unwrap(),
+        Composite::list([]).unwrap(),
+        Composite::map([(text("a"), Value::Composite(nested.clone()))]).unwrap(),
+        Composite::list([Value::Composite(nested), text("b")]).unwrap(),
+        many,
+    ] {
+        let bytes = composite.to_bytes();
+        let (atoms, body) = Composite::split_atoms(&bytes).expect("splits");
+        let mut joined = Vec::new();
+        Composite::join_atoms(&atoms, body, &mut joined);
+        assert_eq!(joined, bytes.as_ref(), "{composite:?}");
+    }
+    assert!(Composite::split_atoms(&[]).is_none());
+    assert!(
+        Composite::split_atoms(&[0x00, 0x00, 0x00]).is_none(),
+        "no body"
+    );
+}
+
+/// Type byte 26 is reserved for a composite's references to its atoms: no
+/// type is it, and a key whose value starts with it does not parse.
+#[dialog_common::test]
+fn it_reserves_the_atom_reference_byte() {
+    assert_eq!(ValueDataType::ATOM_REFERENCE, 26);
+    assert!(
+        ValueDataType::ALL
+            .iter()
+            .all(|kind| *kind as u8 != ValueDataType::ATOM_REFERENCE)
+    );
+    let mut key = vec![crate::ENTITY_KEY_TAG];
+    key.extend_from_slice(b"test:a\0test/v\0");
+    key.extend_from_slice(&[ValueDataType::ATOM_REFERENCE, 0]);
+    assert!(crate::split_record_components(&key).is_none());
+    let mut fine = key.clone();
+    let at = fine.len() - 2;
+    fine[at] = ValueDataType::String as u8;
+    assert!(
+        crate::split_record_components(&fine).is_some(),
+        "the same key of a type parses"
+    );
+}
+
+/// A body slot holding a scalar inline, rather than a reference to its
+/// atom, is not a composite: no reader takes it.
+#[dialog_common::test]
+fn it_refuses_a_scalar_held_in_the_body() {
+    let canonical = Composite::list([text("a")])
+        .unwrap()
+        .to_bytes()
+        .into_owned();
+    let (atoms, _) = Composite::split_atoms(&canonical).unwrap();
+    let atom = atoms[0].to_vec();
+    // The list's one item as the atom itself instead of `26 0`.
+    let mut body = Vec::new();
+    body.push(LIST);
+    body.push(1);
+    body.push(atom.len() as u8);
+    body.extend_from_slice(&atom);
+    let mut bytes = Vec::new();
+    Composite::join_atoms(&[&atom], &body, &mut bytes);
+    assert!(matches!(
+        Composite::from_bytes(&bytes),
+        Err(CompositeError::Malformed)
+    ));
+    assert!(matches!(
+        Composite::from_layout(&bytes),
+        Err(CompositeError::Malformed)
     ));
 }
 
@@ -920,14 +992,21 @@ fn it_refuses_an_offset_that_is_not_where_its_item_is() {
 
 #[dialog_common::test]
 fn it_refuses_a_number_under_a_type_other_than_the_band() {
+    // A list of one item, the atom `slot`, referred to from the body.
+    let list_of = |slot: &[u8]| {
+        let mut bytes = Vec::new();
+        Composite::join_atoms(&[slot], &[LIST, 1, 2, TOKEN_REF, 0], &mut bytes);
+        bytes
+    };
     // The natural 3 under `natural:`'s type byte and in its own encoding,
     // which a key outside the band holds: a composite holds every number in
-    // the band, so it reads no slot of `natural:`.
+    // the band, so it holds no atom of `natural:`.
     let mut slot = vec![ValueDataType::UnsignedInt as u8];
     crate::encode_key_value(&natural(3), 0, &mut slot);
-    let mut bytes = vec![TABLE, 0, 0, LIST, 1, slot.len() as u8];
-    bytes.extend(slot);
-    assert!(matches!(refused(&bytes), CompositeError::Malformed));
+    assert!(matches!(
+        refused(&list_of(&slot)),
+        CompositeError::Malformed
+    ));
     // A number in the band's encoding with more bytes than it needs reads
     // as the number, and is not its encoding.
     let mut slot = vec![ValueDataType::Number as u8];
@@ -936,8 +1015,7 @@ fn it_refuses_a_number_under_a_type_other_than_the_band() {
         .unwrap()
         .to_bytes()
         .into_owned();
-    let mut bytes = vec![TABLE, 0, 0, LIST, 1, slot.len() as u8];
-    bytes.extend(slot);
+    let bytes = list_of(&slot);
     if bytes != canonical {
         assert!(matches!(refused(&bytes), CompositeError::NotCanonical));
     }
@@ -993,6 +1071,10 @@ fn it_never_panics_on_any_bytes() {
             bytes
         };
         let _ = Composite::from_bytes(&bytes);
+        if let Some((atoms, body)) = Composite::split_atoms(&bytes) {
+            let mut joined = Vec::new();
+            Composite::join_atoms(&atoms, body, &mut joined);
+        }
         // A view over bytes nothing checked answers too, if wrongly.
         let unchecked = Composite::root(bytes.clone().into());
         let _ = (unchecked.len(), unchecked.kind(), unchecked.is_record());
@@ -1151,7 +1233,7 @@ fn it_reads_back_from_every_form_a_value_is_written_in() {
     // A record read where a list is declared is refused.
     assert!(
         Value::try_from((
-            ValueDataType::CompositeList,
+            ValueDataType::List,
             location(1.0, 2.0).to_bytes().into_owned()
         ))
         .is_err()
@@ -1254,4 +1336,221 @@ fn it_orders_as_a_tree_key_without_prefixes_colliding() {
         assert_eq!(read, Value::Composite(composite.clone()));
         assert_eq!(rest, b"\x05rest");
     }
+}
+
+/// A syntax tree's shape: every node a map of two fields, its `type` and
+/// its `body`, `depth` deep, the deepest body a text.
+fn chain(depth: usize) -> Composite {
+    let mut body = text("leaf");
+    for level in 0..depth {
+        body = Value::Composite(
+            Composite::map([
+                (text("type"), text(&format!("kind-{}", level % 5))),
+                (text("body"), body),
+            ])
+            .unwrap(),
+        );
+    }
+    match body {
+        Value::Composite(composite) => composite,
+        _ => unreachable!("depth is at least one"),
+    }
+}
+
+/// What reading one field of a stored composite costs on the path a query
+/// takes from a key's value payload (`decode_value_view`): unescaping the
+/// payload, [`Composite::from_bytes`] (reading every part and writing the
+/// composite again to check its bytes are canonical), and reading the
+/// field, the `type` of the deepest map, through its path. Run by hand:
+/// `cargo test --release -p dialog-corpus --lib -- --ignored --nocapture
+/// measure_reading_a_field`.
+#[dialog_common::test]
+#[ignore = "a measurement, run by hand"]
+fn measure_reading_a_field_of_a_stored_syntax_tree() {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    let rounds = 20_000;
+    let nanos = |started: Instant| started.elapsed().as_nanos() as f64 / rounds as f64;
+    println!(
+        "depth | bytes | whole read | unescape | from_bytes | view, no check | field | field share"
+    );
+    for depth in [7, 13, 19] {
+        let tree = chain(depth);
+        let payload = crate::encode_value_owned(&Value::Composite(tree.clone()));
+        let canonical = tree.to_bytes().into_owned();
+        let read = |composite: &Composite| {
+            let mut at = composite.clone();
+            for _ in 1..depth {
+                match at.first(&text("body")) {
+                    Some(Value::Composite(next)) => at = next,
+                    _ => panic!("a body"),
+                }
+            }
+            at.first_view(&text("type"))
+                .and_then(|view| view.to_value().ok())
+        };
+        assert_eq!(read(&tree), Some(text("kind-0")), "the deepest map");
+
+        let started = Instant::now();
+        for _ in 0..rounds {
+            let view =
+                crate::decode_value_view(ValueDataType::Composite, black_box(&payload)).unwrap();
+            let crate::ValueView::Composite(composite) = view else {
+                unreachable!()
+            };
+            black_box(read(&composite));
+        }
+        let whole = nanos(started);
+
+        let started = Instant::now();
+        for _ in 0..rounds {
+            black_box(crate::decode_bytes(black_box(&payload)).unwrap());
+        }
+        let unescape = nanos(started);
+
+        let started = Instant::now();
+        for _ in 0..rounds {
+            black_box(Composite::from_bytes(black_box(&canonical)).unwrap());
+        }
+        let checked = nanos(started);
+
+        let started = Instant::now();
+        for _ in 0..rounds {
+            black_box(Composite::root(black_box(canonical.as_slice()).into()));
+        }
+        let unchecked = nanos(started);
+
+        let view = Composite::root(canonical.as_slice().into());
+        let started = Instant::now();
+        for _ in 0..rounds {
+            black_box(read(black_box(&view)));
+        }
+        let field = nanos(started);
+        println!(
+            "{depth} | {} | {whole:.0} ns | {unescape:.0} ns | {checked:.0} ns | {unchecked:.0} ns | {field:.0} ns | {:.0}%",
+            canonical.len(),
+            100.0 * field / whole
+        );
+    }
+}
+
+/// A table whose one atom is a boolean's type byte with no value after it
+/// is not a composite: splitting it and reading it refuse it, and nothing
+/// reads past the end.
+#[dialog_common::test]
+fn it_refuses_a_boolean_atom_cut_short() {
+    let bytes = [TABLE, 1, 1, ValueDataType::Boolean as u8];
+    assert!(Composite::split_atoms(&bytes).is_none());
+    assert!(Composite::from_bytes(&bytes).is_err());
+    let mut with_body = bytes.to_vec();
+    with_body.extend_from_slice(&[LIST, 0, 0]);
+    assert!(Composite::split_atoms(&with_body).is_none());
+    assert!(Composite::from_bytes(&with_body).is_err());
+}
+
+/// A composite says its layout in the high four bits of its first byte.
+/// This release writes layout 0, which costs no byte, and refuses every
+/// other by name, never as malformed bytes; a store splitting it into
+/// atoms keeps it as it is.
+#[dialog_common::test]
+fn it_refuses_a_layout_it_does_not_read_by_name() {
+    let bytes = Composite::map([(text("x"), text("y"))])
+        .unwrap()
+        .to_bytes()
+        .into_owned();
+    assert_eq!(bytes[0] >> 4, 0, "this release writes layout 0");
+    for layout in 1..16u8 {
+        let mut later = bytes.clone();
+        later[0] |= layout << 4;
+        assert_eq!(
+            Composite::from_bytes(&later).err(),
+            Some(CompositeError::UnsupportedLayout(layout))
+        );
+        assert!(Composite::split_atoms(&later).is_none());
+    }
+}
+
+/// The one-pass check accepts only what the full check accepts, and
+/// accepts what the encoder writes: over every generated composite, and
+/// over random and mutated bytes, `from_bytes` answers as the full check
+/// does, error for error.
+#[dialog_common::test]
+fn it_shows_canonical_bytes_as_the_full_check_does() {
+    let mut random = Seeded(0x0ca1);
+    let mut valid = Vec::new();
+    let mut shown = 0;
+    for seed in 1..=2_000 {
+        let (_, composite) = generate(&mut Seeded(seed), 3, false);
+        let bytes = composite.to_bytes().into_owned();
+        assert!(Composite::from_bytes_fully(&bytes).is_ok());
+        // Every one, but for a key holding two nested composites, which
+        // the encoder orders by their bytes on their own.
+        assert_eq!(
+            check::canonical(&bytes),
+            !two_nested_under_a_key(&composite),
+            "seed {seed}"
+        );
+        shown += check::canonical(&bytes) as usize;
+        valid.push(bytes);
+    }
+    assert!(shown > 1_000, "{shown} of 2,000 shown in one pass");
+    for round in 0..40_000 {
+        let bytes: Vec<u8> = if round % 4 == 0 {
+            (0..random.below(64))
+                .map(|_| random.below(256) as u8)
+                .collect()
+        } else {
+            let mut bytes = valid[random.below(valid.len())].clone();
+            for _ in 0..1 + random.below(2) {
+                match random.below(3) {
+                    0 if !bytes.is_empty() => {
+                        let at = random.below(bytes.len());
+                        bytes[at] = random.below(256) as u8;
+                    }
+                    1 => bytes.truncate(random.below(bytes.len() + 1)),
+                    _ => bytes.insert(random.below(bytes.len() + 1), random.below(256) as u8),
+                }
+            }
+            bytes
+        };
+        let full = Composite::from_bytes_fully(&bytes).map(|read| read.to_bytes().into_owned());
+        if check::canonical(&bytes) {
+            assert_eq!(
+                full.as_ref().ok(),
+                Some(&bytes),
+                "shown canonical, but not: {bytes:?}"
+            );
+        }
+        let quick = Composite::from_bytes(&bytes).map(|read| read.to_bytes().into_owned());
+        if layout::layout_of(&bytes) == 0 {
+            assert_eq!(quick, full, "{bytes:?}");
+        }
+    }
+}
+
+/// Whether a map in `composite` holds two nested composites under one
+/// key: what the one-pass check leaves to the full check.
+fn two_nested_under_a_key(composite: &Composite) -> bool {
+    fn two_nested(composite: &Composite) -> bool {
+        let mut seen: Vec<(Value, usize)> = Vec::new();
+        for (key, value) in composite.entries() {
+            if let Value::Composite(nested) = &value {
+                if two_nested(nested) {
+                    return true;
+                }
+                match seen.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, n)) => *n += 1,
+                    None => seen.push((key.clone(), 1)),
+                }
+            }
+        }
+        if seen.iter().any(|(_, n)| *n >= 2) {
+            return true;
+        }
+        composite
+            .items()
+            .any(|item| matches!(&item, Value::Composite(n) if two_nested(n)))
+    }
+    two_nested(composite)
 }
