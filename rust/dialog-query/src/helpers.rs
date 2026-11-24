@@ -1120,9 +1120,12 @@ where
         Ok(index)
     }
 
-    /// Replay a transaction-ordered fact log (`txn,at,the,of,as,is`, produced
-    /// by `scripts/se-transform.py` from a Stack Exchange site dump) as one
-    /// commit per `txn`, in file order.
+    /// Replay a transaction-ordered fact log (`txn,at,the,of,as,is`, rows
+    /// sharing a `txn` one commit; made from a Stack Exchange site dump by
+    /// [`se-transform.py`] on the `research-data` branch) as one commit per
+    /// `txn`, in file order.
+    ///
+    /// [`se-transform.py`]: https://github.com/dialog-db/dialog-db/blob/research-data/research/benchmark-dataset/se-transform.py
     ///
     /// The point of this fixture is ancestry. Every other seeder here writes
     /// its whole fact base in one or two transactions, which leaves nothing
@@ -1815,8 +1818,12 @@ impl BenchEnv<Session<::dialog_storage::provider::storage::WebSpace>> {
 mod test {
 
     /// Replay a real transaction log and report cost against history depth.
-    /// Skipped unless `DIALOG_TXN_LOG` points at a file produced by
-    /// `scripts/se-transform.py`.
+    /// Skipped unless `DIALOG_TXN_LOG` points at a transaction log
+    /// (`txn,at,the,of,as,is`, rows sharing a `txn` one commit), as
+    /// [`se-transform.py`] on the `research-data` branch makes from a Stack
+    /// Exchange dump.
+    ///
+    /// [`se-transform.py`]: https://github.com/dialog-db/dialog-db/blob/research-data/research/benchmark-dataset/se-transform.py
     ///
     /// This is the fixture with genuine ancestry: one commit per source edit,
     /// so the per-commit history work (skip-table construction, ancestry
@@ -2126,12 +2133,16 @@ mod test {
     /// Capture the node-size distribution of the tree a transaction-log
     /// replay leaves behind: history region plus live per-link novelty
     /// buffers, the shape a real commit sequence produces (deliberately not
-    /// canonicalized). Skipped unless `DIALOG_TXN_LOG` points at a file
-    /// produced by `scripts/se-transform.py`; `DIALOG_TXN_LIMIT` caps the
+    /// canonicalized). Skipped unless `DIALOG_TXN_LOG` points at a
+    /// transaction log (`txn,at,the,of,as,is`, rows sharing a `txn` one
+    /// commit), as [`se-transform.py`] on the `research-data` branch makes
+    /// from a Stack Exchange dump; `DIALOG_TXN_LIMIT` caps the
     /// replay (default 2048, 0 replays all). `DIALOG_TXN_MEM` switches to the
     /// in-memory backend — a deep replay writes cumulative block bytes far
     /// beyond the final tree (every commit rewrites its touched path), so the
     /// disk backend can exhaust storage long before the log ends.
+    ///
+    /// [`se-transform.py`]: https://github.com/dialog-db/dialog-db/blob/research-data/research/benchmark-dataset/se-transform.py
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg(not(target_arch = "wasm32"))]
     async fn it_reports_replay_distribution() -> Result<()> {
