@@ -331,6 +331,10 @@ impl Query {
                 _ => {}
             }
         }
+        // Kept as `None`: a query serializes to JSON whose keys are text,
+        // and renaming changes only variable names, so neither step
+        // fails but by a bug, and `None` is a fold not lowered, which is
+        // asked in memory and answers the same.
         let mut select = serde_json::to_value(&self.select).ok()?;
         rename(&mut select, &names, prefix);
         serde_json::from_value(select).ok()
@@ -1631,19 +1635,22 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
             )));
         }
     }
-    let shown = |term: &Term| match term {
-        Term::Text(text) => Some(Syntax::Constant(Value::String(text.clone()))),
-        Term::Number(text) => syntax::number(text).ok().map(Syntax::Constant),
-        Term::Entity(uri) => syntax::entity(uri).ok().map(Syntax::Constant),
-        Term::Symbol(name) if name == "true" || name == "false" => {
-            Some(Syntax::Constant(Value::Boolean(name == "true")))
-        }
-        Term::Symbol(name) => Some(Syntax::Reference(name.clone())),
-        Term::Variable(_)
-        | Term::Blank
-        | Term::Formula(_)
-        | Term::Struct(_)
-        | Term::Fold { .. } => None,
+    // A term that is a constant, as the form it is; `None` for any other.
+    let shown = |term: &Term| -> Result<Option<Syntax>, Error> {
+        Ok(match term {
+            Term::Text(text) => Some(Syntax::Constant(Value::String(text.clone()))),
+            Term::Number(text) => Some(Syntax::Constant(syntax::number(text)?)),
+            Term::Entity(uri) => Some(Syntax::Constant(syntax::entity(uri)?)),
+            Term::Symbol(name) if name == "true" || name == "false" => {
+                Some(Syntax::Constant(Value::Boolean(name == "true")))
+            }
+            Term::Symbol(name) => Some(Syntax::Reference(name.clone())),
+            Term::Variable(_)
+            | Term::Blank
+            | Term::Formula(_)
+            | Term::Struct(_)
+            | Term::Fold { .. } => None,
+        })
     };
 
     // A query's row that is one record too is derived by a rule, so the
@@ -1659,7 +1666,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
         let mut scope = Scope::default();
         let select = scope.read(only)?;
         if scope.when.is_empty() {
-            let slot = |term: &Term, scope: &mut Scope| match (term, shown(term)) {
+            let slot = |term: &Term, scope: &mut Scope| match (term, shown(term)?) {
                 (_, Some(form)) => Ok(Slot::Is(form)),
                 (Term::Variable(name), _) => Ok(Slot::Bound(scope.name(name))),
                 (Term::Struct(form), _) => {
@@ -1696,6 +1703,9 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                     .collect::<Result<Vec<_>, Error>>()?;
                 Ok::<_, Error>((entity, fields))
             })();
+            // An error here says a term is no slot of a direct select (a
+            // value computed for the report); the relation derived below
+            // reports it, and refuses what it cannot.
             if let Ok((entity, fields)) = direct {
                 let mut select: ConceptQuery =
                     serde_json::from_value(select).map_err(|error| refused("the query", error))?;
@@ -1715,7 +1725,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
     // 58 to the twelfth sites leave two of them alike only by chance.
     let relation = format!("{REPORTED}{}", site.chars().take(12).collect::<String>());
     let mut scope = Scope::default();
-    let entity = match (&read.entity, shown(&read.entity)) {
+    let entity = match (&read.entity, shown(&read.entity)?) {
         (Term::Variable(name), _) => {
             scope.names.insert(name.clone(), "this".into());
             Slot::Bound("this".into())
@@ -1735,7 +1745,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
         // An entry's key is a column of its own.
         let key = match &field.key {
             None => None,
-            Some((key, _)) => Some(match shown(key) {
+            Some((key, _)) => Some(match shown(key)? {
                 Some(form) => Slot::Is(form),
                 None => {
                     let column = format!("c{}", columns.len());
@@ -1760,7 +1770,7 @@ fn report(rule: &Rule, read: &Read, site: &str) -> Result<Step, Error> {
                 }
             }),
         };
-        let slot = match shown(&field.term) {
+        let slot = match shown(&field.term)? {
             Some(form) => Slot::Is(form),
             None => {
                 let column = format!("c{}", columns.len());

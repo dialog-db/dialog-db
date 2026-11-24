@@ -230,6 +230,10 @@ pub(crate) fn concept(
                 Ok(None) if part.is_read() => Some(part.clone()),
                 _ => None,
             };
+            // A declaration says what is written, for an editor. A line
+            // that does not compile is refused by `check`, which says so
+            // where it is written, so here it has no descriptor rather
+            // than a second refusal.
             if let Some(read) = read.and_then(|read| crate::kernel::read(&read).ok())
                 && read.fields.len() == lines.len()
             {
@@ -282,6 +286,8 @@ pub(crate) fn concept(
     let descriptors = analysis
         .analyzed
         .iter()
+        // What does not compile is refused by `check`; a declaration
+        // describes only what does.
         .filter_map(|rule| compile(rule).ok())
         .flatten()
         .filter_map(|step| match step {

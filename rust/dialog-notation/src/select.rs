@@ -460,10 +460,9 @@ impl Selection {
     /// select one relation, each deriving a part of it.
     fn one(&self, rows: &Rows) -> Option<usize> {
         let (first, rest) = rows.runs.split_first()?;
-        let select = |run: &usize| serde_json::to_value(&self.queries[*run].select).ok();
-        let selected = select(first)?;
+        let selected = &self.queries[*first].select;
         rest.iter()
-            .all(|run| select(run).as_ref() == Some(&selected))
+            .all(|run| self.queries[*run].select == *selected)
             .then_some(*first)
     }
 
@@ -581,20 +580,26 @@ struct Evaluation<'a> {
 impl Evaluation<'_> {
     /// The rows of a part's queries, each column as its variable, each
     /// once; worked out once a part.
-    fn rows(&mut self, rows: &Rows) -> Vec<Row> {
+    fn rows(&mut self, rows: &Rows) -> Result<Vec<Row>, Error> {
         let Some(first) = rows.runs.first() else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         if let Some(read) = self.read.get(first) {
-            return read.clone();
+            return Ok(read.clone());
         }
         let mut all: Vec<Row> = Vec::new();
         let mut seen = HashSet::new();
         for run in &rows.runs {
             for values in &self.results[*run] {
-                let record = values
-                    .get(ROW_FIELD)
-                    .and_then(|record| data::entries(record).ok().flatten());
+                // A row of several columns is reported as one record.
+                let record = match values.get(ROW_FIELD) {
+                    Some(record) => Some(data::entries(record)?.ok_or_else(|| {
+                        Error::Refused(format!(
+                            "a row reported as one record is {record:?}, which is no record"
+                        ))
+                    })?),
+                    None => None,
+                };
                 let row: Row = rows
                     .columns
                     .iter()
@@ -614,7 +619,7 @@ impl Evaluation<'_> {
             }
         }
         self.read.insert(*first, all.clone());
-        all
+        Ok(all)
     }
 
     /// Every row of the query named `name`: what each variable of its
@@ -629,7 +634,7 @@ impl Evaluation<'_> {
             .get(name)
             .ok_or_else(|| Error::Unknown(name.to_string()))?;
         let mut rows = match &defined.required {
-            Some(required) => self.rows(required),
+            Some(required) => self.rows(required)?,
             None => vec![Row::new()],
         };
         for call in &defined.calls {
@@ -642,7 +647,7 @@ impl Evaluation<'_> {
         for collect in &defined.collects {
             for row in &mut rows {
                 if let Some(lowered) = &collect.folded {
-                    let (whole, count) = self.fold(lowered, &collect.target, row);
+                    let (whole, count) = self.fold(lowered, &collect.target, row)?;
                     row.insert(collect.target.clone(), whole);
                     row.insert(counted(&collect.target), count);
                     continue;
@@ -749,7 +754,12 @@ impl Evaluation<'_> {
     /// many it holds: the folded row whose groups agree with `row`. A
     /// row no fold gives is of a group the conditions did not give, and
     /// holds nothing.
-    fn fold(&mut self, lowered: &Lowered, target: &str, row: &Row) -> (Syntax, Syntax) {
+    fn fold(
+        &mut self,
+        lowered: &Lowered,
+        target: &str,
+        row: &Row,
+    ) -> Result<(Syntax, Syntax), Error> {
         let shared = &lowered.shared;
         let folded = &self.folded[lowered.fold];
         let index = self.folds.entry(lowered.fold).or_insert_with(|| {
@@ -768,28 +778,38 @@ impl Evaluation<'_> {
         let found = index
             .get(&keyed(shared.iter().map(|term| row.get(term))))
             .map(|at| &folded[*at]);
-        let members = found
-            .and_then(|found| found.get(target))
-            .and_then(|whole| data::items(whole).ok().flatten())
-            .unwrap_or_default();
+        let members = match found.and_then(|found| found.get(target)) {
+            Some(whole) => data::items(whole)?.ok_or_else(|| {
+                Error::Refused(format!(
+                    "the whole of {target} a fold gave is {whole:?}, which is no list"
+                ))
+            })?,
+            None => Vec::new(),
+        };
         let count = found
             .and_then(|found| found.get(&counted(target)).cloned())
             .unwrap_or(Value::UnsignedInt(0));
         let entries = members
             .iter()
-            .filter_map(|member| match &lowered.entry {
+            .map(|member| match &lowered.entry {
                 // An entry is the record of the row it was read from.
                 Some((key, value)) => {
-                    let record = data::entries(member).ok().flatten()?;
-                    Some((
-                        written(data::field(&record, key)?),
-                        written(data::field(&record, value)?),
+                    let refused = || {
+                        Error::Refused(format!(
+                            "an entry of {target} a fold gave is {member:?}, which is no record \
+                             of {key} and {value}"
+                        ))
+                    };
+                    let record = data::entries(member)?.ok_or_else(refused)?;
+                    Ok((
+                        written(data::field(&record, key).ok_or_else(refused)?),
+                        written(data::field(&record, value).ok_or_else(refused)?),
                     ))
                 }
-                None => Some((Syntax::Reference(String::new()), written(member))),
+                None => Ok((Syntax::Reference(String::new()), written(member))),
             })
-            .collect();
-        (Syntax::Map(gathered(entries)), Syntax::Constant(count))
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok((Syntax::Map(gathered(entries)), Syntax::Constant(count)))
     }
 
     /// The whole of what a collecting read gives for `row`: a map of
@@ -808,7 +828,7 @@ impl Evaluation<'_> {
                     .collect();
                 let first = rows.runs.first().copied().unwrap_or_default();
                 if !self.read.contains_key(&first) {
-                    self.rows(rows);
+                    self.rows(rows)?;
                 }
                 let read = self.read.get(&first).map(Vec::as_slice).unwrap_or_default();
                 let groups = self.grouped.entry(first).or_insert_with(|| {
