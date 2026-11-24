@@ -1220,4 +1220,46 @@ mod tests {
         }
         Ok(())
     }
+
+    /// A relation the engine would refuse is refused by the notation, with
+    /// a message that says why: a derived attribute whose relation, its
+    /// attribute's part counted, is past 64 bytes; one under a concept or
+    /// of a name with a character a relation cannot hold; and an attribute
+    /// a line names with one.
+    #[test]
+    fn it_refuses_a_relation_the_engine_would_with_why() -> Result<(), Error> {
+        let long = "abcdefghijabcdefghijabcdefghijabcd";
+        let cafe = "caf\u{e9}";
+        for (text, said) in [
+            (
+                format!(
+                    "(concept ({long} ?l name: ?n) (xyz.l/name of: ?l is: ?n as: :text cardinality: :one))
+                     (rule ({long}/abcdefghijabcdefghijabcdefghij ?l ?n) ({long} ?l name: ?n))"
+                ),
+                "64",
+            ),
+            (
+                format!(
+                    "(concept ({cafe} ?l name: ?n) (xyz.l/name of: ?l is: ?n as: :text cardinality: :one))
+                     (rule ({cafe}/count ?l ?n) ({cafe} ?l name: ?n))"
+                ),
+                "\u{e9}",
+            ),
+            (
+                format!(
+                    "(concept (todo ?l name: ?n) (xyz.{cafe}/name of: ?l is: ?n as: :text cardinality: :one))"
+                ),
+                "lowercase letters",
+            ),
+        ] {
+            let checked = check(&mut Analyzer::new()?, &text);
+            assert!(
+                checked.refusals().any(|refused| matches!(&refused.refusal,
+                    Some(Error::Refused(why)) if why.contains(said) && !why.contains("untagged"))),
+                "{text}: {:?}",
+                checked.diagnostics
+            );
+        }
+        Ok(())
+    }
 }
