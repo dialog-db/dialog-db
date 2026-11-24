@@ -61,7 +61,7 @@ use crate::written::{Note, Path, Segment, Slot, Written};
 pub const NAMESPACE: &str = "dialog.notation";
 
 /// The domain every derived attribute's relation is under:
-/// `dialog.notation.concept.list.count-open` is what
+/// `dialog.notation.concept.4.list.count-open` is what
 /// `(list/count-open ?l ?n)` derives and reads. A concept's domain is
 /// concluded only.
 pub const DERIVED: &str = "dialog.notation.concept";
@@ -82,7 +82,7 @@ pub const DERIVED: &str = "dialog.notation.concept";
 /// | `[view-of]`, `[query-row]`, `[groups]`, `[inputs]` | nothing | constants, each spelled apart from the others and from the prefixes above |
 /// | `dialog.notation.report.q12` | a site's number | digits only |
 /// | `c0`, `c1`, `row`, fields of a report | a column's number | the fields of the notation's own relations, never a document's |
-/// | `dialog.notation.concept.<concept>.<name>` | a concept's name and an attribute's | a concept whose name holds a `.` is refused here, so the concept ends at the first `.` after the prefix |
+/// | `dialog.notation.concept.<length>.<concept>.<name>` | a concept's name and an attribute's | the concept's length, one base-36 digit, says where it ends, so the name splits one way whatever dots either holds |
 /// | `<label>/key`, an entry's key in a rule's head | a field's label | a head with a field named so beside the entry is refused |
 pub fn unwritten(name: &str) -> bool {
     name.contains('[')
@@ -766,6 +766,10 @@ impl Syntax {
     }
 }
 
+/// The tree as a person reads it, for messages and for what a view
+/// shows. It cannot fail, so a value with no written form, bytes, is
+/// shown as `…`. For text that is read back, use [`Syntax::printed`],
+/// which refuses such a value.
 impl Display for Syntax {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.form())

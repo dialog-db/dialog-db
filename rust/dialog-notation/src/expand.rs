@@ -525,14 +525,16 @@ pub(crate) fn line(tree: &Syntax) -> Result<Option<Syntax>, Error> {
 /// The read a derived attribute is: one named under a declared concept,
 /// `list/count-open`, in that concept's own domain. It is a relation of
 /// its own, named by the concept's name and the attribute's, since the
-/// build has no hash of a concept to name it by:
+/// build has no hash of a concept to name it by. The concept's length
+/// comes first, one base-36 digit, so where the concept ends is said and
+/// not found: `my.list/count` and `my/list.count` are two relations.
 ///
 /// ```clj
 /// (list/count-open ?l (count ?t))
-/// (dialog.notation.concept.list.count-open ?l is: (count ?t))
+/// (dialog.notation.concept.4.list.count-open ?l is: (count ?t))
 ///
 /// (list/count ?l status: ?s count: (count ?t))
-/// (dialog.notation.concept.list.count ?l count: (count ?t) status: ?s)
+/// (dialog.notation.concept.4.list.count ?l count: (count ?t) status: ?s)
 /// ```
 ///
 /// Its two terms unlabeled are the entity and the value, under `is:`.
@@ -553,8 +555,21 @@ fn derived(tree: &Syntax, concept: &str, name: &str) -> Result<Syntax, Error> {
             )));
         }
     };
+    // A concept of more than 35 bytes leaves no room for a relation in
+    // the 64 the engine allows, whatever the attribute.
+    let Some(length) = u32::try_from(concept.len())
+        .ok()
+        .and_then(|length| char::from_digit(length, 36))
+    else {
+        return Err(Error::Refused(format!(
+            "{tree} derives under a concept whose name is longer than a derived relation has \
+             room for"
+        )));
+    };
     Ok(Syntax::Application(
-        Box::new(Syntax::Reference(format!("{DERIVED}.{concept}.{name}"))),
+        Box::new(Syntax::Reference(format!(
+            "{DERIVED}.{length}.{concept}.{name}"
+        ))),
         Parameters {
             items: vec![entity],
             terms,
@@ -1991,18 +2006,6 @@ impl Expander {
                 })
                 && self.concepts.contains(concept)
             {
-                // The relation is the concept's name, a `.`, and the
-                // attribute's: a concept's name with no `.` ends at the
-                // first `.`, so no other concept and attribute spell it.
-                if concept.contains('.') {
-                    return self.about(&tree, |_| {
-                        Err(Error::Refused(format!(
-                            "{tree} derives `{concept}/{name}` under a concept whose name holds a \
-                             `.`: its relation would be the one another concept and attribute \
-                             spell, and so it is not derived"
-                        )))
-                    });
-                }
                 return self.about(&tree, |_| derived(&tree, concept, name));
             }
             if !declared && let Some(read) = self.about(&tree, |_| line(&tree))? {
@@ -3456,14 +3459,14 @@ mod tests {
         assert_eq!(concluded.len(), 1);
         assert!(
             concluded[0].starts_with(
-                "(rule (dialog.notation.concept.list.count-open ?l is: (count ?t)) (xyz.list ?l name: "
+                "(rule (dialog.notation.concept.4.list.count-open ?l is: (count ?t)) (xyz.list ?l name: "
             ),
             "{concluded:?}"
         );
         assert_eq!(
             expanded(lists, "(select (list/count-open list:home ?n))").unwrap(),
             vec![
-                "(rule (report (dialog.notation.concept.list.count-open list:home is: ?n)) (dialog.notation.concept.list.count-open list:home is: ?n))"
+                "(rule (report (dialog.notation.concept.4.list.count-open list:home is: ?n)) (dialog.notation.concept.4.list.count-open list:home is: ?n))"
             ]
         );
         let labelled = expanded(
@@ -3474,7 +3477,7 @@ mod tests {
         .unwrap();
         assert!(
             labelled[0].starts_with(
-                "(rule (dialog.notation.concept.list.count ?l count: (count ?t) status: ?s) "
+                "(rule (dialog.notation.concept.4.list.count ?l count: (count ?t) status: ?s) "
             ),
             "{labelled:?}"
         );
