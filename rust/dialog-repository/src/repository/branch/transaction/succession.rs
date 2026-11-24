@@ -287,10 +287,13 @@ impl ReadSettlement {
 /// Settle every succession `head` holds against `view`, the round view
 /// an inductive rule fired on, which is what its head observed: the
 /// claims the view holds, the writes before it in the round included,
-/// and the candidates rules derive through it.
+/// and the candidates rules derive through it. A write the cell already
+/// reads as settles to nothing, and the claim it reads is noted as
+/// asserted in `held_claims`: the round asserted a claim that holds.
 pub(crate) async fn resolve_against(
     view: &QueryEnv<'_>,
     head: &mut Changes,
+    held_claims: &mut Changes,
 ) -> Result<(), CommitError> {
     let cells = head.cells_with_successions();
     if cells.is_empty() {
@@ -304,6 +307,15 @@ pub(crate) async fn resolve_against(
         for change in &list {
             let written = cell.write(change, &derived, edition)?;
             cell.settled.extend(written);
+        }
+        for value in cell.kept.drain(..) {
+            dialog_corpus::Update::associate(
+                held_claims,
+                the.clone(),
+                of.clone(),
+                value,
+                dialog_corpus::Cardinality::Many,
+            );
         }
         head.put_cell(the, of, cell.squashed());
     }
@@ -509,6 +521,10 @@ struct Cell {
     /// not elect, whose version the commit refreshes. The transaction's
     /// row, not the line's, is the one a read sees.
     restaged: Vec<Value>,
+    /// The claims a write under one already read as, so that it settled
+    /// to nothing: each is the claim the read returns, which the write
+    /// leaves standing.
+    kept: Vec<Value>,
 }
 
 impl Cell {
@@ -523,6 +539,7 @@ impl Cell {
             live: claims,
             settled: Vec::new(),
             restaged: Vec::new(),
+            kept: Vec::new(),
         }
     }
 
@@ -606,7 +623,12 @@ impl Cell {
                 // a held 4.3 does, since an integer reader observes 4. An
                 // overlay row or a derived candidate of the value is not a
                 // claim, and the write lands beside it.
-                if matches!(&elected, Some((elected, true)) if elected.reads_as(value)) {
+                if let Some((elected, true)) = &elected
+                    && elected.reads_as(value)
+                {
+                    if !self.kept.contains(elected) {
+                        self.kept.push(elected.clone());
+                    }
                     return Ok(Vec::new());
                 }
                 let mut settled = Vec::with_capacity(2);
