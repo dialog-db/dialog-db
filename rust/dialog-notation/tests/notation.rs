@@ -778,8 +778,8 @@ async fn it_gives_what_a_document_declares_as_data() -> Result<()> {
             ))
             .collect::<Vec<_>>(),
         vec![
-            ("xyz.todo.add/list", Some("many"), Some("control")),
-            ("xyz.todo.add/text", Some("many"), Some("control")),
+            ("xyz.todo.add/list", Some("one"), Some("control")),
+            ("xyz.todo.add/text", Some("one"), Some("control")),
         ]
     );
     assert_eq!(add.descriptors.len(), 1);

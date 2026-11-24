@@ -17,17 +17,17 @@
 
 ; Adding a to-do, to a list.
 (concept (todo/add list: ?l text: ?x)
-  (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control cardinality: :many)
-  (xyz.todo.add/text of: ?c is: ?x as: :text in: :control cardinality: :many))
+  (xyz.todo.add/list of: ?c is: ?l as: :entity in: :control cardinality: :one)
+  (xyz.todo.add/text of: ?c is: ?x as: :text in: :control cardinality: :one))
 
 ; Completing one, found by its list and its text.
 (concept (todo/complete list: ?l text: ?x)
-  (xyz.todo.complete/list of: ?c is: ?l as: :entity in: :control cardinality: :many)
-  (xyz.todo.complete/text of: ?c is: ?x as: :text in: :control cardinality: :many))
+  (xyz.todo.complete/list of: ?c is: ?l as: :entity in: :control cardinality: :one)
+  (xyz.todo.complete/text of: ?c is: ?x as: :text in: :control cardinality: :one))
 
 ; Archiving a list.
 (concept (list/archive list: ?l)
-  (xyz.list.archive/list of: ?c is: ?l as: :entity in: :control cardinality: :many))
+  (xyz.list.archive/list of: ?c is: ?l as: :entity in: :control cardinality: :one))
 
 ; Adding a to-do opens it. Its entity is the one its list and its text
 ; identify, so the same list and text make one to-do on every device.

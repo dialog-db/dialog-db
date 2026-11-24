@@ -313,15 +313,15 @@
 ; Insert one block into a notebook, before another.
 (concept (block/insert notebook: ?n source: ?s next: ?x prev: ?p)
   ; The notebook the block belongs to.
-  (xyz.tonk.notebook.insert/notebook of: ?c is: ?n as: :entity in: :control cardinality: :many)
+  (xyz.tonk.notebook.insert/notebook of: ?c is: ?n as: :entity in: :control cardinality: :one)
   ; The block's markdown source.
-  (xyz.tonk.notebook.insert/source of: ?c is: ?s as: :text in: :control cardinality: :many)
+  (xyz.tonk.notebook.insert/source of: ?c is: ?s as: :text in: :control cardinality: :one)
   ; The block this one precedes, or `case:none` at the tail.
-  (xyz.tonk.notebook.insert/next of: ?c is: ?x as: :entity in: :control cardinality: :many)
+  (xyz.tonk.notebook.insert/next of: ?c is: ?x as: :entity in: :control cardinality: :one)
   ; The existing block this run of inserts follows, or `tonk:notebook/edge`
   ; at the document head. Only the chain's last block consults it; the
   ; others take their bound from their successor.
-  (xyz.tonk.notebook.insert/prev of: ?c is: ?p as: :entity in: :control cardinality: :many))
+  (xyz.tonk.notebook.insert/prev of: ?c is: ?p as: :entity in: :control cardinality: :one))
 
 ; Create a notebook from the index's heading switcher: the switcher's create
 ; row fires it, with only a title. (No form follows in the YAML: the
@@ -360,9 +360,9 @@
 ; palette answers to, and `role: :goal` on its title. YAML 575, 582.
 (concept (notebook/retitle subject: ?n title: ?title)
   ; The notebook entity.
-  (xyz.tonk.notebook.retitle/subject of: ?c is: ?n as: :entity in: :control cardinality: :many)
+  (xyz.tonk.notebook.retitle/subject of: ?c is: ?n as: :entity in: :control cardinality: :one)
   ; The heading text, without its `#` markers.
-  (xyz.tonk.notebook.retitle/title of: ?c is: ?title as: :text in: :control cardinality: :many))
+  (xyz.tonk.notebook.retitle/title of: ?c is: ?title as: :text in: :control cardinality: :one))
 
 ; Said from the command palette on a notebook's page, "rename to Plans"
 ; renames that notebook: the notebook the page shows is derived onto the
@@ -382,13 +382,13 @@
 ; Write one notebook block's source.
 (concept (block/edit subject: ?b source: ?s notebook: ?n)
   ; The block entity, stamped on the element's data-subject.
-  (xyz.tonk.block.edit/subject of: ?c is: ?b as: :entity in: :control cardinality: :many)
+  (xyz.tonk.block.edit/subject of: ?c is: ?b as: :entity in: :control cardinality: :one)
   ; The block's new markdown source.
-  (xyz.tonk.block.edit/source of: ?c is: ?s as: :text in: :control cardinality: :many)
+  (xyz.tonk.block.edit/source of: ?c is: ?s as: :text in: :control cardinality: :one)
   ; The notebook the block belongs to. Carried on every edit: a block written
   ; with only its source does not match `notebook/block`, so it renders no
   ; row. Re-asserting it on an existing block changes nothing.
-  (xyz.tonk.block.edit/notebook of: ?c is: ?n as: :entity in: :control cardinality: :many))
+  (xyz.tonk.block.edit/notebook of: ?c is: ?n as: :entity in: :control cardinality: :one))
 
 ; Placement is per block: put this block into its notebook's sequence under a
 ; position. The element derives the position between the block's neighbours,
@@ -397,11 +397,11 @@
 ; Place one block in its notebook's sequence.
 (concept (block/place subject: ?b notebook: ?n key: ?k)
   ; The block entity.
-  (xyz.tonk.block.place/subject of: ?c is: ?b as: :entity in: :control cardinality: :many)
+  (xyz.tonk.block.place/subject of: ?c is: ?b as: :entity in: :control cardinality: :one)
   ; The notebook whose sequence the block joins.
-  (xyz.tonk.block.place/notebook of: ?c is: ?n as: :entity in: :control cardinality: :many)
+  (xyz.tonk.block.place/notebook of: ?c is: ?n as: :entity in: :control cardinality: :one)
   ; The block's position in the sequence.
-  (xyz.tonk.block.place/key of: ?c is: ?k as: :text in: :control cardinality: :many))
+  (xyz.tonk.block.place/key of: ?c is: ?k as: :text in: :control cardinality: :one))
 
 ; A move re-keys a block that already has an entry: its entries go and one
 ; under `key` takes their place, in the same commit. `from` names the entry
@@ -411,23 +411,23 @@
 ; Move one block to another position in its notebook's sequence.
 (concept (block/move subject: ?b notebook: ?n from: ?from key: ?k)
   ; The block entity.
-  (xyz.tonk.block.move/subject of: ?c is: ?b as: :entity in: :control cardinality: :many)
+  (xyz.tonk.block.move/subject of: ?c is: ?b as: :entity in: :control cardinality: :one)
   ; The notebook whose sequence the block moves in.
-  (xyz.tonk.block.move/notebook of: ?c is: ?n as: :entity in: :control cardinality: :many)
+  (xyz.tonk.block.move/notebook of: ?c is: ?n as: :entity in: :control cardinality: :one)
   ; The position the block held.
-  (xyz.tonk.block.move/from of: ?c is: ?from as: :text in: :control cardinality: :many)
+  (xyz.tonk.block.move/from of: ?c is: ?from as: :text in: :control cardinality: :one)
   ; The position the block moves to.
-  (xyz.tonk.block.move/key of: ?c is: ?k as: :text in: :control cardinality: :many))
+  (xyz.tonk.block.move/key of: ?c is: ?k as: :text in: :control cardinality: :one))
 
 ; Take one block out of its notebook's sequence.
 (concept (block/remove subject: ?b notebook: ?n key: ?k)
   ; The block entity.
-  (xyz.tonk.block.remove/subject of: ?c is: ?b as: :entity in: :control cardinality: :many)
+  (xyz.tonk.block.remove/subject of: ?c is: ?b as: :entity in: :control cardinality: :one)
   ; The notebook whose sequence the block leaves.
-  (xyz.tonk.block.remove/notebook of: ?c is: ?n as: :entity in: :control cardinality: :many)
+  (xyz.tonk.block.remove/notebook of: ?c is: ?n as: :entity in: :control cardinality: :one)
   ; The position the block held. Its own attribute: two commands of one
   ; shape would both decode from one event.
-  (xyz.tonk.block.remove/key of: ?c is: ?k as: :text in: :control cardinality: :many))
+  (xyz.tonk.block.remove/key of: ?c is: ?k as: :text in: :control cardinality: :one))
 
 ; An inserted block exists.
 
