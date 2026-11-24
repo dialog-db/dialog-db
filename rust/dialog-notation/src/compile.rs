@@ -458,6 +458,14 @@ pub const DESCRIBED: &str = "syntax.meta";
 /// one record.
 const RECORD: &str = "row";
 
+/// How many characters of a site's reference name its report relation.
+pub(crate) const SITE: usize = 12;
+
+std::thread_local! {
+    /// [`SITE`], which a test shortens to make two sites meet.
+    pub(crate) static SITE_LENGTH: std::cell::Cell<usize> = const { std::cell::Cell::new(SITE) };
+}
+
 /// The namespace of the relations a report derives, each named by the
 /// reference of its site.
 pub const REPORTED: &str = "report.q";

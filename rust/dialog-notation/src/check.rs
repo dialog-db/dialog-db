@@ -285,37 +285,55 @@ mod tests {
         assert!(matches!(run.join(), Ok(Ok(()))));
     }
 
-    /// A name the build writes itself, a relation, a variable or a
-    /// namespace, written in a document is refused where it is written,
-    /// naming it, and nothing of the form is compiled. Reading
-    /// `syntax.meta`, which is there to be read, is not refused.
+    /// Every name the notation makes for itself is under one namespace,
+    /// `dialog.notation`, and a document that names anything under it is
+    /// refused where it does, naming it, with nothing compiled. Every
+    /// other name is the author's: `report.quarterly`, `concept.list`,
+    /// `?a.b`, `?view-of` and `?source-key` are refused no more. Reading
+    /// `syntax.meta`, which is there to be read, is not refused; writing
+    /// it is.
     #[test]
-    fn it_refuses_a_name_the_notation_writes_itself() -> Result<(), Error> {
-        let cases = [
-            (r#"(select (query.row ?x part: "ab"))"#, "query.row"),
-            (r#"(select (query.row ?x part: "é"))"#, "query.row"),
-            ("(rule (query.row ?x row: 1) (xyz.a ?x))", "query.row"),
-            ("(select (select.query ?x))", "select.query"),
-            ("(assert (once.write once:1 n: 1))", "once.write"),
-            ("(select (view.layer ?x row: ?r))", "view.layer"),
-            ("(select (report.qabc ?x c0: ?y))", "report.qabc"),
+    fn it_refuses_only_what_is_under_the_notations_own_namespace() -> Result<(), Error> {
+        let refused = [
             (
-                "(rule (xyz.a ?x) (concept.list.count-open ?x is: ?n))",
-                "concept.list.count-open",
+                r#"(select (dialog.notation.query.row ?x part: "ab"))"#,
+                "dialog.notation.query.row",
             ),
+            (
+                "(rule (dialog.notation.query.row ?x row: 1) (xyz.a ?x))",
+                "dialog.notation.query.row",
+            ),
+            (
+                "(select (dialog.notation.select ?x))",
+                "dialog.notation.select",
+            ),
+            (
+                "(assert (dialog.notation.once.write once:1 n: 1))",
+                "dialog.notation.once.write",
+            ),
+            (
+                "(select (dialog.notation.view.layer ?x row: ?r))",
+                "dialog.notation.view.layer",
+            ),
+            (
+                "(select (dialog.notation.report.qabc ?x c0: ?y))",
+                "dialog.notation.report.qabc",
+            ),
+            (
+                "(rule (xyz.a ?x) (dialog.notation.concept.list.count-open ?x is: ?n))",
+                "dialog.notation.concept.list.count-open",
+            ),
+            ("(select (dialog.notation ?x))", "dialog.notation"),
             (
                 r#"(assert (syntax.meta rule:1 description: "mine"))"#,
                 "syntax.meta",
             ),
-            ("(select (xyz.a ?a.0 n: ?n))", "?a.0"),
-            ("(select (xyz.a ?a n: ?view-of))", "?view-of"),
-            ("(select (xyz.a ?a n: ?source-key))", "?source-key"),
             (
-                "(rule (syntax (query.row ?x)) (expand (mine ?x)))\n(rule (xyz.out ?a) (mine ?a))",
-                "query.row",
+                "(rule (syntax (dialog.notation.query.row ?x)) (expand (mine ?x)))\n(rule (xyz.out ?a) (mine ?a))",
+                "dialog.notation.query.row",
             ),
         ];
-        for (text, name) in cases {
+        for (text, name) in refused {
             let mut analyzer = Analyzer::new()?;
             let checked = check(&mut analyzer, text);
             let refusals: Vec<&Diagnostic> = checked.refusals().collect();
@@ -327,12 +345,67 @@ mod tests {
             );
             assert!(checked.steps.is_empty(), "{text}");
         }
+        for text in [
+            "(select (report.quarterly ?x total: ?y))",
+            "(select (concept.list ?x name: ?y))",
+            "(select (xyz.a ?a.b n: ?n))",
+            "(select (xyz.a ?a n: ?view-of))",
+            "(select (xyz.a ?a n: ?source-key))",
+            "(select (xyz.a ?a n: ?collect-0 m: ?query-row))",
+            "(select (syntax.meta ?rule description: ?text))",
+        ] {
+            let mut analyzer = Analyzer::new()?;
+            let checked = check(&mut analyzer, text);
+            assert!(
+                checked.refusals().next().is_none(),
+                "{text}: {:?}",
+                checked.diagnostics
+            );
+            assert!(!checked.steps.is_empty(), "{text}");
+        }
+        // An author's `?a.b` is the author's variable: named only where
+        // it must not hold, it is refused as any such variable is, and
+        // not taken for one an expansion made.
         let mut analyzer = Analyzer::new()?;
         let checked = check(
             &mut analyzer,
-            "(select (syntax.meta ?rule description: ?text))",
+            "(select (xyz.a ?a n: ?n) (unless (xyz.b ?a m: ?a.b)))",
         );
-        assert!(checked.refusals().next().is_none());
+        let plain = check(
+            &mut Analyzer::new()?,
+            "(select (xyz.a ?a n: ?n) (unless (xyz.b ?a m: ?ab)))",
+        );
+        assert_eq!(
+            checked.refusals().count(),
+            plain.refusals().count(),
+            "{:?} against {:?}",
+            checked.diagnostics,
+            plain.diagnostics
+        );
+        Ok(())
+    }
+
+    /// Two sites whose report relations would be named alike are refused,
+    /// not read as one: the name is a prefix of the site's reference, and
+    /// a test shortens it until two sites of one document meet.
+    #[test]
+    fn it_refuses_two_sites_named_alike() -> Result<(), Error> {
+        crate::compile::SITE_LENGTH.with(|length| length.set(0));
+        let mut analyzer = Analyzer::new()?;
+        let checked = check(
+            &mut analyzer,
+            "(select (xyz.out ?a with: ?b total: ?n) (xyz.a ?a n: ?n) (xyz.b ?b n: ?n))
+             (select (xyz.out ?a with: ?b other: ?n) (xyz.c ?a n: ?n) (xyz.d ?b n: ?n))",
+        );
+        crate::compile::SITE_LENGTH.with(|length| length.set(crate::compile::SITE));
+        let refusals: Vec<&Diagnostic> = checked.refusals().collect();
+        assert!(
+            refusals
+                .iter()
+                .any(|refused| matches!(&refused.refusal, Some(Error::Clash(..)))),
+            "{refusals:?}"
+        );
+        assert!(checked.steps.is_empty());
         Ok(())
     }
 
