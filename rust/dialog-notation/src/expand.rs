@@ -1156,6 +1156,14 @@ pub struct Expander {
     /// the name it is written by, `list/count-open`: what a person is
     /// shown in its place.
     spelled: BTreeMap<String, String>,
+    /// Each name read or concluded as a derived attribute, `todo/tag`,
+    /// with the document that first did, by its number, and the form
+    /// that did: a later document that declares the name a concept would
+    /// leave the rules installed reading another relation than its own
+    /// text does.
+    derived_uses: BTreeMap<String, (usize, String)>,
+    /// The documents checked so far, this one among them.
+    documents: usize,
     /// The sites of the tree being expanded, each by its reference,
     /// numbered in the order they are met: what a site's own variables
     /// are named apart by. Begun again for each tree, so the numbers
@@ -1304,6 +1312,7 @@ impl Expander {
     /// expanded all the same. The refusals come first, in the order of
     /// their trees, and then what the rules said without refusing.
     pub fn check(&mut self, trees: Vec<Syntax>) -> (Vec<Syntax>, Vec<Diagnostic>) {
+        self.documents += 1;
         self.asked.clear();
         self.origin.clear();
         self.defining.clear();
@@ -1649,6 +1658,24 @@ impl Expander {
                      name with a `.` is a domain, read directly, and a concept's name has none, \
                      `todo` or `notebook/blocks`; that is how the two are told apart",
                     declared.name
+                )));
+            }
+            // A name rules of an earlier document read or concluded as
+            // a derived attribute stays one: those rules are installed,
+            // and would read another relation than the concept.
+            if let Some((document, form)) = self.derived_uses.get(&declared.name)
+                && *document != self.documents
+            {
+                return Err(Error::Refused(format!(
+                    "{pattern} declares `{}` a concept, and an earlier document read or \
+                     concluded it as a derived attribute of `{}` in {form}: the rules installed \
+                     keep that relation, so the name stays a derived attribute; declare the \
+                     concept under another name",
+                    declared.name,
+                    declared
+                        .name
+                        .split_once('/')
+                        .map_or("", |(concept, _)| concept),
                 )));
             }
             // One document says one thing of a name, in any order: a
@@ -2304,6 +2331,15 @@ impl Expander {
                 let domain = syntax::derived(concept, name)?;
                 self.spelled
                     .insert(domain.clone(), format!("{concept}/{name}"));
+                let form = self
+                    .document
+                    .get(self.tree)
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                let documents = self.documents;
+                self.derived_uses
+                    .entry(format!("{concept}/{name}"))
+                    .or_insert((documents, form));
                 return self.about(&tree, |_| derived(&tree, concept, name, &domain));
             }
             if !declared && let Some(read) = self.about(&tree, |_| line(&tree))? {
