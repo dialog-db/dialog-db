@@ -2427,7 +2427,7 @@ enum Follower<'a> {
     Opened(&'a str),
     Created(
         &'a str,
-        dialog_credentials::Ed25519Signer<dialog_credentials::Extractable>,
+        Box<dialog_credentials::Ed25519Signer<dialog_credentials::Extractable>>,
     ),
 }
 
@@ -2470,7 +2470,7 @@ async fn following(
             let repository = profile
                 .space(name)
                 .create()
-                .with_credential(key)
+                .with_credential(*key)
                 .perform(&env)
                 .await?;
             repository.branch("main").open().perform(&env).await?
@@ -2841,7 +2841,7 @@ async fn it_commits_after_a_restart_from_its_own_blocks(s3: S3Address) -> Result
         profile,
         alice_repo,
         &s3,
-        Follower::Created(&follower, key),
+        Follower::Created(&follower, Box::new(key)),
     )
     .await?;
 
