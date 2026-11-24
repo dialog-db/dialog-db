@@ -708,6 +708,26 @@ mod tests {
         Ok(())
     }
 
+    /// A refusal of `(!= …)` names `!=`, as it was written, and not the
+    /// `(== …)` it is the absence of.
+    #[test]
+    fn it_refuses_an_inequality_naming_it_as_written() -> Result<(), Error> {
+        let checked = check(
+            &mut Analyzer::new()?,
+            "(select (xyz.a ?x y: ?y) (xyz.a ?x y: ?y) (!= ?y : 1))",
+        );
+        let said: Vec<&str> = checked
+            .refusals()
+            .map(|refused| refused.message.as_str())
+            .collect();
+        assert!(
+            said.iter().any(|said| said.contains("(!= "))
+                && !said.iter().any(|said| said.contains("(== ")),
+            "{said:?}"
+        );
+        Ok(())
+    }
+
     /// What a comment right above a rule says is the rule's
     /// description: the analyzed tree holds it, and the compiler is
     /// given it. A comment with a blank line under it is not about the
