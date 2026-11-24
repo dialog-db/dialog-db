@@ -8,6 +8,7 @@
 #![allow(deprecated)]
 
 use anyhow::Result;
+use dialog_corpus::Value;
 use dialog_notation::Error;
 
 #[path = "support/session.rs"]
@@ -971,6 +972,119 @@ async fn it_stores_a_set_in_a_record_as_a_list() -> Result<()> {
     assert_eq!(
         report(&mut notebook, "(select (xyz.thing ?x about: ?about))").await?,
         vec![r#"(xyz.thing thing:1 about: {:tags ["errand" "home"]})"#]
+    );
+    Ok(())
+}
+
+/// The rows of each query and of each fold of a selection, asked once.
+async fn given(
+    notebook: &Notebook,
+    selection: &dialog_notation::Selection,
+) -> Result<(Vec<Vec<Row>>, Vec<Vec<Row>>)> {
+    use dialog_query::query::Output as _;
+    let mut results = Vec::new();
+    for query in &selection.queries {
+        let mut layer = notebook.branch.query();
+        if let Some(rule) = &query.rule {
+            layer = layer.with(rule.clone());
+        }
+        let rows: Vec<dialog_query::ConceptConclusion> = layer
+            .select(query.select.clone())
+            .perform(&notebook.operator)
+            .try_vec()
+            .await?;
+        results.push(
+            rows.iter()
+                .map(|row| query.values(row))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    }
+    let mut folded = Vec::new();
+    for fold in &selection.folds {
+        let mut layer = notebook.branch.query();
+        for rule in &fold.rules {
+            layer = layer.with(rule.clone());
+        }
+        let rows = layer
+            .select(fold.fold.clone())
+            .perform(&notebook.operator)
+            .try_vec()
+            .await?;
+        folded.push(rows.iter().map(|row| fold.values(row)).collect());
+    }
+    Ok((results, folded))
+}
+
+type Row = std::collections::BTreeMap<String, Value>;
+
+/// Every value of `rows` that is a composite of `kind`, replaced by
+/// `with`; whether one was.
+fn replaced(rows: &mut [Vec<Row>], kind: fn(&Value) -> bool, with: &Value) -> bool {
+    let mut any = false;
+    for row in rows.iter_mut().flatten() {
+        for value in row.values_mut() {
+            if kind(value) {
+                *value = with.clone();
+                any = true;
+            }
+        }
+    }
+    any
+}
+
+fn list(value: &Value) -> bool {
+    matches!(value, Value::Composite(composite) if composite.is_list())
+}
+
+fn record(value: &Value) -> bool {
+    matches!(value, Value::Composite(composite) if composite.is_map())
+}
+
+/// Rows a selection cannot read, a record that is no record, the whole
+/// of a fold that is no list, a member of an entry fold that is no
+/// record, are refused, where they were read as nothing or as fewer.
+#[dialog_common::test]
+async fn it_refuses_the_rows_it_cannot_read() -> Result<()> {
+    let text = Value::String("not what was folded".into());
+    let strings = dialog_notation::parse(r#"["N1" "N2"]"#)?[0].value()?;
+
+    let notebook = notebooks().await?;
+    let outline = selection(&format!(
+        "{NOTEBOOK}{OUTLINE}(select (notebook/outline ?n is: ?outline))"
+    ))?;
+    let (results, folded) = given(&notebook, &outline).await?;
+    assert!(outline.answer(&results, &folded).is_ok());
+    let mut whole = folded.clone();
+    assert!(replaced(&mut whole, list, &text));
+    assert!(
+        matches!(outline.answer(&results, &whole), Err(Error::Refused(_))),
+        "the whole of a fold that is no list"
+    );
+    let mut members = folded.clone();
+    assert!(replaced(&mut members, list, &strings));
+    assert!(
+        matches!(outline.answer(&results, &members), Err(Error::Refused(_))),
+        "an entry that is no record"
+    );
+
+    let notebook = todos().await?;
+    let pairs = selection(&format!(
+        "{TODOS}(query (todo/pair ?t is: ?pair)
+           (todo ?t title: ?title)
+           (todo/tag ?t tag: ?g)
+           (is ?pair {{:title ?title :tag ?g}}))
+         (select (todo/pair ?t is: ?pair))"
+    ))?;
+    let (results, folded) = given(&notebook, &pairs).await?;
+    assert!(!pairs.answer(&results, &folded)?.is_empty());
+    let mut rows = results.clone();
+    assert!(
+        replaced(&mut rows, record, &text),
+        "a row reported as one record"
+    );
+    assert!(
+        matches!(pairs.answer(&rows, &folded), Err(Error::Refused(_))),
+        "a row that is no record"
     );
     Ok(())
 }
