@@ -1043,6 +1043,37 @@ async fn it_refuses_top_naming_min_over_the_same_list() -> Result<()> {
     Ok(())
 }
 
+/// A concept's name may hold a `.`, as tonk's do, and an attribute
+/// derived under it is a relation of its own: two concepts and
+/// attributes whose names would spell one relation, `xyz.shelf/count`
+/// and `xyz/shelf.count`, each answer only their own.
+#[dialog_common::test]
+async fn it_derives_under_a_concept_whose_name_holds_a_dot() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let (_, diagnostics) = notebook
+        .submit(
+            r#"(concept (xyz ?l name: ?n)
+                 (xyz.top/name of: ?l is: ?n as: :text cardinality: :one))
+               (concept (xyz.shelf ?l name: ?n)
+                 (xyz.shelf/name of: ?l is: ?n as: :text cardinality: :one))
+               (rule (xyz.shelf/count ?l ?n) (xyz.shelf ?l name: ?n))
+               (rule (xyz/shelf.count ?l ?n) (xyz ?l name: ?n))
+               (assert (xyz.shelf shelf:1 name: "dotted"))
+               (assert (xyz top:1 name: "plain"))"#,
+        )
+        .await?;
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(
+        report(&mut notebook, "(select (xyz.shelf/count ?l ?n))").await?,
+        vec![r#"(dialog.notation.concept.9.xyz.shelf.count shelf:1 is: "dotted")"#]
+    );
+    assert_eq!(
+        report(&mut notebook, "(select (xyz/shelf.count ?l ?n))").await?,
+        vec![r#"(dialog.notation.concept.3.xyz.shelf.count top:1 is: "plain")"#]
+    );
+    Ok(())
+}
+
 /// A derived attribute is one a rule concludes in a concept's own
 /// domain: here, how many of a list's to-dos are open. One that folds
 /// is read and expanded, and not run: Dialog-DB refuses a fold in a
