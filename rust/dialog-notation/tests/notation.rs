@@ -2561,3 +2561,104 @@ async fn it_reports_a_formula_in_the_head_of_each_rows_own_values() -> Result<()
     );
     Ok(())
 }
+
+/// What the notebook's commands write, on a branch: an edit writes the
+/// block's source, a move leaves the block under its new key alone, a
+/// placement too, a removal takes the block's entries and its own
+/// facts, and an insert at the tail makes a block with the source, kept
+/// in the notebook's sequence.
+#[dialog_common::test]
+async fn it_runs_the_notebooks_commands() -> Result<()> {
+    let mut notebook = Notebook::open().await?;
+    let (_, diagnostics) = notebook
+        .submit(&format!(
+            "{}\n{}",
+            include_str!("fixtures/core.clj"),
+            include_str!("fixtures/notebook.clj")
+        ))
+        .await?;
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.refusal.is_none()),
+        "{diagnostics:?}"
+    );
+    let scratch = "id:notebook/scratch";
+    let keys = |block: &str| format!("(select (notebook/blocks {scratch} block: {{?k {block}}}))");
+
+    notebook
+        .submit(&format!(
+            r#"(assert (block/edit subject: {scratch}/2 source: "edited" notebook: {scratch}))"#
+        ))
+        .await?;
+    assert_eq!(
+        report(
+            &mut notebook,
+            &format!("(select (notebook/block {scratch}/2 notebook: ?n source: ?s))")
+        )
+        .await?,
+        [format!(
+            r#"(xyz.tonk.notebook.block {scratch}/2 notebook: {scratch} source: "edited")"#
+        )]
+    );
+
+    notebook
+        .submit(&format!(
+            r#"(assert (block/move subject: {scratch}/3 notebook: {scratch} from: "N9" key: "N7"))"#
+        ))
+        .await?;
+    let moved = report(&mut notebook, &keys(&format!("{scratch}/3"))).await?;
+    assert_eq!(moved.len(), 1, "{moved:?}");
+    assert!(moved[0].contains(" N7: "), "{moved:?}");
+
+    notebook
+        .submit(&format!(
+            r#"(assert (block/place subject: {scratch}/3 notebook: {scratch} key: "N8"))"#
+        ))
+        .await?;
+    let placed = report(&mut notebook, &keys(&format!("{scratch}/3"))).await?;
+    assert_eq!(placed.len(), 1, "{placed:?}");
+    assert!(placed[0].contains(" N8: "), "{placed:?}");
+
+    notebook
+        .submit(&format!(
+            r#"(assert (block/remove subject: {scratch}/2 notebook: {scratch} key: "N5"))"#
+        ))
+        .await?;
+    assert!(
+        report(&mut notebook, &keys(&format!("{scratch}/2")))
+            .await?
+            .is_empty()
+    );
+    assert!(
+        report(
+            &mut notebook,
+            &format!("(select (notebook/block {scratch}/2 notebook: ?n source: ?s))")
+        )
+        .await?
+        .is_empty()
+    );
+
+    notebook
+        .submit(&format!(
+            r#"(assert (block/insert notebook: {scratch} source: "tail" next: case:none prev: {scratch}/3))"#
+        ))
+        .await?;
+    let made = report(
+        &mut notebook,
+        &format!(r#"(select (notebook/block ?b notebook: {scratch} source: "tail"))"#),
+    )
+    .await?;
+    assert_eq!(made.len(), 1, "{made:?}");
+    let block = made[0]
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| anyhow::anyhow!("a block"))?
+        .to_string();
+    assert_eq!(
+        report(&mut notebook, &keys(&block)).await?.len(),
+        1,
+        "the inserted block is in the sequence"
+    );
+    Ok(())
+}

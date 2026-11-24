@@ -504,8 +504,40 @@ async fn the_card_through_its_changes(how: How) -> Result<Vec<Vec<Patch>>> {
 /// afresh.
 #[dialog_common::test]
 async fn it_maintains_the_card_from_subscriptions() -> Result<()> {
-    the_card_through_its_changes(How::Subscribed).await?;
+    let log = the_card_through_its_changes(How::Subscribed).await?;
+    let kinds: Vec<Vec<&str>> = log
+        .iter()
+        .map(|step| step.iter().map(kind).collect())
+        .collect();
+    // The card inserted; a to-do added; the list renamed; a to-do
+    // retitled; one completed; another added; each removed. One patch a
+    // step, each checked whole, and the tree against a fresh render, in
+    // the steps themselves.
+    assert_eq!(
+        kinds,
+        [
+            ["insert"],
+            ["insert"],
+            ["text"],
+            ["text"],
+            ["attribute"],
+            ["insert"],
+            ["remove"],
+            ["remove"],
+        ]
+    );
     Ok(())
+}
+
+/// What a patch does, by its kind.
+fn kind(patch: &Patch) -> &'static str {
+    match patch {
+        Patch::Insert { .. } => "insert",
+        Patch::Remove { .. } => "remove",
+        Patch::SetText { .. } => "text",
+        Patch::SetAttribute { .. } => "attribute",
+        Patch::SetEvent { .. } => "event",
+    }
 }
 
 /// The same changes with every layer asked again after each commit give
