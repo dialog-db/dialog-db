@@ -17,9 +17,9 @@ use rkyv::{
 
 use crate::nodes::{Preload, Read};
 use crate::{
-    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Manifest,
-    PersistentNode, Prefetch, Reading, SearchOptions, SearchResult, TreeDifference, TreeWalker,
-    Value, into_owned,
+    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Manifest, NodeBody,
+    NoveltyOp, PersistentNode, Prefetch, Reading, SearchOptions, SearchResult, TreeDifference,
+    TreeWalker, Value, into_owned,
 };
 use dialog_capability::{Provider, Subject};
 
@@ -423,6 +423,97 @@ where
             }
         }
         Ok(Some(total))
+    }
+
+    /// The first answer `accept` gives to an op still buffered on the route
+    /// to `start`, for a key from `start` to `end`, read from what this
+    /// replica holds and from no leaf.
+    ///
+    /// A write lands in a buffer of the index node nearest the root and
+    /// reaches a leaf only when a flush pushes it down, so a key written a
+    /// moment ago is found in a buffer above a leaf that may never have been
+    /// read. This looks there first. It descends from the root along the
+    /// route to `start`, as a walk to `start` would, and at each index node
+    /// offers `accept` the ops of the link it descends whose keys lie from
+    /// `start` to `end`:
+    ///
+    /// - Order: buffers nearer the root are newer, so the first node on the
+    ///   route that holds an op for a key holds that key's newest op. Only
+    ///   that op is offered for the key: an older op for it further down is
+    ///   never offered, whatever the newer one is, a retraction included.
+    ///   Within one buffer the last op for a key is its newest, and keys are
+    ///   offered in key order, a shallower node's before a deeper one's.
+    /// - Reach: only the ops of links on the route to `start` are offered,
+    ///   so a key in the range that routes elsewhere is never offered. A
+    ///   `None` says nothing about the range, only that no op on the route
+    ///   was taken.
+    /// - Reads: every node is read [locally](Reading::locally), so nothing is
+    ///   fetched. The descent stops at the first node the replica does not
+    ///   hold and at the first leaf, and answers `None` there, so a caller
+    ///   falls back to its walk exactly where this could not answer.
+    pub async fn first_buffered<Env, T>(
+        &self,
+        start: &Key,
+        end: &Key,
+        env: &Env,
+        mut accept: impl FnMut(&[u8], NoveltyOp<Value>) -> Option<T>,
+    ) -> Result<Option<T>, DialogSearchTreeError>
+    where
+        Env: Provider<Read<PersistentNode<Key, Value>>> + ConditionalSync,
+    {
+        let Some(root) = self.stored_root() else {
+            return Ok(None);
+        };
+        let (start, end) = (start.as_ref(), end.as_ref());
+        let reading = self.reading.clone().locally();
+        let mut offered: Vec<Vec<u8>> = Vec::new();
+        let mut at = root.clone();
+        loop {
+            let Some(node) = reading
+                .read::<PersistentNode<Key, Value>>(&at)
+                .perform(env)
+                .await?
+            else {
+                return Ok(None);
+            };
+            let NodeBody::Index(index) = node.body() else {
+                return Ok(None);
+            };
+            if index.is_empty() {
+                return Ok(None);
+            }
+            let child = index.route(start)?;
+            if let Some(buffer) = index.buffer_for(child) {
+                // The newest op of each key in range, in key order: within
+                // a buffer equal keys are contiguous and the last is newest.
+                let mut newest: Vec<(Vec<u8>, usize)> = Vec::new();
+                let mut keys = buffer.keys::<Key>()?;
+                while let Some((entry, key)) = keys.next_key()? {
+                    if key > end {
+                        break;
+                    }
+                    if key < start {
+                        continue;
+                    }
+                    match newest.last_mut() {
+                        Some((last, at)) if last.as_slice() == key => *at = entry,
+                        _ => newest.push((key.to_vec(), entry)),
+                    }
+                }
+                for (key, entry) in newest {
+                    // A key a shallower node held was decided there.
+                    if offered.contains(&key) {
+                        continue;
+                    }
+                    let op = buffer.op_at(entry)?;
+                    if let Some(answer) = accept(&key, op) {
+                        return Ok(Some(answer));
+                    }
+                    offered.push(key);
+                }
+            }
+            at = index.hash_at(child)?.clone();
+        }
     }
 
     /// Returns an async stream over entries with keys within the provided
