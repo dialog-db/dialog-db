@@ -5,7 +5,7 @@
 |  | Understanding | Activity |
 |---|---|---|
 | **Status** | What is stored and read, by file. Identities are keyed by nothing a user fact uses; only dialog's own index facts and markers name them, inside dialog. Formats 4 and 5 are unreleased, and every identity already moved since 0.5.0, so a cut-over before the next tag costs a live space one migration. Main's upgrade would strand 88 of tonk-team's 89 transient markers. A 0.5.0 replica meets a newer body under the same index keys and fails the query (F1, run). | Directing. Six approaches and a matrix; F recommended by the agent (E before tonk's answers). |
-| **Agenda** | Tonk's answers to T12 to T15 ([blast radius](blast-radius.md)), T13 first: whether tonk can reinstall without retracting the previous install. The maintainer's answers to the five open questions in the top story, question 5 (when the reversal runs) first.  | The maintainer reads the matrix and chooses. Then step 1 of the [plan](plan.md): tests pinning today's behaviour. |
+| **Agenda** | Tonk's answers to T12 to T15 ([blast radius](blast-radius.md)), T13 first: whether tonk can reinstall without retracting the previous install. The maintainer's answers to open questions 1 to 4 in the top story; 5 is answered.  | The maintainer reads the matrix and chooses. Then step 1 of the [plan](plan.md): tests pinning today's behaviour. |
 
 ## 2026-11-24, Describing to Directing: what "format 5 for everything" would take
 
@@ -149,3 +149,20 @@ exports land first, which every approach needs.
 
 **Decided.** Nothing by the maintainer in this entry. Recorded as the
 agent's opinion: F. Open with tonk: T12 to T15.
+
+## 2026-11-24, Directing: the reversal rides a rule migration
+
+**Asked.** Open question 5, answered by the maintainer and relayed: "If
+we have to migrate rules we can just as well reverse, if we don't then
+we keep them as is". The coordinator asked whether a 0.5.0 space has to
+have its rules migrated, which decides which branch applies.
+
+**Learned.** It does. Every 0.5.0 body is format 3, every identity moved
+since, and a body under an entity it does not hash to is inert; on main
+all 135 of tonk-team's rules derive and fire nothing until rewritten.
+
+**Decided.** By the maintainer: the reversal and `top` becoming `max`
+are a step of a rule migration, never a migration of their own. For a
+0.5.0 space that is this version's migration (tonk's reinstall under F,
+`rewrite_body` for other rules). Replaces the coordinator's reading.
+Plan steps 3 and 7 carry it.

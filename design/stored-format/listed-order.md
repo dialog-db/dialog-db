@@ -27,9 +27,23 @@ listing, least first (`feat/listed-type-order`); the new notation has no
 `top`; nothing is reversed automatically. Next version: `top` is
 removed. The coordinator reads "allowing anyone wishing to migrate to do
 so" as: the reversal and `top` becoming `max` have to have happened for
-a space by then, by a migration its owner runs. That reading is the
-coordinator's, not the maintainer's words, and when the reversal runs is
-open question 5 in the top story.
+a space by then, by a migration its owner runs. That reading was the
+coordinator's, and the maintainer replaced it the same day:
+
+- "If we have to migrate rules we can just as well reverse, if we don't
+  then we keep them as is". Decided: the reversal, and `top` becoming
+  `max`, is a step of a rule migration when one has to run anyway, and
+  never a migration of its own. Where no rule migration is needed, lists
+  stay as written and `top` stays, deprecated.
+
+A space 0.5.0 wrote does need one: every rule it holds is inert on the
+next release until rewritten ([claims](claims.md), the row "a space
+0.5.0 wrote has to have its rules migrated"). So for every 0.5.0 space,
+tonk's included, the reversal is part of this version's migration. Under
+approach F that migration is tonk's reinstall of its library, which
+writes its three lists reversed with `max` (T11), and dialog's
+`rewrite_body` for rules no library installs. A space first written by
+the next release has no rule to migrate; its lists stay as written.
 
 Overruled, the coordinator's opinion of 2026-11-24: a list no ranked
 field reads may already have been written least first, by an author who
@@ -114,10 +128,8 @@ listing tonk stores as several values would not show there; T10.
    every rule's that concludes or reads such a concept, and every
    transient marker keyed by such a concept. The identities move before
    the next tag in any case ([claims](claims.md)), so this adds no second
-   move if it lands in the same release. If the reversal waits for the
-   next version, a space with a listed `as` moves those identities a
-   second time then, with the same work as this release's upgrade
-   (markers, index facts, the embedder's records). The upgrade's reproduction of
+   move if it lands in the same release, which the maintainer's answer
+   of 2026-11-24 makes it for every 0.5.0 space. The upgrade's reproduction of
    the earlier identity has to reverse too, or it will not find a marker.
 3. **`top` becomes `max` in the same rewrite, and a `{ "top:": [..] }`
    ranking is reversed before it is written under `as`.** Main's

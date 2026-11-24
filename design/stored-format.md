@@ -27,7 +27,8 @@ The maintainer, Irakli, 2026-11-24:
   ([listed order](stored-format/listed-order.md)).
 - "We can keep top just deprecate it and not have it in notation, we can
   remove top in the next version allowing anyone wishing to migrate to
-  do so".
+  do so", and "If we have to migrate rules we can just as well reverse,
+  if we don't then we keep them as is".
 
 And 2026-11-18, in the rule-format ledger: a release should read the
 format it writes and no other, with a migration that keeps the earlier
@@ -105,10 +106,7 @@ Open questions for the maintainer:
    (`pick` on an attribute would be ignored and read as cardinality one).
 4. **Formats 0 to 2.** Delete now, or with 3? It turns on whether any
    live space holds one (T7).
-5. **Is reversing the listed `as` a step of this version's upgrade, or
-   of the next one's?** `top` stays, deprecated, this version and is
-   removed in the next (the maintainer, 2026-11-24); the reversal has to
-   have run before then. In this version's upgrade, as a step an owner
-   opts into, it rides the identity move a space makes anyway. In the
-   next one's, a space with a listed `as` moves those identities a second
-   time ([listed order](stored-format/listed-order.md)).
+5. **Answered 2026-11-24:** "If we have to migrate rules we can just as
+   well reverse, if we don't then we keep them as is". A 0.5.0 space has
+   to have its rules migrated, so for it the reversal is a step of this
+   version's migration ([listed order](stored-format/listed-order.md)).
